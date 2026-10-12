@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": {
+      "../../vendor/conpty/x64/conpty.dll": "conpty.dll",
+      "../../vendor/conpty/x64/OpenConsole.exe": "OpenConsole.exe"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
