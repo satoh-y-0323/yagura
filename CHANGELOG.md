@@ -3,7 +3,7 @@
 The format of this file is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-10-13
 
 The first public release of yagura: a desktop app that runs any command -- an agent CLI such as
 Claude Code, Codex CLI or Antigravity CLI, or a plain shell -- in its own window, watches each
@@ -166,3 +166,5 @@ window's status, and lets agents in those windows work with each other through a
 - The session database stores each window's command line and working directory, chat messages, plans and their reports without encrypting them. Do not put secrets in a window's command line.
 - Pasted text cannot end a program's bracketed paste early: yagura removes the paste markers from it before writing.
 - A window's status is advisory: another process of the same user can forge it, so do not base security decisions on it alone.
+
+[0.1.0]: https://github.com/satoh-y-0323/yagura/releases/tag/v0.1.0
