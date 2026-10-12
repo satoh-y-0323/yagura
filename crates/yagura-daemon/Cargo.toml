@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# A part of the yagura app, shipped in its installers rather than released to crates.io.
+publish = false
 
 [[bin]]
 name = "yagura-daemon"
