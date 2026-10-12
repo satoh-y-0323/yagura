@@ -66,7 +66,9 @@ allow it.
 | Platform | How |
 |---|---|
 | Windows 11 | Download the installer from the [Releases](../../releases) page and run it. It installs for your user only (no administrator rights). It is not code-signed yet, so SmartScreen warns about an unrecognized publisher: choose **More info** > **Run anyway**. |
-| macOS, Linux | Build from source -- see [docs/building.md](docs/building.md). |
+| macOS (Apple silicon) | Download the `.dmg` from the [Releases](../../releases) page, open it and drag **yagura** into **Applications**. The app is signed ad-hoc but not notarized, so macOS blocks the first launch: choose **Done**, then **Open Anyway** in **System Settings > Privacy & Security**. See [docs/macos-signing.md](docs/macos-signing.md). |
+| Linux (Debian, Ubuntu) | Download the `.deb` from the [Releases](../../releases) page and install it with `sudo apt install ./yagura_<version>_amd64.deb`. |
+| Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI), installed
 and signed in as usual. yagura does not install or sign in to them for you.

@@ -149,7 +149,9 @@ window's status, and lets agents in those windows work with each other through a
 - Windows 11, macOS and Linux. Windows 10 is not supported.
 - On Windows, every window runs under the ConPTY that ships with yagura (`conpty.dll` and `OpenConsole.exe` from Microsoft's `Microsoft.Windows.Console.ConPTY` 1.25.260930003, MIT) rather than the one built into Windows, so a resize follows the same rule as on macOS and Linux. If those files are missing or altered, no window opens and a banner asks you to reinstall.
 - Windows: a per-user NSIS installer (no administrator rights) that bundles `yagura-daemon`, `yagura-mcp` and the ConPTY above, and installs WebView2 when missing (needs network access). It is not code-signed, so SmartScreen warns on first run. The program goes in `%LOCALAPPDATA%\yagura` and your settings, session store and logs in `%LOCALAPPDATA%\io.github.satoh-y-0323.yagura`, which the uninstaller removes when you choose to delete the app's data.
-- macOS and Linux: build from source; no installer or signed build is provided yet.
+- macOS (Apple silicon): a `.dmg` whose app, `yagura-daemon` and `yagura-mcp` carry an ad-hoc signature. It is not notarized, so the first launch needs **Open Anyway** in **System Settings > Privacy & Security**.
+- Linux: a `.deb` for Debian and Ubuntu that installs the GUI, `yagura-daemon` and `yagura-mcp` into `/usr/bin`.
+- Other systems and Intel Macs: build from source.
 - WSL: the WSL profiles run a CLI inside your default distribution through `bash`. See [`docs/wsl.md`](docs/wsl.md).
 
 ### Security

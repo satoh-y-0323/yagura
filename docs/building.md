@@ -86,19 +86,34 @@ first time it starts afterwards. On macOS and Linux drop the `.exe` suffix. To k
 build apart from the yagura you use every day, run it as a separate instance (see
 [instances.md](instances.md)).
 
-## Building the Windows Installer
+## Building the Installers
 
 ```bash
 cd gui
-node scripts/prepare-sidecar.mjs
+npm ci
 npm run build:web
 npx tauri build
 ```
 
-The NSIS installer lands in `target/release/bundle/nsis/`. It installs per user
+`tauri build` stages the sidecars itself (its `beforeBuildCommand` runs
+`node scripts/prepare-sidecar.mjs`) and bundles for the OS it runs on. `tauri.conf.json` holds
+the settings every OS shares; `tauri.windows.conf.json`, `tauri.macos.conf.json` and
+`tauri.linux.conf.json` add each OS's targets and settings on top of it. The output lands under
+`target/release/bundle/`:
+
+| OS | Output | Notes |
+|---|---|---|
+| Windows | `nsis/yagura_<version>_x64-setup.exe` | See below. |
+| macOS | `macos/yagura.app`, `dmg/yagura_<version>_aarch64.dmg` | Signed ad-hoc; see [macos-signing.md](macos-signing.md). Over SSH, set `CI=true`. |
+| Linux | `deb/yagura_<version>_amd64.deb` | Needs the WebKitGTK 4.1 development packages (`libwebkit2gtk-4.1-dev` on Debian and Ubuntu). No AppImage: it runs the app from a different temporary path on every launch, and yagura recognizes its own GUI and MCP bridge by their paths. |
+
+Pushing a `v*` tag runs the same build on each OS in CI (`.github/workflows/release.yml`) and
+attaches the results to a draft release.
+
+**The Windows installer** installs per user
 (`nsis.installMode = "currentUser"`, no administrator rights), bundles `yagura-daemon.exe` and
 `yagura-mcp.exe` alongside the GUI together with the bundled ConPTY's `conpty.dll` and
-`OpenConsole.exe` (`bundle.resources` in `tauri.conf.json`), and installs the WebView2 runtime silently when the machine
+`OpenConsole.exe` (`bundle.resources` in `tauri.windows.conf.json`), and installs the WebView2 runtime silently when the machine
 lacks it (that step needs network access). The detection definitions are compiled into
 `yagura-daemon.exe` itself, so the installer puts none of them on disk; definitions of your own go
 in a `detection` directory under the config root (`%LOCALAPPDATA%\io.github.satoh-y-0323.yagura` on Windows), where they

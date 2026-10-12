@@ -1,13 +1,63 @@
-# macOS Code Signing and Notarization
+# macOS: Opening, Building and Signing
 
-This guide explains how to sign, notarize, and staple a macOS build of yagura, where the signing
-settings live in the Tauri configuration, and what a user has to do to open an unsigned build.
+This page explains how to open the macOS release of yagura, how that release is built and signed,
+and how to sign and notarize a build with an Apple Developer ID if you want to distribute one.
 
-> **No yagura build is signed or notarized.** This page is a procedure, not a record. Nothing here
-> has been carried out for this repository yet: `gui/src-tauri/tauri.conf.json` has no `bundle.macOS`
-> section, its `bundle.targets` list contains no macOS target, and no Apple Developer account is
-> associated with the project. Every command below is written to be run by whoever prepares the first
-> signed macOS release.
+## Opening the Release Build
+
+The `.dmg` on the [Releases](https://github.com/satoh-y-0323/yagura/releases) page is built for Apple silicon. Its app and the two
+programs inside it (`yagura-daemon` and `yagura-mcp`) carry an **ad-hoc signature** and are **not
+notarized**. An ad-hoc signature is anonymous: it lets the code run on Apple silicon, but Gatekeeper
+still treats the app as coming from an unidentified developer. The first launch therefore needs one
+deliberate step from you:
+
+1. Open the `.dmg` and drag **yagura** into **Applications**.
+2. Open yagura. macOS shows **"yagura" Not Opened** and offers **Done** and **Move to Bin**.
+   Choose **Done**.
+3. Open **System Settings > Privacy & Security** and scroll to **Security**. Next to
+   **"yagura" was blocked to protect your Mac.**, choose **Open Anyway**, confirm with
+   **Open Anyway** again, and enter your password.
+
+macOS remembers this choice for the app, so later launches open normally. Installing a new
+release brings the dialog back once.
+
+If you prefer the terminal, removing the quarantine attribute that the browser put on the
+download has the same effect:
+
+```bash
+xattr -d com.apple.quarantine /Applications/yagura.app
+```
+
+**Do not turn Gatekeeper off** to open yagura. `spctl --master-disable` (the "Anywhere" setting)
+lowers the protection for every application on the machine and long outlives the install it was
+meant to enable. The per-app choice above is the right scope.
+
+An Intel Mac has no release build; [build from source](building.md) instead.
+
+## Building the App Yourself
+
+`gui/src-tauri/tauri.macos.conf.json` holds the macOS bundle settings: the `app` and `dmg` targets
+and `signingIdentity: "-"`, which makes Tauri sign the sidecars and the app ad-hoc during the build.
+
+```bash
+cd gui
+npm ci
+npm run build:web
+npx tauri build
+```
+
+The app lands in `target/release/bundle/macos/` and the disk image in `target/release/bundle/dmg/`.
+Laying out the disk image's window drives Finder through AppleScript, which fails in a session
+without a desktop, such as SSH. Set `CI=true` there: Tauri then skips the layout step, as it does
+on CI runners.
+
+A build you make yourself carries no quarantine attribute, so it opens without the steps above.
+
+## Signing with a Developer ID (Optional)
+
+The rest of this page is for whoever wants to ship a build that opens without any Gatekeeper step.
+That needs a paid Apple Developer Program membership, a Developer ID Application certificate, and
+notarization. yagura's own releases do not do this.
 
 Two facts decide most of what follows:
 
@@ -280,26 +330,14 @@ carries the quarantine attribute — is the only check that reflects a real firs
 
 ## 5. Tauri Configuration (`bundle.macOS`)
 
-All bundle settings live in `gui/src-tauri/tauri.conf.json`. Its current state is Windows-only:
-`bundle.targets` is `["nsis"]`, `bundle.windows` holds the NSIS settings, and there is **no**
-`bundle.macOS` key. Two things must therefore change for a macOS release.
-
-**Bundle targets.** `app` produces the `.app` and `dmg` produces the disk image. Rather than editing
-the shared `targets` list — which is also used by the Windows build — pass the targets on the macOS
-build command:
-
-```bash
-cd gui
-npm run build:web
-npx tauri build --bundles app,dmg
-```
-
-The build runs `beforeBuildCommand`, which includes `node scripts/prepare-sidecar.mjs`, so the
-daemon and MCP sidecars are staged for the host triple before bundling. A universal build
+The macOS bundle settings live in `gui/src-tauri/tauri.macos.conf.json`, which Tauri merges over
+`tauri.conf.json` on macOS. It already selects the `app` and `dmg` targets, and the build runs
+`beforeBuildCommand`, which includes `node scripts/prepare-sidecar.mjs`, so the daemon and MCP
+sidecars are staged for the host triple before bundling. A universal build
 (`--target universal-apple-darwin`) needs a sidecar staged for **each** architecture, since Tauri
 resolves `externalBin` by target triple.
 
-**Signing keys.** Add a `macOS` object under `bundle`:
+**Signing keys.** Replace the ad-hoc identity in `tauri.macos.conf.json`:
 
 ```json
 {
@@ -319,7 +357,7 @@ The keys accepted by `bundle.macOS` (Tauri CLI 2.x, the version pinned in `gui/p
 
 | Key | What to put there |
 | --- | --- |
-| `signingIdentity` | The quoted identity string from `security find-identity -v -p codesigning`. Omit it to leave the build unsigned. |
+| `signingIdentity` | The quoted identity string from `security find-identity -v -p codesigning`. `"-"`, the value this repository ships, signs ad-hoc; omitting the key leaves the build unsigned, which Apple silicon refuses to run. |
 | `hardenedRuntime` | Defaults to `true`, which is what notarization requires. Leave it alone unless there is a measured reason. |
 | `entitlements` | Path to the entitlements plist, relative to `gui/src-tauri/`. Omit the key entirely when there are no entitlements — the preferred starting state (section 3). |
 | `providerShortName` | Only needed when the Apple Account belongs to several teams; it disambiguates which one signs. |
@@ -353,49 +391,3 @@ On a macOS runner, keep the identity out of the repository:
   in `gui/package.json` before depending on it.
 - Signing and notarization need network access to Apple (timestamp server and the notary service),
   and notarization is slow enough that it should not sit on a pull-request path.
-
-## 6. Running an Unsigned Build (Gatekeeper)
-
-Until the pipeline above is in place, macOS artifacts are unsigned, and a user has to override
-Gatekeeper deliberately. Say so in the release notes: the override is the user's own security
-decision, and asking for it without explanation is indistinguishable from what malware asks for.
-
-**Quarantine is what triggers the block.** Browsers and other quarantine-aware tools tag downloaded
-files with the `com.apple.quarantine` extended attribute, and Gatekeeper evaluates a bundle on its
-first launch because of that tag. A build compiled locally, or copied over with `scp`, `rsync`, or
-`git`, carries no such tag and simply opens.
-
-Two different messages, two different fixes:
-
-**"yagura cannot be opened because the developer cannot be verified."** The bundle has a valid
-structure but no recognized signature. Either way works:
-
-- Right-click (or Control-click) the app in Finder, choose **Open**, then **Open** again in the
-  dialog. The plain double-click does not offer this; the choice is remembered per app.
-- Or double-click, let it be blocked, then open **System Settings > Privacy & Security**, scroll to
-  the Security section, and use **Open Anyway** for the app named there.
-
-**"yagura is damaged and can't be opened. You should move it to the Trash."** Despite the wording,
-this usually means a quarantined bundle with no usable signature rather than a corrupt download.
-Remove the quarantine attribute:
-
-```bash
-xattr -d com.apple.quarantine /Applications/yagura.app
-# if that reports no such attribute, clear the whole bundle recursively:
-xattr -c -r /Applications/yagura.app
-```
-
-**On Apple silicon, code must carry at least an ad-hoc signature to run at all.** Binaries produced
-by the local toolchain get one automatically, but a bundle whose contents were modified after being
-signed can be killed on launch. Re-signing ad-hoc restores that minimum:
-
-```bash
-codesign --force --deep --sign - /Applications/yagura.app
-```
-
-An ad-hoc signature satisfies only the kernel's requirement — it is anonymous, and Gatekeeper still
-treats the app as unidentified.
-
-**Do not tell users to turn Gatekeeper off.** `spctl --master-disable` (the "Anywhere" setting)
-lowers the protection for every application on the machine and long outlives the install it was meant
-to enable. The per-app override above is the right scope.
