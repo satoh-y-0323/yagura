@@ -411,7 +411,11 @@ def _reviewed_vulnerabilities(advisory: dict, fetch: Fetch, token: str) -> Optio
     try:
         reviewed, _ = fetch(f"{GITHUB_API}/advisories/{urllib.parse.quote(ghsa)}", None, token)
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        # A workflow token is refused (403) a global advisory it may not read, where a
+        # user's token gets 404; either way there is no reviewed copy to read. A spent
+        # rate limit is not that, and stops the check.
+        remaining = (exc.headers or {}).get("X-RateLimit-Remaining") if exc.headers else None
+        if exc.code == 404 or (exc.code == 403 and remaining not in ("0",)):
             return None
         raise AdvisoryError(f"GitHub advisory {ghsa}: {exc}") from exc
     except (OSError, urllib.error.URLError, ValueError) as exc:

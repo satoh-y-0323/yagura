@@ -312,7 +312,10 @@ class FakeFetch:
         if url == dep_audit.OSV_BATCH_URL:
             return (self.osv(body) if self.osv else osv_none(len(body["queries"]))), {}
         if url in self.pages:
-            return self.pages[url], {}
+            page = self.pages[url]
+            if isinstance(page, Exception):
+                raise page
+            return page, {}
         raise dep_audit.urllib.error.HTTPError(url, 404, "Not Found", {}, None)
 
 
@@ -407,6 +410,41 @@ def test_a_low_advisory_is_shown_but_passes(capsys):
     cargo = inventory(("bit-vec", "0.8.0", "https://github.com/contain-rs/bit-vec"))
     assert audit_only("cargo", fetch, cargo=cargo) == 0
     assert "GHSA-c" in capsys.readouterr().out
+
+
+def forbidden(url, remaining):
+    return dep_audit.urllib.error.HTTPError(
+        url, 403, "Forbidden", {"X-RateLimit-Remaining": remaining}, None
+    )
+
+
+def test_a_reviewed_copy_the_token_may_not_read_leaves_the_repositorys_ranges(capsys):
+    global_url = f"{GITHUB}/advisories/GHSA-c"
+    fetch = FakeFetch(
+        {
+            repo_url("contain-rs", "bit-vec"): [
+                advisory("GHSA-c", "low", ("rust", "bit-vec", "<= 0.9.1"))
+            ],
+            global_url: forbidden(global_url, "59"),
+        }
+    )
+    cargo = inventory(("bit-vec", "0.8.0", "https://github.com/contain-rs/bit-vec"))
+    assert audit_only("cargo", fetch, cargo=cargo) == 0
+    assert "GHSA-c" in capsys.readouterr().out
+
+
+def test_a_rate_limited_reviewed_copy_stops_the_cargo_check():
+    global_url = f"{GITHUB}/advisories/GHSA-c"
+    fetch = FakeFetch(
+        {
+            repo_url("contain-rs", "bit-vec"): [
+                advisory("GHSA-c", "low", ("rust", "bit-vec", "<= 0.9.1"))
+            ],
+            global_url: forbidden(global_url, "0"),
+        }
+    )
+    cargo = inventory(("bit-vec", "0.8.0", "https://github.com/contain-rs/bit-vec"))
+    assert_failed(audit_only("cargo", fetch, cargo=cargo))
 
 
 def test_npm_keeps_the_high_threshold_of_npm_audit():
