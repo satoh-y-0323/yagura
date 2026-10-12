@@ -1,0 +1,91 @@
+# Every action is pinned to a commit SHA; the comment after it names the release.
+name: Release
+
+# Pushing a version tag builds the installers on each OS and attaches them to a draft release.
+# The draft is published by hand after its files have been checked.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A tag that disagrees with the app's version would publish installers named after another release.
+      - name: Check the tag against the app version
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("gui/src-tauri/tauri.conf.json"))["version"])')
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match tauri.conf.json version $version"
+            exit 1
+          fi
+      - name: Create the draft release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            gh release create "$TAG" --draft --verify-tag --title "yagura $TAG" \
+              --notes "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/$TAG/CHANGELOG.md)."
+          fi
+
+  bundle:
+    needs: draft
+    name: bundle-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            files: target/release/bundle/nsis/*.exe
+          - name: macos
+            os: macos-latest
+            files: target/release/bundle/dmg/*.dmg
+          # The oldest supported Ubuntu, so that the .deb installs on as many releases as the glibc it
+          # links against allows.
+          - name: linux
+            os: ubuntu-22.04
+            files: target/release/bundle/deb/*.deb
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install the Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf
+      - name: Prepare rustup toolchain
+        run: rustup update stable
+      - name: Build the installers
+        shell: bash
+        working-directory: gui
+        run: |
+          npm ci
+          npm run build:web
+          npx tauri build
+      - name: Attach them to the draft release
+        shell: bash
+        run: gh release upload "$TAG" ${{ matrix.files }} --clobber
