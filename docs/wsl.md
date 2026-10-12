@@ -137,23 +137,21 @@ path before the process starts, and that directory is handed to `wsl.exe`. yagur
 translation of its own — the `/mnt/c/...` form below is what the shell inside the distribution
 reports for that same directory.
 
-Both cases were measured with `pwd` in the pane:
+This was measured with `pwd` in the pane:
 
-| Working directory field        | `pwd` inside the distribution                    |
-| ------------------------------ | ------------------------------------------------ |
-| left blank                     | `/mnt/c/Users/you/projects/yagura/gui/src-tauri`  |
-| `C:\Users\you\projects\yagura` | `/mnt/c/Users/you/projects/yagura/`               |
+| Working directory field        | `pwd` inside the distribution       |
+| ------------------------------ | ----------------------------------- |
+| `C:\Users\you\projects\yagura` | `/mnt/c/Users/you/projects/yagura/` |
 
-(The run used a real user directory; the paths above keep its shape with the account and project
+(The run used a real user directory; the path above keeps its shape with the account and project
 folder renamed.)
 
 A Windows path entered in the field therefore arrives as its `/mnt/c/...` equivalent and works as
 intended.
 
-**Blank does not mean "the project root."** It means the directory the *daemon process itself* was
-started in. In the verified run the daemon had been started from `gui/src-tauri` (the result of
-launching `npx tauri dev` from `gui/`), which is why the blank case landed two directories below the
-repository root. Fill the field in when the starting directory matters.
+**Blank does not mean "the project root."** It means your Windows home directory, the same directory
+any window opened without a working directory starts in, and it is handed to `wsl.exe` the same way.
+Fill the field in when the starting directory matters.
 
 ## Limits Observed
 

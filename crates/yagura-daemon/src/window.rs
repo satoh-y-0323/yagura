@@ -2855,16 +2855,6 @@ pub struct WindowRegistry {
     /// the sequence restarting at 1 in a new daemon cannot make an old
     /// client's stale identifier resolve to a different window.
     boot_nonce: String,
-    /// Set exactly once, by whichever `open` call is first to succeed. Kept
-    /// separate from `initial_window_id` itself so that eviction clearing that
-    /// field back
-    /// to `None` can never look like "no initial window has been assigned
-    /// yet" and cause a later window to be mistaken for the initial one.
-    initial_window_assigned: std::sync::atomic::AtomicBool,
-    /// The window_id of the first window this registry ever successfully
-    /// opened. Cleared to `None` (never reassigned to a different window) if
-    /// that window is later evicted.
-    initial_window_id: Mutex<Option<String>>,
     /// The one `StatusEvent` auth token every window must adopt, when
     /// [`DaemonConfig::status_token_override`] supplied a well-formed value.
     /// `None` -- the production setting -- means each window gets its own
@@ -2899,9 +2889,7 @@ pub struct WindowRegistry {
 }
 
 impl WindowRegistry {
-    /// Builds an empty registry. Opening the initial window (if any) is the
-    /// caller's responsibility, so that construction does not decide when the
-    /// shell gets spawned.
+    /// Builds an empty registry; construction spawns nothing.
     pub fn new(config: DaemonConfig) -> Self {
         // A well-formed override is adopted as-is (the only supported way for a
         // test / development setup to hold a known token); anything else leaves
@@ -2938,8 +2926,6 @@ impl WindowRegistry {
             open_lock: AsyncMutex::new(()),
             next_id: AtomicU64::new(0),
             boot_nonce: boot_nonce(),
-            initial_window_assigned: std::sync::atomic::AtomicBool::new(false),
-            initial_window_id: Mutex::new(None),
             status_token_override,
             store_sender: Mutex::new(None),
             window_opened_hook: Mutex::new(None),
@@ -3130,13 +3116,7 @@ impl WindowRegistry {
             hook(&entry);
         }
 
-        let already_assigned = self.initial_window_assigned.swap(true, Ordering::SeqCst);
-        if !already_assigned {
-            *lock_recover(&self.initial_window_id) = Some(window_id.clone());
-        }
-
-        // One trigger point inside `open` covers every open, including the
-        // initial window `main.rs` spawns before any IPC connection exists.
+        // One trigger point inside `open` covers every open.
         self.request_snapshot();
 
         Ok(OpenedWindow {
@@ -3154,8 +3134,9 @@ impl WindowRegistry {
         let mut entries = lock_recover(&self.entries);
         if let Some(index) = self.slot_for_new_entry(&entries)? {
             let evicted = entries.remove(index);
+            // The last reference to the entry is not let go under the lock.
             drop(entries);
-            self.clear_initial_if(&evicted.window_id);
+            drop(evicted);
         }
         Ok(())
     }
@@ -3217,13 +3198,6 @@ impl WindowRegistry {
         )?;
         self.slot_for_new_entry(&lock_recover(&self.entries))?;
         Ok(validated.cwd_string)
-    }
-
-    fn clear_initial_if(&self, window_id: &str) {
-        let mut initial = lock_recover(&self.initial_window_id);
-        if initial.as_deref() == Some(window_id) {
-            *initial = None;
-        }
     }
 
     /// Makes a [`CliInjection`] ready to spawn with: writes its settings
@@ -3666,13 +3640,6 @@ impl WindowRegistry {
         WindowLiveness::Alive(entry)
     }
 
-    /// The `window_id` of the first window this registry ever successfully
-    /// opened, or `None` if none has been opened yet or that window was
-    /// since evicted. Never transfers to a different window.
-    pub fn initial_window_id(&self) -> Option<String> {
-        lock_recover(&self.initial_window_id).clone()
-    }
-
     /// Installs the channel [`WindowRegistry::request_snapshot`] sends
     /// restore-candidate rows on (`store::wire_into` is its only caller). Persistence being disabled or unwired is represented by
     /// never calling this at all, so `request_snapshot` stays a no-op.
@@ -3849,7 +3816,6 @@ impl std::fmt::Debug for WindowRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WindowRegistry")
             .field("window_count", &lock_recover(&self.entries).len())
-            .field("initial_window_id", &self.initial_window_id())
             .finish_non_exhaustive()
     }
 }

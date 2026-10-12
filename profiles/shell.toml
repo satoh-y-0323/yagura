@@ -1,4 +1,4 @@
 # No [command] table: launches the daemon's own resolved default shell
-# (the same one the initial window is spawned with).
+# (resolved once, when the daemon starts).
 schema = 1
 display_name = "Shell"

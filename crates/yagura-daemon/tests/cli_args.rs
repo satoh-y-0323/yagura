@@ -938,8 +938,8 @@ fn resolve_playbook_returns_none_when_nothing_resolves() {
 }
 
 // resolve_emit_window_id: unlike resolve_playbook, an empty `YAGURA_WINDOW_ID`
-// stays `Some("")` so a misconfigured hook fails closed instead of falling back
-// to initial-window attribution.
+// stays `Some("")` so a misconfigured hook's event names no window
+// (`window_not_found`) rather than omitting one.
 
 #[test]
 fn resolve_emit_window_id_returns_some_when_the_env_var_is_set() {
@@ -952,8 +952,8 @@ fn resolve_emit_window_id_returns_none_when_the_env_var_is_absent() {
     let result = resolve_emit_window_id(None);
     assert_eq!(
         result, None,
-        "an absent YAGURA_WINDOW_ID must stay None: that is what selects the \
-         initial-window fallback, not window_not_found"
+        "an absent YAGURA_WINDOW_ID must stay None: the event then omits window_id, \
+         which the daemon refuses as such rather than as window_not_found"
     );
 }
 
@@ -964,8 +964,8 @@ fn resolve_emit_window_id_keeps_an_empty_value_as_some_empty_string() {
         result,
         Some(String::new()),
         "an empty YAGURA_WINDOW_ID must not be rounded to None (unlike resolve_playbook): \
-         folding it to None would fall back to initial-window attribution instead of failing \
-         closed with window_not_found"
+         folding it to None would send an event that omits window_id instead of one naming \
+         no window (window_not_found)"
     );
 }
 
@@ -983,8 +983,8 @@ fn resolve_emit_window_id_lossily_converts_a_non_utf8_value_instead_of_returning
 
     let Some(value) = result else {
         panic!(
-            "a non-UTF-8 YAGURA_WINDOW_ID must not become None: that would fall back to \
-             initial-window attribution instead of failing closed with window_not_found"
+            "a non-UTF-8 YAGURA_WINDOW_ID must not become None: that would send an event \
+             that omits window_id instead of one naming no window (window_not_found)"
         );
     };
     assert!(

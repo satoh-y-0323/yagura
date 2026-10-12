@@ -654,7 +654,7 @@ export interface RecoveryStatusReport {
 }
 
 /** What keeps the daemon from opening windows, as `get_daemon_health` names it. */
-export type DaemonProblemKind = 'windows_unavailable' | 'initial_window_failed';
+export type DaemonProblemKind = 'windows_unavailable';
 
 /** One problem the daemon reports about itself. */
 export interface DaemonProblem {
@@ -1062,7 +1062,6 @@ export function narrowRecoveryStatusReport(value: unknown): RecoveryStatusReport
 
 const DAEMON_PROBLEM_KINDS: ReadonlySet<string> = new Set<DaemonProblemKind>([
   'windows_unavailable',
-  'initial_window_failed',
 ]);
 
 /**

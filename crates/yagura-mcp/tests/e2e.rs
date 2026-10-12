@@ -260,8 +260,7 @@ fn policy(tools: &[&str]) -> ApprovalPolicy {
 }
 
 /// A real daemon (`IpcServer` + `WindowRegistry`) serving a private endpoint,
-/// with one already-open window standing in for the initial window that
-/// `main.rs` opens in production.
+/// with one window the harness opens up front for the cases to act on.
 struct DaemonHarness {
     registry: Arc<WindowRegistry>,
     endpoint: String,
@@ -272,7 +271,7 @@ struct DaemonHarness {
 impl DaemonHarness {
     /// The default daemon for this file: a detection directory holding the
     /// control definition is always available, so any test may drive a
-    /// window (including the initial one) to `idle` on demand via
+    /// window (including the harness's own) to `idle` on demand via
     /// [`DaemonHarness::write_window_input`] plus [`CONTROL_READY_LINE`]. A window
     /// nobody stimulates still stays `Unknown`.
     async fn start(tag: &str) -> Self {

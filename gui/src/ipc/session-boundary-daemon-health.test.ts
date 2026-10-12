@@ -7,18 +7,12 @@ describe('narrowDaemonHealth', () => {
     expect(narrowDaemonHealth({ problems: [] })).toEqual([]);
   });
 
-  it('keeps both known kinds in order', () => {
+  it('keeps the known kind', () => {
     expect(
       narrowDaemonHealth({
-        problems: [
-          { kind: 'windows_unavailable', detail: 'a' },
-          { kind: 'initial_window_failed', detail: 'b' },
-        ],
+        problems: [{ kind: 'windows_unavailable', detail: 'a' }],
       })
-    ).toEqual([
-      { kind: 'windows_unavailable', detail: 'a' },
-      { kind: 'initial_window_failed', detail: 'b' },
-    ]);
+    ).toEqual([{ kind: 'windows_unavailable', detail: 'a' }]);
   });
 
   it('drops a kind this build does not know instead of failing the reply', () => {
@@ -26,15 +20,16 @@ describe('narrowDaemonHealth', () => {
       narrowDaemonHealth({
         problems: [
           { kind: 'from_the_future', detail: 'x' },
-          { kind: 'initial_window_failed', detail: 'b' },
+          { kind: 'initial_window_failed', detail: 'y' },
+          { kind: 'windows_unavailable', detail: 'b' },
         ],
       })
-    ).toEqual([{ kind: 'initial_window_failed', detail: 'b' }]);
+    ).toEqual([{ kind: 'windows_unavailable', detail: 'b' }]);
   });
 
   it('strips control characters from the detail', () => {
     const [problem] = narrowDaemonHealth({
-      problems: [{ kind: 'initial_window_failed', detail: 'bad\u001b[31mred' }],
+      problems: [{ kind: 'windows_unavailable', detail: 'bad\u001b[31mred' }],
     });
     expect(problem?.detail).not.toContain('\u001b');
   });

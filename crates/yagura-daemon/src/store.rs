@@ -617,7 +617,7 @@ pub fn spawn_store_thread(mut store: Store) -> Sender<Vec<SnapshotWindow>> {
 }
 
 /// Wires the store into `registry`: production's only entry point, called
-/// once at start-up before the initial window is opened.
+/// once at start-up before any window can be opened.
 ///
 /// Internal order: [`open_store`] -> [`rotate_slots`] ->
 /// [`spawn_store_thread`] -> [`crate::window::WindowRegistry::set_store_sender`].

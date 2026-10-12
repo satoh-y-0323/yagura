@@ -2428,8 +2428,8 @@ mod tests {
                 PendingKind::GetDaemonHealth,
                 Ok(Reply::DaemonHealth(DaemonHealthReply {
                     problems: vec![yagura_protocol::DaemonProblem {
-                        kind: yagura_protocol::DaemonProblemKind::InitialWindowFailed,
-                        detail: "spawn refused".to_owned(),
+                        kind: yagura_protocol::DaemonProblemKind::WindowsUnavailable,
+                        detail: "conpty.dll missing".to_owned(),
                     }],
                 }))
             )

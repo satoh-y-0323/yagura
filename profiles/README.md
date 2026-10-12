@@ -198,7 +198,7 @@ explained under [WSL profiles](#wsl-profiles).
 ### `[command]` omitted
 
 A profile with no `[command]` table at all launches the daemon's own
-resolved default shell (the same one its initial window starts with) --
+resolved default shell (resolved once, when the daemon starts) --
 `shell.toml`, one of the profiles this repository ships, is exactly this:
 
 ```toml

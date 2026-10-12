@@ -48,6 +48,7 @@ window's status, and lets agents in those windows work with each other through a
 - A report stands until the next one; `--emit-status` takes only a status and `--source`, with no time-to-live. A turn with no output for 5 seconds is taken as over, which covers the interrupts and denied permissions Claude Code sends no hook for. A turn with no report for 2 minutes is taken as over as well, so a screen that keeps redrawing itself cannot hold it open.
 - A window whose CLI was given hooks but has sent no report 10 seconds after its screen shows a running turn gets a yellow mark beside its plug icon, and the daemon logs one warning -- the sign that a CLI update changed its hooks.
 - `--emit-status` does nothing and exits successfully outside a yagura window, so a hook a CLI runs in every session stays quiet in sessions yagura did not open.
+- A `status_event` must name its window: one without `window_id` is refused as `invalid_argument`.
 
 #### MCP server and tools
 
@@ -137,12 +138,14 @@ window's status, and lets agents in those windows work with each other through a
 #### Sessions and the daemon
 
 - The daemon keeps windows running in the background and outlives the GUI: closing the GUI leaves it running. After upgrading yagura, stop it with `yagura-daemon --shutdown` so the new version starts; restarting the daemon closes every window.
+- The daemon starts with no window open: every window is one you, a restored session or an agent opens.
+- A window opened without a working directory starts in your home directory on every platform, however the daemon was started. If the home directory cannot be found, it starts in the daemon's own directory and the daemon logs a warning.
 - On the next start, the GUI offers to restore the windows of your last session with their layout; windows opened from a profile are reopened from that profile.
 - If the daemon disappears while you have windows open, the GUI starts it again (with backoff) and offers a Reconnect button when it gives up. The windows that were running are lost with the old daemon. See [`docs/client-config.md`](docs/client-config.md).
 - `YAGURA_INSTANCE` runs a second, fully separate instance (for example a development build) beside your everyday one. Any identifier the rule accepts, up to 16 bytes, works on every platform, including macOS with its long temporary directory. See [`docs/instances.md`](docs/instances.md).
 - A window the GUI reconnects to comes back whole from the daemon's model of its terminal: its history and screen with colors, wide characters, the alternate screen and the cursor. The GUI names the size it draws at when it attaches, and again when it reconnects, so the window and the view agree on it after the daemon was started anew.
 - A GUI does not show windows from a daemon older than itself: it says so in a banner and asks you to restart the daemon with `yagura-daemon --shutdown`.
-- When the daemon cannot open windows -- the console host bundled with yagura is missing or damaged, or the first window fails to open -- it keeps running and the GUI says why in a banner. Daemon clients can ask for the same list with the `get_daemon_health` request.
+- When the daemon cannot open windows because the console host bundled with yagura is missing or damaged, it keeps running and the GUI says why in a banner. Daemon clients can ask for the same list with the `get_daemon_health` request.
 
 #### Platforms and installers
 

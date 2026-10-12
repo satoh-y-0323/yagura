@@ -18,8 +18,8 @@
 //!   with a readable marker: under ConPTY the default `0x03` becomes a
 //!   `CTRL_C_EVENT` and is never echoed, so the scrollback cannot show it.
 //! - [`probe_status_event`]'s `window_id` is `Option<&str>`: `None` omits the
-//!   field on the wire (initial-window fallback), while `Some("")` sends an
-//!   explicit empty string, which must fail closed rather than read as absent.
+//!   field on the wire (refused as `invalid_argument`), while `Some("")` sends
+//!   an explicit empty string, which names no window (`window_not_found`).
 
 mod common;
 
@@ -2169,14 +2169,14 @@ async fn wait_for_window_token(h: &Harness, window_id: &str, timeout: Duration) 
     }
 }
 
-// The two non-override tests below mint a token per window: an initial window,
-// opened first and never fed a marker so it stays `Unknown`, plus a non-initial
-// window that prints both `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID`. Wait for
-// the window_id in the scrollback before reading the token, or the token read can
-// see a snapshot from before the window_id half of the echoed line landed.
+// The two non-override tests below mint a token per window: a bystander window,
+// opened first and never fed a marker so it stays `Unknown`, plus a window that
+// prints both `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID`. Wait for the window_id
+// in the scrollback before reading the token, or the token read can see a snapshot
+// from before the window_id half of the echoed line landed.
 
 #[tokio::test]
-async fn a_non_initial_windows_own_token_and_window_id_together_authenticate_its_status_event() {
+async fn a_windows_own_token_and_window_id_together_authenticate_its_status_event() {
     // What a spawned child actually receives through the environment is exactly
     // what `--emit-status` needs to authenticate as, and attribute to, that window.
     let dir = unique_temp_dir("hk-window-id-success-1");
@@ -2187,9 +2187,9 @@ async fn a_non_initial_windows_own_token_and_window_id_together_authenticate_its
     let h = Harness::start("hk-window-id-success-1", config).await;
     let mut client = h.connect().await;
 
-    // Initial window: opened first, never fed a marker, so it stays Unknown for the
-    // duration of this test (fixture convention shared with the cross-window test above).
-    let initial_window = h.open_unknown_window().await;
+    // Opened first, never fed a marker, so it stays Unknown for the duration of
+    // this test (fixture convention shared with the cross-window test above).
+    let bystander = h.open_unknown_window().await;
 
     // Fixed-literal argv only, nothing concatenated into it: the shell's built-in
     // echo is the only way to observe that an environment variable arrived.
@@ -2225,17 +2225,16 @@ async fn a_non_initial_windows_own_token_and_window_id_together_authenticate_its
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        query_status(&mut client, &initial_window).await,
+        query_status(&mut client, &bystander).await,
         WindowStatus::Unknown,
-        "the event must attribute to window_b, not silently fall back to the initial window"
+        "the event must attribute to window_b alone, not to the window opened before it"
     );
 }
 
 #[tokio::test]
-async fn a_status_event_missing_window_id_is_rejected_even_with_a_non_initial_windows_real_token() {
-    // Omitting window_id routes through the initial-window fallback, so a
-    // non-initial window's own real token must not authenticate there -- that
-    // omission path is the only entry point that could confuse the two.
+async fn a_status_event_without_a_window_id_is_rejected_even_with_a_windows_real_token() {
+    // A real token names no window by itself, so an event that omits window_id
+    // has no target to authenticate against.
     let dir = unique_temp_dir("hk-window-id-fail-closed");
     let config = DaemonConfig {
         status_token_override: None,
@@ -2243,8 +2242,6 @@ async fn a_status_event_missing_window_id_is_rejected_even_with_a_non_initial_wi
     };
     let h = Harness::start("hk-window-id-fail-closed", config).await;
     let mut client = h.connect().await;
-
-    let initial_window = h.open_unknown_window().await;
 
     let window_b = h
         .open(
@@ -2255,30 +2252,30 @@ async fn a_status_event_missing_window_id_is_rejected_even_with_a_non_initial_wi
     h.wait_for_scrollback(&window_b, window_b.as_bytes(), Duration::from_secs(10))
         .await;
     let token_b = wait_for_window_token(&h, &window_b, Duration::from_secs(10)).await;
+    let before = query_status(&mut client, &window_b).await;
 
     assert_eq!(
         probe_status_event(&mut client, None, &token_b, WindowStatus::Running).await,
-        EventOutcome::Rejected("auth_failed".to_string()),
-        "window_b's real token must not authenticate an event that omits window_id and so \
-         resolves to the initial window instead"
+        EventOutcome::Rejected("invalid_argument".to_string()),
+        "an event that omits window_id must be refused, even with a real window's token"
     );
     // Give a (hypothetical) unauthenticated write time to land before asserting that
     // nothing moved.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        query_status(&mut client, &initial_window).await,
-        WindowStatus::Unknown,
-        "a rejected omitted-window_id event must not reach the initial window's detector"
+        query_status(&mut client, &window_b).await,
+        before,
+        "a rejected omitted-window_id event must not reach the token owner's detector"
     );
 }
 
 #[tokio::test]
-async fn status_event_with_an_explicit_window_id_attributes_to_that_window_not_the_initial_one() {
+async fn status_event_with_an_explicit_window_id_attributes_to_that_window_alone() {
     let dir = unique_temp_dir("hk-explicit-attrib");
     let h = Harness::start("hk-explicit-attrib", detection_config(&dir)).await;
     let mut client = h.connect().await;
 
-    let initial_window = h.open_unknown_window().await;
+    let bystander = h.open_unknown_window().await;
     let path = echo_child_path();
     let path = path.to_str().expect("echo_child path must be valid UTF-8");
     let target_window = h
@@ -2305,24 +2302,23 @@ async fn status_event_with_an_explicit_window_id_attributes_to_that_window_not_t
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        query_status(&mut client, &initial_window).await,
+        query_status(&mut client, &bystander).await,
         WindowStatus::Unknown,
-        "an explicit window_id must not also touch the initial window"
+        "an explicit window_id must not also touch the window opened before it"
     );
 }
 
 #[tokio::test]
-async fn status_event_without_window_id_falls_back_to_the_initial_window_across_multiple_windows() {
-    // Exercised with more than one open window so a fallback to "the daemon's own
-    // idea of the current window" cannot be confused with a fallback to "the most
-    // recently opened window". The single-window case lives in detector_wiring.rs.
+async fn a_status_event_without_a_window_id_is_rejected_and_touches_no_window() {
+    // More than one window is open, so neither the first-opened nor the most
+    // recently opened window may stand in for the missing target.
     let dir = unique_temp_dir("hk-omitted-multi");
     let h = Harness::start("hk-omitted-multi", detection_config(&dir)).await;
     let mut client = h.connect().await;
 
     let path = echo_child_path();
     let path = path.to_str().expect("echo_child path must be valid UTF-8");
-    let initial_window = h
+    let first_window = h
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
     let path = echo_child_path();
@@ -2333,32 +2329,27 @@ async fn status_event_without_window_id_falls_back_to_the_initial_window_across_
 
     assert_eq!(
         probe_status_event(&mut client, None, VALID_TOKEN, WindowStatus::Running).await,
-        EventOutcome::Accepted,
+        EventOutcome::Rejected("invalid_argument".to_string()),
     );
-    wait_until_status(
-        &mut client,
-        &initial_window,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        query_status(&mut client, &later_window).await,
-        WindowStatus::Unknown,
-        "an omitted-window_id event must not also touch a later-opened window"
-    );
+    for window in [&first_window, &later_window] {
+        assert_eq!(
+            query_status(&mut client, window).await,
+            WindowStatus::Unknown,
+            "an omitted-window_id event must not touch any window"
+        );
+    }
 }
 
 #[tokio::test]
-async fn status_event_with_an_empty_window_id_returns_window_not_found_without_falling_back() {
-    // An empty window_id fails closed: it must not be read as "absent" and routed
-    // through the initial-window fallback.
+async fn status_event_with_an_empty_window_id_returns_window_not_found() {
+    // An empty window_id names a window, just not one that exists: it is not
+    // read as an omitted one.
     let dir = unique_temp_dir("hk-empty-window-id");
     let h = Harness::start("hk-empty-window-id", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let initial_window = h.open_unknown_window().await;
+    let window = h.open_unknown_window().await;
 
     let outcome =
         probe_status_event(&mut client, Some(""), VALID_TOKEN, WindowStatus::Running).await;
@@ -2369,9 +2360,9 @@ async fn status_event_with_an_empty_window_id_returns_window_not_found_without_f
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
-        query_status(&mut client, &initial_window).await,
+        query_status(&mut client, &window).await,
         WindowStatus::Unknown,
-        "an empty window_id must not fall back to the initial window"
+        "an empty window_id must not reach any window"
     );
 }
 
@@ -2411,12 +2402,11 @@ async fn status_event_with_a_window_id_from_a_previous_boot_nonce_returns_window
 }
 
 #[tokio::test]
-async fn a_failed_open_does_not_become_the_initial_window_or_appear_in_list_windows() {
+async fn a_failed_open_does_not_appear_in_list_windows() {
     // Calls the registry directly, bypassing the Harness::open helper: the
     // SpawnFailed mapping itself is asserted elsewhere and not repeated here.
     let dir = unique_temp_dir("hk-spawn-failed");
     let h = Harness::start("hk-spawn-failed", detection_config(&dir)).await;
-    let mut client = h.connect().await;
 
     let missing_exe = r"C:\yagura-definitely-not-a-real-executable-xyz.exe".to_string();
     let failed = h
@@ -2436,23 +2426,8 @@ async fn a_failed_open_does_not_become_the_initial_window_or_appear_in_list_wind
 
     let path = echo_child_path();
     let path = path.to_str().expect("echo_child path must be valid UTF-8");
-    let window_id = h
-        .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
+    h.open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
-
-    assert_eq!(
-        probe_status_event(&mut client, None, VALID_TOKEN, WindowStatus::Running).await,
-        EventOutcome::Accepted,
-        "the first *successful* open must still function as the initial window despite the \
-         earlier failed open"
-    );
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
 
     assert_eq!(
         h.registry.list().len(),

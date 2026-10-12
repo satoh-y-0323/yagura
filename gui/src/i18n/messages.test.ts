@@ -138,7 +138,6 @@ export const dummyMessages: Messages = {
       `DUMMY_restoreAvailable(${count},${String(timestamp)})`,
     restoreLoadFailed: 'DUMMY_restoreLoadFailed',
     daemonWindowsUnavailable: 'DUMMY_daemonWindowsUnavailable',
-    daemonInitialWindowFailed: (detail: string) => `DUMMY_daemonInitialWindowFailed(${detail})`,
     // Unseen-and-expired approval requests.
     approvalExpiredUnseen: (
       count: number,

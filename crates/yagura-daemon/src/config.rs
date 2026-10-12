@@ -285,11 +285,10 @@ pub struct DaemonConfig {
     pub program_is_executable: fn(&Path) -> bool,
 
     /// The default shell, resolved once by `main.rs` (via
-    /// [`crate::resolve_shell`], the same input the initial window uses)
-    /// and held here rather than re-read from the environment by every
-    /// launch. `None` means resolution failed at start-up: a profile that
-    /// omits `[command]` cannot launch until the daemon is restarted with a
-    /// resolvable shell.
+    /// [`crate::resolve_shell`]) and held here rather than re-read from the
+    /// environment by every launch. `None` means resolution failed at
+    /// start-up: a profile that omits `[command]` cannot launch until the
+    /// daemon is restarted with a resolvable shell.
     pub default_shell: Option<PathBuf>,
 
     /// The environment laid over the daemon's own for the children it
@@ -302,9 +301,10 @@ pub struct DaemonConfig {
     pub child_base_env: ChildBaseEnv,
 
     /// The working directory a window opens in when neither the caller nor a
-    /// profile names one, resolved once by `main.rs` at start-up (via
-    /// [`resolve_default_window_cwd`]). `None` (the default) leaves such a
-    /// window in the daemon's own current directory.
+    /// profile names one: the user's home directory, resolved once by
+    /// `main.rs` at start-up (via [`resolve_default_window_cwd`]). `None` (the
+    /// default, and what start-up leaves when no home directory is usable)
+    /// leaves such a window in the daemon's own current directory.
     pub default_window_cwd: Option<PathBuf>,
 
     /// The `[chat]` playbook section's numeric limits, merged in by
@@ -838,41 +838,27 @@ pub fn resolve_status_token_override(raw: Option<&str>) -> Option<RedactedString
 
 /// Whether the daemon's own inherited `TERM` shows it was started from a
 /// terminal: a missing or empty value means it was not (Finder, Dock, a
-/// desktop launcher). [`crate::child_env::login_env_decision`], and through
-/// it [`resolve_default_window_cwd`], rest on it.
+/// desktop launcher). [`crate::child_env::login_env_decision`] rests on it.
 #[must_use]
 pub fn inherits_terminal(term: Option<&OsStr>) -> bool {
     term.is_some_and(|value| !value.is_empty())
 }
 
-/// Resolves what [`DaemonConfig::default_window_cwd`] should hold.
+/// Resolves what [`DaemonConfig::default_window_cwd`] should hold: `home`,
+/// provided it is non-empty and `exists_dir` says it is a directory, else
+/// `None` (the daemon's own current directory).
 ///
-/// A daemon started without a terminal (the case in which
-/// [`crate::child_env::login_env_decision`] reads the login shell) inherits
-/// whatever directory its launcher left it in, often the filesystem root,
-/// whereas a terminal opens its shell in the home directory. So in that case
-/// only, the home directory stands in: `HOME` from `base_env`, else
-/// `inherited_home`, provided `exists_dir` says it is a directory. Every
-/// other case returns `None`, keeping the daemon's own current directory.
+/// The host OS and how the daemon was started play no part: the daemon is
+/// resident and outlives whatever launched it, so its own current directory
+/// is an accident of that first launch.
 #[must_use]
 pub fn resolve_default_window_cwd(
-    host_os: ProfileOs,
-    term: Option<&OsStr>,
-    base_env: &ChildBaseEnv,
-    inherited_home: Option<&OsStr>,
+    home: Option<&Path>,
     exists_dir: &dyn Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
-    if crate::child_env::login_env_decision(host_os, term)
-        != crate::child_env::LoginEnvDecision::Read
-    {
-        return None;
-    }
-    base_env
-        .get(OsStr::new("HOME"))
-        .or(inherited_home)
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
+    home.filter(|home| !home.as_os_str().is_empty())
         .filter(|home| exists_dir(home))
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]

@@ -370,7 +370,7 @@ pub fn resolve_roles_path(
 /// Unlike [`resolve_playbook`], which treats an empty value as unset, this
 /// function returns `Some("")` for empty strings to fail-closed: an empty
 /// window_id will not resolve to any window and will cause window_not_found on
-/// the daemon side, preventing accidental fallback to the initial window.
+/// the daemon side, the same as any other id naming no window.
 /// Non-UTF-8 values are converted with `to_string_lossy`, which also produces
 /// an invalid id that will not match any window (fail-closed).
 pub fn resolve_emit_window_id(env: Option<std::ffi::OsString>) -> Option<String> {

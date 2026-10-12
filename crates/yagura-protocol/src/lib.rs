@@ -113,6 +113,11 @@
 //! Revision 20 adds `get_daemon_health`, answered with `daemon_health`: the
 //! problems that keep the daemon from opening windows. A caller establishes
 //! [`DAEMON_HEALTH_MIN_REVISION`] before asking.
+//!
+//! Revision 21 drops `initial_window_failed` from [`DaemonProblemKind`]: the
+//! daemon starts with no window, so there is no start-up window to fail. A
+//! `status_event` without `window_id` is now refused as `invalid_argument`
+//! instead of being attributed to the first window the daemon opened.
 
 use std::collections::BTreeSet;
 
@@ -124,7 +129,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 20;
+pub const PROTOCOL_REVISION: u32 = 21;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -2241,9 +2246,9 @@ pub enum ClientMessage {
         source: String,
         /// The reported status.
         status: WindowStatus,
-        /// Target window ID (multi-window v2, protocol v2). When omitted,
-        /// defaults to the initial window. This field is optional for backward
-        /// compatibility with existing hook sources (protocol v1).
+        /// Target window ID. The daemon refuses an event without one as
+        /// `invalid_argument`; it stays optional on decode so that such an
+        /// event is answered with that error instead of failing the frame.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window_id: Option<String>,
         /// Per-boot authentication token. Required: the pre-token
@@ -3312,9 +3317,6 @@ pub enum DaemonProblemKind {
     /// The pseudoconsole bundled with the daemon is missing or altered, so no
     /// window can be opened.
     WindowsUnavailable,
-    /// The window opened at start-up could not be opened for another reason;
-    /// [`DaemonProblem::detail`] says why.
-    InitialWindowFailed,
 }
 
 /// One problem listed by [`DaemonMessage::DaemonHealth`].
@@ -3322,8 +3324,7 @@ pub enum DaemonProblemKind {
 pub struct DaemonProblem {
     /// What kind of problem this is.
     pub kind: DaemonProblemKind,
-    /// The daemon's own English description of the cause, for a log or for
-    /// [`DaemonProblemKind::InitialWindowFailed`]'s display.
+    /// The daemon's own English description of the cause, for a log.
     pub detail: String,
 }
 

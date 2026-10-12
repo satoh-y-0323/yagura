@@ -1037,57 +1037,6 @@ async fn registry_notify_resize_started_returns_true_while_alive_and_false_after
 }
 
 #[tokio::test]
-async fn registry_initial_window_id_does_not_transfer_after_eviction() {
-    let config = DaemonConfig {
-        max_windows: 1, // total cap = 2, forces eviction quickly
-        ..DaemonConfig::default()
-    };
-    let registry = WindowRegistry::new(config);
-
-    let id1 = registry
-        .open(echo_request())
-        .await
-        .expect("first open")
-        .window_id;
-    assert_eq!(
-        registry.initial_window_id(),
-        Some(id1.clone()),
-        "initial_window_id must be the id of the first successful open"
-    );
-    let entry1 = registry.get(&id1).expect("get id1");
-    registry.terminate_all().await;
-    wait_for_exited(&entry1).await;
-
-    let id2 = registry
-        .open(echo_request())
-        .await
-        .expect("second open")
-        .window_id;
-    let entry2 = registry.get(&id2).expect("get id2");
-    registry.terminate_all().await;
-    wait_for_exited(&entry2).await;
-
-    // id1 and id2 are both Exited now (total = 2 = max_windows * 2); a third
-    // open evicts id1 (the oldest unattached Exited entry).
-    let _id3 = registry
-        .open(echo_request())
-        .await
-        .expect("third open should evict id1")
-        .window_id;
-    assert!(
-        registry.get(&id1).is_none(),
-        "id1 must have been evicted as test setup"
-    );
-
-    assert_eq!(
-        registry.initial_window_id(),
-        None,
-        "initial_window_id must become None once the initial window is evicted, never \
-         transferring to another window"
-    );
-}
-
-#[tokio::test]
 async fn registry_terminate_all_exits_all_windows_with_observable_exit_codes() {
     let registry = WindowRegistry::new(DaemonConfig::default());
     let id1 = registry

@@ -14,10 +14,11 @@ use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
 use std::time::Duration;
 
-use common::real_daemon::{Sandbox, daemon_bin};
+use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin, shell_path};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{ClientMessage, DaemonMessage, MCP_BRIDGE_ENV};
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
+use yagura_test_support::paths::strip_extended_length_prefix;
 use yagura_test_support::process::env_probe_path;
 
 #[cfg(windows)]
@@ -115,6 +116,102 @@ async fn profiles_are_read_from_the_users_config_directory() {
     daemon
         .open_profile_window(&sandbox, "config-root-probe")
         .await;
+}
+
+/// The windows the daemon lists, as `(window_id, cwd)` pairs.
+async fn listed_windows(daemon: &mut RunningDaemon) -> Vec<(String, String)> {
+    common::send(&mut daemon.client, &ClientMessage::ListWindows).await;
+    match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+        DaemonMessage::WindowList { windows } => windows
+            .into_iter()
+            .map(|window| (window.window_id, window.cwd))
+            .collect(),
+        other => panic!("expected window_list, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_daemon_starts_with_no_window() {
+    let sandbox = Sandbox::new("launch-no-window");
+    let mut daemon = sandbox.start().await;
+
+    let windows = listed_windows(&mut daemon).await;
+
+    assert!(
+        windows.is_empty(),
+        "a freshly started daemon must hold no window, got {windows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_status_event_without_a_window_id_is_rejected() {
+    let sandbox = Sandbox::new("launch-status-no-window-id");
+    let mut daemon = sandbox.start().await;
+
+    common::send(
+        &mut daemon.client,
+        &ClientMessage::StatusEvent {
+            source: "cli".to_string(),
+            status: yagura_protocol::WindowStatus::Running,
+            window_id: None,
+            token: "0123456789abcdef0123456789abcdef".to_string(),
+        },
+    )
+    .await;
+
+    match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+        DaemonMessage::Error { code, .. } => assert_eq!(code, "invalid_argument"),
+        other => panic!("expected error(invalid_argument), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_window_opened_without_a_cwd_starts_in_the_home_directory() {
+    let sandbox = Sandbox::new("launch-home-cwd");
+    let home = sandbox.tree.make_dir("home");
+    let home_str = home.to_str().expect("the sandbox home must be UTF-8");
+    // The sandbox starts the daemon from a terminal (`TERM` set), and the test runner's own
+    // current directory is not the home: neither may decide where the window starts.
+    let mut daemon = sandbox.start_from(&[("USERPROFILE", home_str)]).await;
+
+    common::send(
+        &mut daemon.client,
+        &ClientMessage::OpenWindow {
+            command: vec![shell_path().to_str().unwrap().to_string()],
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+        },
+    )
+    .await;
+    let window_id = match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!(
+            "expected window_opened, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    };
+
+    let windows = listed_windows(&mut daemon).await;
+    let (_, cwd) = windows
+        .iter()
+        .find(|(id, _)| *id == window_id)
+        .expect("the opened window must be listed");
+    let expected = strip_extended_length_prefix(&home.canonicalize().unwrap());
+    let actual = strip_extended_length_prefix(&std::path::Path::new(cwd).canonicalize().unwrap());
+    let same = if cfg!(windows) {
+        actual
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.to_string_lossy())
+    } else {
+        actual == expected
+    };
+    assert!(
+        same,
+        "the window must start in the home directory {}, but its cwd is {cwd}",
+        expected.display()
+    );
 }
 
 #[tokio::test]
@@ -263,8 +360,8 @@ mod bundled_pair {
         );
     }
 
-    // The daemon opens its first window at start-up; a refused pair does not end it, so a
-    // client can ask why through `get_daemon_health`.
+    // A refused pair does not end the daemon, so a client can ask why through
+    // `get_daemon_health`.
     #[tokio::test]
     async fn a_daemon_beside_an_altered_pseudoconsole_host_stays_up_and_reports_why() {
         let sandbox = Sandbox::new("launch-pair-altered");

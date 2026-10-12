@@ -4,10 +4,10 @@
 //!
 //! Execution order is fixed: argument parsing (`--shutdown`,
 //! `--emit-status`) -> instance identifier resolution -> the children's base
-//! environment -> multi-instance prevention -> opening the initial window
-//! (shell spawn) -> connection acceptance. The endpoint is protected *before*
-//! the shell is spawned so that a losing multi-instance race, or a
-//! client-side invocation, never orphans a shell process. The base
+//! environment -> multi-instance prevention -> connection acceptance. The
+//! daemon starts with no window: every window is opened by a client, so none
+//! is spawned before the endpoint is protected and a losing multi-instance
+//! race, or a client-side invocation, never orphans a child process. The base
 //! environment's login-shell read comes earlier, but it is a one-shot capture
 //! collected with its whole process tree before the endpoint is bound, not a
 //! window's shell.
@@ -35,9 +35,7 @@ use yagura_daemon::detector::layers::DetectionLayers;
 use yagura_daemon::ipc::{chat, plan};
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
-use yagura_daemon::{
-    DaemonConfig, IpcServer, OpenWindowRequest, WindowRegistry, WindowsShellSearch, resolve_shell,
-};
+use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
     ClientMessage, DaemonMessage, STATUS_TOKEN_ENV, WINDOW_ID_ENV, WindowStatus,
     decode_daemon_message, encode_client_message, frame_encode,
@@ -140,15 +138,15 @@ async fn async_main(command: CliCommand) -> Result<()> {
         );
     }
 
-    // Whether the daemon inherited a terminal decides both whether the login
-    // shell is read and the default window cwd, so it is read once for both.
+    // Whether the daemon inherited a terminal decides whether the login shell
+    // is read.
     let term = std::env::var_os("TERM");
     let shell_env = std::env::var_os("SHELL").map(PathBuf::from);
     // Before the endpoint is bound: a client that can connect must find the
     // children's environment already decided (the GUI waits out the read).
     let child_base_env = resolve_child_base_env(ChildBaseEnvInputs {
         host_os: ProfileOs::host(),
-        term: term.clone(),
+        term,
         shell_env: shell_env.clone(),
         passwd_shell: tokio::task::spawn_blocking(yagura_os::login_shell::passwd_login_shell)
             .await
@@ -187,8 +185,6 @@ async fn async_main(command: CliCommand) -> Result<()> {
         }
     };
 
-    // The initial window (and thus the shell) is only opened after the
-    // endpoint has been claimed and protected.
     let defaults = DaemonConfig::default();
     let max_windows = resolve_max_windows(
         std::env::var("YAGURA_MAX_WINDOWS").ok().as_deref(),
@@ -302,21 +298,14 @@ async fn async_main(command: CliCommand) -> Result<()> {
         None => tracing::info!("no roles path resolved"),
     }
 
-    // Decided before the registry below takes its copy of `config`, from the
-    // same `TERM` and host the login-shell read was decided on. The existence
-    // check runs off the async workers: a home on a network mount can stall.
+    // One home directory serves both the default window cwd and
+    // `config.home_dir`. The existence check runs off the async workers: a
+    // home on a network mount can stall.
+    let home_dir = std::env::home_dir();
     let default_window_cwd = {
-        let base_env = child_base_env.clone();
-        let term = term.clone();
-        let inherited_home = std::env::var_os("HOME");
+        let home_dir = home_dir.clone();
         tokio::task::spawn_blocking(move || {
-            resolve_default_window_cwd(
-                ProfileOs::host(),
-                term.as_deref(),
-                &base_env,
-                inherited_home.as_deref(),
-                &|path: &Path| path.is_dir(),
-            )
+            resolve_default_window_cwd(home_dir.as_deref(), &|path: &Path| path.is_dir())
         })
         .await
         .ok()
@@ -324,7 +313,17 @@ async fn async_main(command: CliCommand) -> Result<()> {
     };
     match default_window_cwd.as_deref() {
         Some(path) => tracing::info!("default window cwd: {}", path.display()),
-        None => tracing::info!("default window cwd: the daemon's current directory"),
+        None => match home_dir.as_deref() {
+            Some(path) => tracing::warn!(
+                "the home directory {} is not an existing directory; a window opened \
+                 without a cwd starts in the daemon's current directory",
+                path.display()
+            ),
+            None => tracing::warn!(
+                "no home directory resolved; a window opened without a cwd starts in \
+                 the daemon's current directory"
+            ),
+        },
     }
 
     let mut config = DaemonConfig::from_startup(StartupParts {
@@ -375,19 +374,32 @@ async fn async_main(command: CliCommand) -> Result<()> {
     // `WindowsShellSearch::from_env` is likewise read once, here, rather than
     // inside `resolve_shell`.
     let windows_shell_search = WindowsShellSearch::from_env();
-    let shell = resolve_shell(
+    // A profile that omits `[command]` uses exactly this shell, resolved once
+    // here rather than re-read from the environment by every launch. Without
+    // one the daemon still serves: only such a profile is refused.
+    config.default_shell = match resolve_shell(
         configured_shell.as_deref(),
         shell_env.as_deref(),
         &windows_shell_search,
-    )
-    .context("failed to resolve a shell executable")?;
-    let shell_str = shell
-        .to_str()
-        .context("resolved shell path is not valid UTF-8")?;
-    // A profile that omits `[command]` uses exactly this shell, the
-    // same one the initial window below is spawned with -- resolved once
-    // here rather than re-read from the environment by every launch.
-    config.default_shell = Some(shell.clone());
+    ) {
+        // A window's argv is UTF-8, so a shell path that is not cannot be launched.
+        Ok(shell) if shell.to_str().is_some() => Some(shell),
+        Ok(shell) => {
+            tracing::warn!(
+                "the resolved shell path {} is not valid UTF-8; a profile without \
+                 [command] cannot open a window",
+                shell.display()
+            );
+            None
+        }
+        Err(err) => {
+            tracing::warn!(
+                "failed to resolve a shell executable: {err}; a profile without \
+                 [command] cannot open a window"
+            );
+            None
+        }
+    };
     config.mcp_bridge = resolve_mcp_bridge(config.host_os.platform());
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));
@@ -401,14 +413,11 @@ async fn async_main(command: CliCommand) -> Result<()> {
     // A named instance's registration must carry `YAGURA_INSTANCE` so
     // it never overwrites, or reads as, the default instance's own.
     config.instance_id = namespace.id().map(str::to_string);
-    config.home_dir = std::env::home_dir();
+    config.home_dir = home_dir;
 
-    // The initial window: the resolved shell, with every optional field left
-    // to the registry's documented defaults. Its child process tree is reaped
-    // through the process group its PTY session starts it in.
     let registry = Arc::new(WindowRegistry::new(config.clone()));
 
-    // The store is wired before the initial window is opened, so start-up
+    // The store is wired before any window can be opened, so start-up
     // rotation runs before anything writes to `current`.
     let explicit_db_path = config.store_db_path.clone();
     let data_base_dir = yagura_os::default_data_base_dir();
@@ -439,9 +448,8 @@ async fn async_main(command: CliCommand) -> Result<()> {
     store::wire_into(&registry, store_db_path);
 
     // Opening a database is blocking I/O, so it runs on a blocking thread
-    // rather than this async one. Installed before the
-    // initial window is opened, so a participant window spawned below still
-    // gets the intro.
+    // rather than this async one. Installed before any window can be opened,
+    // so every participant window gets the intro.
     let chat = Arc::new(
         tokio::task::spawn_blocking({
             let config = config.clone();
@@ -464,29 +472,8 @@ async fn async_main(command: CliCommand) -> Result<()> {
         .context("plan ledger initialization panicked")?,
     );
 
-    // The daemon keeps serving when the initial window cannot open, so a
-    // client can ask why through `get_daemon_health` instead of finding a
-    // daemon that exited with its reason on a detached stderr.
-    let initial_window_failure = registry
-        .open(OpenWindowRequest {
-            command: vec![shell_str.to_string()],
-            cwd: None,
-            name: None,
-            vendor: None,
-            detection: None,
-        })
-        .await
-        .err()
-        .map(|err| {
-            tracing::error!("failed to open the initial window: {err}");
-            err.to_string()
-        });
-
-    let mut server = IpcServer::new_with_chat(registry, endpoint, config, chat).with_ledger(ledger);
-    if let Some(reason) = initial_window_failure {
-        server = server.with_initial_window_failure(reason);
-    }
-    let server = Arc::new(server);
+    let server =
+        Arc::new(IpcServer::new_with_chat(registry, endpoint, config, chat).with_ledger(ledger));
     server
         .run_with_listener(listener, daemon_sid)
         .await

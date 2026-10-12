@@ -273,8 +273,6 @@ export const messagesEn = {
     restoreLoadFailed: 'Previous session could not be read.',
     daemonWindowsUnavailable:
       'Windows cannot be opened: the console host bundled with yagura (conpty.dll, OpenConsole.exe) is missing or damaged. Reinstall yagura.',
-    daemonInitialWindowFailed: (detail: string): string =>
-      `The first window could not be opened: ${detail}`,
 
     /** Plural form policy lives with the resource, not the machinery. */
     approvalExpiredUnseen: (

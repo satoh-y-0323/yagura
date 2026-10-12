@@ -26,23 +26,24 @@ fn get_daemon_health_round_trips_under_its_snake_case_tag() {
 #[test]
 fn daemon_health_round_trips_with_snake_case_kinds() {
     let message = DaemonMessage::DaemonHealth {
-        problems: vec![
-            DaemonProblem {
-                kind: DaemonProblemKind::WindowsUnavailable,
-                detail: "missing".to_string(),
-            },
-            DaemonProblem {
-                kind: DaemonProblemKind::InitialWindowFailed,
-                detail: "boom".to_string(),
-            },
-        ],
+        problems: vec![DaemonProblem {
+            kind: DaemonProblemKind::WindowsUnavailable,
+            detail: "missing".to_string(),
+        }],
     };
     let bytes = encode_daemon_message(&message);
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["type"], "daemon_health");
     assert_eq!(value["problems"][0]["kind"], "windows_unavailable");
-    assert_eq!(value["problems"][1]["kind"], "initial_window_failed");
     assert_eq!(decode_daemon_message(&bytes).unwrap(), message);
+}
+
+#[test]
+fn initial_window_failed_is_not_a_problem_kind() {
+    // The daemon opens no window at start-up, so there is no such failure to report.
+    let bytes =
+        br#"{"type":"daemon_health","problems":[{"kind":"initial_window_failed","detail":""}]}"#;
+    assert!(decode_daemon_message(bytes).is_err());
 }
 
 #[test]

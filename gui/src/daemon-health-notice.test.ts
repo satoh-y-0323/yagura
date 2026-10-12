@@ -14,10 +14,4 @@ describe('daemonProblemNotices', () => {
       'Windows cannot be opened: the console host bundled with yagura (conpty.dll, OpenConsole.exe) is missing or damaged. Reinstall yagura.',
     ]);
   });
-
-  it('carries the daemon detail for initial_window_failed', () => {
-    expect(
-      daemonProblemNotices([{ kind: 'initial_window_failed', detail: 'spawn refused' }])
-    ).toEqual(['The first window could not be opened: spawn refused']);
-  });
 });

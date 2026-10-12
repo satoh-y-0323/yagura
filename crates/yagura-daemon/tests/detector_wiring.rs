@@ -33,11 +33,12 @@ const TEST_STATUS_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// A status report as a hook sends it, built from JSON so the tests do not
 /// depend on which fields the Rust variant carries.
-fn status_event(source: &str, status: WindowStatus) -> ClientMessage {
+fn status_event(source: &str, status: WindowStatus, window_id: &str) -> ClientMessage {
     let body = serde_json::json!({
         "type": "status_event",
         "source": source,
         "status": status,
+        "window_id": window_id,
         "token": TEST_STATUS_TOKEN,
     });
     yagura_protocol::decode_client_message(body.to_string().as_bytes())
@@ -277,7 +278,7 @@ async fn status_event_reaches_attached_client_as_status_changed() {
 
     send_client_message(
         &mut client,
-        &status_event("hook-test", WindowStatus::Running),
+        &status_event("hook-test", WindowStatus::Running, &window_id),
     )
     .await;
 
@@ -352,8 +353,8 @@ async fn status_event_rejects_invalid_source() {
     let config = base_config();
     let registry = Arc::new(WindowRegistry::new(config.clone()));
     // The target window is resolved before the source is judged, so this event
-    // needs a real window -- here the initial one -- to be attributed to.
-    let _window_id = open_echo_window_id(&registry, None).await;
+    // needs a real window to be attributed to.
+    let window_id = open_echo_window_id(&registry, None).await;
     let pipe_name = unique_endpoint_name("yagura-test", "status-event-invalid-source");
     let server = Arc::new(IpcServer::new(
         registry.clone(),
@@ -365,7 +366,7 @@ async fn status_event_rejects_invalid_source() {
 
     send_client_message(
         &mut client,
-        &status_event("Invalid Source!", WindowStatus::Running),
+        &status_event("Invalid Source!", WindowStatus::Running, &window_id),
     )
     .await;
 
@@ -385,7 +386,11 @@ async fn status_event_rejects_invalid_source() {
 
     // Control case: unless a valid source is also shown to pass, an
     // implementation that rejects every StatusEvent would satisfy the above.
-    send_client_message(&mut client, &status_event("cli", WindowStatus::Running)).await;
+    send_client_message(
+        &mut client,
+        &status_event("cli", WindowStatus::Running, &window_id),
+    )
+    .await;
     send_client_message(&mut client, &ClientMessage::Ping).await;
     let next = read_daemon_frame(&mut client, Duration::from_secs(5))
         .await

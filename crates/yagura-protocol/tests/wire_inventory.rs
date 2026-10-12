@@ -1342,19 +1342,15 @@ fn model_choice_source_wire_variants() -> BTreeSet<String> {
 /// Every wire enum's full wire-string variant set, keyed by the enum's own
 /// name.
 fn daemon_problem_kind_wire_variants() -> BTreeSet<String> {
-    [
-        DaemonProblemKind::WindowsUnavailable,
-        DaemonProblemKind::InitialWindowFailed,
-    ]
-    .into_iter()
-    .map(|kind| {
-        let hand = match &kind {
-            DaemonProblemKind::WindowsUnavailable => "windows_unavailable",
-            DaemonProblemKind::InitialWindowFailed => "initial_window_failed",
-        };
-        serde_spelling(&kind, hand)
-    })
-    .collect()
+    [DaemonProblemKind::WindowsUnavailable]
+        .into_iter()
+        .map(|kind| {
+            let hand = match &kind {
+                DaemonProblemKind::WindowsUnavailable => "windows_unavailable",
+            };
+            serde_spelling(&kind, hand)
+        })
+        .collect()
 }
 
 fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {

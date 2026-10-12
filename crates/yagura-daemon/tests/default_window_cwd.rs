@@ -5,12 +5,9 @@
 //! wiring into `DaemonConfig::default_window_cwd` / the `cwd: None` branch
 //! `WindowRegistry::open` resolves through.
 //!
-//! `resolve_default_window_cwd` applies the same read/skip judgement as the
-//! login-shell read (`child_env::login_env_decision`): on Windows, or when
-//! the daemon inherited a terminal's `TERM`, it defers to the daemon's own
-//! current directory (`None`). Only a termless Unix
-//! daemon looks at `HOME` (the base environment's, falling back to the
-//! daemon's own inherited one) and only when that directory exists.
+//! The default is the user's home directory whatever the host OS and however
+//! the daemon was started; only a home that is missing or not an existing
+//! directory defers to the daemon's own current directory (`None`).
 //!
 //! `DaemonConfig::default_window_cwd` itself defaults to `None`, so every
 //! existing `..DaemonConfig::default()` literal -- including
@@ -22,9 +19,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::child_env::ChildBaseEnv;
 use yagura_daemon::config::resolve_default_window_cwd;
-use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
 use yagura_test_support::paths::{strip_extended_length_prefix, unique_temp_dir};
 use yagura_test_support::process::echo_child_path;
@@ -32,13 +27,6 @@ use yagura_test_support::process::echo_child_path;
 fn exists_paths_among(paths: Vec<&Path>) -> impl Fn(&Path) -> bool + use<> {
     let owned: Vec<PathBuf> = paths.into_iter().map(Path::to_path_buf).collect();
     move |candidate: &Path| owned.iter().any(|known| known == candidate)
-}
-
-fn base_env_with_home(home: &Path) -> ChildBaseEnv {
-    ChildBaseEnv::from_pairs(vec![(
-        OsString::from("HOME"),
-        OsString::from(home.as_os_str()),
-    )])
 }
 
 fn echo_request() -> OpenWindowRequest {
@@ -62,119 +50,40 @@ fn echo_request() -> OpenWindowRequest {
 // =====================================================================
 
 #[test]
-fn windows_never_reads_home_and_defers_to_the_daemon_cwd() {
+fn the_home_directory_is_the_default_cwd_when_it_is_an_existing_directory() {
     let home = PathBuf::from("home-that-exists");
-    let base_env = base_env_with_home(&home);
     let exists = exists_paths_among(vec![&home]);
 
-    let result = resolve_default_window_cwd(ProfileOs::Windows, None, &base_env, None, &exists);
-
-    assert_eq!(result, None);
-}
-
-#[test]
-fn a_terminal_launched_unix_daemon_defers_to_the_daemon_cwd_even_when_home_exists() {
-    let home = PathBuf::from("home-that-exists");
-    let base_env = base_env_with_home(&home);
-    let exists = exists_paths_among(vec![&home]);
-    let term = OsString::from("xterm-256color");
-
-    let result = resolve_default_window_cwd(
-        ProfileOs::Linux,
-        Some(term.as_os_str()),
-        &base_env,
-        None,
-        &exists,
-    );
-
-    assert_eq!(result, None);
-}
-
-#[test]
-fn a_termless_linux_daemon_defaults_to_home_from_the_base_environment_when_it_exists() {
-    let home = PathBuf::from("home-that-exists");
-    let base_env = base_env_with_home(&home);
-    let exists = exists_paths_among(vec![&home]);
-
-    let result = resolve_default_window_cwd(ProfileOs::Linux, None, &base_env, None, &exists);
+    let result = resolve_default_window_cwd(Some(&home), &exists);
 
     assert_eq!(result, Some(home));
 }
 
 #[test]
-fn a_termless_macos_daemon_defaults_to_home_from_the_base_environment_when_it_exists() {
-    // An empty `TERM` counts the same as a missing one
-    // (`child_env::login_env_decision`'s own judgement).
-    let home = PathBuf::from("home-that-exists");
-    let base_env = base_env_with_home(&home);
-    let exists = exists_paths_among(vec![&home]);
-    let empty_term = OsString::new();
-
-    let result = resolve_default_window_cwd(
-        ProfileOs::MacOs,
-        Some(empty_term.as_os_str()),
-        &base_env,
-        None,
-        &exists,
-    );
-
-    assert_eq!(result, Some(home));
-}
-
-#[test]
-fn falls_back_to_the_daemons_own_inherited_home_when_the_base_environment_has_none() {
-    let inherited_home = PathBuf::from("inherited-home-that-exists");
-    let base_env = ChildBaseEnv::default();
-    let exists = exists_paths_among(vec![&inherited_home]);
-    let inherited_home_os = OsString::from(inherited_home.as_os_str());
-
-    let result = resolve_default_window_cwd(
-        ProfileOs::Linux,
-        None,
-        &base_env,
-        Some(inherited_home_os.as_os_str()),
-        &exists,
-    );
-
-    assert_eq!(result, Some(inherited_home));
-}
-
-#[test]
-fn the_base_environments_home_takes_precedence_over_the_daemons_inherited_home() {
-    let base_home = PathBuf::from("base-home-that-exists");
-    let inherited_home = PathBuf::from("inherited-home-that-exists");
-    let base_env = base_env_with_home(&base_home);
-    let exists = exists_paths_among(vec![&base_home, &inherited_home]);
-    let inherited_home_os = OsString::from(inherited_home.as_os_str());
-
-    let result = resolve_default_window_cwd(
-        ProfileOs::Linux,
-        None,
-        &base_env,
-        Some(inherited_home_os.as_os_str()),
-        &exists,
-    );
-
-    assert_eq!(result, Some(base_home));
-}
-
-#[test]
-fn a_home_that_does_not_exist_defers_to_the_daemon_cwd() {
+fn a_home_that_is_not_an_existing_directory_defers_to_the_daemon_cwd() {
     let home = PathBuf::from("home-that-does-not-exist");
-    let base_env = base_env_with_home(&home);
     let exists = exists_paths_among(vec![]);
 
-    let result = resolve_default_window_cwd(ProfileOs::Linux, None, &base_env, None, &exists);
+    let result = resolve_default_window_cwd(Some(&home), &exists);
 
     assert_eq!(result, None);
 }
 
 #[test]
-fn no_home_anywhere_defers_to_the_daemon_cwd() {
-    let base_env = ChildBaseEnv::default();
-    let exists = exists_paths_among(vec![]);
+fn an_empty_home_defers_to_the_daemon_cwd() {
+    let empty = PathBuf::new();
+    let exists = |_: &Path| true;
 
-    let result = resolve_default_window_cwd(ProfileOs::Linux, None, &base_env, None, &exists);
+    let result = resolve_default_window_cwd(Some(&empty), &exists);
+
+    assert_eq!(result, None);
+}
+
+#[test]
+fn no_home_defers_to_the_daemon_cwd() {
+    let exists = |_: &Path| true;
+
+    let result = resolve_default_window_cwd(None, &exists);
 
     assert_eq!(result, None);
 }

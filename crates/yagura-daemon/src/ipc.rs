@@ -954,9 +954,6 @@ pub struct IpcServer {
     /// Every window's inbox of reports from the windows it opened or owns
     /// tasks for. Memory only, and always enabled.
     reports: Arc<report::ReportInboxes>,
-    /// Why the window opened at start-up could not be opened, when it could
-    /// not; reported by `get_daemon_health`.
-    initial_window_failure: Option<String>,
     /// Admits one `get_daemon_health` pseudoconsole check at a time: the check
     /// reads and hashes files on a blocking thread, and any connection may ask.
     health_checks: Semaphore,
@@ -968,10 +965,9 @@ pub struct IpcServer {
 impl IpcServer {
     /// Builds a server around an already-constructed [`WindowRegistry`].
     ///
-    /// Window lifecycle is the registry's responsibility and opening the
-    /// initial window is the caller's: the endpoint must be secured *before*
-    /// any child is spawned in production (`main.rs`), while tests open
-    /// `echo_child`-backed windows directly.
+    /// Window lifecycle is the registry's responsibility: in production every
+    /// window is opened through this server once the endpoint is secured
+    /// (`main.rs`), while tests open `echo_child`-backed windows directly.
     pub fn new(
         registry: Arc<WindowRegistry>,
         endpoint: impl Into<String>,
@@ -1046,18 +1042,9 @@ impl IpcServer {
             mcp_registration_row_reads,
             mcp_registration_changes,
             reports,
-            initial_window_failure: None,
             health_checks: Semaphore::new(1),
             _notice_agents: notice_agents,
         }
-    }
-
-    /// Records why the window opened at start-up could not be opened, so
-    /// `get_daemon_health` can say so. The daemon keeps serving without it.
-    #[must_use]
-    pub fn with_initial_window_failure(mut self, reason: impl Into<String>) -> Self {
-        self.initial_window_failure = Some(reason.into());
-        self
     }
 
     /// [`IpcServer::new`]'s counterpart for the plan ledger: serves the plan
@@ -1133,7 +1120,7 @@ impl IpcServer {
     /// Runs the accept loop on an endpoint the caller already claimed.
     ///
     /// This is the main entry point for the daemon: the endpoint is claimed
-    /// before the initial window is opened, ensuring that a losing
+    /// before any window can be opened, ensuring that a losing
     /// multi-instance race never orphans a child process.
     ///
     /// # Arguments
@@ -1700,10 +1687,7 @@ impl IpcServer {
                     Err(_) => None,
                 };
                 outbound.reply(&DaemonMessage::DaemonHealth {
-                    problems: health::daemon_problems(
-                        conpty_fault.as_deref(),
-                        self.initial_window_failure.as_deref(),
-                    ),
+                    problems: health::daemon_problems(conpty_fault.as_deref()),
                 });
                 FrameOutcome::Continue
             }
@@ -3508,9 +3492,9 @@ impl IpcServer {
     ///
     /// Validation is fail-loud but non-fatal: a rejected event answers an
     /// error and leaves the connection open. No attach is required, since
-    /// events arrive from hook processes rather than the GUI. An omitted
-    /// `window_id` targets the initial window; if that window is
-    /// gone, the event is refused rather than mis-filed onto another window.
+    /// events arrive from hook processes rather than the GUI. An event that
+    /// omits `window_id` is refused: no other window may stand in for the one
+    /// it does not name.
     ///
     /// Order: the token's *shape* is checked first, then the target window is
     /// resolved, then the candidate is compared against that window's own
@@ -3542,20 +3526,14 @@ impl IpcServer {
             return;
         }
 
-        let target = match window_id {
-            Some(window_id) => window_id.to_string(),
-            None => match self.registry.initial_window_id() {
-                Some(window_id) => window_id,
-                None => {
-                    outbound.reply(&error_msg(
-                        "window_not_found",
-                        "no initial window to attribute this status event to",
-                    ));
-                    return;
-                }
-            },
+        let Some(target) = window_id else {
+            outbound.reply(&error_msg(
+                "invalid_argument",
+                "status_event requires window_id",
+            ));
+            return;
         };
-        let Some(entry) = self.registry.get(&target) else {
+        let Some(entry) = self.registry.get(target) else {
             outbound.reply(&window_not_found_msg());
             return;
         };
