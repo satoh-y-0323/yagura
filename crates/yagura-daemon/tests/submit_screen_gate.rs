@@ -1270,14 +1270,11 @@ async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_env
         ),
     )
     .await;
-    seed_composer(&h, &window_id, "ENV").await;
+    // The seed itself moves the write count past the caller's baseline, so the
+    // composer reads as the envelope while the ledger no longer vouches for it:
+    // the resend has to confirm behind it first.
     let residue_seq = entry(&h, &window_id).write_seq();
-    // Someone else's write leaves the composer reading as the envelope and
-    // moves the write count: the resend has to confirm behind it first.
-    entry(&h, &window_id)
-        .write_pty_input(b"d\x08", InputOrigin::Interactive)
-        .await
-        .expect("foreign write must not fail");
+    seed_composer(&h, &window_id, "ENV").await;
 
     let sender = entry(&h, &window_id);
     let call = tokio::spawn(async move {

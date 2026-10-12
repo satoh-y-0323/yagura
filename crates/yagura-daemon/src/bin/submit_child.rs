@@ -728,17 +728,17 @@ fn main() -> io::Result<()> {
             overlay_fired = true;
             fire_overlay(&out, &overlay_drawn, overlay)?;
         }
-        if let Some(reflector) = &reflector
-            && !state.held
-        {
+        let reflects = reflector.is_some() && !state.held;
+        if reflects {
             out.set_body_pasted_through(
                 &String::from_utf8_lossy(&state.buffer),
                 state.pasted_len.min(state.buffer.len()),
             );
-            let _ = reflector.send(());
         }
         // After the body sync above, so the dialog is drawn beside what the
-        // trigger byte left in the composer rather than a stale body.
+        // trigger byte left in the composer, and before the reflector is woken,
+        // so the reaction to the trigger byte reaches the screen as one frame
+        // rather than a dialog-less repaint followed by the dialog.
         if let Some(overlay) = &overlay
             && overlay.trigger.trigger_byte().is_some()
             && !overlay_fired
@@ -746,6 +746,9 @@ fn main() -> io::Result<()> {
         {
             overlay_fired = true;
             fire_overlay(&out, &overlay_drawn, overlay)?;
+        }
+        if reflects && let Some(reflector) = &reflector {
+            let _ = reflector.send(());
         }
     }
 
