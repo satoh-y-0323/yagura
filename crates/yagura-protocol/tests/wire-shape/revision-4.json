@@ -1,0 +1,732 @@
+{
+  "revision": 4,
+  "shapes": {
+    "client": {
+      "approval_decision": {
+        "approved": "boolean",
+        "request_id": "string",
+        "type": "string"
+      },
+      "attach": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "broadcast_chat": {
+        "body": "string",
+        "room_id": "string",
+        "type": "string"
+      },
+      "clear_task_assignment": {
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "close_window": {
+        "force": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "create_plan": {
+        "tasks": [
+          {
+            "depends_on": [
+              "string"
+            ],
+            "effort": "string",
+            "model": "string",
+            "profile": "string",
+            "role": "string",
+            "task_id": "string",
+            "title": "string",
+            "writes": [
+              "string"
+            ]
+          }
+        ],
+        "title": "string",
+        "type": "string"
+      },
+      "delete_plan": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "get_plan": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "get_protocol_revision": {
+        "type": "string"
+      },
+      "get_window_status": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "identify": {
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "input": {
+        "data_b64": "string",
+        "type": "string"
+      },
+      "interrupt_window": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "list_chat_rooms": {
+        "type": "string"
+      },
+      "list_detections": {
+        "type": "string"
+      },
+      "list_plans": {
+        "type": "string"
+      },
+      "list_profiles": {
+        "type": "string"
+      },
+      "list_restore_candidates": {
+        "type": "string"
+      },
+      "list_roles": {
+        "type": "string"
+      },
+      "list_windows": {
+        "type": "string"
+      },
+      "open_task_window": {
+        "name": "string",
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "open_window": {
+        "command": [
+          "string"
+        ],
+        "cwd": "string",
+        "detection": "string",
+        "name": "string",
+        "type": "string",
+        "vendor": "string"
+      },
+      "open_window_from_profile": {
+        "cwd": "string",
+        "effort": "string",
+        "model": "string",
+        "name": "string",
+        "profile": "string",
+        "type": "string"
+      },
+      "ping": {
+        "type": "string"
+      },
+      "read_chat": {
+        "after_seq": "number",
+        "limit": "number",
+        "room_id": "string",
+        "type": "string"
+      },
+      "read_output": {
+        "lines": "number",
+        "type": "string",
+        "window_id": "string"
+      },
+      "register_approver": {
+        "type": "string"
+      },
+      "rename_window": {
+        "name": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "resize": {
+        "cols": "number",
+        "rows": "number",
+        "type": "string"
+      },
+      "save_roles": {
+        "roles": [
+          {
+            "effort": "string",
+            "model": "string",
+            "name": "string",
+            "profile": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "send_chat": {
+        "body": "string",
+        "room_id": "string",
+        "type": "string"
+      },
+      "send_handoff": {
+        "cwd": "string",
+        "effort": "string",
+        "model": "string",
+        "name": "string",
+        "note": "string",
+        "profile": "string",
+        "reference": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "send_report": {
+        "outcome": "string",
+        "path": "string",
+        "summary": "string",
+        "type": "string"
+      },
+      "send_text": {
+        "text": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "set_plan_owner": {
+        "plan_id": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "set_task_assignment": {
+        "assignment": {
+          "effort": "string",
+          "model": "string",
+          "profile": "string"
+        },
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "shutdown": {
+        "type": "string"
+      },
+      "status_event": {
+        "source": "string",
+        "status": "string",
+        "token": "string",
+        "ttl_ms": "number",
+        "type": "string",
+        "window_id": "string"
+      },
+      "update_plan": {
+        "plan_id": "string",
+        "tasks": [
+          {
+            "depends_on": [
+              "string"
+            ],
+            "effort": "string",
+            "model": "string",
+            "profile": "string",
+            "role": "string",
+            "task_id": "string",
+            "title": "string",
+            "writes": [
+              "string"
+            ]
+          }
+        ],
+        "title": "string",
+        "type": "string"
+      },
+      "update_window_layout": {
+        "layout_json": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "wait_for_report": {
+        "timeout_sec": "number",
+        "type": "string"
+      },
+      "wait_for_status": {
+        "target_status": "string",
+        "timeout_sec": "number",
+        "type": "string",
+        "window_id": "string"
+      }
+    },
+    "daemon": {
+      "approval_requested": {
+        "request": {
+          "request_id": "string",
+          "requester": {
+            "kind": "string",
+            "name": "string",
+            "window_id": "string"
+          },
+          "room": {
+            "name": "string",
+            "room_id": "string"
+          },
+          "target": {
+            "name": "string",
+            "status": "string",
+            "window_id": "string"
+          },
+          "text": "string",
+          "tool": "string"
+        },
+        "type": "string"
+      },
+      "approval_resolved": {
+        "request_id": "string",
+        "type": "string"
+      },
+      "approval_withdrawn": {
+        "reason": "string",
+        "request_id": "string",
+        "type": "string"
+      },
+      "approver_registered": {
+        "pending": [
+          {
+            "request_id": "string",
+            "requester": {
+              "kind": "string",
+              "name": "string",
+              "window_id": "string"
+            },
+            "room": {
+              "name": "string",
+              "room_id": "string"
+            },
+            "target": {
+              "name": "string",
+              "status": "string",
+              "window_id": "string"
+            },
+            "text": "string",
+            "tool": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "attached": {
+        "child_exited": "boolean",
+        "exit_code": "number",
+        "scrollback_b64": "string",
+        "type": "string"
+      },
+      "chat_changed": {
+        "needs_user": "boolean",
+        "room_id": "string",
+        "seq": "number",
+        "type": "string"
+      },
+      "chat_messages": {
+        "halted": {
+          "reason": "string",
+          "since_ms": "number"
+        },
+        "messages": [
+          {
+            "at_ms": "number",
+            "body": "string",
+            "broadcast": "boolean",
+            "deliveries": [
+              {
+                "state": "string",
+                "unknown_reason": "string",
+                "window_id": "string"
+              }
+            ],
+            "from_kind": "string",
+            "from_name": "string",
+            "from_window_id": "string",
+            "mentions": [
+              "string"
+            ],
+            "seq": "number"
+          }
+        ],
+        "needs_user": "boolean",
+        "next_after_seq": "number",
+        "room_id": "string",
+        "roster": [
+          {
+            "name": "string",
+            "window_id": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "chat_posted": {
+        "halted": "boolean",
+        "room_id": "string",
+        "seq": "number",
+        "targets": [
+          "string"
+        ],
+        "type": "string",
+        "unresolved": [
+          "string"
+        ],
+        "user": "boolean"
+      },
+      "chat_rooms": {
+        "rooms": [
+          {
+            "halted": {
+              "reason": "string",
+              "since_ms": "number"
+            },
+            "last_at_ms": "number",
+            "name": "string",
+            "needs_user": "boolean",
+            "participant_count": "number",
+            "room_id": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "detection_list": {
+        "bundled_names": [
+          "string"
+        ],
+        "directory_names": [
+          "string"
+        ],
+        "names": [
+          "string"
+        ],
+        "type": "string",
+        "warning": "string"
+      },
+      "error": {
+        "code": "string",
+        "message": "string",
+        "rejected_argument": "string",
+        "type": "string"
+      },
+      "exit": {
+        "exit_code": "number",
+        "type": "string"
+      },
+      "handoff_sent": {
+        "delivery": "string",
+        "opened": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "identified": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "output": {
+        "data_b64": "string",
+        "type": "string"
+      },
+      "plan_changed": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "plan_deleted": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "plan_detail": {
+        "plan": {
+          "cwd": "string",
+          "owner_window": "string",
+          "plan_id": "string",
+          "roles_warning": "string",
+          "tasks": [
+            {
+              "depends_on": [
+                "string"
+              ],
+              "parent": {
+                "effort": "string",
+                "model": "string",
+                "profile": "string"
+              },
+              "report": {
+                "outcome": "string",
+                "path": "string",
+                "reported_at": "number",
+                "summary": "string"
+              },
+              "resolved": {
+                "assignment": {
+                  "effort": "string",
+                  "model": "string",
+                  "profile": "string"
+                },
+                "source": "string"
+              },
+              "role": "string",
+              "task_id": "string",
+              "title": "string",
+              "user": {
+                "effort": "string",
+                "model": "string",
+                "profile": "string"
+              },
+              "wave": "number",
+              "window_id": "string",
+              "writes": [
+                "string"
+              ]
+            }
+          ],
+          "title": "string",
+          "waves": [
+            [
+              "string"
+            ]
+          ]
+        },
+        "type": "string"
+      },
+      "plan_list": {
+        "plans": [
+          {
+            "owner_window": "string",
+            "plan_id": "string",
+            "task_count": "number",
+            "title": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "pong": {
+        "type": "string"
+      },
+      "profile_list": {
+        "profiles": [
+          {
+            "available": "boolean",
+            "command": [
+              "string"
+            ],
+            "cwd": "string",
+            "detection": "string",
+            "detection_warning": "string",
+            "display_name": "string",
+            "effort": {
+              "aliases": [
+                {
+                  "alias": "string",
+                  "value": "string"
+                }
+              ]
+            },
+            "id": "string",
+            "model": {
+              "aliases": [
+                {
+                  "alias": "string",
+                  "value": "string"
+                }
+              ]
+            },
+            "unavailable_reason": "string"
+          }
+        ],
+        "type": "string",
+        "warnings": [
+          "string"
+        ]
+      },
+      "protocol_revision": {
+        "revision": "number",
+        "type": "string"
+      },
+      "report_sent": {
+        "delivered_to": "string",
+        "task": {
+          "plan_id": "string",
+          "task_id": "string"
+        },
+        "type": "string"
+      },
+      "reports": {
+        "reports": [
+          {
+            "at_ms": "number",
+            "from_name": "string",
+            "from_window_id": "string",
+            "outcome": "string",
+            "path": "string",
+            "summary": "string",
+            "task": {
+              "plan_id": "string",
+              "task_id": "string"
+            }
+          }
+        ],
+        "type": "string"
+      },
+      "restore_candidate_list": {
+        "taken_at_epoch_s": "number",
+        "type": "string",
+        "windows": [
+          {
+            "command": [
+              "string"
+            ],
+            "cwd": "string",
+            "detection": "string",
+            "layout_json": "string",
+            "name": "string",
+            "position": "number",
+            "vendor": "string"
+          }
+        ]
+      },
+      "resync": {
+        "scrollback_b64": "string",
+        "type": "string"
+      },
+      "role_list": {
+        "roles": [
+          {
+            "effort": "string",
+            "model": "string",
+            "name": "string",
+            "profile": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "status_changed": {
+        "status": "string",
+        "status_rev": "number",
+        "type": "string",
+        "unknown_reason": "string",
+        "window_id": "string"
+      },
+      "task_window_opened": {
+        "assignment": {
+          "assignment": {
+            "effort": "string",
+            "model": "string",
+            "profile": "string"
+          },
+          "source": "string"
+        },
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "text_sent": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "wait_result": {
+        "outcome": "string",
+        "status": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_closed": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_interrupted": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_layout_updated": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_list": {
+        "type": "string",
+        "windows": [
+          {
+            "cwd": "string",
+            "detection_warning": "string",
+            "exit_code": "number",
+            "layout_json": "string",
+            "name": "string",
+            "room": {
+              "name": "string",
+              "room_id": "string"
+            },
+            "status": "string",
+            "status_rev": "number",
+            "unknown_reason": "string",
+            "vendor": "string",
+            "window_id": "string"
+          }
+        ]
+      },
+      "window_opened": {
+        "detection_warning": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_output": {
+        "text": "string",
+        "truncated": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_renamed": {
+        "name": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_status": {
+        "detection_warning": "string",
+        "exit_code": "number",
+        "last_output_summary": "string",
+        "since_ms": "number",
+        "status": "string",
+        "type": "string",
+        "unknown_reason": "string",
+        "window_id": "string"
+      }
+    }
+  },
+  "enums": {
+    "ApprovalRequesterKind": [
+      "external",
+      "unknown",
+      "window"
+    ],
+    "AssignmentSource": [
+      "parent",
+      "role",
+      "unassigned",
+      "user"
+    ],
+    "HandoffDelivery": [
+      "confirmed",
+      "not_observed",
+      "not_written",
+      "unconfirmed"
+    ],
+    "ReportOutcome": [
+      "failed",
+      "succeeded"
+    ],
+    "UnknownReason": [
+      "declared_unknown",
+      "detector_stopped",
+      "no_definition",
+      "no_rule_matched",
+      "not_yet_judged",
+      "screen_lost"
+    ],
+    "WindowStatus": [
+      "exited",
+      "idle",
+      "interrupted",
+      "running",
+      "unknown",
+      "waiting_approval",
+      "waiting_input"
+    ],
+    "WithdrawReason": [
+      "requester_disconnected",
+      "resolved",
+      "timeout",
+      "unknown"
+    ]
+  }
+}

@@ -1,0 +1,72 @@
+# Allow unwrap/expect/panic in test contexts
+# (complementary to the #![allow(...)] at the head of each test file)
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+
+# Raw IPC transport types belong to yagura-os alone.
+# Every other crate must reach the operating system through the
+# `IpcTransport` abstraction, so that endpoint protection (DACL / socket
+# permissions) and peer verification cannot be bypassed by constructing a
+# listener or a connection directly.
+#
+# `allow-invalid` is set on every entry whose path only exists on one
+# platform (and on `tokio::process`, gated behind a feature this workspace
+# does not enable): without it clippy reports the entry as unreachable on the
+# other platform.
+disallowed-types = [
+    { path = "tokio::net::windows::named_pipe::ServerOptions", allow-invalid = true, reason = "raw IPC transport: bind through yagura-os `IpcTransport::bind` so endpoint security is applied" },
+    { path = "tokio::net::windows::named_pipe::ClientOptions", allow-invalid = true, reason = "raw IPC transport: connect through yagura-os `IpcTransport::connect`" },
+    { path = "tokio::net::windows::named_pipe::NamedPipeServer", allow-invalid = true, reason = "raw IPC transport: use the `IpcTransport::Connection` associated type" },
+    { path = "tokio::net::windows::named_pipe::NamedPipeClient", allow-invalid = true, reason = "raw IPC transport: use the `IpcTransport::ClientConnection` associated type" },
+    { path = "tokio::net::UnixListener", allow-invalid = true, reason = "raw IPC transport: bind through yagura-os `IpcTransport::bind` so endpoint security is applied" },
+    { path = "tokio::net::UnixStream", allow-invalid = true, reason = "raw IPC transport: connect through yagura-os `IpcTransport::connect`" },
+]
+
+# Invariant: a new OS process is created only by yagura-os's spawn functions
+# (a window's PTY spawn and the one-shot capture spawn). They put the child
+# into its teardown unit (a Windows job, a Unix process group) before it runs
+# and hand it only the handles they name, so a stray spawn would start a
+# process nothing tears down. The `std::process` entries carry no
+# `allow-invalid`, so a typo in them is still reported.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    { path = "std::process::Command::spawn", reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    { path = "tokio::process::Command::new", allow-invalid = true, reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    { path = "tokio::process::Command::spawn", allow-invalid = true, reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    { path = "windows::Win32::System::Threading::CreateProcessW", allow-invalid = true, reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    { path = "windows::Win32::System::Threading::CreateProcessA", allow-invalid = true, reason = "spawn only through yagura-os's window or one-shot spawn: those start the child inside its own teardown unit and hand it only the handles it is given" },
+    # Single-caller functions: each is called only from the one place that
+    # holds the lock, bound or ordering it needs, and that place carries an
+    # `#[allow(clippy::disallowed_methods)]` naming why.
+    { path = "yagura_os::capture::spawn_captured", reason = "call pty::spawn_one_shot so the child gets the daemon's environment layering" },
+    { path = "tokio::sync::Mutex::blocking_lock", reason = "reach a store through store_gate::with_store: blocking_lock panics on an async runtime thread" },
+    { path = "yagura_daemon::workspace::resolve_key", reason = "blocking filesystem walk: call resolve_key_blocking so it runs on the blocking pool" },
+    { path = "yagura_daemon::roles::read_roles", reason = "blocking file read: go through ipc::plan's bounded load_role_and_profile_state_blocking" },
+    { path = "yagura_daemon::profile::list_profiles", reason = "blocking directory read: go through ipc::plan's bounded load_role_and_profile_state_blocking" },
+    { path = "yagura_daemon::window::WindowRegistry::list_participation", reason = "read a room's members through ipc::chat's room_members so every reader applies the same membership rule" },
+    { path = "yagura_daemon::chat_store::ChatStore::ensure_room", reason = "create rooms only through ipc::chat's resolve_room, which decides who may own one" },
+    { path = "yagura_daemon::store::rotate_slots", reason = "rotate once at startup through store::wire_into: a second rotation overwrites the previous session" },
+    # Invariant: the SQL text a store hands to SQLite is fixed when the binary
+    # is built, so only bound parameters vary at run time (CWE-89). The
+    # daemon's `sql::FixedSql` is the one caller of rusqlite's text-taking
+    # methods; a leaked String is the way around its `&'static str`.
+    { path = "rusqlite::Connection::execute", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::execute_batch", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::prepare", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::prepare_cached", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::prepare_with_flags", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::query_row", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::query_one", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::query_row_and_then", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::pragma", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::pragma_query", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::pragma_query_value", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::pragma_update", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Connection::pragma_update_and_check", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "rusqlite::Batch::new", reason = "SQL text must be fixed at build time (CWE-89): call it through the daemon's sql::FixedSql, which takes the statement as &'static str" },
+    { path = "std::boxed::Box::leak", reason = "a leaked String is run-time text passed off as &'static str, the type the SQL boundary relies on" },
+    { path = "std::string::String::leak", reason = "a leaked String is run-time text passed off as &'static str, the type the SQL boundary relies on" },
+    { path = "std::vec::Vec::leak", reason = "a leaked String is run-time text passed off as &'static str, the type the SQL boundary relies on" },
+]

@@ -1,0 +1,117 @@
+# Runs the Codex CLI inside a WSL distribution. Windows only (see
+# wsl-claude-code.toml for why this profile carries no other operating
+# system's argv). The shell is both a login and an interactive shell so
+# `~/.bashrc` runs too, which is where a tool such as nvm adds its own
+# install to `PATH`.
+# The launch options below follow `codex --help` (0.153.4) and the Codex config
+# reference. Model names change over time -- edit the aliases to match what
+# your own account can run.
+schema = 1
+display_name = "WSL: Codex CLI"
+detection = "codex-cli"
+
+[command]
+windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "codex"]
+
+[model]
+args = ["-m", "{value}"]
+
+[model.aliases]
+fast = "gpt-5.6-luna"
+default = "gpt-5.6-terra"
+strong = "gpt-6-astra"
+
+# Listed by the CLI itself (`codex debug models`, JSON). A `debug` command may
+# change shape; if it does, edit the pointers below to follow it.
+[model.choices]
+args = ["debug", "models"]
+format = "json"
+items = "/models"
+id = "/slug"
+label = "/display_name"
+filter = { pointer = "/visibility", equals = "list" }
+
+# No aliases: the levels pass through as given into the -c key=value override.
+[effort]
+args = ["-c", "model_reasoning_effort={value}"]
+
+[mcp]
+args = [
+  "-c", "mcp_servers.yagura.command='bash'",
+  "-c", "mcp_servers.yagura.args=['-c','exec \"$YAGURA_MCP_BRIDGE\"']",
+  "-c", "mcp_servers.yagura.env_vars={env_names_toml}",
+  # Codex's own 60-second default would end a call before the daemon's deadlines do.
+  "-c", "mcp_servers.yagura.tool_timeout_sec=86400",
+]
+
+# Each turn boundary runs the daemon's status report. Codex runs a
+# command-line hook only once its trust is recorded in the user's own
+# config (the `entries` of `[mcp_registration.toml_set]` below), so the
+# daemon injects these only while that registration holds. Checked with
+# codex 0.158.0 inside WSL.
+[hooks]
+args = [
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_approval --source codex-cli'}]}]",
+  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
+  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
+]
+
+# The registration commands below run the same way any other window from
+# this profile does: through the launch argv above, so they reach the same
+# `codex` the login shell's `PATH` would find. `bridge_probe` and the file
+# tools run as their own standalone `wsl` invocations instead, because they
+# have nothing to do with launching the CLI itself. `codex mcp add` rewrites
+# the whole `[mcp_servers.<name>]` table, dropping any hand-written key --
+# including `tool_timeout_sec` -- so it is written back once as a
+# settings-file edit right after add.
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
+env_forward = { name = "WSLENV", separator = ":" }
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}", "--json"]
+format = "json"
+command = "/transport/command"
+args_pointer = "/transport/args"
+absent = "No MCP server named"
+
+[mcp_registration.toml_set]
+file = ".codex/config.toml"
+table = ["mcp_servers", "{server}"]
+values = { tool_timeout_sec = 86400 }
+confirm = { tool_timeout_sec = "/tool_timeout_sec" }
+
+# The trust Codex needs before it runs the `[hooks]` above: one
+# `hooks.state` key per hook, holding the hash Codex itself reports for
+# it (`codex app-server`, request `hooks/list`). Any change to a hook's
+# command changes its hash, so take the values again after one. The key
+# names the command-line layer, whose path depends on the operating
+# system Codex runs on.
+[mcp_registration.toml_set.entries]
+under = ["hooks", "state"]
+
+[mcp_registration.toml_set.entries.default]
+'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:83f84d8a25f526a1ada8a56b0bf9fc47f4994145ed7427c23932aa675dd79aa4" }
+'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:98dabe6d33c4c6d7ab045cd4bd62f35293a7bc6d2dfbd925ead971024f6feb25" }
+'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:eaa6e89082c12ced1b86bb9d2a230c3918e7943c03cf54f2ad713ed0b1edea91" }
+'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:44f1ce78ae1ed855ad7b9bf53ef66a9a9b12d6b3a03c1eb63c9ac361e9a577a2" }
+'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:8918ebfbb7a4fd5c7aae8798514ca10d115b5ef648ef3704a11afcfc7840f666" }
+'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:19a4ee2712cd73414b2c13f19a8183731238195ddd118946ee8fb9d210193f2b" }
+
+[mcp_registration.files]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself. `readlink -f`
+# follows a symlinked settings file to its real target, and the replacement
+# is written to a temporary file in the same directory, given the target's
+# own mode, then renamed over it -- so a dotfiles-managed link stays a link
+# and the file's mode never widens.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; r=$(readlink -f -- "$f") || exit 1; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && chmod --reference="$r" "$t" && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
+absent_exit = 3

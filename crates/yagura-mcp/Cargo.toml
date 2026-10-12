@@ -1,0 +1,31 @@
+[package]
+name = "yagura-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+yagura-protocol = { path = "../yagura-protocol" }
+yagura-os = { path = "../yagura-os" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rmcp.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["process"] }
+serde_json.workspace = true
+# tests/e2e.rs only: exercises the tool layer against a real in-process
+# daemon (IpcServer + WindowRegistry) over the real named-pipe transport.
+# Dev-only by design -- the shipped bridge owns no daemon code and reaches
+# the daemon only over IPC.
+yagura-daemon = { path = "../yagura-daemon", features = ["fault-injection"] }
+# Shared test fixtures. Dev-only: `publish = false` and absent from
+# the normal dependency graph, so it never reaches the shipped bridge.
+yagura-test-support = { path = "../yagura-test-support" }
+
+[lints]
+workspace = true

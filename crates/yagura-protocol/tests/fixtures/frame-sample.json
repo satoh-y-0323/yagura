@@ -1,0 +1,491 @@
+{
+  "description": "Steps of frames applied in order to one persistent grid; see tests/frame_fixture.rs",
+  "steps": [
+    {
+      "expected": {
+        "cells": [
+          {
+            "bg": "default",
+            "col": 0,
+            "fg": "default",
+            "flags": [],
+            "row": 0,
+            "text": "a",
+            "width": 1
+          },
+          {
+            "bg": "default",
+            "col": 2,
+            "fg": {
+              "indexed": 1
+            },
+            "flags": [
+              "bold"
+            ],
+            "row": 0,
+            "text": "全",
+            "width": 2
+          },
+          {
+            "bg": "default",
+            "col": 3,
+            "fg": {
+              "indexed": 1
+            },
+            "flags": [
+              "bold"
+            ],
+            "row": 0,
+            "text": "",
+            "width": 0
+          },
+          {
+            "bg": "default",
+            "col": 4,
+            "fg": "default",
+            "flags": [],
+            "row": 0,
+            "text": "é",
+            "width": 1
+          },
+          {
+            "bg": "default",
+            "col": 5,
+            "fg": "default",
+            "flags": [],
+            "row": 0,
+            "text": " ",
+            "width": 1
+          },
+          {
+            "bg": {
+              "rgb": [
+                10,
+                20,
+                30
+              ]
+            },
+            "col": 0,
+            "fg": "default",
+            "flags": [
+              "underline",
+              "selected"
+            ],
+            "row": 2,
+            "text": "x",
+            "width": 1
+          },
+          {
+            "bg": {
+              "rgb": [
+                10,
+                20,
+                30
+              ]
+            },
+            "col": 1,
+            "fg": "default",
+            "flags": [
+              "underline",
+              "selected"
+            ],
+            "row": 2,
+            "text": "y",
+            "width": 1
+          },
+          {
+            "bg": "default",
+            "col": 9,
+            "fg": "default",
+            "flags": [],
+            "row": 2,
+            "text": " ",
+            "width": 1
+          }
+        ],
+        "cols": 10,
+        "cursor": {
+          "col": 0,
+          "row": 1,
+          "shape": "block",
+          "visible": true
+        },
+        "overrides": [],
+        "rows": 3,
+        "screen_text": [
+          "ab全é",
+          "",
+          "xy"
+        ],
+        "view": {
+          "alt_screen": false,
+          "display_offset": 0,
+          "history_rows": 0,
+          "mouse_reporting": false
+        },
+        "wrapped_rows": [
+          0
+        ]
+      },
+      "messages": [
+        {
+          "attrs": [
+            {
+              "bg": "default",
+              "fg": "default"
+            },
+            {
+              "bg": "default",
+              "fg": {
+                "indexed": 1
+              },
+              "flags": [
+                "bold"
+              ]
+            }
+          ],
+          "cols": 10,
+          "cursor": {
+            "col": 5,
+            "row": 0,
+            "shape": "block",
+            "visible": true
+          },
+          "last": false,
+          "lines": [
+            {
+              "row": 0,
+              "runs": [
+                {
+                  "attr": 0,
+                  "cells": [
+                    "a",
+                    "b"
+                  ]
+                },
+                {
+                  "attr": 1,
+                  "cells": [
+                    "全"
+                  ],
+                  "wide": [
+                    0
+                  ]
+                },
+                {
+                  "attr": 0,
+                  "cells": [
+                    "é"
+                  ]
+                }
+              ],
+              "wrapped": true
+            }
+          ],
+          "reset": true,
+          "rows": 3,
+          "seq": 1,
+          "type": "frame",
+          "view": {
+            "alt_screen": false,
+            "display_offset": 0,
+            "history_rows": 0,
+            "mouse_reporting": false
+          }
+        },
+        {
+          "attrs": [
+            {
+              "bg": "default",
+              "fg": "default"
+            },
+            {
+              "bg": {
+                "rgb": [
+                  10,
+                  20,
+                  30
+                ]
+              },
+              "fg": "default",
+              "flags": [
+                "underline",
+                "selected"
+              ]
+            }
+          ],
+          "cols": 10,
+          "cursor": {
+            "col": 0,
+            "row": 1,
+            "shape": "block",
+            "visible": true
+          },
+          "last": true,
+          "lines": [
+            {
+              "row": 2,
+              "runs": [
+                {
+                  "attr": 1,
+                  "cells": [
+                    "x",
+                    "y"
+                  ]
+                }
+              ]
+            }
+          ],
+          "reset": false,
+          "rows": 3,
+          "seq": 1,
+          "type": "frame",
+          "view": {
+            "alt_screen": false,
+            "display_offset": 0,
+            "history_rows": 0,
+            "mouse_reporting": false
+          }
+        }
+      ],
+      "name": "a full frame in two parts: wide and combining cells, attribute tables per part"
+    },
+    {
+      "expected": {
+        "cells": [
+          {
+            "bg": "default",
+            "col": 2,
+            "fg": {
+              "indexed": 1
+            },
+            "flags": [
+              "bold"
+            ],
+            "row": 0,
+            "text": "全",
+            "width": 2
+          },
+          {
+            "bg": "default",
+            "col": 0,
+            "fg": "default",
+            "flags": [],
+            "row": 1,
+            "text": "z",
+            "width": 1
+          },
+          {
+            "bg": {
+              "rgb": [
+                10,
+                20,
+                30
+              ]
+            },
+            "col": 0,
+            "fg": "default",
+            "flags": [
+              "underline",
+              "selected"
+            ],
+            "row": 2,
+            "text": "x",
+            "width": 1
+          }
+        ],
+        "cols": 10,
+        "cursor": {
+          "col": 1,
+          "row": 1,
+          "shape": "underline",
+          "visible": false
+        },
+        "overrides": [
+          {
+            "rgb": [
+              1,
+              2,
+              3
+            ],
+            "slot": "background"
+          },
+          {
+            "rgb": [
+              4,
+              5,
+              6
+            ],
+            "slot": {
+              "indexed": 4
+            }
+          }
+        ],
+        "rows": 3,
+        "screen_text": [
+          "ab全é",
+          "z",
+          "xy"
+        ],
+        "view": {
+          "alt_screen": true,
+          "display_offset": 2,
+          "history_rows": 5,
+          "mouse_reporting": true
+        },
+        "wrapped_rows": [
+          0
+        ]
+      },
+      "messages": [
+        {
+          "attrs": [
+            {
+              "bg": "default",
+              "fg": "default"
+            }
+          ],
+          "cols": 10,
+          "cursor": {
+            "col": 1,
+            "row": 1,
+            "shape": "underline",
+            "visible": false
+          },
+          "last": true,
+          "lines": [
+            {
+              "row": 1,
+              "runs": [
+                {
+                  "attr": 0,
+                  "cells": [
+                    "z"
+                  ]
+                }
+              ]
+            }
+          ],
+          "overrides": [
+            {
+              "rgb": [
+                1,
+                2,
+                3
+              ],
+              "slot": "background"
+            },
+            {
+              "rgb": [
+                4,
+                5,
+                6
+              ],
+              "slot": {
+                "indexed": 4
+              }
+            }
+          ],
+          "reset": false,
+          "rows": 3,
+          "seq": 2,
+          "type": "frame",
+          "view": {
+            "alt_screen": true,
+            "display_offset": 2,
+            "history_rows": 5,
+            "mouse_reporting": true
+          }
+        }
+      ],
+      "name": "a diff frame replaces one row and the state around the cells"
+    },
+    {
+      "expected": {
+        "cells": [
+          {
+            "bg": "default",
+            "col": 0,
+            "fg": "default",
+            "flags": [],
+            "row": 0,
+            "text": "h",
+            "width": 1
+          },
+          {
+            "bg": "default",
+            "col": 3,
+            "fg": "default",
+            "flags": [],
+            "row": 1,
+            "text": " ",
+            "width": 1
+          }
+        ],
+        "cols": 4,
+        "cursor": {
+          "col": 2,
+          "row": 0,
+          "shape": "bar",
+          "visible": true
+        },
+        "overrides": [],
+        "rows": 2,
+        "screen_text": [
+          "hi",
+          ""
+        ],
+        "view": {
+          "alt_screen": false,
+          "display_offset": 0,
+          "history_rows": 0,
+          "mouse_reporting": false
+        },
+        "wrapped_rows": []
+      },
+      "messages": [
+        {
+          "attrs": [
+            {
+              "bg": "default",
+              "fg": "default"
+            }
+          ],
+          "cols": 4,
+          "cursor": {
+            "col": 2,
+            "row": 0,
+            "shape": "bar",
+            "visible": true
+          },
+          "last": true,
+          "lines": [
+            {
+              "row": 0,
+              "runs": [
+                {
+                  "attr": 0,
+                  "cells": [
+                    "h",
+                    "i"
+                  ]
+                }
+              ]
+            }
+          ],
+          "reset": true,
+          "rows": 2,
+          "seq": 3,
+          "type": "frame",
+          "view": {
+            "alt_screen": false,
+            "display_offset": 0,
+            "history_rows": 0,
+            "mouse_reporting": false
+          }
+        }
+      ],
+      "name": "a reset frame of another size replaces the whole grid and drops the overrides"
+    }
+  ]
+}

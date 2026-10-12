@@ -1,0 +1,16 @@
+> Run this exact shell command, then reply with the single word done: powershell -NoProfile
+  -Command Start-Sleep -Seconds 20
+
+> Call the demoserver tool of some MCP server once and reply with its output only.
+
+Files
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Allow editing this file?
+
+   ~/github_project/yagura/example.txt
+
+
+
+esc to cancel                                                                 Gemini 3.8 Flash · lo
+

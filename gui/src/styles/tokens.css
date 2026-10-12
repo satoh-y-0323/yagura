@@ -1,0 +1,90 @@
+/* Design tokens - CSS variables for theme consistency */
+
+/* The colour values below are the built-in `dark` palette (BUILT_IN_PALETTES.dark
+   in src/theme/palette.ts) and are kept in step with it by tokens-parity.test.ts.
+   They are only the boot-time values: the theme store overwrites them on the root
+   element at runtime, which is why there is no prefers-color-scheme media query
+   here. */
+:root {
+  color-scheme: dark;
+
+  /* Colors */
+  --color-background: #1e1e1e;
+  --color-foreground: #ffffff;
+  --color-surface: #2d2d2d;
+  --color-border: #404040;
+  --color-primary: #4a9eff;
+  --color-primary-hover: #2e7fd4;
+  --color-success: #28a745;
+  --color-warning: #ffc107;
+  --color-error: #dc3545;
+  --color-error-hover: #d32f2f;
+  --color-warning-action: #ff9800;
+  --color-warning-action-hover: #f57c00;
+  --color-on-warning: #333333;
+  --color-on-warning-action: #ffffff;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #a0a0a0;
+
+  /* Terminal selection (VS Code Dark+ terminal.selectionBackground equivalent) */
+  --term-selection-background: #264f78;
+  --term-selection-foreground: #ffffff;
+  --term-selection-inactive-background: #3d3d3d;
+
+  /* Terminal ANSI 16 colors (VS Code Dark+ terminal.ansi* equivalent) */
+  --term-ansi-black: #000000;
+  --term-ansi-red: #cd3131;
+  --term-ansi-green: #0dbc79;
+  --term-ansi-yellow: #e5e510;
+  --term-ansi-blue: #007acc;
+  --term-ansi-magenta: #bc3fbc;
+  --term-ansi-cyan: #11a8cd;
+  --term-ansi-white: #e5e5e5;
+  --term-ansi-bright-black: #666666;
+  --term-ansi-bright-red: #f14c4c;
+  --term-ansi-bright-green: #23d18b;
+  --term-ansi-bright-yellow: #f5f543;
+  --term-ansi-bright-blue: #3b8eea;
+  --term-ansi-bright-magenta: #d670d6;
+  --term-ansi-bright-cyan: #29b8db;
+  --term-ansi-bright-white: #ffffff;
+
+  /* Spacing */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+
+  /* Typography */
+  --font-family-base:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell',
+    sans-serif;
+  --font-family-mono: 'Courier New', monospace;
+  --font-size-base: 16px;
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size-md: 16px;
+  --font-size-lg: 18px;
+  --line-height-base: 1.5;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+
+  /* Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 1rem;
+
+  /* Non-palette values: not part of the 35-key theme contract */
+  --shadow-modal: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --overlay-backdrop: rgba(0, 0, 0, 0.5);
+}
+
+::selection {
+  background-color: var(--term-selection-background);
+  color: var(--term-selection-foreground);
+}

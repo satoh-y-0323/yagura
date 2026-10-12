@@ -1,0 +1,16 @@
+schema = 1
+display_name = "Launch Options"
+
+[command]
+default = ["launch-options-program"]
+
+[model]
+args = ["--tier", "{value}"]
+
+[model.aliases]
+gamma = "tier-c"
+alpha = "tier-a"
+beta = "tier-b"
+
+[effort]
+args = ["-c", "tier={value}"]

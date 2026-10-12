@@ -1,0 +1,16 @@
+────────────────────────────────────────────────────────────
+> Call the probe_ping tool of the demoserver MCP server once and reply with its output only.        
+
+● Read(~/.gemini/antigravity-cli/mcp/demoserver/probe_ping.json)
+● demoserver/probe_ping(Call probe_ping tool) (ctrl+o to expand)
+
+  pong
+
+────────────────────────────────────────────────────────────
+> Write a 600-word essay about lighthouses.
+
+  ⎿  Interrupted · What should Antigravity CLI do instead?
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                               Gemini 3.8 Flash · lo 

@@ -1,0 +1,251 @@
+# NOTE: if a third-party action is added to this workflow in the future, it must be pinned to a commit SHA.
+name: Probe
+
+# Manual-only measurement harness: it repeats one cargo test scope many times and reports how the
+# result counts move across iterations. It is never part of a gate, so it has no automatic trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner to measure on"
+        type: choice
+        default: macos-latest
+        options:
+          - macos-latest
+          - ubuntu-latest
+      package:
+        description: "Cargo package to measure (-p). The whole workspace is never built."
+        type: string
+        default: yagura-os
+      test_target:
+        description: "Integration test target (--test). Empty means every test target of the package."
+        type: string
+        default: ""
+      filter:
+        description: "libtest name filter, substring match. Empty means no filter."
+        type: string
+        default: ""
+      skip:
+        description: "libtest --skip pattern, substring match. Empty means no skip."
+        type: string
+        default: ""
+      repetitions:
+        description: "Loop iterations, integer of 1 or more."
+        type: string
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ${{ inputs.runner }}
+    # Outer backstop only. The loop carries its own wall-clock budget so that an over-long run still
+    # emits its summary instead of being killed silently.
+    timeout-minutes: 45
+    env:
+      # Debuginfo generation and linking dominate build time; a measurement run needs no symbols.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      PACKAGE: ${{ inputs.package }}
+      TEST_TARGET: ${{ inputs.test_target }}
+      FILTER: ${{ inputs.filter }}
+      SKIP: ${{ inputs.skip }}
+      REPETITIONS: ${{ inputs.repetitions }}
+      MAX_LOOP_SECONDS: "2400"
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          # `case` patterns are globs, not regular expressions, so a trailing `*` is a wildcard rather
+          # than a quantifier: reject non-digits, the empty string and leading zeros instead.
+          case "$REPETITIONS" in
+            ''|*[!0-9]*|0*)
+              echo "repetitions must be an integer of 1 or more, got: $REPETITIONS"
+              exit 1
+              ;;
+          esac
+          echo "repetitions: $REPETITIONS"
+
+      - uses: actions/checkout@v4
+
+      - name: Prepare rustup toolchain
+        shell: bash
+        run: rustup update stable
+
+      # Restore only: a measurement run must not publish its own cache entry over the one the gates use.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Same scope as the loop, so that compilation cost is paid once and stays out of the measured
+      # seconds. The whole workspace is never built: the GUI crate needs a frontend dist and a staged
+      # sidecar that this workflow does not prepare.
+      - name: Pre-build the test scope
+        shell: bash
+        run: cargo test --locked --no-run -p "$PACKAGE" ${TEST_TARGET:+--test "$TEST_TARGET"}
+
+      # The macOS runner ships bash 3.2 and a BSD userland, so this script stays inside POSIX shell
+      # and POSIX tool options; a GNU-only form here would break macOS runs only.
+      - id: measure
+        name: Run the measurement loop and write the summary
+        shell: bash
+        run: |
+          set +e
+          # `shell: bash` runs with -e -o pipefail. Extraction that only matches on failing iterations
+          # returns non-zero on green ones, which would cut the loop short; pipefail stays on so that
+          # the real exit codes are not masked. The verdict is raised explicitly at the end.
+
+          LOG="probe-log.txt"
+          RUN_OUT="$RUNNER_TEMP/probe-run-output.txt"
+          SUMMARY="$RUNNER_TEMP/probe-summary.txt"
+          : > "$LOG"
+
+          {
+            echo "package: $PACKAGE"
+            echo "test_target: $TEST_TARGET"
+            echo "filter: $FILTER"
+            echo "skip: $SKIP"
+            echo "requested_repetitions: $REPETITIONS"
+            echo "max_loop_seconds: $MAX_LOOP_SECONDS"
+          } >> "$LOG"
+
+          completed=0
+          passed_runs=0
+          failed_runs=0
+          empty_runs=0
+          failed_iterations=""
+          counts_detail=""
+          counts_signature=""
+          counts_mismatch="no"
+          first_passed=0
+          first_failed=0
+          first_ignored=0
+          first_filtered=0
+          aborted="no"
+
+          start=$(date +%s)
+          i=1
+          while [ "$i" -le "$REPETITIONS" ]; do
+            echo "=== iteration $i / $REPETITIONS ==="
+            cargo test --locked -p "$PACKAGE" ${TEST_TARGET:+--test "$TEST_TARGET"} -- ${FILTER:+"$FILTER"} ${SKIP:+--skip "$SKIP"} > "$RUN_OUT" 2>&1
+            rc=$?
+            cat "$RUN_OUT"
+
+            counts=$(awk '/^test result:/ { for (j = 2; j <= NF; j++) { if ($j == "passed;") p += $(j-1); else if ($j == "failed;") f += $(j-1); else if ($j == "ignored;") g += $(j-1); else if ($j == "filtered") o += $(j-1) } } END { printf "%d %d %d %d\n", p, f, g, o }' "$RUN_OUT")
+            set -- $counts
+            run_passed=$1
+            run_failed=$2
+            run_ignored=$3
+            run_filtered=$4
+
+            names=$(awk '/\.\.\. FAILED/ { out = (out == "" ? $2 : out "," $2) } END { print out }' "$RUN_OUT")
+
+            record="iteration=$i exit=$rc passed=$run_passed failed=$run_failed ignored=$run_ignored filtered_out=$run_filtered failed_tests=${names:-none}"
+            echo "$record"
+            {
+              echo "=== iteration $i / $REPETITIONS ==="
+              echo "$record"
+              cat "$RUN_OUT"
+            } >> "$LOG"
+
+            completed=$(( completed + 1 ))
+            if [ "$rc" -eq 0 ]; then
+              passed_runs=$(( passed_runs + 1 ))
+            else
+              failed_runs=$(( failed_runs + 1 ))
+              failed_iterations="${failed_iterations}${failed_iterations:+ }$i=${names:-none}"
+            fi
+            if [ $(( run_passed + run_failed )) -eq 0 ]; then
+              empty_runs=$(( empty_runs + 1 ))
+            fi
+
+            signature="$run_passed/$run_failed/$run_ignored/$run_filtered"
+            counts_detail="${counts_detail}${counts_detail:+ }$i=$signature"
+            if [ "$completed" -eq 1 ]; then
+              counts_signature="$signature"
+              first_passed=$run_passed
+              first_failed=$run_failed
+              first_ignored=$run_ignored
+              first_filtered=$run_filtered
+            elif [ "$signature" != "$counts_signature" ]; then
+              counts_mismatch="yes"
+            fi
+
+            i=$(( i + 1 ))
+            # Wall-clock budget inside the loop: the job limit alone would kill the step before any
+            # summary exists, and there is no portable per-command limiter on the macOS runner.
+            elapsed=$(( $(date +%s) - start ))
+            if [ "$elapsed" -ge "$MAX_LOOP_SECONDS" ]; then
+              aborted="time_budget_exceeded"
+              break
+            fi
+          done
+          total_seconds=$(( $(date +%s) - start ))
+
+          if [ "$counts_mismatch" = "yes" ]; then
+            per_run_line="per_run_counts: mismatch ($counts_detail)"
+          elif [ "$completed" -eq 0 ]; then
+            per_run_line="per_run_counts: none"
+          else
+            per_run_line="per_run_counts: passed=$first_passed failed=$first_failed ignored=$first_ignored filtered_out=$first_filtered"
+          fi
+
+          environment="$(bash --version | head -n 1) / $(uname -sr)"
+
+          {
+            echo "=== PROBE SUMMARY BEGIN"
+            echo "requested_repetitions: $REPETITIONS"
+            echo "completed_repetitions: $completed"
+            echo "passed_runs: $passed_runs"
+            echo "failed_runs: $failed_runs"
+            echo "$per_run_line"
+            echo "failed_iterations: $failed_iterations"
+            echo "total_seconds: $total_seconds"
+            echo "aborted: $aborted"
+            echo "environment: $environment"
+            echo "=== PROBE SUMMARY END"
+          } > "$SUMMARY"
+
+          # The summary reaches all three faces before the verdict is raised: a red measurement is an
+          # expected outcome and must still leave its block behind.
+          cat "$SUMMARY"
+          cat "$SUMMARY" >> "$LOG"
+          cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+          reasons=""
+          if [ "$failed_runs" -gt 0 ]; then
+            reasons="${reasons}${reasons:+; }at least one iteration exited non-zero"
+          fi
+          if [ "$empty_runs" -gt 0 ]; then
+            reasons="${reasons}${reasons:+; }at least one iteration ran no test (passed + failed == 0)"
+          fi
+          if [ "$counts_mismatch" = "yes" ]; then
+            reasons="${reasons}${reasons:+; }result counts differ between iterations"
+          fi
+          if [ "$completed" -ne "$REPETITIONS" ]; then
+            reasons="${reasons}${reasons:+; }completed repetitions differ from the requested count"
+          fi
+          if [ "$aborted" != "no" ]; then
+            reasons="${reasons}${reasons:+; }loop aborted: $aborted"
+          fi
+
+          if [ -n "$reasons" ]; then
+            echo "verdict: fail ($reasons)"
+            echo "verdict: fail ($reasons)" >> "$LOG"
+            exit 1
+          fi
+          echo "verdict: pass"
+          echo "verdict: pass" >> "$LOG"
+          exit 0
+
+      - name: Upload the measurement log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: probe-log.txt

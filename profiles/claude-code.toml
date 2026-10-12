@@ -1,0 +1,52 @@
+# Launches the Claude Code CLI directly. Requires `claude` to be resolvable
+# on the daemon's PATH (or its extra bin directories on Windows).
+# The launch options below follow `claude --help` (2.1.263). Model names change
+# over time -- edit the aliases to match what your own CLI accepts.
+schema = 1
+display_name = "Claude Code"
+detection = "claude-code"
+
+[command]
+default = ["claude"]
+
+[model]
+args = ["--model", "{value}"]
+
+[model.aliases]
+fast = "haiku"
+default = "sonnet"
+strong = "opus"
+fable = "fable"
+
+# A fixed list: edit it to match the models your own CLI accepts.
+[model.choices]
+values = ["haiku", "sonnet", "opus", "fable"]
+
+# No aliases: this CLI's own levels are already short and pass through as given.
+[effort]
+args = ["--effort", "{value}"]
+
+[mcp]
+config_file = '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+args = ["--mcp-config", "{mcp_config_file}"]
+
+# Each hook event reports the turn's start, a permission prompt, or its end to
+# the daemon through the window's own environment (verified with Claude Code
+# 2.1.285).
+[hooks]
+config_file = '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status running --source claude-code"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status waiting_input --source claude-code"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --emit-status waiting_input --source claude-code"}]}]}}'
+args = ["--settings", "{hooks_config_file}"]
+
+# Claude Code reports its own registrations as `Prefix: value` lines and
+# accepts an environment pair per `-e`.
+[mcp_registration]
+add = ["mcp", "add", "--scope", "user", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "--scope", "user", "{server}"]
+env_arg = ["--env={env}"]
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}"]
+format = "lines"
+command = "Command:"
+require = { "Scope:" = "User" }
+absent = "No MCP server named"

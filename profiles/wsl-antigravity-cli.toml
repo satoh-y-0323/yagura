@@ -1,0 +1,71 @@
+# Runs the Antigravity CLI inside a WSL distribution. Windows only (see
+# wsl-claude-code.toml for why this profile carries no other operating
+# system's argv). The shell is both a login and an interactive shell so
+# `~/.bashrc` runs too, which is where a tool such as nvm adds its own
+# install to `PATH`.
+# The launch options below follow `agy --help` (1.2.11). Model names change
+# over time -- edit the aliases to match what your own account can run.
+# No [effort] table: agy's --effort is refused alongside the effort-qualified
+# ids `agy models` lists, so effort is selected through a [model] alias
+# instead (see profiles/README.md).
+# No [mcp] table: agy reads MCP servers only from its own global
+# registration, not from a per-launch config (see profiles/README.md's MCP
+# injection section).
+schema = 1
+display_name = "WSL: Antigravity CLI"
+detection = "antigravity-cli"
+
+[command]
+windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "agy"]
+
+[model]
+args = ["--model", "{value}"]
+
+[model.aliases]
+fast = "gemini-3.8-flash-low"
+default = "gemini-3.8-flash-medium"
+strong = "gemini-3.1-pro-high"
+
+# Listed by the CLI itself (`agy models`): one model per line, its id and
+# display name separated by a tab.
+[model.choices]
+args = ["models"]
+format = "lines"
+separator = "\t"
+
+# agy keeps its registrations in a settings file, not behind a status
+# command, so the daemon reads that file through the read tool below rather
+# than running a status command.
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
+env_forward = { name = "WSLENV", separator = ":" }
+
+[mcp_registration.status]
+file = ".gemini/config/mcp_config.json"
+format = "json"
+command = "/mcpServers/{server}/command"
+
+# agy takes no hooks at launch, only from its own hooks file, so
+# registration adds yagura's entry there and removal takes it out (checked
+# with agy 1.2.14). PreToolUse and Stop are not used: agy requires a
+# `decision` in their output, which a status report does not give.
+[mcp_registration.json_entry]
+file = ".gemini/config/hooks.json"
+
+[mcp_registration.json_entry.entries."{server}"]
+PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }]
+PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }] }]
+
+[mcp_registration.files]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself. The replace
+# tool follows a symlinked file to its target and keeps its mode, as in
+# wsl-codex-cli.toml, but creates the file (and its directory) when it is
+# not there yet: the hooks file need not exist before registration.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; if [ -e "$f" ]; then r=$(readlink -f -- "$f") || exit 1; else r="$f"; mkdir -p -- "$(dirname -- "$r")" || exit 1; fi; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && { [ ! -e "$r" ] || chmod --reference="$r" "$t"; } && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
+absent_exit = 3

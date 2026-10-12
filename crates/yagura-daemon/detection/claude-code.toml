@@ -1,0 +1,81 @@
+# Detection definition for the Claude Code CLI.
+#
+# Vendor identity lives only in this filename and the `name` value below --
+# never in the daemon's core types.
+#
+# No `quiescence`: every screen the agent can leave the user waiting on
+# (prompt, dialog, spinner) is covered by a `[[rules]]` pattern below, so a
+# screen that matches no rule falls back to `Unknown` rather than a guessed
+# `idle`.
+schema_version = 1
+name = "claude-code"
+# 12 lines: while the agent works, the bottom of the screen stacks the
+# spinner/status line, the (always-visible) input box frame (3 lines), and a
+# hint line; a 5-line window can push the spinner out of the match region
+# (observed in manual verification, 2026-08-14).
+bottom_line_count = 12
+
+[debounce]
+confirm_ms = 300
+
+# Selection dialogs (permission confirmations, AskUserQuestion, trust
+# prompts, ...) redraw their footer with one of two stable anchors, so match
+# the footer rather than the (much more varied) dialog body. This takes the
+# highest priority: it must win over a coincidental `running` or
+# `waiting_input` match on the same redrawn screen.
+[[rules]]
+status = "waiting_approval"
+# `(?i)` because the footer is assembled by the CLI and its casing is not
+# guaranteed to stay fixed across screens. A dialog without an "Esc to
+# cancel" footer and without "Do you want to" wording falls through to
+# Unknown.
+pattern = '(?i)(Do you want to|Esc to cancel)'
+priority = 30
+region = "bottom"
+
+# The spinner / "esc to interrupt" status line shown while the agent is
+# actively working on a task.
+[[rules]]
+status = "running"
+# Spinner line while the agent works, e.g. "✢ Sketching…" (spinner glyph +
+# English gerund + U+2026). Verified against a live screen dump on
+# 2026-08-14; the finished marker "✻ Worked for 4s" has no "ing…" and thus
+# does not match. Older UIs used "(esc to interrupt)", kept as alternative.
+pattern = '(\p{L}ing…)|(esc to interrupt)'
+priority = 20
+region = "bottom"
+
+# The agent's own input prompt, waiting for the user's next instruction.
+[[rules]]
+status = "waiting_input"
+# Claude Code picks the input-box glyph from the terminal-identifying
+# environment variables ("❯" U+276F or ASCII ">"), so accept either. The
+# no-break space (U+00A0) after it stays the discriminator: history lines
+# echo past prompts with a regular space. While the agent is working the
+# prompt is still visible, but the higher-priority `running` rule wins then.
+pattern = '^[❯>]\x{A0}'
+priority = 10
+region = "bottom"
+
+# Identifies the composer (input box) so the daemon can read what has been
+# typed before submitting. The marker deliberately omits the separator: an
+# empty composer shows only the glyph (no NBSP after it), so requiring the
+# separator in the marker would make an empty composer unobservable.
+# Continuation-line indent verified live at 80x24 (2 spaces, both wrapped
+# and unwrapped bodies).
+[composer]
+marker = '[❯>]'
+separator = " "
+continuation_prefix = "  "
+
+[input]
+bracketed_paste = true
+submit = "\r"
+submit_delay_ms = 800       # verified to work at 200ms too; kept equal to the default for headroom
+clear = "\u0015"           # erases one display line per press, harmless on an empty composer (repeated by the daemon)
+probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+delivery_confirm_ms = 8000
+resend_max = 1
+
+[requests]
+abandoned_at_turn_end = false  # moves a long tool call to the background and keeps it alive; cancels the calls it drops

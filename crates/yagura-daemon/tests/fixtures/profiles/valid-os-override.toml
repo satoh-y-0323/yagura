@@ -1,0 +1,10 @@
+schema = 1
+display_name = "OS Override"
+
+# Every operating-system key is present alongside `default`, so a selection
+# that ignores the per-OS keys is visible as the `default` argv leaking out.
+[command]
+default = ["default-program"]
+windows = ["windows-program"]
+macos = ["macos-program"]
+linux = ["linux-program"]

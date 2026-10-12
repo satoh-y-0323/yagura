@@ -1,0 +1,16 @@
+   ▄▀▀    ▀▀▄     ~/github_project/yagura
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Reply with just the word ok.
+
+  ok
+
+────────────────────────────────────────────────────────────
+> Run this exact shell command, then reply with the single word done: powershell -NoProfile
+  -Command Start-Sleep -Seconds 20
+⡿  Generating...
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                 Gemini 3.8 Flash · lo 

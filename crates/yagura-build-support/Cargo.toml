@@ -1,0 +1,15 @@
+[package]
+name = "yagura-build-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Build-script helper crate: consumed only through the build-dependencies of
+# the other workspace members, so it is never released to crates.io.
+publish = false
+
+[dependencies]
+yagura-protocol = { path = "../yagura-protocol" }
+
+[lints]
+workspace = true

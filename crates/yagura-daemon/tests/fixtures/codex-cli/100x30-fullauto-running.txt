@@ -1,0 +1,16 @@
+
+• I’ll inspect the current directory and read the first line of README.txt.
+
+• Ran Get-ChildItem -Force | Select-Object -ExpandProperty Name; Write-Output
+  │ '---README_FIRST_LINE---'; Get-Content -LiteralPath .\README.txt -TotalCount 1
+  └ .git
+    README.txt
+    ---README_FIRST_LINE---
+    hello
+
+• Working (2s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-luna low · ~\work\project-…

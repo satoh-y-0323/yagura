@@ -1,0 +1,8 @@
+schema = 1
+display_name = "No Placeholder"
+
+[command]
+default = ["no-placeholder-program"]
+
+[model]
+args = ["--tier", "tier-a"]

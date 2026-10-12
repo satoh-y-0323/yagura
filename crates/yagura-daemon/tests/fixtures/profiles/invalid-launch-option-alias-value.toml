@@ -1,0 +1,14 @@
+schema = 1
+display_name = "Alias Value"
+
+[command]
+default = ["alias-value-program"]
+
+[model]
+args = ["--tier", "{value}"]
+
+# The escape encodes a C0 control character, which the launch option value
+# rule the alias values are held to forbids. Kept as an escape so this file
+# stays plain ASCII.
+[model.aliases]
+alpha = "tier\u0007a"

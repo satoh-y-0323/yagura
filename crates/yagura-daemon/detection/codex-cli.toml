@@ -1,0 +1,76 @@
+# Detection definition for the Codex CLI (OpenAI Codex).
+#
+# Vendor identity lives only in this filename and the `name` value below --
+# never in the daemon's core types (project convention: vendor-neutral vocabulary).
+schema_version = 1
+name = "codex-cli"
+# Captured against Codex CLI v0.152.1 on 2026-09-03 at 100x30 and 80x24 PTY
+# geometries; see `tests/fixtures/codex-cli/README.md` for the extraction rule.
+bottom_line_count = 16
+
+[debounce]
+confirm_ms = 300
+
+# Dialogs that wait for the user's choice (command approval, directory or
+# hook trust, the numbered selection lists, ...) differ in their body but
+# redraw a key hint in their footer, so match the shape of that footer,
+# not the wording of the question.
+# `^\s{0,4}` covers the two-space indent the dialog frames add; `(?i)` is
+# there because the footer is assembled by the CLI and its casing is not
+# guaranteed to stay fixed.
+# Screens whose footer carries no such hint (AppLink, the keymap help, the
+# resume picker, `/agents`) deliberately stay out of this rule and fall
+# back to Unknown.
+# Highest priority so it wins over a coincidental `running` or
+# `waiting_input` match on the same screen.
+[[rules]]
+status = "waiting_approval"
+pattern = '(?i)(^\s{0,4}Press (enter|space|a number)\b|\benter to submit\b|^\s{0,4}Use ↑/↓ to move,)'
+priority = 30
+region = "bottom"
+
+# Two footers only a turn in progress draws (verified against v0.159.2):
+# the "Working (Ns • esc to interrupt)" line, shown while Codex thinks or runs
+# a tool, and "tab to queue message", shown while the composer holds a draft.
+# While it streams its answer with an empty composer Codex draws neither and
+# its screen matches an idle one, so no screen rule can see that stretch.
+[[rules]]
+status = "running"
+pattern = '(esc to interrupt\)|tab to queue message)'
+priority = 20
+region = "bottom"
+
+# The composer's own prompt line, waiting for the user's next instruction.
+# While Codex is working the composer stays visible, but the higher-priority
+# `running` rule wins then.
+# A numbered option row (`› N. `) is not the composer: a selection list is
+# drawn with the same glyph in column 0, so the rule excludes that shape.
+# The regex engine has no lookahead, so the negative condition is spelled
+# out with character classes and alternation instead.
+[[rules]]
+status = "waiting_input"
+pattern = '^› (\D|\d+([^\d.]|\.\S)|$)'
+priority = 10
+region = "bottom"
+
+# Identifies the composer so the daemon can read what has been typed before
+# submitting. The marker omits the trailing space so an empty composer
+# (glyph alone) still matches. Continuation-line indent verified live at
+# 80x24 (2 spaces, same as Claude Code's).
+[composer]
+marker = '›'
+separator = " "
+continuation_prefix = "  "
+
+[input]
+bracketed_paste = true      # paste_burst.rs treats input closer than 8ms as one burst
+submit = "\r"
+ready_hold_ms = 3000        # startup phase: prompt and work line alternate; measured up to 1.8s under load
+submit_delay_ms = 800       # PASTE_ENTER_SUPPRESS_WINDOW=120ms; 800ms verified for long bodies
+clear = "\u0015"            # erases one display line per press, harmless on an empty composer (repeated by the daemon)
+probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+delivery_confirm_ms = 9000
+resend_max = 4              # re-sends after codex drains input while starting up (discard_pending_input_before_interactive_screen)
+
+[requests]
+abandoned_at_turn_end = true  # ends its turn with a tool call still out, sends no cancellation, and stays running while it waits

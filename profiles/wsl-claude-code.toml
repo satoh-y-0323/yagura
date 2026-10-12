@@ -1,0 +1,74 @@
+# Runs the Claude Code CLI inside a WSL distribution. Windows only: `wsl.exe` is
+# an ordinary Windows program, and yagura starts it without rewriting the argv.
+# The windows argv execs the CLI directly through a fixed wrapper
+# (`bash -lic 'exec "$0" "$@"'`) without going through a shell, so this
+# profile's launch-option values and the daemon's MCP injection arguments
+# reach `claude`'s own argv unchanged. The shell is both a login and an
+# interactive shell so `~/.bashrc` runs too, which is where a tool such as
+# nvm adds its own install to `PATH`. See profiles/README.md
+# "Launch options" and docs/wsl.md. This profile carries no argv for any other
+# operating system -- on one, it does not appear in any listing and is not
+# seeded, and naming it directly is refused as an unknown profile.
+# The launch options below follow `claude --help` (2.1.263). Model names change
+# over time -- edit the aliases to match what your own CLI accepts.
+schema = 1
+display_name = "WSL: Claude Code"
+detection = "claude-code"
+
+[command]
+windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "claude"]
+
+[model]
+args = ["--model", "{value}"]
+
+[model.aliases]
+fast = "haiku"
+default = "sonnet"
+strong = "opus"
+fable = "fable"
+
+# A fixed list: edit it to match the models your own CLI accepts.
+[model.choices]
+values = ["haiku", "sonnet", "opus", "fable"]
+
+# No aliases: this CLI's own levels are already short and pass through as given.
+[effort]
+args = ["--effort", "{value}"]
+
+[mcp]
+args = ["--mcp-config", '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}']
+
+# Each hook event reports the turn's start, a permission prompt, or its end to
+# the daemon through the window's own environment (verified with Claude Code
+# 2.1.285).
+# The JSON is inline because a Windows path is unreadable from the WSL CLI, and
+# the Windows executable is called by name because a Linux shell does not
+# resolve the bare name.
+[hooks]
+args = ["--settings", '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}]}}']
+
+# The registration commands below run the same way any other window from
+# this profile does: through the launch argv above, so they reach the same
+# `claude` the login shell's `PATH` would find. `bridge_probe` and the file
+# tool run as their own standalone `wsl` invocations instead, because they
+# have nothing to do with launching the CLI itself.
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "--scope", "user", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "--scope", "user", "{server}"]
+env_arg = ["--env={env}"]
+bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
+env_forward = { name = "WSLENV", separator = ":" }
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}"]
+format = "lines"
+command = "Command:"
+require = { "Scope:" = "User" }
+absent = "No MCP server named"
+
+[mcp_registration.files]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+absent_exit = 3

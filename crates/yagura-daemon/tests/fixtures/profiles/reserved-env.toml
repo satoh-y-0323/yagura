@@ -1,0 +1,9 @@
+schema = 1
+display_name = "Reserved Env"
+
+[command]
+default = ["reserved-env-program"]
+
+[env]
+YAGURA_WINDOW_ID = "hijacked"
+KEPT = "kept value"

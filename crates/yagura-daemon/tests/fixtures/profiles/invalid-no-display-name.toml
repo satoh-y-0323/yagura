@@ -1,0 +1,4 @@
+schema = 1
+
+[command]
+default = ["no-display-name-program"]

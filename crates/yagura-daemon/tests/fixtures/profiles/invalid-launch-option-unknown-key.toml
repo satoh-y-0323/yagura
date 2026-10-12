@@ -1,0 +1,9 @@
+schema = 1
+display_name = "Unknown Key"
+
+[command]
+default = ["unknown-key-program"]
+
+[model]
+args = ["--tier", "{value}"]
+unknown = "whatever"

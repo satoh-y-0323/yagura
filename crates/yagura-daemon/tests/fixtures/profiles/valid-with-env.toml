@@ -1,0 +1,12 @@
+schema = 1
+display_name = "With Env"
+
+[command]
+default = ["with-env-program"]
+
+# Values are taken verbatim: no shell expansion, and an empty string is an
+# empty value rather than a removal.
+[env]
+PLAIN = "plain value"
+EMPTY = ""
+NOT_EXPANDED = "$HOME %USERPROFILE% ~"

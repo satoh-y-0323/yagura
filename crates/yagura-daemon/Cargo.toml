@@ -1,0 +1,106 @@
+[package]
+name = "yagura-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "yagura-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "echo_child"
+path = "src/bin/echo_child.rs"
+
+[[bin]]
+name = "hex_echo"
+path = "src/bin/hex_echo.rs"
+
+[[bin]]
+name = "screen_load_child"
+path = "src/bin/screen_load_child.rs"
+
+[[bin]]
+name = "env_probe"
+path = "src/bin/env_probe.rs"
+
+[[bin]]
+name = "argv_probe"
+path = "src/bin/argv_probe.rs"
+
+[[bin]]
+name = "ready_child"
+path = "src/bin/ready_child.rs"
+
+[[bin]]
+name = "submit_child"
+path = "src/bin/submit_child.rs"
+
+[[bin]]
+name = "capture_child"
+path = "src/bin/capture_child.rs"
+
+[[bin]]
+name = "mcp_cli_stub"
+path = "src/bin/mcp_cli_stub.rs"
+
+[dependencies]
+yagura-protocol = { path = "../yagura-protocol" }
+# The only way this crate reaches the operating system: transport,
+# endpoint protection, peer identity, process groups and randomness.
+yagura-os = { path = "../yagura-os" }
+tokio.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+alacritty_terminal.workspace = true
+unicode-width.workspace = true
+parking_lot.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+
+[features]
+# Lets tests make the detection screen panic on demand, to exercise its
+# recovery (see `VtScreen::poison_after_calls`), and keeps the raw bytes a
+# window's child wrote for tests that count writes. Enabled for this crate's own
+# tests through the self dev-dependency below; never in a shipped build.
+fault-injection = []
+
+[build-dependencies]
+yagura-build-support = { path = "../yagura-build-support" }
+# Hash check of the vendored pseudoconsole (the pins are shared with yagura-os).
+sha2.workspace = true
+
+[dev-dependencies]
+yagura-daemon = { path = ".", features = ["fault-injection"] }
+# `test-util` enables tokio::time::pause()/advance(), which the detector
+# tests rely on for deterministic time-based assertions. Dev-only: the
+# production binaries keep the workspace feature set.
+tokio = { workspace = true, features = ["test-util"] }
+tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
+# Shared test fixtures. Dev-only: `publish = false` and absent from
+# the normal dependency graph, so it never reaches the shipped binaries.
+yagura-test-support = { path = "../yagura-test-support" }
+
+# Windows-only, tests-only: the conhost-reaping regression test enumerates
+# conhost.exe process IDs directly (via Toolhelp32Snapshot) as an independent
+# check, so it does not exercise the production teardown mechanism it is meant
+# to catch a regression in. Every production OS call of this crate
+# goes through `yagura-os`; this dev-dependency is a deliberate, test-only exception
+# to that boundary, needed to build a test oracle independent of the
+# mechanism it verifies, not a second production dependency on `windows`.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

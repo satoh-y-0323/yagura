@@ -1,0 +1,11 @@
+schema = 1
+display_name = "Alias Key"
+
+[command]
+default = ["alias-key-program"]
+
+[model]
+args = ["--tier", "{value}"]
+
+[model.aliases]
+Alpha = "tier-a"

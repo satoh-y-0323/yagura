@@ -1,0 +1,16 @@
+
+✔ You approved codex to run curl.exe -sI https://example.com this time
+
+• Ran curl.exe -sI https://example.com
+  └ (no output)
+
+────────────────────────────────────────────────────────────────────────────────
+
+• HTTP/1.1 200 OK
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-luna low · ~\work\project-…

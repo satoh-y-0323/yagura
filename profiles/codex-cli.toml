@@ -1,0 +1,103 @@
+# Launches the Codex CLI directly. Requires `codex` to be resolvable on the
+# daemon's PATH (or its extra bin directories on Windows).
+# The launch options below follow `codex --help` (0.153.4) and the Codex config
+# reference. Model names change over time -- edit the aliases to match what
+# your own account can run.
+schema = 1
+display_name = "Codex CLI"
+detection = "codex-cli"
+
+[command]
+default = ["codex"]
+
+[model]
+args = ["-m", "{value}"]
+
+[model.aliases]
+fast = "gpt-5.6-luna"
+default = "gpt-5.6-terra"
+strong = "gpt-6-astra"
+
+# Listed by the CLI itself (`codex debug models`, JSON). A `debug` command may
+# change shape; if it does, edit the pointers below to follow it.
+[model.choices]
+args = ["debug", "models"]
+format = "json"
+items = "/models"
+id = "/slug"
+label = "/display_name"
+filter = { pointer = "/visibility", equals = "list" }
+
+# No aliases: the levels pass through as given into the -c key=value override.
+[effort]
+args = ["-c", "model_reasoning_effort={value}"]
+
+[mcp]
+args = [
+  "-c", "mcp_servers.yagura.command={bridge_toml}",
+  "-c", "mcp_servers.yagura.args=[]",
+  "-c", "mcp_servers.yagura.env_vars={env_names_toml}",
+  # Codex's own 60-second default would end a call before the daemon's deadlines do.
+  "-c", "mcp_servers.yagura.tool_timeout_sec=86400",
+]
+
+# Each turn boundary runs the daemon's status report. Codex runs a
+# command-line hook only once its trust is recorded in the user's own
+# config (the `entries` of `[mcp_registration.toml_set]` below), so the
+# daemon injects these only while that registration holds. Checked with
+# codex 0.159.2 on Windows.
+[hooks]
+args = [
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_approval --source codex-cli'}]}]",
+  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
+  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
+]
+
+# `codex mcp add` rewrites the whole `[mcp_servers.<name>]` table, dropping
+# any hand-written key -- including `tool_timeout_sec` -- so it is written
+# back once as a settings-file edit right after add.
+[mcp_registration]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}", "--json"]
+format = "json"
+command = "/transport/command"
+args_pointer = "/transport/args"
+absent = "No MCP server named"
+
+[mcp_registration.toml_set]
+file = ".codex/config.toml"
+table = ["mcp_servers", "{server}"]
+values = { tool_timeout_sec = 86400 }
+confirm = { tool_timeout_sec = "/tool_timeout_sec" }
+
+# The trust Codex needs before it runs the `[hooks]` above: one
+# `hooks.state` key per hook, holding the hash Codex itself reports for
+# it (`codex app-server`, request `hooks/list`). Any change to a hook's
+# command changes its hash, so take the values again after one. The key
+# names the command-line layer, whose path depends on the operating
+# system Codex runs on.
+[mcp_registration.toml_set.entries]
+under = ["hooks", "state"]
+
+[mcp_registration.toml_set.entries.windows]
+'C:\<session-flags>\config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2" }
+'C:\<session-flags>\config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379" }
+'C:\<session-flags>\config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f" }
+'C:\<session-flags>\config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
+'C:\<session-flags>\config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
+'C:\<session-flags>\config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }
+
+[mcp_registration.toml_set.entries.default]
+'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2" }
+'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379" }
+'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f" }
+'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
+'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
+'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }

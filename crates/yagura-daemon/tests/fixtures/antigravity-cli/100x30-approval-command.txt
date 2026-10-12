@@ -1,0 +1,16 @@
+Command
+────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Requesting permission for:
+   powershell -NoProfile -Command Start-Sleep -Seconds 20
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'powershell -NoProfile 
+-Command Start-Sleep -Seconds 20'
+  3. Yes, and always allow for commands that start with 'powershell -NoProfile -Command Start-Sleep 
+-Seconds 20' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                                 Gemini 3.8 Flash · lo 

@@ -1,0 +1,58 @@
+/**
+ * Pure decisions behind the Settings panel's Profiles tab. No IPC, no DOM:
+ * the component renders these rows and hands the switch back to its caller.
+ */
+import type { ProfileOption } from '../components/add-window-dialog-types';
+import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
+import type { RoleEntry } from '../ipc/plan-boundary';
+
+/** What one row of the Profiles tab shows. */
+export interface ProfileSettingsRow {
+  /** The profile identifier. */
+  id: string;
+  /** The profile's declared display name. */
+  displayName: string;
+  /** The argv the daemon would run, joined with single spaces. */
+  commandLine: string;
+  /** Whether the profile currently resolves to something launchable. */
+  isReady: boolean;
+  /** The daemon's English reason text when the profile is not ready. */
+  reason: string | null;
+  /** Whether the user left this profile switched on. */
+  enabled: boolean;
+  /**
+   * The roles that still point at this profile, only while it is disabled:
+   * those roles' tasks cannot open windows until it is switched back on.
+   */
+  rolesUsing: string[];
+}
+
+/** Names the roles whose profile is exactly `profileId`, in table order. */
+export function rolesUsingProfile(roles: readonly RoleEntry[], profileId: string): string[] {
+  return roles.filter((role) => role.profile === profileId).map((role) => role.name);
+}
+
+/** Builds one row per profile, in the order the profiles arrived in. */
+export function profileSettingsRows(
+  profiles: readonly ProfileOption[],
+  roles: readonly RoleEntry[]
+): ProfileSettingsRow[] {
+  return profiles.map((profile) => ({
+    id: profile.id,
+    displayName: profile.displayName,
+    commandLine: profile.command.join(' '),
+    isReady: profile.available,
+    reason: profile.reason,
+    enabled: profile.enabled,
+    rolesUsing: profile.enabled ? [] : rolesUsingProfile(roles, profile.id),
+  }));
+}
+
+/**
+ * Whether the switches must stay frozen because the daemon predates the
+ * enabled state. An unreported revision is not frozen: the daemon's own
+ * refusal is the authority, so the switches are only locked on evidence.
+ */
+export function isProfileSettingsReadOnly(protocolRevision: number | null): boolean {
+  return protocolRevision !== null && protocolRevision < PROFILE_ENABLED_MIN_REVISION;
+}

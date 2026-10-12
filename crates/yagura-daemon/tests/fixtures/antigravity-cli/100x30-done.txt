@@ -1,0 +1,16 @@
+  The command has been launched in the background. Waiting for it to finish.
+
+  done
+
+────────────────────────────────────────────────────────────
+> Call the probe_ping tool of the demoserver MCP server once and reply with its output only.        
+
+● Read(~/.gemini/antigravity-cli/mcp/demoserver/probe_ping.json)
+● demoserver/probe_ping(Call probe_ping tool) (ctrl+o to expand)
+
+  pong
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                                               Gemini 3.8 Flash · lo 

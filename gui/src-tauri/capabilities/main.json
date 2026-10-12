@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Minimal core permissions for the yagura main window: it only listens to the session events emitted by the Rust core and reads whether the main window is minimized. The application commands registered in main.rs (`attach_window` / `list_windows` / `list_detections` / `list_profiles` / `list_restore_candidates` / `get_daemon_health` / `update_window_layout` / `open_window` / `close_window` / `interrupt_window` / `decide_approval` / `sync_approvals` / `rename_window` / `send_chat` / `broadcast_chat` / `read_chat` / `list_chat_rooms` / `list_plans` / `get_plan` / `delete_plan` / `set_task_assignment` / `clear_task_assignment` / `set_plan_owner` / `approve_plan` / `mark_plan_seen` / `list_roles` / `save_roles` / `list_model_choices` / `save_model_aliases` / `set_profile_enabled` / `get_profile_detail` / `set_profile_command` / `get_approval_settings` / `set_auto_approve` / `set_plan_approval_required` / `list_mcp_registrations` / `run_mcp_registration` / `send_window_input` / `next_frames` / `set_window_palette` / `set_window_visible` / `copy_window_selection` / `clear_window_selection` / `resize` / `load_keymap` / `keymap_file_path` / `save_keymap` / `load_themes` / `reconnect_daemon` / `get_recovery_status`) are not permission-gated by Tauri and are validated in Rust instead. The non-core permissions are dialog:allow-open, which the Browse... folder picker needs, and clipboard-manager:allow-read-text / allow-write-text, which copy and paste in a window need (text only: no image, HTML or clear access); no fs: permission is granted and no filesystem plugin is registered.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-is-minimized",
+    "dialog:allow-open",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
+  ]
+}

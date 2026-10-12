@@ -1,0 +1,41 @@
+[package]
+name = "yagura-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Desktop application binary shipped as an installer, not a library for
+# downstream crates: it is never released to crates.io.
+publish = false
+
+[lib]
+name = "yagura_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yagura-gui"
+path = "src/main.rs"
+
+[dependencies]
+yagura-protocol = { path = "../../crates/yagura-protocol" }
+yagura-os = { path = "../../crates/yagura-os" }
+tauri.workspace = true
+tauri-plugin-dialog.workspace = true
+tauri-plugin-clipboard-manager.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
+thiserror.workspace = true
+anyhow.workspace = true
+toml.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dev-dependencies]
+# Shared test fixtures. Dev-only: `publish = false` and absent from
+# the normal dependency graph, so it never reaches the shipped app.
+yagura-test-support = { path = "../../crates/yagura-test-support" }
+
+[lints]
+workspace = true

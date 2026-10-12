@@ -1,0 +1,16 @@
+ ▐▛███▛█   Claude Code v2.1.260
+▝▜██████▀  Fable 5.1 with high effort · <plan>
+  ▝▝ ▝▝    ~\work\project
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Try "create a util logging.py that..."
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← for agents
+
+
+
+
+
+
+

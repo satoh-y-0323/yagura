@@ -1,0 +1,6 @@
+schema = 1
+display_name = "Tilde Cwd"
+cwd = "~/dir"
+
+[command]
+default = ["tilde-cwd-program"]

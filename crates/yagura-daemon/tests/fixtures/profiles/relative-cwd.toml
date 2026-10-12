@@ -1,0 +1,6 @@
+schema = 1
+display_name = "Relative Cwd"
+cwd = "relative/dir"
+
+[command]
+default = ["relative-cwd-program"]

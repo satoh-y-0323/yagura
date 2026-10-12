@@ -1,0 +1,16 @@
+
+• Unable to retrieve status: connection failed through proxy.
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+› The sandbox blocks network. Please request approval to run `curl.exe -sI
+  https://example.com` outside the sandbox and report the status line.
+
+
+• Working (3s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-luna low · ~\work\project-…

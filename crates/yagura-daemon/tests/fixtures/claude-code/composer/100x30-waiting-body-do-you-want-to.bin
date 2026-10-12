@@ -1,0 +1,54 @@
+[?9001h[?1004h[?25l[2J[m[H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[H]0;C:\Users\dummy\.local\bin\claude.EXE[?25h]0;claude[?25l[?2004h[?2031h[?1004h[>0q[?u[>4m[?2031l[?2004l[?2004h[?2031h[?1004h]0;✳ Claude Code[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[m[1m[3CClaude[1CCode[38;2;153;153;153m[22m[1Cv2.1.285[38;2;215;119;87m
+▝▜[48;2;0;0;0m█████[49m█▀[38;2;153;153;153m[2COpus[1C5.5[1C·[1CClaude[1CMax[38;2;215;119;87m
+ ▝▝[3C▝▝[38;2;153;153;153m[3CC:\demo\todo-app[38;2;136;136;136m[6;1H────────────────────────────────────────────────────────────────────────────────────────────────────[m
+❯ [2mTry[1C"fix[1Clint[1Cerrors"[38;2;136;136;136m[22m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[9;3H⏸[1Cmanual[1Cmode[1Con[1C·[1C?[1Cfor[1Cshortcuts[1C·[1C←[1Cfor[1Cagents[29C◐[1Cmedium[1C·[1C/effort[7;3H[?25h[m[>0q[?25lRun the shell command[1Cnode[1C--version[1Cand[1Ctell[1Cme[1Cits[1Coutput.[9;19H[33X[7;63H[?25h]0;◐ Claude Code[?25l[38;2;80;80;80m[48;2;55;55;55m[6;1H❯ [38;2;153;153;153mRun the shell command node --version and tell me its output.                                      [m
+[K[38;2;215;119;87m
+✽ Spinning…[K[m[9;3H[K[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m
+❯ [38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[13;3H⏸[1Cmanual[1Cmode[1Con[1C·[1Cesc[1Cto[1Cinterrupt[1C·[1C←[1Cfor[1Cagents[28C◐[1Cmedium[1C·[1C/effort[11;3H[?25h[?25l[m[38;2;215;119;87m[8;1H✻[11;3H[?25h[m[?25l[38;2;215;119;87m[8;1H✶[11;3H[?25h[m]0;◐ Node version check[?25l[38;2;215;119;87m[8;1H*[11;3H[?25h[m[?25l[38;2;215;119;87m[8;1H✢[11;3H[?25h[m]0;◑ Node version check[?25l[38;2;215;119;87m[8;1H·[11;3H[?25h[?25l[mPlease[1Creview[1Cthis[1Clater,[1Cnot[1Cnow.[1CThe[1Cstatus[1Cfooter[1Ctext[1Cesc[1Cto[1Cinterrupt)[1Cis[1Cwhat[1Cthe[1CCLI
+  shows while it works -> treat it as plain words. Do you want to keep the counter as it is? The    [13;3Hspinner says Sketching… or Thinking… and a dialog footer[1Cmight[1Csay[1CEsc[1Cto[1Ccancel, Press enter to[14;3Hcontinue,[1C↑/↓[1CNavigate[1C·[1Center[1CConfirm,[1Cor[1C3[1Ctask(s)[1Crunning[1Cin[1Cthe[1Cbackground.[1CNone[1Cof[1Cthese[15;3Hwords[1Care[1Ca[1Creal[1Cdialog[1Chere;[1Cthey[1Care[1Conly[1Cpart[1Cof[1Ca[1Clong[1Cnote[1Cthat[1Csits[1Cin[1Cthe[1Cinput[1Cbox[1Cwhile[16;3Hthe[1Cagent[1Ckeeps[1Cworking.[1CThen[1Ccheck[1Cthe[1Chelper[1Cthat[1Cassigns[1Cids[1C(list.length[1C+[1C1[1C->[1Cduplicate[17;3Hids[1Cafter[1Cremoval)[1Cand[1Cthe[1Cfilter[1Cthat[1Creturns[1Cpending[1Citems,[1Cand[1Cwrite[1Cdown[1Cwhat[1Cyou[1Cfind[1Cin[18;3Htwo[1Cshort[1Cparagraphs[1Cwithout[1Cediting[1Cany[1Cfile.[1CThanks,[1Cend[1Cof[1Cnote.[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[20;3H⏸[1Cmanual[1Cmode[1Con[62C◐[1Cmedium[1C·[1C/effort[18;70H[?25h[m[?25l[38;2;255;255;255m[48;2;55;55;55m[6;3HRun the shell command node --version and tell me its output.[38;2;215;119;87m[49m[8;3HWaddl[18;70H[?25h[m[?25l[38;2;215;119;87m[8;1H✢[18;70H[?25h[m[?25l[38;2;215;119;87m[8;1H*[18;70H[?25h[m[?25l[38;2;215;119;87m[8;1H✶[18;70H[?25h[m[?25l[38;2;215;119;87m[8;1H✻[18;70H[?25h[m]0;◐ Node version check[?25l[38;2;215;119;87m[8;1H✽[18;70H[?25h[m[?25l[38;2;228;144;112m[8;3HWaddling…[18;70H[?25h[m[?25l[38;2;153;153;153m[8;1H●[m[1m[1CPowerShell[22m(node[1C--version)[38;2;153;153;153m
+  ⎿  Waiting…[m
+[K[38;2;215;119;87m
+✽ [38;2;223;134;102mWaddling… [38;2;153;153;153m(2s · ↓ 2 tokens)[K[m[12;3H[K[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m❯ [mPlease review[1Cthis later, [1Cot now. The status footer[1Ctext esc to interrupt) is what the[1CCLI       [15;3Hshow[2Cwhile[1Cit works ->[1Ctreat[1Cit as plai[1C words.[1CDo[1Cyou want [1Co[1Ckeep[1Cthe coun[1Cer[1Cas i[2Cis?[1CT[1Ce    [16;3Hspinner says Sketching… or Thinking… and a dialog footer might say Esc to cancel, Press enter[1Cto[17;3Hcontinu[1C,[1C↑/↓ N[1Cvig[1Cte[1C· [1Cnter Confirm, or 3 task(s) running in the background. None o[1C these[18;3Hword[1C a[1Ce[1Ca [1Ceal dialog [1Cere; they are only part of a lo[1Cg[1Cnote [1Chat[1Csits[1Cin[1Cthe[1Cinput[1Cbox[1Cwhile
+  the agent keeps working. Then check the helper that assigns ids (list.length + 1 -> duplicate     [20;3Hids after removal)[1Cand[1Cthe[1Cfilter[1Cthat[1Creturns[1Cpending[1Citems,[1Cand[1Cwrite[1Cdown[1Cwhat you find in     [21;3Htwo[1Cshort[1Cparagraphs[1Cwithout[1Cediting[1Cany[1Cfile.[1CThanks,[1Cend[1Cof[1Cnote.[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[23;3H⏸[1Cmanual[1Cmode[1Con[62C◐[1Cmedium[1C·[1C/effort[21;70H[?25h[m[?25l[38;2;220;129;97m[11;3HWaddling…[38;2;153;153;153m[9C4[21;70H[?25h[m[?25l[38;2;215;119;87m[11;1H✻[38;2;218;124;92m[1CWaddling…[38;2;153;153;153m[9C5[21;70H[?25h[m[?25l[38;2;215;119;87m[11;1H✶[1CWaddling…[38;2;153;153;153m[9C7[21;70H[?25h[m[?25l[38;2;215;119;87m[11;1H*[38;2;153;153;153m[19C8[21;70H[?25h[m[?25l[38;2;153;153;153m[11;21H11 tokens)[21;70H[?25h[m]0;✳ Node version check[?25l[38;2;177;185;249m[11;1H────────────────────────────────────────────────────────────────────────────────────────────────────[1m[12;2HPowerShell command[m
+[K
+   node --version[K[15;3H [38;2;153;153;153mShow Node.js version[K[m[16;3H[K[17;2HThis command requires approval[K[18;3H[K[19;2HDo you want to proceed?[K[38;2;177;185;249m[20;2H❯ [38;2;153;153;153m1. [38;2;177;185;249mYes[K[m[21;3H [38;2;153;153;153m2. [mYes, and don’t ask again[1Cfor: [1Code --version[K
+   [38;2;153;153;153m3. [mNo[K[23;3H[K[38;2;153;153;153m[24;2HEsc[1Cto[1Ccancel[1C·[1CTab[1Cto[1Camend[?2004h[m[38;2;255;107;128m[8;1H●[38;2;153;153;153m[9;6HInterrupted · What should Claude do instead?[11;1H✻ Worked for 2s · done 20:13                                                                        [m[12;2H[K[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[m❯ Please review this[1Clater,[1Cnot[1Cnow.[1CThe[1Cstatus[1Cfooter[1Ctext[1Cesc[1Cto[1Cinterrupt)[1Cis[1Cwhat[1Cthe[1CCLI[15;3Hshows while it works ->[1Ctreat[1Cit[1Cas[1Cplain[1Cwords.[1CDo[1Cyou[1Cwant[1Cto[1Ckeep[1Cthe[1Ccounter[1Cas[1Cit[1Cis?[1CThe[16;3Hspinner[1Csays[1CSketching…[1Cor[1CThinking…[1Cand[1Ca[1Cdialog[1Cfooter[1Cmight[1Csay[1CEsc[1Cto[1Ccancel,[1CPress[1Center[1Cto[17;2H continue, ↑/↓ Navigate · enter[1CConfirm,[1Cor[1C3[1Ctask(s)[1Crunning[1Cin[1Cthe[1Cbackground.[1CNone[1Cof[1Cthese[18;3Hwords[1Care[1Ca[1Creal[1Cdialog[1Chere;[1Cthey[1Care[1Conly[1Cpart[1Cof[1Ca[1Clong[1Cnote[1Cthat[1Csits[1Cin[1Cthe[1Cinput[1Cbox[1Cwhile[19;2H the agent keeps working.[1CThen[1Ccheck[1Cthe[1Chelper[1Cthat[1Cassigns[1Cids[1C(list.length[1C+[1C1[1C->[1Cduplicate[20;2H ids after[1Cremoval)[1Cand[1Cthe[1Cfilter[1Cthat[1Creturns[1Cpending[1Citems,[1Cand[1Cwrite[1Cdown[1Cwhat[1Cyou[1Cfind[1Cin[21;3Htwo short paragraphs without[1Cediti[1Cg any file. Thanks,[1Cend[1Cof[1Cnote.[38;2;136;136;136m
+────────────────────────────────────────────────────────────────────────────────────────────────────[38;2;153;153;153m[23;3H⏸ manual mode on[62C◐ medium · /effort[m
+[K
+[K[21;70H[?25h

@@ -1,0 +1,79 @@
+[package]
+name = "yagura-os"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Cross-platform CSPRNG behind `fill_random`: the library absorbs
+# the platform difference, so this is not part of the OS abstraction boundary.
+getrandom.workspace = true
+# SHA-256 of the bundled pseudoconsole files (`bundled_conpty`).
+sha2.workspace = true
+
+# Unix-only: the Unix branch (`platform_unix`) talks to the kernel directly
+# (getuid, getpgrp/getpgid, killpg, SO_PEERCRED on Linux, getpeereid on macOS,
+# setsid) rather than through a higher-level crate, symmetric with the
+# `windows` crate used below. The macOS peer-credential call (getpeereid)
+# is covered by this same entry.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+# Unix windows start their child on a pseudoterminal through it (`pty`); it
+# stays inside this crate.
+portable-pty.workspace = true
+
+# macOS-only: `locale::preferred_locale` reads the user's CFLocale, the one
+# place a Finder-started process can learn its locale without `LANG`. The
+# `-sys` crate is used directly because the safe wrapper has no CFLocale type.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = "0.8.7"
+
+# Windows-only: the non-Windows branch (`platform_unix`) must resolve without
+# it so `--target x86_64-unknown-linux-gnu` builds.
+[target.'cfg(windows)'.dependencies]
+# Added on top of the workspace feature set: `Win32_Storage_FileSystem`
+# for CreateFileW (opening the pipe to read its DACL),
+# `Win32_System_SystemServices` for the ACE/security-descriptor revision
+# constants. `Win32_System_Console`
+# for GetStdHandle / GetConsoleMode / SetConsoleMode
+# (`enter_raw_console_input`) and the pseudoconsole handle type.
+# `Win32_System_LibraryLoader` for LoadLibraryExW / GetProcAddress (the
+# bundled `conpty.dll`). `Win32_System_Registry` and
+# `Win32_System_Environment` build a window's base environment from the
+# persistent variables in the registry.
+windows = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Environment",
+] }
+# `webview::turn_off_browser_accelerator_keys`: pinned to the versions Tauri
+# already links, so the controller the GUI hands over is the same type.
+webview2-com = "=0.38.2"
+windows-core = "=0.61.2"
+
+[dev-dependencies]
+# `macros` / `rt` for the `#[tokio::test]` harness of tests/os_security.rs.
+tokio = { workspace = true, features = ["macros", "rt"] }
+# Shared test fixtures. Dev-only: `publish = false` and absent from
+# the normal dependency graph, so it never reaches the shipped library.
+yagura-test-support = { path = "../yagura-test-support" }
+
+# `tests/os_unix.rs` reaches libc directly (getpgrp, waitid) to build an
+# independent oracle for `UnixProcessGroup`'s fixtures, so
+# those assertions do not just re-run the implementation under test. Already
+# covered transitively by the `[target.'cfg(unix)'.dependencies]` entry
+# above; listed here too so the intent (a test-only direct libc use) is
+# visible next to the tests that make it, and so it keeps resolving if that
+# production dependency is ever removed.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

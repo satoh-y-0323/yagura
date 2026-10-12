@@ -1,0 +1,16 @@
+❯ Use the AskUserQuestion tool to ask me which color I prefer, with two options: red and blue. Do
+  nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color
+
+Which color do you prefer?
+
+❯ 1. Red
+     Choose red as your preferred color
+  2. Blue
+     Choose blue as your preferred color
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

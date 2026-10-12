@@ -1,0 +1,74 @@
+# yagura playbook: the operator-authored policy that relaxes the daemon's
+# approval gate. See docs/mcp-setup.md for the full schema and troubleshooting.
+
+[approval]
+# Tool names that may run without a human decision. open_window is listed by
+# default so that agents can start windows (a command or a launch profile,
+# including the windows a handoff or a plan task opens) as they always have;
+# remove it and every such start waits for a human, who is shown the command
+# and its working directory -- an agent can otherwise run any command as you,
+# outside its own CLI's permission prompts. send_chat is listed because its
+# reach is closed: it can only address a window that is already a chat
+# participant, never an arbitrary process or file. Remove it and every
+# window's chat post waits for a human, like the other six -- close_window,
+# interrupt_window, send_message, send_keys, send_handoff and broadcast_chat --
+# which reach the GUI's approval dialog when requested by another window or an
+# external MCP client. A request naming the requester's own window as its
+# target, or one from the GUI's own approver connection, is never gated and
+# does not need to be listed here; chat and open_window have no such target,
+# so this list is the only thing that can skip the dialog for them.
+auto_approve = ["send_chat", "open_window"]
+# This list, and [plans] require_approval below, can also be switched while
+# the daemon is running from the GUI's Settings > Approvals tab; see
+# docs/mcp-setup.md's "Changing approvals from the GUI" section.
+
+[plans]
+# Whether a new plan waits for the operator to approve it in the GUI before
+# any of its task windows can open. Omitting this also means true.
+require_approval = true
+
+# [limits]
+# Optional operational overrides; every field defaults to a built-in value
+# when omitted, including the whole table.
+# approval_timeout_secs = 60         # Deadline for a pending approval, in
+#                                     # seconds. Must be within 1..=600 -- a
+#                                     # value outside that range fails this
+#                                     # whole file to load, not just this
+#                                     # key. 60 is also the daemon's own
+#                                     # built-in default, so leaving this
+#                                     # commented out has the same effect.
+# handoff_ready_timeout_secs = 60    # Deadline for a send_handoff's
+#                                     # profile-opened window to become
+#                                     # ready for input, in seconds. Same
+#                                     # 1..=600 range and 60s default as
+#                                     # approval_timeout_secs above.
+# chat_delivery_max = 32             # Upper bound on how many chat deliveries
+#                                     # (posts and intros together) may be in
+#                                     # flight at once. Must be within
+#                                     # 1..=256.
+
+# [chat]
+# Optional overrides for the chat rooms; every field defaults to a
+# built-in value when omitted, including the whole table.
+# repetition_count = 4          # Occurrences of the same room state (1 or
+#                                # more) that halt the room as a loop.
+# repetition_window = 12        # History window (most recent non-system
+#                                # entries) compared for repetition (1 or
+#                                # more).
+# repetition_distance = 6       # Maximum simhash Hamming distance still
+#                                # counted as the same state (0..=64).
+# monologue_max = 3             # Consecutive posts from the same window
+#                                # before the room halts (1 or more).
+# turn_message_max = 30         # AI posts allowed since the last user post
+#                                # before the room halts (1 or more).
+# silence_timeout_secs = 300    # Seconds of no reply before the room is
+#                                # marked as needing the user (1..=86400).
+# history_max = 5000            # Messages retained per room (1 or more).
+# intro = "..."                 # One-time announcement posted to a
+#                                # participant window when it opens. Empty
+#                                # disables intro delivery.
+# exclude_detections = ["generic-shell"]  # Detection definition names
+#                                          # excluded from chat participation.
+#                                          # A definition that declares no
+#                                          # composer never participates
+#                                          # regardless of this setting.

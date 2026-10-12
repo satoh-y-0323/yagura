@@ -1,0 +1,7 @@
+schema = 1
+# The escape encodes a C0 control character, which the window-label rule
+# forbids. Kept as an escape so this file stays plain ASCII on disk.
+display_name = "Bad\u0007Name"
+
+[command]
+default = ["bad-display-name-program"]

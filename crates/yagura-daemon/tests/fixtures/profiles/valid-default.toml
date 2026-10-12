@@ -1,0 +1,6 @@
+schema = 1
+display_name = "Valid Default"
+detection = "generic-shell"
+
+[command]
+default = ["codex"]

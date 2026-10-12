@@ -1,0 +1,8 @@
+schema = 1
+display_name = "Empty Launch Option Arg"
+
+[command]
+default = ["empty-launch-option-arg-program"]
+
+[model]
+args = ["--tier", "", "{value}"]

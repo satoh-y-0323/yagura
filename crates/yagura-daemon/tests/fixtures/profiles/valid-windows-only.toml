@@ -1,0 +1,7 @@
+schema = 1
+display_name = "Windows Only"
+
+# No `default`, so every operating system other than Windows has no argv at
+# all and the profile is not launchable there.
+[command]
+windows = ["windows-only-program"]

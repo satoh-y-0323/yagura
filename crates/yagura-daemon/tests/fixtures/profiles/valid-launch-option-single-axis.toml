@@ -1,0 +1,11 @@
+schema = 1
+display_name = "Single Axis"
+
+[command]
+default = ["single-axis-program"]
+
+[model]
+args = ["--tier", "{value}"]
+
+[model.aliases]
+alpha = "tier-a"

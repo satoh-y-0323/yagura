@@ -1,0 +1,16 @@
+│ model:     gpt-5.6-luna low   /model to change        │
+│ directory: ~\work\project │
+╰───────────────────────────────────────────────────────╯
+
+  Tip: New For a limited time, Codex is included in your plan for free – let’s build together.
+
+
+› Run the shell command `curl -sI https://example.com` and tell me only the HTTP status line.
+
+
+• Working (0s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-luna low · ~\work\project-…

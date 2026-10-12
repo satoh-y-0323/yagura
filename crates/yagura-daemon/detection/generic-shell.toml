@@ -1,0 +1,36 @@
+# Detection definition for a plain, non-agent shell (bash/zsh/PowerShell/
+# cmd), used as the daemon's default (`--detection generic-shell`) when no
+# CLI-specific definition applies.
+#
+# No `[composer]`: a plain shell's screen alone cannot tell its prompt apart
+# from a program's own output, so the daemon never writes text into this window.
+#
+# Both `quiescence` and `activity` are opted into, since a bare shell has no
+# reliable "still working" pattern to match against (unlike an agent CLI's
+# spinner). Opting into both gives a held-judgement bridge across
+# `window_ms <= t < after_ms`, so the window never reports `Unknown` merely
+# because output paused briefly between commands.
+schema_version = 1
+name = "generic-shell"
+
+[debounce]
+confirm_ms = 300
+
+# A trailing shell prompt character at end of line: `$`, `#`, or `>` for
+# common POSIX shells, root shells, and PowerShell/cmd, and `%` for zsh. Only a
+# `%` after whitespace counts here, so a figure such as `45%` is not taken for
+# a prompt; a `%` glued to the host name (`host% `) settles by quiescence.
+# This drives the status display only: a program printing `45% ` reads the same.
+[[rules]]
+status = "idle"
+pattern = '(?:[$#>]|(?:^|\s)%)\s*$'
+priority = 1
+region = "bottom"
+
+[quiescence]
+status = "idle"
+after_ms = 2000
+
+[activity]
+status = "running"
+window_ms = 500

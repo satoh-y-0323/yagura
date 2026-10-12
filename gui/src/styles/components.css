@@ -1,0 +1,307 @@
+/* Shared component classes.
+   Global on purpose: every component that renders a button or a dialog shares
+   these rules, so they live here once and are imported from main.ts. Every
+   colour is a token, so a theme change reaches them through the same custom
+   properties as everything else. */
+
+/* Sizes include padding and border, so a width of 100% never overflows its box. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.btn {
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: var(--color-primary);
+  color: var(--color-background);
+  border-color: var(--color-primary);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-primary-hover);
+}
+
+.btn-secondary {
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-border);
+}
+
+.btn-danger {
+  background-color: var(--color-error);
+  color: var(--color-background);
+  border-color: var(--color-error);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: var(--color-error-hover);
+}
+
+.dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.dialog-message {
+  margin: 0;
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: var(--space-sm);
+  justify-content: flex-end;
+}
+
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.dialog-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.dialog-input {
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-background);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.dialog-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-hover);
+}
+
+/* A horizontal strip whose children sit on one baseline with the standard
+   gap. The three shared declarations live here; each component <style> keeps
+   only its genuinely local declarations. */
+.status-panel__header-row,
+.status-panel__room-heading,
+.status-panel__header,
+.dialog-header,
+.popup-menu__item,
+.window-menu__theme-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* The two of the above that also space their children apart:
+   the remaining four keep their children packed at the start, so this stays
+   a separate, narrower selector list rather than widening the group above. */
+.status-panel__header,
+.dialog-header {
+  justify-content: space-between;
+}
+
+/* The sidebar itself has no padding so the rows reach both edges; the room
+   heading supplies its own inset, aligned with the row text. */
+.status-panel__room-heading {
+  padding: var(--space-sm);
+}
+
+/* An unfilled control drawn only as a framed glyph: the row actions in the
+   window list, the WindowControls button row, and the sidebar's tile-arrange
+   button. Unlike .btn it carries no fill of its own, so the frame reads as
+   part of the surface it sits on until it is hovered. */
+.status-panel__button,
+.window-controls__menu-anchor,
+.window-controls__button {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.status-panel__button:hover:not(:disabled),
+.window-controls__menu-anchor:hover,
+.window-controls__button:hover:not(:disabled) {
+  background-color: var(--color-border);
+}
+
+.status-panel__button {
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-surface);
+  transition: all 0.2s;
+}
+
+/* Both interrupt buttons stay mounted whatever the status, so
+   the two surfaces need the same "cannot be pressed" look. */
+.status-panel__button:disabled,
+.window-controls__button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.window-controls__menu-anchor,
+.window-controls__button {
+  padding: 0 var(--space-sm);
+  background-color: var(--color-background);
+  line-height: 1.6;
+}
+
+/* A dismiss glyph that borrows the colour of whatever surface it sits on:
+   the banner's ✕ and the add-window dialog's ✕. */
+.banner-close,
+.dialog-close {
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  color: currentColor;
+}
+
+.banner-close:hover,
+.dialog-close:hover {
+  opacity: 0.7;
+}
+
+/* Tone-to-colour mapping for the window list lives
+   here, not in StatusPanel's own <style>, so status-tone.ts never has to
+   know a token name and every tone-conditional rule sits in one place. */
+.status-panel__item[data-tone='attention'] {
+  border-left: 3px solid var(--color-warning);
+  padding-left: calc(var(--space-sm) - 3px);
+}
+
+.status-panel__item[data-tone='unknown'] {
+  border-left: 3px dashed var(--color-text-secondary);
+  padding-left: calc(var(--space-sm) - 3px);
+}
+
+.status-panel__item[data-tone='attention'] .status-panel__status {
+  background-color: var(--color-warning);
+  color: var(--color-on-warning);
+}
+
+.status-panel__item[data-tone='active'] .status-panel__status {
+  background-color: var(--color-success);
+  color: var(--color-background);
+}
+
+.status-panel__item[data-tone='halted'] .status-panel__status {
+  background-color: var(--color-error);
+  color: var(--color-background);
+}
+
+.status-panel__item[data-tone='quiet'] .status-panel__status {
+  background-color: var(--color-text-secondary);
+  color: var(--color-background);
+}
+
+.status-panel__item[data-tone='unknown'] .status-panel__status {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-text-secondary);
+}
+
+/* The three "needs you" badges (window-list header, room heading, rail)
+   each carried this pair in its own component <style>; they read it from the
+   same data-tone attribute their markup already sets, so the tone vocabulary
+   -- not a bespoke colour -- is what paints them. */
+.status-panel__count-badge[data-tone='attention'],
+.status-panel__room-badge[data-tone='attention'],
+.app-rail__badge[data-tone='attention'] {
+  background-color: var(--color-warning);
+  color: var(--color-on-warning);
+}
+
+/* The room heading's Unknown-count badge, the same dashed-outline
+   treatment the window-row tone already uses for `unknown`. */
+.status-panel__room-badge[data-tone='unknown'] {
+  background-color: transparent;
+  border: 1px dashed var(--color-text-secondary);
+  color: var(--color-text-secondary);
+}
+
+/* Tone-to-colour mapping for FloatWindow's
+   status pill and tone-conditional rendering. Mirrors the colour pairing in
+   the window list (status-panel) so the same status value always looks the same. */
+.float-window__status[data-tone='attention'] {
+  background-color: var(--color-warning);
+  color: var(--color-on-warning);
+}
+
+.float-window__status[data-tone='active'] {
+  background-color: var(--color-success);
+  color: var(--color-background);
+}
+
+.float-window__status[data-tone='halted'] {
+  background-color: var(--color-error);
+  color: var(--color-background);
+}
+
+.float-window__status[data-tone='quiet'] {
+  background-color: var(--color-text-secondary);
+  color: var(--color-background);
+}
+
+.float-window__status[data-tone='unknown'] {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-text-secondary);
+}
+
+/* The tab strip's dot joins the tone
+   vocabulary as a third display location, in its own block -- the dot has no
+   `color` declaration to share the two blocks above with (it paints no
+   text). */
+.tab-bar__dot[data-tone='attention'] {
+  background-color: var(--color-warning);
+}
+
+.tab-bar__dot[data-tone='active'] {
+  background-color: var(--color-success);
+}
+
+.tab-bar__dot[data-tone='halted'] {
+  background-color: var(--color-error);
+}
+
+.tab-bar__dot[data-tone='quiet'] {
+  background-color: var(--color-text-secondary);
+}
+
+.tab-bar__dot[data-tone='unknown'] {
+  background-color: transparent;
+  border: 1px solid var(--color-text-secondary);
+}

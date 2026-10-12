@@ -1,0 +1,16 @@
+  ok
+
+────────────────────────────────────────────────────────────
+> Run this exact shell command, then reply with the single word done: powershell -NoProfile
+  -Command Start-Sleep -Seconds 20
+
+● Bash(powershell -NoProfile -Command Start-Sleep -Seconds 20) (ctrl+o to expand)
+
+  The command has been launched in the background. Waiting for it to finish.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● [01:31:15] powershell -NoProfile -Command Start-Sleep -Seconds 20 running
+────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                          Gemini 3.8 Flash · low · 1 task(s) · /ta   

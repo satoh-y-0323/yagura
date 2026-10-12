@@ -1,0 +1,7 @@
+schema = 1
+display_name = "Bad Id"
+
+# The contents are valid; the file name is what makes this one unusable, since
+# the identifier is the file name stem.
+[command]
+default = ["bad-id-program"]

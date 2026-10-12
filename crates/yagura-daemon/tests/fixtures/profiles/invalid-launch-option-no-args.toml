@@ -1,0 +1,8 @@
+schema = 1
+display_name = "No Args"
+
+[command]
+default = ["no-args-program"]
+
+[model.aliases]
+alpha = "tier-a"

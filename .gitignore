@@ -1,0 +1,38 @@
+# Local planning documents
+.dev/
+
+# Local development tool configuration
+.claude/
+
+# Rust build artifacts
+/target/
+# An isolated CARGO_TARGET_DIR, used because linking fails while the resident daemon is running
+/target-*/
+crates/*/target/
+gui/src-tauri/target/
+gui/src-tauri/target-*/
+
+# Tauri sidecar staging (regenerate with gui/scripts/prepare-sidecar.mjs)
+gui/src-tauri/binaries/
+
+# Node.js dependencies and build output
+gui/node_modules/
+gui/dist/
+gui/.pnpm-store/
+
+# TypeScript
+*.tsbuildinfo
+
+# Python bytecode cache (scripts/ tooling and its pytest runs)
+__pycache__/
+
+# Claude Code project-scoped MCP registration (points at a local build)
+.mcp.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+

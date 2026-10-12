@@ -1,0 +1,6 @@
+# Raw PTY captures: store byte for byte, never convert line endings.
+*.bin binary
+
+# Bundled executables: store byte for byte.
+*.dll binary
+*.exe binary

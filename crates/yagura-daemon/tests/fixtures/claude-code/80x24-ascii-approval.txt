@@ -1,0 +1,16 @@
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode"
+ below
+
+   dir
+   List files in current directory
+
+ This command requires approval
+
+ Do you want to proceed?
+ > 1. Yes
+   2. Yes, and don’t ask again for: dir *
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

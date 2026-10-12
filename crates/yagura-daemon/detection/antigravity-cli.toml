@@ -1,0 +1,87 @@
+# Detection definition for the Antigravity CLI (`agy`).
+#
+# Vendor identity lives only in this filename and the `name` value below --
+# never in the daemon's core types (project convention: vendor-neutral
+# vocabulary).
+schema_version = 1
+name = "antigravity-cli"
+# Captured against Antigravity CLI 1.2.11 on 2026-09-26 at 100x30 (one dialog
+# at 110x34); see tests/fixtures/antigravity-cli/README.md for the
+# extraction rule and fixture provenance.
+bottom_line_count = 12
+
+[debounce]
+confirm_ms = 300
+
+# Selection dialogs (command approval, MCP tool approval, folder trust, the
+# slash-menu candidate list, ...) redraw a stable footer hint regardless of
+# the dialog body, so match that footer rather than the dialog's own
+# wording. Highest priority so it wins over a coincidental `running` or
+# `unknown`/`waiting_input` match on the same screen (a numbered option row
+# starts with the same `>` glyph the composer uses).
+[[rules]]
+status = "waiting_approval"
+pattern = '(?i)^\s{0,4}(Keyboard: )?↑/↓ Navigate\b'
+priority = 30
+region = "bottom"
+
+# The point-symbol spinner shown while a turn is generating, and the
+# background-task footer shown once a running command has been handed off
+# but the turn has not finished evaluating it (composer looks idle but the
+# CLI is still working, the same reading codex-cli.toml gives its own
+# background-terminal footer variant).
+[[rules]]
+status = "running"
+pattern = '(^[\x{2801}-\x{28FF}]\s+\S.*\.\.\.)|(\d+\s*task\(s\))'
+priority = 20
+region = "bottom"
+
+# `esc to cancel` is shown by every dialog and by the running spinner, but
+# also by screens this definition does not otherwise recognize (an
+# unrecognized approval dialog, for instance). Those higher-priority rules
+# win when their own anchor is present; this one exists so a screen that
+# carries *only* this footer -- no navigation hint, no spinner, no
+# background-task count -- reports Unknown (fail-safe) rather than falling
+# through to a composer-shaped history line reading as `waiting_input`.
+[[rules]]
+status = "unknown"
+pattern = '(?i)^\s{0,4}esc to cancel\b'
+priority = 15
+region = "bottom"
+
+# The composer's own prompt line, waiting for the user's next instruction.
+# Past turns are echoed with the same leading `>` (color is the only
+# difference), which is why the three rules above outrank this one.
+[[rules]]
+status = "waiting_input"
+pattern = '^>( |$)'
+priority = 10
+region = "bottom"
+
+# Identifies the composer so the daemon can read what has been typed before
+# submitting. The marker omits the trailing space so an empty composer
+# (glyph alone) still matches.
+[composer]
+marker = '^>'
+separator = " "
+continuation_prefix = "  "
+# A blank line in a multi-line draft is drawn as nothing, and a draft taller
+# than the composer folds under a `> ↑ N more lines` row.
+blank_lines_in_body = true
+
+[input]
+bracketed_paste = true
+submit = "\r"
+# No startup oscillation observed over 5 Windows + 3 WSL runs (max 732ms
+# held before WaitingInput); load was not measured, so this stays a
+# conservative headroom value pending real-machine confirmation.
+ready_hold_ms = 1500
+submit_delay_ms = 800       # a 1,200-char paste submitted cleanly at 0/100/300ms gaps
+delivery_confirm_ms = 8000  # reaction latency not separately measured; kept at the default
+# Ctrl+U erases one display line per press and does nothing on an empty
+# composer, so a take-back repeats it once per line the body may occupy.
+clear = "\u0015"
+probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+
+[requests]
+abandoned_at_turn_end = false  # cancels the call when the user presses Esc and when its own call timeout ends it
