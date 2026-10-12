@@ -1,17 +1,14 @@
-# NOTE: if a third-party action is added to this workflow in the future, it must be pinned to a commit SHA.
+# Every action is pinned to a commit SHA; the comment after it names the release.
 name: CI
 
-# Manual-only: every check is run locally before pushing, so CI runs on workflow_dispatch only.
-#
-# To restore, put back these triggers alongside workflow_dispatch:
-#   push:
-#     branches: [main]
-#     paths-ignore: &paths-ignore
-#       - "**.md"
-#       - "docs/**"
-#   pull_request:
-#     paths-ignore: *paths-ignore
 on:
+  push:
+    branches: [main]
+    paths-ignore: &paths-ignore
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    paths-ignore: *paths-ignore
   workflow_dispatch:
 
 permissions:
@@ -29,8 +26,8 @@ jobs:
       run:
         working-directory: gui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -54,7 +51,7 @@ jobs:
       # Debuginfo generation and linking dominate build time on Windows runners; CI needs no debug symbols.
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Create placeholder frontend dist
         # tauri::generate_context! requires the frontendDist directory to exist at compile time.
         # It lives in the bin target (gui/src-tauri/src/main.rs), which cargo builds for clippy
@@ -75,7 +72,7 @@ jobs:
         run: |
           rustup update stable
           rustup component add rustfmt clippy
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -88,7 +85,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --workspace --tests --locked
       # Save right after the build so build artifacts carry over even if the test step times out.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -103,22 +100,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
-  # Linux coverage for the yagura-os Unix implementation. Only the 5 non-GUI
-  # crates run here; gui/src-tauri is desktop-bundling code the Windows `rust` job already covers
-  # and this job does not need a frontendDist placeholder for.
-  rust-linux:
-    runs-on: ubuntu-latest
-    # 30 min: a completed run on this same configuration took 16 minutes; the rest is headroom for rusqlite's bundled C build and a cold cache.
-    timeout-minutes: 30
+  # Linux and macOS coverage for the Unix side of yagura-os and everything above it. The GUI crate
+  # (gui/src-tauri) is left to the Windows `rust` job, so these jobs need no frontend dist or sidecar
+  # placeholders.
+  rust-unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rust-linux
+            os: ubuntu-latest
+            # A completed run took 16 minutes; the rest is headroom for rusqlite's bundled C build and a cold cache.
+            timeout: 30
+          - name: rust-macos
+            os: macos-latest
+            timeout: 40
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Prepare rustup toolchain
         run: |
           rustup update stable
           rustup component add clippy
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -128,39 +136,7 @@ jobs:
             ${{ runner.os }}-cargo-
       - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
       # Save right after clippy so build artifacts carry over even if the test step times out.
-      - uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - run: cargo test -p yagura-protocol -p yagura-os -p yagura-daemon -p yagura-mcp -p yagura-test-support --locked
-
-  # macOS coverage for the yagura-os macOS implementation. Mirrors rust-linux:
-  # only the 5 non-GUI crates run here; gui/src-tauri is desktop-bundling code not covered by this
-  # smoke job.
-  rust-macos:
-    runs-on: macos-latest
-    timeout-minutes: 40
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Prepare rustup toolchain
-        run: |
-          rustup update stable
-          rustup component add clippy
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-      - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
-      # Save right after clippy so build artifacts carry over even if the test step times out.
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry

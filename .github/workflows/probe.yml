@@ -1,4 +1,4 @@
-# NOTE: if a third-party action is added to this workflow in the future, it must be pinned to a commit SHA.
+# Every action is pinned to a commit SHA; the comment after it names the release.
 name: Probe
 
 # Manual-only measurement harness: it repeats one cargo test scope many times and reports how the
@@ -66,14 +66,14 @@ jobs:
           esac
           echo "repetitions: $REPETITIONS"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare rustup toolchain
         shell: bash
         run: rustup update stable
 
       # Restore only: a measurement run must not publish its own cache entry over the one the gates use.
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -245,7 +245,7 @@ jobs:
 
       - name: Upload the measurement log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: probe-log-${{ github.run_id }}-${{ github.run_attempt }}
           path: probe-log.txt
