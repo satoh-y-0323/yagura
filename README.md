@@ -8,7 +8,7 @@ waiting for you, and gives the agents in those windows an MCP server to see and 
 You stay in control: anything one agent does to another window waits for your approval unless you
 allow it.
 
-![yagura with Claude Code, Codex CLI, Antigravity CLI and a shell open side by side](docs/images/overview.png)
+![One prompt to Claude Code: Antigravity CLI implements, Codex CLI reviews and finds gaps in the tests, and Claude Code asks you to decide](docs/images/demo.gif)
 
 ## Features
 
@@ -20,6 +20,8 @@ allow it.
   status, vendor and working directory.
 - Windows keep running in a background daemon, so closing the GUI does not stop your agents. Next
   time, yagura offers to bring your last layout back.
+
+![yagura with Claude Code, Codex CLI, Antigravity CLI and a shell open side by side](docs/images/overview.png)
 
 **Know who needs you**
 
