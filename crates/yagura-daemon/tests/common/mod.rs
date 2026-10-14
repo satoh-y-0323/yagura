@@ -3276,3 +3276,25 @@ pub async fn wait_until_input_log_contains(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+/// Everything the child read up to now, from its input log. The log is filled
+/// as the child reads, behind the daemon's writes, so it is read only once a
+/// sentinel written after them has come back through it.
+pub async fn input_log_read_so_far(
+    entry: &yagura_daemon::window::WindowEntry,
+    log: &Path,
+    timeout: Duration,
+) -> Vec<u8> {
+    const SENTINEL: &[u8] = b"SENTINEL-AFTER";
+    entry
+        .write_pty_input(SENTINEL, yagura_daemon::window::InputOrigin::Interactive)
+        .await
+        .expect("the sentinel must not fail");
+    let mut read = wait_until_input_log_contains(log, SENTINEL, timeout).await;
+    let at = read
+        .windows(SENTINEL.len())
+        .position(|window| window == SENTINEL)
+        .expect("the log was returned holding the sentinel");
+    read.truncate(at);
+    read
+}

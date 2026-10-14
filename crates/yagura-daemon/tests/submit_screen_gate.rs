@@ -28,9 +28,9 @@ use std::time::Duration;
 
 use common::{
     Harness, SUBMIT_CHILD_PROBE, approver_base_config, composer_section_toml, count_marker,
-    let_every_clock_bound_run_out, new_engine, policy, read_composer_now, read_response, repaint,
-    send, settled_marker_count, submit_child_composer_section, tick_after_ms, unique_temp_dir,
-    wait_until_status,
+    input_log_read_so_far, let_every_clock_bound_run_out, new_engine, policy, read_composer_now,
+    read_response, repaint, send, settled_marker_count, submit_child_composer_section,
+    tick_after_ms, unique_temp_dir, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
@@ -474,10 +474,10 @@ fn assert_declined_as_not_accepting(judgment: &SubmitJudgment, envelope_remains:
     }
 }
 
-/// Every byte the child read, in order, as the log a [`GateWindow`] with an
+/// Every byte the child read, in order, from the log a [`GateWindow`] with an
 /// `input_log` fills.
-fn child_input(log: &Path) -> Vec<u8> {
-    std::fs::read(log).unwrap_or_default()
+async fn child_input(h: &Harness, window_id: &str, log: &Path) -> Vec<u8> {
+    input_log_read_so_far(&entry(h, window_id), log, Duration::from_secs(10)).await
 }
 
 fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
@@ -489,17 +489,16 @@ fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
 
 /// Asserts that, of everything the child read, nothing was a clear sequence, a
 /// submit key or a probe erase: the bytes that would act on a dialog.
-fn assert_no_acting_byte_reached_the_child(log: &Path) {
-    assert_no_acting_byte_in(&child_input(log));
+fn assert_no_acting_byte_reached_the_child(received: &[u8]) {
+    assert_no_acting_byte_in(received);
 }
 
 /// [`assert_no_acting_byte_reached_the_child`] for what the child read after
 /// the body's paste ended: the bytes that could act on a dialog the body
 /// raised. A probe confirmed and erased before the body was written is not
 /// one of them.
-fn assert_no_acting_byte_reached_the_child_after_the_body(log: &Path) {
+fn assert_no_acting_byte_reached_the_child_after_the_body(received: &[u8]) {
     const PASTE_END: &[u8] = b"\x1b[201~";
-    let received = child_input(log);
     let end = received
         .windows(PASTE_END.len())
         .position(|window| window == PASTE_END)
@@ -798,7 +797,9 @@ async fn a_dialog_that_replaces_the_written_body_gets_neither_the_submit_key_nor
         }
         other => panic!("another writer's byte must end the wait, got {other:?}"),
     }
-    assert_no_acting_byte_reached_the_child_after_the_body(&log);
+    assert_no_acting_byte_reached_the_child_after_the_body(
+        &child_input(&h, &window_id, &log).await,
+    );
     assert_eq!(
         count_marker(&h, &window_id, "APPROVED"),
         0,
@@ -933,8 +934,8 @@ async fn neither_a_clear_nor_a_rewrite_follows_a_body_that_stays_unread_beside_a
         other => panic!("another writer's byte must end the wait, got {other:?}"),
     }
 
-    let received = child_input(&log);
-    assert_no_acting_byte_reached_the_child_after_the_body(&log);
+    let received = child_input(&h, &window_id, &log).await;
+    assert_no_acting_byte_reached_the_child_after_the_body(&received);
     assert_eq!(
         count_subslice(&received, b"\x1b[200~hello\x1b[201~"),
         1,
@@ -1244,7 +1245,7 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
         }
         other => panic!("another writer's byte must end the wait, got {other:?}"),
     }
-    assert_no_acting_byte_reached_the_child(&log);
+    assert_no_acting_byte_reached_the_child(&child_input(&h, &window_id, &log).await);
     assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
 }

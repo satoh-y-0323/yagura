@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, count_marker,
+    Harness, SubmitDefinitionInput, approver_base_config, count_marker, input_log_read_so_far,
     let_every_clock_bound_run_out, let_every_clock_bound_run_out_while_a_thread_is_awaited,
     read_composer_now, report_status, settled_marker_count, unique_temp_dir,
     wait_until_composer_is, wait_until_status, write_submit_definition,
@@ -127,15 +127,6 @@ fn not_placed_of(judgment: &SubmitJudgment, what: &str) -> NotPlaced {
         SubmitPlacement::NotPlaced(not_placed) => *not_placed,
         other => panic!("{what}, got {other:?}"),
     }
-}
-
-/// What the child read, in order.
-fn child_input(log: &Path) -> Vec<u8> {
-    std::fs::read(log).unwrap_or_default()
-}
-
-fn contains_byte(log: &Path, byte: u8) -> bool {
-    child_input(log).contains(&byte)
 }
 
 // =====================================================================
@@ -277,7 +268,7 @@ async fn a_body_the_receiver_drops_is_not_reflected_leaves_nothing_and_never_get
         ComposerReadout::Empty,
         "the probe must have been erased before the call answered"
     );
-    let received = child_input(&log);
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert!(
         !received.contains(&b'\r'),
         "the submit key must never have been written; the receiver read {received:?}"
@@ -342,11 +333,11 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
 
     let declined = not_placed_of(&judgment, "a body that never showed must not be placed");
     assert_eq!(declined.reason, NotPlacedReason::Interrupted);
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert!(
-        contains_byte(&log, b'Q'),
-        "the other writer's byte was written"
+        received.contains(&b'Q'),
+        "the other writer's byte was written; the receiver read {received:?}"
     );
-    let received = child_input(&log);
     assert!(
         !received.contains(&b'\r') && !received.contains(&0x15),
         "neither the submit key nor a clear may have been written; the receiver read {received:?}"
@@ -480,7 +471,7 @@ async fn a_requester_that_leaves_after_the_body_gets_it_taken_back_and_the_compo
         ComposerReadout::Empty,
         "the composer must read empty by the time the call answers"
     );
-    let received = child_input(&log);
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert!(
         received.contains(&0x15),
         "the take-back's clear sequence must have been written; the receiver read {received:?}"
@@ -556,7 +547,7 @@ async fn a_requester_that_leaves_when_nothing_can_take_the_body_back_leaves_a_ma
         seq,
         "the next delivery must write nothing"
     );
-    let received = child_input(&log);
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     let pastes = received
         .windows(b"\x1b[200~BODY".len())
         .filter(|window| *window == b"\x1b[200~BODY")
@@ -727,7 +718,7 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
         2,
         "the resend reaches the receiver as one more submission"
     );
-    let received = child_input(&log);
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     let pastes = received
         .windows(b"[200~BODY".len())
         .filter(|window| *window == b"[200~BODY")
