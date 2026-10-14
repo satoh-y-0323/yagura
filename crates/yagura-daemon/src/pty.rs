@@ -843,9 +843,10 @@ impl PtySession {
                     break;
                 }
                 Ok(n) => {
-                    let output = buf[0..n].to_vec();
-                    raw_capture.record(&output);
-                    feed.feed(output);
+                    feed.feed(buf[0..n].to_vec());
+                    // After the model has the bytes, so a test that finds them
+                    // in the capture can read them through the model too.
+                    raw_capture.record(&buf[0..n]);
                 }
                 Err(_) => {
                     break;
