@@ -104,7 +104,7 @@ the settings every OS shares; `tauri.windows.conf.json`, `tauri.macos.conf.json`
 | OS | Output | Notes |
 |---|---|---|
 | Windows | `nsis/yagura_<version>_x64-setup.exe` | See below. |
-| macOS | `macos/yagura.app`, `dmg/yagura_<version>_aarch64.dmg` | Signed ad-hoc; see [macos-signing.md](macos-signing.md). Over SSH, set `CI=true`. |
+| macOS | `macos/yagura.app`, `dmg/yagura_<version>_aarch64.dmg` | Signed ad-hoc; see [macos-signing.md](macos-signing.md). Over SSH, set `CI=true`. Needs Xcode 26 or later for the macOS 26 icon (see below). |
 | Linux | `deb/yagura_<version>_amd64.deb` | Needs the WebKitGTK 4.1 development packages (`libwebkit2gtk-4.1-dev` on Debian and Ubuntu). No AppImage: it runs the app from a different temporary path on every launch, and yagura recognizes its own GUI and MCP bridge by their paths. |
 
 Pushing a `v*` tag runs the same build on each OS in CI (`.github/workflows/release.yml`) and
@@ -186,3 +186,18 @@ powershell -ExecutionPolicy Bypass -File gui/scripts/compose-ico.ps1 -SourceIco 
 
 This assumes `npm install` has already been run in `gui/`. If you change icon assets (SVGs,
 scripts), run `verify-icon.ps1` before committing.
+
+### The macOS 26 icon
+
+macOS 26 masks every app icon to its rounded square, and shows an icon of any other shape shrunk
+onto a gray plate. `icons/yagura.icon` is an Icon Composer icon for macOS 26 and later: a dark blue
+gradient fill with `icon.svg` as its only layer, scaled and offset to the centre in `icon.json`.
+On macOS, `tauri build` runs `gui/scripts/compile-macos-icon.mjs` before bundling
+(`beforeBundleCommand` in `tauri.macos.conf.json`). It compiles the icon with `actool`, which needs
+Xcode 26 or later, into `gui/src-tauri/gen/macos-icon/Assets.car`, and the bundle lists that file.
+Earlier macOS releases keep using `icons/icon.icns`. Tauri could compile the `.icon` itself, but under
+the Node.js CLI it starts `actool` without a stdin and `actool` crashes
+([tauri-apps/tauri#15315](https://github.com/tauri-apps/tauri/issues/15315)).
+
+`icons/yagura.icon/Assets/icon.svg` is a copy of `icons/icon.svg`: copy it again after editing the
+artwork.

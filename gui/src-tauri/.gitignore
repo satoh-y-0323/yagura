@@ -3,3 +3,6 @@
 
 # Cargo build output (also covered by the repository root .gitignore)
 /target
+
+# The macOS 26 icon, compiled by gui/scripts/compile-macos-icon.mjs
+/gen/macos-icon

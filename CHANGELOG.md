@@ -3,6 +3,12 @@
 The format of this file is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- On macOS 26, the app icon fills the rounded square like other Mac apps instead of sitting small on a gray plate. If the Dock still shows the old icon after you update, remove yagura from the Dock (Options > Remove from Dock) and open it again.
+
 ## [0.1.0] - 2026-10-13
 
 The first public release of yagura: a desktop app that runs any command -- an agent CLI such as
@@ -167,4 +173,5 @@ window's status, and lets agents in those windows work with each other through a
 - Pasted text cannot end a program's bracketed paste early: yagura removes the paste markers from it before writing.
 - A window's status is advisory: another process of the same user can forge it, so do not base security decisions on it alone.
 
+[Unreleased]: https://github.com/satoh-y-0323/yagura/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/satoh-y-0323/yagura/releases/tag/v0.1.0
