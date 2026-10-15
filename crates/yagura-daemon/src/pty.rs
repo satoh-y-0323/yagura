@@ -1,5 +1,6 @@
 //! PTY session management on top of [`yagura_os::pty`].
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -267,11 +268,79 @@ impl WriteLedger {
     }
 }
 
+/// Whether a plain write puts the registered take-back in front of its own
+/// bytes; see [`PtySession::write_input_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakeBackPrefix {
+    /// Write the registered take-back first.
+    Apply,
+    /// Write no take-back; the registration is dropped all the same.
+    Withhold,
+}
+
+/// What [`PtySession::write_input_if_unmoved`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedWrite {
+    /// The ledger was where the caller expected, and the bytes were written.
+    Written,
+    /// Another write had been counted since; nothing was written or counted.
+    Moved,
+}
+
+/// One take-back call's generation, from [`PtySession::begin_take_back_call`].
+/// A registration made under a call that has ended is never placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TakeBackCall(u64);
+
+/// How a ledger-checked write leaves the window's take-back registration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TakeBackRegistration {
+    /// Leave the registration as it is.
+    Keep,
+    /// Remove the registration.
+    Empty,
+    /// Register `text` as the daemon's part of the composer, taken back with
+    /// `clear` keys, unless `call` has already ended.
+    Set {
+        /// The call that owns the registration.
+        call: TakeBackCall,
+        /// The daemon's text in the composer.
+        text: String,
+        /// One take-back key.
+        clear: Vec<u8>,
+    },
+}
+
+/// The daemon's text in a composer, held as text and key rather than bytes so
+/// the key count follows the width at the moment it is written.
+struct Registered {
+    call: TakeBackCall,
+    text: String,
+    clear: Vec<u8>,
+}
+
+impl Registered {
+    fn keys(&self, cols: u16) -> Vec<u8> {
+        self.clear
+            .repeat(crate::input::take_back_key_count(&self.text, cols))
+    }
+}
+
+#[derive(Default)]
+struct TakeBackState {
+    next_call: u64,
+    live_calls: HashSet<u64>,
+    registered: Option<Registered>,
+}
+
 /// The write end of a window's PTY, which teardown can hand back without
 /// waiting for a writer that is stuck inside a write.
 struct WriterSlot {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     release_requested: AtomicBool,
+    /// Taken inside `writer`'s lock, never the other way round, and never held
+    /// across a write, so a stuck PTY never holds it.
+    take_back: Mutex<TakeBackState>,
 }
 
 impl WriterSlot {
@@ -279,6 +348,40 @@ impl WriterSlot {
         Self {
             writer: Mutex::new(Some(writer)),
             release_requested: AtomicBool::new(false),
+            take_back: Mutex::new(TakeBackState::default()),
+        }
+    }
+
+    fn begin_take_back_call(&self) -> TakeBackCall {
+        let mut state = lock_recover(&self.take_back);
+        state.next_call = state.next_call.wrapping_add(1);
+        let call = state.next_call;
+        state.live_calls.insert(call);
+        TakeBackCall(call)
+    }
+
+    fn end_take_back_call(&self, call: TakeBackCall) {
+        let mut state = lock_recover(&self.take_back);
+        state.live_calls.remove(&call.0);
+        if state.registered.as_ref().is_some_and(|r| r.call == call) {
+            state.registered = None;
+        }
+    }
+
+    fn take_registration(&self) -> Option<Registered> {
+        lock_recover(&self.take_back).registered.take()
+    }
+
+    fn update_registration(&self, update: TakeBackRegistration) {
+        let mut state = lock_recover(&self.take_back);
+        match update {
+            TakeBackRegistration::Keep => {}
+            TakeBackRegistration::Empty => state.registered = None,
+            TakeBackRegistration::Set { call, text, clear } => {
+                if state.live_calls.contains(&call.0) {
+                    state.registered = Some(Registered { call, text, clear });
+                }
+            }
         }
     }
 
@@ -526,7 +629,7 @@ pub struct PtySession {
 
     /// Counts the writes to the child's input, before each reaches it;
     /// `screen` follows it (see [`VtScreen::follow_writes`]).
-    input_writes: watch::Sender<u64>,
+    input_writes: Arc<watch::Sender<u64>>,
 
     /// Resizes and closes the PTY. The exit monitor closes it once the child
     /// has exited.
@@ -795,7 +898,7 @@ impl PtySession {
             input,
             resize_order: tokio::sync::Mutex::new(()),
             output_arrivals,
-            input_writes,
+            input_writes: Arc::new(input_writes),
             control,
             group,
             writer,
@@ -918,9 +1021,8 @@ impl PtySession {
     }
 
     /// Counts one write to the child's input, before it is made.
-    fn count_input_write(&self) {
-        self.input_writes
-            .send_modify(|count| *count = count.wrapping_add(1));
+    fn count_input_write(input_writes: &watch::Sender<u64>) {
+        input_writes.send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// Runs `read` against the window's model as it stands, the way a reader
@@ -993,29 +1095,53 @@ impl PtySession {
         self.replies.push(report, 0);
     }
 
+    /// [`PtySession::write_input_with`] with [`TakeBackPrefix::Apply`].
+    ///
+    /// # Errors
+    ///
+    /// As [`PtySession::write_input_with`].
+    pub async fn write_input(&self, data: &[u8]) -> PtyResult<()> {
+        self.write_input_with(data, TakeBackPrefix::Apply).await
+    }
+
     /// Writes `data` to the child's input, counting it in this window's write
     /// ledger under the same lock that orders the bytes, so
     /// [`PtySession::writes_recorded`] never counts a write ahead of one whose
     /// bytes reached the child first. A write that then fails still counts.
     ///
+    /// Under the same lock, the take-back registered by
+    /// [`PtySession::write_input_if_unmoved`] is removed and, with
+    /// [`TakeBackPrefix::Apply`], written ahead of `data`, its key count taken
+    /// at the window's width at that moment, so a daemon's unsent text never
+    /// ends up in front of another writer's bytes.
+    ///
     /// # Errors
     ///
-    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted);
-    /// [`PtyError::WriteFailed`] when the write itself fails.
-    pub async fn write_input(&self, data: &[u8]) -> PtyResult<()> {
+    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted
+    /// and the registration stays); [`PtyError::WriteFailed`] when the write
+    /// itself fails.
+    pub async fn write_input_with(&self, data: &[u8], prefix: TakeBackPrefix) -> PtyResult<()> {
         if self.is_exited.load(Ordering::SeqCst) {
             return Err(PtyError::ChildExited);
         }
 
-        self.count_input_write();
+        Self::count_input_write(&self.input_writes);
         let data = data.to_vec();
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
+        let input = Arc::clone(&self.input);
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
+            let registered = writer.take_registration();
+            let take_back = match prefix {
+                TakeBackPrefix::Apply => registered.map(|r| r.keys(input.load().cols)),
+                TakeBackPrefix::Withhold => None,
+            };
             ledger.count();
             let written = match writer_guard.as_mut() {
-                Some(w) => w.write_all(&data),
+                Some(w) => take_back
+                    .map_or(Ok(()), |keys| w.write_all(&keys))
+                    .and_then(|()| w.write_all(&data)),
                 None => Ok(()),
             };
             drop(writer_guard);
@@ -1027,7 +1153,74 @@ impl PtySession {
         .map_err(|_| PtyError::WriteFailed)
     }
 
-    /// How many writes [`PtySession::write_input`] has counted.
+    /// Writes `data` only if the write ledger still reads `expected_seq`,
+    /// checked under the lock that orders every write, so a decision made on
+    /// a composer nobody else has written to since is never acted on after
+    /// someone has. On a match, `before_write` runs, the write is counted and
+    /// made, and `registration` is applied; otherwise nothing runs, nothing is
+    /// counted, and [`GuardedWrite::Moved`] is returned.
+    ///
+    /// # Errors
+    ///
+    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted);
+    /// [`PtyError::WriteFailed`] when the write itself fails or
+    /// `before_write` panics.
+    pub async fn write_input_if_unmoved(
+        &self,
+        data: &[u8],
+        expected_seq: u64,
+        registration: TakeBackRegistration,
+        before_write: impl FnOnce() + Send + 'static,
+    ) -> PtyResult<GuardedWrite> {
+        if self.is_exited.load(Ordering::SeqCst) {
+            return Err(PtyError::ChildExited);
+        }
+
+        let data = data.to_vec();
+        let writer = self.writer.clone();
+        let ledger = Arc::clone(&self.write_ledger);
+        let input_writes = Arc::clone(&self.input_writes);
+        tokio::task::spawn_blocking(move || {
+            let mut writer_guard = writer.lock();
+            let outcome = if *ledger.count.borrow() == expected_seq {
+                before_write();
+                Self::count_input_write(&input_writes);
+                ledger.count();
+                let written = match writer_guard.as_mut() {
+                    Some(w) => w.write_all(&data),
+                    None => Ok(()),
+                };
+                // Applied even when the write failed: part of `data` may have
+                // reached the composer, and extra take-back keys are harmless.
+                writer.update_registration(registration);
+                written.map(|()| GuardedWrite::Written)
+            } else {
+                Ok(GuardedWrite::Moved)
+            };
+            drop(writer_guard);
+            writer.release_if_requested();
+            outcome
+        })
+        .await
+        .map_err(|_| PtyError::WriteFailed)?
+        .map_err(|_| PtyError::WriteFailed)
+    }
+
+    /// Starts a take-back call: registrations made under the returned
+    /// generation are placed until [`PtySession::end_take_back_call`].
+    #[must_use]
+    pub fn begin_take_back_call(&self) -> TakeBackCall {
+        self.writer.begin_take_back_call()
+    }
+
+    /// Ends `call`: removes its registration, if it is the one in place, and
+    /// places none of its later ones.
+    pub fn end_take_back_call(&self, call: TakeBackCall) {
+        self.writer.end_take_back_call(call);
+    }
+
+    /// How many writes [`PtySession::write_input_with`] and
+    /// [`PtySession::write_input_if_unmoved`] have counted.
     #[must_use]
     pub fn writes_recorded(&self) -> u64 {
         *self.write_ledger.count.borrow()

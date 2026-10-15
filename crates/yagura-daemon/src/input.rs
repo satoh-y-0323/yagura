@@ -271,7 +271,7 @@ const COMPOSER_LINE_OVERHEAD_COLS: usize = 8;
 /// lines it may occupy, doubled for CLIs that wrap at word boundaries and so
 /// waste columns, plus a margin. Every character outside ASCII counts as two
 /// columns, the widest a terminal cell gets, so wide text is never undercounted.
-fn take_back_key_count(body: &str, cols: u16) -> usize {
+pub(crate) fn take_back_key_count(body: &str, cols: u16) -> usize {
     let usable = usize::from(cols)
         .saturating_sub(COMPOSER_LINE_OVERHEAD_COLS)
         .max(1);
