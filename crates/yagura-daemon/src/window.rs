@@ -704,14 +704,14 @@ impl ShownText {
         }
     }
 
-    /// What shows in front of `probe` when this ends with it. A tail that is
-    /// the probe alone says nothing of what precedes it, which is off the
-    /// screen.
+    /// What shows in front of `probe` when this ends with it. Whitespace
+    /// alone in front of it is no body that arrived. A tail that is the probe
+    /// alone says nothing of what precedes it, which is off the screen.
     fn behind(&self, probe: char) -> Option<BehindProbe> {
         match self {
             Self::Body(text) => {
                 let before = text.strip_suffix(probe)?;
-                Some(if before.is_empty() {
+                Some(if before.trim().is_empty() {
                     BehindProbe::Alone
                 } else {
                     BehindProbe::Text(Self::Body(before.to_string()))
@@ -2266,9 +2266,10 @@ impl WindowEntry {
     /// on the detector answering a query it has taken up (see
     /// [`DetectorHandle::query_composer`]).
     ///
-    /// A wait that turns down an unreadable composer is logged once when it
-    /// does and once when it ends, under `route`: nothing else ends such a
-    /// wait, so this is what tells a window held by one apart.
+    /// A wait that turns down an unreadable composer is logged under `route`
+    /// when it ends other than by a reading: only another writer, the
+    /// requester leaving or the child exiting ends such a wait, so this is
+    /// what tells a window held by one apart.
     async fn wait_for_composer<T>(
         &self,
         route: &'static str,
@@ -2303,7 +2304,7 @@ impl WindowEntry {
             }
             if !waiting_on_unreadable && observation.readout == ComposerReadout::NotObserved {
                 waiting_on_unreadable = true;
-                tracing::info!(
+                tracing::debug!(
                     window_id = %self.window_id(),
                     route,
                     "waiting for the composer to become readable"
@@ -2319,12 +2320,23 @@ impl WindowEntry {
             }
         };
         if waiting_on_unreadable {
-            tracing::info!(
-                window_id = %self.window_id(),
-                route,
-                ended_by = end.label(),
-                "wait on an unreadable composer ended"
-            );
+            // A torn frame is routine; only a wait no reading ended is news.
+            match &end {
+                ComposerWait::Done(_) => tracing::debug!(
+                    window_id = %self.window_id(),
+                    route,
+                    ended_by = end.label(),
+                    "wait on an unreadable composer ended"
+                ),
+                ComposerWait::OtherWriter | ComposerWait::Exited | ComposerWait::RequesterGone => {
+                    tracing::info!(
+                        window_id = %self.window_id(),
+                        route,
+                        ended_by = end.label(),
+                        "wait on an unreadable composer ended"
+                    )
+                }
+            }
         }
         end
     }
@@ -5723,5 +5735,14 @@ mod tests {
             .expect("the detector must still be running");
         assert_eq!(confirmed.status, DetectedStatus::Idle);
         session.terminate();
+    }
+
+    #[test]
+    fn a_probe_behind_only_whitespace_shows_alone() {
+        let behind = ShownText::Body(" \t ~".to_string()).behind('~');
+        assert!(
+            matches!(behind, Some(BehindProbe::Alone)),
+            "whitespace in front of the probe is no body that arrived: {behind:?}"
+        );
     }
 }
