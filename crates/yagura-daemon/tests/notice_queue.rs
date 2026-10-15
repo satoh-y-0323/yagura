@@ -27,6 +27,10 @@ use yagura_test_support::process::echo_child_command;
 
 const NOTICE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Longer than the clock-driven retry interval, so a timer retry would show
+/// up inside it. It is only waited out, never relied on to succeed.
+const NO_RETRY_WINDOW: Duration = Duration::from_secs(4);
+
 const FOREIGN_DRAFT: &str = "NQFOREIGNDRAFT";
 
 fn expected_report_notice(pending: usize) -> String {
@@ -100,7 +104,7 @@ async fn pin_status(probe: &mut Connection, window_id: &str, status: WindowStatu
     wait_until_status(probe, window_id, status, Duration::from_secs(10)).await;
 }
 
-// --- A declined notice is retried without typing over the draft ---------
+// --- A notice declined by a foreign draft waits for the draft to change ---
 
 fn report_config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
@@ -111,7 +115,7 @@ fn report_config(dir: &Path) -> DaemonConfig {
 }
 
 #[tokio::test]
-async fn a_declined_notice_is_retried_and_lands_only_once_the_draft_is_cleared() {
+async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_changes() {
     let dir = unique_temp_dir("nq5-retry-pace");
     let h = Harness::start("nq5-retry-pace", report_config(&dir)).await;
     let mut probe = h.connect().await;
@@ -169,18 +173,20 @@ async fn a_declined_notice_is_retried_and_lands_only_once_the_draft_is_cleared()
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // The window keeps accepting input and its status never changes, so only
-    // the retry interval may trigger another attempt. Its spacing is measured
-    // on a paused clock by `notice_queue`'s unit tests.
+    // The draft belongs to someone else and nobody writes while the status
+    // stays put: the ledger must not move, so no second attempt may start.
+    // An attempt is counted only after its own writes are recorded, so the
+    // ledger value read here already includes them.
     let before = entry.notice_attempts();
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while entry.notice_attempts() == before {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "a declined notice must still be retried while the window keeps accepting input"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let settled = entry.session().writes_recorded();
+    let mut writes = entry.session().subscribe_writes_recorded();
+    let moved = tokio::time::timeout(NO_RETRY_WINDOW, writes.changed()).await;
+    assert!(
+        moved.is_err(),
+        "a notice declined by a foreign draft must not write into the window again"
+    );
+    assert_eq!(entry.session().writes_recorded(), settled);
+    assert_eq!(entry.notice_attempts(), before);
     assert_eq!(
         submitted_lines(&h, &parent),
         0,
@@ -195,6 +201,11 @@ async fn a_declined_notice_is_retried_and_lands_only_once_the_draft_is_cleared()
         NOTICE_TIMEOUT,
     )
     .await;
+    assert_eq!(
+        entry.notice_attempts(),
+        before + 1,
+        "clearing the draft must deliver the notice on the very next attempt"
+    );
     h.registry.terminate_all().await;
 }
 

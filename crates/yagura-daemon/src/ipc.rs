@@ -563,6 +563,10 @@ enum DeliveryEnd<'a> {
         /// What the last attempt left in the composer, for a caller that
         /// retries the same delivery later.
         residue: Option<CarriedResidue>,
+        /// The write ledger's count, read right after this delivery's own
+        /// last write, when it ended because someone else's text is in the
+        /// composer. Until the ledger moves from it, nobody has written.
+        foreign_ledger: Option<u64>,
     },
     /// The watched connection closed before the first byte was written.
     /// Never produced when [`run_delivery`] is called with `closed: None`.
@@ -4636,6 +4640,7 @@ async fn run_delivery<'a>(
     // a later attempt that finds nothing of its own cannot vouch for an
     // earlier write that has yet to be painted.
     let mut envelope_remains: Option<bool> = Some(false);
+    let mut foreign_ledger: Option<u64>;
 
     let verdict = loop {
         let request = SubmitRequest::Judged {
@@ -4656,12 +4661,14 @@ async fn run_delivery<'a>(
             SubmitPlacement::Placed(outcome) => {
                 placements += 1;
                 envelope_remains = None;
+                foreign_ledger = None;
                 outcome
             }
             SubmitPlacement::NotPlaced(NotPlaced {
                 envelope_remains: remains,
                 reason,
             }) => {
+                foreign_ledger = judgment.foreign_ledger;
                 // A declined write still spends this delivery's resend
                 // budget: re-observing and retrying is what lets a
                 // momentarily unwritable composer (a startup discard window,
@@ -4797,6 +4804,7 @@ async fn run_delivery<'a>(
         verdict,
         envelope_remains,
         residue,
+        foreign_ledger,
     }
 }
 

@@ -7,7 +7,10 @@
 //! declined stays where it is and is tried again when the window's status
 //! moves on or, failing that, after [`NOTICE_RETRY_INTERVAL`], so a window
 //! that keeps accepting input while refusing the write is not retried in a
-//! tight loop. Whatever is still queued when the window ends is settled then:
+//! tight loop. A notice declined because someone else's text sits in the
+//! composer is not retried on a clock: that text stays until somebody writes,
+//! so it waits for the write ledger to move or the status to move on.
+//! Whatever is still queued when the window ends is settled then:
 //! an intro as abandoned, a task notice as `window_closed` in the ledger.
 
 use std::sync::{Arc, OnceLock};
@@ -115,6 +118,11 @@ impl Next {
 enum Attempt {
     Written(&'static str),
     Declined(&'static str),
+    /// Declined because someone else's text is in the composer; `ledger` is
+    /// the write ledger's count once this attempt's own writes were done.
+    DeclinedForeign {
+        ledger: u64,
+    },
 }
 
 /// When the last attempt was declined, and on which status generation.
@@ -128,6 +136,9 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
     let mut status = entry.watch_status();
     let mut declined: Option<Declined> = None;
     let mut retries: u32 = 0;
+    // The write ledger's count the last attempt left behind when it was
+    // declined for someone else's text; `None` for any other outcome.
+    let mut foreign_ledger: Option<u64> = None;
     // What a declined attempt left in the composer, handed to the next one so
     // it finishes its own text instead of declining it as someone else's.
     let mut residue: Option<CarriedResidue> = None;
@@ -137,6 +148,7 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
     ) {
         let Some(next) = next_notice(&agents, &entry) else {
             declined = None;
+            foreign_ledger = None;
             retries = 0;
             residue = None;
             if !idle(&entry, &mut status).await {
@@ -144,10 +156,14 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
             }
             continue;
         };
-        if let Some(last) = &declined
-            && !wait_to_retry(&mut status, last).await
-        {
-            break;
+        if let Some(last) = &declined {
+            let released = match foreign_ledger {
+                Some(ledger) => wait_for_draft_change(&entry, &mut status, last, ledger).await,
+                None => wait_to_retry(&mut status, last).await,
+            };
+            if !released {
+                break;
+            }
         }
         let ready_hold = entry.input_profile().ready_hold;
         match wait_for_any_held(
@@ -165,7 +181,10 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
         entry.note_left_startup_phase();
         let attempt = attempt_notice(&agents, &entry, &next, &mut residue).await;
         entry.note_notice_attempt();
-        let (Attempt::Written(outcome) | Attempt::Declined(outcome)) = attempt;
+        let outcome = match attempt {
+            Attempt::Written(outcome) | Attempt::Declined(outcome) => outcome,
+            Attempt::DeclinedForeign { .. } => "foreign_draft",
+        };
         tracing::info!(
             window_id,
             kind = next.kind(),
@@ -176,13 +195,18 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
         match attempt {
             Attempt::Written(_) => {
                 declined = None;
+                foreign_ledger = None;
                 retries = 0;
             }
-            Attempt::Declined(_) => {
+            Attempt::Declined(_) | Attempt::DeclinedForeign { .. } => {
                 declined = Some(Declined {
                     generation: status.borrow().generation,
                     at: Instant::now(),
                 });
+                foreign_ledger = match attempt {
+                    Attempt::DeclinedForeign { ledger } => Some(ledger),
+                    Attempt::Written(_) | Attempt::Declined(_) => None,
+                };
                 retries = retries.saturating_add(1);
             }
         }
@@ -237,6 +261,37 @@ async fn wait_to_retry(status: &mut watch::Receiver<StatusAt>, last: &Declined) 
                 if changed.is_err() {
                     return false;
                 }
+            }
+        }
+    }
+}
+
+/// Holds a retry back after a decline for someone else's text, which stays
+/// until somebody writes: released once the write ledger leaves `ledger` or
+/// the status generation moves past the declined attempt's. `false` once the
+/// window's status stream is gone.
+async fn wait_for_draft_change(
+    entry: &WindowEntry,
+    status: &mut watch::Receiver<StatusAt>,
+    last: &Declined,
+    ledger: u64,
+) -> bool {
+    let mut writes = entry.session().subscribe_writes_recorded();
+    let mut writes_open = true;
+    loop {
+        if *writes.borrow_and_update() != ledger
+            || status.borrow_and_update().generation > last.generation
+        {
+            return true;
+        }
+        tokio::select! {
+            changed = status.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+            changed = writes.changed(), if writes_open => {
+                writes_open = changed.is_ok();
             }
         }
     }
@@ -365,11 +420,15 @@ async fn deliver(
         DeliveryEnd::Finished {
             verdict,
             residue: left,
+            foreign_ledger,
             ..
         } => match verdict.delivery {
             HandoffDelivery::NotWritten => {
                 *residue = left;
-                Attempt::Declined("not_written")
+                match foreign_ledger {
+                    Some(ledger) => Attempt::DeclinedForeign { ledger },
+                    None => Attempt::Declined("not_written"),
+                }
             }
             HandoffDelivery::Confirmed => {
                 *residue = None;
