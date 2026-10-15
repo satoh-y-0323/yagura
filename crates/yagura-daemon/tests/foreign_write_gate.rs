@@ -16,13 +16,12 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
-    Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, read_composer_now,
-    settled_marker_count, unique_temp_dir, wait_until_composer_is, wait_until_input_log_contains,
-    wait_until_status, write_submit_definition,
+    BODY, CLEAR, CTRL_C, HANG_GUARD, Harness, MARKER, SUBMIT_CHILD_PROBE, SubmitDefinitionInput,
+    after_the_body, approver_base_config, gate_config, read_composer_now, settled_marker_count,
+    take_back_in_front_of, unique_temp_dir, wait_until_composer_is, wait_until_input_log_contains,
+    wait_until_status, window_entry, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::interrupt_window;
@@ -34,31 +33,6 @@ use yagura_daemon::window::{
 use yagura_protocol::WindowStatus;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
-
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(60);
-
-const BODY: &str = "BODY";
-const CLEAR: u8 = 0x15;
-const CTRL_C: u8 = 0x03;
-const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Written last; read back, it proves the child has read everything before
-/// it. `M` then an erase leaves the composer as it stood.
-const MARKER: &[u8] = b"M\x7f";
-
-fn gate_config(dir: &Path) -> DaemonConfig {
-    DaemonConfig {
-        detection_dir: Some(dir.to_path_buf()),
-        ..approver_base_config()
-    }
-}
-
-fn entry(h: &Harness, window_id: &str) -> Arc<WindowEntry> {
-    h.registry
-        .get(window_id)
-        .expect("window must exist in registry")
-}
 
 /// A stalled receiver: its definition takes the body back with Ctrl-U, and
 /// the child stops reading at the body's paste until `resume` exists.
@@ -121,7 +95,7 @@ async fn deliver_until_stalled(
     h: &Harness,
     window: &Stalled,
 ) -> tokio::task::JoinHandle<PtyResult<SubmitJudgment>> {
-    let sender = entry(h, &window.window_id);
+    let sender = window_entry(h, &window.window_id);
     let call = tokio::spawn(async move { sender.submit_message(BODY, None, None).await });
     h.wait_for_scrollback(&window.window_id, b"STALL-BEGAN", HANG_GUARD)
         .await;
@@ -136,7 +110,7 @@ async fn resume_and_collect(
     call: tokio::task::JoinHandle<PtyResult<SubmitJudgment>>,
 ) -> (NotPlaced, Vec<u8>) {
     std::fs::write(&window.resume, b"").expect("let the receiver read on");
-    entry(h, &window.window_id)
+    window_entry(h, &window.window_id)
         .write_pty_input(MARKER, InputOrigin::Interactive)
         .await
         .expect("the marker must not fail");
@@ -158,28 +132,6 @@ async fn resume_and_collect(
     (not_placed, read)
 }
 
-/// What the child read after the body's paste, up to the marker.
-fn after_the_body(read: &[u8]) -> &[u8] {
-    let end = read
-        .windows(PASTE_END.len())
-        .position(|w| w == PASTE_END)
-        .unwrap_or_else(|| panic!("the body's paste must have reached the child: {read:?}"));
-    &read[end + PASTE_END.len()..]
-}
-
-/// Splits `after_body`, which must end with `foreign`, into what came before
-/// the run of clear bytes right in front of `foreign`, and that run's length.
-fn take_back_in_front_of<'a>(after_body: &'a [u8], foreign: &[u8]) -> (&'a [u8], usize) {
-    assert!(
-        after_body.ends_with(foreign),
-        "the other writer's bytes must be the last the child read before the marker -- the \
-         delivery writes nothing after them; after the body it read {after_body:?}"
-    );
-    let before = &after_body[..after_body.len() - foreign.len()];
-    let run = before.iter().rev().take_while(|&&b| b == CLEAR).count();
-    (&before[..before.len() - run], run)
-}
-
 /// Another writer's keystroke and its erase land while the body has not shown:
 /// the body is taken back in front of them, so the composer ends up empty, and
 /// the delivery neither probes nor submits after them.
@@ -191,7 +143,7 @@ async fn a_foreign_write_while_the_body_waits_to_show_gets_the_body_taken_back_i
     let window = open_stalled_window(&h, &mut client, &dir, "erased").await;
 
     let call = deliver_until_stalled(&h, &window).await;
-    entry(&h, &window.window_id)
+    window_entry(&h, &window.window_id)
         .write_pty_input(b"h\x7f", InputOrigin::Interactive)
         .await
         .expect("another writer's bytes must not fail");
@@ -217,7 +169,7 @@ async fn a_foreign_write_while_the_body_waits_to_show_gets_the_body_taken_back_i
 
     let judgment = tokio::time::timeout(
         HANG_GUARD,
-        entry(&h, &window.window_id).submit_message(BODY, None, None),
+        window_entry(&h, &window.window_id).submit_message(BODY, None, None),
     )
     .await
     .expect("the next delivery must not hang")
@@ -244,7 +196,7 @@ async fn a_foreign_keystroke_is_all_the_composer_holds_once_the_body_is_taken_ba
     let window = open_stalled_window(&h, &mut client, &dir, "kept").await;
 
     let call = deliver_until_stalled(&h, &window).await;
-    entry(&h, &window.window_id)
+    window_entry(&h, &window.window_id)
         .write_pty_input(b"h", InputOrigin::Interactive)
         .await
         .expect("another writer's byte must not fail");
@@ -291,7 +243,7 @@ async fn assert_interrupt_keys_go_bare(
     let window = open_stalled_window(&h, &mut client, &dir, "interrupt").await;
 
     let call = deliver_until_stalled(&h, &window).await;
-    interrupt(&entry(&h, &window.window_id), &config).await;
+    interrupt(&window_entry(&h, &window.window_id), &config).await;
     let (not_placed, read) = resume_and_collect(&h, &window, call).await;
 
     assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);
@@ -366,7 +318,7 @@ async fn which_keys_go_without_a_take_back_is_decided_by_the_configured_interrup
     let mut client = h.connect().await;
     let window = open_stalled_window(&h, &mut client, &dir, "single").await;
     let call = deliver_until_stalled(&h, &window).await;
-    entry(&h, &window.window_id)
+    window_entry(&h, &window.window_id)
         .write_pty_input(&[CTRL_C], InputOrigin::Interactive)
         .await
         .expect("another writer's byte must not fail");

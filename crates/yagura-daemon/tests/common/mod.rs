@@ -3441,3 +3441,53 @@ pub async fn open_gate_window(
     .await;
     window_id
 }
+
+// --- shared by the foreign-write gate suites ---------------------------------
+
+/// The longest any single step may take before the case is called hung.
+pub const HANG_GUARD: Duration = Duration::from_secs(60);
+
+pub const BODY: &str = "BODY";
+pub const CLEAR: u8 = 0x15;
+pub const CTRL_C: u8 = 0x03;
+pub const ERASE: u8 = 0x7f;
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Written last; read back, it proves the child has read everything before
+/// it. `M` then an erase leaves the composer as it stood.
+pub const MARKER: &[u8] = b"M\x7f";
+
+pub fn gate_config(dir: &Path) -> DaemonConfig {
+    DaemonConfig {
+        detection_dir: Some(dir.to_path_buf()),
+        ..approver_base_config()
+    }
+}
+
+pub fn window_entry(h: &Harness, window_id: &str) -> Arc<yagura_daemon::window::WindowEntry> {
+    h.registry
+        .get(window_id)
+        .expect("window must exist in registry")
+}
+
+/// What the child read after the body's paste, up to the marker.
+pub fn after_the_body(read: &[u8]) -> &[u8] {
+    let end = read
+        .windows(PASTE_END.len())
+        .position(|w| w == PASTE_END)
+        .unwrap_or_else(|| panic!("the body's paste must have reached the child: {read:?}"));
+    &read[end + PASTE_END.len()..]
+}
+
+/// Splits `after_body`, which must end with `foreign`, into what came before
+/// the run of clear bytes right in front of `foreign`, and that run's length.
+pub fn take_back_in_front_of<'a>(after_body: &'a [u8], foreign: &[u8]) -> (&'a [u8], usize) {
+    assert!(
+        after_body.ends_with(foreign),
+        "the other writer's bytes must be the last the child read before the marker -- the \
+         delivery writes nothing after them; after the body it read {after_body:?}"
+    );
+    let before = &after_body[..after_body.len() - foreign.len()];
+    let run = before.iter().rev().take_while(|&&b| b == CLEAR).count();
+    (&before[..before.len() - run], run)
+}

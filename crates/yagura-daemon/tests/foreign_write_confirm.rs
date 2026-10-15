@@ -19,40 +19,26 @@ mod common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
-    APPROVAL_HEADING, GateWindow, Harness, SUBMIT_CHILD_PROBE, approver_base_config, count_marker,
-    let_every_clock_bound_run_out, open_gate_window, unique_temp_dir, wait_until_composer_is,
-    wait_until_input_log_contains, wait_until_model_shows,
+    APPROVAL_HEADING, BODY, CLEAR, CTRL_C, ERASE, GateWindow, HANG_GUARD, Harness, MARKER,
+    SUBMIT_CHILD_PROBE, after_the_body, count_marker, gate_config, let_every_clock_bound_run_out,
+    open_gate_window, take_back_in_front_of, unique_temp_dir, wait_until_composer_is,
+    wait_until_input_log_contains, wait_until_model_shows, window_entry,
 };
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::pty::{PtyError, PtyResult};
 use yagura_daemon::window::{
     InputOrigin, NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
 };
 
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(60);
-
 /// The largest `submit_delay_ms` a definition may carry. A delivery sleeps
 /// this long after the body, before the probe, so a write made once the
 /// dialog shows lands first.
 const LONGEST_SUBMIT_DELAY_MS: u64 = 5000;
 const ORDINARY_SUBMIT_DELAY_MS: u64 = 120;
-
-const BODY: &str = "BODY";
-const CLEAR: u8 = 0x15;
-const CTRL_C: u8 = 0x03;
-const ERASE: u8 = 0x7f;
-const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Written last; read back, it proves the child has read everything before
-/// it. `M` then an erase leaves the composer as it stood.
-const MARKER: &[u8] = b"M\x7f";
 
 fn probe() -> u8 {
     SUBMIT_CHILD_PROBE.as_bytes()[0]
@@ -92,17 +78,8 @@ async fn open_window(
     Window { id, log }
 }
 
-fn gate_config(dir: &std::path::Path) -> DaemonConfig {
-    DaemonConfig {
-        detection_dir: Some(dir.to_path_buf()),
-        ..approver_base_config()
-    }
-}
-
 fn entry(h: &Harness, window: &Window) -> Arc<WindowEntry> {
-    h.registry
-        .get(&window.id)
-        .expect("window must exist in registry")
+    window_entry(h, &window.id)
 }
 
 fn start_delivery(
@@ -155,28 +132,6 @@ async fn read_log(h: &Harness, window: &Window) -> Vec<u8> {
         .expect("the log was returned holding the marker");
     read.truncate(at);
     read
-}
-
-/// What the child read after the body's paste, up to the marker.
-fn after_the_body(read: &[u8]) -> &[u8] {
-    let end = read
-        .windows(PASTE_END.len())
-        .position(|w| w == PASTE_END)
-        .unwrap_or_else(|| panic!("the body's paste must have reached the child: {read:?}"));
-    &read[end + PASTE_END.len()..]
-}
-
-/// Splits `after_body`, which must end with `foreign`, into what came before
-/// the run of clear bytes right in front of `foreign`, and that run's length.
-fn take_back_in_front_of<'a>(after_body: &'a [u8], foreign: &[u8]) -> (&'a [u8], usize) {
-    assert!(
-        after_body.ends_with(foreign),
-        "the other writer's bytes must be the last the child read; after the body it read \
-         {after_body:?}"
-    );
-    let before = &after_body[..after_body.len() - foreign.len()];
-    let run = before.iter().rev().take_while(|&&b| b == CLEAR).count();
-    (&before[..before.len() - run], run)
 }
 
 fn count_byte(bytes: &[u8], byte: u8) -> usize {
