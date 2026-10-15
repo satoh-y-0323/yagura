@@ -300,10 +300,17 @@ line is not taken to be in the composer. Declare it only for a CLI whose
 dialogs hide the cursor: a dialog's layout has blank lines as well, and an
 option row drawn with the marker's glyph could otherwise be taken for the
 marker line.
-When the walk cannot reach a marker line -- it meets another line first, or
-the marker line has scrolled off the top of the screen -- the composer is
-not observed, and so is a marker line with visible text after the marker but
-no `separator`; the daemon does not write into a composer it cannot observe.
+When the walk meets another line before it reaches a marker line, the
+composer is not observed, and so is a marker line with visible text after the
+marker but no `separator`; the daemon does not write into a composer it
+cannot observe, and waits for a reading it can use rather than deciding on
+one it cannot. A frame the CLI has erased and not yet drawn again reads this
+way.
+
+When every line from the cursor up to the top row of the screen is a
+continuation line, the marker line has scrolled off the top (a body taller
+than the screen). The daemon then reads the end of the body, from the top row
+to the cursor, and only that: it is never taken for the whole body.
 
 While the cursor is visible and the composer can be located this way, the
 composer's body is taken out of the screen before `[[rules]]` are matched
@@ -323,7 +330,11 @@ receiver reacted, and when it did not, the daemon may press the submit key
 again, up to `resend_max` times. A re-send only ever presses that key: it
 runs where the envelope this delivery wrote is still the only thing in the
 composer, so the body is neither cleared nor written a second time, and a
-definition needs no `clear` sequence to declare `resend_max`.
+definition needs no `clear` sequence to declare `resend_max`. The key is
+pressed on its own only when the screen shows that envelope itself. When the
+screen shows it as a placeholder, or shows only its end, the daemon first
+types the probe behind it, and presses the key once the probe has shown at the
+cursor and been erased again.
 
 Whether a written body has shown is decided by the order the CLI handles its
 input in, never by a clock. The daemon types `probe` right behind the body and
@@ -332,10 +343,11 @@ takes another write:
 
 - The composer ends with the probe behind something: the CLI has handled the
   body. The daemon types `erase`, and writes the submit bytes once the
-  composer reads as it did before the probe. A body the composer cannot be
-  read back as -- folded into a placeholder, or running past the screen -- is
-  taken the same way while the daemon's own writes are the only ones the
-  window took since.
+  composer reads as it did before the probe. A body taller than the screen
+  shows only its end: that end, followed by the probe, counts when it ends the
+  body once the probe is left off, and the composer must read as such an end
+  again before the submit bytes are written. A composer that cannot be read
+  at all is waited on, not taken for either.
 - The probe shows alone: the CLI dropped the body, as a CLI that is still
   starting up can. The daemon erases the probe and reports the write as
   `not_written`, with nothing left behind.
@@ -923,8 +935,9 @@ single event (only `Stop`, say) is not.
 - **A window whose input line has grown taller than the screen** shows
   nothing a rule can match. While a turn is open it reads as `running`; once
   the turn closes it cannot be told apart from a selection list that shows no
-  key hint, so it stays `unknown` (`no_rule_matched`). Nothing could be
-  written into it anyway, since its input line cannot be read.
+  key hint, so it stays `unknown` (`no_rule_matched`). With a `continuation_prefix` declared, the
+  daemon can still write into it: it reads the end of the input line, which is
+  what a write is confirmed against.
 - **Antigravity CLI reports neither an approval prompt nor an interrupt.**
   Only `PreInvocation` and `PostToolUse` are used: `agy` expects the output of
   a `PreToolUse` or `Stop` hook to carry a decision, which a status report does

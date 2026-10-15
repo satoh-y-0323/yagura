@@ -85,7 +85,16 @@
 //! the first read of the byte `<hex>` when `until-byte|<hex>` is given: that
 //! byte is then handled as if no dialog had been drawn, and the screen shows
 //! its effect with the dialog gone in a single frame. It stays drawn
-//! otherwise. `style` is
+//! otherwise. Either end may be preceded by `torn|<shape>|<path>|` (or the
+//! whole third part be `torn|<shape>|<path>`): the dialog then takes input at
+//! once but is painted in two writes, the way a CLI caught between erasing
+//! its composer and drawing a dialog shows a torn frame. The first write
+//! draws only `<shape>`; the full dialog follows once the file `<path>`
+//! exists. `<shape>` is `erase` (the composer region erased, nothing drawn),
+//! `option` (one indented option row carrying the composer's marker, as a
+//! dialog's selected row drawn with the composer's glyph), or `echo=<text>`
+//! (more continuation rows reading `<text>` than the screen holds, the cursor
+//! after a last, empty one: a response indented like the composer). `style` is
 //! `hidden` (option rows follow the heading and the composer is not drawn),
 //! `option` (the selected option is drawn as a composer-shaped line reading
 //! `1. Yes`), `beside` (the composer stays drawn below the heading) or
@@ -334,6 +343,44 @@ struct OverlaySettings {
     /// A fired overlay is removed by the first read of this byte, which is
     /// then handled as if no dialog had been drawn.
     gone_on_byte: Option<u8>,
+    /// Paints the overlay in two writes (see the module doc comment).
+    torn: Option<TornFrame>,
+}
+
+/// More rows than the PTY a test opens shows, so an `echo` shape reaches the
+/// screen's top row.
+const TORN_ECHO_ROWS: usize = 30;
+
+/// The first of an overlay's two writes, and when the second follows.
+struct TornFrame {
+    first: Overlay,
+    rest_when_exists: std::path::PathBuf,
+}
+
+impl TornFrame {
+    /// Parses `<shape>` and `<path>`, the composer's own marker, separator
+    /// and continuation prefix taken from the positional arguments.
+    fn parse(shape: &str, path: &str) -> Option<Self> {
+        let arg = |index: usize| std::env::args().nth(index).unwrap_or_default();
+        let lines = match shape {
+            "erase" => Vec::new(),
+            "option" => vec![format!("  {}{}1. Yes", arg(6), arg(7))],
+            other => {
+                let text = other.strip_prefix("echo=")?;
+                let prefix = arg(8);
+                std::iter::repeat_n(format!("{prefix}{text}"), TORN_ECHO_ROWS)
+                    .chain(std::iter::once(prefix))
+                    .collect()
+            }
+        };
+        Some(TornFrame {
+            first: Overlay {
+                lines,
+                composer: OverlayComposer::Hidden,
+            },
+            rest_when_exists: std::path::PathBuf::from(path),
+        })
+    }
 }
 
 impl OverlayTrigger {
@@ -419,7 +466,21 @@ impl OverlaySettings {
             ),
             _ => return None,
         };
-        let (gone_when_exists, gone_on_byte) = match parts.next() {
+        let (torn, end) = match parts.next() {
+            Some(rest) => match rest.strip_prefix("torn|") {
+                Some(torn) => {
+                    let (shape, after_shape) = torn.split_once('|')?;
+                    let (path, end) = match after_shape.split_once('|') {
+                        Some((path, end)) => (path, Some(end)),
+                        None => (after_shape, None),
+                    };
+                    (Some(TornFrame::parse(shape, path)?), end)
+                }
+                None => (None, Some(rest)),
+            },
+            None => (None, None),
+        };
+        let (gone_when_exists, gone_on_byte) = match end {
             None => (None, None),
             Some(rest) => match rest.strip_prefix("until|") {
                 Some(path) => (Some(std::path::PathBuf::from(path)), None),
@@ -435,6 +496,7 @@ impl OverlaySettings {
             is_dialog,
             gone_when_exists,
             gone_on_byte,
+            torn,
         })
     }
 }
@@ -450,6 +512,31 @@ fn set_overlay(
     out.set_overlay(show.then(|| settings.overlay.clone()))
 }
 
+/// Draws the overlay, or for a torn one its first write, with the full
+/// overlay following on a thread of its own once its file exists.
+fn show_overlay(
+    out: &Arc<Output>,
+    drawn: &Arc<AtomicBool>,
+    settings: &Arc<OverlaySettings>,
+) -> io::Result<()> {
+    let Some(torn) = &settings.torn else {
+        return set_overlay(out, drawn, settings, true);
+    };
+    drawn.store(true, Ordering::SeqCst);
+    out.set_overlay(Some(torn.first.clone()))?;
+    let rest_when_exists = torn.rest_when_exists.clone();
+    let (out, drawn, settings) = (Arc::clone(out), Arc::clone(drawn), Arc::clone(settings));
+    std::thread::spawn(move || {
+        while !rest_when_exists.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if drawn.load(Ordering::SeqCst) {
+            let _ = out.set_overlay(Some(settings.overlay.clone()));
+        }
+    });
+    Ok(())
+}
+
 /// Draws the overlay its trigger has just fired, and removes it again once
 /// its end comes, on a thread of its own so input keeps being read meanwhile.
 fn fire_overlay(
@@ -457,7 +544,7 @@ fn fire_overlay(
     drawn: &Arc<AtomicBool>,
     settings: &Arc<OverlaySettings>,
 ) -> io::Result<()> {
-    set_overlay(out, drawn, settings, true)?;
+    show_overlay(out, drawn, settings)?;
     let Some(gone) = settings.gone_when_exists.clone() else {
         return Ok(());
     };
@@ -721,7 +808,11 @@ fn main() -> io::Result<()> {
                 if overlay.trigger == OverlayTrigger::Key
                     && (byte == OVERLAY_SHOW || byte == OVERLAY_HIDE)
                 {
-                    set_overlay(&out, &overlay_drawn, overlay, byte == OVERLAY_SHOW)?;
+                    if byte == OVERLAY_SHOW {
+                        show_overlay(&out, &overlay_drawn, overlay)?;
+                    } else {
+                        set_overlay(&out, &overlay_drawn, overlay, false)?;
+                    }
                     continue;
                 }
                 if overlay.is_dialog && overlay_drawn.load(Ordering::SeqCst) {

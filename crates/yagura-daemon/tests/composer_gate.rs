@@ -472,9 +472,9 @@ async fn row5_does_not_resend_via_the_record_once_someone_else_has_touched_the_w
 
 /// The screen-unrestorable case reached through a folded composer rather
 /// than through [`oversized_body`]. The write count pins that the
-/// receiver's own screen-reflected body never got rewritten -- only the
-/// write record's content identity could have vouched for this resend, since
-/// a folded screen never shows the body back.
+/// receiver's own screen-reflected body never got rewritten. A folded screen
+/// never shows the body back, so the write record vouches for it and the
+/// probe confirms the composer behind the placeholder before the submit key.
 #[tokio::test]
 async fn row5_folded_resends_via_the_write_record_when_the_placeholder_hides_the_body() {
     let dir = unique_temp_dir("gate-row5-folded-pos");
@@ -529,9 +529,9 @@ async fn row5_folded_resends_via_the_write_record_when_the_placeholder_hides_the
     );
     assert_eq!(
         entry(&h, &window_id).write_seq(),
-        mine.write_seq + 1,
-        "a resend via the write record must not rewrite the body: the submit key is its only \
-         write"
+        mine.write_seq + 3,
+        "a resend via the write record must not rewrite the body: the probe, its erase and the \
+         submit key are its only writes"
     );
 }
 
