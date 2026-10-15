@@ -4271,8 +4271,12 @@ async fn execute_send_text(
 /// encoded with the window's modes at this moment.
 ///
 /// The input lock is not taken: these keys are often what dismisses a dialog
-/// that keeps a delivery holding that lock, and the write moves the ledger
-/// so such a delivery stops on its own.
+/// that keeps a delivery holding that lock. The keys are written at once,
+/// behind the take-back of such a delivery's unsent text (none in front of
+/// the window's own interrupt keys), and the write moves
+/// the ledger, so the delivery writes nothing more of its own plan; it answers
+/// once it has checked the composer on a screen that accepts a write (see
+/// [`WindowEntry::submit_message`]).
 async fn execute_send_keys(
     outbound: &Outbound,
     entry: &WindowEntry,

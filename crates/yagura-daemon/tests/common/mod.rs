@@ -32,6 +32,7 @@ use yagura_protocol::{
     HandoffDelivery, ToolAutoApprove, WindowInfo, WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
+use yagura_test_support::process;
 
 /// The literal behind [`SUBMIT_CHILD_PROBE`], so [`CONTROL_INPUT_TABLE`] can
 /// name the same probe through `concat!`.
@@ -3297,4 +3298,146 @@ pub async fn input_log_read_so_far(
         .expect("the log was returned holding the sentinel");
     read.truncate(at);
     read
+}
+
+// --- a `submit_child` window whose screen can show an approval dialog ---------
+
+/// The first line of the fixture's approval dialog, matched by
+/// [`write_gate_definition`]'s approval rule.
+pub const APPROVAL_HEADING: &str = "GATE-APPROVAL";
+
+/// The status line of the fixture's `working` overlay, matched by
+/// [`write_gate_definition`]'s running rule.
+pub const WORKING_HEADING: &str = "GATE-WORKING";
+
+/// Ctrl-U, as a TOML basic-string body.
+pub const CLEAR_CTRL_U: &str = "\\u0015";
+
+/// A rules-only definition for `submit_child`: approval over working over
+/// input, so a drawn dialog wins even while the startup marker line is still
+/// on screen, plus the shared composer section.
+pub fn write_gate_definition(
+    dir: &Path,
+    name: &str,
+    marker: &str,
+    clear: &str,
+    submit_delay_ms: u64,
+) {
+    let toml = format!(
+        r#"schema_version = 1
+name = "{name}"
+bottom_line_count = 5
+
+[debounce]
+confirm_ms = 30
+
+[[rules]]
+status = "waiting_approval"
+pattern = '{APPROVAL_HEADING}'
+priority = 30
+region = "bottom"
+
+[[rules]]
+status = "running"
+pattern = '(SUBMITTED)|({WORKING_HEADING})'
+priority = 20
+region = "bottom"
+
+[[rules]]
+status = "waiting_input"
+pattern = '{marker}'
+priority = 10
+region = "bottom"
+
+[input]
+bracketed_paste = true
+ready_hold_ms = 0
+submit_delay_ms = {submit_delay_ms}
+clear = "{clear}"
+delivery_confirm_ms = 2000
+resend_max = 2
+probe = "{SUBMIT_CHILD_PROBE}"
+"#
+    );
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!("{toml}{}", composer_section_toml()),
+    )
+    .expect("write detection definition file");
+}
+
+/// How one gate window is launched.
+pub struct GateWindow<'a> {
+    pub name: &'a str,
+    pub marker: &'a str,
+    /// `submit_child`'s overlay argument; empty for none.
+    pub overlay: &'a str,
+    pub heading: &'a str,
+    pub clear: &'a str,
+    /// `submit_child`'s `clear_scope` argument; empty for the ordinary one.
+    pub clear_scope: &'a str,
+    pub reflect_delay_ms: u64,
+    /// A file the child appends every byte it reads to; none when unset.
+    pub input_log: Option<&'a Path>,
+    /// The definition's `submit_delay_ms`: how long a delivery sleeps after
+    /// the body, before it goes on to the probe.
+    pub submit_delay_ms: u64,
+}
+
+impl<'a> GateWindow<'a> {
+    pub fn new(name: &'a str, marker: &'a str, overlay: &'a str, heading: &'a str) -> Self {
+        GateWindow {
+            name,
+            marker,
+            overlay,
+            heading,
+            clear: CLEAR_CTRL_U,
+            clear_scope: "",
+            reflect_delay_ms: 0,
+            input_log: None,
+            submit_delay_ms: 120,
+        }
+    }
+}
+
+/// Opens `submit_child` in composer-draw mode with the overlay argument and
+/// observes the window reach `waiting_input` before returning.
+pub async fn open_gate_window(
+    h: &Harness,
+    client: &mut Connection,
+    dir: &Path,
+    window: GateWindow<'_>,
+) -> String {
+    write_gate_definition(
+        dir,
+        window.name,
+        window.marker,
+        window.clear,
+        window.submit_delay_ms,
+    );
+    let mut command = process::submit_child_command(window.marker, 0, 0, 0);
+    command.push(process::COMPOSER_MARKER.to_string());
+    command.push(process::COMPOSER_SEPARATOR.to_string());
+    command.push(process::COMPOSER_CONTINUATION_PREFIX.to_string());
+    command.push(window.reflect_delay_ms.to_string());
+    command.push(String::new()); // fold_placeholder: none
+    command.push(window.clear_scope.to_string());
+    command.push(window.overlay.to_string());
+    command.push(window.heading.to_string());
+    if let Some(log) = window.input_log {
+        command.push(
+            log.to_str()
+                .expect("the input log path must be valid UTF-8")
+                .to_string(),
+        );
+    }
+    let window_id = h.open(command, Some(window.name)).await;
+    wait_until_status(
+        client,
+        &window_id,
+        WindowStatus::WaitingInput,
+        Duration::from_secs(10),
+    )
+    .await;
+    window_id
 }

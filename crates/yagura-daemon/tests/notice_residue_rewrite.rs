@@ -270,8 +270,10 @@ async fn text_typed_behind_a_waiting_notice_is_neither_cleared_overwritten_nor_s
         .write_pty_input(b"USER-TYPED", InputOrigin::Interactive)
         .await
         .expect("write user text");
-    scene.wait_for_attempts(1).await;
+    // A call that stepped aside returns only once the screen can be written to
+    // again, so the dialog goes first.
     scene.remove_dialog();
+    scene.wait_for_attempts(1).await;
 
     scene.wait_for_attempts(2).await;
     let text = flattened(&scene.h, &parent);

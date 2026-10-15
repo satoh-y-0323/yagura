@@ -849,6 +849,81 @@ enum JudgedSteps {
     Moved { at: u64 },
 }
 
+/// What one [`WindowEntry::submit_message`] call knows of its own part of the
+/// composer, from its own writes: what it checks once another writer's write
+/// ends it. Never read from the PTY's registration, which another writer's
+/// bytes empty whether or not the receiver acted on the take-back.
+#[derive(Default)]
+struct OwnPart {
+    left: OwnLeft,
+    /// Whether the call read its own body back off the screen.
+    read_back: bool,
+}
+
+#[derive(Default)]
+enum OwnLeft {
+    /// Nothing the call wrote is known to be in the composer.
+    #[default]
+    Nothing,
+    /// Text the call confirmed as its own part of the composer.
+    Text(String),
+    /// A probe written behind a composer that read as this, not seen yet.
+    UnconfirmedProbe(ComposerReadout),
+}
+
+/// What [`WindowEntry::check_own_text`] found of the call's own text.
+enum Checked {
+    Gone,
+    MayRemain,
+}
+
+/// How a composer reading stands against a call's own text.
+enum OwnShows {
+    /// The call's own text and nothing else.
+    Alone,
+    /// The call's own text, or what may be part of it, beside something else.
+    WithOthers,
+    /// None of the call's own text.
+    Absent,
+}
+
+/// How `text` reads against `own`, the call's own text (possibly ending with
+/// the probe it wrote). A reading `own` starts with counts as beside
+/// something rather than gone, since part of `own` may be what is left.
+fn own_text_shows(text: &str, own: &str, probe: char) -> OwnShows {
+    if reads_as_before_take_back(text, own, probe) {
+        return OwnShows::Alone;
+    }
+    let shown: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let core: String = own
+        .strip_suffix(probe)
+        .unwrap_or(own)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if !shown.is_empty() && (shown.contains(&core) || core.starts_with(&shown)) {
+        OwnShows::WithOthers
+    } else {
+        OwnShows::Absent
+    }
+}
+
+/// `judgment`, still reporting the envelope as possibly remaining.
+fn remaining(judgment: SubmitJudgment) -> SubmitJudgment {
+    if leaves_envelope(&judgment) {
+        judgment
+    } else {
+        declined_unvouched(NotPlacedReason::Interrupted)
+    }
+}
+
+fn leaves_envelope(judgment: &SubmitJudgment) -> bool {
+    match judgment.placement {
+        SubmitPlacement::NotPlaced(not_placed) => not_placed.envelope_remains,
+        SubmitPlacement::Placed(_) => false,
+    }
+}
+
 /// Ends a call's take-back generation on drop, however the call ends, so
 /// its registration never outlives it.
 struct TakeBackScope<'a> {
@@ -859,6 +934,7 @@ struct TakeBackScope<'a> {
 impl Drop for TakeBackScope<'_> {
     fn drop(&mut self) {
         *lock_recover(&self.entry.take_back_call) = None;
+        *lock_recover(&self.entry.own_part) = OwnPart::default();
         self.entry.session.end_take_back_call(self.call);
     }
 }
@@ -1017,6 +1093,8 @@ pub struct WindowEntry {
     /// The take-back generation of the [`WindowEntry::submit_message`] call
     /// holding `input_lock`; `None` between calls.
     take_back_call: Mutex<Option<TakeBackCall>>,
+    /// What that call has of its own in the composer.
+    own_part: Mutex<OwnPart>,
     /// The chat intro's outcome, written at most once. `None`
     /// while the intro is still queued, or when none was queued (no chat, no
     /// intro, or not a participant).
@@ -1319,13 +1397,31 @@ impl WindowEntry {
     ) -> PtyResult<GuardedWrite> {
         let detector = lock_recover(&self.detector).clone();
         let echo = classify_input_echo(data, InputOrigin::Message);
-        self.session
+        let left = match &registration {
+            TakeBackRegistration::Keep => None,
+            TakeBackRegistration::Empty => Some(OwnLeft::Nothing),
+            TakeBackRegistration::Set { text, .. } => Some(OwnLeft::Text(text.clone())),
+        };
+        let written = self
+            .session
             .write_input_if_unmoved(data, expected, registration, move || {
                 if let Some(detector) = detector {
                     detector.notify_input(echo);
                 }
             })
-            .await
+            .await?;
+        if let (GuardedWrite::Written, Some(left)) = (written, left) {
+            lock_recover(&self.own_part).left = left;
+        }
+        Ok(written)
+    }
+
+    /// Notes that the running call read its own `body` back off the screen,
+    /// when `shown` is it.
+    fn note_read_back(&self, shown: &str, body: &str) {
+        if composer_text_matches_ignoring_lost_whitespace(shown, body) {
+            lock_recover(&self.own_part).read_back = true;
+        }
     }
 
     /// [`WindowEntry::write_judged`] for each step of `plan` in turn, the
@@ -1383,6 +1479,7 @@ impl WindowEntry {
     fn begin_take_back_scope(&self) -> TakeBackScope<'_> {
         let call = self.session.begin_take_back_call();
         *lock_recover(&self.take_back_call) = Some(call);
+        *lock_recover(&self.own_part) = OwnPart::default();
         TakeBackScope { entry: self, call }
     }
 
@@ -1499,6 +1596,15 @@ impl WindowEntry {
     /// call waits, and only the child exiting, `requester` leaving or another
     /// writer's write ends that wait without an answer from the screen.
     ///
+    /// Another writer's write gets this call's unsent text taken back in
+    /// front of it, and this call writes nothing more of its plan. Before it
+    /// answers, it reads a screen that accepts a write, with no time limit,
+    /// and takes its text back again behind a probe of its own when that
+    /// text shows alone (the receiver dropped the take-back). The envelope is
+    /// reported as gone only when the screen shows it gone; a further write,
+    /// `requester` leaving or the child exiting ends that check with it
+    /// reported as possibly remaining.
+    ///
     /// `residue` is what the caller's own send plan believes it left in the
     /// composer from a previous attempt at the same envelope (`None` for a
     /// first attempt, or for a caller with no notion of its own residue, such
@@ -1542,12 +1648,27 @@ impl WindowEntry {
         let ComposerAccess::Judged { probe } = self.composer_access else {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         };
+        let judgment = self
+            .judge_submit(body, probe, residue, &mut requester)
+            .await?;
+        self.check_after_another_write(judgment, probe, &mut requester)
+            .await
+    }
 
+    /// [`WindowEntry::submit_message`]'s judgment, before what another
+    /// writer's write leaves is checked.
+    async fn judge_submit(
+        &self,
+        body: &str,
+        probe: char,
+        residue: Option<ComposerResidue<'_>>,
+        requester: &mut Requester,
+    ) -> PtyResult<SubmitJudgment> {
         // The ledger as of the reading every write below is decided on: read
         // before asking for it, so a write landing meanwhile is caught by the
         // first ledger-checked write.
         let mut seen = self.write_seq();
-        let Some(mut observation) = self.observe_composer(&mut requester).await? else {
+        let Some(mut observation) = self.observe_composer(requester).await? else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
         let vouched_seq = residue
@@ -1558,7 +1679,7 @@ impl WindowEntry {
                 return Ok(declined(NotPlacedReason::Unobservable, None));
             }
             return self
-                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, &mut requester)
+                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, requester)
                 .await;
         } else if matches!(observation.readout, ComposerReadout::NotObserved)
             && vouched_seq.is_none()
@@ -1571,7 +1692,7 @@ impl WindowEntry {
             };
             let guarded = self.write_seq();
             match self
-                .wait_for_composer(Some(guarded), &mut requester, readable)
+                .wait_for_composer(Some(guarded), requester, readable)
                 .await
             {
                 ComposerWait::Done(readable) => {
@@ -1594,7 +1715,7 @@ impl WindowEntry {
                 if self.degenerate_and_unchanged() {
                     return Ok(declined(NotPlacedReason::Unobservable, None));
                 }
-                self.confirm_empty_then_write(body, probe, &observation, seen, &mut requester)
+                self.confirm_empty_then_write(body, probe, &observation, seen, requester)
                     .await
             }
             ComposerReadout::Body(text) => {
@@ -1604,7 +1725,7 @@ impl WindowEntry {
                 {
                     Some(TakenBack::Emptied(settled_rule, seq)) => {
                         return self
-                            .write_fresh_and_decide(body, probe, settled_rule, seq, &mut requester)
+                            .write_fresh_and_decide(body, probe, settled_rule, seq, requester)
                             .await;
                     }
                     Some(TakenBack::Declined(judgment)) => return Ok(judgment),
@@ -1623,6 +1744,9 @@ impl WindowEntry {
                     composer_text_matches_ignoring_lost_whitespace(text, residue.body)
                         && residue.body == body
                 });
+                if restored_own_envelope {
+                    self.note_read_back(text, body);
+                }
                 let vouched_seq = residue
                     .filter(|residue| self.record_vouches_for_residue(Some(*residue), body))
                     .map(|residue| residue.write_seq);
@@ -1645,11 +1769,11 @@ impl WindowEntry {
                                 probe,
                                 &observation.readout,
                                 seen,
-                                &mut requester,
+                                requester,
                             )
                             .await;
                     };
-                    self.resend_key_only(body, vouched_seq, &requester).await
+                    self.resend_key_only(body, vouched_seq, requester).await
                 } else if let Some(residue) =
                     // The ledger alone vouches the composer holds only the
                     // caller's own text, however the CLI draws it (folded or
@@ -1661,13 +1785,13 @@ impl WindowEntry {
                         probe,
                         residue,
                         &observation,
-                        &mut requester,
+                        requester,
                     )
                     .await
                 } else if !self.degenerate_and_unchanged() {
                     // What reads as someone else's text may only be a screen
                     // that has not caught up with input that emptied it.
-                    self.confirm_empty_then_write(body, probe, &observation, seen, &mut requester)
+                    self.confirm_empty_then_write(body, probe, &observation, seen, requester)
                         .await
                 } else {
                     Ok(declined(NotPlacedReason::Foreign, None))
@@ -1678,11 +1802,182 @@ impl WindowEntry {
                     if !screen_accepts_write(observation.screen_rule) {
                         return Ok(decline_not_accepting(Some(vouched_seq)));
                     }
-                    self.resend_key_only(body, vouched_seq, &requester).await
+                    self.resend_key_only(body, vouched_seq, requester).await
                 }
                 None => Ok(declined(NotPlacedReason::Unobservable, None)),
             },
         }
+    }
+
+    /// Once another writer's write has ended the call, goes back to the
+    /// screen before answering: the receiver may have dropped the take-back
+    /// put in front of that write (a dialog, or input dropped right after a
+    /// paste), and nobody else will clean up what is left. What the call
+    /// itself wrote decides the check, never the PTY's registration.
+    async fn check_after_another_write(
+        &self,
+        judgment: SubmitJudgment,
+        probe: char,
+        requester: &mut Requester,
+    ) -> PtyResult<SubmitJudgment> {
+        let SubmitPlacement::NotPlaced(NotPlaced {
+            reason: NotPlacedReason::Interrupted,
+            ..
+        }) = judgment.placement
+        else {
+            return Ok(judgment);
+        };
+        let own = std::mem::take(&mut *lock_recover(&self.own_part));
+        match own.left {
+            OwnLeft::Nothing => Ok(judgment),
+            // A requester already gone is not waited for.
+            OwnLeft::Text(_) if requester.has_left() => Ok(remaining(judgment)),
+            OwnLeft::Text(text) => Ok(
+                match self
+                    .check_own_text(&text, own.read_back, probe, requester)
+                    .await?
+                {
+                    Checked::Gone => declined(NotPlacedReason::Interrupted, None),
+                    Checked::MayRemain => remaining(judgment),
+                },
+            ),
+            OwnLeft::UnconfirmedProbe(before_probe) => {
+                if !requester.has_left() {
+                    self.check_unconfirmed_probe(&before_probe, probe, requester)
+                        .await?;
+                }
+                Ok(judgment)
+            }
+        }
+    }
+
+    /// The first reading of a screen that accepts a write, with the ledger
+    /// count it was guarded at. There is no time limit: `None` once another
+    /// writer writes or `requester` leaves first.
+    async fn read_writable_screen(
+        &self,
+        requester: &mut Requester,
+    ) -> PtyResult<Option<(ComposerReadout, u64)>> {
+        let seen = self.write_seq();
+        match self
+            .wait_for_composer(Some(seen), requester, |observation| {
+                screen_accepts_write(observation.screen_rule).then(|| observation.readout.clone())
+            })
+            .await
+        {
+            ComposerWait::Done(readout) => Ok(Some((readout, seen))),
+            ComposerWait::OtherWriter | ComposerWait::RequesterGone => Ok(None),
+            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+        }
+    }
+
+    /// Checks what is left of `own`, the call's own text, once another
+    /// writer's write ended the call. A probe is written only when the
+    /// screen shows `own` alone: anything beside it may be the other
+    /// writer's, still typing, and a probe would land in the middle of that.
+    /// What gone means for a reading without `own` depends on `read_back`: a
+    /// body never read back may simply not be drawn yet.
+    async fn check_own_text(
+        &self,
+        own: &str,
+        read_back: bool,
+        probe: char,
+        requester: &mut Requester,
+    ) -> PtyResult<Checked> {
+        let gone_if_read_back = if read_back {
+            Checked::Gone
+        } else {
+            Checked::MayRemain
+        };
+        let Some((reading, seen)) = self.read_writable_screen(requester).await? else {
+            return Ok(Checked::MayRemain);
+        };
+        let shows = match &reading {
+            ComposerReadout::Empty => OwnShows::Absent,
+            ComposerReadout::NotObserved => return Ok(Checked::MayRemain),
+            ComposerReadout::Body(text) => own_text_shows(text, own, probe),
+        };
+        match shows {
+            OwnShows::Absent => return Ok(gone_if_read_back),
+            OwnShows::WithOthers => return Ok(Checked::MayRemain),
+            OwnShows::Alone => {}
+        }
+        let ProbeReading::Shown { before } = self
+            .read_through_probe(probe, seen, &reading, requester)
+            .await?
+        else {
+            return Ok(Checked::MayRemain);
+        };
+        let after_probe = seen + 1;
+        if before.chars().all(char::is_whitespace) {
+            self.erase_probe_behind(after_probe, probe, &before).await?;
+            return Ok(Checked::Gone);
+        }
+        match own_text_shows(&before, own, probe) {
+            OwnShows::Alone => {
+                let written = format!("{own}{probe}");
+                let shown = ComposerReadout::Body(format!("{before}{probe}"));
+                match self
+                    .take_back_and_settle(&written, probe, after_probe, &shown)
+                    .await?
+                {
+                    TakenBack::Emptied(..) => Ok(Checked::Gone),
+                    TakenBack::Declined(judgment) if leaves_envelope(&judgment) => {
+                        Ok(Checked::MayRemain)
+                    }
+                    TakenBack::Declined(_) => Ok(Checked::Gone),
+                }
+            }
+            OwnShows::WithOthers => {
+                self.erase_probe_behind(after_probe, probe, &before).await?;
+                Ok(Checked::MayRemain)
+            }
+            OwnShows::Absent => {
+                self.erase_probe_behind(after_probe, probe, &before).await?;
+                Ok(gone_if_read_back)
+            }
+        }
+    }
+
+    /// Once another writer's write ended the call while its probe, written
+    /// behind a composer reading as `before_probe`, had not shown: erases
+    /// that probe when the screen shows it alone behind `before_probe`, and
+    /// writes nothing otherwise (it may sit among the other writer's text).
+    async fn check_unconfirmed_probe(
+        &self,
+        before_probe: &ComposerReadout,
+        probe: char,
+        requester: &mut Requester,
+    ) -> PtyResult<()> {
+        let before = match before_probe {
+            ComposerReadout::Empty => String::new(),
+            ComposerReadout::Body(text) => text.clone(),
+            ComposerReadout::NotObserved => return Ok(()),
+        };
+        let probed = format!("{before}{probe}");
+        let Some((reading, seen)) = self.read_writable_screen(requester).await? else {
+            return Ok(());
+        };
+        if !composer_reads_back_as(&reading, &probed) {
+            return Ok(());
+        }
+        let ProbeReading::Shown { before: shown } = self
+            .read_through_probe(probe, seen, &reading, requester)
+            .await?
+        else {
+            return Ok(());
+        };
+        let after_check = seen + 1;
+        if composer_text_matches_ignoring_lost_whitespace(&shown, &probed) {
+            if self.erase_probe_behind(after_check, probe, &probed).await? == GuardedWrite::Written
+            {
+                self.erase_probe_behind(after_check + 1, probe, &before)
+                    .await?;
+            }
+        } else {
+            self.erase_probe_behind(after_check, probe, &shown).await?;
+        }
+        Ok(())
     }
 
     /// Takes this window's input lock, unless `requester` leaves first.
@@ -1919,6 +2214,7 @@ impl WindowEntry {
             .await
         {
             ComposerWait::Done(Reflection::Behind(before)) => {
+                self.note_read_back(&before, body);
                 self.erase_probe_then_resend(body, &before, after_probe, requester)
                     .await
             }
@@ -1990,6 +2286,7 @@ impl WindowEntry {
             ProbeReading::Shown { before }
                 if composer_text_matches_ignoring_lost_whitespace(&before, body) =>
             {
+                self.note_read_back(&before, body);
                 self.erase_probe_then_resend(body, &before, seq + 1, requester)
                     .await
             }
@@ -2031,14 +2328,19 @@ impl WindowEntry {
     /// until the erase is reached -- the composer holds `before` again, or
     /// something that no longer ends with the probe -- or another writer
     /// moves the ledger, so the next reader sees what was there before the
-    /// probe.
-    async fn erase_probe_behind(&self, seq: u64, probe: char, before: &str) -> PtyResult<()> {
+    /// probe. [`GuardedWrite::Moved`] when the erase itself was not written.
+    async fn erase_probe_behind(
+        &self,
+        seq: u64,
+        probe: char,
+        before: &str,
+    ) -> PtyResult<GuardedWrite> {
         if self
             .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
             .await?
             == GuardedWrite::Moved
         {
-            return Ok(());
+            return Ok(GuardedWrite::Moved);
         }
         self.wait_for_composer_unwatched(seq + 1, |observation| {
             let erased = match &observation.readout {
@@ -2048,7 +2350,7 @@ impl WindowEntry {
             (erased || composer_reads_back_as(&observation.readout, before)).then_some(())
         })
         .await?;
-        Ok(())
+        Ok(GuardedWrite::Written)
     }
 
     /// Writes the probe behind everything written so far (ledger at `seq`)
@@ -2077,6 +2379,7 @@ impl WindowEntry {
         {
             return Ok(ProbeReading::Interrupted);
         }
+        lock_recover(&self.own_part).left = OwnLeft::UnconfirmedProbe(before_probe.clone());
         let shown_before = |observation: &ComposerObservation| match &observation.readout {
             ComposerReadout::Body(text)
                 if &observation.readout != before_probe
@@ -2176,7 +2479,8 @@ impl WindowEntry {
     /// covering the composer) is waited out, never declined on. A write from
     /// another writer ends the call with the body reported as remaining: the
     /// body is registered as this call's own, so that writer's bytes go out
-    /// behind its take-back, and nothing of this call's is written after them.
+    /// behind its take-back, and nothing more of this plan is written after
+    /// them ([`WindowEntry::submit_message`] then checks what is left).
     /// A requester that leaves once the body is written gets no submit key;
     /// the body is taken back instead (see
     /// [`WindowEntry::take_back_for_departed_requester`]).
@@ -2296,10 +2600,13 @@ impl WindowEntry {
             })
             .await;
         let (outcome, reflected) = match &reflection {
-            ComposerWait::Done(Reflection::Behind(before)) => (
-                "behind",
-                composer_text_matches_ignoring_lost_whitespace(before, body),
-            ),
+            ComposerWait::Done(Reflection::Behind(before)) => {
+                self.note_read_back(before, body);
+                (
+                    "behind",
+                    composer_text_matches_ignoring_lost_whitespace(before, body),
+                )
+            }
             ComposerWait::Done(Reflection::Dropped) => ("dropped", false),
             ComposerWait::Done(Reflection::Unreadable) => ("unreadable", false),
             ComposerWait::OtherWriter => ("other_writer", false),
@@ -3775,6 +4082,7 @@ impl WindowRegistry {
             unanswered_probe: Mutex::new(None),
             interrupt_bytes: self.config().interrupt_bytes.clone(),
             take_back_call: Mutex::new(None),
+            own_part: Mutex::new(OwnPart::default()),
             chat_intro_outcome: std::sync::OnceLock::new(),
             notices: Mutex::new(NoticeQueue::default()),
             notice_wake: Notify::new(),

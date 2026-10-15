@@ -27,10 +27,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    Harness, SUBMIT_CHILD_PROBE, approver_base_config, composer_section_toml, count_marker,
-    input_log_read_so_far, let_every_clock_bound_run_out, new_engine, policy, read_composer_now,
-    read_response, repaint, send, settled_marker_count, submit_child_composer_section,
-    tick_after_ms, unique_temp_dir, wait_until_status,
+    APPROVAL_HEADING, GateWindow, Harness, SUBMIT_CHILD_PROBE, WORKING_HEADING,
+    approver_base_config, count_marker, input_log_read_so_far, let_every_clock_bound_run_out,
+    new_engine, open_gate_window, policy, read_composer_now, read_response, repaint, send,
+    settled_marker_count, submit_child_composer_section, tick_after_ms, unique_temp_dir,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
@@ -40,7 +40,6 @@ use yagura_daemon::window::{
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process;
 
 // =====================================================================
 // The detection engine answers a composer query together with what its
@@ -228,20 +227,9 @@ async fn an_engine_that_cannot_answer_resolves_to_a_screen_rule_that_closes_the_
 // approval rule.
 // =====================================================================
 
-/// The first line of the fixture's approval dialog, matched by
-/// [`write_gate_definition`]'s approval rule.
-const APPROVAL_HEADING: &str = "GATE-APPROVAL";
-
-/// The status line of the fixture's `working` overlay, matched by
-/// [`write_gate_definition`]'s running rule.
-const WORKING_HEADING: &str = "GATE-WORKING";
-
 /// The fixture's `key` trigger bytes: draw the overlay, remove it.
 const OVERLAY_SHOW: u8 = 0x01;
 const OVERLAY_HIDE: u8 = 0x02;
-
-/// Ctrl-U, as a TOML basic-string body.
-const CLEAR_CTRL_U: &str = "\\u0015";
 
 fn detection_config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
@@ -249,119 +237,6 @@ fn detection_config(dir: &Path) -> DaemonConfig {
         approval_policy: Some(policy(&["send_message"])),
         ..approver_base_config()
     }
-}
-
-/// A rules-only definition for `submit_child`: approval over working over
-/// input, so a drawn dialog wins even while the startup marker line is still
-/// on screen, plus the shared composer section.
-fn write_gate_definition(dir: &Path, name: &str, marker: &str, clear: &str) {
-    let toml = format!(
-        r#"schema_version = 1
-name = "{name}"
-bottom_line_count = 5
-
-[debounce]
-confirm_ms = 30
-
-[[rules]]
-status = "waiting_approval"
-pattern = '{APPROVAL_HEADING}'
-priority = 30
-region = "bottom"
-
-[[rules]]
-status = "running"
-pattern = '(SUBMITTED)|({WORKING_HEADING})'
-priority = 20
-region = "bottom"
-
-[[rules]]
-status = "waiting_input"
-pattern = '{marker}'
-priority = 10
-region = "bottom"
-
-[input]
-bracketed_paste = true
-ready_hold_ms = 0
-submit_delay_ms = 120
-clear = "{clear}"
-delivery_confirm_ms = 2000
-resend_max = 2
-probe = "{SUBMIT_CHILD_PROBE}"
-"#
-    );
-    std::fs::write(
-        dir.join(format!("{name}.toml")),
-        format!("{toml}{}", composer_section_toml()),
-    )
-    .expect("write detection definition file");
-}
-
-/// How one gate window is launched.
-struct GateWindow<'a> {
-    name: &'a str,
-    marker: &'a str,
-    /// `submit_child`'s overlay argument; empty for none.
-    overlay: &'a str,
-    heading: &'a str,
-    clear: &'a str,
-    /// `submit_child`'s `clear_scope` argument; empty for the ordinary one.
-    clear_scope: &'a str,
-    reflect_delay_ms: u64,
-    /// A file the child appends every byte it reads to; none when unset.
-    input_log: Option<&'a Path>,
-}
-
-impl<'a> GateWindow<'a> {
-    fn new(name: &'a str, marker: &'a str, overlay: &'a str, heading: &'a str) -> Self {
-        GateWindow {
-            name,
-            marker,
-            overlay,
-            heading,
-            clear: CLEAR_CTRL_U,
-            clear_scope: "",
-            reflect_delay_ms: 0,
-            input_log: None,
-        }
-    }
-}
-
-/// Opens `submit_child` in composer-draw mode with the overlay argument and
-/// observes the window reach `waiting_input` before returning.
-async fn open_gate_window(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    window: GateWindow<'_>,
-) -> String {
-    write_gate_definition(dir, window.name, window.marker, window.clear);
-    let mut command = process::submit_child_command(window.marker, 0, 0, 0);
-    command.push(process::COMPOSER_MARKER.to_string());
-    command.push(process::COMPOSER_SEPARATOR.to_string());
-    command.push(process::COMPOSER_CONTINUATION_PREFIX.to_string());
-    command.push(window.reflect_delay_ms.to_string());
-    command.push(String::new()); // fold_placeholder: none
-    command.push(window.clear_scope.to_string());
-    command.push(window.overlay.to_string());
-    command.push(window.heading.to_string());
-    if let Some(log) = window.input_log {
-        command.push(
-            log.to_str()
-                .expect("the input log path must be valid UTF-8")
-                .to_string(),
-        );
-    }
-    let window_id = h.open(command, Some(window.name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
-    window_id
 }
 
 fn entry(h: &Harness, window_id: &str) -> Arc<WindowEntry> {
@@ -777,8 +652,10 @@ async fn a_key_only_resend_is_still_written_while_the_window_shows_it_is_working
 /// A dialog that replaces the composer once the body is in: the screen does
 /// not accept a write, and nothing the daemon decides on its own to write (a
 /// clear, the probe's erase, the submit key) may reach it, however long that
-/// takes. Only another writer's bytes end the wait, and the body's take-back
-/// goes to the dialog right in front of them.
+/// takes. Another writer's byte gets the body's take-back, which goes to the
+/// dialog right in front of it, but the call is not over: what the take-back
+/// did is checked on a screen that accepts a write, so it is answered only
+/// when a second writer's byte, not the dialog's staying, ends the check.
 #[tokio::test]
 async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_the_submit_key() {
     let dir = unique_temp_dir("screen-gate-after-body");
@@ -813,6 +690,12 @@ async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_th
         "a screen that does not accept a write is waited on, not given up on by a clock"
     );
     press(&h, &window_id, b'Q').await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "the dialog still stands, so the take-back cannot be checked and the call is not over"
+    );
+    press(&h, &window_id, b'R').await;
     let judgment = call
         .await
         .expect("the submit task must not panic")
@@ -826,7 +709,7 @@ async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_th
                 "the body is still in the composer"
             );
         }
-        other => panic!("another writer's byte must end the wait, got {other:?}"),
+        other => panic!("a second writer's byte must end the check, got {other:?}"),
     }
     assert_only_the_take_back_reached_the_child_after_the_body(
         &child_input(&h, &window_id, &log).await,
@@ -1230,8 +1113,9 @@ async fn a_composer_hidden_for_a_moment_takes_the_body_once_it_is_readable_again
 
 /// A dialog that appears as the probe is typed: the probe shows, but on a
 /// screen that must not be written to, so the erase that would follow it is
-/// not written either, however long the dialog stays; only another writer's
-/// byte ends the wait.
+/// not written either, however long the dialog stays. Another writer's byte
+/// does not end the call while the dialog stands (what the probe left is
+/// checked on a screen that accepts a write); a second writer's byte does.
 #[tokio::test]
 async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it() {
     let dir = unique_temp_dir("screen-gate-dialog-at-probe");
@@ -1267,6 +1151,12 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
         "a probe that shows on a screen that does not accept a write is waited on, not given up on by a clock"
     );
     press(&h, &window_id, b'Q').await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "the dialog still stands, so what the probe left cannot be checked and the call is not over"
+    );
+    press(&h, &window_id, b'R').await;
     let judgment = call
         .await
         .expect("the submit task must not panic")
@@ -1276,7 +1166,7 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
         SubmitPlacement::NotPlaced(not_placed) => {
             assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);
         }
-        other => panic!("another writer's byte must end the wait, got {other:?}"),
+        other => panic!("a second writer's byte must end the check, got {other:?}"),
     }
     assert_no_acting_byte_reached_the_child(&child_input(&h, &window_id, &log).await);
     assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
@@ -1286,8 +1176,9 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
 /// A dialog that appears as the probe is erased, with the envelope reading
 /// as it did before: the envelope is whole, but the key that would resend it
 /// is a key for the dialog too, so it is not pressed however long the dialog
-/// stays; only another writer's byte ends the wait, with the envelope's
-/// take-back going to the dialog right in front of it.
+/// stays. Another writer's byte gets the envelope's take-back, which goes to
+/// the dialog right in front of it, but does not end the call while the
+/// dialog stands; a second writer's byte does.
 #[tokio::test]
 async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_envelope() {
     let dir = unique_temp_dir("screen-gate-dialog-at-erase");
@@ -1338,6 +1229,12 @@ async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_env
         "a dialog beside the envelope is waited on, not given up on by a clock"
     );
     press(&h, &window_id, b'Q').await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "the dialog still stands, so the envelope's take-back cannot be checked and the call is not over"
+    );
+    press(&h, &window_id, b'R').await;
     let judgment = call
         .await
         .expect("the submit task must not panic")

@@ -66,19 +66,26 @@
 //! which is then handled as usual: a CLI that swallows all input while it
 //! starts and is taken out of that state by a keystroke. `drain:` and then a
 //! `discard-*` prefix may stand in front of `held:` or a plain scope.
+//! `"keep-on-interrupt:<scope>"` makes `Ctrl-C` (`0x03`) leave the composer as
+//! it is, the way a CLI that takes the key for something else does; it stands
+//! in front of `held:` or a plain scope.
 //!
 //! The last two arguments draw a dialog or a status line over the composer
 //! region, the way a CLI raises an approval prompt. Omitted or empty, nothing
-//! changes. `overlay` is `<trigger>:<style>[:until|<path>]`, and
+//! changes. `overlay` is `<trigger>:<style>[:until|<path>|:until-byte|<hex>]`, and
 //! `overlay_heading` is the first line drawn, the one a detection rule
 //! matches. `trigger` is `key` (byte `0x01` draws the overlay, `0x02` removes
 //! it), `body` (drawn once, as soon as a paste leaves the buffer non-empty)
 //! `clear` (drawn once, right after the read carrying the first `clear`
-//! byte has been applied to the buffer) or `byte=<hex>` (the same, for the
+//! byte has been applied to the buffer), `byte=<hex>` (the same, for the
 //! first read carrying that byte: how a dialog is raised by the daemon's own
-//! probe or erase). A `body`, `clear` or `byte` overlay is
-//! removed once the file `<path>` exists when `until|<path>` is given, and
-//! stays drawn otherwise. `style` is
+//! probe or erase) or `erase` (the same, for the first `DEL` read after a
+//! bracketed paste began). A `body`, `clear`, `byte` or `erase` overlay is
+//! removed once the file `<path>` exists when `until|<path>` is given, or by
+//! the first read of the byte `<hex>` when `until-byte|<hex>` is given: that
+//! byte is then handled as if no dialog had been drawn, and the screen shows
+//! its effect with the dialog gone in a single frame. It stays drawn
+//! otherwise. `style` is
 //! `hidden` (option rows follow the heading and the composer is not drawn),
 //! `option` (the selected option is drawn as a composer-shaped line reading
 //! `1. Yes`), `beside` (the composer stays drawn below the heading) or
@@ -299,6 +306,8 @@ struct Settings<'a> {
     /// The bracketed pastes whose content is dropped: the first
     /// `discard_pastes` of them (`u32::MAX` for all).
     discard_pastes: u32,
+    /// `clear_scope` was given with a `"keep-on-interrupt:"` prefix.
+    interrupt_keeps_buffer: bool,
 }
 
 /// What draws the overlay (see the module doc comment).
@@ -309,6 +318,8 @@ enum OverlayTrigger {
     Clear,
     /// The first read carrying this byte.
     Byte(u8),
+    /// The first read carrying `DEL` once a bracketed paste has begun.
+    Erase,
 }
 
 /// The parsed `overlay` / `overlay_heading` arguments.
@@ -320,6 +331,9 @@ struct OverlaySettings {
     /// A fired overlay is removed once the file at this path exists, as late
     /// as the test decides; `None` keeps it drawn.
     gone_when_exists: Option<std::path::PathBuf>,
+    /// A fired overlay is removed by the first read of this byte, which is
+    /// then handled as if no dialog had been drawn.
+    gone_on_byte: Option<u8>,
 }
 
 impl OverlayTrigger {
@@ -328,12 +342,20 @@ impl OverlayTrigger {
         match self {
             OverlayTrigger::Clear => Some(0x15),
             OverlayTrigger::Byte(byte) => Some(byte),
+            OverlayTrigger::Erase => Some(0x7f),
             OverlayTrigger::Key | OverlayTrigger::Body => None,
         }
     }
 }
 
 impl OverlaySettings {
+    /// Whether reading `byte` fires this overlay, `pastes_begun` bracketed
+    /// pastes having begun so far.
+    fn fires_on(&self, byte: u8, pastes_begun: u32) -> bool {
+        self.trigger.trigger_byte() == Some(byte)
+            && (self.trigger != OverlayTrigger::Erase || pastes_begun > 0)
+    }
+
     /// `None` when the arguments are absent or empty; exits the process on a
     /// value it cannot parse, so a misspelled mode fails loudly instead of
     /// running as the default fixture.
@@ -356,6 +378,7 @@ impl OverlaySettings {
             "key" => OverlayTrigger::Key,
             "body" => OverlayTrigger::Body,
             "clear" => OverlayTrigger::Clear,
+            "erase" => OverlayTrigger::Erase,
             other => {
                 OverlayTrigger::Byte(u8::from_str_radix(other.strip_prefix("byte=")?, 16).ok()?)
             }
@@ -396,15 +419,22 @@ impl OverlaySettings {
             ),
             _ => return None,
         };
-        let gone_when_exists = match parts.next() {
-            Some(rest) => Some(std::path::PathBuf::from(rest.strip_prefix("until|")?)),
-            None => None,
+        let (gone_when_exists, gone_on_byte) = match parts.next() {
+            None => (None, None),
+            Some(rest) => match rest.strip_prefix("until|") {
+                Some(path) => (Some(std::path::PathBuf::from(path)), None),
+                None => (
+                    None,
+                    Some(u8::from_str_radix(rest.strip_prefix("until-byte|")?, 16).ok()?),
+                ),
+            },
         };
         Some(OverlaySettings {
             trigger,
             overlay,
             is_dialog,
             gone_when_exists,
+            gone_on_byte,
         })
     }
 }
@@ -504,6 +534,7 @@ fn process_byte(
         }
         0x15 => apply_clear(state, settings, chunk_had_append),
         0x7f | 0x08 => take_back_one_unit(&mut state.buffer),
+        0x03 if settings.interrupt_keeps_buffer => {}
         0x03 => {
             state.buffer.clear();
             state.pasted_len = 0;
@@ -606,6 +637,11 @@ fn main() -> io::Result<()> {
         } else {
             (0, clear_scope_arg)
         };
+    let (interrupt_keeps_buffer, clear_scope_arg) =
+        match clear_scope_arg.strip_prefix("keep-on-interrupt:") {
+            Some(inner) => (true, inner.to_string()),
+            None => (false, clear_scope_arg),
+        };
     let (held_paste, clear_scope) = match clear_scope_arg.strip_prefix("held:") {
         Some(inner) => (true, ClearScope::parse(inner)),
         None => (false, ClearScope::parse(&clear_scope_arg)),
@@ -638,6 +674,7 @@ fn main() -> io::Result<()> {
         clear_scope,
         held_paste,
         discard_pastes,
+        interrupt_keeps_buffer,
     };
     let out = Arc::new(Output::new(style));
     let reflector = reflect.map(|reflect| spawn_reflector(Arc::clone(&out), reflect));
@@ -672,6 +709,7 @@ fn main() -> io::Result<()> {
         let mut dialog_took_submit = false;
         let mut dialog_took_input = false;
         let mut chunk_had_trigger_byte = false;
+        let mut overlay_removal_pending = false;
         for &byte in &chunk[..n] {
             if draining {
                 if byte != 0x03 {
@@ -687,18 +725,24 @@ fn main() -> io::Result<()> {
                     continue;
                 }
                 if overlay.is_dialog && overlay_drawn.load(Ordering::SeqCst) {
-                    if byte == b'\r' {
-                        dialog_took_submit = true;
+                    if overlay.gone_on_byte == Some(byte) {
+                        // The dialog is gone from here on; its frame is drawn
+                        // once this read's body has been synced.
+                        overlay_drawn.store(false, Ordering::SeqCst);
+                        overlay_removal_pending = true;
                     } else {
-                        dialog_took_input = true;
+                        if byte == b'\r' {
+                            dialog_took_submit = true;
+                        } else {
+                            dialog_took_input = true;
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
             chunk_had_trigger_byte |= overlay
                 .as_ref()
-                .and_then(|overlay| overlay.trigger.trigger_byte())
-                == Some(byte);
+                .is_some_and(|overlay| overlay.fires_on(byte, state.pastes_begun));
             let was_in_paste = state.in_paste;
             process_byte(&mut state, byte, &settings, &out, &mut chunk_had_append)?;
             if !was_in_paste && state.in_paste {
@@ -734,6 +778,9 @@ fn main() -> io::Result<()> {
                 &String::from_utf8_lossy(&state.buffer),
                 state.pasted_len.min(state.buffer.len()),
             );
+        }
+        if overlay_removal_pending && let Some(overlay) = &overlay {
+            set_overlay(&out, &overlay_drawn, overlay, false)?;
         }
         // After the body sync above, so the dialog is drawn beside what the
         // trigger byte left in the composer, and before the reflector is woken,
