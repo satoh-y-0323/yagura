@@ -563,10 +563,8 @@ enum DeliveryEnd<'a> {
         /// What the last attempt left in the composer, for a caller that
         /// retries the same delivery later.
         residue: Option<CarriedResidue>,
-        /// The write ledger's count, read right after this delivery's own
-        /// last write, when it ended because someone else's text is in the
-        /// composer. Until the ledger moves from it, nobody has written.
-        foreign_ledger: Option<u64>,
+        /// Whether it ended because someone else's text is in the composer.
+        foreign_draft: bool,
     },
     /// The watched connection closed before the first byte was written.
     /// Never produced when [`run_delivery`] is called with `closed: None`.
@@ -4106,8 +4104,7 @@ fn not_placed_message(not_placed: &NotPlaced) -> &'static str {
         }
         (NotPlacedReason::Interrupted, false) => {
             "another write reached the window before the submit key, so the submit key was \
-             not written; the daemon took its own text back and checked that none of it is \
-             left in the composer"
+             not written; no part of the daemon's own text is known to remain in the composer"
         }
         (NotPlacedReason::NotAccepting, true) => {
             "the window's screen was not accepting input (an approval prompt, most likely), so \
@@ -4642,7 +4639,7 @@ async fn run_delivery<'a>(
     // a later attempt that finds nothing of its own cannot vouch for an
     // earlier write that has yet to be painted.
     let mut envelope_remains: Option<bool> = Some(false);
-    let mut foreign_ledger: Option<u64>;
+    let mut foreign_draft: bool;
 
     let verdict = loop {
         let request = SubmitRequest::Judged {
@@ -4663,14 +4660,14 @@ async fn run_delivery<'a>(
             SubmitPlacement::Placed(outcome) => {
                 placements += 1;
                 envelope_remains = None;
-                foreign_ledger = None;
+                foreign_draft = false;
                 outcome
             }
             SubmitPlacement::NotPlaced(NotPlaced {
                 envelope_remains: remains,
                 reason,
             }) => {
-                foreign_ledger = judgment.foreign_ledger;
+                foreign_draft = judgment.foreign_draft;
                 // A declined write still spends this delivery's resend
                 // budget: re-observing and retrying is what lets a
                 // momentarily unwritable composer (a startup discard window,
@@ -4806,7 +4803,7 @@ async fn run_delivery<'a>(
         verdict,
         envelope_remains,
         residue,
-        foreign_ledger,
+        foreign_draft,
     }
 }
 

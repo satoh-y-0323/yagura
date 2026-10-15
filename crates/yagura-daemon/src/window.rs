@@ -589,11 +589,9 @@ pub struct SubmitJudgment {
     /// baseline handed on.
     pub residue_write_seq: Option<u64>,
     /// Set when the envelope was declined because someone else's text is in
-    /// the composer: the write ledger's count at the moment that was decided,
-    /// after this call's own erase. Text of someone else stays until somebody
-    /// writes, so a retry has nothing new to see while the ledger still reads
-    /// this; a count already moved past it means a retry may go at once.
-    pub foreign_ledger: Option<u64>,
+    /// the composer. That text stays until somebody empties it, so a retry
+    /// has nothing new to see until the composer reads empty.
+    pub foreign_draft: bool,
 }
 
 /// Builds a declined judgment. `residue_write_seq` is the single source for
@@ -608,7 +606,7 @@ fn declined(reason: NotPlacedReason, residue_write_seq: Option<u64>) -> SubmitJu
             reason,
         }),
         residue_write_seq,
-        foreign_ledger: None,
+        foreign_draft: false,
     }
 }
 
@@ -624,25 +622,15 @@ fn declined_unvouched(reason: NotPlacedReason) -> SubmitJudgment {
             reason,
         }),
         residue_write_seq: None,
-        foreign_ledger: None,
+        foreign_draft: false,
     }
 }
 
-/// `judgment` (a [`NotPlacedReason::Foreign`] decline) carrying the ledger
-/// count the decision was taken at.
-fn with_foreign_ledger(mut judgment: SubmitJudgment, ledger: u64) -> SubmitJudgment {
-    judgment.foreign_ledger = Some(ledger);
+/// `judgment` (a [`NotPlacedReason::Foreign`] decline) marked as declined for
+/// someone else's text.
+fn foreign_draft(mut judgment: SubmitJudgment) -> SubmitJudgment {
+    judgment.foreign_draft = true;
     judgment
-}
-
-/// The ledger count once [`WindowEntry::erase_probe_behind`], called with the
-/// count `seq`, has ended: one past it when the erase was written, else
-/// `seq`, which the ledger has already left.
-fn ledger_after_erase(seq: u64, erased: GuardedWrite) -> u64 {
-    match erased {
-        GuardedWrite::Written => seq + 1,
-        GuardedWrite::Moved => seq,
-    }
 }
 
 /// Builds a placed judgment: the submit key was written, and `write_seq` is
@@ -651,7 +639,7 @@ fn placed(outcome: SubmitOutcome, write_seq: u64) -> SubmitJudgment {
     SubmitJudgment {
         placement: SubmitPlacement::Placed(outcome),
         residue_write_seq: Some(write_seq),
-        foreign_ledger: None,
+        foreign_draft: false,
     }
 }
 
@@ -1572,7 +1560,7 @@ impl WindowEntry {
         Ok(SubmitJudgment {
             placement: SubmitPlacement::Placed(outcome),
             residue_write_seq: None,
-            foreign_ledger: None,
+            foreign_draft: false,
         })
     }
 
@@ -1821,10 +1809,7 @@ impl WindowEntry {
                     self.confirm_empty_then_write(body, probe, &observation, seen, requester)
                         .await
                 } else {
-                    Ok(with_foreign_ledger(
-                        declined(NotPlacedReason::Foreign, None),
-                        seen,
-                    ))
+                    Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
                 }
             }
             ComposerReadout::NotObserved => match vouched_seq {
@@ -2102,6 +2087,27 @@ impl WindowEntry {
         }
     }
 
+    /// Resolves once the composer reads empty on a screen that accepts a
+    /// write, or the child has exited. Writes by others do not end it: a
+    /// draft being typed moves the ledger on every key and is still a draft.
+    /// Output reaching the screen is what prompts each new reading, so an
+    /// emptying whose redraw lags is still caught.
+    pub(crate) async fn wait_for_composer_empty(&self) {
+        match self
+            .wait_for_composer(None, &mut Requester::none(), |observation| {
+                (screen_accepts_write(observation.screen_rule)
+                    && observation.readout == ComposerReadout::Empty)
+                    .then_some(())
+            })
+            .await
+        {
+            // The caller's own loop sees an exited child.
+            ComposerWait::Done(()) | ComposerWait::Exited => {}
+            // Neither can end a wait with no ledger count and no requester.
+            ComposerWait::OtherWriter | ComposerWait::RequesterGone => {}
+        }
+    }
+
     /// What ends [`WindowEntry::wait_for_composer`] as things stand, in its
     /// order of rank.
     fn wait_ended<T>(
@@ -2176,11 +2182,8 @@ impl WindowEntry {
                         .await
                 }
                 ComposerWait::Done(before) => {
-                    let erased = self.erase_probe_behind(seq, probe, &before).await?;
-                    Ok(with_foreign_ledger(
-                        declined(NotPlacedReason::Foreign, None),
-                        ledger_after_erase(seq, erased),
-                    ))
+                    self.erase_probe_behind(seq, probe, &before).await?;
+                    Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
                 }
                 ComposerWait::OtherWriter => Ok(declined(NotPlacedReason::Interrupted, None)),
                 ComposerWait::RequesterGone => Ok(declined(NotPlacedReason::Unobservable, None)),
@@ -2196,11 +2199,8 @@ impl WindowEntry {
                     .await
             }
             ProbeReading::Shown { before } => {
-                let erased = self.erase_probe_behind(seq + 1, probe, &before).await?;
-                Ok(with_foreign_ledger(
-                    declined(NotPlacedReason::Foreign, None),
-                    ledger_after_erase(seq + 1, erased),
-                ))
+                self.erase_probe_behind(seq + 1, probe, &before).await?;
+                Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
             }
             ProbeReading::Interrupted => Ok(declined(NotPlacedReason::Interrupted, None)),
             ProbeReading::Abandoned => Ok(declined(NotPlacedReason::Unobservable, None)),
@@ -2327,11 +2327,8 @@ impl WindowEntry {
                     .await
             }
             ProbeReading::Shown { before } => {
-                let erased = self.erase_probe_behind(seq + 1, probe, &before).await?;
-                Ok(with_foreign_ledger(
-                    declined_unvouched(NotPlacedReason::Foreign),
-                    ledger_after_erase(seq + 1, erased),
-                ))
+                self.erase_probe_behind(seq + 1, probe, &before).await?;
+                Ok(foreign_draft(declined_unvouched(NotPlacedReason::Foreign)))
             }
             ProbeReading::Interrupted => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
             ProbeReading::Abandoned => Ok(declined_unvouched(NotPlacedReason::Unobservable)),
@@ -2827,10 +2824,7 @@ impl WindowEntry {
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if self.input.take_back() == TakeBack::Unavailable {
-            return Ok(with_foreign_ledger(
-                declined(NotPlacedReason::Foreign, None),
-                self.write_seq(),
-            ));
+            return Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)));
         }
         if !screen_accepts_write(observed.screen_rule) {
             return Ok(decline_not_accepting(Some(residue.write_seq)));
