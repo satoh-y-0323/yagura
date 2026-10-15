@@ -232,9 +232,11 @@ impl YaguraMcpServer {
             cancelling the call ends it without the text being submitted. Your other tool \
             calls do not wait behind it (up to 4 calls run at once; more wait for one to \
             end). not_written means the daemon did not write this \
-            text into the window: depending on the reason, something of it may still be \
-            left in the window's composer, and the daemon does not erase it -- read the \
-            window's output before sending the same text again.",
+            text into the window: when another write reached the window first, it takes \
+            its own text back in front of that write and checks the composer before it \
+            answers; depending on the reason, something of it may still be left in the \
+            window's composer -- read the window's output before sending the same text \
+            again.",
         input_schema = schema_object(json!({
             "type": "object",
             "properties": {

@@ -373,6 +373,19 @@ body; since the CLI handles its input in order, the keys follow the body
 however late the CLI gets to it, and the keys left over land on an empty
 composer. The bundled definitions all use Ctrl+U (`"\u0015"`).
 
+`clear` also takes the daemon's text back when another writer's input reaches
+the window while that text sits unsubmitted in the composer. The take-back is
+written in the same write, in front of the other writer's bytes, counted at the
+window's width at that moment; it relies on `clear` doing nothing on an empty
+composer. The daemon then writes nothing more in that attempt -- no submit
+bytes, no re-send. It reads the composer once the screen accepts input and
+writes `probe` only if its own text is still all that shows; the probe then
+tells whether the take-back got through (it is taken back again if not), and is
+erased. When the composer shows anything else, nothing is written and the text
+is reported as possibly left behind. The one write nothing is put in front of
+is the interrupt key sequence (`interrupt_window`'s bytes): it reaches the CLI
+as sent, and the daemon takes its text back after it.
+
 An empty composer right after the take-back proves nothing: a CLI that has
 not read the body yet shows exactly that. So the daemon types `probe` behind
 the take-back and reads the composer until it shows the probe and nothing
@@ -385,8 +398,10 @@ behind, and a window a handoff opened for it stays open:
 - The probe shows behind something -- the take-back left part of the body.
   The daemon types `erase` (input is handled in order, so it removes the
   daemon's own probe whenever the CLI gets to it).
-- Anyone else writes into the window meanwhile. The daemon stops there and
-  never takes back or erases anything after another writer's input.
+- Anyone else writes into the window meanwhile. The daemon stops there: it
+  writes nothing more to finish the delivery, and beyond taking its own text
+  back (in front of that writer's input, as described above) and erasing its
+  own probe it takes back or erases nothing.
 
 Until the probe shows, the daemon waits for it, the same way it waits for a
 body to show.
@@ -442,7 +457,8 @@ something else, never shows where the daemon looks for it, and the write
 waits as described above.
 
 An empty `clear` cannot retract anything -- the body the daemon wrote for a
-requester that left is left sitting in the composer instead, and the
+requester that left, or in front of which another writer typed, is left
+sitting in the composer instead, and the
 delivery ends as `not_written` with the envelope still in front of the
 receiver (see
 [`send_handoff`'s delivery outcomes](../../../docs/mcp-setup.md#send_handoff)).
