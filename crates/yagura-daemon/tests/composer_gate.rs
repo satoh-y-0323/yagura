@@ -23,16 +23,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, attach, count_marker,
-    decide, empty_lookup, expect_approval_requested_within, expect_error, handoff_profile_config,
-    let_every_clock_bound_run_out, open_submit_child_window_with_composer,
+    HANG_GUARD, Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, attach,
+    count_marker, decide, empty_lookup, expect_approval_requested_within, expect_error,
+    handoff_profile_config, let_every_clock_bound_run_out, open_submit_child_window_with_composer,
     open_submit_child_window_with_folded_composer, policy, read_composer_now, read_response,
     register_approver, send, send_from_two_connections, send_handoff_from_profile,
     settled_marker_count, submit_child_profile_source_logging_input,
     submit_child_profile_source_with_detection_and_clear_scope, unique_temp_dir,
-    wait_for_only_window, wait_until_composer_is, wait_until_input_log_contains,
-    wait_until_the_handoff_budget_is_given_back, write_interactive_input, write_profile,
-    write_submit_definition,
+    wait_for_only_window, wait_until_composer_is, wait_until_composer_satisfies,
+    wait_until_input_log_contains, wait_until_the_handoff_budget_is_given_back,
+    write_interactive_input, write_profile, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -392,17 +392,21 @@ async fn row5_resends_via_the_write_record_when_the_screen_cannot_be_fully_resto
     }
 }
 
+/// What a touched envelope does depends on what the screen shows of it, so
+/// each screen is fixed here. A tall envelope whose end still reads as a
+/// continuation of the composer is someone else's draft now: the call refuses
+/// it without writing a byte.
 #[tokio::test]
-async fn row5_does_not_resend_via_the_record_once_someone_else_has_touched_the_window() {
-    let dir = unique_temp_dir("gate-row5-neg");
-    let h = Harness::start("gate-row5-neg", detection_config(&dir)).await;
+async fn row5_refuses_a_touched_envelope_whose_tail_reads_on_screen_without_writing() {
+    let dir = unique_temp_dir("gate-row5-neg-tail");
+    let h = Harness::start("gate-row5-neg-tail", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        "row5neg",
-        "row5neg-marker",
+        "row5negtail",
+        "row5negtail-marker",
         "\\u0015",
         0,
     )
@@ -422,12 +426,97 @@ async fn row5_does_not_resend_via_the_record_once_someone_else_has_touched_the_w
     // A second writer touches the window: `Message` on purpose (record-based
     // matching is not limited to interactive/control origins).
     entry(&h, &window_id)
-        .write_pty_input(b" ", InputOrigin::Message)
+        .write_pty_input(b"!", InputOrigin::Message)
+        .await
+        .expect("interfering write must not fail");
+    // The call starts only once the touch is on the daemon's screen model, so
+    // the screen it reads is this one and not a frame on the way to it.
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "the touched envelope's tail",
+        Duration::from_secs(10),
+        |readout| matches!(readout, ComposerReadout::Tail(tail) if tail.ends_with('!')),
+    )
+    .await;
+
+    let result = tokio::time::timeout(
+        HANG_GUARD,
+        entry(&h, &window_id).submit_message(&body, Some(mine), None),
+    )
+    .await
+    .expect("a tail that reads on screen must end the call")
+    .expect("a refused write is not a PTY error")
+    .placement;
+
+    match result {
+        SubmitPlacement::NotPlaced(not_placed) => {
+            assert_eq!(not_placed.reason, NotPlacedReason::Foreign);
+        }
+        other => panic!("a touched, oversized envelope must not resend blind, got {other:?}"),
+    }
+    assert_eq!(
+        count_marker(&h, &window_id, "PASTE "),
+        0,
+        "the body must not be written again over the touched envelope"
+    );
+    assert_eq!(
+        count_marker(&h, &window_id, "SUBMITTED"),
+        0,
+        "the submit key must not be pressed on the touched envelope"
+    );
+}
+
+/// The other screen: nothing on it is the composer (the child's frame is
+/// caught between erasing the composer and drawing the rest). Nothing is
+/// decided and nothing is written, however long that lasts; the requester
+/// leaving ends the call.
+#[tokio::test]
+async fn row5_waits_on_a_touched_envelope_while_the_screen_shows_no_composer() {
+    let dir = unique_temp_dir("gate-row5-neg-unobserved");
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let overlay = format!(
+        "body:hidden:torn|erase|{}",
+        rest.to_str().expect("the path must be valid UTF-8")
+    );
+    let h = Harness::start("gate-row5-neg-unobserved", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = common::open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        common::GateWindow {
+            input_log: Some(&log),
+            ..common::GateWindow::new(
+                "row5negunobserved",
+                "row5negunobserved-marker",
+                &overlay,
+                common::APPROVAL_HEADING,
+            )
+        },
+    )
+    .await;
+    let body = oversized_body();
+
+    seed_previous_attempt(&h, &window_id, &body).await;
+    // The seed raises the torn frame, and it stays until `rest` exists.
+    wait_until_composer_is(
+        &h,
+        &window_id,
+        &ComposerReadout::NotObserved,
+        Duration::from_secs(10),
+    )
+    .await;
+    let mine = ComposerResidue {
+        body: &body,
+        write_seq: entry(&h, &window_id).write_seq(),
+    };
+    entry(&h, &window_id)
+        .write_pty_input(b"!", InputOrigin::Message)
         .await
         .expect("interfering write must not fail");
 
-    // Nothing on screen can say what the touched composer holds, so the call
-    // waits; its requester leaving is what ends it here.
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(&h, &window_id);
     let resend_body = body.clone();
@@ -444,29 +533,31 @@ async fn row5_does_not_resend_via_the_record_once_someone_else_has_touched_the_w
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),
-        "a touched envelope nothing on screen can confirm is waited on, not given up on by a clock"
+        "a screen that shows no composer is waited on, not given up on by a clock"
     );
     leave.send(true).expect("the call holds its receiver");
-    let result = tokio::time::timeout(Duration::from_secs(60), call)
+    let result = tokio::time::timeout(HANG_GUARD, call)
         .await
         .expect("the requester leaving must end the wait")
         .expect("the submit task must not panic")
         .expect("a blocked write is not a PTY error")
         .placement;
 
-    match result {
-        SubmitPlacement::NotPlaced(_) => {}
-        other => panic!("a touched, oversized envelope must not resend blind, got {other:?}"),
-    }
-    assert_eq!(
-        count_marker(&h, &window_id, "PASTE "),
-        0,
-        "the body must not be written again over the touched envelope"
+    assert!(
+        matches!(result, SubmitPlacement::NotPlaced(_)),
+        "a touched, oversized envelope must not resend blind, got {result:?}"
     );
     assert_eq!(
-        count_marker(&h, &window_id, "SUBMITTED"),
-        0,
-        "the submit key must not be pressed on the touched envelope"
+        settled_marker_count(&h, &window_id, "PASTE ", 1).await,
+        1,
+        "only the seed's paste reached the child: the body was not written again"
+    );
+    assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
+    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    let received = common::input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    assert!(
+        !received.contains(&b'\r'),
+        "the submit key must not be pressed; the child read {received:?}"
     );
 }
 

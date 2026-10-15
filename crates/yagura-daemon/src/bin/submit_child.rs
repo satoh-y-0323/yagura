@@ -69,6 +69,10 @@
 //! `"keep-on-interrupt:<scope>"` makes `Ctrl-C` (`0x03`) leave the composer as
 //! it is, the way a CLI that takes the key for something else does; it stands
 //! in front of `held:` or a plain scope.
+//! `"takes-paste-on-typing:<scope>"` empties the buffer when a typed byte
+//! arrives after a paste, the way a receiver that has taken a folded envelope
+//! in leaves a probe typed behind it alone on the screen; it stands in front
+//! of `held:` or a plain scope.
 //!
 //! The last two arguments draw a dialog or a status line over the composer
 //! region, the way a CLI raises an approval prompt. Omitted or empty, nothing
@@ -266,6 +270,10 @@ impl State {
         if self.in_paste && self.pastes_begun <= settings.discard_pastes {
             return;
         }
+        if settings.typing_takes_paste && !self.in_paste && self.pasted_len > 0 {
+            self.buffer.clear();
+            self.pasted_len = 0;
+        }
         self.buffer.push(byte);
         if self.in_paste {
             self.pasted_len = self.buffer.len();
@@ -317,6 +325,8 @@ struct Settings<'a> {
     discard_pastes: u32,
     /// `clear_scope` was given with a `"keep-on-interrupt:"` prefix.
     interrupt_keeps_buffer: bool,
+    /// `clear_scope` was given with a `"takes-paste-on-typing:"` prefix.
+    typing_takes_paste: bool,
 }
 
 /// What draws the overlay (see the module doc comment).
@@ -729,6 +739,11 @@ fn main() -> io::Result<()> {
             Some(inner) => (true, inner.to_string()),
             None => (false, clear_scope_arg),
         };
+    let (typing_takes_paste, clear_scope_arg) =
+        match clear_scope_arg.strip_prefix("takes-paste-on-typing:") {
+            Some(inner) => (true, inner.to_string()),
+            None => (false, clear_scope_arg),
+        };
     let (held_paste, clear_scope) = match clear_scope_arg.strip_prefix("held:") {
         Some(inner) => (true, ClearScope::parse(inner)),
         None => (false, ClearScope::parse(&clear_scope_arg)),
@@ -762,6 +777,7 @@ fn main() -> io::Result<()> {
         held_paste,
         discard_pastes,
         interrupt_keeps_buffer,
+        typing_takes_paste,
     };
     let out = Arc::new(Output::new(style));
     let reflector = reflect.map(|reflect| spawn_reflector(Arc::clone(&out), reflect));

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    APPROVAL_HEADING, ERASE, GateWindow, HANG_GUARD, Harness, PASTE_END, SUBMIT_CHILD_PROBE,
+    APPROVAL_HEADING, CLEAR, ERASE, GateWindow, HANG_GUARD, Harness, PASTE_END, SUBMIT_CHILD_PROBE,
     WORKING_HEADING, approver_base_config, count_marker, input_log_read_so_far,
     let_every_clock_bound_run_out, new_engine, open_gate_window, policy, read_composer_now,
     read_response, repaint, send, settled_marker_count, submit_child_composer_section,
@@ -1685,6 +1685,374 @@ async fn a_folded_envelope_is_resent_only_once_the_probe_has_shown_behind_it() {
     );
 }
 
+// --- what a reading that shows no evidence must never lead to -------------------
+
+const PASTE_START: &[u8] = b"\x1b[200~";
+
+/// Ends `call` within a bound that is not a clock the daemon owns: a call
+/// that is blocked for good fails here, not by hanging the suite.
+async fn ended(call: SubmitCall, what: &str) -> SubmitJudgment {
+    tokio::time::timeout(Duration::from_secs(10), call)
+        .await
+        .unwrap_or_else(|_| panic!("{what}"))
+        .expect("the submit task must not panic")
+        .expect("the call must not fail at the PTY level")
+}
+
+/// The ledger vouches for a folded envelope, but the receiver has taken it in
+/// by the time the probe lands, so the probe shows alone. That is a body that
+/// never reached the composer: no submit key follows, the probe does not stay
+/// behind, and the call ends instead of waiting for a composer that can never
+/// read as the envelope.
+#[tokio::test]
+async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidence_for_the_submit_key()
+ {
+    const PLACEHOLDER: &str = "[Pasted text #1]";
+    let dir = unique_temp_dir("screen-gate-folded-probe-alone");
+    let log = dir.join("child-input.log");
+    let h = Harness::start("screen-gate-folded-probe-alone", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            fold_placeholder: PLACEHOLDER,
+            clear_scope: "takes-paste-on-typing:",
+            ..GateWindow::new("foldedgone", "foldedgone-marker", "", "")
+        },
+    )
+    .await;
+    let body = "the retry budget for this delivery has not been reached yet";
+    entry(&h, &window_id)
+        .write_pty_input(
+            format!("\x1b[200~{body}\x1b[201~").as_bytes(),
+            InputOrigin::Message,
+        )
+        .await
+        .expect("seed write must not fail");
+    wait_until_composer_is(
+        &h,
+        &window_id,
+        &ComposerReadout::Body(PLACEHOLDER.to_string()),
+        Duration::from_secs(10),
+    )
+    .await;
+    let seq = entry(&h, &window_id).write_seq();
+
+    let sender = entry(&h, &window_id);
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(
+                body,
+                Some(ComposerResidue {
+                    body,
+                    write_seq: seq,
+                }),
+                None,
+            )
+            .await
+    });
+    let probe_then_erase = [SUBMIT_CHILD_PROBE.as_bytes(), &[ERASE]].concat();
+    wait_until_input_log_contains(&log, &probe_then_erase, HANG_GUARD).await;
+    let_every_clock_bound_run_out().await;
+    let judgment = ended(
+        call,
+        "a probe that shows alone is waited on for good: the call must end",
+    )
+    .await;
+
+    assert!(
+        matches!(judgment.placement, SubmitPlacement::NotPlaced(_)),
+        "a probe alone is no evidence the envelope is there, got {:?}",
+        judgment.placement
+    );
+    wait_until_composer_is(
+        &h,
+        &window_id,
+        &ComposerReadout::Empty,
+        Duration::from_secs(10),
+    )
+    .await;
+    let received = child_input(&h, &window_id, &log).await;
+    assert!(
+        !received.contains(&b'\r'),
+        "no submit key may follow a probe that shows alone; the child read {received:?}"
+    );
+    assert_eq!(
+        count_subslice(&received, PASTE_START),
+        1,
+        "the body must not be written again; the child read {received:?}"
+    );
+    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+}
+
+/// The end of a body taller than the screen is what shows, the ledger vouches
+/// for it, and a dialog the probe raises keeps the screen closed until another
+/// writer's byte ends the wait. What the call wrote on top of the draft is
+/// still its own probe, at the end of the composer, once the dialog is gone:
+/// it does not stay there.
+#[tokio::test]
+async fn a_probe_written_behind_a_tall_draft_is_erased_once_another_writer_interrupts() {
+    let dir = unique_temp_dir("screen-gate-tail-probe-left");
+    let log = dir.join("child-input.log");
+    let gone = dir.join("dialog-gone");
+    let h = Harness::start("screen-gate-tail-probe-left", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let probe_byte = format!("byte={:02x}", SUBMIT_CHILD_PROBE.as_bytes()[0]);
+    let overlay = dialog_raised_by(&probe_byte, "hidden", &gone);
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("tailleft", "tailleft-marker", &overlay, APPROVAL_HEADING)
+        },
+    )
+    .await;
+    let body: String = (0..300).map(|i| format!("{i:04}")).collect();
+    entry(&h, &window_id)
+        .write_pty_input(body.as_bytes(), InputOrigin::Message)
+        .await
+        .expect("typing the draft must not fail");
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "the draft's tail",
+        Duration::from_secs(10),
+        |readout| matches!(readout, ComposerReadout::Tail(tail) if body.ends_with(tail.as_str())),
+    )
+    .await;
+    let seq = entry(&h, &window_id).write_seq();
+
+    let sender = entry(&h, &window_id);
+    let sent = body.clone();
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(
+                &sent,
+                Some(ComposerResidue {
+                    body: &sent,
+                    write_seq: seq,
+                }),
+                None,
+            )
+            .await
+    });
+    wait_for_screen(&h, &window_id, "the dialog the probe raises", |screen| {
+        shows(screen, APPROVAL_HEADING)
+    })
+    .await;
+    press(&h, &window_id, b'Q').await;
+    std::fs::write(&gone, b"").expect("remove the dialog");
+    let judgment = ended(call, "another writer's byte must end the call").await;
+
+    assert!(
+        matches!(judgment.placement, SubmitPlacement::NotPlaced(_)),
+        "an interrupted call places nothing, got {:?}",
+        judgment.placement
+    );
+    wait_for_screen(&h, &window_id, "the dialog to be gone", |screen| {
+        heading_not_drawn(screen) && matches!(composer_of(screen), ComposerReadout::Tail(_))
+    })
+    .await;
+    let after = rebuilt_screen(&h, &window_id).await;
+    assert!(
+        matches!(composer_of(&after), ComposerReadout::Tail(ref tail) if tail.ends_with("0299")),
+        "the call's own probe must not stay at the end of the draft, the composer reads {:?}",
+        composer_of(&after)
+    );
+    let received = child_input(&h, &window_id, &log).await;
+    assert!(
+        received.contains(&ERASE) && !received.contains(&b'\r'),
+        "the probe is erased and no submit key is written; the child read {received:?}"
+    );
+}
+
+/// The ledger vouches for an envelope the composer does not show, and the
+/// probe's own write raises a frame that only erases the composer: that is not
+/// the probe alone, so the envelope is neither written again nor submitted.
+#[tokio::test]
+async fn an_unshown_envelope_is_not_decided_on_while_its_probe_reads_as_a_torn_frame() {
+    let dir = unique_temp_dir("screen-gate-torn-unshown");
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let h = Harness::start("screen-gate-torn-unshown", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let probe_byte = format!("byte={:02x}", SUBMIT_CHILD_PROBE.as_bytes()[0]);
+    let overlay = torn_dialog(&probe_byte, "hidden", "erase", &rest);
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            clear_scope: "held:",
+            ..GateWindow::new(
+                "tornunshown",
+                "tornunshown-marker",
+                &overlay,
+                APPROVAL_HEADING,
+            )
+        },
+    )
+    .await;
+    entry(&h, &window_id)
+        .write_pty_input(b"\x1b[200~ENV\x1b[201~", InputOrigin::Message)
+        .await
+        .expect("seed write must not fail");
+    wait_until_input_log_contains(&log, PASTE_END, HANG_GUARD).await;
+    wait_for_screen(&h, &window_id, "the held paste to be read", |screen| {
+        shows(screen, "PASTE 1")
+    })
+    .await;
+    assert_eq!(
+        read_composer_now(&h, &window_id).await,
+        ComposerReadout::Empty,
+        "the held envelope must not show for this case to mean anything"
+    );
+    let seq = entry(&h, &window_id).write_seq();
+
+    let sender = entry(&h, &window_id);
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(
+                "ENV",
+                Some(ComposerResidue {
+                    body: "ENV",
+                    write_seq: seq,
+                }),
+                None,
+            )
+            .await
+    });
+    wait_for_screen(&h, &window_id, "the torn frame after the probe", |screen| {
+        heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
+    })
+    .await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a torn frame is waited on, not decided on and not given up on by a clock"
+    );
+    let judgment = finish_the_dialog_then_write_another_byte(&h, &window_id, &rest, call).await;
+
+    assert_no_submit_key_reached_the_child(&h, &window_id, &log, &judgment).await;
+    let received = child_input(&h, &window_id, &log).await;
+    assert_eq!(
+        count_subslice(&received, PASTE_START),
+        1,
+        "the envelope must not be written again; the child read {received:?}"
+    );
+    assert_only_the_take_back_reached_the_child_after_the_body(&received, FOREIGN);
+}
+
+/// The requester leaves after the body and its probe are written, while the
+/// composer reads as a torn frame: the body's take-back needs a reading of
+/// the composer too, so the daemon writes none of its own on it; only the one
+/// the registered body gets in front of another writer's byte reaches the child.
+#[tokio::test]
+async fn no_take_back_is_written_for_a_departed_requester_while_the_composer_reads_as_a_torn_frame()
+{
+    let dir = unique_temp_dir("screen-gate-torn-departed");
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let h = Harness::start("screen-gate-torn-departed", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let overlay = torn_dialog("body", "hidden", "erase", &rest);
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("tornleft", "tornleft-marker", &overlay, APPROVAL_HEADING)
+        },
+    )
+    .await;
+
+    let (leave, requester) = tokio::sync::watch::channel(false);
+    let sender = entry(&h, &window_id);
+    let call =
+        tokio::spawn(async move { sender.submit_message("hello", None, Some(requester)).await });
+    let probe_after_the_body = [PASTE_END, SUBMIT_CHILD_PROBE.as_bytes()].concat();
+    wait_until_input_log_contains(&log, &probe_after_the_body, HANG_GUARD).await;
+    wait_for_screen(&h, &window_id, "the torn frame after the body", |screen| {
+        heading_not_drawn(screen)
+            && shows(screen, "PASTE 1")
+            && composer_of(screen) == ComposerReadout::NotObserved
+    })
+    .await;
+    leave.send(true).expect("the call holds its receiver");
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a take-back waits for a reading of the composer, however long that takes"
+    );
+    let judgment = finish_the_dialog_then_write_another_byte(&h, &window_id, &rest, call).await;
+
+    assert_no_submit_key_reached_the_child(&h, &window_id, &log, &judgment).await;
+    let received = child_input(&h, &window_id, &log).await;
+    assert_only_the_take_back_reached_the_child_after_the_body(&received, FOREIGN);
+}
+
+/// Another writer's text stands in the composer, the probe shows behind it
+/// and is erased, and the erase raises a frame that only erases the
+/// composer: that is no sign the erase was reached, so the call goes on
+/// waiting and writes no second erase.
+#[tokio::test]
+async fn a_probe_erase_is_not_taken_for_reached_while_the_composer_reads_as_a_torn_frame() {
+    let dir = unique_temp_dir("screen-gate-torn-erase-behind");
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let h = Harness::start("screen-gate-torn-erase-behind", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let overlay = torn_dialog(&format!("byte={ERASE:02x}"), "hidden", "erase", &rest);
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "tornbehind",
+                "tornbehind-marker",
+                &overlay,
+                APPROVAL_HEADING,
+            )
+        },
+    )
+    .await;
+    seed_composer(&h, &window_id, "ENV").await;
+
+    let sender = entry(&h, &window_id);
+    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    wait_for_screen(&h, &window_id, "the torn frame after the erase", |screen| {
+        heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
+    })
+    .await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a torn frame after the erase is waited on, not taken for the erase reached"
+    );
+    let judgment = finish_the_dialog_then_write_another_byte(&h, &window_id, &rest, call).await;
+
+    assert_no_submit_key_reached_the_child(&h, &window_id, &log, &judgment).await;
+    let received = child_input(&h, &window_id, &log).await;
+    assert_eq!(
+        received.iter().filter(|&&byte| byte == ERASE).count(),
+        1,
+        "only the probe's own erase is written; the child read {received:?}"
+    );
+    assert!(
+        !received.contains(&CLEAR),
+        "no clear sequence follows another writer's text; the child read {received:?}"
+    );
+}
+
 // --- over the wire --------------------------------------------------------
 
 /// Sends `send_message` with `text` and returns the `not_written` message.
@@ -1885,4 +2253,63 @@ async fn the_not_accepting_message_differs_from_every_other_reason() {
             "a screen that was not accepting input must not be reported in another reason's words"
         );
     }
+}
+
+/// The body raises a dialog whose first write only erases the composer, and
+/// another writer's byte arrives while that frame stands: the dialog takes it
+/// and the frame stays as it was. A frame with no composer in it says nothing
+/// about the take-back, so the call is not over until a screen that shows a
+/// composer, another writer, or the requester's leaving ends the check.
+#[tokio::test]
+async fn a_torn_frame_standing_after_another_writers_byte_is_not_taken_for_a_finished_check() {
+    let dir = unique_temp_dir("screen-gate-torn-after-foreign");
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let h = Harness::start("screen-gate-torn-after-foreign", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let overlay = format!(
+        "body:hidden:torn|erase|{}",
+        rest.to_str().expect("the dialog path must be valid UTF-8")
+    );
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "tornafterforeign",
+                "tornafterforeign-marker",
+                &overlay,
+                APPROVAL_HEADING,
+            )
+        },
+    )
+    .await;
+
+    let sender = entry(&h, &window_id);
+    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    wait_for_screen(&h, &window_id, "the torn frame", |screen| {
+        heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
+    })
+    .await;
+    press(&h, &window_id, b'R').await;
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a frame with no composer in it cannot show what became of the take-back, so the call is not over"
+    );
+
+    std::fs::write(&rest, b"").expect("draw the rest of the dialog");
+    wait_for_screen(
+        &h,
+        &window_id,
+        "the rest of the dialog to be drawn",
+        |screen| shows(screen, APPROVAL_HEADING),
+    )
+    .await;
+    press(&h, &window_id, b'S').await;
+    let judgment = ended(call, "a second writer's byte must end the check").await;
+
+    assert_no_submit_key_reached_the_child(&h, &window_id, &log, &judgment).await;
 }

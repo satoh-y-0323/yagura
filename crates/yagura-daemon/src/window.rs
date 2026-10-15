@@ -646,9 +646,8 @@ fn placed(outcome: SubmitOutcome, write_seq: u64) -> SubmitJudgment {
 /// What [`WindowEntry::read_through_probe`] found.
 enum ProbeReading {
     /// The probe showed last in the composer, on a screen that accepts a
-    /// write; `before` is what precedes it, and `tail` says it is only the
-    /// end of a composer taller than the screen.
-    Shown { before: String, tail: bool },
+    /// write, behind this.
+    Shown(BehindProbe),
     /// Another writer wrote after the probe.
     Interrupted,
     /// The requester left, before the probe was written or before it showed.
@@ -676,28 +675,140 @@ enum ComposerWait<T> {
     RequesterGone,
 }
 
-/// What the composer shows once a fresh body and the probe behind it were
-/// written: the receiver handles input in order, so the probe showing means
-/// the body was handled before it.
-enum Reflection {
-    /// Something shows before the probe: the body landed, reading as
-    /// `before`.
-    Behind(String),
-    /// The probe shows alone: the receiver dropped the body.
-    Dropped,
-    /// The body runs off the viewport, so only its end shows, and that end is
-    /// followed by the probe.
-    BehindTail,
+impl<T> ComposerWait<T> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Done(_) => "reading",
+            Self::OtherWriter => "other_writer",
+            Self::Exited => "exited",
+            Self::RequesterGone => "requester_gone",
+        }
+    }
 }
 
-/// What the composer must read as once a probe that showed behind it is
-/// erased.
-#[derive(Clone, Copy)]
-enum ErasedTarget<'a> {
-    /// The text that showed before the probe.
-    Body(&'a str),
-    /// The end of the call's own text (see [`tail_is_end_of`]).
-    Tail,
+/// Text the composer shows, as it was found.
+#[derive(Debug, Clone)]
+enum ShownText {
+    /// The composer's whole text, found by its marker.
+    Body(String),
+    /// Only the end of a composer taller than the screen.
+    Tail(String),
+}
+
+impl ShownText {
+    fn of(readout: &ComposerReadout) -> Option<Self> {
+        match readout {
+            ComposerReadout::Body(text) => Some(Self::Body(text.clone())),
+            ComposerReadout::Tail(text) => Some(Self::Tail(text.clone())),
+            ComposerReadout::Empty | ComposerReadout::NotObserved => None,
+        }
+    }
+
+    /// What shows in front of `probe` when this ends with it. A tail that is
+    /// the probe alone says nothing of what precedes it, which is off the
+    /// screen.
+    fn behind(&self, probe: char) -> Option<BehindProbe> {
+        match self {
+            Self::Body(text) => {
+                let before = text.strip_suffix(probe)?;
+                Some(if before.is_empty() {
+                    BehindProbe::Alone
+                } else {
+                    BehindProbe::Text(Self::Body(before.to_string()))
+                })
+            }
+            Self::Tail(text) => text
+                .strip_suffix(probe)
+                .filter(|before| !before.trim().is_empty())
+                .map(|before| BehindProbe::Text(Self::Tail(before.to_string()))),
+        }
+    }
+
+    /// Whether `other` can be another reading of the same text. A tail is
+    /// redrawn from whichever row the screen's top lands on, so either one
+    /// may be the end of the other.
+    fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Body(a), Self::Body(b)) => composer_text_matches_ignoring_lost_whitespace(a, b),
+            (Self::Tail(a), Self::Tail(b)) => tail_is_end_of(a, b) || tail_is_end_of(b, a),
+            (Self::Body(_), Self::Tail(_)) | (Self::Tail(_), Self::Body(_)) => false,
+        }
+    }
+
+    /// Whether `readout`, read once a probe that showed behind this was
+    /// erased, shows the composer as it was again, `own` being the call's
+    /// own text in it. Without the probe a body that ran off the screen may
+    /// fit it after all.
+    fn restored_in(&self, readout: &ComposerReadout, own: &str) -> bool {
+        match (self, readout) {
+            (Self::Body(before), ComposerReadout::Body(_)) => {
+                composer_reads_back_as(readout, before)
+            }
+            (Self::Tail(_), ComposerReadout::Body(_)) => composer_reads_back_as(readout, own),
+            (Self::Tail(_), ComposerReadout::Tail(text)) => tail_is_end_of(text, own),
+            (Self::Body(_), ComposerReadout::Tail(_))
+            | (
+                Self::Body(_) | Self::Tail(_),
+                ComposerReadout::Empty | ComposerReadout::NotObserved,
+            ) => false,
+        }
+    }
+}
+
+/// What shows in front of a probe at the end of the composer. The receiver
+/// handles input in order, so this is what everything written before the
+/// probe left there.
+#[derive(Debug, Clone)]
+enum BehindProbe {
+    /// The probe shows alone: nothing written before it is in the composer.
+    Alone,
+    /// The probe shows behind this text.
+    Text(ShownText),
+}
+
+impl BehindProbe {
+    /// What `readout` shows in front of `probe`, when it ends with it.
+    fn of(readout: &ComposerReadout, probe: char) -> Option<Self> {
+        ShownText::of(readout)?.behind(probe)
+    }
+
+    /// What the composer read as before the probe was written behind it.
+    fn before(readout: &ComposerReadout) -> Option<Self> {
+        match readout {
+            ComposerReadout::Empty => Some(Self::Alone),
+            ComposerReadout::Body(_) | ComposerReadout::Tail(_) => {
+                ShownText::of(readout).map(Self::Text)
+            }
+            ComposerReadout::NotObserved => None,
+        }
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Alone, Self::Alone) => true,
+            (Self::Text(a), Self::Text(b)) => a.same_as(b),
+            (Self::Alone, Self::Text(_)) | (Self::Text(_), Self::Alone) => false,
+        }
+    }
+
+    /// Whether `readout` shows this again.
+    fn shows_again_in(&self, readout: &ComposerReadout) -> bool {
+        match self {
+            Self::Alone => matches!(readout, ComposerReadout::Empty),
+            Self::Text(shown) => ShownText::of(readout).is_some_and(|read| shown.same_as(&read)),
+        }
+    }
+
+    /// Whether this is a probe showing right behind `before`: what a second
+    /// probe written behind the first finds.
+    fn is_probe_behind(&self, before: &Self, probe: char) -> bool {
+        match self {
+            Self::Text(shown) => shown
+                .behind(probe)
+                .is_some_and(|first| first.same_as(before)),
+            Self::Alone => false,
+        }
+    }
 }
 
 /// The requester of one write, as far as the window can tell. `None` is a
@@ -768,26 +879,16 @@ async fn next_change<T>(cue: &mut watch::Receiver<T>) {
 /// the body and the probe -- a proper prefix of both together -- is not
 /// decided, so a body made of or starting with the probe's character is never
 /// taken for the probe alone.
-fn reflection_of(readout: &ComposerReadout, body: &str, probe: char) -> Option<Reflection> {
-    match readout {
-        ComposerReadout::Body(text) => {
-            let before = text.strip_suffix(probe)?;
-            if is_proper_prefix_ignoring_whitespace(text, body, probe) {
-                return None;
-            }
-            Some(if before.is_empty() {
-                Reflection::Dropped
-            } else {
-                Reflection::Behind(before.to_string())
-            })
-        }
-        // Only a tail that ends in the probe and, without it, ends the body
-        // reflects the write; a tail alone is not this call's text.
-        ComposerReadout::Tail(text) => text
-            .strip_suffix(probe)
-            .filter(|before| tail_is_end_of(before, body))
-            .map(|_| Reflection::BehindTail),
-        ComposerReadout::NotObserved | ComposerReadout::Empty => None,
+fn reflection_of(readout: &ComposerReadout, body: &str, probe: char) -> Option<BehindProbe> {
+    if let ComposerReadout::Body(text) = readout
+        && is_proper_prefix_ignoring_whitespace(text, body, probe)
+    {
+        return None;
+    }
+    match BehindProbe::of(readout, probe)? {
+        // A tail alone is not this call's text: it must end the body.
+        BehindProbe::Text(ShownText::Tail(before)) if !tail_is_end_of(&before, body) => None,
+        behind @ (BehindProbe::Alone | BehindProbe::Text(_)) => Some(behind),
     }
 }
 
@@ -1740,7 +1841,7 @@ impl WindowEntry {
             };
             let guarded = self.write_seq();
             match self
-                .wait_for_composer(Some(guarded), requester, readable)
+                .wait_for_composer("judge_submit", Some(guarded), requester, readable)
                 .await
             {
                 ComposerWait::Done(readable) => {
@@ -1931,17 +2032,22 @@ impl WindowEntry {
         }
     }
 
-    /// The first reading of a screen that accepts a write, with the ledger
-    /// count it was guarded at. There is no time limit: `None` once another
-    /// writer writes or `requester` leaves first.
+    /// The first reading of a screen that accepts a write and shows a
+    /// composer, with the ledger count it was guarded at: a frame caught
+    /// between erasing and repainting the composer says nothing of what is
+    /// left. There is no time limit: `None` once another writer writes or
+    /// `requester` leaves first.
     async fn read_writable_screen(
         &self,
+        route: &'static str,
         requester: &mut Requester,
     ) -> PtyResult<Option<(ComposerReadout, u64)>> {
         let seen = self.write_seq();
         match self
-            .wait_for_composer(Some(seen), requester, |observation| {
-                screen_accepts_write(observation.screen_rule).then(|| observation.readout.clone())
+            .wait_for_composer(route, Some(seen), requester, |observation| {
+                (screen_accepts_write(observation.screen_rule)
+                    && observation.readout != ComposerReadout::NotObserved)
+                    .then(|| observation.readout.clone())
             })
             .await
         {
@@ -1973,7 +2079,10 @@ impl WindowEntry {
         } else {
             Checked::MayRemain
         };
-        let Some((reading, seen)) = self.read_writable_screen(requester).await? else {
+        let Some((reading, seen)) = self
+            .read_writable_screen("check_own_text", requester)
+            .await?
+        else {
             return Ok(Checked::MayRemain);
         };
         let shows = match &reading {
@@ -1997,18 +2106,31 @@ impl WindowEntry {
             OwnShows::WithOthers => return Ok(Checked::MayRemain),
             OwnShows::Alone => {}
         }
-        let ProbeReading::Shown { before, .. } = self
+        let ProbeReading::Shown(behind) = self
             .read_through_probe(probe, seen, &reading, requester)
             .await?
         else {
             return Ok(Checked::MayRemain);
         };
         let after_probe = seen + 1;
-        if before.chars().all(char::is_whitespace) {
-            self.erase_probe_behind(after_probe, probe, &before).await?;
-            return Ok(Checked::Gone);
-        }
-        match own_text_shows(&before, own, probe) {
+        let before = match &behind {
+            BehindProbe::Text(ShownText::Body(before))
+                if !before.chars().all(char::is_whitespace) =>
+            {
+                before
+            }
+            BehindProbe::Alone | BehindProbe::Text(ShownText::Body(_)) => {
+                self.erase_probe_behind(after_probe, probe, &behind).await?;
+                return Ok(Checked::Gone);
+            }
+            // The end of a taller composer cannot show the call's own text
+            // alone.
+            BehindProbe::Text(ShownText::Tail(_)) => {
+                self.erase_probe_behind(after_probe, probe, &behind).await?;
+                return Ok(Checked::MayRemain);
+            }
+        };
+        match own_text_shows(before, own, probe) {
             OwnShows::Alone => {
                 let written = format!("{own}{probe}");
                 let shown = ComposerReadout::Body(format!("{before}{probe}"));
@@ -2016,11 +2138,11 @@ impl WindowEntry {
                     .await
             }
             OwnShows::WithOthers => {
-                self.erase_probe_behind(after_probe, probe, &before).await?;
+                self.erase_probe_behind(after_probe, probe, &behind).await?;
                 Ok(Checked::MayRemain)
             }
             OwnShows::Absent => {
-                self.erase_probe_behind(after_probe, probe, &before).await?;
+                self.erase_probe_behind(after_probe, probe, &behind).await?;
                 Ok(gone_if_read_back)
             }
         }
@@ -2049,36 +2171,38 @@ impl WindowEntry {
 
     /// Once another writer's write ended the call while its probe, written
     /// behind a composer reading as `before_probe`, had not shown: erases
-    /// that probe when the screen shows it alone behind `before_probe`, and
-    /// writes nothing otherwise (it may sit among the other writer's text).
+    /// that probe when the screen shows it right behind `before_probe` -- the
+    /// end of a taller composer included -- and writes nothing otherwise (it
+    /// may sit among the other writer's text).
     async fn check_unconfirmed_probe(
         &self,
         before_probe: &ComposerReadout,
         probe: char,
         requester: &mut Requester,
     ) -> PtyResult<()> {
-        let before = match before_probe {
-            ComposerReadout::Empty => String::new(),
-            ComposerReadout::Body(text) => text.clone(),
-            ComposerReadout::NotObserved | ComposerReadout::Tail(_) => return Ok(()),
-        };
-        let probed = format!("{before}{probe}");
-        let Some((reading, seen)) = self.read_writable_screen(requester).await? else {
+        let Some(before) = BehindProbe::before(before_probe) else {
             return Ok(());
         };
-        if !composer_reads_back_as(&reading, &probed) {
+        let Some((reading, seen)) = self
+            .read_writable_screen("check_unconfirmed_probe", requester)
+            .await?
+        else {
+            return Ok(());
+        };
+        let probe_shows = &reading != before_probe
+            && BehindProbe::of(&reading, probe).is_some_and(|shown| shown.same_as(&before));
+        if !probe_shows {
             return Ok(());
         }
-        let ProbeReading::Shown { before: shown, .. } = self
+        let ProbeReading::Shown(shown) = self
             .read_through_probe(probe, seen, &reading, requester)
             .await?
         else {
             return Ok(());
         };
         let after_check = seen + 1;
-        if composer_text_matches_ignoring_lost_whitespace(&shown, &probed) {
-            if self.erase_probe_behind(after_check, probe, &probed).await? == GuardedWrite::Written
-            {
+        if shown.is_probe_behind(&before, probe) {
+            if self.erase_probe_behind(after_check, probe, &shown).await? == GuardedWrite::Written {
                 self.erase_probe_behind(after_check + 1, probe, &before)
                     .await?;
             }
@@ -2120,7 +2244,9 @@ impl WindowEntry {
         requester: &mut Requester,
     ) -> PtyResult<Option<ComposerObservation>> {
         match self
-            .wait_for_composer(None, requester, |observation| Some(observation.clone()))
+            .wait_for_composer("observe_composer", None, requester, |observation| {
+                Some(observation.clone())
+            })
             .await
         {
             ComposerWait::Done(observation) => Ok(Some(observation)),
@@ -2139,8 +2265,13 @@ impl WindowEntry {
     /// read again and nothing more; there is no time limit, and this relies
     /// on the detector answering a query it has taken up (see
     /// [`DetectorHandle::query_composer`]).
+    ///
+    /// A wait that turns down an unreadable composer is logged once when it
+    /// does and once when it ends, under `route`: nothing else ends such a
+    /// wait, so this is what tells a window held by one apart.
     async fn wait_for_composer<T>(
         &self,
+        route: &'static str,
         own_seq: Option<u64>,
         requester: &mut Requester,
         mut settle: impl FnMut(&ComposerObservation) -> Option<T>,
@@ -2149,35 +2280,53 @@ impl WindowEntry {
         let mut writes = self.session.subscribe_writes_recorded();
         let mut arrivals = self.session.output_arrivals();
         let mut status = self.watch_status();
-        loop {
+        let mut waiting_on_unreadable = false;
+        let end = 'wait: loop {
             // Seen before the query, so a change while it runs is a cue.
             arrivals.borrow_and_update();
             status.borrow_and_update();
             if let Some(end) = self.wait_ended(&exit, requester, own_seq) {
-                return end;
+                break 'wait end;
             }
             let observation = tokio::select! {
                 biased;
-                () = child_exited(&mut exit) => return ComposerWait::Exited,
-                () = requester.left() => return ComposerWait::RequesterGone,
-                () = ledger_moved(&mut writes, own_seq) => return ComposerWait::OtherWriter,
+                () = child_exited(&mut exit) => break 'wait ComposerWait::Exited,
+                () = requester.left() => break 'wait ComposerWait::RequesterGone,
+                () = ledger_moved(&mut writes, own_seq) => break 'wait ComposerWait::OtherWriter,
                 observation = self.query_composer() => observation,
             };
             if let Some(end) = self.wait_ended(&exit, requester, own_seq) {
-                return end;
+                break 'wait end;
             }
             if let Some(settled) = settle(&observation) {
-                return ComposerWait::Done(settled);
+                break 'wait ComposerWait::Done(settled);
+            }
+            if !waiting_on_unreadable && observation.readout == ComposerReadout::NotObserved {
+                waiting_on_unreadable = true;
+                tracing::info!(
+                    window_id = %self.window_id(),
+                    route,
+                    "waiting for the composer to become readable"
+                );
             }
             tokio::select! {
                 biased;
-                () = child_exited(&mut exit) => return ComposerWait::Exited,
-                () = requester.left() => return ComposerWait::RequesterGone,
-                () = ledger_moved(&mut writes, own_seq) => return ComposerWait::OtherWriter,
+                () = child_exited(&mut exit) => break 'wait ComposerWait::Exited,
+                () = requester.left() => break 'wait ComposerWait::RequesterGone,
+                () = ledger_moved(&mut writes, own_seq) => break 'wait ComposerWait::OtherWriter,
                 () = next_change(&mut arrivals) => {}
                 () = next_change(&mut status) => {}
             }
+        };
+        if waiting_on_unreadable {
+            tracing::info!(
+                window_id = %self.window_id(),
+                route,
+                ended_by = end.label(),
+                "wait on an unreadable composer ended"
+            );
         }
+        end
     }
 
     /// Resolves once the composer reads empty on a screen that accepts a
@@ -2187,11 +2336,16 @@ impl WindowEntry {
     /// emptying whose redraw lags is still caught.
     pub(crate) async fn wait_for_composer_empty(&self) {
         match self
-            .wait_for_composer(None, &mut Requester::none(), |observation| {
-                (screen_accepts_write(observation.screen_rule)
-                    && observation.readout == ComposerReadout::Empty)
-                    .then_some(())
-            })
+            .wait_for_composer(
+                "wait_for_composer_empty",
+                None,
+                &mut Requester::none(),
+                |observation| {
+                    (screen_accepts_write(observation.screen_rule)
+                        && observation.readout == ComposerReadout::Empty)
+                        .then_some(())
+                },
+            )
             .await
         {
             // The caller's own loop sees an exited child.
@@ -2225,11 +2379,12 @@ impl WindowEntry {
     /// writer.
     async fn wait_for_composer_unwatched<T>(
         &self,
+        route: &'static str,
         own_seq: u64,
         settle: impl FnMut(&ComposerObservation) -> Option<T>,
     ) -> PtyResult<Option<T>> {
         match self
-            .wait_for_composer(Some(own_seq), &mut Requester::none(), settle)
+            .wait_for_composer(route, Some(own_seq), &mut Requester::none(), settle)
             .await
         {
             ComposerWait::Done(settled) => Ok(Some(settled)),
@@ -2259,8 +2414,8 @@ impl WindowEntry {
             // An earlier probe is still on its way: a second one behind it
             // would leave one of them in the composer.
             let shown_before = |observation: &ComposerObservation| match &observation.readout {
-                ComposerReadout::Body(text) if screen_accepts_write(observation.screen_rule) => {
-                    text.strip_suffix(probe).map(str::to_string)
+                ComposerReadout::Body(_) if screen_accepts_write(observation.screen_rule) => {
+                    BehindProbe::of(&observation.readout, probe)
                 }
                 ComposerReadout::Body(_)
                 | ComposerReadout::Empty
@@ -2268,14 +2423,19 @@ impl WindowEntry {
                 | ComposerReadout::Tail(_) => None,
             };
             return match self
-                .wait_for_composer(Some(seq), requester, shown_before)
+                .wait_for_composer(
+                    "confirm_empty_then_write",
+                    Some(seq),
+                    requester,
+                    shown_before,
+                )
                 .await
             {
-                ComposerWait::Done(before) if before.is_empty() => {
+                ComposerWait::Done(BehindProbe::Alone) => {
                     self.write_once_probe_erased(body, probe, seq, requester)
                         .await
                 }
-                ComposerWait::Done(before) => {
+                ComposerWait::Done(before @ BehindProbe::Text(_)) => {
                     self.erase_probe_behind(seq, probe, &before).await?;
                     Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
                 }
@@ -2288,11 +2448,11 @@ impl WindowEntry {
             .read_through_probe(probe, seq, &observed.readout, requester)
             .await?
         {
-            ProbeReading::Shown { before, .. } if before.is_empty() => {
+            ProbeReading::Shown(BehindProbe::Alone) => {
                 self.write_once_probe_erased(body, probe, seq + 1, requester)
                     .await
             }
-            ProbeReading::Shown { before, .. } => {
+            ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
                 self.erase_probe_behind(seq + 1, probe, &before).await?;
                 Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
             }
@@ -2305,9 +2465,11 @@ impl WindowEntry {
     /// since its baseline, yet the composer reads empty: the envelope is not
     /// drawn yet, or the receiver has already taken or dropped it. The probe
     /// written behind it tells which, in the order the receiver handles its
-    /// input: shown behind something (or past what can be read), the
-    /// envelope is there and the submit key alone is pressed; shown alone,
-    /// it is gone and `body` is written fresh; nothing shown, the call waits.
+    /// input: shown behind something (behind the end of `body`, when only
+    /// the end of a taller composer shows), the envelope is there and the
+    /// submit key alone is pressed once the probe is erased; shown alone, it
+    /// is gone and `body` is written fresh; nothing shown, or a screen that
+    /// shows no composer, the call waits.
     async fn confirm_unshown_envelope(
         &self,
         body: &str,
@@ -2340,24 +2502,22 @@ impl WindowEntry {
             }
         };
         match self
-            .wait_for_composer(Some(after_probe), requester, shown)
+            .wait_for_composer(
+                "confirm_unshown_envelope",
+                Some(after_probe),
+                requester,
+                shown,
+            )
             .await
         {
-            ComposerWait::Done(Reflection::Behind(before)) => {
-                self.note_read_back(&before, body);
-                self.erase_probe_then_resend(
-                    body,
-                    ErasedTarget::Body(&before),
-                    after_probe,
-                    requester,
-                )
-                .await
-            }
-            ComposerWait::Done(Reflection::BehindTail) => {
-                self.erase_probe_then_resend(body, ErasedTarget::Tail, after_probe, requester)
+            ComposerWait::Done(BehindProbe::Text(shown)) => {
+                if let ShownText::Body(before) = &shown {
+                    self.note_read_back(before, body);
+                }
+                self.erase_probe_then_resend(body, &shown, after_probe, requester)
                     .await
             }
-            ComposerWait::Done(Reflection::Dropped) => {
+            ComposerWait::Done(BehindProbe::Alone) => {
                 self.write_once_probe_erased(body, probe, after_probe, requester)
                     .await
             }
@@ -2402,7 +2562,9 @@ impl WindowEntry {
     ///
     /// What counts as the envelope is the screen showing the body when the
     /// ledger does not vouch; a tail must end the body either way, since the
-    /// end of a long composer can be anything that ends alike.
+    /// end of a long composer can be anything that ends alike. A probe that
+    /// shows alone means the envelope is not there, however the ledger
+    /// vouches: the probe is erased and nothing is sent.
     async fn confirm_envelope_then_resend(
         &self,
         body: &str,
@@ -2412,27 +2574,25 @@ impl WindowEntry {
         ledger_vouches: bool,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
+        let envelope_shows = |shown: &ShownText| match shown {
+            ShownText::Body(before) => {
+                ledger_vouches || composer_text_matches_ignoring_lost_whitespace(before, body)
+            }
+            ShownText::Tail(before) => tail_is_end_of(before, body),
+        };
         match self
             .read_through_probe(probe, seq, observed, requester)
             .await?
         {
-            ProbeReading::Shown { before, tail: true } if tail_is_end_of(&before, body) => {
-                self.erase_probe_then_resend(body, ErasedTarget::Tail, seq + 1, requester)
-                    .await
-            }
-            ProbeReading::Shown {
-                before,
-                tail: false,
-            } if ledger_vouches
-                || composer_text_matches_ignoring_lost_whitespace(&before, body) =>
-            {
-                if composer_text_matches_ignoring_lost_whitespace(&before, body) {
-                    self.note_read_back(&before, body);
+            ProbeReading::Shown(BehindProbe::Alone) => self.erase_dropped_probe(seq + 1).await,
+            ProbeReading::Shown(BehindProbe::Text(shown)) if envelope_shows(&shown) => {
+                if let ShownText::Body(before) = &shown {
+                    self.note_read_back(before, body);
                 }
-                self.erase_probe_then_resend(body, ErasedTarget::Body(&before), seq + 1, requester)
+                self.erase_probe_then_resend(body, &shown, seq + 1, requester)
                     .await
             }
-            ProbeReading::Shown { before, .. } => {
+            ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
                 self.erase_probe_behind(seq + 1, probe, &before).await?;
                 Ok(foreign_draft(declined_unvouched(NotPlacedReason::Foreign)))
             }
@@ -2447,7 +2607,7 @@ impl WindowEntry {
     async fn erase_probe_then_resend(
         &self,
         body: &str,
-        target: ErasedTarget<'_>,
+        target: &ShownText,
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
@@ -2467,7 +2627,7 @@ impl WindowEntry {
     }
 
     /// Erases a probe that showed behind `before` (ledger at `seq`), and reads
-    /// until the erase is reached -- the composer holds `before` again, or
+    /// until the erase is reached -- the composer shows `before` again, or
     /// something that no longer ends with the probe -- or another writer
     /// moves the ledger, so the next reader sees what was there before the
     /// probe. [`GuardedWrite::Moved`] when the erase itself was not written.
@@ -2475,7 +2635,7 @@ impl WindowEntry {
         &self,
         seq: u64,
         probe: char,
-        before: &str,
+        before: &BehindProbe,
     ) -> PtyResult<GuardedWrite> {
         if self
             .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
@@ -2484,14 +2644,14 @@ impl WindowEntry {
         {
             return Ok(GuardedWrite::Moved);
         }
-        self.wait_for_composer_unwatched(seq + 1, |observation| {
+        self.wait_for_composer_unwatched("erase_probe_behind", seq + 1, |observation| {
             // A screen not readable yet is no sign the erase was reached.
             let erased = match &observation.readout {
                 ComposerReadout::Body(text) | ComposerReadout::Tail(text) => !text.ends_with(probe),
                 ComposerReadout::Empty => true,
                 ComposerReadout::NotObserved => false,
             };
-            (erased || composer_reads_back_as(&observation.readout, before)).then_some(())
+            (erased || before.shows_again_in(&observation.readout)).then_some(())
         })
         .await?;
         Ok(GuardedWrite::Written)
@@ -2530,22 +2690,18 @@ impl WindowEntry {
             {
                 return None;
             }
-            match &observation.readout {
-                ComposerReadout::Body(text) => text
-                    .strip_suffix(probe)
-                    .map(|before| (before.to_string(), false)),
-                ComposerReadout::Tail(text) => text
-                    .strip_suffix(probe)
-                    .filter(|before| !before.trim().is_empty())
-                    .map(|before| (before.to_string(), true)),
-                ComposerReadout::Empty | ComposerReadout::NotObserved => None,
-            }
+            BehindProbe::of(&observation.readout, probe)
         };
         match self
-            .wait_for_composer(Some(after_probe), requester, shown_before)
+            .wait_for_composer(
+                "read_through_probe",
+                Some(after_probe),
+                requester,
+                shown_before,
+            )
             .await
         {
-            ComposerWait::Done((before, tail)) => Ok(ProbeReading::Shown { before, tail }),
+            ComposerWait::Done(behind) => Ok(ProbeReading::Shown(behind)),
             ComposerWait::OtherWriter => Ok(ProbeReading::Interrupted),
             ComposerWait::RequesterGone => {
                 // Still on its way: the next call settles it by this count.
@@ -2562,11 +2718,9 @@ impl WindowEntry {
     /// brought with it. Every write, from every writer, moves that count, so
     /// a match means the composer holds what this caller left there and
     /// nothing else; another writer's bytes cannot pass as the caller's own
-    /// by being identical. This is why what the screen shows may be
-    /// disregarded when it holds: the single decision point behind both
-    /// readings that cannot restore the caller's envelope from the screen (a
-    /// region that reads as something else, and one that cannot be read at
-    /// all).
+    /// by being identical. It never stands in for the screen: the envelope,
+    /// or a probe written behind it, still has to show before the submit key
+    /// is pressed.
     fn record_vouches_for_residue(&self, residue: Option<ComposerResidue<'_>>, body: &str) -> bool {
         residue.is_some_and(|residue| residue.body == body && residue.write_seq == self.write_seq())
     }
@@ -2616,7 +2770,7 @@ impl WindowEntry {
 
     /// Writes `body` fresh into a composer just observed empty, then the
     /// probe behind it, and decides from what the composer shows once the
-    /// probe does (see [`Reflection`]): the body landed, so the probe is
+    /// probe does (see [`reflection_of`]): the body landed, so the probe is
     /// erased and the submit key pressed once the composer reads as it did
     /// before the probe; the body was dropped, so the probe is erased and
     /// nothing is left; or nothing shows yet, so the call waits.
@@ -2696,29 +2850,18 @@ impl WindowEntry {
             .wait_for_reflection(body, probe, after_probe, requester)
             .await
         {
-            ComposerWait::Done(Reflection::Behind(before)) => {
+            ComposerWait::Done(BehindProbe::Text(shown)) => {
                 self.erase_probe_then_submit(
                     body,
                     probe,
-                    ErasedTarget::Body(&before),
+                    &shown,
                     &submit_step,
                     after_probe,
                     requester,
                 )
                 .await
             }
-            ComposerWait::Done(Reflection::BehindTail) => {
-                self.erase_probe_then_submit(
-                    body,
-                    probe,
-                    ErasedTarget::Tail,
-                    &submit_step,
-                    after_probe,
-                    requester,
-                )
-                .await
-            }
-            ComposerWait::Done(Reflection::Dropped) => self.erase_dropped_probe(after_probe).await,
+            ComposerWait::Done(BehindProbe::Alone) => self.erase_dropped_probe(after_probe).await,
             ComposerWait::OtherWriter => {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_probe)))
             }
@@ -2739,10 +2882,10 @@ impl WindowEntry {
         probe: char,
         seq: u64,
         requester: &mut Requester,
-    ) -> ComposerWait<Reflection> {
+    ) -> ComposerWait<BehindProbe> {
         let started = Instant::now();
         let reflection = self
-            .wait_for_composer(Some(seq), requester, |observation| {
+            .wait_for_composer("wait_for_reflection", Some(seq), requester, |observation| {
                 if screen_accepts_write(observation.screen_rule) {
                     reflection_of(&observation.readout, body, probe)
                 } else {
@@ -2751,15 +2894,15 @@ impl WindowEntry {
             })
             .await;
         let (outcome, reflected) = match &reflection {
-            ComposerWait::Done(Reflection::Behind(before)) => {
+            ComposerWait::Done(BehindProbe::Text(ShownText::Body(before))) => {
                 self.note_read_back(before, body);
                 (
                     "behind",
                     composer_text_matches_ignoring_lost_whitespace(before, body),
                 )
             }
-            ComposerWait::Done(Reflection::Dropped) => ("dropped", false),
-            ComposerWait::Done(Reflection::BehindTail) => ("behind_tail", true),
+            ComposerWait::Done(BehindProbe::Alone) => ("dropped", false),
+            ComposerWait::Done(BehindProbe::Text(ShownText::Tail(_))) => ("behind_tail", true),
             ComposerWait::OtherWriter => ("other_writer", false),
             ComposerWait::RequesterGone => ("requester_gone", false),
             ComposerWait::Exited => ("exited", false),
@@ -2787,7 +2930,7 @@ impl WindowEntry {
     async fn erase_probe_back_to(
         &self,
         seq: u64,
-        target: ErasedTarget<'_>,
+        target: &ShownText,
         own: &str,
         requester: &mut Requester,
     ) -> PtyResult<Option<ComposerWait<()>>> {
@@ -2799,23 +2942,18 @@ impl WindowEntry {
             return Ok(None);
         }
         let reads_as_before = |observation: &ComposerObservation| {
-            let reached = match (&observation.readout, target) {
-                (ComposerReadout::Body(_), ErasedTarget::Body(before)) => {
-                    composer_reads_back_as(&observation.readout, before)
-                }
-                // Without the probe the body may fit the screen after all.
-                (ComposerReadout::Body(_), ErasedTarget::Tail) => {
-                    composer_reads_back_as(&observation.readout, own)
-                }
-                (ComposerReadout::Tail(text), ErasedTarget::Tail) => tail_is_end_of(text, own),
-                (ComposerReadout::Tail(_), ErasedTarget::Body(_))
-                | (ComposerReadout::Empty | ComposerReadout::NotObserved, _) => false,
-            };
-            (screen_accepts_write(observation.screen_rule) && reached).then_some(())
+            (screen_accepts_write(observation.screen_rule)
+                && target.restored_in(&observation.readout, own))
+            .then_some(())
         };
         Ok(Some(
-            self.wait_for_composer(Some(seq + 1), requester, reads_as_before)
-                .await,
+            self.wait_for_composer(
+                "erase_probe_back_to",
+                Some(seq + 1),
+                requester,
+                reads_as_before,
+            )
+            .await,
         ))
     }
 
@@ -2826,7 +2964,7 @@ impl WindowEntry {
         &self,
         body: &str,
         probe: char,
-        target: ErasedTarget<'_>,
+        target: &ShownText,
         submit_step: &SubmitStep,
         seq: u64,
         requester: &mut Requester,
@@ -2884,7 +3022,7 @@ impl WindowEntry {
         // The take-back is a write of its own, so it waits for a screen that
         // accepts one, the same as every other write.
         let Some(before_take_back) = self
-            .wait_for_composer_unwatched(seq, |observation| {
+            .wait_for_composer_unwatched("take_back_for_departed_requester", seq, |observation| {
                 (screen_accepts_write(observation.screen_rule)
                     && !matches!(observation.readout, ComposerReadout::NotObserved))
                 .then(|| observation.readout.clone())
@@ -3030,7 +3168,7 @@ impl WindowEntry {
             | ComposerReadout::Tail(_) => None,
         };
         match self
-            .wait_for_composer_unwatched(after_probe, probe_shown_alone)
+            .wait_for_composer_unwatched("settle_with_probe", after_probe, probe_shown_alone)
             .await?
         {
             Some(true) => {
@@ -3087,7 +3225,7 @@ impl WindowEntry {
             .then_some(observation.screen_rule)
         };
         match self
-            .wait_for_composer_unwatched(after_erase, emptied)
+            .wait_for_composer_unwatched("erase_probe", after_erase, emptied)
             .await?
         {
             Some(rule) => {
