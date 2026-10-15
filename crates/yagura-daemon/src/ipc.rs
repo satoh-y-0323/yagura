@@ -4095,9 +4095,13 @@ fn not_placed_message(not_placed: &NotPlaced) -> &'static str {
              the request was cancelled before the text showed), so it was withdrawn and \
              nothing remains"
         }
-        (NotPlacedReason::Interrupted, _) => {
-            "another write reached the window before the submit key, so the two writes were \
-             left mixed together"
+        (NotPlacedReason::Interrupted, true) => {
+            "another write reached the window before the submit key, so nothing more was \
+             written; the text written so far may still be in the composer alongside that write"
+        }
+        (NotPlacedReason::Interrupted, false) => {
+            "another write reached the window before the submit key, so nothing more was \
+             written, and none of the text is left in the composer"
         }
         (NotPlacedReason::NotAccepting, true) => {
             "the window's screen was not accepting input (an approval prompt, most likely), so \

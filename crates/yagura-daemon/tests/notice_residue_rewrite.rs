@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use common::{
     Harness, SUBMIT_CHILD_PROBE, approver_base_config, call_open_window, composer_section_toml,
-    identify, policy, read_response, send, unique_temp_dir, wait_until_composer_satisfies,
-    wait_until_status,
+    identify, policy, read_composer_now, read_response, send, unique_temp_dir,
+    wait_until_composer_satisfies, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -275,9 +275,19 @@ async fn text_typed_behind_a_waiting_notice_is_neither_cleared_overwritten_nor_s
 
     scene.wait_for_attempts(2).await;
     let text = flattened(&scene.h, &parent);
+    // This receiver types the clear key out as `^U`, so the notice's take-back
+    // shows where it reached the composer: in front of the other writer's text.
+    let composer = match read_composer_now(&scene.h, &parent).await {
+        ComposerReadout::Body(composer) => composer,
+        other => panic!("the other writer's text must still stand in the composer, got {other:?}"),
+    };
+    let typed = composer
+        .find("USER-TYPED")
+        .unwrap_or_else(|| panic!("the other writer's text must be kept; composer: {composer}"));
     assert!(
-        !text.contains("^U"),
-        "text that is not the daemon's own record must not be cleared; screen text: {text}"
+        composer[..typed].contains("^U") && !composer[typed..].contains("^U"),
+        "the notice's take-back must go in front of the other writer's text, never behind it; \
+         composer: {composer}"
     );
     assert!(
         !text.contains("SUBMITTED "),

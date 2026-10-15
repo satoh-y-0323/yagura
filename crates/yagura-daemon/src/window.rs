@@ -42,7 +42,10 @@ use crate::handoff::{ReadyHoldLatch, StartupEvidence};
 use crate::input::{
     InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack, plan_submit_line,
 };
-use crate::pty::{PtyResult, PtySession, lock_recover};
+use crate::pty::{
+    GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix, TakeBackRegistration,
+    lock_recover,
+};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
@@ -639,9 +642,10 @@ enum ProbeReading {
 
 /// What [`WindowEntry::erase_probe`] found.
 enum ProbeErased {
-    /// The composer reads empty, on the screen this rule verdict was read on.
-    Emptied(Option<DetectedStatus>),
-    /// Another writer wrote after the erase, which left the ledger here.
+    /// The composer reads empty, on the screen this rule verdict was read on,
+    /// with the ledger at this count.
+    Emptied(Option<DetectedStatus>, u64),
+    /// Another writer wrote; this call's own writes left the ledger here.
     Interrupted(u64),
 }
 
@@ -830,9 +834,33 @@ fn composer_reads_back_as(readout: &ComposerReadout, body: &str) -> bool {
 
 /// How a take-back ended: the composer confirmed empty (with the screen rule
 /// verdict of that reading), or a judgment declining the attempt.
+/// `Emptied` also carries the ledger count the empty reading was guarded at.
 enum TakenBack {
-    Emptied(Option<DetectedStatus>),
+    Emptied(Option<DetectedStatus>, u64),
     Declined(SubmitJudgment),
+}
+
+/// What [`WindowEntry::run_judged_steps`] did.
+enum JudgedSteps {
+    /// Every step was written.
+    Written(SubmitOutcome),
+    /// Another write was counted first; the steps before the one expecting
+    /// `at` were written, and nothing after.
+    Moved { at: u64 },
+}
+
+/// Ends a call's take-back generation on drop, however the call ends, so
+/// its registration never outlives it.
+struct TakeBackScope<'a> {
+    entry: &'a WindowEntry,
+    call: TakeBackCall,
+}
+
+impl Drop for TakeBackScope<'_> {
+    fn drop(&mut self) {
+        *lock_recover(&self.entry.take_back_call) = None;
+        self.entry.session.end_take_back_call(self.call);
+    }
 }
 
 /// One place in a window's queue for its delivery turn, given back on drop.
@@ -981,6 +1009,14 @@ pub struct WindowEntry {
     /// with nothing written since, what the composer holds can still be
     /// settled.
     unanswered_probe: Mutex<Option<u64>>,
+    /// What [`crate::control::interrupt_window`] writes, from the same
+    /// configuration: a write of exactly these bytes goes out with no
+    /// take-back in front, since some CLIs exit on an interrupt to an empty
+    /// composer.
+    interrupt_bytes: Vec<u8>,
+    /// The take-back generation of the [`WindowEntry::submit_message`] call
+    /// holding `input_lock`; `None` between calls.
+    take_back_call: Mutex<Option<TakeBackCall>>,
     /// The chat intro's outcome, written at most once. `None`
     /// while the intro is still queued, or when none was queued (no chat, no
     /// intro, or not a participant).
@@ -1243,6 +1279,10 @@ impl WindowEntry {
     /// detector has already been taken (`Exited`) is written to without a
     /// notification: nothing is left to attribute the output to.
     ///
+    /// A [`WindowEntry::submit_message`] call's own unsent text goes in front
+    /// of `data`, taken back (see [`PtySession::write_input_with`]), unless
+    /// `data` is exactly this window's configured interrupt bytes.
+    ///
     /// # Errors
     ///
     /// Propagates [`crate::pty::PtyError`] from the underlying write; in
@@ -1260,7 +1300,90 @@ impl WindowEntry {
                 detector.notify_input(classify_input_echo(data, origin));
             }
         }
-        self.session.write_input(data).await
+        let prefix = if !data.is_empty() && data == self.interrupt_bytes.as_slice() {
+            TakeBackPrefix::Withhold
+        } else {
+            TakeBackPrefix::Apply
+        };
+        self.session.write_input_with(data, prefix).await
+    }
+
+    /// Writes `data` as one of [`WindowEntry::submit_message`]'s own writes:
+    /// only while the ledger still reads `expected`, the value the decision
+    /// to write was made on. The detector hears of it only once that holds.
+    async fn write_judged(
+        &self,
+        data: &[u8],
+        expected: u64,
+        registration: TakeBackRegistration,
+    ) -> PtyResult<GuardedWrite> {
+        let detector = lock_recover(&self.detector).clone();
+        let echo = classify_input_echo(data, InputOrigin::Message);
+        self.session
+            .write_input_if_unmoved(data, expected, registration, move || {
+                if let Some(detector) = detector {
+                    detector.notify_input(echo);
+                }
+            })
+            .await
+    }
+
+    /// [`WindowEntry::write_judged`] for each step of `plan` in turn, the
+    /// first expecting `expected` and each later one the count after the step
+    /// before it. `registration` gets each step's index.
+    async fn run_judged_steps(
+        &self,
+        plan: &SubmitPlan,
+        expected: u64,
+        registration: impl Fn(usize) -> TakeBackRegistration,
+    ) -> PtyResult<JudgedSteps> {
+        let last_index = plan.steps.len().saturating_sub(1);
+        let mut status_before_submit = self.current_status();
+        let mut submitted_at = tokio::time::Instant::now();
+        for (index, step) in plan.steps.iter().enumerate() {
+            if index == last_index {
+                status_before_submit = self.current_status();
+            }
+            let at = expected + index as u64;
+            match self
+                .write_judged(&step.bytes, at, registration(index))
+                .await?
+            {
+                GuardedWrite::Written => {}
+                GuardedWrite::Moved => return Ok(JudgedSteps::Moved { at }),
+            }
+            if index == last_index {
+                submitted_at = tokio::time::Instant::now();
+            }
+            if !step.delay_after.is_zero() {
+                tokio::time::sleep(step.delay_after).await;
+            }
+        }
+        Ok(JudgedSteps::Written(SubmitOutcome {
+            status_before_submit,
+            submitted_at,
+        }))
+    }
+
+    /// The registration naming `text` as the running call's own part of the
+    /// composer; none when this window's profile cannot take text back (or no
+    /// call is running).
+    fn own_text(&self, text: &str) -> TakeBackRegistration {
+        match (*lock_recover(&self.take_back_call), self.input.take_back()) {
+            (Some(call), TakeBack::Fixed) => TakeBackRegistration::Set {
+                call,
+                text: text.to_string(),
+                clear: self.input.clear.clone(),
+            },
+            (None, _) | (Some(_), TakeBack::Unavailable) => TakeBackRegistration::Empty,
+        }
+    }
+
+    /// Starts the take-back generation for a call holding `input_lock`.
+    fn begin_take_back_scope(&self) -> TakeBackScope<'_> {
+        let call = self.session.begin_take_back_call();
+        *lock_recover(&self.take_back_call) = Some(call);
+        TakeBackScope { entry: self, call }
     }
 
     /// How many writes this window has taken, from every writer alike. A send plan pairs this with the text it left in the
@@ -1330,8 +1453,9 @@ impl WindowEntry {
     }
 
     /// One write sequence's step loop, run under the input lock its caller
-    /// holds: [`WindowEntry::submit_message`] runs several such sequences
-    /// (and the observation between them) inside one exclusive region.
+    /// holds, for bytes the caller composed itself
+    /// ([`WindowEntry::submit_raw_gated`]); [`WindowEntry::submit_message`]'s
+    /// own writes go through [`WindowEntry::run_judged_steps`] instead.
     ///
     /// `status_before_submit` is read immediately before the final step and
     /// `submitted_at` is the instant that write completes, both inside the
@@ -1414,24 +1538,30 @@ impl WindowEntry {
         let Some(_guard) = self.lock_input(&mut requester).await else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
+        let _scope = self.begin_take_back_scope();
         let ComposerAccess::Judged { probe } = self.composer_access else {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         };
 
+        // The ledger as of the reading every write below is decided on: read
+        // before asking for it, so a write landing meanwhile is caught by the
+        // first ledger-checked write.
+        let mut seen = self.write_seq();
         let Some(mut observation) = self.observe_composer(&mut requester).await? else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
-        if matches!(observation.readout, ComposerReadout::Empty)
-            && self.record_vouches_for_residue(residue, body)
-        {
+        let vouched_seq = residue
+            .filter(|residue| self.record_vouches_for_residue(Some(*residue), body))
+            .map(|residue| residue.write_seq);
+        if let (ComposerReadout::Empty, Some(vouched_seq)) = (&observation.readout, vouched_seq) {
             if self.degenerate_and_unchanged() {
                 return Ok(declined(NotPlacedReason::Unobservable, None));
             }
             return self
-                .confirm_unshown_envelope(body, probe, &observation, &mut requester)
+                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, &mut requester)
                 .await;
         } else if matches!(observation.readout, ComposerReadout::NotObserved)
-            && !self.record_vouches_for_residue(residue, body)
+            && vouched_seq.is_none()
         {
             // A screen caught between erasing and repainting its composer
             // reads as unobservable for a moment; nothing is decided on that.
@@ -1439,11 +1569,15 @@ impl WindowEntry {
                 (!matches!(observation.readout, ComposerReadout::NotObserved))
                     .then(|| observation.clone())
             };
+            let guarded = self.write_seq();
             match self
-                .wait_for_composer(Some(self.write_seq()), &mut requester, readable)
+                .wait_for_composer(Some(guarded), &mut requester, readable)
                 .await
             {
-                ComposerWait::Done(readable) => observation = readable,
+                ComposerWait::Done(readable) => {
+                    observation = readable;
+                    seen = guarded;
+                }
                 ComposerWait::OtherWriter => {
                     return Ok(declined(NotPlacedReason::Interrupted, None));
                 }
@@ -1460,7 +1594,7 @@ impl WindowEntry {
                 if self.degenerate_and_unchanged() {
                     return Ok(declined(NotPlacedReason::Unobservable, None));
                 }
-                self.confirm_empty_then_write(body, probe, &observation, &mut requester)
+                self.confirm_empty_then_write(body, probe, &observation, seen, &mut requester)
                     .await
             }
             ComposerReadout::Body(text) => {
@@ -1468,9 +1602,9 @@ impl WindowEntry {
                     .settle_unanswered_probe(text, probe, observation.screen_rule)
                     .await?
                 {
-                    Some(TakenBack::Emptied(settled_rule)) => {
+                    Some(TakenBack::Emptied(settled_rule, seq)) => {
                         return self
-                            .write_fresh_and_decide(body, probe, settled_rule, &mut requester)
+                            .write_fresh_and_decide(body, probe, settled_rule, seq, &mut requester)
                             .await;
                     }
                     Some(TakenBack::Declined(judgment)) => return Ok(judgment),
@@ -1489,8 +1623,10 @@ impl WindowEntry {
                     composer_text_matches_ignoring_lost_whitespace(text, residue.body)
                         && residue.body == body
                 });
-                let vouched = self.record_vouches_for_residue(residue, body);
-                if restored_own_envelope || vouched {
+                let vouched_seq = residue
+                    .filter(|residue| self.record_vouches_for_residue(Some(*residue), body))
+                    .map(|residue| residue.write_seq);
+                if restored_own_envelope || vouched_seq.is_some() {
                     // A dialog's option row can read exactly like a composer
                     // holding other text (an approval screen's `1. Yes`, most
                     // notably), so the ledger match above cannot by itself
@@ -1500,7 +1636,7 @@ impl WindowEntry {
                     if !screen_accepts_write(observation.screen_rule) {
                         return Ok(decline_not_accepting(residue.map(|r| r.write_seq)));
                     }
-                    if !vouched {
+                    let Some(vouched_seq) = vouched_seq else {
                         // Someone wrote since the caller's baseline, so the
                         // envelope on screen may have unshown input behind it.
                         return self
@@ -1508,11 +1644,12 @@ impl WindowEntry {
                                 body,
                                 probe,
                                 &observation.readout,
+                                seen,
                                 &mut requester,
                             )
                             .await;
-                    }
-                    self.resend_key_only(body, &requester).await
+                    };
+                    self.resend_key_only(body, vouched_seq, &requester).await
                 } else if let Some(residue) =
                     // The ledger alone vouches the composer holds only the
                     // caller's own text, however the CLI draws it (folded or
@@ -1530,22 +1667,21 @@ impl WindowEntry {
                 } else if !self.degenerate_and_unchanged() {
                     // What reads as someone else's text may only be a screen
                     // that has not caught up with input that emptied it.
-                    self.confirm_empty_then_write(body, probe, &observation, &mut requester)
+                    self.confirm_empty_then_write(body, probe, &observation, seen, &mut requester)
                         .await
                 } else {
                     Ok(declined(NotPlacedReason::Foreign, None))
                 }
             }
-            ComposerReadout::NotObserved => {
-                if self.record_vouches_for_residue(residue, body) {
+            ComposerReadout::NotObserved => match vouched_seq {
+                Some(vouched_seq) => {
                     if !screen_accepts_write(observation.screen_rule) {
-                        return Ok(decline_not_accepting(residue.map(|r| r.write_seq)));
+                        return Ok(decline_not_accepting(Some(vouched_seq)));
                     }
-                    self.resend_key_only(body, &requester).await
-                } else {
-                    Ok(declined(NotPlacedReason::Unobservable, None))
+                    self.resend_key_only(body, vouched_seq, &requester).await
                 }
-            }
+                None => Ok(declined(NotPlacedReason::Unobservable, None)),
+            },
         }
     }
 
@@ -1689,12 +1825,12 @@ impl WindowEntry {
         body: &str,
         probe: char,
         observed: &ComposerObservation,
+        seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if !screen_accepts_write(observed.screen_rule) {
             return Ok(decline_not_accepting(None));
         }
-        let seq = self.write_seq();
         if *lock_recover(&self.unanswered_probe) == Some(seq) {
             // An earlier probe is still on its way: a second one behind it
             // would leave one of them in the composer.
@@ -1752,9 +1888,9 @@ impl WindowEntry {
         body: &str,
         probe: char,
         observed: &ComposerObservation,
+        seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        let seq = self.write_seq();
         if !screen_accepts_write(observed.screen_rule) {
             return Ok(decline_not_accepting(Some(seq)));
         }
@@ -1762,8 +1898,15 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
         let after_probe = seq + 1;
-        self.write_pty_input(probe.to_string().as_bytes(), InputOrigin::Message)
-            .await?;
+        let envelope_and_probe = self.own_text(&format!("{body}{probe}"));
+        if self
+            .write_judged(probe.to_string().as_bytes(), seq, envelope_and_probe)
+            .await?
+            == GuardedWrite::Moved
+        {
+            // The earlier attempt's envelope stays, carried forward as it was.
+            return Ok(declined(NotPlacedReason::Interrupted, Some(seq)));
+        }
         let shown = |observation: &ComposerObservation| {
             if screen_accepts_write(observation.screen_rule) {
                 reflection_of(&observation.readout, body, probe)
@@ -1782,9 +1925,17 @@ impl WindowEntry {
             ComposerWait::Done(Reflection::Unreadable) => {
                 // Handled in order, so the erase reaches the probe ahead of
                 // the submit key whether or not it shows.
-                self.write_pty_input(&self.input.erase, InputOrigin::Message)
-                    .await?;
-                self.resend_key_only(body, requester).await
+                match self
+                    .write_judged(&self.input.erase, after_probe, self.own_text(body))
+                    .await?
+                {
+                    GuardedWrite::Written => {
+                        self.resend_key_only(body, after_probe + 1, requester).await
+                    }
+                    GuardedWrite::Moved => {
+                        Ok(declined(NotPlacedReason::Interrupted, Some(after_probe)))
+                    }
+                }
             }
             ComposerWait::Done(Reflection::Dropped) => {
                 self.write_once_probe_erased(body, probe, after_probe, requester)
@@ -1792,7 +1943,9 @@ impl WindowEntry {
             }
             ComposerWait::OtherWriter => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
             ComposerWait::RequesterGone => {
-                self.write_pty_input(&self.input.erase, InputOrigin::Message)
+                // Whether or not another write got in first, the requester is
+                // gone and nothing more is decided here.
+                self.write_judged(&self.input.erase, after_probe, self.own_text(body))
                     .await?;
                 Ok(declined_unvouched(NotPlacedReason::Unobservable))
             }
@@ -1810,8 +1963,8 @@ impl WindowEntry {
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         match self.erase_probe(seq).await? {
-            ProbeErased::Emptied(settled_rule) => {
-                self.write_fresh_and_decide(body, probe, settled_rule, requester)
+            ProbeErased::Emptied(settled_rule, after_erase) => {
+                self.write_fresh_and_decide(body, probe, settled_rule, after_erase, requester)
                     .await
             }
             ProbeErased::Interrupted(_) => Ok(declined(NotPlacedReason::Interrupted, None)),
@@ -1827,9 +1980,9 @@ impl WindowEntry {
         body: &str,
         probe: char,
         observed: &ComposerReadout,
+        seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        let seq = self.write_seq();
         match self
             .read_through_probe(probe, seq, observed, requester)
             .await?
@@ -1859,11 +2012,18 @@ impl WindowEntry {
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        match self.erase_probe_back_to(seq, before, requester).await? {
-            ComposerWait::Done(()) => self.resend_key_only(body, requester).await,
-            ComposerWait::OtherWriter => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
-            ComposerWait::RequesterGone => Ok(declined_unvouched(NotPlacedReason::Unobservable)),
-            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+        match self
+            .erase_probe_back_to(seq, before, body, requester)
+            .await?
+        {
+            Some(ComposerWait::Done(())) => self.resend_key_only(body, seq + 1, requester).await,
+            None | Some(ComposerWait::OtherWriter) => {
+                Ok(declined_unvouched(NotPlacedReason::Interrupted))
+            }
+            Some(ComposerWait::RequesterGone) => {
+                Ok(declined_unvouched(NotPlacedReason::Unobservable))
+            }
+            Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
         }
     }
 
@@ -1873,8 +2033,13 @@ impl WindowEntry {
     /// moves the ledger, so the next reader sees what was there before the
     /// probe.
     async fn erase_probe_behind(&self, seq: u64, probe: char, before: &str) -> PtyResult<()> {
-        self.write_pty_input(&self.input.erase, InputOrigin::Message)
-            .await?;
+        if self
+            .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(());
+        }
         self.wait_for_composer_unwatched(seq + 1, |observation| {
             let erased = match &observation.readout {
                 ComposerReadout::Body(text) => !text.ends_with(probe),
@@ -1904,8 +2069,14 @@ impl WindowEntry {
         }
         let probe_text = probe.to_string();
         let after_probe = seq + 1;
-        self.write_pty_input(probe_text.as_bytes(), InputOrigin::Message)
-            .await?;
+        // Nothing before this probe is confirmed as this call's own yet.
+        if self
+            .write_judged(probe_text.as_bytes(), seq, TakeBackRegistration::Empty)
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(ProbeReading::Interrupted);
+        }
         let shown_before = |observation: &ComposerObservation| match &observation.readout {
             ComposerReadout::Body(text)
                 if &observation.readout != before_probe
@@ -1966,22 +2137,28 @@ impl WindowEntry {
     async fn resend_key_only(
         &self,
         body: &str,
+        seq: u64,
         requester: &Requester,
     ) -> PtyResult<SubmitJudgment> {
         if requester.has_left() {
-            return Ok(declined(
-                NotPlacedReason::Unobservable,
-                Some(self.write_seq()),
-            ));
+            return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
         let plan = plan_submit_line(&self.input, body, SubmitAction::ResendOnly);
-        // Counted from before the first step rather than read back after the
-        // last, so a foreign write landing mid-sequence leaves the baseline
-        // short of the window's count and the next attempt declines.
+        let last_index = plan.steps.len().saturating_sub(1);
         let own_writes = plan.steps.len() as u64;
-        let seq_before = self.write_seq();
-        let outcome = self.run_plan_steps(&plan, InputOrigin::Message).await?;
-        Ok(placed(outcome, seq_before + own_writes))
+        // The submit key closes the composer's content out of this call's
+        // hands, so its write leaves nothing to take back.
+        let registration = |index: usize| {
+            if index == last_index {
+                TakeBackRegistration::Empty
+            } else {
+                TakeBackRegistration::Keep
+            }
+        };
+        match self.run_judged_steps(&plan, seq, registration).await? {
+            JudgedSteps::Written(outcome) => Ok(placed(outcome, seq + own_writes)),
+            JudgedSteps::Moved { at } => Ok(declined(NotPlacedReason::Interrupted, Some(at))),
+        }
     }
 
     /// Writes `body` fresh into a composer just observed empty, then the
@@ -1992,12 +2169,14 @@ impl WindowEntry {
     /// nothing is left; or nothing shows yet, so the call waits.
     /// `screen_rule` is the rule verdict already read alongside the empty
     /// composer, so the write gate is checked before this call's very first
-    /// byte rather than against a fresh reading of its own.
+    /// byte rather than against a fresh reading of its own; `seq` is the
+    /// ledger that empty reading was taken at.
     ///
     /// A screen that stops accepting a write once something showed (a dialog
     /// covering the composer) is waited out, never declined on. A write from
-    /// another writer ends the call with the body reported as remaining, and
-    /// is never taken back: clearing it would erase another writer's input.
+    /// another writer ends the call with the body reported as remaining: the
+    /// body is registered as this call's own, so that writer's bytes go out
+    /// behind its take-back, and nothing of this call's is written after them.
     /// A requester that leaves once the body is written gets no submit key;
     /// the body is taken back instead (see
     /// [`WindowEntry::take_back_for_departed_requester`]).
@@ -2006,6 +2185,7 @@ impl WindowEntry {
         body: &str,
         probe: char,
         screen_rule: Option<DetectedStatus>,
+        seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if !screen_accepts_write(screen_rule) {
@@ -2026,9 +2206,14 @@ impl WindowEntry {
 
         // What the ledger reads as once each of this call's own writes has
         // gone out: the baseline a follow-up attempt brings back.
-        let after_body = self.write_seq() + 1;
-        self.write_pty_input(&body_step.bytes, InputOrigin::Message)
-            .await?;
+        let after_body = seq + 1;
+        if self
+            .write_judged(&body_step.bytes, seq, self.own_text(body))
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(declined(NotPlacedReason::Interrupted, None));
+        }
         if !body_step.delay_after.is_zero() {
             tokio::time::sleep(body_step.delay_after).await;
         }
@@ -2042,8 +2227,17 @@ impl WindowEntry {
         }
 
         let after_probe = after_body + 1;
-        self.write_pty_input(probe.to_string().as_bytes(), InputOrigin::Message)
-            .await?;
+        if self
+            .write_judged(
+                probe.to_string().as_bytes(),
+                after_body,
+                self.own_text(&format!("{body}{probe}")),
+            )
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(declined(NotPlacedReason::Interrupted, Some(after_body)));
+        }
         match self
             .wait_for_reflection(body, probe, after_probe, requester)
             .await
@@ -2129,24 +2323,33 @@ impl WindowEntry {
     /// Erases a probe that showed behind `before` (ledger at `seq`) and waits
     /// until the composer reads as `before` again, on a screen that accepts a
     /// write. A reading that cannot be restored is still only this call's own
-    /// writes, the same as a body read back as unreadable.
+    /// writes, the same as a body read back as unreadable. `own` is this
+    /// call's text the composer holds once the probe is erased. `None` when
+    /// another write got in before the erase, which is then not written.
     async fn erase_probe_back_to(
         &self,
         seq: u64,
         before: &str,
+        own: &str,
         requester: &mut Requester,
-    ) -> PtyResult<ComposerWait<()>> {
-        self.write_pty_input(&self.input.erase, InputOrigin::Message)
-            .await?;
+    ) -> PtyResult<Option<ComposerWait<()>>> {
+        if self
+            .write_judged(&self.input.erase, seq, self.own_text(own))
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(None);
+        }
         let reads_as_before = |observation: &ComposerObservation| {
             (screen_accepts_write(observation.screen_rule)
                 && (composer_reads_back_as(&observation.readout, before)
                     || matches!(observation.readout, ComposerReadout::NotObserved)))
             .then_some(())
         };
-        Ok(self
-            .wait_for_composer(Some(seq + 1), requester, reads_as_before)
-            .await)
+        Ok(Some(
+            self.wait_for_composer(Some(seq + 1), requester, reads_as_before)
+                .await,
+        ))
     }
 
     /// The body landed and the probe shows behind it, reading as `before`
@@ -2167,16 +2370,20 @@ impl WindowEntry {
                 .await;
         }
         let after_erase = seq + 1;
-        match self.erase_probe_back_to(seq, before, requester).await? {
-            ComposerWait::Done(()) => self.press_submit_key(submit_step, after_erase + 1).await,
-            ComposerWait::OtherWriter => {
+        match self
+            .erase_probe_back_to(seq, before, body, requester)
+            .await?
+        {
+            Some(ComposerWait::Done(())) => self.press_submit_key(submit_step, after_erase).await,
+            None => Ok(declined(NotPlacedReason::Interrupted, Some(seq))),
+            Some(ComposerWait::OtherWriter) => {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
-            ComposerWait::RequesterGone => {
+            Some(ComposerWait::RequesterGone) => {
                 self.take_back_for_departed_requester(&format!("{body}{probe}"), probe, after_erase)
                     .await
             }
-            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+            Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
         }
     }
 
@@ -2199,14 +2406,19 @@ impl WindowEntry {
                 .await;
         }
         let after_erase = seq + 1;
-        self.write_pty_input(&self.input.erase, InputOrigin::Message)
-            .await?;
+        if self
+            .write_judged(&self.input.erase, seq, self.own_text(body))
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(declined(NotPlacedReason::Interrupted, Some(seq)));
+        }
         if requester.has_left() {
             return self
                 .take_back_for_departed_requester(&written, probe, after_erase)
                 .await;
         }
-        self.press_submit_key(submit_step, after_erase + 1).await
+        self.press_submit_key(submit_step, after_erase).await
     }
 
     /// The receiver dropped the body and shows the probe alone (ledger at
@@ -2214,7 +2426,7 @@ impl WindowEntry {
     /// nothing of this call's left behind.
     async fn erase_dropped_probe(&self, seq: u64) -> PtyResult<SubmitJudgment> {
         match self.erase_probe(seq).await? {
-            ProbeErased::Emptied(_) => Ok(declined(NotPlacedReason::NotReflected, None)),
+            ProbeErased::Emptied(..) => Ok(declined(NotPlacedReason::NotReflected, None)),
             ProbeErased::Interrupted(_) => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
         }
     }
@@ -2250,7 +2462,7 @@ impl WindowEntry {
             .take_back_and_settle(written, probe, seq, &before_take_back)
             .await?
         {
-            TakenBack::Emptied(_) => Ok(declined(NotPlacedReason::NotReflected, None)),
+            TakenBack::Emptied(..) => Ok(declined(NotPlacedReason::NotReflected, None)),
             TakenBack::Declined(judgment) => Ok(judgment),
         }
     }
@@ -2284,8 +2496,8 @@ impl WindowEntry {
             .take_back_and_settle(residue.body, probe, residue.write_seq, &observed.readout)
             .await?
         {
-            TakenBack::Emptied(settled_rule) => {
-                self.write_fresh_and_decide(body, probe, settled_rule, requester)
+            TakenBack::Emptied(settled_rule, seq) => {
+                self.write_fresh_and_decide(body, probe, settled_rule, seq, requester)
                     .await
             }
             TakenBack::Declined(judgment) => Ok(judgment),
@@ -2313,19 +2525,27 @@ impl WindowEntry {
             .ok_or(crate::pty::PtyError::WriteFailed)?;
         let take_back_plan = self.input.plan_take_back(written, cols);
         let after_take_back = seq_after_written + take_back_plan.steps.len() as u64;
-        self.run_plan_steps(&take_back_plan, InputOrigin::Message)
-            .await?;
+        // Until the probe behind it shows, the take-back may not have reached
+        // `written` (a receiver dropping input), so `written` stays registered.
+        match self
+            .run_judged_steps(&take_back_plan, seq_after_written, |_| {
+                self.own_text(written)
+            })
+            .await?
+        {
+            JudgedSteps::Written(_) => {}
+            JudgedSteps::Moved { at } => {
+                return Ok(TakenBack::Declined(declined(
+                    NotPlacedReason::Interrupted,
+                    Some(at),
+                )));
+            }
+        }
         tracing::debug!(
             window_id = %self.window_id(),
             take_back = ?self.input.take_back(),
             "composer take-back written"
         );
-        if self.write_seq() != after_take_back {
-            return Ok(TakenBack::Declined(declined(
-                NotPlacedReason::Interrupted,
-                Some(after_take_back),
-            )));
-        }
         self.settle_with_probe(probe, after_take_back, before_take_back, written)
             .await
     }
@@ -2347,8 +2567,20 @@ impl WindowEntry {
         written: &str,
     ) -> PtyResult<TakenBack> {
         let after_probe = seq + 1;
-        self.write_pty_input(probe.to_string().as_bytes(), InputOrigin::Message)
-            .await?;
+        if self
+            .write_judged(
+                probe.to_string().as_bytes(),
+                seq,
+                self.own_text(&format!("{written}{probe}")),
+            )
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(TakenBack::Declined(declined(
+                NotPlacedReason::Interrupted,
+                Some(seq),
+            )));
+        }
         let probe_shown_alone = |observation: &ComposerObservation| match &observation.readout {
             ComposerReadout::Body(text)
                 if &observation.readout != before_take_back
@@ -2372,11 +2604,17 @@ impl WindowEntry {
             Some(false) => {
                 // Input is handled in order, so this erases the probe behind
                 // whatever the take-back left.
-                self.write_pty_input(&self.input.erase, InputOrigin::Message)
-                    .await?;
-                Ok(TakenBack::Declined(self.decline_unconfirmed_take_back(
-                    NotPlacedReason::NotReflected,
-                )))
+                match self
+                    .write_judged(&self.input.erase, after_probe, self.own_text(written))
+                    .await?
+                {
+                    GuardedWrite::Written => Ok(TakenBack::Declined(
+                        self.decline_unconfirmed_take_back(NotPlacedReason::NotReflected),
+                    )),
+                    GuardedWrite::Moved => Ok(TakenBack::Declined(declined_unvouched(
+                        NotPlacedReason::Interrupted,
+                    ))),
+                }
             }
             None => Ok(TakenBack::Declined(declined_unvouched(
                 NotPlacedReason::Interrupted,
@@ -2387,7 +2625,7 @@ impl WindowEntry {
     /// A take-back's outcome once its probe has been erased.
     fn taken_back_once(&self, erased: ProbeErased) -> TakenBack {
         match erased {
-            ProbeErased::Emptied(rule) => TakenBack::Emptied(rule),
+            ProbeErased::Emptied(rule, seq) => TakenBack::Emptied(rule, seq),
             ProbeErased::Interrupted(after_erase) => {
                 TakenBack::Declined(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
@@ -2400,8 +2638,13 @@ impl WindowEntry {
     /// ledger. Erasing its own probe is cleanup, so no requester stops it.
     async fn erase_probe(&self, seq: u64) -> PtyResult<ProbeErased> {
         let after_erase = seq + 1;
-        self.write_pty_input(&self.input.erase, InputOrigin::Message)
-            .await?;
+        if self
+            .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(ProbeErased::Interrupted(seq));
+        }
         let emptied = |observation: &ComposerObservation| {
             (matches!(observation.readout, ComposerReadout::Empty)
                 && screen_accepts_write(observation.screen_rule))
@@ -2414,7 +2657,7 @@ impl WindowEntry {
             Some(rule) => {
                 *lock_recover(&self.unanswered_probe) = None;
                 *lock_recover(&self.degenerate_since) = None;
-                Ok(ProbeErased::Emptied(rule))
+                Ok(ProbeErased::Emptied(rule, after_erase))
             }
             None => Ok(ProbeErased::Interrupted(after_erase)),
         }
@@ -2452,24 +2695,28 @@ impl WindowEntry {
     }
 
     /// Presses the plan's own submit key once the composer has been
-    /// confirmed to hold this call's own write and nothing else's, and
-    /// answers at once: what the receiver does with it is the caller's to
-    /// confirm.
+    /// confirmed to hold this call's own write and nothing else's (the
+    /// ledger at `seq`), and answers at once: what the receiver does with it
+    /// is the caller's to confirm.
     async fn press_submit_key(
         &self,
         submit_step: &SubmitStep,
-        residue_write_seq: u64,
+        seq: u64,
     ) -> PtyResult<SubmitJudgment> {
         let status_before_submit = self.current_status();
-        self.write_pty_input(&submit_step.bytes, InputOrigin::Message)
-            .await?;
-        Ok(placed(
-            SubmitOutcome {
-                status_before_submit,
-                submitted_at: tokio::time::Instant::now(),
-            },
-            residue_write_seq,
-        ))
+        match self
+            .write_judged(&submit_step.bytes, seq, TakeBackRegistration::Empty)
+            .await?
+        {
+            GuardedWrite::Written => Ok(placed(
+                SubmitOutcome {
+                    status_before_submit,
+                    submitted_at: tokio::time::Instant::now(),
+                },
+                seq + 1,
+            )),
+            GuardedWrite::Moved => Ok(declined(NotPlacedReason::Interrupted, Some(seq))),
+        }
     }
 
     /// Takes this window's delivery lock, which one handoff delivery holds
@@ -3526,6 +3773,8 @@ impl WindowRegistry {
             turn_waiters: AtomicUsize::new(0),
             degenerate_since: Mutex::new(None),
             unanswered_probe: Mutex::new(None),
+            interrupt_bytes: self.config().interrupt_bytes.clone(),
+            take_back_call: Mutex::new(None),
             chat_intro_outcome: std::sync::OnceLock::new(),
             notices: Mutex::new(NoticeQueue::default()),
             notice_wake: Notify::new(),

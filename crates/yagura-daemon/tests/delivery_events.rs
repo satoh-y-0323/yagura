@@ -282,8 +282,9 @@ async fn a_body_the_receiver_drops_is_not_reflected_leaves_nothing_and_never_get
 
 /// A receiver that shows nothing once the body arrives. A status change and a
 /// resize are cues to look again, not the end of the wait; another writer's
-/// byte is. The order is the point: had the status change or the resize ended
-/// the wait, the call would have answered before the byte was written.
+/// byte is, and the body's take-back reaches the receiver right in front of
+/// it. The order is the point: had the status change or the resize ended the
+/// wait, the call would have answered before the byte was written.
 #[tokio::test]
 async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_resizes_until_another_writer_writes()
  {
@@ -338,9 +339,24 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
         received.contains(&b'Q'),
         "the other writer's byte was written; the receiver read {received:?}"
     );
+    let other = received
+        .iter()
+        .rposition(|&byte| byte == b'Q')
+        .expect("the other writer's byte was read");
+    let take_back = received[..other]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == 0x15)
+        .count();
     assert!(
-        !received.contains(&b'\r') && !received.contains(&0x15),
-        "neither the submit key nor a clear may have been written; the receiver read {received:?}"
+        take_back > 0,
+        "the body's take-back must reach the receiver right in front of the other writer's byte; \
+         the receiver read {received:?}"
+    );
+    assert!(
+        !received.contains(&b'\r') && !received[..other - take_back].contains(&0x15),
+        "neither the submit key nor any other clear may have been written; the receiver read \
+         {received:?}"
     );
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
 }

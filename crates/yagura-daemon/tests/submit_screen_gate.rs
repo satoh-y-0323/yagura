@@ -493,17 +493,47 @@ fn assert_no_acting_byte_reached_the_child(received: &[u8]) {
     assert_no_acting_byte_in(received);
 }
 
-/// [`assert_no_acting_byte_reached_the_child`] for what the child read after
-/// the body's paste ended: the bytes that could act on a dialog the body
-/// raised. A probe confirmed and erased before the body was written is not
-/// one of them.
-fn assert_no_acting_byte_reached_the_child_after_the_body(received: &[u8]) {
+/// What the child read after the body's paste ended: the bytes that could act
+/// on a dialog the body raised. A probe confirmed and erased before the body
+/// was written is not one of them.
+fn after_the_body(received: &[u8]) -> &[u8] {
     const PASTE_END: &[u8] = b"\x1b[201~";
     let end = received
         .windows(PASTE_END.len())
         .position(|window| window == PASTE_END)
         .unwrap_or_else(|| panic!("the body's paste must have reached the child: {received:?}"));
-    assert_no_acting_byte_in(&received[end + PASTE_END.len()..]);
+    &received[end + PASTE_END.len()..]
+}
+
+/// Where another writer's last `foreign` byte stands in `received`, and how
+/// many clear bytes the daemon put right in front of it.
+fn take_back_in_front_of(received: &[u8], foreign: u8) -> (usize, usize) {
+    let at = received
+        .iter()
+        .rposition(|&byte| byte == foreign)
+        .unwrap_or_else(|| panic!("the other writer's byte must have been read: {received:?}"));
+    let run = received[..at]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == 0x15)
+        .count();
+    assert!(
+        run > 0,
+        "the take-back must reach the child right in front of the other writer's byte; it read \
+         {received:?}"
+    );
+    (at, run)
+}
+
+/// [`assert_no_acting_byte_reached_the_child`] for what the child read after
+/// the body, except for the take-back the daemon puts right in front of
+/// another writer's `foreign` byte: a clear on a dialog changes nothing, a
+/// submit key would answer it.
+fn assert_only_the_take_back_reached_the_child_after_the_body(received: &[u8], foreign: u8) {
+    let after = after_the_body(received);
+    let (at, run) = take_back_in_front_of(after, foreign);
+    assert_no_acting_byte_in(&after[..at - run]);
+    assert_no_acting_byte_in(&after[at + 1..]);
 }
 
 fn assert_no_acting_byte_in(received: &[u8]) {
@@ -747,9 +777,10 @@ async fn a_key_only_resend_is_still_written_while_the_window_shows_it_is_working
 /// A dialog that replaces the composer once the body is in: the screen does
 /// not accept a write, and nothing the daemon decides on its own to write (a
 /// clear, the probe's erase, the submit key) may reach it, however long that
-/// takes. Only another writer's bytes end the wait.
+/// takes. Only another writer's bytes end the wait, and the body's take-back
+/// goes to the dialog right in front of them.
 #[tokio::test]
-async fn a_dialog_that_replaces_the_written_body_gets_neither_the_submit_key_nor_a_clear() {
+async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_the_submit_key() {
     let dir = unique_temp_dir("screen-gate-after-body");
     let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-after-body", detection_config(&dir)).await;
@@ -797,8 +828,9 @@ async fn a_dialog_that_replaces_the_written_body_gets_neither_the_submit_key_nor
         }
         other => panic!("another writer's byte must end the wait, got {other:?}"),
     }
-    assert_no_acting_byte_reached_the_child_after_the_body(
+    assert_only_the_take_back_reached_the_child_after_the_body(
         &child_input(&h, &window_id, &log).await,
+        b'Q',
     );
     assert_eq!(
         count_marker(&h, &window_id, "APPROVED"),
@@ -869,12 +901,13 @@ fn dialog_until(style: &str, gone: &Path) -> String {
 /// The written body never paints, so the composer keeps reading empty -- while
 /// the dialog drawn beside it matches an approval rule, and then goes away. The
 /// clear sequence that would take the write back is a byte for that dialog
-/// too, and the body may still land later, so neither a clear nor a second copy
-/// of the body is written while the daemon waits; only another writer's byte
-/// ends the wait.
+/// too, and the body may still land later, so neither a clear of the daemon's
+/// own choosing nor a second copy of the body is written while the daemon
+/// waits; only another writer's byte ends the wait, with the body's take-back
+/// right in front of it.
 #[tokio::test]
-async fn neither_a_clear_nor_a_rewrite_follows_a_body_that_stays_unread_beside_an_approval_dialog()
-{
+async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and_is_taken_back_in_front_of_another_writer()
+ {
     let dir = unique_temp_dir("screen-gate-clear");
     let log = dir.join("child-input.log");
     let dialog_gone = dir.join("dialog-gone");
@@ -935,7 +968,7 @@ async fn neither_a_clear_nor_a_rewrite_follows_a_body_that_stays_unread_beside_a
     }
 
     let received = child_input(&h, &window_id, &log).await;
-    assert_no_acting_byte_reached_the_child_after_the_body(&received);
+    assert_only_the_take_back_reached_the_child_after_the_body(&received, b'Q');
     assert_eq!(
         count_subslice(&received, b"\x1b[200~hello\x1b[201~"),
         1,
@@ -1253,22 +1286,27 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
 /// A dialog that appears as the probe is erased, with the envelope reading
 /// as it did before: the envelope is whole, but the key that would resend it
 /// is a key for the dialog too, so it is not pressed however long the dialog
-/// stays; only another writer's byte ends the wait.
+/// stays; only another writer's byte ends the wait, with the envelope's
+/// take-back going to the dialog right in front of it.
 #[tokio::test]
 async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_envelope() {
     let dir = unique_temp_dir("screen-gate-dialog-at-erase");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-dialog-at-erase", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new(
-            "aterase",
-            "aterase-marker",
-            "byte=7f:beside",
-            APPROVAL_HEADING,
-        ),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "aterase",
+                "aterase-marker",
+                "byte=7f:beside",
+                APPROVAL_HEADING,
+            )
+        },
     )
     .await;
     // The seed itself moves the write count past the caller's baseline, so the
@@ -1311,6 +1349,12 @@ async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_env
         }
         other => panic!("a dialog beside the envelope must stop the resend, got {other:?}"),
     }
+    let received = child_input(&h, &window_id, &log).await;
+    take_back_in_front_of(&received, b'Q');
+    assert!(
+        !received.contains(&b'\r'),
+        "the submit key must never have been written; the child read {received:?}"
+    );
     assert_eq!(
         count_marker(&h, &window_id, "APPROVED"),
         0,

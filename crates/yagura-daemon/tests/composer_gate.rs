@@ -1172,8 +1172,8 @@ async fn a_takeback_is_skipped_once_a_foreign_write_lands_between_verification_a
     assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);
     assert!(
         not_placed.envelope_remains,
-        "another writer intervened before the takeback point too, so the clear sequence must not have been \
-         sent -- sending it here would erase the other writer's byte"
+        "another writer's byte landed before the body ever showed, so the call cannot vouch that the \
+         take-back put in front of that byte emptied the composer"
     );
 }
 
