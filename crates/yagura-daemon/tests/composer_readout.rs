@@ -12,9 +12,9 @@
 //!
 //! Region determination itself (the cursor-bound walk that finds where a
 //! composer's text starts) is covered in `detector_screen.rs`, next to
-//! `cursor_row`; this file covers the three-way result
-//! (`Body` / `Empty` / `NotObserved`) and the restore rule that turns a
-//! region's raw lines into recovered body text.
+//! `cursor_row`; this file covers the result
+//! (`Body` / `Tail` / `Empty` / `NotObserved`) and the restore rule that turns
+//! a region's raw lines into recovered body text.
 
 use regex::Regex;
 use yagura_daemon::detector::VtScreen;
@@ -493,9 +493,103 @@ fn claude_empty_composer_with_a_dim_hint_reads_as_empty() {
 }
 
 #[test]
-fn claude_screen_whose_marker_row_scrolled_off_is_not_observed() {
+fn claude_screen_whose_marker_row_scrolled_off_reads_as_the_tail() {
     let section = shipped_composer("claude-code");
     let screen = captured_screen("claude-code", "80x24-marker-scrolled-off", 80, 24);
+    // Two bodies were typed; the top row starts inside the first one, at the
+    // word after "Codex".
+    let top = HANDOFF_BODY
+        .find(r#"CLI","cwd""#)
+        .expect("fixture precondition: the body names the CLI");
+    let visible = format!("{}{HANDOFF_BODY}", &HANDOFF_BODY[top..]);
+
+    match screen.read_composer(&section) {
+        ComposerReadout::Tail(text) => {
+            assert!(
+                squeezed(&text).ends_with(&squeezed(r#""window_id":"w4-80d4k1"}}"#)),
+                "the tail must end where the composer ends, got {text:?}"
+            );
+            assert_eq!(squeezed(&text), squeezed(&visible));
+        }
+        other => panic!("expected Tail, got {other:?}"),
+    }
+}
+
+#[test]
+fn claude_scrolled_off_screen_with_the_cursor_moved_back_into_the_body_is_not_observed() {
+    let section = shipped_composer("claude-code");
+    let mut screen = captured_screen("claude-code", "80x24-marker-scrolled-off", 80, 24);
+    move_cursor(&mut screen, 20, 10);
+
+    match screen.read_composer(&section) {
+        ComposerReadout::NotObserved => {}
+        other => panic!("expected NotObserved, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// Without the marker on screen, continuation rows that reach the top row
+// are the end of a body; anything short of that is a frame the CLI has not
+// finished drawing.
+// =====================================================================
+
+#[test]
+fn continuation_rows_reaching_the_top_read_as_the_tail_without_their_prefix() {
+    let section = shipped_composer("claude-code");
+
+    match feed_rows(30, &["  first", "  second", "  third"]).read_composer(&section) {
+        ComposerReadout::Tail(text) => assert_eq!(text, "firstsecondthird"),
+        other => panic!("expected Tail, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_frame_whose_composer_rows_were_just_erased_is_not_observed() {
+    let section = shipped_composer("claude-code");
+
+    // The cursor waits on an erased row under the transcript.
+    let mut under_transcript = feed_rows(40, &["\u{23fa} an answer", "  wrapped answer", "", ""]);
+    move_cursor(&mut under_transcript, 2, 2);
+    match under_transcript.read_composer(&section) {
+        ComposerReadout::NotObserved => {}
+        other => panic!("expected NotObserved under the transcript, got {other:?}"),
+    }
+
+    // Everything above the cursor was erased too.
+    let mut all_erased = feed_rows(40, &["", "", ""]);
+    move_cursor(&mut all_erased, 2, 2);
+    match all_erased.read_composer(&section) {
+        ComposerReadout::NotObserved => {}
+        other => panic!("expected NotObserved on an erased screen, got {other:?}"),
+    }
+}
+
+#[test]
+fn continuation_rows_that_stop_below_the_top_are_not_observed() {
+    let section = shipped_composer("claude-code");
+
+    match feed_rows(30, &["\u{23fa} an answer", "  second", "  third"]).read_composer(&section) {
+        ComposerReadout::NotObserved => {}
+        other => panic!("expected NotObserved, got {other:?}"),
+    }
+}
+
+#[test]
+fn continuation_rows_reaching_the_top_with_no_text_are_not_observed() {
+    // An empty tail would end every body alike.
+    let section = shipped_composer("claude-code");
+
+    match feed_rows(10, &["  ", "  ", "  "]).read_composer(&section) {
+        ComposerReadout::NotObserved => {}
+        other => panic!("expected NotObserved, got {other:?}"),
+    }
+}
+
+#[test]
+fn continuation_rows_reaching_the_top_with_text_right_of_the_cursor_are_not_observed() {
+    let section = shipped_composer("claude-code");
+    let mut screen = feed_rows(30, &["  first", "  second EXTRA"]);
+    move_cursor(&mut screen, 1, 8);
 
     match screen.read_composer(&section) {
         ComposerReadout::NotObserved => {}

@@ -771,7 +771,7 @@ fn reflection_of(readout: &ComposerReadout, body: &str, probe: char) -> Option<R
                 Reflection::Behind(before.to_string())
             })
         }
-        ComposerReadout::NotObserved => Some(Reflection::Unreadable),
+        ComposerReadout::NotObserved | ComposerReadout::Tail(_) => Some(Reflection::Unreadable),
         ComposerReadout::Empty => None,
     }
 }
@@ -1818,7 +1818,7 @@ impl WindowEntry {
                     Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
                 }
             }
-            ComposerReadout::NotObserved => match vouched_seq {
+            ComposerReadout::NotObserved | ComposerReadout::Tail(_) => match vouched_seq {
                 Some(vouched_seq) => {
                     if !screen_accepts_write(observation.screen_rule) {
                         return Ok(decline_not_accepting(Some(vouched_seq)));
@@ -1916,7 +1916,9 @@ impl WindowEntry {
         };
         let shows = match &reading {
             ComposerReadout::Empty => OwnShows::Absent,
-            ComposerReadout::NotObserved => return Ok(Checked::MayRemain),
+            ComposerReadout::NotObserved | ComposerReadout::Tail(_) => {
+                return Ok(Checked::MayRemain);
+            }
             ComposerReadout::Body(text) => own_text_shows(text, own, probe),
         };
         let only_interrupt_keys_since = part.after_own_write.map(|after| after.wrapping_add(1))
@@ -1996,7 +1998,7 @@ impl WindowEntry {
         let before = match before_probe {
             ComposerReadout::Empty => String::new(),
             ComposerReadout::Body(text) => text.clone(),
-            ComposerReadout::NotObserved => return Ok(()),
+            ComposerReadout::NotObserved | ComposerReadout::Tail(_) => return Ok(()),
         };
         let probed = format!("{before}{probe}");
         let Some((reading, seen)) = self.read_writable_screen(requester).await? else {
@@ -2043,7 +2045,15 @@ impl WindowEntry {
     async fn query_composer(&self) -> ComposerObservation {
         let detector = lock_recover(&self.detector).clone();
         match detector {
-            Some(detector) => detector.query_composer().await,
+            Some(detector) => {
+                let mut observation = detector.query_composer().await;
+                // No decision here can tell a tail from the caller's own body
+                // yet, so a tail is held to what any unreadable composer is.
+                if let ComposerReadout::Tail(_) = observation.readout {
+                    observation.readout = ComposerReadout::NotObserved;
+                }
+                observation
+            }
             None => ComposerObservation::closed_unobserved(),
         }
     }
@@ -2200,7 +2210,8 @@ impl WindowEntry {
                 }
                 ComposerReadout::Body(_)
                 | ComposerReadout::Empty
-                | ComposerReadout::NotObserved => None,
+                | ComposerReadout::NotObserved
+                | ComposerReadout::Tail(_) => None,
             };
             return match self
                 .wait_for_composer(Some(seq), requester, shown_before)
@@ -2410,7 +2421,9 @@ impl WindowEntry {
         self.wait_for_composer_unwatched(seq + 1, |observation| {
             let erased = match &observation.readout {
                 ComposerReadout::Body(text) => !text.ends_with(probe),
-                ComposerReadout::Empty | ComposerReadout::NotObserved => true,
+                ComposerReadout::Empty
+                | ComposerReadout::NotObserved
+                | ComposerReadout::Tail(_) => true,
             };
             (erased || composer_reads_back_as(&observation.readout, before)).then_some(())
         })
@@ -2452,9 +2465,10 @@ impl WindowEntry {
             {
                 text.strip_suffix(probe).map(str::to_string)
             }
-            ComposerReadout::Body(_) | ComposerReadout::Empty | ComposerReadout::NotObserved => {
-                None
-            }
+            ComposerReadout::Body(_)
+            | ComposerReadout::Empty
+            | ComposerReadout::NotObserved
+            | ComposerReadout::Tail(_) => None,
         };
         match self
             .wait_for_composer(Some(after_probe), requester, shown_before)
@@ -2961,9 +2975,10 @@ impl WindowEntry {
             {
                 text.strip_suffix(probe).map(str::is_empty)
             }
-            ComposerReadout::Body(_) | ComposerReadout::Empty | ComposerReadout::NotObserved => {
-                None
-            }
+            ComposerReadout::Body(_)
+            | ComposerReadout::Empty
+            | ComposerReadout::NotObserved
+            | ComposerReadout::Tail(_) => None,
         };
         match self
             .wait_for_composer_unwatched(after_probe, probe_shown_alone)

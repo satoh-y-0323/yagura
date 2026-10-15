@@ -592,9 +592,10 @@ impl DetectionEngine {
     /// The reading never fails: everything that leaves the composer unreadable
     /// resolves to [`ComposerReadout::NotObserved`] -- a definition without a
     /// `[composer]` table (answered without looking at the screen at all), no
-    /// definition, a marker the screen does not show, and a screen loss that
-    /// still stands. An empty composer is [`ComposerReadout::Empty`], which is
-    /// a reading, not a failure.
+    /// definition, a marker the screen does not show (unless the body's end
+    /// still fills the screen, which is [`ComposerReadout::Tail`]), and a
+    /// screen loss that still stands. An empty composer is
+    /// [`ComposerReadout::Empty`], which is a reading, not a failure.
     ///
     /// The rule verdict ignores the structured source and every time-based
     /// judgement -- only [`DetectionEngine::match_rules`], applied to the

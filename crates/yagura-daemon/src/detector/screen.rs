@@ -36,16 +36,32 @@ pub enum ScreenIntegrity {
     Rebuilt,
 }
 
-/// The result of reading a composer from the screen, distinguishing the three
-/// states: body recovered, empty (marker present but no text), or not observed.
+/// The result of reading a composer from the screen: body recovered, only the
+/// body's end in view, empty (marker present but no text), or not observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerReadout {
     /// The composer contains a non-empty body of text.
     Body(String),
+    /// The marker row has scrolled off the top, but every row from the top
+    /// down to the cursor is a continuation row: only the body's end is in
+    /// view, and this is that non-empty end. A frame whose composer rows were
+    /// just erased never takes this shape, since erased rows do not fill the
+    /// screen up to the top with continuation rows.
+    Tail(String),
     /// The composer is present but empty.
     Empty,
     /// The composer could not be observed (marker not found or not defined).
     NotObserved,
+}
+
+/// Where the upward walk from the cursor ended (see `VtScreen::walk_to_marker`).
+enum ComposerWalk {
+    /// On the marker row.
+    Marker(u16),
+    /// Off the top, every row on the way a continuation row.
+    ReachedTop,
+    /// On a row that is neither a continuation row nor the marker.
+    Absent,
 }
 
 /// One window's screen, shared by everything that reads it: the PTY reader
@@ -499,12 +515,17 @@ impl VtScreen {
     /// [`VtScreen::visible_text`]).
     ///
     /// Returns:
-    /// - `NotObserved` if the marker is not found, or if anything not dimmed
-    ///   stands to the right of the cursor -- which is also how a cursor
-    ///   parked in the middle of a body avoids reporting a shortened one
+    /// - `NotObserved` if the marker is not found and the walk stopped below
+    ///   the top, if the section has no continuation prefix to walk by, or if
+    ///   anything not dimmed stands to the right of the cursor -- which is
+    ///   also how a cursor parked in the middle of a body avoids reporting a
+    ///   shortened one
     /// - `Empty` if the marker is found and nothing but dimmed drawing is in
     ///   the composer
     /// - `Body(text)` if body text is successfully extracted and normalized
+    /// - `Tail(text)` if continuation rows reach the top row without the
+    ///   marker, and joining them (normalized as below) leaves text; with no
+    ///   text left it is `NotObserved`, since an empty tail ends every body
     ///
     /// The normalization process:
     /// - Remove marker and separator from the first line
@@ -520,8 +541,10 @@ impl VtScreen {
         let cursor_col = cursor_col.min(cols);
         let cursor_line = self.text_left_of_cursor(cursor, cursor_col);
 
-        let Some((marker_row, _)) = self.locate_composer(section) else {
-            return ComposerReadout::NotObserved;
+        let marker_row = match self.walk_to_marker(section) {
+            ComposerWalk::Marker(row) => Some(row),
+            ComposerWalk::ReachedTop => None,
+            ComposerWalk::Absent => return ComposerReadout::NotObserved,
         };
 
         // Text the CLI left to the right of the insertion point is either its
@@ -541,6 +564,22 @@ impl VtScreen {
             } else {
                 self.visible_text(row, 0, cols)
             }
+        };
+        let continuation_text = |row: u16| {
+            let line = region_line(row);
+            let continued = line
+                .strip_prefix(&section.continuation_prefix)
+                .unwrap_or(&line);
+            continued.trim_end().to_string()
+        };
+
+        let Some(marker_row) = marker_row else {
+            let tail: String = (0..=cursor).map(continuation_text).collect();
+            return if tail.is_empty() {
+                ComposerReadout::NotObserved
+            } else {
+                ComposerReadout::Tail(tail)
+            };
         };
 
         // Normalize:
@@ -578,11 +617,7 @@ impl VtScreen {
 
         // 2. Continuation lines: remove prefix, trim trailing whitespace, concatenate
         for row in marker_row.saturating_add(1)..=cursor {
-            let line = region_line(row);
-            let continued = line
-                .strip_prefix(&section.continuation_prefix)
-                .unwrap_or(&line);
-            normalized.push_str(continued.trim_end());
+            normalized.push_str(&continuation_text(row));
         }
 
         if normalized.is_empty() {
@@ -608,6 +643,19 @@ impl VtScreen {
         &self,
         section: &crate::detector::definition::ComposerSection,
     ) -> Option<(u16, u16)> {
+        match self.walk_to_marker(section) {
+            ComposerWalk::Marker(row) => Some((row, self.cursor_position().0)),
+            ComposerWalk::ReachedTop | ComposerWalk::Absent => None,
+        }
+    }
+
+    /// The upward walk behind [`VtScreen::locate_composer`], telling a walk
+    /// that ran off the top through continuation rows from one that stopped
+    /// on a row that is neither a continuation nor the marker.
+    fn walk_to_marker(
+        &self,
+        section: &crate::detector::definition::ComposerSection,
+    ) -> ComposerWalk {
         let (cols, _rows) = self.size();
         let (cursor, cursor_col) = self.cursor_position();
         let cursor_col = cursor_col.min(cols);
@@ -618,15 +666,25 @@ impl VtScreen {
             let line = if row == cursor {
                 cursor_line.clone()
             } else {
-                self.row_text(row, 0, cols, false)?.0
+                match self.row_text(row, 0, cols, false) {
+                    Some((text, _)) => text,
+                    None => return ComposerWalk::Absent,
+                }
             };
             let is_continuation = !section.continuation_prefix.is_empty()
                 && (line.starts_with(&section.continuation_prefix)
                     || (crosses_blank_rows && row != cursor && line.trim().is_empty()));
             if !is_continuation {
-                return section.marker.is_match(&line).then_some((row, cursor));
+                return if section.marker.is_match(&line) {
+                    ComposerWalk::Marker(row)
+                } else {
+                    ComposerWalk::Absent
+                };
             }
-            row = row.checked_sub(1)?;
+            match row.checked_sub(1) {
+                Some(above) => row = above,
+                None => return ComposerWalk::ReachedTop,
+            }
         }
     }
 
