@@ -3382,6 +3382,8 @@ pub struct GateWindow<'a> {
     /// The definition's `submit_delay_ms`: how long a delivery sleeps after
     /// the body, before it goes on to the probe.
     pub submit_delay_ms: u64,
+    /// `submit_child`'s `fold_placeholder` argument; empty for no folding.
+    pub fold_placeholder: &'a str,
 }
 
 impl<'a> GateWindow<'a> {
@@ -3396,6 +3398,7 @@ impl<'a> GateWindow<'a> {
             reflect_delay_ms: 0,
             input_log: None,
             submit_delay_ms: 120,
+            fold_placeholder: "",
         }
     }
 }
@@ -3420,7 +3423,7 @@ pub async fn open_gate_window(
     command.push(process::COMPOSER_SEPARATOR.to_string());
     command.push(process::COMPOSER_CONTINUATION_PREFIX.to_string());
     command.push(window.reflect_delay_ms.to_string());
-    command.push(String::new()); // fold_placeholder: none
+    command.push(window.fold_placeholder.to_string());
     command.push(window.clear_scope.to_string());
     command.push(window.overlay.to_string());
     command.push(window.heading.to_string());

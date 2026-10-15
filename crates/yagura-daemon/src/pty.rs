@@ -251,12 +251,15 @@ pub async fn spawn_one_shot(
 /// that woke it.
 struct WriteLedger {
     count: watch::Sender<u64>,
+    /// The count of the latest write made with [`TakeBackPrefix::Withhold`].
+    withheld: Mutex<Option<u64>>,
 }
 
 impl Default for WriteLedger {
     fn default() -> Self {
         Self {
             count: watch::Sender::new(0),
+            withheld: Mutex::new(None),
         }
     }
 }
@@ -265,6 +268,11 @@ impl WriteLedger {
     fn count(&self) {
         self.count
             .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    fn count_withheld(&self) {
+        self.count();
+        *lock_recover(&self.withheld) = Some(*self.count.borrow());
     }
 }
 
@@ -1137,7 +1145,10 @@ impl PtySession {
                 TakeBackPrefix::Apply => registered.map(|r| r.keys(input.load().cols)),
                 TakeBackPrefix::Withhold => None,
             };
-            ledger.count();
+            match prefix {
+                TakeBackPrefix::Apply => ledger.count(),
+                TakeBackPrefix::Withhold => ledger.count_withheld(),
+            }
             let written = match writer_guard.as_mut() {
                 Some(w) => take_back
                     .map_or(Ok(()), |keys| w.write_all(&keys))
@@ -1224,6 +1235,13 @@ impl PtySession {
     #[must_use]
     pub fn writes_recorded(&self) -> u64 {
         *self.write_ledger.count.borrow()
+    }
+
+    /// The [`PtySession::writes_recorded`] count of the latest write made
+    /// with [`TakeBackPrefix::Withhold`], if any.
+    #[must_use]
+    pub fn latest_withheld_write(&self) -> Option<u64> {
+        *lock_recover(&self.write_ledger.withheld)
     }
 
     /// A receiver of [`PtySession::writes_recorded`]'s value, changing as each

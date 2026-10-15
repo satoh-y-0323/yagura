@@ -60,6 +60,20 @@ async fn open_window(
     clear_scope: &str,
     submit_delay_ms: u64,
 ) -> Window {
+    open_window_folding(h, dir, name, overlay, clear_scope, submit_delay_ms, "").await
+}
+
+/// [`open_window`] whose composer paints a pasted body as `fold_placeholder`
+/// (empty for no folding), the way a CLI folds a long paste.
+async fn open_window_folding(
+    h: &Harness,
+    dir: &std::path::Path,
+    name: &str,
+    overlay: &str,
+    clear_scope: &str,
+    submit_delay_ms: u64,
+    fold_placeholder: &str,
+) -> Window {
     let log = dir.join(format!("{name}-input.log"));
     let marker = format!("{name}-marker");
     let mut client = h.connect().await;
@@ -71,6 +85,7 @@ async fn open_window(
             clear_scope,
             input_log: Some(&log),
             submit_delay_ms,
+            fold_placeholder,
             ..GateWindow::new(name, &marker, overlay, APPROVAL_HEADING)
         },
     )
@@ -364,6 +379,107 @@ async fn a_body_that_survives_the_interrupt_keys_is_taken_back_after_them() {
             .all(|&b| b == probe() || b == CLEAR || b == ERASE),
         "after the interrupt keys the call may write only its probe, the take-back and the \
          probe's erase; the child read {read:?}"
+    );
+}
+
+const FOLD_PLACEHOLDER: &str = "[Pasted text #1]";
+
+/// Opens a folding receiver that keeps its composer through the interrupt
+/// keys, and starts a delivery once the screen shows the folded body.
+async fn start_delivery_into_a_folding_receiver(
+    tag: &str,
+) -> (Harness, Window, JoinHandle<PtyResult<SubmitJudgment>>) {
+    let dir = unique_temp_dir(tag);
+    let h = Harness::start(tag, gate_config(&dir)).await;
+    let window = open_window_folding(
+        &h,
+        &dir,
+        "folded",
+        "",
+        "keep-on-interrupt:",
+        LONGEST_SUBMIT_DELAY_MS,
+        FOLD_PLACEHOLDER,
+    )
+    .await;
+    let call = start_delivery(&h, &window, None);
+    wait_until_composer_is(
+        &h,
+        &window.id,
+        &ComposerReadout::Body(FOLD_PLACEHOLDER.to_string()),
+        HANG_GUARD,
+    )
+    .await;
+    (h, window, call)
+}
+
+/// The receiver folds the body, so its text never shows, and keeps it
+/// through the interrupt keys. Those keys put no text in the composer, so
+/// what stands there is the delivery's alone: the call takes it back and says
+/// the composer is empty, and presses no submit key.
+#[tokio::test]
+async fn a_folded_body_that_survives_the_interrupt_keys_is_taken_back_after_them() {
+    let (h, window, call) =
+        start_delivery_into_a_folding_receiver("confirm-folded-interrupt").await;
+    write_as_another_writer(&h, &window, &[CTRL_C]).await;
+    let_every_clock_bound_run_out().await;
+
+    let not_placed = not_placed(answer(call).await);
+    assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);
+    assert!(
+        !not_placed.envelope_remains,
+        "only the interrupt keys reached the composer besides the body, so the call takes the \
+         folded body back and sees the composer empty"
+    );
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty, HANG_GUARD).await;
+
+    let read = read_log(&h, &window).await;
+    let after = after_the_body(&read);
+    assert_eq!(
+        after.first(),
+        Some(&CTRL_C),
+        "nothing may be put in front of the interrupt keys; the child read {read:?}"
+    );
+    assert!(
+        after[1..].contains(&CLEAR),
+        "the check must take the body back after the interrupt keys; the child read {read:?}"
+    );
+    assert!(
+        !after.contains(&b'\r'),
+        "the delivery must never press a submit key; the child read {read:?}"
+    );
+    assert_eq!(count_marker(&h, &window.id, "SUBMITTED"), 0);
+}
+
+/// The same folding receiver, but the other writer typed a character: the
+/// composer may hold the user's text, so the check writes nothing and the
+/// call says its text may remain.
+#[tokio::test]
+async fn a_folded_body_with_another_writers_keystroke_is_left_alone_and_reported_as_remaining() {
+    let (h, window, call) =
+        start_delivery_into_a_folding_receiver("confirm-folded-keystroke").await;
+    write_as_another_writer(&h, &window, b"h").await;
+    let_every_clock_bound_run_out().await;
+
+    let not_placed = not_placed(answer(call).await);
+    assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);
+    assert!(
+        not_placed.envelope_remains,
+        "another writer typed into the composer, so the call cannot vouch for what is left"
+    );
+    wait_until_composer_is(
+        &h,
+        &window.id,
+        &ComposerReadout::Body("h".to_string()),
+        HANG_GUARD,
+    )
+    .await;
+
+    let read = read_log(&h, &window).await;
+    let (rest, run) = take_back_in_front_of(after_the_body(&read), b"h");
+    assert!(
+        run > 0 && rest.is_empty(),
+        "nothing but the body's take-back may stand in front of the other writer's byte, and the \
+         check writes nothing of its own; the child read {read:?}"
     );
 }
 

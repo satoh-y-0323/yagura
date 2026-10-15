@@ -872,6 +872,8 @@ struct OwnPart {
     left: OwnLeft,
     /// Whether the call read its own body back off the screen.
     read_back: bool,
+    /// The ledger count the call's own latest write left.
+    after_own_write: Option<u64>,
 }
 
 #[derive(Default)]
@@ -1424,8 +1426,12 @@ impl WindowEntry {
                 }
             })
             .await?;
-        if let (GuardedWrite::Written, Some(left)) = (written, left) {
-            lock_recover(&self.own_part).left = left;
+        if written == GuardedWrite::Written {
+            let mut own = lock_recover(&self.own_part);
+            own.after_own_write = Some(expected.wrapping_add(1));
+            if let Some(left) = left {
+                own.left = left;
+            }
         }
         Ok(written)
     }
@@ -1843,22 +1849,19 @@ impl WindowEntry {
             return Ok(judgment);
         };
         let own = std::mem::take(&mut *lock_recover(&self.own_part));
-        match own.left {
+        match &own.left {
             OwnLeft::Nothing => Ok(judgment),
             // A requester already gone is not waited for.
             OwnLeft::Text(_) if requester.has_left() => Ok(remaining(judgment)),
             OwnLeft::Text(text) => Ok(
-                match self
-                    .check_own_text(&text, own.read_back, probe, requester)
-                    .await?
-                {
+                match self.check_own_text(text, &own, probe, requester).await? {
                     Checked::Gone => declined(NotPlacedReason::Interrupted, None),
                     Checked::MayRemain => remaining(judgment),
                 },
             ),
             OwnLeft::UnconfirmedProbe(before_probe) => {
                 if !requester.has_left() {
-                    self.check_unconfirmed_probe(&before_probe, probe, requester)
+                    self.check_unconfirmed_probe(before_probe, probe, requester)
                         .await?;
                 }
                 Ok(judgment)
@@ -1892,14 +1895,18 @@ impl WindowEntry {
     /// writer's, still typing, and a probe would land in the middle of that.
     /// What gone means for a reading without `own` depends on `read_back`: a
     /// body never read back may simply not be drawn yet.
+    ///
+    /// When the only write since the call's own was the interrupt keys, which
+    /// put no text in the composer, whatever the composer holds is the call's
+    /// own, even drawn otherwise (a folded paste), so it is taken back.
     async fn check_own_text(
         &self,
         own: &str,
-        read_back: bool,
+        part: &OwnPart,
         probe: char,
         requester: &mut Requester,
     ) -> PtyResult<Checked> {
-        let gone_if_read_back = if read_back {
+        let gone_if_read_back = if part.read_back {
             Checked::Gone
         } else {
             Checked::MayRemain
@@ -1912,6 +1919,15 @@ impl WindowEntry {
             ComposerReadout::NotObserved => return Ok(Checked::MayRemain),
             ComposerReadout::Body(text) => own_text_shows(text, own, probe),
         };
+        let only_interrupt_keys_since = part.after_own_write.map(|after| after.wrapping_add(1))
+            == Some(seen)
+            && self.session.latest_withheld_write() == Some(seen);
+        if only_interrupt_keys_since
+            && matches!(reading, ComposerReadout::Body(_))
+            && matches!(shows, OwnShows::Absent | OwnShows::WithOthers)
+        {
+            return self.take_back_own(own, probe, seen, &reading).await;
+        }
         match shows {
             OwnShows::Absent => return Ok(gone_if_read_back),
             OwnShows::WithOthers => return Ok(Checked::MayRemain),
@@ -1932,16 +1948,8 @@ impl WindowEntry {
             OwnShows::Alone => {
                 let written = format!("{own}{probe}");
                 let shown = ComposerReadout::Body(format!("{before}{probe}"));
-                match self
-                    .take_back_and_settle(&written, probe, after_probe, &shown)
-                    .await?
-                {
-                    TakenBack::Emptied(..) => Ok(Checked::Gone),
-                    TakenBack::Declined(judgment) if leaves_envelope(&judgment) => {
-                        Ok(Checked::MayRemain)
-                    }
-                    TakenBack::Declined(_) => Ok(Checked::Gone),
-                }
+                self.take_back_own(&written, probe, after_probe, &shown)
+                    .await
             }
             OwnShows::WithOthers => {
                 self.erase_probe_behind(after_probe, probe, &before).await?;
@@ -1952,6 +1960,27 @@ impl WindowEntry {
                 Ok(gone_if_read_back)
             }
         }
+    }
+
+    /// [`WindowEntry::take_back_and_settle`] of the call's own `written`,
+    /// as what the check found of it.
+    async fn take_back_own(
+        &self,
+        written: &str,
+        probe: char,
+        seq_after_written: u64,
+        before_take_back: &ComposerReadout,
+    ) -> PtyResult<Checked> {
+        Ok(
+            match self
+                .take_back_and_settle(written, probe, seq_after_written, before_take_back)
+                .await?
+            {
+                TakenBack::Emptied(..) => Checked::Gone,
+                TakenBack::Declined(judgment) if leaves_envelope(&judgment) => Checked::MayRemain,
+                TakenBack::Declined(_) => Checked::Gone,
+            },
+        )
     }
 
     /// Once another writer's write ended the call while its probe, written
