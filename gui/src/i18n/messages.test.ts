@@ -455,6 +455,7 @@ export const dummyMessages: Messages = {
     deliveryPending: 'DUMMY_chat_deliveryPending',
     deliveryConfirmed: 'DUMMY_chat_deliveryConfirmed',
     deliveryUnconfirmed: 'DUMMY_chat_deliveryUnconfirmed',
+    deliveryUnconfirmedHint: 'DUMMY_chat_deliveryUnconfirmedHint',
     deliveryNotObserved: 'DUMMY_chat_deliveryNotObserved',
     deliveryNotWritten: 'DUMMY_chat_deliveryNotWritten',
     deliveryWriteFailed: 'DUMMY_chat_deliveryWriteFailed',

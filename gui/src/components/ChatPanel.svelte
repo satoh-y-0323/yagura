@@ -454,7 +454,13 @@
           {#if message.deliveries.length > 0}
             <div class="msg__deliveries">
               {#each message.deliveries as delivery (delivery.window_id)}
-                <span class="delivery" data-tone={deliveryTone(delivery.state)}>
+                <span
+                  class="delivery"
+                  data-tone={deliveryTone(delivery.state)}
+                  title={delivery.state === 'unconfirmed'
+                    ? chat.deliveryUnconfirmedHint
+                    : undefined}
+                >
                   <span class="delivery__to">{deliveryTarget(delivery.window_id)}</span>
                   <span
                     >{delivery.state === 'undelivered_unknown'

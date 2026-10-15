@@ -478,7 +478,10 @@ export const messagesEn = {
 
     deliveryPending: 'Sending…',
     deliveryConfirmed: 'Delivered',
-    deliveryUnconfirmed: 'No response',
+    deliveryUnconfirmed: 'Sent',
+    /** The `unconfirmed` chip's tooltip: the state covers a receiver that was busy and took the message anyway. */
+    deliveryUnconfirmedHint:
+      'Sent to the window, but no reaction was seen. It may have been busy — check the window.',
     deliveryNotObserved: 'Not observed',
     deliveryNotWritten: 'Not sent',
     deliveryWriteFailed: 'Write failed',
