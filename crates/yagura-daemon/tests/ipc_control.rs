@@ -5174,9 +5174,10 @@ async fn send_message_does_not_wait_for_a_reaction_or_resend() {
     // second submit key although the submit key was swallowed and never
     // reacted to.
     let expected: &[u8] = b"x\x7f\x1b[200~send-message-no-confirm-body\x1b[201~x\x7f\r";
+    // The reply can arrive before the child has logged the submit key it read.
+    let read = wait_until_input_log_contains(&input_log, expected, Duration::from_secs(20)).await;
     assert_eq!(
-        std::fs::read(&input_log).unwrap_or_default(),
-        expected,
+        read, expected,
         "send_message must not resend just because the submit key was swallowed"
     );
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED "), 0);
