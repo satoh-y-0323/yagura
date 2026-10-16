@@ -160,6 +160,10 @@ pub struct ComposerObservation {
     /// ignoring the structured source and every time-based judgement. `None`
     /// while no rule matches this screen.
     pub screen_rule: Option<DetectedStatus>,
+    /// Whether the program had finished painting this screen: the cursor is
+    /// shown and no synchronized update is open. Always `false` for a screen
+    /// that is not trusted to reflect what the program drew.
+    pub painted: bool,
 }
 
 impl ComposerObservation {
@@ -172,6 +176,7 @@ impl ComposerObservation {
         Self {
             readout: ComposerReadout::NotObserved,
             screen_rule: Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown)),
+            painted: false,
         }
     }
 }
@@ -185,6 +190,8 @@ struct ScreenReading {
     rebuilt: bool,
     generation: u64,
     cursor_hidden: bool,
+    /// The program has a synchronized update open.
+    sync_open: bool,
     /// What the definition's rules say about this screen.
     rule: Option<WindowStatus>,
     /// The composer as this screen shows it; `None` when not asked for, or
@@ -251,12 +258,14 @@ pub struct DetectionEngine {
 /// How long output must pause, with the cursor still hidden, before the
 /// screen counts as finished: CLIs hide the cursor while they paint and show
 /// it again at the end, so a hidden cursor that stays put this long belongs
-/// to a screen the user is actually looking at.
+/// to a screen the user is actually looking at. Whether the daemon may write
+/// never rests on this clock: that is [`ComposerObservation::painted`].
 pub const SETTLE_QUIET: Duration = Duration::from_millis(50);
 
 /// The longest a judgement or a composer query is held back for a screen
 /// that never finishes, so output that keeps the cursor hidden is still
-/// judged.
+/// judged. Whether the daemon may write never rests on this clock: that is
+/// [`ComposerObservation::painted`].
 pub const SETTLE_CEILING: Duration = Duration::from_millis(250);
 
 impl DetectionEngine {
@@ -614,13 +623,15 @@ impl DetectionEngine {
     /// The answer to a composer query from one reading. A model rebuilt
     /// since the engine last looked is as untrusted as a loss it has seen.
     fn observe(&self, reading: &ScreenReading) -> ComposerObservation {
+        let trusted = self.screen_trusted && !reading.rebuilt;
         let readout = match reading.composer.as_ref() {
-            Some(readout) if self.screen_trusted && !reading.rebuilt => readout.clone(),
+            Some(readout) if trusted => readout.clone(),
             _ => ComposerReadout::NotObserved,
         };
         ComposerObservation {
             readout,
             screen_rule: reading.rule.map(declare_status),
+            painted: trusted && !reading.cursor_hidden && !reading.sync_open,
         }
     }
 
@@ -647,16 +658,21 @@ impl DetectionEngine {
                 let readout = composer
                     .filter(|_| with_composer)
                     .map(|section| screen.read_composer(section));
-                (screen.cursor_hidden(), bottom, readout)
+                (
+                    (screen.cursor_hidden(), screen.sync_open()),
+                    bottom,
+                    readout,
+                )
             });
             (read, model.generation())
         };
-        let (cursor_hidden, bottom, composer) = read.unwrap_or_default();
+        let ((cursor_hidden, sync_open), bottom, composer) = read.unwrap_or_default();
         ScreenReading {
             // A read that panicked rebuilt the model, which moved its generation.
             rebuilt: generation != self.screen_generation,
             generation,
             cursor_hidden,
+            sync_open,
             // Matched after the lock is released, so the reader thread does
             // not wait on the regular expressions.
             rule: bottom.and_then(|bottom| self.match_rules(&bottom)),

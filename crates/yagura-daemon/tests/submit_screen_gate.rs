@@ -22,7 +22,7 @@
 mod common;
 
 use common::ScreenFeed;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,11 +37,13 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
 use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::input::plan_raw_write;
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
 use yagura_test_support::ipc::Connection;
+use yagura_test_support::process::{COMPOSER_MARKER, COMPOSER_SEPARATOR};
 
 // =====================================================================
 // The detection engine answers a composer query together with what its
@@ -2312,4 +2314,311 @@ async fn a_torn_frame_standing_after_another_writers_byte_is_not_taken_for_a_fin
     let judgment = ended(call, "a second writer's byte must end the check").await;
 
     assert_no_submit_key_reached_the_child(&h, &window_id, &log, &judgment).await;
+}
+
+// --- a screen that has not finished painting -------------------------------
+
+/// A key-raised dialog whose first write draws `shape` alone, bracketed the
+/// way `torn` (`torn` or `torn-sync`) says, and whose rest is drawn once the
+/// file `rest` exists. The first read of [`FOREIGN`] removes it.
+fn unfinished_dialog(torn: &str, shape: &str, rest: &Path) -> String {
+    format!(
+        "key:hidden:{torn}|{shape}|{}|until-byte|{FOREIGN:02x}",
+        rest.to_str().expect("the dialog path must be valid UTF-8")
+    )
+}
+
+/// Whether the window's model shows the cursor hidden right now.
+async fn cursor_hidden_now(h: &Harness, window_id: &str) -> bool {
+    entry(h, window_id)
+        .session()
+        .clone()
+        .read_screen(|screen| screen.cursor_hidden())
+        .await
+        .unwrap()
+}
+
+/// Whether the first write of a torn frame of `shape` is what the screen
+/// shows: the heading not drawn yet, and the row `shape` draws read as the
+/// composer.
+fn first_write_shows(screen: &ScreenRead, shape: &str) -> bool {
+    let row_read = match shape {
+        "option" => composer_of(screen) == ComposerReadout::Body("1. Yes".to_string()),
+        "marker" => {
+            composer_of(screen) == ComposerReadout::Empty
+                && shows(screen, &format!("{COMPOSER_MARKER}{COMPOSER_SEPARATOR}"))
+        }
+        other => panic!("no first write is described for the shape {other:?}"),
+    };
+    heading_not_drawn(screen) && row_read
+}
+
+/// A window logging what its child reads, whose dialog's first write
+/// (`torn`, `shape`) has been raised and has reached the daemon's model.
+/// Returns the window, the child's input log and the file that draws the
+/// rest of the dialog.
+async fn raise_an_unfinished_dialog(
+    h: &Harness,
+    client: &mut Connection,
+    dir: &Path,
+    name: &str,
+    torn: &str,
+    shape: &str,
+) -> (String, PathBuf, PathBuf) {
+    let log = dir.join("child-input.log");
+    let rest = dir.join("dialog-rest");
+    let overlay = unfinished_dialog(torn, shape, &rest);
+    let marker = format!("{name}-marker");
+    let window_id = open_gate_window(
+        h,
+        client,
+        dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(name, &marker, &overlay, APPROVAL_HEADING)
+        },
+    )
+    .await;
+    press(h, &window_id, OVERLAY_SHOW).await;
+    wait_for_screen(h, &window_id, "the dialog's first write", |screen| {
+        first_write_shows(screen, shape)
+    })
+    .await;
+    let synchronized = torn == "torn-sync";
+    assert_eq!(
+        cursor_hidden_now(h, &window_id).await,
+        !synchronized,
+        "the first write must leave the cursor as a real CLI caught mid-paint does"
+    );
+    (window_id, log, rest)
+}
+
+/// Asserts the daemon wrote none of its own bytes to the child: the dialog
+/// took neither a submit key nor anything else, nothing was submitted, and
+/// the child read only the key that raised the dialog. `others` are bytes
+/// the test itself wrote after that key.
+async fn assert_no_daemon_byte_reached_the_child(
+    h: &Harness,
+    window_id: &str,
+    log: &Path,
+    others: &[u8],
+) {
+    assert_eq!(
+        settled_marker_count(h, window_id, "APPROVED", 0).await,
+        0,
+        "a submit key reached the dialog"
+    );
+    assert_eq!(
+        settled_marker_count(h, window_id, "DIALOG-INPUT", 0).await,
+        0,
+        "a byte reached the dialog"
+    );
+    assert_eq!(count_marker(h, window_id, "SUBMITTED"), 0);
+    let read = std::fs::read(log).unwrap_or_default();
+    let expected = [&[OVERLAY_SHOW][..], others].concat();
+    assert_eq!(
+        read, expected,
+        "the child must have read only the test's own bytes"
+    );
+}
+
+/// A `send_message` body written through (`text`), sent while the dialog's
+/// first write stands: nothing is written however long that takes, and once
+/// the rest is drawn the call is declined for the dialog.
+async fn a_raw_send_waits_out_an_unfinished_dialog(
+    case: &str,
+    torn: &str,
+    shape: &str,
+    text: &str,
+) {
+    let dir = unique_temp_dir(case);
+    let h = Harness::start(case, detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let (window_id, log, rest) =
+        raise_an_unfinished_dialog(&h, &mut client, &dir, "unfinished", torn, shape).await;
+
+    let sender = entry(&h, &window_id);
+    let plan = plan_raw_write(text);
+    let call = tokio::spawn(async move { sender.submit_raw_gated(&plan, None).await });
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a screen still being painted is waited on, not written to and not given up on by a clock"
+    );
+    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+
+    std::fs::write(&rest, b"").expect("draw the rest of the dialog");
+    wait_for_screen(
+        &h,
+        &window_id,
+        "the rest of the dialog to be drawn",
+        |screen| shows(screen, APPROVAL_HEADING),
+    )
+    .await;
+    let judgment = tokio::time::timeout(HANG_GUARD, call)
+        .await
+        .expect("the finished dialog must end the call")
+        .expect("the submit task must not panic")
+        .expect("the call must not fail at the PTY level");
+
+    assert_declined_as_not_accepting(&judgment, false);
+    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+    assert_eq!(
+        child_input(&h, &window_id, &log).await,
+        [OVERLAY_SHOW],
+        "the daemon must have written nothing"
+    );
+}
+
+/// [`a_raw_send_waits_out_an_unfinished_dialog`] for a judged body: neither
+/// the body nor its probe is written while the first write stands.
+async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, shape: &str) {
+    let dir = unique_temp_dir(case);
+    let h = Harness::start(case, detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let (window_id, log, rest) =
+        raise_an_unfinished_dialog(&h, &mut client, &dir, "unfinished", torn, shape).await;
+
+    let sender = entry(&h, &window_id);
+    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let_every_clock_bound_run_out().await;
+    assert!(
+        !call.is_finished(),
+        "a screen still being painted is waited on, not written to and not given up on by a clock"
+    );
+    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+
+    let judgment = finish_the_dialog_then_write_another_byte(&h, &window_id, &rest, call).await;
+
+    assert!(
+        matches!(judgment.placement, SubmitPlacement::NotPlaced(_)),
+        "nothing may be placed on a screen that was never finished as a composer, got {:?}",
+        judgment.placement
+    );
+    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[FOREIGN]).await;
+    assert_eq!(
+        child_input(&h, &window_id, &log).await,
+        [OVERLAY_SHOW, FOREIGN],
+        "the daemon must have written nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_terminator_is_not_written_while_a_dialogs_option_row_is_half_painted() {
+    a_raw_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-raw-cr-option",
+        "torn",
+        "option",
+        "\r",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_bare_terminator_is_not_written_while_a_half_painted_dialog_reads_as_an_empty_composer() {
+    a_raw_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-raw-cr-marker",
+        "torn",
+        "marker",
+        "\r",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_unterminated_body_is_not_written_while_a_dialogs_option_row_is_half_painted() {
+    a_raw_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-raw-1-option",
+        "torn",
+        "option",
+        "1",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_unterminated_body_is_not_written_while_a_half_painted_dialog_reads_as_an_empty_composer()
+ {
+    a_raw_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-raw-1-marker",
+        "torn",
+        "marker",
+        "1",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_judged_body_is_not_written_while_a_half_painted_dialog_reads_as_an_empty_composer() {
+    a_judged_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-judged-marker",
+        "torn",
+        "marker",
+    )
+    .await;
+}
+
+/// A synchronized update left open is a paint still under way, though the
+/// cursor stays shown inside it.
+#[tokio::test]
+async fn a_bare_terminator_is_not_written_while_a_synchronized_update_is_left_open() {
+    a_raw_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-raw-sync",
+        "torn-sync",
+        "marker",
+        "\r",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_judged_body_is_not_written_while_a_synchronized_update_is_left_open() {
+    a_judged_send_waits_out_an_unfinished_dialog(
+        "screen-gate-unfinished-judged-sync",
+        "torn-sync",
+        "marker",
+    )
+    .await;
+}
+
+/// A finished composer, its cursor shown, takes a written-through body as it
+/// is, once.
+#[tokio::test]
+async fn a_written_through_body_reaches_a_finished_composer_as_it_is() {
+    let dir = unique_temp_dir("screen-gate-finished-raw");
+    let log = dir.join("child-input.log");
+    let h = Harness::start("screen-gate-finished-raw", detection_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_gate_window(
+        &h,
+        &mut client,
+        &dir,
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("finished", "finished-marker", "", "")
+        },
+    )
+    .await;
+    assert!(
+        !cursor_hidden_now(&h, &window_id).await,
+        "a finished composer shows its cursor for this case to mean anything"
+    );
+
+    let judgment = tokio::time::timeout(
+        HANG_GUARD,
+        entry(&h, &window_id).submit_raw_gated(&plan_raw_write("alpha"), None),
+    )
+    .await
+    .expect("a finished composer must be written to without waiting")
+    .expect("the call must not fail at the PTY level");
+
+    match judgment.placement {
+        SubmitPlacement::Placed(_) => {}
+        other => panic!("a finished composer must take the body, got {other:?}"),
+    }
+    assert_eq!(
+        child_input(&h, &window_id, &log).await,
+        b"alpha",
+        "the body must reach the child as it is, once"
+    );
 }

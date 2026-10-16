@@ -20,7 +20,7 @@
 //! the file `<path>` exists, so the window becomes ready when the test
 //! decides; any other value starts it at once. Given the four trailing arguments the fixture also
 //! paints its unsubmitted input as one marked composer region; without them
-//! it writes exactly what it wrote before that mode existed, which is what
+//! it writes the same text it wrote before that mode existed, which is what
 //! every caller of the five-argument launcher relies on. One further argument
 //! folds that region: its placeholder is painted wherever a non-empty body
 //! would stand, so the body never reaches the screen. A further argument
@@ -96,9 +96,15 @@
 //! draws only `<shape>`; the full dialog follows once the file `<path>`
 //! exists. `<shape>` is `erase` (the composer region erased, nothing drawn),
 //! `option` (one indented option row carrying the composer's marker, as a
-//! dialog's selected row drawn with the composer's glyph), or `echo=<text>`
-//! (more continuation rows reading `<text>` than the screen holds, the cursor
-//! after a last, empty one: a response indented like the composer). `style` is
+//! dialog's selected row drawn with the composer's glyph), `marker` (the
+//! composer's marker and separator alone, the cursor right after them: a
+//! dialog's option rows cut short where they begin, reading as an empty
+//! composer), or `echo=<text>` (more continuation rows reading `<text>` than
+//! the screen holds, the cursor after a last, empty one: a response indented
+//! like the composer). The first write of `torn|` hides the cursor and never
+//! shows it again; `torn-sync|` in its place opens a synchronized update
+//! (`ESC[?2026h`) instead, the cursor left shown, and the second write closes
+//! it at the frame's end. `style` is
 //! `hidden` (option rows follow the heading and the composer is not drawn),
 //! `option` (the selected option is drawn as a composer-shaped line reading
 //! `1. Yes`), `beside` (the composer stays drawn below the heading) or
@@ -106,6 +112,10 @@
 //! style but `working` is a dialog: while it is drawn, the bytes written to
 //! this process never reach the buffer, and each read prints `APPROVED` if it
 //! held a carriage return and `DIALOG-INPUT` if it held anything else.
+//!
+//! Every frame hides the cursor while it paints and shows it again at its
+//! end, the way a real CLI brackets a repaint; a frame drawing a dialog leaves
+//! it hidden, as the real CLIs' approval dialogs do.
 //!
 //! One further argument, `input_log` (argv index 14), is a file path to which
 //! every byte read from stdin is appended as it is read, before any
@@ -131,7 +141,7 @@ use std::time::{Duration, Instant};
 #[path = "shared/composer_paint.rs"]
 mod composer_paint;
 
-use composer_paint::{ComposerStyle, Output, Overlay, OverlayComposer, spawn_reflector};
+use composer_paint::{ComposerStyle, Output, Overlay, OverlayComposer, Paint, spawn_reflector};
 
 /// Lines of filler output, enough to push the marker line out of a
 /// `bottom_line_count`-sized detection window: the only way this fixture can
@@ -365,16 +375,19 @@ const TORN_ECHO_ROWS: usize = 30;
 struct TornFrame {
     first: Overlay,
     rest_when_exists: std::path::PathBuf,
+    /// The first write opens a synchronized update the second one closes.
+    sync: bool,
 }
 
 impl TornFrame {
     /// Parses `<shape>` and `<path>`, the composer's own marker, separator
     /// and continuation prefix taken from the positional arguments.
-    fn parse(shape: &str, path: &str) -> Option<Self> {
+    fn parse(shape: &str, path: &str, sync: bool) -> Option<Self> {
         let arg = |index: usize| std::env::args().nth(index).unwrap_or_default();
         let lines = match shape {
             "erase" => Vec::new(),
             "option" => vec![format!("  {}{}1. Yes", arg(6), arg(7))],
+            "marker" => vec![format!("{}{}", arg(6), arg(7))],
             other => {
                 let text = other.strip_prefix("echo=")?;
                 let prefix = arg(8);
@@ -387,8 +400,15 @@ impl TornFrame {
             first: Overlay {
                 lines,
                 composer: OverlayComposer::Hidden,
+                paint: if sync {
+                    Paint::SyncOpen
+                } else {
+                    Paint::CursorHidden
+                },
+                closes_sync: false,
             },
             rest_when_exists: std::path::PathBuf::from(path),
+            sync,
         })
     }
 }
@@ -450,6 +470,8 @@ impl OverlaySettings {
                         "Esc to cancel".to_string(),
                     ],
                     composer: OverlayComposer::Hidden,
+                    paint: Paint::CursorHidden,
+                    closes_sync: false,
                 },
                 true,
             ),
@@ -457,6 +479,8 @@ impl OverlaySettings {
                 Overlay {
                     lines: vec![heading],
                     composer: OverlayComposer::Replaced("1. Yes".to_string()),
+                    paint: Paint::CursorHidden,
+                    closes_sync: false,
                 },
                 true,
             ),
@@ -464,6 +488,8 @@ impl OverlaySettings {
                 Overlay {
                     lines: vec![heading],
                     composer: OverlayComposer::Shown,
+                    paint: Paint::CursorHidden,
+                    closes_sync: false,
                 },
                 true,
             ),
@@ -471,23 +497,31 @@ impl OverlaySettings {
                 Overlay {
                     lines: vec![heading],
                     composer: OverlayComposer::Shown,
+                    paint: Paint::Finished,
+                    closes_sync: false,
                 },
                 false,
             ),
             _ => return None,
         };
         let (torn, end) = match parts.next() {
-            Some(rest) => match rest.strip_prefix("torn|") {
-                Some(torn) => {
-                    let (shape, after_shape) = torn.split_once('|')?;
-                    let (path, end) = match after_shape.split_once('|') {
-                        Some((path, end)) => (path, Some(end)),
-                        None => (after_shape, None),
-                    };
-                    (Some(TornFrame::parse(shape, path)?), end)
+            Some(rest) => {
+                let torn = match rest.strip_prefix("torn|") {
+                    Some(torn) => Some((torn, false)),
+                    None => rest.strip_prefix("torn-sync|").map(|torn| (torn, true)),
+                };
+                match torn {
+                    Some((torn, sync)) => {
+                        let (shape, after_shape) = torn.split_once('|')?;
+                        let (path, end) = match after_shape.split_once('|') {
+                            Some((path, end)) => (path, Some(end)),
+                            None => (after_shape, None),
+                        };
+                        (Some(TornFrame::parse(shape, path, sync)?), end)
+                    }
+                    None => (None, Some(rest)),
                 }
-                None => (None, Some(rest)),
-            },
+            }
             None => (None, None),
         };
         let (gone_when_exists, gone_on_byte) = match end {
@@ -535,13 +569,17 @@ fn show_overlay(
     drawn.store(true, Ordering::SeqCst);
     out.set_overlay(Some(torn.first.clone()))?;
     let rest_when_exists = torn.rest_when_exists.clone();
-    let (out, drawn, settings) = (Arc::clone(out), Arc::clone(drawn), Arc::clone(settings));
+    let rest = Overlay {
+        closes_sync: torn.sync,
+        ..settings.overlay.clone()
+    };
+    let (out, drawn) = (Arc::clone(out), Arc::clone(drawn));
     std::thread::spawn(move || {
         while !rest_when_exists.exists() {
             std::thread::sleep(Duration::from_millis(10));
         }
         if drawn.load(Ordering::SeqCst) {
-            let _ = out.set_overlay(Some(settings.overlay.clone()));
+            let _ = out.set_overlay(Some(rest));
         }
     });
     Ok(())

@@ -104,6 +104,42 @@ pub(crate) enum OverlayComposer {
 pub(crate) struct Overlay {
     pub(crate) lines: Vec<String>,
     pub(crate) composer: OverlayComposer,
+    pub(crate) paint: Paint,
+    /// The frame also ends a synchronized update an earlier frame left open.
+    pub(crate) closes_sync: bool,
+}
+
+/// How a frame brackets what it draws, the way a real CLI marks a repaint in
+/// progress: a screen reader tells a finished paint from one still under way
+/// (or a dialog) by these brackets alone.
+// Only `submit_child` draws an overlay; see [`OverlayComposer`].
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub(crate) enum Paint {
+    /// `ESC[?25l` ... `ESC[?25h`: the paint is finished and the cursor shows
+    /// where input goes.
+    Finished,
+    /// `ESC[?25l` with the cursor left hidden: a dialog, or a paint cut short.
+    CursorHidden,
+    /// `ESC[?2026h` left open with the cursor never hidden: a synchronized
+    /// paint cut short.
+    SyncOpen,
+}
+
+impl Paint {
+    fn opening(self) -> &'static [u8] {
+        match self {
+            Paint::Finished | Paint::CursorHidden => b"\x1b[?25l",
+            Paint::SyncOpen => b"\x1b[?2026h",
+        }
+    }
+
+    fn closing(self) -> &'static [u8] {
+        match self {
+            Paint::Finished => b"\x1b[?25h",
+            Paint::CursorHidden | Paint::SyncOpen => b"",
+        }
+    }
 }
 
 /// The fixture's output together with the composer region painted below it,
@@ -203,12 +239,26 @@ impl Screen {
         Ok(())
     }
 
-    /// Writes the assembled frame with a single write. Rust's stdout is
+    /// Writes the assembled frame, bracketed as the overlay's [`Paint`] says
+    /// (a finished paint without one), with a single write. Rust's stdout is
     /// line-buffered and would split a frame at its last newline, letting a
     /// reader see the region erased but not yet repainted; stderr is
     /// unbuffered and, on a PTY, feeds the same terminal stream.
     fn commit(&mut self) -> io::Result<()> {
-        let frame = std::mem::take(&mut self.frame);
+        let (paint, closes_sync) = self
+            .overlay
+            .as_ref()
+            .map_or((Paint::Finished, false), |overlay| {
+                (overlay.paint, overlay.closes_sync)
+            });
+        let drawn = std::mem::take(&mut self.frame);
+        let mut frame = Vec::with_capacity(drawn.len() + 24);
+        frame.extend_from_slice(paint.opening());
+        frame.extend_from_slice(&drawn);
+        frame.extend_from_slice(paint.closing());
+        if closes_sync {
+            frame.extend_from_slice(b"\x1b[?2026l");
+        }
         let mut stderr = io::stderr().lock();
         stderr.write_all(&frame)?;
         stderr.flush()

@@ -656,9 +656,9 @@ enum ProbeReading {
 
 /// What [`WindowEntry::erase_probe`] found.
 enum ProbeErased {
-    /// The composer reads empty, on the screen this rule verdict was read on,
-    /// with the ledger at this count.
-    Emptied(Option<DetectedStatus>, u64),
+    /// The composer reads empty in this reading, with the ledger at this
+    /// count.
+    Emptied(ComposerObservation, u64),
     /// Another writer wrote; this call's own writes left the ledger here.
     Interrupted(u64),
 }
@@ -925,20 +925,46 @@ fn reads_as_before_take_back(text: &str, written: &str, probe: char) -> bool {
             .is_some_and(|body| composer_text_matches_ignoring_lost_whitespace(text, body))
 }
 
+/// What the write gate makes of one [`ComposerObservation`] (see
+/// [`write_gate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteGate {
+    /// A finished screen no rule closes: the daemon may write.
+    Open,
+    /// A rule reads the screen as an approval prompt, or as its explicit
+    /// `unknown` declaration. A dialog keeps the cursor hidden even once it
+    /// is drawn, so this holds whether or not the screen is finished.
+    Closed,
+    /// The program has not finished painting this screen: nothing is decided
+    /// on it, neither a write nor a decline.
+    Unfinished,
+}
+
 /// The one write gate every byte the daemon decides to write on its own --
 /// a fresh body, the clear sequence, the submit key, a key-only resend, and a
 /// `send_message` body written straight through -- passes before its first
-/// byte: closed while `screen_rule` alone reads the screen as an approval
-/// prompt, or as a rule's explicit `unknown` declaration. `screen_rule` must
-/// come from the very [`ComposerObservation`] the decision to write was made
-/// from, never a fresh one taken a moment later, so the check and the write
-/// see the same screen.
-fn screen_accepts_write(screen_rule: Option<DetectedStatus>) -> bool {
-    !matches!(
-        screen_rule,
+/// byte. It takes the very [`ComposerObservation`] the decision to write was
+/// made from, never a fresh one taken a moment later, so the check and the
+/// write see the same screen.
+fn write_gate(observation: &ComposerObservation) -> WriteGate {
+    if matches!(
+        observation.screen_rule,
         Some(DetectedStatus::WaitingApproval)
             | Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown))
-    )
+    ) {
+        WriteGate::Closed
+    } else if observation.painted {
+        WriteGate::Open
+    } else {
+        WriteGate::Unfinished
+    }
+}
+
+/// Whether [`write_gate`] is open on `observation`. Every reading a wait
+/// hands on is finished (see [`WindowEntry::wait_for_composer`]), so a
+/// decision made from one that is not open declines.
+fn screen_accepts_write(observation: &ComposerObservation) -> bool {
+    write_gate(observation) == WriteGate::Open
 }
 
 /// Declines with [`NotPlacedReason::NotAccepting`], carrying forward whatever
@@ -972,11 +998,11 @@ fn composer_reads_back_as(readout: &ComposerReadout, body: &str) -> bool {
         if composer_text_matches_ignoring_lost_whitespace(text, body))
 }
 
-/// How a take-back ended: the composer confirmed empty (with the screen rule
-/// verdict of that reading), or a judgment declining the attempt.
+/// How a take-back ended: the composer confirmed empty (with the reading that
+/// showed it), or a judgment declining the attempt.
 /// `Emptied` also carries the ledger count the empty reading was guarded at.
 enum TakenBack {
-    Emptied(Option<DetectedStatus>, u64),
+    Emptied(ComposerObservation, u64),
     Declined(SubmitJudgment),
 }
 
@@ -1685,7 +1711,7 @@ impl WindowEntry {
         let Some(observation) = self.observe_composer(&mut requester).await? else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
-        if !screen_accepts_write(observation.screen_rule) {
+        if !screen_accepts_write(&observation) {
             return Ok(declined(NotPlacedReason::NotAccepting, None));
         }
         let outcome = self.run_plan_steps(plan, InputOrigin::Message).await?;
@@ -1827,8 +1853,7 @@ impl WindowEntry {
             // A dialog the screen rule names hides the composer for good: the
             // gate is closed on that screen, so nothing is written and there
             // is nothing to wait out.
-            if let (false, Some(vouched_seq)) =
-                (screen_accepts_write(observation.screen_rule), vouched_now())
+            if let (false, Some(vouched_seq)) = (screen_accepts_write(&observation), vouched_now())
             {
                 return Ok(decline_not_accepting(Some(vouched_seq)));
             }
@@ -1888,12 +1913,12 @@ impl WindowEntry {
                 };
                 if let Some(text) = marked {
                     match self
-                        .settle_unanswered_probe(text, probe, observation.screen_rule)
+                        .settle_unanswered_probe(text, probe, &observation)
                         .await?
                     {
-                        Some(TakenBack::Emptied(settled_rule, seq)) => {
+                        Some(TakenBack::Emptied(settled, seq)) => {
                             return self
-                                .write_fresh_and_decide(body, probe, settled_rule, seq, requester)
+                                .write_fresh_and_decide(body, probe, &settled, seq, requester)
                                 .await;
                         }
                         Some(TakenBack::Declined(judgment)) => return Ok(judgment),
@@ -1928,7 +1953,7 @@ impl WindowEntry {
                     // tell that apart from the caller's own envelope. The
                     // screen rule can: it names the dialog, not the row's
                     // shape.
-                    if !screen_accepts_write(observation.screen_rule) {
+                    if !screen_accepts_write(&observation) {
                         return Ok(decline_not_accepting(residue.map(|r| r.write_seq)));
                     }
                     match (restored_own_envelope, vouched_seq) {
@@ -2045,7 +2070,7 @@ impl WindowEntry {
         let seen = self.write_seq();
         match self
             .wait_for_composer(route, Some(seen), requester, |observation| {
-                (screen_accepts_write(observation.screen_rule)
+                (screen_accepts_write(observation)
                     && observation.readout != ComposerReadout::NotObserved)
                     .then(|| observation.readout.clone())
             })
@@ -2266,6 +2291,11 @@ impl WindowEntry {
     /// on the detector answering a query it has taken up (see
     /// [`DetectorHandle::query_composer`]).
     ///
+    /// A reading of a screen the program has not finished painting (see
+    /// [`WriteGate::Unfinished`]) never reaches `settle`: it is read again,
+    /// so everything decided from what a wait hands on sees a finished
+    /// screen, whatever clock the detector answered on.
+    ///
     /// A wait that turns down an unreadable composer is logged under `route`
     /// when it ends other than by a reading: only another writer, the
     /// requester leaving or the child exiting ends such a wait, so this is
@@ -2282,6 +2312,7 @@ impl WindowEntry {
         let mut arrivals = self.session.output_arrivals();
         let mut status = self.watch_status();
         let mut waiting_on_unreadable = false;
+        let mut waiting_on_unfinished = false;
         let end = 'wait: loop {
             // Seen before the query, so a change while it runs is a cue.
             arrivals.borrow_and_update();
@@ -2299,7 +2330,16 @@ impl WindowEntry {
             if let Some(end) = self.wait_ended(&exit, requester, own_seq) {
                 break 'wait end;
             }
-            if let Some(settled) = settle(&observation) {
+            if write_gate(&observation) == WriteGate::Unfinished {
+                if !waiting_on_unfinished {
+                    waiting_on_unfinished = true;
+                    tracing::debug!(
+                        window_id = %self.window_id(),
+                        route,
+                        "waiting for the screen to finish painting"
+                    );
+                }
+            } else if let Some(settled) = settle(&observation) {
                 break 'wait ComposerWait::Done(settled);
             }
             if !waiting_on_unreadable && observation.readout == ComposerReadout::NotObserved {
@@ -2353,7 +2393,7 @@ impl WindowEntry {
                 None,
                 &mut Requester::none(),
                 |observation| {
-                    (screen_accepts_write(observation.screen_rule)
+                    (screen_accepts_write(observation)
                         && observation.readout == ComposerReadout::Empty)
                         .then_some(())
                 },
@@ -2419,14 +2459,14 @@ impl WindowEntry {
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        if !screen_accepts_write(observed.screen_rule) {
+        if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(None));
         }
         if *lock_recover(&self.unanswered_probe) == Some(seq) {
             // An earlier probe is still on its way: a second one behind it
             // would leave one of them in the composer.
             let shown_before = |observation: &ComposerObservation| match &observation.readout {
-                ComposerReadout::Body(_) if screen_accepts_write(observation.screen_rule) => {
+                ComposerReadout::Body(_) if screen_accepts_write(observation) => {
                     BehindProbe::of(&observation.readout, probe)
                 }
                 ComposerReadout::Body(_)
@@ -2490,7 +2530,7 @@ impl WindowEntry {
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        if !screen_accepts_write(observed.screen_rule) {
+        if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(Some(seq)));
         }
         if requester.has_left() {
@@ -2507,7 +2547,7 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Interrupted, Some(seq)));
         }
         let shown = |observation: &ComposerObservation| {
-            if screen_accepts_write(observation.screen_rule) {
+            if screen_accepts_write(observation) {
                 reflection_of(&observation.readout, body, probe)
             } else {
                 None
@@ -2555,8 +2595,8 @@ impl WindowEntry {
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         match self.erase_probe(seq).await? {
-            ProbeErased::Emptied(settled_rule, after_erase) => {
-                self.write_fresh_and_decide(body, probe, settled_rule, after_erase, requester)
+            ProbeErased::Emptied(settled, after_erase) => {
+                self.write_fresh_and_decide(body, probe, &settled, after_erase, requester)
                     .await
             }
             ProbeErased::Interrupted(_) => Ok(declined(NotPlacedReason::Interrupted, None)),
@@ -2697,9 +2737,7 @@ impl WindowEntry {
         }
         lock_recover(&self.own_part).left = OwnLeft::UnconfirmedProbe(before_probe.clone());
         let shown_before = |observation: &ComposerObservation| {
-            if &observation.readout == before_probe
-                || !screen_accepts_write(observation.screen_rule)
-            {
+            if &observation.readout == before_probe || !screen_accepts_write(observation) {
                 return None;
             }
             BehindProbe::of(&observation.readout, probe)
@@ -2786,10 +2824,10 @@ impl WindowEntry {
     /// erased and the submit key pressed once the composer reads as it did
     /// before the probe; the body was dropped, so the probe is erased and
     /// nothing is left; or nothing shows yet, so the call waits.
-    /// `screen_rule` is the rule verdict already read alongside the empty
-    /// composer, so the write gate is checked before this call's very first
-    /// byte rather than against a fresh reading of its own; `seq` is the
-    /// ledger that empty reading was taken at.
+    /// `observed` is the reading that showed the composer empty, so the write
+    /// gate is checked before this call's very first byte rather than against
+    /// a fresh reading of its own; `seq` is the ledger that empty reading was
+    /// taken at.
     ///
     /// A screen that stops accepting a write once something showed (a dialog
     /// covering the composer) is waited out, never declined on. A write from
@@ -2804,11 +2842,11 @@ impl WindowEntry {
         &self,
         body: &str,
         probe: char,
-        screen_rule: Option<DetectedStatus>,
+        observed: &ComposerObservation,
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        if !screen_accepts_write(screen_rule) {
+        if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(None));
         }
         if requester.has_left() {
@@ -2898,7 +2936,7 @@ impl WindowEntry {
         let started = Instant::now();
         let reflection = self
             .wait_for_composer("wait_for_reflection", Some(seq), requester, |observation| {
-                if screen_accepts_write(observation.screen_rule) {
+                if screen_accepts_write(observation) {
                     reflection_of(&observation.readout, body, probe)
                 } else {
                     None
@@ -2954,9 +2992,8 @@ impl WindowEntry {
             return Ok(None);
         }
         let reads_as_before = |observation: &ComposerObservation| {
-            (screen_accepts_write(observation.screen_rule)
-                && target.restored_in(&observation.readout, own))
-            .then_some(())
+            (screen_accepts_write(observation) && target.restored_in(&observation.readout, own))
+                .then_some(())
         };
         Ok(Some(
             self.wait_for_composer(
@@ -3035,7 +3072,7 @@ impl WindowEntry {
         // accepts one, the same as every other write.
         let Some(before_take_back) = self
             .wait_for_composer_unwatched("take_back_for_departed_requester", seq, |observation| {
-                (screen_accepts_write(observation.screen_rule)
+                (screen_accepts_write(observation)
                     && !matches!(observation.readout, ComposerReadout::NotObserved))
                 .then(|| observation.readout.clone())
             })
@@ -3068,7 +3105,7 @@ impl WindowEntry {
         if self.input.take_back() == TakeBack::Unavailable {
             return Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)));
         }
-        if !screen_accepts_write(observed.screen_rule) {
+        if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(Some(residue.write_seq)));
         }
         if requester.has_left() {
@@ -3081,8 +3118,8 @@ impl WindowEntry {
             .take_back_and_settle(residue.body, probe, residue.write_seq, &observed.readout)
             .await?
         {
-            TakenBack::Emptied(settled_rule, seq) => {
-                self.write_fresh_and_decide(body, probe, settled_rule, seq, requester)
+            TakenBack::Emptied(settled, seq) => {
+                self.write_fresh_and_decide(body, probe, &settled, seq, requester)
                     .await
             }
             TakenBack::Declined(judgment) => Ok(judgment),
@@ -3169,7 +3206,7 @@ impl WindowEntry {
         let probe_shown_alone = |observation: &ComposerObservation| match &observation.readout {
             ComposerReadout::Body(text)
                 if &observation.readout != before_take_back
-                    && screen_accepts_write(observation.screen_rule)
+                    && screen_accepts_write(observation)
                     && !reads_as_before_take_back(text, written, probe) =>
             {
                 text.strip_suffix(probe).map(str::is_empty)
@@ -3211,7 +3248,7 @@ impl WindowEntry {
     /// A take-back's outcome once its probe has been erased.
     fn taken_back_once(&self, erased: ProbeErased) -> TakenBack {
         match erased {
-            ProbeErased::Emptied(rule, seq) => TakenBack::Emptied(rule, seq),
+            ProbeErased::Emptied(settled, seq) => TakenBack::Emptied(settled, seq),
             ProbeErased::Interrupted(after_erase) => {
                 TakenBack::Declined(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
@@ -3233,17 +3270,17 @@ impl WindowEntry {
         }
         let emptied = |observation: &ComposerObservation| {
             (matches!(observation.readout, ComposerReadout::Empty)
-                && screen_accepts_write(observation.screen_rule))
-            .then_some(observation.screen_rule)
+                && screen_accepts_write(observation))
+            .then(|| observation.clone())
         };
         match self
             .wait_for_composer_unwatched("erase_probe", after_erase, emptied)
             .await?
         {
-            Some(rule) => {
+            Some(settled) => {
                 *lock_recover(&self.unanswered_probe) = None;
                 *lock_recover(&self.degenerate_since) = None;
-                Ok(ProbeErased::Emptied(rule, after_erase))
+                Ok(ProbeErased::Emptied(settled, after_erase))
             }
             None => Ok(ProbeErased::Interrupted(after_erase)),
         }
@@ -3258,13 +3295,13 @@ impl WindowEntry {
         &self,
         text: &str,
         probe: char,
-        screen_rule: Option<DetectedStatus>,
+        observed: &ComposerObservation,
     ) -> PtyResult<Option<TakenBack>> {
         let Some(seq) = *lock_recover(&self.unanswered_probe) else {
             return Ok(None);
         };
         let probe_alone = text == probe.to_string();
-        if !probe_alone || !screen_accepts_write(screen_rule) || self.write_seq() != seq {
+        if !probe_alone || !screen_accepts_write(observed) || self.write_seq() != seq {
             return Ok(None);
         }
         let erased = self.erase_probe(seq).await?;

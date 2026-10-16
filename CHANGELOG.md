@@ -8,6 +8,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - A message or handoff that is being delivered no longer leaves yagura's own half-written text (including the `x` probe) in a window's input line when someone types, `send_keys` or interrupts meanwhile: the delivery takes its text back in front of that input, writes nothing more, and checks the line before it answers. Text typed in front of a waiting notice no longer sets off a loop of probes that kept the notice from arriving. Where the check cannot confirm the text gone, the call still reports that something may remain.
+- A `send_message`, a handoff or a chat message could reach a CLI while it was still drawing an approval dialog, so its keys could answer the dialog (an Enter could approve it). yagura now writes into a window only once the CLI has finished drawing its screen -- the cursor is shown again and no synchronized update is open -- and still never writes on an approval dialog. A CLI that keeps the cursor hidden while its input line sits idle receives nothing from yagura.
 - On macOS 26, the app icon fills the rounded square like other Mac apps instead of sitting small on a gray plate. If the Dock still shows the old icon after you update, remove yagura from the Dock (Options > Remove from Dock) and open it again.
 
 ## [0.1.0] - 2026-10-13

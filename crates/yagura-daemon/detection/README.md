@@ -280,6 +280,17 @@ check every write goes through. The definition still loads and the window's
 status is still detected; naming a `probe` is all it takes for the daemon to
 write lines into it.
 
+The daemon writes only on a screen the CLI has finished painting: the cursor
+is shown and no synchronized update (`CSI ? 2026 h`) is open. A screen that
+is not finished -- one read halfway through a repaint, or one held open in a
+synchronized update -- is neither written to nor declined on; the daemon reads
+it again once more output arrives, however long that takes, rather than
+taking it as finished after a pause. A screen the rules read as an approval
+prompt or declare `unknown` is declined on whether or not it is finished,
+since a dialog keeps the cursor hidden. So a CLI that hides the cursor while
+its composer sits idle receives no write from the daemon at all: that is the
+safe side, since such a screen cannot be told apart from a half-drawn dialog.
+
 `marker` is a regex identifying the composer's marker line (its prompt).
 Match the marker itself, not what follows it, unless `separator` is empty --
 then the marker's own match already reaches the body. `separator` is the
@@ -594,8 +605,8 @@ from the terminal can end halfway through, and the half-drawn screen can match
 a rule the finished one does not. So the daemon judges when the cursor is
 shown, or when it has stayed hidden and output has paused for 50 ms (a dialog
 that keeps the cursor hidden). Output that keeps the cursor hidden without
-pausing is still judged within 250 ms. Reading the composer before a write
-waits for a finished screen the same way.
+pausing is still judged within 250 ms. These pauses only time the status; a
+write never rests on them (see [`[composer]`](#composer)).
 
 Two fail-safe routes reach `unknown` without waiting out `confirm_ms`: a
 screen model that failed and was rebuilt blank, and a window whose detection

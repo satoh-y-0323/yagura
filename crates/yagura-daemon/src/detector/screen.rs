@@ -443,6 +443,15 @@ impl VtScreen {
         !self.model.term().mode().contains(TermMode::SHOW_CURSOR)
     }
 
+    /// Whether the program has a synchronized update (`CSI ? 2026 h`) open,
+    /// so the frame it brackets is not finished yet. Unlike
+    /// [`VtScreen::frame_held`], only the program closing it (or a reset)
+    /// ends it.
+    #[must_use]
+    pub fn sync_open(&self) -> bool {
+        self.model.sync_open()
+    }
+
     /// The modes the child set that change what input becomes (see
     /// [`crate::input_encode`]).
     #[must_use]

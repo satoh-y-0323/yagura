@@ -878,6 +878,12 @@ impl Model {
         })
     }
 
+    /// Whether the program has a synchronized update open, whatever has
+    /// released the view's hold on it.
+    pub(super) fn sync_open(&self) -> bool {
+        self.extras.sync.is_some()
+    }
+
     pub(super) fn extras(&self) -> &Extras {
         &self.extras
     }

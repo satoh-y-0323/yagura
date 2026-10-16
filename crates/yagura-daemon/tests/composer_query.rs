@@ -42,7 +42,8 @@ use common::ScreenFeed;
 use std::time::Duration;
 
 use common::{
-    SCREEN_COLS, SCREEN_ROWS, new_engine, new_engine_sized, repaint, screen_of, tick_after_ms,
+    SCREEN_COLS, SCREEN_ROWS, feed_handle, new_engine, new_engine_sized, repaint, screen_of,
+    tick_after_ms,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
@@ -457,4 +458,45 @@ async fn an_engine_with_no_definition_at_all_never_observes_a_composer() {
         engine.query_composer().readout,
         ComposerReadout::NotObserved
     );
+}
+
+// --- The answer says whether the screen was finished painting -------------
+
+/// A CLI hides the cursor while it repaints, or opens a synchronized update
+/// around the repaint with the cursor still shown: either way the screen read
+/// is not finished, and the answer read from it says so.
+#[tokio::test]
+async fn the_answer_says_whether_the_screen_it_was_read_from_was_finished_painting() {
+    let config = DaemonConfig::default();
+    let engine = new_engine(COMPOSER_DEF, &config);
+    let screen = engine.screen().clone();
+    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    feed_handle(&screen, &handle, &composer_line("draft"));
+
+    let steps: [(&[u8], bool, &str); 4] = [
+        (
+            b"\x1b[?25l",
+            false,
+            "a hidden cursor marks a paint under way",
+        ),
+        (
+            b"\x1b[?25h",
+            true,
+            "a shown cursor marks the paint finished",
+        ),
+        (
+            b"\x1b[?2026h",
+            false,
+            "an open synchronized update marks a paint under way, the cursor shown or not",
+        ),
+        (
+            b"\x1b[?2026l",
+            true,
+            "a closed synchronized update with the cursor shown marks the paint finished",
+        ),
+    ];
+    for (bytes, painted, what) in steps {
+        feed_handle(&screen, &handle, bytes);
+        assert_eq!(handle.query_composer().await.painted, painted, "{what}");
+    }
 }
