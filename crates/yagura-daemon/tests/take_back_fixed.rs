@@ -30,8 +30,8 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{
-    ComposerResidue, InputOrigin, NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement,
-    WindowEntry,
+    ComposerResidue, InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment,
+    SubmitPlacement, WindowEntry,
 };
 use yagura_protocol::WindowStatus;
 use yagura_test_support::ipc::Connection;
@@ -89,8 +89,11 @@ async fn start_delivery(
 ) {
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(h, window_id);
-    let call =
-        tokio::spawn(async move { sender.submit_message(body, None, Some(requester)).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(body, None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     h.wait_for_scrollback(window_id, b"PASTE 1", Duration::from_secs(10))
         .await;
     (leave, call)
@@ -273,7 +276,7 @@ async fn a_retry_that_carries_forward_what_a_declined_takeback_actually_returned
         .map(|write_seq| ComposerResidue { body, write_seq });
     let second: SubmitJudgment = tokio::time::timeout(
         Duration::from_secs(20),
-        entry(&h, &window_id).submit_message(body, residue, None),
+        entry(&h, &window_id).submit_message(body, residue, SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect("a retry over a residue it cannot vouch for must answer, not wait")
@@ -573,7 +576,7 @@ async fn a_takebacks_own_clear_write_that_lands_beside_an_approval_dialog_leaves
         .map(|write_seq| ComposerResidue { body, write_seq });
     let retry: SubmitJudgment = tokio::time::timeout(
         Duration::from_secs(20),
-        entry(&h, &window_id).submit_message(body, residue, None),
+        entry(&h, &window_id).submit_message(body, residue, SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect("a retry over a screen that does not accept a write must answer, not wait")

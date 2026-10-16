@@ -558,6 +558,67 @@ pub enum NotPlacedReason {
     /// would land in an input line or in a running program's input, or
     /// whether it showed. Nothing was read or written.
     NoComposer,
+    /// The send this call belongs to pressed the submit key on an earlier
+    /// attempt, and the composer now reads empty with not one write from
+    /// another writer since that key: the receiver took the envelope as one
+    /// message. Nothing was written, and nothing of the send remains.
+    Taken,
+    /// The send this call belongs to pressed the submit key on an earlier
+    /// attempt, and the composer now reads empty, but another writer may have
+    /// written since that key, so nothing tells whether the receiver took the
+    /// envelope. Nothing was written: a send never writes its body again once
+    /// it has pressed the submit key.
+    Vanished,
+}
+
+/// Whether the send a [`WindowEntry::submit_message`] call belongs to has
+/// already pressed the submit key on an earlier attempt. Kept apart from
+/// [`ComposerResidue`], which a declined attempt can drop while the fact
+/// that the key was pressed still holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStage {
+    /// No attempt of this send has pressed the submit key.
+    BeforeSubmitKey,
+    /// An earlier attempt of this send pressed the submit key, so its body is
+    /// never written again.
+    AfterSubmitKey,
+}
+
+/// What [`WindowEntry::write_fresh_and_decide`] may do once the composer
+/// reads empty, by what the send has already done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshBody {
+    /// The send has not pressed the submit key: the body may be written.
+    Allowed,
+    /// The send pressed the submit key, and the ledger held nothing but its
+    /// own writes since: an empty composer is the envelope taken.
+    AfterOwnKey,
+    /// The send pressed the submit key, and something other than the
+    /// receiver may have emptied the composer since.
+    AfterKeyUnvouched,
+}
+
+impl FreshBody {
+    /// The same stage once this call has erased something of its own: an
+    /// empty composer then proves nothing about the receiver.
+    fn after_own_erase(self) -> Self {
+        match self {
+            Self::Allowed => Self::Allowed,
+            Self::AfterOwnKey | Self::AfterKeyUnvouched => Self::AfterKeyUnvouched,
+        }
+    }
+}
+
+/// What ended [`WindowEntry::wait_for_envelope_taken`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvelopeWait {
+    /// A finished screen that accepts a write read the composer empty, with
+    /// nothing written since the submit key.
+    Taken,
+    /// Another writer wrote since the submit key.
+    OtherWriter,
+    /// The child exited.
+    Exited,
 }
 
 /// What a send plan believes its own previous attempt left in a window's
@@ -1788,6 +1849,12 @@ impl WindowEntry {
     /// told apart by what they each bring, not by anything this window
     /// remembers about who wrote what.
     ///
+    /// `stage` says whether an earlier attempt of the same send pressed the
+    /// submit key. After it, the body is never written again: a composer
+    /// read empty ends the call with [`NotPlacedReason::Taken`] when the
+    /// ledger holds nothing but the send's own writes since, and with
+    /// [`NotPlacedReason::Vanished`] otherwise.
+    ///
     /// `requester` turns `true` once whoever asked for the write has left (a
     /// closed channel counts too); `None` never leaves. Nothing new is
     /// written after it leaves, except what takes this call's own body back:
@@ -1812,6 +1879,7 @@ impl WindowEntry {
         &self,
         body: &str,
         residue: Option<ComposerResidue<'_>>,
+        stage: SendStage,
         requester: Option<watch::Receiver<bool>>,
     ) -> PtyResult<SubmitJudgment> {
         let mut requester = Requester(requester);
@@ -1823,7 +1891,7 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         };
         let judgment = self
-            .judge_submit(body, probe, residue, &mut requester)
+            .judge_submit(body, probe, residue, stage, &mut requester)
             .await?;
         self.check_after_another_write(judgment, probe, &mut requester)
             .await
@@ -1836,6 +1904,7 @@ impl WindowEntry {
         body: &str,
         probe: char,
         residue: Option<ComposerResidue<'_>>,
+        stage: SendStage,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         // The ledger as of the reading every write below is decided on: read
@@ -1884,12 +1953,17 @@ impl WindowEntry {
             }
         }
         let vouched_seq = vouched_now();
+        let fresh = match (stage, vouched_seq) {
+            (SendStage::BeforeSubmitKey, _) => FreshBody::Allowed,
+            (SendStage::AfterSubmitKey, Some(_)) => FreshBody::AfterOwnKey,
+            (SendStage::AfterSubmitKey, None) => FreshBody::AfterKeyUnvouched,
+        };
         if let (ComposerReadout::Empty, Some(vouched_seq)) = (&observation.readout, vouched_seq) {
             if self.degenerate_and_unchanged() {
                 return Ok(declined(NotPlacedReason::Unobservable, None));
             }
             return self
-                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, requester)
+                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, fresh, requester)
                 .await;
         }
         match &observation.readout {
@@ -1899,7 +1973,7 @@ impl WindowEntry {
                 if self.degenerate_and_unchanged() {
                     return Ok(declined(NotPlacedReason::Unobservable, None));
                 }
-                self.confirm_empty_then_write(body, probe, &observation, seen, requester)
+                self.confirm_empty_then_write(body, probe, &observation, seen, fresh, requester)
                     .await
             }
             ComposerReadout::Body(_) | ComposerReadout::Tail(_) => {
@@ -1919,7 +1993,14 @@ impl WindowEntry {
                     {
                         Some(TakenBack::Emptied(settled, seq)) => {
                             return self
-                                .write_fresh_and_decide(body, probe, &settled, seq, requester)
+                                .write_fresh_and_decide(
+                                    body,
+                                    probe,
+                                    &settled,
+                                    seq,
+                                    fresh.after_own_erase(),
+                                    requester,
+                                )
                                 .await;
                         }
                         Some(TakenBack::Declined(judgment)) => return Ok(judgment),
@@ -2002,13 +2083,14 @@ impl WindowEntry {
                         probe,
                         residue,
                         &observation,
+                        fresh,
                         requester,
                     )
                     .await
                 } else if !self.degenerate_and_unchanged() {
                     // What reads as someone else's text may only be a screen
                     // that has not caught up with input that emptied it.
-                    self.confirm_empty_then_write(body, probe, &observation, seen, requester)
+                    self.confirm_empty_then_write(body, probe, &observation, seen, fresh, requester)
                         .await
                 } else {
                     Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
@@ -2408,6 +2490,32 @@ impl WindowEntry {
         }
     }
 
+    /// Waits, once a send has pressed the submit key leaving the ledger at
+    /// `after_key`, for a finished screen that accepts a write to read the
+    /// composer empty. The envelope showed in the composer when the key was
+    /// pressed, so that reading means the receiver took it as one message.
+    /// There is no time limit: the caller bounds it.
+    pub(crate) async fn wait_for_envelope_taken(&self, after_key: u64) -> EnvelopeWait {
+        match self
+            .wait_for_composer(
+                "wait_for_envelope_taken",
+                Some(after_key),
+                &mut Requester::none(),
+                |observation| {
+                    (screen_accepts_write(observation)
+                        && observation.readout == ComposerReadout::Empty)
+                        .then_some(())
+                },
+            )
+            .await
+        {
+            ComposerWait::Done(()) => EnvelopeWait::Taken,
+            // No requester was given, so it never leaves.
+            ComposerWait::OtherWriter | ComposerWait::RequesterGone => EnvelopeWait::OtherWriter,
+            ComposerWait::Exited => EnvelopeWait::Exited,
+        }
+    }
+
     /// What ends [`WindowEntry::wait_for_composer`] as things stand, in its
     /// order of rank.
     fn wait_ended<T>(
@@ -2458,6 +2566,7 @@ impl WindowEntry {
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
+        fresh: FreshBody,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if !screen_accepts_write(observed) {
@@ -2485,7 +2594,7 @@ impl WindowEntry {
                 .await
             {
                 ComposerWait::Done(BehindProbe::Alone) => {
-                    self.write_once_probe_erased(body, probe, seq, requester)
+                    self.write_once_probe_erased(body, probe, seq, fresh, requester)
                         .await
                 }
                 ComposerWait::Done(before @ BehindProbe::Text(_)) => {
@@ -2502,7 +2611,7 @@ impl WindowEntry {
             .await?
         {
             ProbeReading::Shown(BehindProbe::Alone) => {
-                self.write_once_probe_erased(body, probe, seq + 1, requester)
+                self.write_once_probe_erased(body, probe, seq + 1, fresh, requester)
                     .await
             }
             ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
@@ -2529,6 +2638,7 @@ impl WindowEntry {
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
+        fresh: FreshBody,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if !screen_accepts_write(observed) {
@@ -2571,7 +2681,7 @@ impl WindowEntry {
                     .await
             }
             ComposerWait::Done(BehindProbe::Alone) => {
-                self.write_once_probe_erased(body, probe, after_probe, requester)
+                self.write_once_probe_erased(body, probe, after_probe, fresh, requester)
                     .await
             }
             ComposerWait::OtherWriter => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
@@ -2593,11 +2703,12 @@ impl WindowEntry {
         body: &str,
         probe: char,
         seq: u64,
+        fresh: FreshBody,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         match self.erase_probe(seq).await? {
             ProbeErased::Emptied(settled, after_erase) => {
-                self.write_fresh_and_decide(body, probe, &settled, after_erase, requester)
+                self.write_fresh_and_decide(body, probe, &settled, after_erase, fresh, requester)
                     .await
             }
             ProbeErased::Interrupted(_) => Ok(declined(NotPlacedReason::Interrupted, None)),
@@ -2845,10 +2956,20 @@ impl WindowEntry {
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
+        fresh: FreshBody,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(None));
+        }
+        match fresh {
+            FreshBody::Allowed => {}
+            FreshBody::AfterOwnKey if self.write_seq() == seq => {
+                return Ok(declined(NotPlacedReason::Taken, None));
+            }
+            FreshBody::AfterOwnKey | FreshBody::AfterKeyUnvouched => {
+                return Ok(declined(NotPlacedReason::Vanished, None));
+            }
         }
         if requester.has_left() {
             return Ok(declined(NotPlacedReason::Unobservable, None));
@@ -3101,6 +3222,7 @@ impl WindowEntry {
         probe: char,
         residue: ComposerResidue<'_>,
         observed: &ComposerObservation,
+        fresh: FreshBody,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if self.input.take_back() == TakeBack::Unavailable {
@@ -3120,8 +3242,15 @@ impl WindowEntry {
             .await?
         {
             TakenBack::Emptied(settled, seq) => {
-                self.write_fresh_and_decide(body, probe, &settled, seq, requester)
-                    .await
+                self.write_fresh_and_decide(
+                    body,
+                    probe,
+                    &settled,
+                    seq,
+                    fresh.after_own_erase(),
+                    requester,
+                )
+                .await
             }
             TakenBack::Declined(judgment) => Ok(judgment),
         }

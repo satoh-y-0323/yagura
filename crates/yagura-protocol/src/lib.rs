@@ -1924,18 +1924,20 @@ pub enum WithdrawReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandoffDelivery {
-    /// After the submit key was written, the target's confirmed status left
-    /// the statuses that accept input for one that means it is doing
-    /// something -- the daemon's evidence that the envelope was taken as one
-    /// message.
+    /// After the submit key was written, the daemon saw evidence that the
+    /// envelope was taken as one message: the target's composer, which held
+    /// the envelope, read empty on a fully drawn screen with nothing written
+    /// since (the receiver handled it, or queued it while busy), or the
+    /// target's confirmed status moved from one that accepts input to one
+    /// that means it is doing something.
     Confirmed,
     /// The envelope and its submit key were written (and that submit key
     /// pressed again, up to the definition's `resend_max`), but no such
-    /// reaction followed: the
-    /// target stayed quiet, it had already left the statuses that accept
-    /// input before the submit key was written, or it exited afterwards. The
-    /// receiver may or may not have taken it: read the target's output
-    /// before handing it the same work again.
+    /// evidence followed: the envelope stayed in the composer and no move to
+    /// working was seen, another writer wrote into the window before the
+    /// composer emptied, or the target exited afterwards. The receiver may or
+    /// may not have taken it: read the target's output before handing it the
+    /// same work again.
     Unconfirmed,
     /// No reaction was looked for, or none could be: the target's definition
     /// sets `delivery_confirm_ms = 0`, or its status stream was lagging far

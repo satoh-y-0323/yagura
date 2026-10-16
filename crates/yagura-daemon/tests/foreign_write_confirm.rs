@@ -31,7 +31,8 @@ use tokio::task::JoinHandle;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::pty::{PtyError, PtyResult};
 use yagura_daemon::window::{
-    InputOrigin, NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
+    InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
+    WindowEntry,
 };
 
 /// The largest `submit_delay_ms` a definition may carry. A delivery sleeps
@@ -103,7 +104,11 @@ fn start_delivery(
     requester: Option<watch::Receiver<bool>>,
 ) -> JoinHandle<PtyResult<SubmitJudgment>> {
     let sender = entry(h, window);
-    tokio::spawn(async move { sender.submit_message(BODY, None, requester).await })
+    tokio::spawn(async move {
+        sender
+            .submit_message(BODY, None, SendStage::BeforeSubmitKey, requester)
+            .await
+    })
 }
 
 async fn write_as_another_writer(h: &Harness, window: &Window, bytes: &[u8]) {

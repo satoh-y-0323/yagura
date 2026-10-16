@@ -129,10 +129,23 @@
 //! `openai/codex`): the time the daemon leaves between a body and its submit
 //! key is then what decides whether the body is submitted. Omitted or `0`,
 //! no window applies.
+//!
+//! One further argument, `receive_mode` (argv index 16), is a `;`-separated
+//! list of how the receiver takes a submitted line. Omitted, empty or `-`,
+//! nothing changes. `silent` makes a taken line print `TAKEN` where it printed
+//! `SUBMITTED <body>`, so no detection rule keyed to `SUBMITTED` sees the
+//! receiver react. `take-on|<path>` (it implies `silent`) takes a submit key
+//! only once the file `<path>` exists: until then the composer keeps showing
+//! the body in a frame that never finishes (the cursor stays hidden), and the
+//! line is taken, the composer emptied and drawn finished, the moment the file
+//! appears. `hold-probe|<path>` stops reading at the first typed byte after the
+//! first bracketed paste until the file `<path>` exists, with the pasted body
+//! drawn meanwhile: what a delivery writes behind its body stays unread, and
+//! so unpainted, for as long as a test chooses.
 
 use std::io::{self, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 // The shared module's byte-accepting half is unused here: this fixture drives
@@ -259,6 +272,8 @@ struct State {
     pasted_len: usize,
     /// Bracketed pastes begun so far.
     pastes_begun: u32,
+    /// The `hold-probe` stop has been made.
+    probe_held: bool,
 }
 
 impl State {
@@ -273,6 +288,7 @@ impl State {
             held: false,
             pasted_len: 0,
             pastes_begun: 0,
+            probe_held: false,
         }
     }
 
@@ -337,6 +353,90 @@ struct Settings<'a> {
     interrupt_keeps_buffer: bool,
     /// `clear_scope` was given with a `"takes-paste-on-typing:"` prefix.
     typing_takes_paste: bool,
+    /// A taken line prints `TAKEN` instead of `SUBMITTED <body>`.
+    silent: bool,
+    /// Submit keys are taken only once this file exists.
+    take_on: Option<Arc<TakeOn>>,
+    /// Reading stops at the first typed byte after a paste until this file
+    /// exists.
+    hold_probe: Option<std::path::PathBuf>,
+}
+
+/// The `take-on` receive mode: a submit key that arrives before the file
+/// exists is held, and taken as soon as the file appears.
+struct TakeOn {
+    gone_when_exists: std::path::PathBuf,
+    /// A submit key is held and not yet taken.
+    held: Mutex<bool>,
+    /// The held line was taken on another thread, so the buffer this thread
+    /// owns still holds it.
+    released: AtomicBool,
+}
+
+impl TakeOn {
+    /// Whether a submit key arriving now is held rather than taken. Decided
+    /// under the lock the releasing thread takes, so a key is never held
+    /// after the release has looked.
+    fn defer(&self) -> bool {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.gone_when_exists.exists() {
+            return false;
+        }
+        *held = true;
+        true
+    }
+}
+
+/// The composer drawn the way a CLI caught mid-repaint draws it: the body is
+/// there, the cursor is hidden and never shown again by this frame.
+fn unfinished_composer() -> Overlay {
+    Overlay {
+        lines: Vec::new(),
+        composer: OverlayComposer::Shown,
+        paint: Paint::CursorHidden,
+        closes_sync: false,
+    }
+}
+
+/// Parsed `receive_mode` argument.
+struct ReceiveMode {
+    silent: bool,
+    take_on: Option<Arc<TakeOn>>,
+    hold_probe: Option<std::path::PathBuf>,
+}
+
+impl ReceiveMode {
+    /// Exits the process on a value it cannot parse, so a misspelled mode
+    /// fails loudly instead of running as the default receiver.
+    fn from_args(index: usize) -> Self {
+        let spec = std::env::args()
+            .nth(index)
+            .filter(|value| !value.is_empty() && value != "-")
+            .unwrap_or_default();
+        let mut mode = ReceiveMode {
+            silent: false,
+            take_on: None,
+            hold_probe: None,
+        };
+        for part in spec.split(';').filter(|part| !part.is_empty()) {
+            if part == "silent" {
+                mode.silent = true;
+            } else if let Some(path) = part.strip_prefix("take-on|") {
+                mode.silent = true;
+                mode.take_on = Some(Arc::new(TakeOn {
+                    gone_when_exists: std::path::PathBuf::from(path),
+                    held: Mutex::new(false),
+                    released: AtomicBool::new(false),
+                }));
+            } else if let Some(path) = part.strip_prefix("hold-probe|") {
+                mode.hold_probe = Some(std::path::PathBuf::from(path));
+            } else {
+                eprintln!("submit_child: cannot parse receive_mode {part:?}");
+                std::process::exit(2);
+            }
+        }
+        mode
+    }
 }
 
 /// What draws the overlay (see the module doc comment).
@@ -694,6 +794,13 @@ fn process_byte(
             // inside that input, not a submit.
             let discarded_as_line_break = *chunk_had_append || inside_paste_guard;
             if !discarded_as_line_break && !state.buffer.is_empty() {
+                if settings
+                    .take_on
+                    .as_ref()
+                    .is_some_and(|take_on| take_on.defer())
+                {
+                    return out.set_overlay(Some(unfinished_composer()));
+                }
                 let body = String::from_utf8_lossy(&state.buffer).into_owned();
                 state.held = false;
                 state.buffer.clear();
@@ -703,7 +810,11 @@ fn process_byte(
                 // of a later, separately timed repaint still showing the
                 // submitted body as an unsent draft.
                 out.set_body("");
-                emit(out, &format!("SUBMITTED {body}"))?;
+                if settings.silent {
+                    emit(out, "TAKEN")?;
+                } else {
+                    emit(out, &format!("SUBMITTED {body}"))?;
+                }
             }
         }
         _ => state.append(byte, settings, chunk_had_append),
@@ -786,6 +897,7 @@ fn main() -> io::Result<()> {
         Some(inner) => (true, ClearScope::parse(inner)),
         None => (false, ClearScope::parse(&clear_scope_arg)),
     };
+    let receive_mode = ReceiveMode::from_args(16);
     let mut input_log = std::env::args()
         .nth(14)
         .filter(|path| !path.is_empty() && path != "-")
@@ -816,9 +928,27 @@ fn main() -> io::Result<()> {
         discard_pastes,
         interrupt_keeps_buffer,
         typing_takes_paste,
+        silent: receive_mode.silent,
+        take_on: receive_mode.take_on,
+        hold_probe: receive_mode.hold_probe,
     };
     let out = Arc::new(Output::new(style));
     let reflector = reflect.map(|reflect| spawn_reflector(Arc::clone(&out), reflect));
+    if let Some(take_on) = settings.take_on.clone() {
+        let out = Arc::clone(&out);
+        std::thread::spawn(move || {
+            while !take_on.gone_when_exists.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let mut held = take_on.held.lock().unwrap_or_else(PoisonError::into_inner);
+            if std::mem::take(&mut *held) {
+                take_on.released.store(true, Ordering::SeqCst);
+                out.set_body("");
+                let _ = out.set_overlay(None);
+                let _ = out.line("TAKEN");
+            }
+        });
+    }
     if let Some(path) = &ready_gate {
         while !path.exists() {
             std::thread::sleep(Duration::from_millis(10));
@@ -846,6 +976,15 @@ fn main() -> io::Result<()> {
             continue;
         }
 
+        if settings
+            .take_on
+            .as_ref()
+            .is_some_and(|take_on| take_on.released.swap(false, Ordering::SeqCst))
+        {
+            state.buffer.clear();
+            state.pasted_len = 0;
+            state.held = false;
+        }
         let mut chunk_had_append = false;
         let mut dialog_took_submit = false;
         let mut dialog_took_input = false;
@@ -888,6 +1027,25 @@ fn main() -> io::Result<()> {
             chunk_had_trigger_byte |= overlay
                 .as_ref()
                 .is_some_and(|overlay| overlay.fires_on(byte, state.pastes_begun));
+            if let Some(path) = &settings.hold_probe
+                && !state.probe_held
+                && state.pastes_begun > 0
+                && !state.in_paste
+                && state.pending.is_empty()
+                && byte != 0x1b
+            {
+                state.probe_held = true;
+                out.set_body_pasted_through(
+                    &String::from_utf8_lossy(&state.buffer),
+                    state.pasted_len.min(state.buffer.len()),
+                );
+                if let Some(reflector) = &reflector {
+                    let _ = reflector.send(());
+                }
+                while !path.exists() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
             let was_in_paste = state.in_paste;
             process_byte(&mut state, byte, &settings, &out, &mut chunk_had_append)?;
             if !was_in_paste && state.in_paste {

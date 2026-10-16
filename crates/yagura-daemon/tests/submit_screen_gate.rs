@@ -39,7 +39,8 @@ use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::input::plan_raw_write;
 use yagura_daemon::window::{
-    ComposerResidue, InputOrigin, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
+    ComposerResidue, InputOrigin, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
+    WindowEntry,
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
 use yagura_test_support::ipc::Connection;
@@ -498,6 +499,7 @@ async fn a_key_only_resend_is_not_written_while_an_approval_dialog_hides_the_com
                 body: "ENV",
                 write_seq: seq,
             }),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -545,6 +547,7 @@ async fn a_key_only_resend_is_not_written_when_the_dialogs_option_row_reads_as_a
                 body: "ENV",
                 write_seq: seq,
             }),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -591,6 +594,7 @@ async fn a_key_only_resend_is_still_written_once_the_dialog_is_gone() {
                 body: "ENV",
                 write_seq: seq,
             }),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -636,6 +640,7 @@ async fn a_key_only_resend_is_still_written_while_the_window_shows_it_is_working
                 body: "ENV",
                 write_seq: seq,
             }),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -683,7 +688,11 @@ async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_th
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the dialog to be drawn", |screen| {
         shows(screen, APPROVAL_HEADING)
     })
@@ -743,7 +752,11 @@ async fn a_dialog_that_flashes_after_the_body_is_written_still_lets_the_submit_k
     .await;
 
     let sender = entry(&h, &window_id);
-    let submit = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let submit = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the dialog to be drawn", |screen| {
         shows(screen, APPROVAL_HEADING)
     })
@@ -814,7 +827,11 @@ async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the dialog to be drawn", |screen| {
         shows(screen, APPROVAL_HEADING)
     })
@@ -893,7 +910,7 @@ async fn the_body_is_not_written_when_an_approval_rule_matches_beside_an_empty_c
 
     let seq = entry(&h, &window_id).write_seq();
     let judgment = entry(&h, &window_id)
-        .submit_message("hello", None, None)
+        .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("the call must not fail at the PTY level");
 
@@ -929,7 +946,7 @@ async fn a_body_is_still_written_into_a_window_that_shows_it_is_working() {
     .await;
 
     let judgment = entry(&h, &window_id)
-        .submit_message("hello", None, None)
+        .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("the call must not fail at the PTY level");
 
@@ -985,8 +1002,11 @@ async fn an_unreadable_composer_is_waited_on_until_the_requester_leaves() {
     let seq = entry(&h, &window_id).write_seq();
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(&h, &window_id);
-    let call =
-        tokio::spawn(async move { sender.submit_message("hello", None, Some(requester)).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),
@@ -1045,7 +1065,11 @@ async fn an_unreadable_composer_wait_ended_by_another_writer_is_reported_as_inte
 
     let seq = entry(&h, &window_id).write_seq();
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),
@@ -1100,7 +1124,11 @@ async fn a_composer_hidden_for_a_moment_takes_the_body_once_it_is_readable_again
     );
 
     let sender = entry(&h, &window_id);
-    let submit = tokio::spawn(async move { sender.submit_message("BODY", None, None).await });
+    let submit = tokio::spawn(async move {
+        sender
+            .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     std::fs::write(&dialog_gone, b"").expect("remove the dialog");
     let judgment = submit
         .await
@@ -1147,7 +1175,11 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the dialog to be drawn", |screen| {
         shows(screen, APPROVAL_HEADING)
     })
@@ -1222,6 +1254,7 @@ async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_env
                     body: "ENV",
                     write_seq: residue_seq,
                 }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -1361,7 +1394,11 @@ async fn no_submit_key_follows_a_body_whose_composer_reads_as_a_torn_frame() {
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the torn frame after the body", |screen| {
         heading_not_drawn(screen)
             && shows(screen, "PASTE 1")
@@ -1400,7 +1437,11 @@ async fn no_submit_key_follows_a_probe_erase_whose_composer_reads_as_a_torn_fram
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     let erase_after_the_body = [PASTE_END, SUBMIT_CHILD_PROBE.as_bytes(), &[ERASE]].concat();
     wait_until_input_log_contains(&log, &erase_after_the_body, HANG_GUARD).await;
     wait_for_screen(&h, &window_id, "the torn frame after the erase", |screen| {
@@ -1438,6 +1479,7 @@ async fn resend_on_a_torn_frame(
                     body: "ENV",
                     write_seq: seq,
                 }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -1596,7 +1638,7 @@ async fn a_body_taller_than_the_screen_is_placed_from_its_tail() {
     .await;
     let judgment = tokio::time::timeout(
         HANG_GUARD,
-        entry(&h, &window_id).submit_message(&body, None, None),
+        entry(&h, &window_id).submit_message(&body, None, SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect("a body read back by its tail must be decided")
@@ -1659,6 +1701,7 @@ async fn a_folded_envelope_is_resent_only_once_the_probe_has_shown_behind_it() {
                 body,
                 write_seq: seq,
             }),
+            SendStage::BeforeSubmitKey,
             None,
         ),
     )
@@ -1752,6 +1795,7 @@ async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidenc
                     body,
                     write_seq: seq,
                 }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -1839,6 +1883,7 @@ async fn a_probe_written_behind_a_tall_draft_is_erased_once_another_writer_inter
                     body: &sent,
                     write_seq: seq,
                 }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -1926,6 +1971,7 @@ async fn an_unshown_envelope_is_not_decided_on_while_its_probe_reads_as_a_torn_f
                     body: "ENV",
                     write_seq: seq,
                 }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -1977,8 +2023,11 @@ async fn no_take_back_is_written_for_a_departed_requester_while_the_composer_rea
 
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(&h, &window_id);
-    let call =
-        tokio::spawn(async move { sender.submit_message("hello", None, Some(requester)).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     let probe_after_the_body = [PASTE_END, SUBMIT_CHILD_PROBE.as_bytes()].concat();
     wait_until_input_log_contains(&log, &probe_after_the_body, HANG_GUARD).await;
     wait_for_screen(&h, &window_id, "the torn frame after the body", |screen| {
@@ -2030,7 +2079,11 @@ async fn a_probe_erase_is_not_taken_for_reached_while_the_composer_reads_as_a_to
     seed_composer(&h, &window_id, "ENV").await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the torn frame after the erase", |screen| {
         heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
     })
@@ -2189,8 +2242,11 @@ async fn the_not_accepting_message_differs_from_every_other_reason() {
     .await;
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(&h, &unconfirmed_window);
-    let first =
-        tokio::spawn(async move { sender.submit_message("first", None, Some(requester)).await });
+    let first = tokio::spawn(async move {
+        sender
+            .submit_message("first", None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     h.wait_for_scrollback(&unconfirmed_window, b"PASTE 1", Duration::from_secs(10))
         .await;
     leave.send(true).expect("the call holds its receiver");
@@ -2290,7 +2346,11 @@ async fn a_torn_frame_standing_after_another_writers_byte_is_not_taken_for_a_fin
     .await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     wait_for_screen(&h, &window_id, "the torn frame", |screen| {
         heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
     })
@@ -2480,7 +2540,11 @@ async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, sh
         raise_an_unfinished_dialog(&h, &mut client, &dir, "unfinished", torn, shape).await;
 
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message("hello", None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),

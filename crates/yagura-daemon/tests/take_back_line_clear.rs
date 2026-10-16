@@ -26,7 +26,7 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{
-    NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
+    NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement, WindowEntry,
 };
 use yagura_protocol::WindowStatus;
 use yagura_test_support::process;
@@ -87,8 +87,11 @@ fn start_delivery(
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(h, window_id);
     let body = body.to_string();
-    let call =
-        tokio::spawn(async move { sender.submit_message(&body, None, Some(requester)).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(&body, None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     (leave, call)
 }
 
@@ -262,6 +265,7 @@ async fn a_second_attempt_after_a_stalled_take_back_writes_the_body_only_once() 
                     body: &body,
                     write_seq,
                 }),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -357,7 +361,7 @@ async fn a_clear_key_the_receiver_ignores_leaves_the_sender_told_something_may_r
     let write_seq_after_first = entry(&h, &window_id).write_seq();
     let retry = tokio::time::timeout(
         Duration::from_secs(20),
-        entry(&h, &window_id).submit_message(&body, None, None),
+        entry(&h, &window_id).submit_message(&body, None, SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect("a retry over what the take-back could not remove must answer, not wait")

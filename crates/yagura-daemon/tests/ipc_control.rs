@@ -4553,9 +4553,8 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_not_confirmed
     // receiver whose observable state moves as soon as it accepts the body,
     // before any submit key arrives. A confirmation that does not fix its
     // starting point at the submit key's own write would count this as
-    // delivered. The confirmation wait is the loader's upper bound, well past
-    // the reply timeout below: only a delivery that short-circuits on the
-    // status it saw right before the submit key replies at all.
+    // delivered. The submit key is swallowed, so the envelope stays in the
+    // composer: nothing but the body's own echo ever moved the status.
     let dir = unique_temp_dir("handoff-a2-body-echo");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["send_handoff"])),
@@ -4577,7 +4576,7 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_not_confirmed
             ready_hold_ms: 0,
             submit_delay_ms: 300,
             clear: "",
-            delivery_confirm_ms: 30_000,
+            delivery_confirm_ms: 1000,
             resend_max: 0,
         },
         0,

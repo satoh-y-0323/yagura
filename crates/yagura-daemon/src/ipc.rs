@@ -61,7 +61,7 @@ use crate::handoff::{
     compose_envelope, hold_is_reachable_within, is_ready,
 };
 use crate::health;
-use crate::input::{SubmitPlan, plan_raw_write};
+use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
 use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::plan_permit::{self, ChangeKind, PermitError};
@@ -70,10 +70,10 @@ use crate::store::{self, SnapshotWindow, StoreError};
 use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
 use crate::window::{
-    CliInjection, ComposerResidue, InputOrigin, LaunchIdentity, McpConnectionClaim, NotPlaced,
-    NotPlacedReason, OpenWindowRequest, OpenedWindow, QueuedNotice, RequestedCwd, SubmitJudgment,
-    SubmitPlacement, TaskOrigin, WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance,
-    WindowRegistry, resolve_existing_dir, window_status_wire,
+    CliInjection, ComposerResidue, EnvelopeWait, InputOrigin, LaunchIdentity, McpConnectionClaim,
+    NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, QueuedNotice, RequestedCwd,
+    SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin, WindowEntry, WindowLiveness,
+    WindowOpenError, WindowProvenance, WindowRegistry, resolve_existing_dir, window_status_wire,
 };
 
 use permit::{
@@ -4116,6 +4116,16 @@ fn not_placed_message(not_placed: &NotPlaced) -> &'static str {
              nothing was sent"
         }
         (NotPlacedReason::NoComposer, _) => NO_COMPOSER_MESSAGE,
+        // Only a send that pressed the submit key on an earlier attempt ends
+        // with these, and `send_text` makes a single attempt.
+        (NotPlacedReason::Taken, _) => {
+            "the window had already taken the text after an earlier submit key, so nothing \
+             more was sent"
+        }
+        (NotPlacedReason::Vanished, _) => {
+            "the text left the window's composer after an earlier submit key, but another write \
+             reached the window since, so nothing more was sent"
+        }
     }
 }
 
@@ -4244,6 +4254,7 @@ async fn execute_send_text(
         Some(body) => SubmitRequest::Judged {
             body,
             residue: None,
+            stage: SendStage::BeforeSubmitKey,
         },
         None => SubmitRequest::RawMessage(plan_raw_write(text)),
     };
@@ -4317,10 +4328,12 @@ enum SubmitRequest<'a> {
     /// terminator, or a bare submit-key terminator.
     RawMessage(SubmitPlan),
     /// A single line, judged before being written. `residue` is this send's
-    /// own envelope from a previous attempt, if it has one.
+    /// own envelope from a previous attempt, if it has one; `stage` is whether
+    /// a previous attempt pressed the submit key.
     Judged {
         body: &'a str,
         residue: Option<ComposerResidue<'a>>,
+        stage: SendStage,
     },
 }
 
@@ -4444,9 +4457,11 @@ async fn submit_line_to_pty(
 ) -> Result<SubmitJudgment, PtyError> {
     match request {
         SubmitRequest::RawMessage(plan) => entry.submit_raw_gated(&plan, requester).await,
-        SubmitRequest::Judged { body, residue } => {
-            entry.submit_message(body, residue, requester).await
-        }
+        SubmitRequest::Judged {
+            body,
+            residue,
+            stage,
+        } => entry.submit_message(body, residue, stage, requester).await,
     }
 }
 
@@ -4640,11 +4655,22 @@ async fn run_delivery<'a>(
     // earlier write that has yet to be painted.
     let mut envelope_remains: Option<bool> = Some(false);
     let mut foreign_draft: bool;
+    // The last attempt that pressed the submit key, for a verdict a later
+    // attempt reaches without pressing it again.
+    let mut last_submit: Option<SubmitOutcome> = None;
 
     let verdict = loop {
+        // Decided here rather than from `residue`: a declined attempt can
+        // drop the residue while the key it pressed earlier still counts.
+        let stage = if placements > 0 {
+            SendStage::AfterSubmitKey
+        } else {
+            SendStage::BeforeSubmitKey
+        };
         let request = SubmitRequest::Judged {
             body: envelope,
             residue,
+            stage,
         };
         let judgment = match submit_line_to_pty(entry, request, closed.clone()).await {
             Ok(judgment) => judgment,
@@ -4656,12 +4682,32 @@ async fn run_delivery<'a>(
             body: envelope,
             write_seq,
         });
-        let outcome = match judgment.placement {
+        let (outcome, after_key) = match judgment.placement {
             SubmitPlacement::Placed(outcome) => {
                 placements += 1;
                 envelope_remains = None;
                 foreign_draft = false;
-                outcome
+                last_submit = Some(outcome);
+                (outcome, judgment.residue_write_seq)
+            }
+            SubmitPlacement::NotPlaced(NotPlaced {
+                reason: reason @ (NotPlacedReason::Taken | NotPlacedReason::Vanished),
+                ..
+            }) => {
+                foreign_draft = false;
+                let delivery = if reason == NotPlacedReason::Taken {
+                    HandoffDelivery::Confirmed
+                } else {
+                    HandoffDelivery::Unconfirmed
+                };
+                break DeliveryVerdict {
+                    delivery,
+                    attempts: placements,
+                    submitted_at: last_submit.map_or_else(Instant::now, |last| last.submitted_at),
+                    status_before_submit: last_submit
+                        .map_or_else(|| entry.current_status(), |last| last.status_before_submit),
+                    ready_hold_wait_ms,
+                };
             }
             SubmitPlacement::NotPlaced(NotPlaced {
                 envelope_remains: remains,
@@ -4721,16 +4767,6 @@ async fn run_delivery<'a>(
                 ready_hold_wait_ms,
             };
         }
-        if !is_ready(outcome.status_before_submit) {
-            break DeliveryVerdict {
-                delivery: HandoffDelivery::Unconfirmed,
-                attempts: placements,
-                submitted_at: outcome.submitted_at,
-                status_before_submit: outcome.status_before_submit,
-                ready_hold_wait_ms,
-            };
-        }
-
         let unanswered = DeliveryVerdict {
             delivery: HandoffDelivery::Unconfirmed,
             attempts: placements,
@@ -4741,21 +4777,17 @@ async fn run_delivery<'a>(
         if requester_left(&closed) {
             break unanswered;
         }
-        let reaction = tokio::select! {
-            biased;
-            () = wait_for_disconnect(&mut closed) => None,
-            reaction = waiter::wait_for_reaction(
-                &mut rx,
-                DELIVERY_REACTION_STATUSES,
-                outcome.submitted_at,
-                profile.delivery_confirm,
-            ) => Some(reaction),
-        };
-        let Some(reaction) = reaction else {
-            break unanswered;
-        };
-        match reaction {
-            ReactionOutcome::Reacted(_) => {
+        let evidence = wait_for_submit_evidence(
+            entry,
+            &mut rx,
+            &mut closed,
+            outcome,
+            after_key,
+            profile.delivery_confirm,
+        )
+        .await;
+        match evidence {
+            SubmitEvidence::Taken => {
                 break DeliveryVerdict {
                     delivery: HandoffDelivery::Confirmed,
                     attempts: placements,
@@ -4764,8 +4796,8 @@ async fn run_delivery<'a>(
                     ready_hold_wait_ms,
                 };
             }
-            ReactionOutcome::Exited => break unanswered,
-            ReactionOutcome::Unobservable => {
+            SubmitEvidence::Unanswered => break unanswered,
+            SubmitEvidence::Unobservable => {
                 break DeliveryVerdict {
                     delivery: HandoffDelivery::NotObserved,
                     attempts: placements,
@@ -4774,7 +4806,7 @@ async fn run_delivery<'a>(
                     ready_hold_wait_ms,
                 };
             }
-            ReactionOutcome::Quiet => {
+            SubmitEvidence::Quiet => {
                 resent += 1;
                 let out_of_resends = !profile.may_resend() || resent > profile.resend_max;
                 // The target left the ready statuses on its own while this
@@ -4804,6 +4836,94 @@ async fn run_delivery<'a>(
         envelope_remains,
         residue,
         foreign_draft,
+    }
+}
+
+/// What [`wait_for_submit_evidence`] settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitEvidence {
+    /// The envelope was taken as one message: the composer read empty with
+    /// nothing written since the submit key, or a window that accepted input
+    /// right before the key moved to working after it.
+    Taken,
+    /// Neither showed within the bound.
+    Quiet,
+    /// Status changes were lost, so a reaction may have been missed.
+    Unobservable,
+    /// Nothing more can show: the child exited or the requester left, or
+    /// status changes were lost after another writer had already written.
+    Unanswered,
+}
+
+/// Waits, for at most `bound` after the submit key `outcome` describes, for
+/// evidence the receiver took the envelope: the composer reading empty with
+/// the ledger still at `after_key` (`None` waits for no such reading), or,
+/// when the window accepted input right before the key, its status moving to
+/// working. Whichever shows first settles it.
+async fn wait_for_submit_evidence(
+    entry: &WindowEntry,
+    rx: &mut broadcast::Receiver<StatusAt>,
+    closed: &mut Option<watch::Receiver<bool>>,
+    outcome: SubmitOutcome,
+    after_key: Option<u64>,
+    bound: Duration,
+) -> SubmitEvidence {
+    // A status that did not accept input right before the key gives no
+    // starting point that a reaction could be told apart from.
+    let reacts = is_ready(outcome.status_before_submit);
+    let composer = async {
+        match after_key {
+            Some(after_key) => entry.wait_for_envelope_taken(after_key).await,
+            None => std::future::pending().await,
+        }
+    };
+    let reaction = async {
+        if reacts {
+            waiter::wait_for_reaction(rx, DELIVERY_REACTION_STATUSES, outcome.submitted_at, bound)
+                .await
+        } else {
+            std::future::pending().await
+        }
+    };
+    tokio::pin!(composer, reaction);
+    let deadline = tokio::time::sleep(bound);
+    tokio::pin!(deadline);
+    let mut composer_open = after_key.is_some();
+    let mut status_open = reacts;
+    let mut lost_status = false;
+    let mut other_writer = false;
+    loop {
+        if !composer_open && !status_open {
+            break;
+        }
+        tokio::select! {
+            biased;
+            () = wait_for_disconnect(closed) => return SubmitEvidence::Unanswered,
+            taken = &mut composer, if composer_open => match taken {
+                EnvelopeWait::Taken => return SubmitEvidence::Taken,
+                EnvelopeWait::Exited => return SubmitEvidence::Unanswered,
+                EnvelopeWait::OtherWriter => {
+                    composer_open = false;
+                    other_writer = true;
+                }
+            },
+            reacted = &mut reaction, if status_open => match reacted {
+                ReactionOutcome::Reacted(_) => return SubmitEvidence::Taken,
+                ReactionOutcome::Exited => return SubmitEvidence::Unanswered,
+                ReactionOutcome::Quiet => break,
+                // The composer can still show the envelope taken.
+                ReactionOutcome::Unobservable => {
+                    status_open = false;
+                    lost_status = true;
+                }
+            },
+            () = &mut deadline => break,
+        }
+    }
+    match (lost_status, other_writer) {
+        (false, _) => SubmitEvidence::Quiet,
+        (true, false) => SubmitEvidence::Unobservable,
+        (true, true) => SubmitEvidence::Unanswered,
     }
 }
 

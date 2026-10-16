@@ -5,7 +5,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `send_handoff`'s `delivery: "confirmed"` (and the "Delivered" state of a chat message) now means the daemon saw the envelope taken as one message, either way it can show: the target's input line, which held the envelope, emptied after the submit key with nothing else written into the window, or the target moved from waiting for input to working. A handoff to a busy window that queues the message, and one whose text is taller than the window, are now `confirmed` instead of `unconfirmed`. `unconfirmed` now means the envelope stayed in the input line and the target was not seen to start working, another writer wrote into the window first, or the target exited. This changes what an existing MCP contract value means.
+
 ### Fixed
+
+- A handoff or chat message to a window that took it without visibly starting work could be written into that window two or three times: a later attempt read the emptied input line as the text having been lost. Once the submit key has been pressed, yagura no longer writes the text again; it only presses the key again over text it still sees in the input line.
 
 - A message or handoff that is being delivered no longer leaves yagura's own half-written text (including the `x` probe) in a window's input line when someone types, `send_keys` or interrupts meanwhile: the delivery takes its text back in front of that input, writes nothing more, and checks the line before it answers. Text typed in front of a waiting notice no longer sets off a loop of probes that kept the notice from arriving. Where the check cannot confirm the text gone, the call still reports that something may remain.
 - A `send_message`, a handoff or a chat message could reach a CLI while it was still drawing an approval dialog, so its keys could answer the dialog (an Enter could approve it). yagura now writes into a window only once the CLI has finished drawing its screen -- the cursor is shown again and no synchronized update is open -- and still never writes on an approval dialog. A CLI that keeps the cursor hidden while its input line sits idle receives nothing from yagura.

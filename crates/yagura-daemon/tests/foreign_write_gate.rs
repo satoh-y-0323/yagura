@@ -28,7 +28,8 @@ use yagura_daemon::control::interrupt_window;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::pty::PtyResult;
 use yagura_daemon::window::{
-    InputOrigin, NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
+    InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
+    WindowEntry,
 };
 use yagura_protocol::WindowStatus;
 use yagura_test_support::ipc::Connection;
@@ -96,7 +97,11 @@ async fn deliver_until_stalled(
     window: &Stalled,
 ) -> tokio::task::JoinHandle<PtyResult<SubmitJudgment>> {
     let sender = window_entry(h, &window.window_id);
-    let call = tokio::spawn(async move { sender.submit_message(BODY, None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(BODY, None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     h.wait_for_scrollback(&window.window_id, b"STALL-BEGAN", HANG_GUARD)
         .await;
     call
@@ -169,7 +174,12 @@ async fn a_foreign_write_while_the_body_waits_to_show_gets_the_body_taken_back_i
 
     let judgment = tokio::time::timeout(
         HANG_GUARD,
-        window_entry(&h, &window.window_id).submit_message(BODY, None, None),
+        window_entry(&h, &window.window_id).submit_message(
+            BODY,
+            None,
+            SendStage::BeforeSubmitKey,
+            None,
+        ),
     )
     .await
     .expect("the next delivery must not hang")

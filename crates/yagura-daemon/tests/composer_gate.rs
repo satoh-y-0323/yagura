@@ -37,7 +37,8 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{
-    ComposerResidue, InputOrigin, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowEntry,
+    ComposerResidue, InputOrigin, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
+    WindowEntry,
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, WindowStatus};
 use yagura_test_support::ipc::Connection;
@@ -240,7 +241,7 @@ async fn row1_writes_the_body_with_no_clear_when_the_composer_observes_empty() {
     let window_id = open_gate_window(&h, &mut client, &dir, "row1", "row1-marker", "", 0).await;
 
     let result = entry(&h, &window_id)
-        .submit_message("hello", None, None)
+        .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -285,7 +286,7 @@ async fn row2_resends_the_submit_key_only_when_its_own_envelope_is_still_on_scre
     };
 
     let result = entry(&h, &window_id)
-        .submit_message("ENV", Some(mine), None)
+        .submit_message("ENV", Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -324,7 +325,7 @@ async fn row4_blocks_when_the_screen_shows_content_that_does_not_match_the_resid
     // against, so the foreign content on screen can only read as someone
     // else's.
     let result = entry(&h, &window_id)
-        .submit_message("MINE", None, None)
+        .submit_message("MINE", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -381,7 +382,7 @@ async fn row5_resends_via_the_write_record_when_the_screen_cannot_be_fully_resto
     // the write record alone can vouch for this resend even though the
     // screen reconstruction cannot.
     let result = entry(&h, &window_id)
-        .submit_message(&body, Some(mine), None)
+        .submit_message(&body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -442,7 +443,7 @@ async fn row5_refuses_a_touched_envelope_whose_tail_reads_on_screen_without_writ
 
     let result = tokio::time::timeout(
         HANG_GUARD,
-        entry(&h, &window_id).submit_message(&body, Some(mine), None),
+        entry(&h, &window_id).submit_message(&body, Some(mine), SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect("a tail that reads on screen must end the call")
@@ -527,7 +528,12 @@ async fn row5_waits_on_a_touched_envelope_while_the_screen_shows_no_composer() {
             write_seq: baseline,
         };
         sender
-            .submit_message(&resend_body, Some(mine), Some(requester))
+            .submit_message(
+                &resend_body,
+                Some(mine),
+                SendStage::BeforeSubmitKey,
+                Some(requester),
+            )
             .await
     });
     let_every_clock_bound_run_out().await;
@@ -604,7 +610,7 @@ async fn row5_folded_resends_via_the_write_record_when_the_placeholder_hides_the
     // write record alone can vouch for this resend even though folding hides
     // the body from the screen entirely.
     let result = entry(&h, &window_id)
-        .submit_message(body, Some(mine), None)
+        .submit_message(body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -660,7 +666,7 @@ async fn row5_folded_takes_back_its_own_envelope_to_write_a_different_body() {
     // Folding hides the previous body, but nothing else has written since, so
     // the write record alone vouches that the composer holds only it.
     let result = entry(&h, &window_id)
-        .submit_message(next, Some(mine), None)
+        .submit_message(next, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -722,6 +728,7 @@ async fn row5_folded_does_not_take_back_for_a_different_body_once_someone_else_h
         .submit_message(
             "a newer notice replaces the one still waiting",
             Some(mine),
+            SendStage::BeforeSubmitKey,
             None,
         )
         .await
@@ -781,7 +788,7 @@ async fn row5_folded_does_not_resend_or_erase_once_someone_else_has_touched_the_
         .expect("interfering write must not fail");
 
     let result = entry(&h, &window_id)
-        .submit_message(body, Some(mine), None)
+        .submit_message(body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -854,7 +861,7 @@ async fn row5_folded_does_not_resend_when_a_ctrl_u_reset_is_followed_by_a_same_l
         .expect("human draft must not fail");
 
     let result = entry(&h, &window_id)
-        .submit_message(body, Some(mine), None)
+        .submit_message(body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -912,7 +919,7 @@ async fn row5_folded_does_not_resend_when_another_writer_writes_the_identical_by
         .expect("the other writer's write must not fail");
 
     let result = entry(&h, &window_id)
-        .submit_message(body, Some(mine), None)
+        .submit_message(body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -955,7 +962,7 @@ async fn row6_blocks_when_the_window_has_no_composer_section_to_observe() {
     .await;
 
     let result = entry(&h, &window_id)
-        .submit_message("hello", None, None)
+        .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -995,7 +1002,7 @@ async fn a_body_the_receiver_drops_is_reported_not_reflected_with_nothing_left_b
     .await;
 
     let result = entry(&h, &window_id)
-        .submit_message("never-seen", None, None)
+        .submit_message("never-seen", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -1093,7 +1100,7 @@ async fn presses_submit_on_a_first_write_whose_folded_placeholder_hides_its_own_
     let body = "the retry budget for this delivery has not been reached yet";
 
     let result = entry(&h, &window_id)
-        .submit_message(body, None, None)
+        .submit_message(body, None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -1141,8 +1148,11 @@ fn start_delivery(
 ) {
     let (leave, requester) = tokio::sync::watch::channel(false);
     let sender = entry(h, window_id);
-    let call =
-        tokio::spawn(async move { sender.submit_message(body, None, Some(requester)).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(body, None, SendStage::BeforeSubmitKey, Some(requester))
+            .await
+    });
     (leave, call)
 }
 
@@ -1175,7 +1185,10 @@ async fn a_does_not_press_submit_when_interactive_input_lands_before_it() {
     let e = entry(&h, &window_id);
     let submit_task = tokio::spawn({
         let e = Arc::clone(&e);
-        async move { e.submit_message("mixed", None, None).await }
+        async move {
+            e.submit_message("mixed", None, SendStage::BeforeSubmitKey, None)
+                .await
+        }
     });
     wait_until_body_reached_child(&h, &window_id).await;
     let mut attached = h.connect().await;
@@ -1209,7 +1222,10 @@ async fn a_does_not_press_submit_when_a_control_byte_lands_before_it() {
     let e = entry(&h, &window_id);
     let submit_task = tokio::spawn({
         let e = Arc::clone(&e);
-        async move { e.submit_message("mixed", None, None).await }
+        async move {
+            e.submit_message("mixed", None, SendStage::BeforeSubmitKey, None)
+                .await
+        }
     });
     wait_until_body_reached_child(&h, &window_id).await;
     entry(&h, &window_id)
@@ -1243,7 +1259,10 @@ async fn a_takeback_is_skipped_once_a_foreign_write_lands_between_verification_a
     let e = entry(&h, &window_id);
     let submit_task = tokio::spawn({
         let e = Arc::clone(&e);
-        async move { e.submit_message("never-seen", None, None).await }
+        async move {
+            e.submit_message("never-seen", None, SendStage::BeforeSubmitKey, None)
+                .await
+        }
     });
     wait_until_body_reached_child(&h, &window_id).await;
     entry(&h, &window_id)
@@ -1358,7 +1377,7 @@ async fn a_send_that_failed_to_reflect_never_leaves_something_for_the_next_send_
 
     for body in ["first-body", "second-body"] {
         let result = entry(&h, &window_id)
-            .submit_message(body, None, None)
+            .submit_message(body, None, SendStage::BeforeSubmitKey, None)
             .await
             .expect("a blocked write is not a PTY error")
             .placement;
@@ -1405,7 +1424,12 @@ async fn resend_repeats_up_to_the_retry_limit_while_the_composer_stays_empty() {
 
     for attempt in 0..3 {
         let result = entry(&h, &window_id)
-            .submit_message(&format!("body{attempt}"), None, None)
+            .submit_message(
+                &format!("body{attempt}"),
+                None,
+                SendStage::BeforeSubmitKey,
+                None,
+            )
             .await
             .expect("write must not fail at the PTY level")
             .placement;
@@ -1505,7 +1529,7 @@ async fn a_pending_deliverys_resend_does_not_erase_unrelated_content_left_by_ano
     // A pending delivery's resend: its own residue is its own envelope,
     // not the other sender's body.
     let result = entry(&h, &window_id)
-        .submit_message("MY-ENVELOPE", Some(mine), None)
+        .submit_message("MY-ENVELOPE", Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -1552,7 +1576,7 @@ async fn a_fresh_send_does_not_overwrite_an_envelope_still_sitting_in_the_compos
         .expect("seed write must not fail");
 
     let result = entry(&h, &window_id)
-        .submit_message("NEW-MESSAGE", None, None)
+        .submit_message("NEW-MESSAGE", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -1750,7 +1774,7 @@ async fn a_human_typed_draft_is_never_merged_with_a_daemon_delivered_line() {
         .expect("seed write must not fail");
 
     let result = entry(&h, &window_id)
-        .submit_message("delivered-line", None, None)
+        .submit_message("delivered-line", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a blocked write is not a PTY error")
         .placement;
@@ -2368,7 +2392,7 @@ async fn a_wrap_boundary_space_the_reading_lost_does_not_keep_a_reflected_body_f
     let body = wrap_boundary_space_body();
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        entry(&h, &window_id).submit_message(&body, None, None),
+        entry(&h, &window_id).submit_message(&body, None, SendStage::BeforeSubmitKey, None),
     )
     .await
     .expect(
@@ -2428,7 +2452,7 @@ async fn residue_restored_from_screen_ignores_a_wrap_boundary_space_the_reading_
         write_seq: stale_seq,
     };
     let result = entry(&h, &window_id)
-        .submit_message(&body, Some(mine), None)
+        .submit_message(&body, Some(mine), SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level")
         .placement;
@@ -2552,7 +2576,11 @@ async fn a_stalled_reflection_is_waited_on_and_the_body_is_delivered_once_and_wh
 
     let body = "hello-f4";
     let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move { sender.submit_message(body, None, None).await });
+    let call = tokio::spawn(async move {
+        sender
+            .submit_message(body, None, SendStage::BeforeSubmitKey, None)
+            .await
+    });
     h.wait_for_scrollback(&window_id, b"STALL-BEGAN", Duration::from_secs(10))
         .await;
     let_every_clock_bound_run_out().await;
@@ -2686,6 +2714,7 @@ async fn submit_then_resume_painting(
             .submit_message(
                 body,
                 residue.map(|(body, write_seq)| ComposerResidue { body, write_seq }),
+                SendStage::BeforeSubmitKey,
                 None,
             )
             .await
@@ -3030,7 +3059,7 @@ async fn a_probe_a_starting_receiver_dropped_is_waited_on_and_probed_again_by_th
     }
 
     let second = entry(&h, &window_id)
-        .submit_message("BODY", None, None)
+        .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level");
 
@@ -3089,7 +3118,7 @@ async fn a_probe_drawn_after_its_requester_left_is_settled_by_the_next_delivery(
     .await;
 
     let second = entry(&h, &window_id)
-        .submit_message("BODY", None, None)
+        .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level");
 
@@ -3167,7 +3196,7 @@ async fn the_submit_key_waits_the_submit_delay_after_the_body_so_a_pasting_recei
     .await;
 
     let judgment = entry(&h, &window_id)
-        .submit_message("BODY", None, None)
+        .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level");
 
@@ -3201,7 +3230,7 @@ async fn a_submit_key_inside_the_receivers_paste_window_leaves_the_body_unsubmit
     .await;
 
     entry(&h, &window_id)
-        .submit_message("BODY", None, None)
+        .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("write must not fail at the PTY level");
     // Typed after the submit key, so once it shows, the submit key was read.

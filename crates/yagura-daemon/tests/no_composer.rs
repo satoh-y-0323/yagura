@@ -32,7 +32,7 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::ComposerAccess;
 use yagura_daemon::input::plan_raw_write;
 use yagura_daemon::window::{
-    NotPlaced, NotPlacedReason, SubmitJudgment, SubmitPlacement, WindowParticipation,
+    NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement, WindowParticipation,
 };
 use yagura_protocol::{
     ClientMessage, DaemonMessage, InstructionNoticeState, PlanInfo, PlanTaskInfo, PlanTaskSpec,
@@ -163,7 +163,7 @@ async fn neither_writing_entry_point_writes_into_a_window_that_declares_no_compo
 
     let seq_before: u64 = silent.write_seq();
     let judged: SubmitJudgment = silent
-        .submit_message("silent-judged-body", None, None)
+        .submit_message("silent-judged-body", None, SendStage::BeforeSubmitKey, None)
         .await
         .expect("a declined write is not a PTY error");
     let raw: SubmitJudgment = silent
@@ -1182,7 +1182,12 @@ async fn a_judged_line_is_declined_before_writing_into_a_composer_without_a_prob
     let seq_before: u64 = entry.write_seq();
 
     let judged: SubmitJudgment = entry
-        .submit_message("raw-only-judged-body", None, None)
+        .submit_message(
+            "raw-only-judged-body",
+            None,
+            SendStage::BeforeSubmitKey,
+            None,
+        )
         .await
         .expect("a declined write is not a PTY error");
     assert_eq!(

@@ -326,8 +326,9 @@ impl YaguraMcpServer {
             opened; one that leaves something there leaves it open. At most 4 handoffs \
             per connection and 32 daemon-wide may be outstanding at once; beyond that \
             it is resource_exhausted. delivery in the reply says whether the target \
-            was seen to react; \"unconfirmed\" means the envelope was written but no \
-            reaction was seen, and \"not_written\" means the daemon never sent it -- \
+            was seen to take it; \"unconfirmed\" means the envelope was written but \
+            that was not seen, and \
+            \"not_written\" means the daemon never sent it -- \
             read the target's output before handing it the same work again. \
             Delivery waits with no deadline of its own (see \
             docs/mcp-setup.md, Maximum wait); cancelling the call ends it. What arrives \
