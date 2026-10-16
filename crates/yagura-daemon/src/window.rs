@@ -960,9 +960,10 @@ fn write_gate(observation: &ComposerObservation) -> WriteGate {
     }
 }
 
-/// Whether [`write_gate`] is open on `observation`. Every reading a wait
-/// hands on is finished (see [`WindowEntry::wait_for_composer`]), so a
-/// decision made from one that is not open declines.
+/// Whether [`write_gate`] is open on `observation`. A wait hands on only
+/// readings whose gate is open or closed, never unfinished (see
+/// [`WindowEntry::wait_for_composer`]), so a decision made from one that is
+/// not open declines for a closed gate.
 fn screen_accepts_write(observation: &ComposerObservation) -> bool {
     write_gate(observation) == WriteGate::Open
 }
