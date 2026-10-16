@@ -228,9 +228,10 @@ probe = "x"                    # one printable, non-blank character other
 erase = "\u007f"               # the key that erases one character, used to
                                # take the probe back out. 1..=8 bytes.
                                # Default: DEL
-delivery_confirm_ms = 8000     # how long to wait for a reaction after the
-                               # submit bytes. 0..=30000; 0 means "do not
-                               # look for one". Default: 8000
+delivery_confirm_ms = 8000     # how long to wait, after the submit bytes,
+                               # for the composer to empty or the status to
+                               # react. 0..=30000; 0 means "do not look for
+                               # either". Default: 8000
 resend_max = 0                 # how many times an unconfirmed submit may be
                                # written again. 0..=4. Default: 0
 
@@ -336,8 +337,10 @@ envelope, for instance. The body and the submit bytes are written as two
 steps, `submit_delay_ms` apart, because a CLI that reads a fast burst of input
 as a paste takes a carriage return arriving inside that burst as a line break
 rather than as "submit". After the submit bytes are written, the daemon
-watches the window's status for `delivery_confirm_ms` to see whether the
-receiver reacted, and when it did not, the daemon may press the submit key
+watches the window for `delivery_confirm_ms` to see whether the receiver
+took the envelope: its painted composer empties with nothing else written into
+the window, or its status moves from waiting for input to working. When
+neither shows, the daemon may press the submit key
 again, up to `resend_max` times. A re-send only ever presses that key: it
 runs where the envelope this delivery wrote is still the only thing in the
 composer, so the body is neither cleared nor written a second time, and a

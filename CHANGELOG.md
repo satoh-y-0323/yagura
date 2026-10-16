@@ -7,7 +7,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `send_handoff`'s `delivery: "confirmed"` (and the "Delivered" state of a chat message) now means the daemon saw the envelope taken as one message, either way it can show: the target's input line, which held the envelope, emptied after the submit key with nothing else written into the window, or the target moved from waiting for input to working. A handoff to a busy window that queues the message, and one whose text is taller than the window, are now `confirmed` instead of `unconfirmed`. `unconfirmed` now means the envelope stayed in the input line and the target was not seen to start working, another writer wrote into the window first, or the target exited. This changes what an existing MCP contract value means.
+- `send_handoff`'s `delivery: "confirmed"` (and the "Delivered" state of a chat message) now means the daemon saw the envelope taken as one message, either way it can show: the target's input line, which held the envelope, emptied after the submit key with nothing else written into the window, or the target moved from waiting for input to working. A handoff to a busy window that queues the message, and one whose text is taller than the window, are now `confirmed` instead of `unconfirmed`. `unconfirmed` now means the envelope stayed in the input line and the target was not seen to start working, another writer wrote into the window after the submit key and before the input line emptied, or the target exited. This changes what an existing MCP contract value means.
 
 ### Fixed
 

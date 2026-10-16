@@ -432,9 +432,10 @@ pub fn evaluate_limits(history: &[HistoryEntry], limits: &ChatLimits) -> Option<
 pub enum ChatDeliveryState {
     /// Recorded when the message was appended, before any delivery ran.
     Pending,
-    /// Written and the window reacted to it.
+    /// Written, and the window was seen taking it: its composer emptied
+    /// after the submit key, or it started working.
     Confirmed,
-    /// Written, but no reaction has been observed yet.
+    /// Written, but the window was not seen taking it.
     Unconfirmed,
     /// Written, but the window's reaction could not be observed at all.
     NotObserved,
