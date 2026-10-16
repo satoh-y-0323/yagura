@@ -242,6 +242,10 @@ async fn a_requester_leaving_mid_send_message_gets_no_submit_key_and_its_body_ta
         1,
         "only the next send_message presses the submit key: {read:?}"
     );
+    // The answer can come before the receiver draws the line it printed on
+    // taking the body; that line is what is waited for, then counted.
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY", HANG_GUARD)
+        .await;
     assert_eq!(
         count(&h.scrollback(&window_id), b"SUBMITTED BODY"),
         1,

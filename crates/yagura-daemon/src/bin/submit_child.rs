@@ -141,7 +141,11 @@
 //! appears. `hold-probe|<path>` stops reading at the first typed byte after the
 //! first bracketed paste until the file `<path>` exists, with the pasted body
 //! drawn meanwhile: what a delivery writes behind its body stays unread, and
-//! so unpainted, for as long as a test chooses.
+//! so unpainted, for as long as a test chooses. `take-on-typing-after-key`
+//! reads a submit key taken as a line break (the envelope stays in the
+//! composer) and, at the first typed byte after it, takes the whole buffer
+//! and paints that byte alone: a receiver that processes the envelope behind
+//! a submit key it did not take just before the next keystroke.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -274,6 +278,9 @@ struct State {
     pastes_begun: u32,
     /// The `hold-probe` stop has been made.
     probe_held: bool,
+    /// A submit key was taken as a line break with a body in the buffer, and
+    /// no typed byte has followed it yet (`take-on-typing-after-key` only).
+    line_break_key_seen: bool,
 }
 
 impl State {
@@ -289,6 +296,7 @@ impl State {
             pasted_len: 0,
             pastes_begun: 0,
             probe_held: false,
+            line_break_key_seen: false,
         }
     }
 
@@ -297,6 +305,13 @@ impl State {
             return;
         }
         if settings.typing_takes_paste && !self.in_paste && self.pasted_len > 0 {
+            self.buffer.clear();
+            self.pasted_len = 0;
+        }
+        if settings.takes_on_typing_after_key
+            && !self.in_paste
+            && std::mem::take(&mut self.line_break_key_seen)
+        {
             self.buffer.clear();
             self.pasted_len = 0;
         }
@@ -360,6 +375,9 @@ struct Settings<'a> {
     /// Reading stops at the first typed byte after a paste until this file
     /// exists.
     hold_probe: Option<std::path::PathBuf>,
+    /// The first typed byte after a submit key taken as a line break takes the
+    /// buffer (`take-on-typing-after-key`).
+    takes_on_typing_after_key: bool,
 }
 
 /// The `take-on` receive mode: a submit key that arrives before the file
@@ -403,6 +421,7 @@ struct ReceiveMode {
     silent: bool,
     take_on: Option<Arc<TakeOn>>,
     hold_probe: Option<std::path::PathBuf>,
+    takes_on_typing_after_key: bool,
 }
 
 impl ReceiveMode {
@@ -417,6 +436,7 @@ impl ReceiveMode {
             silent: false,
             take_on: None,
             hold_probe: None,
+            takes_on_typing_after_key: false,
         };
         for part in spec.split(';').filter(|part| !part.is_empty()) {
             if part == "silent" {
@@ -428,6 +448,8 @@ impl ReceiveMode {
                     held: Mutex::new(false),
                     released: AtomicBool::new(false),
                 }));
+            } else if part == "take-on-typing-after-key" {
+                mode.takes_on_typing_after_key = true;
             } else if let Some(path) = part.strip_prefix("hold-probe|") {
                 mode.hold_probe = Some(std::path::PathBuf::from(path));
             } else {
@@ -793,6 +815,10 @@ fn process_byte(
             // A CR/LF read together with typed characters is line editing
             // inside that input, not a submit.
             let discarded_as_line_break = *chunk_had_append || inside_paste_guard;
+            if settings.takes_on_typing_after_key && inside_paste_guard && !state.buffer.is_empty()
+            {
+                state.line_break_key_seen = true;
+            }
             if !discarded_as_line_break && !state.buffer.is_empty() {
                 if settings
                     .take_on
@@ -931,6 +957,7 @@ fn main() -> io::Result<()> {
         silent: receive_mode.silent,
         take_on: receive_mode.take_on,
         hold_probe: receive_mode.hold_probe,
+        takes_on_typing_after_key: receive_mode.takes_on_typing_after_key,
     };
     let out = Arc::new(Output::new(style));
     let reflector = reflect.map(|reflect| spawn_reflector(Arc::clone(&out), reflect));

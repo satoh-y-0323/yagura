@@ -4123,8 +4123,9 @@ fn not_placed_message(not_placed: &NotPlaced) -> &'static str {
              more was sent"
         }
         (NotPlacedReason::Vanished, _) => {
-            "the text left the window's composer after an earlier submit key, but another write \
-             reached the window since, so nothing more was sent"
+            "the submit key was written on an earlier attempt, but whether the window took the \
+             text could not be confirmed (another write may have reached the window since, or an \
+             earlier write was left unconfirmed), so nothing more was sent"
         }
     }
 }

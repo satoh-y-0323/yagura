@@ -958,6 +958,8 @@ struct ReceivingWindow<'a> {
     resend_max: u8,
     /// `submit_child`'s timing argument: a delay in ms, or `pause|<path>`.
     timing: &'a str,
+    /// `submit_child`'s `fold_placeholder` argument; `-` for no folding.
+    fold_placeholder: &'a str,
 }
 
 impl<'a> ReceivingWindow<'a> {
@@ -969,6 +971,7 @@ impl<'a> ReceivingWindow<'a> {
             delivery_confirm_ms: 2000,
             resend_max: 2,
             timing: "0",
+            fold_placeholder: "-",
         }
     }
 }
@@ -1004,7 +1007,7 @@ async fn open_receiving_window(
     let mut command =
         process::submit_child_command_with_composer(&marker, 0, window.paste_guard_keys, 0, 0);
     command[9] = window.timing.to_string();
-    command.push("-".to_string()); // fold_placeholder: none
+    command.push(window.fold_placeholder.to_string());
     command.push("-".to_string()); // clear_scope: ordinary
     command.push("-".to_string()); // overlay: none
     command.push("-".to_string()); // overlay_heading
@@ -1578,6 +1581,68 @@ async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_wri
         delivery,
         HandoffDelivery::Confirmed,
         "the composer the submit key was pressed in read empty on a finished screen"
+    );
+    assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
+}
+
+/// What the folding receiver of R10 paints in place of the pasted envelope.
+const FOLD_PLACEHOLDER: &str = "[Pasted text #1]";
+
+/// R10: after the submit key (taken as a line break, the envelope stays in the
+/// composer, drawn folded), the receiver takes the envelope just before the
+/// next typed byte and paints that byte alone. The probe a resend attempt
+/// writes then shows alone, which says the envelope left the composer: it was
+/// taken, and the probe is erased, not left behind.
+#[tokio::test]
+async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_confirmed_and_leaves_no_probe()
+ {
+    let dir = unique_temp_dir("events-confirm-folded-taken-by-probe");
+    let log = dir.join("child-input.log");
+    let h = Harness::start("events-confirm-folded-taken-by-probe", handoff_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window = ReceivingWindow {
+        paste_guard_keys: u64::MAX,
+        receive_mode: "take-on-typing-after-key",
+        resend_max: 2,
+        fold_placeholder: FOLD_PLACEHOLDER,
+        ..ReceivingWindow::new("confirm-folded-taken-by-probe")
+    };
+    let window_id = open_receiving_window(&h, &mut client, &dir, &window, &log).await;
+
+    request_handoff(&mut client, &window_id, "look here").await;
+    // The key is taken as a line break: the envelope stays, drawn folded.
+    wait_for_the_submit_key(&log).await;
+    wait_until_frame_satisfies(
+        &h,
+        &window_id,
+        "the folded envelope in a finished frame",
+        HANG_GUARD,
+        |readout, unfinished| {
+            !unfinished
+                && matches!(readout, ComposerReadout::Body(text) if text == FOLD_PLACEHOLDER)
+        },
+    )
+    .await;
+    let_every_clock_bound_run_out().await;
+
+    let delivery = handoff_reply(&mut client).await;
+    // Before the sentinel below, which this receiver paints as typed text.
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    assert_eq!(
+        delivery,
+        HandoffDelivery::Confirmed,
+        "the probe the receiver read after the submit key showed alone: the envelope was taken; the receiver read {read:?}"
+    );
+    let after_the_key = read_after_the_submit_key(&read);
+    assert_eq!(
+        count_of(after_the_key, b"x"),
+        1,
+        "the resend attempt wrote its probe once; the receiver read {after_the_key:?} after the key"
+    );
+    assert!(
+        after_the_key.ends_with(&[0x7f]),
+        "the probe was erased; the receiver read {after_the_key:?} after the key"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }

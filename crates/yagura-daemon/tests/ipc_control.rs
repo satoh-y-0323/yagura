@@ -4230,6 +4230,13 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
         1,
         "the body must be written exactly once"
     );
+    h.wait_for_scrollback_occurrences(
+        &window_id,
+        "SUBMITTED [yagura handoff] ",
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
     assert!(
         count_marker(&h, &window_id, "SUBMITTED [yagura handoff] ") >= 1,
         "the submit key must have been taken as a submit, not folded into the body \
@@ -4768,6 +4775,8 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1, Duration::from_secs(10))
+        .await;
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED "), 1);
     assert_eq!(count_marker(&h, &window_id, "PASTE "), 1);
 }

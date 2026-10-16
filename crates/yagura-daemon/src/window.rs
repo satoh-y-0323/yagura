@@ -561,14 +561,15 @@ pub enum NotPlacedReason {
     /// The send this call belongs to pressed the submit key on an earlier
     /// attempt, and the composer now reads empty with not one write from
     /// another writer since that key: the receiver took the envelope as one
-    /// message. Nothing was written, and nothing of the send remains.
+    /// message. The body was not written again, and nothing of the send
+    /// remains.
     Taken,
     /// The send this call belongs to pressed the submit key on an earlier
     /// attempt, but another writer may have written since that key, or an
     /// earlier write was left unconfirmed, so nothing tells whether the
-    /// receiver took the envelope. Nothing was written: a send never writes
-    /// its body again, nor presses the key on another writer's input, once
-    /// it has pressed the submit key.
+    /// receiver took the envelope. The body was not written again: a send
+    /// never writes its body again, nor presses the key on another writer's
+    /// input, once it has pressed the submit key.
     Vanished,
 }
 
@@ -2022,6 +2023,7 @@ impl WindowEntry {
                                 &observation.readout,
                                 seen,
                                 false,
+                                stage,
                                 requester,
                             )
                             .await
@@ -2036,6 +2038,7 @@ impl WindowEntry {
                                 &observation.readout,
                                 vouched_seq,
                                 true,
+                                stage,
                                 requester,
                             )
                             .await
@@ -2730,7 +2733,11 @@ impl WindowEntry {
     /// ledger does not vouch; a tail must end the body either way, since the
     /// end of a long composer can be anything that ends alike. A probe that
     /// shows alone means the envelope is not there, however the ledger
-    /// vouches: the probe is erased and nothing is sent.
+    /// vouches: the probe is erased and nothing is sent. After the submit key
+    /// (`stage`), that is the receiver having taken the envelope, as long as
+    /// nothing but the probe and its erase was written since.
+    // What the probe means depends on both the ledger and whether the key was pressed.
+    #[allow(clippy::too_many_arguments)]
     async fn confirm_envelope_then_resend(
         &self,
         body: &str,
@@ -2738,6 +2745,7 @@ impl WindowEntry {
         observed: &ComposerReadout,
         seq: u64,
         ledger_vouches: bool,
+        stage: SendStage,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         let envelope_shows = |shown: &ShownText| match shown {
@@ -2750,7 +2758,13 @@ impl WindowEntry {
             .read_through_probe(probe, seq, observed, requester)
             .await?
         {
-            ProbeReading::Shown(BehindProbe::Alone) => self.erase_dropped_probe(seq + 1).await,
+            ProbeReading::Shown(BehindProbe::Alone) => match stage {
+                SendStage::BeforeSubmitKey => self.erase_dropped_probe(seq + 1).await,
+                SendStage::AfterSubmitKey => Ok(match self.erase_probe(seq + 1).await? {
+                    ProbeErased::Emptied(..) => declined(NotPlacedReason::Taken, None),
+                    ProbeErased::Interrupted(_) => declined_unvouched(NotPlacedReason::Vanished),
+                }),
+            },
             ProbeReading::Shown(BehindProbe::Text(shown)) if envelope_shows(&shown) => {
                 if let ShownText::Body(before) = &shown {
                     self.note_read_back(before, body);

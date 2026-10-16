@@ -2418,6 +2418,8 @@ async fn send_handoff_from_a_profile_waits_on_a_probe_the_startup_drain_dropped_
     assert!(opened);
     assert_eq!(delivery, HandoffDelivery::Confirmed);
 
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1, Duration::from_secs(10))
+        .await;
     assert_eq!(
         count_marker(&h, &window_id, "SUBMITTED "),
         1,
