@@ -25,8 +25,8 @@ use common::{
     count_marker, input_log_read_so_far, let_every_clock_bound_run_out,
     let_every_clock_bound_run_out_while_a_thread_is_awaited, open_gate_window, policy,
     read_composer_now, read_response, report_status, send, settled_marker_count, unique_temp_dir,
-    wait_until_composer_is, wait_until_input_log_contains, wait_until_status,
-    write_submit_definition,
+    wait_until_composer_is, wait_until_frame_satisfies, wait_until_input_log_contains,
+    wait_until_status, write_submit_definition,
 };
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{
@@ -945,6 +945,7 @@ async fn a_window_carrying_an_unconfirmed_write_declines_the_next_delivery_at_on
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
 
 /// How a window the cases below deliver to is launched.
 struct ReceivingWindow<'a> {
@@ -1068,6 +1069,38 @@ async fn wait_until_confirmed_status(entry: &WindowEntry, wanted: WindowStatus) 
     })
     .await
     .unwrap_or_else(|_| panic!("the window never reached {wanted:?}"));
+}
+
+/// Waits until the model holds the frame a `take-on` receiver draws once it
+/// holds the submit key: the envelope in a composer whose paint never finishes.
+/// A reading the delivery takes from here on is of that frame, never of the
+/// finished one from before the key.
+async fn wait_until_the_held_envelope_is_drawn_unfinished(h: &Harness, window_id: &str) {
+    wait_until_frame_satisfies(
+        h,
+        window_id,
+        "the envelope in an unfinished frame",
+        HANG_GUARD,
+        |readout, unfinished| {
+            unfinished
+                && matches!(readout, ComposerReadout::Body(text) if text.contains("[yagura handoff]"))
+        },
+    )
+    .await;
+}
+
+/// What the receiver read after the first submit key behind the body's paste.
+fn read_after_the_submit_key(read: &[u8]) -> &[u8] {
+    let paste_end = read
+        .windows(PASTE_END.len())
+        .position(|window| window == PASTE_END)
+        .unwrap_or_else(|| panic!("the receiver never read the end of a paste; it read {read:?}"))
+        + PASTE_END.len();
+    let key = read[paste_end..]
+        .iter()
+        .position(|byte| *byte == b'\r')
+        .unwrap_or_else(|| panic!("the receiver never read a submit key; it read {read:?}"));
+    &read[paste_end + key + 1..]
 }
 
 fn count_of(haystack: &[u8], needle: &[u8]) -> usize {
@@ -1319,6 +1352,7 @@ async fn a_composer_that_empties_only_after_the_confirmation_window_is_confirmed
 
     request_handoff(&mut client, &window_id, "look here").await;
     wait_for_the_submit_key(&log).await;
+    wait_until_the_held_envelope_is_drawn_unfinished(&h, &window_id).await;
     let_every_clock_bound_run_out().await;
     create_signal_file(&take_now);
 
@@ -1357,6 +1391,7 @@ async fn another_writer_between_the_submit_key_and_the_empty_composer_does_not_g
 
     request_handoff(&mut client, &window_id, "look here").await;
     wait_for_the_submit_key(&log).await;
+    wait_until_the_held_envelope_is_drawn_unfinished(&h, &window_id).await;
     entry(&h, &window_id)
         .write_pty_input(b"Q", InputOrigin::Interactive)
         .await
@@ -1451,4 +1486,98 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
         HandoffDelivery::Unconfirmed,
         "another writer wrote after the submit key"
     );
+}
+
+/// R9a: another writer wrote after the submit key, into a composer still
+/// holding the envelope. Whatever the composer reads then, nothing of the
+/// delivery's own follows the other writer's input: no probe, no submit key
+/// pressed over it.
+#[tokio::test]
+async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_it() {
+    let dir = unique_temp_dir("events-confirm-foreign-after-key");
+    let log = dir.join("child-input.log");
+    let h = Harness::start("events-confirm-foreign-after-key", handoff_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window = ReceivingWindow {
+        paste_guard_keys: u64::MAX,
+        resend_max: 2,
+        ..ReceivingWindow::new("confirm-foreign-after-key")
+    };
+    let window_id = open_receiving_window(&h, &mut client, &dir, &window, &log).await;
+
+    request_handoff(&mut client, &window_id, "look here").await;
+    // The key is taken as a line break, so the envelope stays in the composer
+    // and another writer types behind it.
+    wait_for_the_submit_key(&log).await;
+    entry(&h, &window_id)
+        .write_pty_input(b"Q", InputOrigin::Interactive)
+        .await
+        .expect("the other writer's byte must not fail");
+    wait_until_frame_satisfies(
+        &h,
+        &window_id,
+        "the envelope and the other writer's byte in a finished frame",
+        HANG_GUARD,
+        |readout, unfinished| {
+            !unfinished
+                && matches!(readout, ComposerReadout::Body(text) if text.trim_end().ends_with('Q'))
+        },
+    )
+    .await;
+    let_every_clock_bound_run_out().await;
+
+    let delivery = handoff_reply(&mut client).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    assert_eq!(
+        read_after_the_submit_key(&read),
+        b"Q",
+        "after the submit key, only the other writer's byte reaches the receiver; the delivery was {delivery:?}, the receiver read {read:?}"
+    );
+    assert_eq!(
+        delivery,
+        HandoffDelivery::Unconfirmed,
+        "another writer wrote after the submit key"
+    );
+    assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
+}
+
+/// R9b: after the submit key, a resend attempt reads the composer empty on a
+/// finished screen, nobody else having written. The envelope was taken, which
+/// that reading already says: nothing is written to check it.
+#[tokio::test]
+async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_writes_no_probe() {
+    let dir = unique_temp_dir("events-confirm-empty-no-probe");
+    let log = dir.join("child-input.log");
+    let take_now = dir.join("take-now");
+    let h = Harness::start("events-confirm-empty-no-probe", handoff_config(&dir)).await;
+    let mut client = h.connect().await;
+    let mode = format!("take-on|{}", take_now.display());
+    let window = ReceivingWindow {
+        receive_mode: &mode,
+        resend_max: 2,
+        ..ReceivingWindow::new("confirm-empty-no-probe")
+    };
+    let window_id = open_receiving_window(&h, &mut client, &dir, &window, &log).await;
+
+    request_handoff(&mut client, &window_id, "look here").await;
+    wait_for_the_submit_key(&log).await;
+    wait_until_the_held_envelope_is_drawn_unfinished(&h, &window_id).await;
+    // The delivery's own wait for the composer runs out on the unfinished
+    // frame; its resend attempt is what reads the composer empty.
+    let_every_clock_bound_run_out().await;
+    create_signal_file(&take_now);
+
+    let delivery = handoff_reply(&mut client).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    assert_eq!(
+        read_after_the_submit_key(&read),
+        b"",
+        "after the submit key nothing more is written, a probe included; the delivery was {delivery:?}, the receiver read {read:?}"
+    );
+    assert_eq!(
+        delivery,
+        HandoffDelivery::Confirmed,
+        "the composer the submit key was pressed in read empty on a finished screen"
+    );
+    assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }

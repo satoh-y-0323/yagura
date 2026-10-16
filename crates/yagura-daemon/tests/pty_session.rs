@@ -32,8 +32,8 @@ async fn recv_until_contains(session: &PtySession, needle: &[u8], timeout: Durat
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         arrivals.borrow_and_update();
-        // The raw bytes are kept before they are fed, so a chunk is in here by
-        // the time its arrival is counted.
+        // An arrival is announced only once the raw bytes are kept, so a chunk
+        // is in here by the time its arrival wakes this loop.
         let collected = session.captured_output();
         if contains_subsequence(&collected, needle) {
             return collected;

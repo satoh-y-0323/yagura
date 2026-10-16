@@ -3066,6 +3066,58 @@ pub async fn wait_until_composer_satisfies(
     }
 }
 
+/// Waits until `window_id`'s model holds a frame `accept` takes, given the
+/// composer `submit_child` shows in it and whether the program is still
+/// painting it (the cursor hidden or a synchronized update open, which no
+/// write is decided on). Woken by the model's own output arrivals, never by a
+/// delay; `timeout` only calls it hung.
+pub async fn wait_until_frame_satisfies(
+    h: &Harness,
+    window_id: &str,
+    what: &str,
+    timeout: Duration,
+    accept: impl Fn(&ComposerReadout, bool) -> bool,
+) -> ComposerReadout {
+    let session = h
+        .registry
+        .get(window_id)
+        .expect("window must exist in registry")
+        .session()
+        .clone();
+    let mut arrivals = session.output_arrivals();
+    let mut last = None;
+    let found = tokio::time::timeout(timeout, async {
+        loop {
+            // Marked seen before the read, so output fed after it wakes the
+            // wait below.
+            arrivals.borrow_and_update();
+            let (readout, unfinished) = session
+                .read_screen(|screen| {
+                    (
+                        screen.read_composer(&submit_child_composer_section()),
+                        screen.cursor_hidden() || screen.sync_open(),
+                    )
+                })
+                .await
+                .unwrap();
+            if accept(&readout, unfinished) {
+                return readout;
+            }
+            last = Some((readout, unfinished));
+            arrivals
+                .changed()
+                .await
+                .expect("the window's output arrivals stay open");
+        }
+    })
+    .await;
+    found.unwrap_or_else(|_| {
+        panic!(
+            "the model of {window_id} never held {what}; last saw (composer, unfinished) {last:?}"
+        )
+    })
+}
+
 // --- what a hex_echo child received -------------------------------------------
 
 /// `bytes` as lowercase hex, the form `hex_echo` prints what it reads.

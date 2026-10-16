@@ -565,6 +565,7 @@ struct ModelFeed {
     input: Arc<PublishedInput>,
     /// Where the model's replies to the child's queries go.
     replies: Arc<ReplyQueue>,
+    raw_capture: RawCapture,
     arrivals: watch::Sender<u64>,
 }
 
@@ -580,11 +581,15 @@ impl ModelFeed {
     /// queued after it is released, never written here. The input state is
     /// published before every release, so it never lags what a reader that
     /// takes the lock sees.
-    fn feed(&self, output: Vec<u8>) {
+    ///
+    /// The arrival is announced last, once both the model and the raw capture
+    /// hold `output`, so whoever it wakes finds the chunk in either.
+    fn feed(&self, output: &[u8]) {
         let Self {
             screen,
             input,
             replies,
+            raw_capture,
             arrivals,
         } = self;
         let mut guard = screen.lock();
@@ -597,13 +602,15 @@ impl ModelFeed {
             }
             guard.feed(slice);
         }
-        // Published under the lock, so a count read anywhere never runs ahead
-        // of what the screen holds.
-        arrivals.send_replace(guard.note_output());
+        // Counted under the lock, so the count announced never runs ahead of
+        // what the screen holds.
+        let arrival = guard.note_output();
         input.publish(&guard);
         let (queued, dropped) = guard.take_replies();
         parking_lot::MutexGuard::unlock_fair(guard);
         replies.push(queued, dropped);
+        raw_capture.record(output);
+        arrivals.send_replace(arrival);
     }
 }
 
@@ -859,13 +866,13 @@ impl PtySession {
                 screen: screen.clone(),
                 input: Arc::clone(&input),
                 replies: Arc::clone(&replies),
+                raw_capture: raw_capture.clone(),
                 arrivals: arrivals_tx,
             };
-            let raw_capture = raw_capture.clone();
             let is_exited = is_exited.clone();
 
             thread::spawn(move || {
-                Self::reader_loop(&feed, &raw_capture, reader, &is_exited);
+                Self::reader_loop(&feed, reader, &is_exited);
             })
         };
 
@@ -930,7 +937,6 @@ impl PtySession {
     /// observing PTY EOF on its own.
     fn reader_loop(
         feed: &ModelFeed,
-        raw_capture: &RawCapture,
         mut reader: Box<dyn Read + Send>,
         is_exited: &Arc<AtomicBool>,
     ) {
@@ -954,10 +960,7 @@ impl PtySession {
                     break;
                 }
                 Ok(n) => {
-                    feed.feed(buf[0..n].to_vec());
-                    // After the model has the bytes, so a test that finds them
-                    // in the capture can read them through the model too.
-                    raw_capture.record(&buf[0..n]);
+                    feed.feed(&buf[0..n]);
                 }
                 Err(_) => {
                     break;
@@ -1484,6 +1487,7 @@ mod tests {
             screen: screen.clone(),
             input,
             replies: Arc::new(ReplyQueue::default()),
+            raw_capture: RawCapture::default(),
             arrivals,
         };
         // The child's last words are still unread when its exit is observed.
@@ -1491,7 +1495,7 @@ mod tests {
         let left_in_pty: Box<dyn Read + Send> =
             Box::new(std::io::Cursor::new(b"LAST-WORDS".to_vec()));
 
-        PtySession::reader_loop(&feed, &RawCapture::default(), left_in_pty, &is_exited);
+        PtySession::reader_loop(&feed, left_in_pty, &is_exited);
 
         let (text, _) = screen.lock().text_tail(24, 4096);
         assert!(
