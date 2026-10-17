@@ -24,15 +24,12 @@ use std::time::Duration;
 
 use common::{
     HANG_GUARD, Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, attach,
-    count_marker, decide, empty_lookup, expect_approval_requested_within, expect_error,
-    handoff_profile_config, let_every_clock_bound_run_out, open_submit_child_window_with_composer,
+    count_marker, decide, expect_approval_requested_within, expect_error,
+    let_every_clock_bound_run_out, open_submit_child_window_with_composer,
     open_submit_child_window_with_folded_composer, policy, read_composer_now, read_response,
-    register_approver, send, send_from_two_connections, send_handoff_from_profile,
-    settled_marker_count, submit_child_profile_source_logging_input,
-    submit_child_profile_source_with_detection_and_clear_scope, unique_temp_dir,
-    wait_for_only_window, wait_until_composer_is, wait_until_composer_satisfies,
-    wait_until_input_log_contains, wait_until_the_handoff_budget_is_given_back,
-    write_interactive_input, write_profile, write_submit_definition,
+    register_approver, send, send_from_two_connections, settled_marker_count, unique_temp_dir,
+    wait_until_composer_is, wait_until_composer_satisfies, write_interactive_input,
+    write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -40,7 +37,7 @@ use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
     WindowEntry,
 };
-use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
@@ -82,40 +79,6 @@ region = "bottom"
 
 [input]
 submit_delay_ms = 40
-"#
-        ),
-    )
-    .expect("write detection definition file");
-}
-
-/// A definition that declares a composer whose marker the child never draws,
-/// so a write is allowed to look for the composer and finds nothing to read.
-fn write_undrawn_composer_definition(dir: &Path, name: &str, marker: &str) {
-    std::fs::write(
-        dir.join(format!("{name}.toml")),
-        format!(
-            r#"schema_version = 1
-name = "{name}"
-
-[debounce]
-confirm_ms = 30
-
-[[rules]]
-status = "waiting_input"
-pattern = '{marker}'
-priority = 10
-region = "bottom"
-
-[composer]
-marker = '^never-drawn-composer-marker'
-separator = " "
-continuation_prefix = "  "
-
-[input]
-submit_delay_ms = 40
-# Above zero, so the end of a handoff's readiness wait latches and can be seen.
-ready_hold_ms = 1
-probe = "{SUBMIT_CHILD_PROBE}"
 "#
         ),
     )
@@ -1656,8 +1619,8 @@ async fn send_handoff_resend_succeeds_on_the_write_seq_submit_message_itself_ret
     match read_response(&mut client, Duration::from_secs(30)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
-                delivery,
-                HandoffDelivery::Confirmed,
+                serde_json::to_value(delivery).expect("a delivery encodes"),
+                "taken",
                 "the resend must land through the carried-forward write-seq baseline once \
                  the paste guard has taken the first submit key"
             );
@@ -1683,8 +1646,9 @@ const RESEND_BUDGET: u8 = 2;
 
 /// Delivers one `send_handoff` to a receiver that stays ready and quiet
 /// while its paste guard swallows the first `swallowed` submit keys, and
-/// returns the verdict.
-async fn deliver_against_swallowed_submit_keys(tag: &str, swallowed: u64) -> HandoffDelivery {
+/// returns how many submit keys the receiver took as a submit once the
+/// handoff was answered.
+async fn deliver_against_swallowed_submit_keys(tag: &str, swallowed: u64) -> usize {
     let dir = unique_temp_dir(tag);
     let config = DaemonConfig {
         approval_policy: Some(policy(&["send_handoff"])),
@@ -1717,7 +1681,7 @@ async fn deliver_against_swallowed_submit_keys(tag: &str, swallowed: u64) -> Han
     send(
         &mut client,
         &ClientMessage::SendHandoff {
-            window_id: Some(window_id),
+            window_id: Some(window_id.clone()),
             profile: None,
             cwd: None,
             name: None,
@@ -1729,9 +1693,10 @@ async fn deliver_against_swallowed_submit_keys(tag: &str, swallowed: u64) -> Han
     )
     .await;
     match read_response(&mut client, Duration::from_secs(30)).await {
-        DaemonMessage::HandoffSent { delivery, .. } => delivery,
+        DaemonMessage::HandoffSent { .. } => {}
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    count_marker(&h, &window_id, "SUBMITTED ")
 }
 
 #[tokio::test]
@@ -1739,7 +1704,7 @@ async fn a_quiet_receiver_is_resent_the_submit_key_as_many_times_as_resend_max_a
     assert_eq!(
         deliver_against_swallowed_submit_keys("gate-resend-budget-spent", u64::from(RESEND_BUDGET))
             .await,
-        HandoffDelivery::Confirmed,
+        1,
         "the last resend the budget allows must still be pressed"
     );
 }
@@ -1752,7 +1717,7 @@ async fn a_quiet_receiver_is_never_resent_the_submit_key_beyond_resend_max() {
             u64::from(RESEND_BUDGET) + 1,
         )
         .await,
-        HandoffDelivery::Unconfirmed,
+        0,
         "no submit key may be pressed past the resend budget"
     );
 }
@@ -2025,216 +1990,6 @@ async fn a_delivery_held_for_approval_observes_the_composer_at_write_time_not_at
         ComposerReadout::Body(text) => assert_eq!(text, "LANDED-WHILE-PENDING"),
         other => panic!("expected the foreign content still on screen, got {other:?}"),
     }
-}
-
-// =====================================================================
-// A `profile`-addressed delivery's window closes exactly when its
-// envelope does not remain in the receiver's composer, never keyed to the
-// delivery result value or to whether any byte was ever written.
-// =====================================================================
-
-/// Reused by every `profile`-close case below: a config resolving profiles
-/// from `profiles_dir` against `detection_dir`, with `send_handoff`
-/// auto-approved so no approver connection is needed.
-fn profile_close_config(profiles_dir: std::path::PathBuf, detection_dir: &Path) -> DaemonConfig {
-    handoff_profile_config(
-        Some(profiles_dir),
-        empty_lookup(),
-        detection_dir,
-        None,
-        Some(policy(&["send_handoff"])),
-        30,
-    )
-}
-
-/// The `profiles` / `detection` directory pair every `profile`-close case
-/// writes into, both created: a definition writer handed a directory that
-/// does not exist fails at the filesystem, well before the contract under
-/// test is reached.
-fn profile_close_dirs(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let profiles_dir = dir.join("profiles");
-    let detection_dir = dir.join("detection");
-    std::fs::create_dir_all(&profiles_dir).expect("make profiles dir");
-    std::fs::create_dir_all(&detection_dir).expect("make detection dir");
-    (profiles_dir, detection_dir)
-}
-
-/// Bounds a profile launch plus a delivery's steps; only a failure reaches it.
-const PROFILE_CLOSE_HANG_GUARD: Duration = Duration::from_secs(30);
-
-/// The composer is never drawn, so the delivery waits before writing its
-/// first byte until something ends the wait: here, its requester leaving.
-#[tokio::test]
-async fn profile_close_i_a_delivery_that_never_wrote_closes_the_window() {
-    let dir = unique_temp_dir("gate-close-i");
-    let (profiles_dir, detection_dir) = profile_close_dirs(&dir);
-    write_undrawn_composer_definition(&detection_dir, "close-i", "close-i-marker");
-    write_profile(
-        &profiles_dir,
-        "close-i",
-        &process::submit_child_profile_source_with_composer(
-            "Close I",
-            "close-i-marker",
-            0,
-            0,
-            0,
-            0,
-        )
-        .replacen("\n\n[command]", "\ndetection = \"close-i\"\n\n[command]", 1),
-    );
-
-    let h = Harness::start(
-        "gate-close-i",
-        profile_close_config(profiles_dir, &detection_dir),
-    )
-    .await;
-    let mut client = h.connect().await;
-    send_handoff_from_profile(&mut client, "close-i", None, None, "src/foo.rs", "look").await;
-    let window_id = wait_for_only_window(&h, PROFILE_CLOSE_HANG_GUARD).await;
-    // Latched once the handoff's readiness wait is over; from there to the
-    // delivery's wait on the composer nothing waits.
-    let deadline = tokio::time::Instant::now() + PROFILE_CLOSE_HANG_GUARD;
-    while !entry(&h, &window_id).has_left_startup_phase() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the handoff never left its readiness wait"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    drop(client);
-
-    // A closed window stays in the registry with an `Exited` status, so
-    // "the window was closed" is read off the child, not off the listing.
-    h.wait_until_child_exited(&window_id, PROFILE_CLOSE_HANG_GUARD)
-        .await;
-}
-
-/// The body is written and never shown until a clear arrives; the requester
-/// leaves, the delivery takes its body back, and nothing of it remains.
-#[tokio::test]
-async fn profile_close_ii_a_delivery_that_takes_itself_back_closes_the_window() {
-    let dir = unique_temp_dir("gate-close-ii");
-    let (profiles_dir, detection_dir) = profile_close_dirs(&dir);
-    write_submit_definition(
-        &detection_dir,
-        "close-ii",
-        "close-ii-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 120,
-            clear: "\\u0015",
-            delivery_confirm_ms: 2000,
-            resend_max: 0,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        "close-ii",
-        &submit_child_profile_source_with_detection_and_clear_scope(
-            "Close II",
-            "close-ii-marker",
-            "close-ii",
-            "held:",
-        ),
-    );
-
-    let h = Harness::start(
-        "gate-close-ii",
-        profile_close_config(profiles_dir, &detection_dir),
-    )
-    .await;
-    let mut client = h.connect().await;
-    send_handoff_from_profile(&mut client, "close-ii", None, None, "src/foo.rs", "look").await;
-    let window_id = wait_for_only_window(&h, PROFILE_CLOSE_HANG_GUARD).await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", PROFILE_CLOSE_HANG_GUARD)
-        .await;
-    drop(client);
-
-    h.wait_until_child_exited(&window_id, PROFILE_CLOSE_HANG_GUARD)
-        .await;
-}
-
-/// The body is written into a window that shows nothing from it on and has
-/// no clear sequence; the requester leaves, and the body can only stay.
-#[tokio::test]
-async fn profile_close_iii_a_delivery_that_cannot_take_itself_back_keeps_the_window_open() {
-    let dir = unique_temp_dir("gate-close-iii");
-    let (profiles_dir, detection_dir) = profile_close_dirs(&dir);
-    let input_log = dir.join("child-input.log");
-    write_submit_definition(
-        &detection_dir,
-        "close-iii",
-        "close-iii-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 120,
-            // No clear sequence: this window can never take a write back.
-            clear: "",
-            delivery_confirm_ms: 2000,
-            resend_max: 0,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        "close-iii",
-        &submit_child_profile_source_logging_input(
-            "Close III",
-            "close-iii-marker",
-            "close-iii",
-            "frozen:",
-            &input_log,
-        ),
-    );
-    write_profile(
-        &profiles_dir,
-        "close-iii-probe",
-        &submit_child_profile_source_with_detection_and_clear_scope(
-            "Close III Probe",
-            "close-iii-marker",
-            "close-iii",
-            "-",
-        ),
-    );
-
-    // One daemon-wide handoff at a time, so the budget coming back tells the
-    // test the first handoff has decided its window's fate.
-    let config = DaemonConfig {
-        max_open_handoffs: 1,
-        ..profile_close_config(profiles_dir, &detection_dir)
-    };
-    let h = Harness::start("gate-close-iii", config).await;
-    let mut client = h.connect().await;
-    send_handoff_from_profile(&mut client, "close-iii", None, None, "src/foo.rs", "look").await;
-    let window_id = wait_for_only_window(&h, PROFILE_CLOSE_HANG_GUARD).await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", PROFILE_CLOSE_HANG_GUARD)
-        .await;
-    drop(client);
-
-    wait_until_the_handoff_budget_is_given_back(&h, "close-iii-probe", PROFILE_CLOSE_HANG_GUARD)
-        .await;
-    assert!(
-        entry(&h, &window_id).session().exit_status().is_none(),
-        "a delivery whose write could not be taken back must keep the window open, so the \
-         requester can read the receiver's own output to find out what happened"
-    );
-    entry(&h, &window_id)
-        .write_pty_input(b"SENTINEL-AFTER", InputOrigin::Interactive)
-        .await
-        .expect("the sentinel must reach a window that was kept open");
-    let read =
-        wait_until_input_log_contains(&input_log, b"SENTINEL-AFTER", PROFILE_CLOSE_HANG_GUARD)
-            .await;
-    let paste_end = read
-        .windows(b"\x1b[201~".len())
-        .position(|window| window == b"\x1b[201~")
-        .expect("the envelope must have reached the receiver");
-    let after_paste = &read[paste_end..];
-    assert!(
-        !after_paste.contains(&b'\r') && !after_paste.contains(&0x15),
-        "neither the submit key nor a take-back may follow the envelope: {read:?}"
-    );
 }
 
 // =====================================================================

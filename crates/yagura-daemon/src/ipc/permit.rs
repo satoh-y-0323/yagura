@@ -45,11 +45,15 @@ pub(super) struct InterruptWindow;
 /// Terminating a window and its whole process tree.
 pub(super) struct CloseWindow;
 
-/// Writing a handoff envelope into a window's PTY.
+/// Handing a handoff envelope to a window's CLI.
 pub(super) struct SendHandoff;
 
 /// Starting a new process in a new window.
 pub(super) struct OpenWindow;
+
+/// Starting a new window from a profile with a handoff envelope as its first
+/// request: one decision licenses both.
+pub(super) struct LaunchHandoff;
 
 impl GatedTool for SendMessage {
     const TOOL: DestructiveTool = DestructiveTool::SendMessage;
@@ -75,6 +79,10 @@ impl GatedTool for OpenWindow {
     const TOOL: DestructiveTool = DestructiveTool::OpenWindow;
 }
 
+impl GatedTool for LaunchHandoff {
+    const TOOL: DestructiveTool = DestructiveTool::SendHandoff;
+}
+
 /// Proof that one request for the tool `T` names passed the gates that
 /// license it.
 ///
@@ -91,6 +99,14 @@ impl<T: GatedTool> Permit<T> {
     /// the judgment never granted.
     fn issue() -> Self {
         Self { tool: PhantomData }
+    }
+}
+
+impl Permit<LaunchHandoff> {
+    /// The two licences the one decision granted: starting the window, and
+    /// handing it the envelope.
+    pub(super) fn split(self) -> (Permit<OpenWindow>, Permit<SendHandoff>) {
+        (Permit::issue(), Permit::issue())
     }
 }
 
@@ -128,7 +144,7 @@ pub(super) fn gate_destructive<T: GatedTool>(
     let tool = T::TOOL;
     let detected = entry.current_detected();
     let policy_snapshot = context.policy.snapshot();
-    match control::check_destructive(
+    let verdict = control::check_destructive(
         live_policy::policy_source(&policy_snapshot),
         tool,
         detected,
@@ -136,7 +152,44 @@ pub(super) fn gate_destructive<T: GatedTool>(
         send_message_write(tool, text),
         context.origin,
         entry.window_id(),
-    ) {
+    );
+    gate_window(context, entry, detected, verdict, text)
+}
+
+/// Runs a handoff to an existing window past the status and approval gates.
+///
+/// The composer gate does not apply: the envelope goes into the window's
+/// inbox, and is typed only into a window whose composer the daemon can judge.
+pub(super) fn gate_handoff(
+    context: &GateContext<'_>,
+    entry: &WindowEntry,
+    text: &str,
+) -> GateOutcome<SendHandoff> {
+    let tool = SendHandoff::TOOL;
+    let detected = entry.current_detected();
+    let policy_snapshot = context.policy.snapshot();
+    let verdict = control::status_gate(tool, detected).and_then(|()| {
+        control::policy_gate(
+            live_policy::policy_source(&policy_snapshot),
+            tool,
+            context.origin,
+            Some(entry.window_id()),
+        )
+    });
+    gate_window(context, entry, detected, verdict, Some(text))
+}
+
+/// Turns a gate's verdict on a request aimed at `entry`, judged against
+/// `detected`, into its outcome, queueing it for a human when it needs one.
+fn gate_window<T: GatedTool>(
+    context: &GateContext<'_>,
+    entry: &WindowEntry,
+    detected: DetectedStatus,
+    verdict: Result<GateVerdict, DenyReason>,
+    text: Option<&str>,
+) -> GateOutcome<T> {
+    let tool = T::TOOL;
+    match verdict {
         Ok(GateVerdict::Allow) => return GateOutcome::Proceed(Permit::issue()),
         Ok(GateVerdict::NeedsApproval) => {}
         Err(reason) => return GateOutcome::Refused(deny_msg(tool, reason)),
@@ -157,6 +210,49 @@ pub(super) fn gate_destructive<T: GatedTool>(
                 status: detected.status(),
             }),
             text: text.map(str::to_string),
+            room: None,
+        },
+    )
+}
+
+/// Runs a handoff that opens a window from a profile past the approval gate,
+/// before anything starts: the envelope reaches the CLI the moment it does.
+///
+/// There is no window yet, so only the policy half of the gate applies, as
+/// for [`gate_open`]. One decision both starts a process and hands it the
+/// envelope, so it passes on its own only when the policy lets both
+/// `open_window` and `send_handoff` through; otherwise it is asked for once.
+/// `text` is what the approver reads: the lines naming what would be started,
+/// then the envelope.
+pub(super) fn gate_launched_handoff(
+    context: &GateContext<'_>,
+    text: &str,
+) -> GateOutcome<LaunchHandoff> {
+    let tool = LaunchHandoff::TOOL;
+    let policy_snapshot = context.policy.snapshot();
+    let mut needs_approval = false;
+    for gated in [OpenWindow::TOOL, tool] {
+        match control::policy_gate(
+            live_policy::policy_source(&policy_snapshot),
+            gated,
+            context.origin,
+            None,
+        ) {
+            Ok(GateVerdict::Allow) => {}
+            Ok(GateVerdict::NeedsApproval) => needs_approval = true,
+            Err(reason) => return GateOutcome::Refused(deny_msg(gated, reason)),
+        }
+    }
+    if !needs_approval {
+        return GateOutcome::Proceed(Permit::issue());
+    }
+    queue_for_approval(
+        context,
+        ApprovalDraft {
+            tool,
+            requester: requester_for(context.registry, context.origin),
+            target: None,
+            text: Some(text.to_string()),
             room: None,
         },
     )
@@ -253,6 +349,11 @@ pub(super) enum OpenPurpose<'a> {
 }
 
 impl OpenDescription {
+    /// The lines an approver reads.
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+
     /// A window that runs `argv` as given, each argument quoted where its
     /// boundaries would otherwise be unclear.
     pub(super) fn for_command(argv: &[String], cwd: Option<&str>) -> Self {
@@ -328,30 +429,31 @@ fn quote_argument(arg: &str) -> String {
     escape_control(&quoted)
 }
 
-/// How a queued request to open a window was decided.
+/// How a queued request was decided.
 // Built once per request and consumed at once; boxing the answer would put an
 // indirection in every caller's pattern and buy nothing.
 #[allow(clippy::large_enum_variant)]
-pub(super) enum OpenVerdict {
-    /// The gate or an approver allowed it; the permit licenses opening the
-    /// window.
-    Approved(Permit<OpenWindow>),
+pub(super) enum Verdict<T: GatedTool> {
+    /// The gate or an approver allowed it; the permit licenses it.
+    Approved(Permit<T>),
     /// It was denied or timed out, carrying the answer the requester must get.
     Refused(DaemonMessage),
 }
 
-/// Waits for the decision on a queued request to open a window. `None` means
-/// the requester left (`closed` was raised) first, so nobody is left to
-/// answer.
-pub(super) async fn await_open_verdict(
+/// How a queued request to open a window was decided.
+pub(super) type OpenVerdict = Verdict<OpenWindow>;
+
+/// Waits for the decision on a queued request. `None` means the requester
+/// left (`closed` was raised) first, so nobody is left to answer.
+pub(super) async fn await_verdict<T: GatedTool>(
     mut ticket: Ticket,
     config: &DaemonConfig,
     closed: &mut watch::Receiver<bool>,
-) -> Option<OpenVerdict> {
+) -> Option<Verdict<T>> {
     let deadline = Duration::from_secs(config.approval_timeout_secs);
     match await_approval(&mut ticket, deadline, closed).await {
-        ApprovalEnd::Approved => Some(OpenVerdict::Approved(Permit::issue())),
-        ApprovalEnd::Refused(message) => Some(OpenVerdict::Refused(message)),
+        ApprovalEnd::Approved => Some(Verdict::Approved(Permit::issue())),
+        ApprovalEnd::Refused(message) => Some(Verdict::Refused(message)),
         ApprovalEnd::RequesterGone => None,
     }
 }
@@ -381,8 +483,6 @@ pub(super) enum PermittedAction {
         text: String,
         requester: Option<String>,
         slot: Option<HandoffSlot>,
-        opened: bool,
-        ready_hold_wait_ms: u128,
         permit: Permit<SendHandoff>,
     },
 }
@@ -417,14 +517,10 @@ pub(super) fn gate_approved(action: PendingAction, detected: DetectedStatus) -> 
             text,
             requester,
             slot,
-            opened,
-            ready_hold_wait_ms,
         } => PermittedAction::SendHandoff {
             text,
             requester,
             slot,
-            opened,
-            ready_hold_wait_ms,
             permit: Permit::issue(),
         },
     })

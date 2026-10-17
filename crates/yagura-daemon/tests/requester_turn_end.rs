@@ -33,9 +33,7 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
-use yagura_protocol::{
-    ClientMessage, DaemonMessage, HandoffDelivery, WindowStatus, WithdrawReason,
-};
+use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
@@ -273,7 +271,7 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
             .expect("the input log path must be valid UTF-8")
             .to_string(),
     );
-    let receiver = h.open(command, Some("receiver")).await;
+    let receiver = h.open_delivering(command, Some("receiver")).await;
     wait_until_status(
         &mut observer,
         &receiver,
@@ -513,10 +511,10 @@ async fn a_send_message_is_answered_not_written_when_its_requester_window_is_clo
 }
 
 /// A window-addressed handoff is ended the same way. It answers
-/// `handoff_sent` with `delivery: not_written`, the answer a handoff gives
-/// whenever its envelope was never submitted.
+/// `handoff_sent` with an undelivered `delivery`, and its envelope no longer
+/// waits in the receiver's inbox: nothing is handed over after the answer.
 #[tokio::test]
-async fn a_handoff_is_answered_not_written_when_its_requester_goes_from_running_to_waiting_input() {
+async fn a_handoff_is_answered_undelivered_when_its_requester_goes_from_running_to_waiting_input() {
     let (mut stage, mut requester) = stage("turn-end-handoff", Some(&abandoned_table(true))).await;
     start_handoff(&stage, &mut requester).await;
 
@@ -529,10 +527,21 @@ async fn a_handoff_is_answered_not_written_when_its_requester_goes_from_running_
         } => {
             assert_eq!(window_id, stage.receiver);
             assert!(!opened, "the handoff was addressed to an open window");
-            assert_eq!(delivery, HandoffDelivery::NotWritten);
+            let delivery = serde_json::to_value(delivery).expect("a delivery encodes");
+            assert!(
+                delivery
+                    .as_str()
+                    .is_some_and(|wire| wire.starts_with("undelivered_")),
+                "an envelope taken back before it was submitted is undelivered, got {delivery}"
+            );
         }
-        other => panic!("expected handoff_sent with delivery not_written, got {other:?}"),
+        other => panic!("expected handoff_sent with an undelivered delivery, got {other:?}"),
     }
+    assert_eq!(
+        stage.receiver_entry().inbox().pending_count(),
+        0,
+        "the envelope of an answered handoff no longer waits for the receiver"
+    );
     expect_pong(&mut requester).await;
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }

@@ -6,16 +6,15 @@
 //!
 //! The shared budgets (chat's delivery budget, the daemon-wide handoff
 //! budget) are taken only once a delivery holds the window's turn, so a stuck
-//! window holds at most one unit of each. Deliveries waiting for its turn are
-//! counted per window instead, and the ones past that count end at once for
-//! that window alone. A `frozen:` `submit_child` window is the stuck one: it
+//! window holds at most one unit of each. Posts waiting for it stay in its own
+//! inbox, and the ones past that inbox's capacity are turned away for that
+//! window alone. A `frozen:` `submit_child` window is the stuck one: it
 //! paints nothing from the first paste on. The hang guards only bound a
 //! failure.
 
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
@@ -24,7 +23,6 @@ use common::{
     unique_temp_dir,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::window::{ChatIntroOutcome, WindowEntry};
 use yagura_protocol::{ChatMessage, ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
 
@@ -33,8 +31,8 @@ const HANG_GUARD: Duration = Duration::from_secs(60);
 
 const EXHAUSTED: &str = "undelivered_exhausted";
 
-/// States a chat delivery ends in once its envelope was written and submitted.
-const DELIVERED: [&str; 3] = ["confirmed", "unconfirmed", "not_observed"];
+/// The state a chat delivery ends in once its envelope was written and submitted.
+const DELIVERED: [&str; 1] = ["taken"];
 
 fn window_input() -> String {
     SubmitDefinitionInput {
@@ -78,14 +76,7 @@ async fn open_healthy_window(h: &Harness, client: &mut Connection, dir: &Path) -
     .await
 }
 
-fn entry(h: &Harness, window_id: &str) -> Arc<WindowEntry> {
-    h.registry
-        .get(window_id)
-        .expect("window must exist in registry")
-}
-
-/// The poster's definition is left out of chat: as a participant it would be
-/// sent an intro it never shows, holding a unit of the budget under test.
+/// The poster's definition is left out of chat: it only posts.
 const NON_PARTICIPANTS: &[&str] = &[CONTROL_DETECTION_NAME];
 
 /// Chat limits wide enough that no number of posts in a case halts the room.
@@ -205,7 +196,7 @@ async fn wait_until_exhausted(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the deliveries past the window's turn waiters were never turned away: {states:?}"
+            "the posts past the window's inbox were never turned away: {states:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -271,10 +262,10 @@ async fn posts_beyond_the_chat_budget_to_a_stuck_window_do_not_keep_another_wind
 }
 
 #[tokio::test]
-async fn posts_past_a_stuck_windows_turn_waiters_are_exhausted_for_that_window_alone() {
+async fn posts_past_a_stuck_windows_inbox_are_turned_away_for_that_window_alone() {
     let dir = unique_temp_dir("stuck-chat-waiters");
     let config = DaemonConfig {
-        max_turn_waiters_per_window: 2,
+        inbox_capacity: 2,
         ..chat_config(&dir, &chat_spec(None, 32))
     };
     let h = Harness::start_with_chat("stuck-chat-waiters", config).await;
@@ -283,8 +274,11 @@ async fn posts_past_a_stuck_windows_turn_waiters_are_exhausted_for_that_window_a
     let healthy = open_healthy_window(&h, &mut client, &dir).await;
     let mut poster = open_poster(&h, &mut client).await;
 
-    let mut stuck_seqs = vec![post(&mut poster, &format!("@{stuck} first"), &stuck).await];
+    post(&mut poster, &format!("@{stuck} first"), &stuck).await;
+    // The first post is being typed into the stuck window: the four after it wait in
+    // its inbox, which holds two.
     h.wait_for_scrollback(&stuck, b"PASTE 1", HANG_GUARD).await;
+    let mut stuck_seqs = Vec::new();
     for index in 0..4 {
         stuck_seqs.push(
             post(
@@ -313,60 +307,13 @@ async fn posts_past_a_stuck_windows_turn_waiters_are_exhausted_for_that_window_a
     assert_eq!(
         states.iter().filter(|state| *state == EXHAUSTED).count(),
         2,
-        "one post holds the turn and two wait for it, so exactly the other two are exhausted: \
-         {states:?}"
+        "the inbox holds two of the four posts waiting behind the one being typed, so exactly \
+         the other two are turned away: {states:?}"
     );
     assert_eq!(
         wait_until_settled(&mut poster, &[healthy_seq], &healthy).await,
         vec![healthy_state],
         "the other window's record must not change"
-    );
-}
-
-#[tokio::test]
-async fn a_stuck_windows_intro_and_posts_do_not_keep_another_windows_intro_from_being_sent() {
-    let dir = unique_temp_dir("stuck-chat-intro");
-    let config = DaemonConfig {
-        max_turn_waiters_per_window: 1,
-        ..chat_config(&dir, &chat_spec(Some("welcome to the room"), 2))
-    };
-    let h = Harness::start_with_chat("stuck-chat-intro", config).await;
-    let mut client = h.connect().await;
-    let stuck = open_stuck_window(&h, &mut client, &dir).await;
-    h.wait_for_scrollback(&stuck, b"PASTE 1", HANG_GUARD).await;
-    let mut poster = open_poster(&h, &mut client).await;
-
-    let mut stuck_seqs = Vec::new();
-    for index in 0..3 {
-        stuck_seqs.push(
-            post(
-                &mut poster,
-                &format!("@{stuck} queued number {index}"),
-                &stuck,
-            )
-            .await,
-        );
-    }
-
-    let healthy = open_healthy_window(&h, &mut client, &dir).await;
-    let healthy_entry = entry(&h, &healthy);
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    while healthy_entry.chat_intro_outcome() != Some(ChatIntroOutcome::Sent) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "another window's intro must be sent while a stuck window holds its own, got {:?}",
-            healthy_entry.chat_intro_outcome()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    close_window(&mut client, &stuck).await;
-    let states = wait_until_settled(&mut poster, &stuck_seqs, &stuck).await;
-    assert_eq!(
-        states.iter().filter(|state| *state == EXHAUSTED).count(),
-        2,
-        "the intro holds the turn and one post waits for it, so exactly the other two are \
-         exhausted: {states:?}"
     );
 }
 

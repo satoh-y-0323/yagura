@@ -181,10 +181,17 @@ pub struct DaemonConfig {
     /// `[limits] approval_timeout_secs`.
     pub approval_timeout_secs: u64,
 
-    /// Deadline for a window opened by a handoff to become ready for input,
-    /// in seconds. Defaults to [`HANDOFF_READY_TIMEOUT_DEFAULT_SECS`].
-    /// Overridable through a playbook's `[limits] handoff_ready_timeout_secs`.
+    /// How long a delivery the daemon types into a window waits for that
+    /// window to leave its startup phase, in seconds. Defaults to
+    /// [`HANDOFF_READY_TIMEOUT_DEFAULT_SECS`]. Overridable through a
+    /// playbook's `[limits] handoff_ready_timeout_secs`.
     pub handoff_ready_timeout_secs: u64,
+
+    /// How long a handoff to an existing window waits for that window's CLI
+    /// to take its envelope before it is answered as undelivered, in seconds.
+    /// Defaults to [`HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS`]. Overridable
+    /// through a playbook's `[limits] handoff_delivery_timeout_secs`.
+    pub handoff_delivery_timeout_secs: u64,
 
     /// Daemon-wide cap on handoffs the daemon has accepted and not yet
     /// answered. Defaults to 32.
@@ -313,9 +320,9 @@ pub struct DaemonConfig {
     /// [`room::ChatLimits::default`] (documented in the bundled `playbook.toml`).
     pub chat_limits: room::ChatLimits,
 
-    /// The intro text painted once into a participant window at startup,
-    /// into that window's own workspace room. Empty disables intro delivery.
-    /// Defaults to a built-in text explaining how to use the room.
+    /// The intro a participant window's CLI reads through its start-up door.
+    /// Empty disables it. Defaults to a built-in text explaining how to use
+    /// the room.
     pub chat_intro: String,
 
     /// How the doors a CLI's hook reads a window's inbox through answer:
@@ -331,14 +338,15 @@ pub struct DaemonConfig {
     /// Defaults to `["generic-shell"]`.
     pub chat_exclude_detections: Vec<String>,
 
-    /// Upper bound on how many chat deliveries (posts and intros together)
-    /// may be in flight at once. Defaults to 32.
+    /// Upper bound on how many chat posts may be typed into windows at once.
+    /// Defaults to 32.
     pub chat_delivery_max: usize,
 
-    /// Upper bound on how many deliveries (chat posts, intros and handoffs)
-    /// may wait for one window's turn at a time. The delivery holding the
-    /// turn is not counted; a delivery past the bound is turned away for that
-    /// window alone. Defaults to 8.
+    /// Upper bound on how many deliveries may wait for one window's turn at a
+    /// time: typed deliveries queued on its delivery lock, and handoffs
+    /// waiting in the inbox of a window that is typed into. The delivery
+    /// holding the turn is not counted; one past the bound is turned away for
+    /// that window alone. Defaults to 8.
     pub max_turn_waiters_per_window: usize,
 
     /// The MCP bridge executable (`yagura-mcp`) a window's CLI is pointed at,
@@ -482,6 +490,9 @@ pub const APPROVAL_TIMEOUT_DEFAULT_SECS: u64 = 60;
 /// overrides it: the single definition point every default (this one and
 /// [`DaemonConfig::default`]) derives from.
 pub const HANDOFF_READY_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+/// Default value of [`DaemonConfig::handoff_delivery_timeout_secs`].
+pub const HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS: u64 = 120;
 
 /// Default value of [`DaemonConfig::max_open_handoffs`].
 const DEFAULT_MAX_OPEN_HANDOFFS: usize = 32;
@@ -648,6 +659,7 @@ impl Default for DaemonConfig {
             approval_policy: None,
             approval_timeout_secs: APPROVAL_TIMEOUT_DEFAULT_SECS,
             handoff_ready_timeout_secs: HANDOFF_READY_TIMEOUT_DEFAULT_SECS,
+            handoff_delivery_timeout_secs: HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS,
             max_open_handoffs: DEFAULT_MAX_OPEN_HANDOFFS,
             max_open_handoffs_per_conn: DEFAULT_MAX_OPEN_HANDOFFS_PER_CONN,
             max_pending_approvals: DEFAULT_MAX_PENDING_APPROVALS,

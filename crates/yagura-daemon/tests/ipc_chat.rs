@@ -15,6 +15,10 @@
 //!   [`common::write_submit_definition`] wrote: it starts at `waiting_input` and can be driven
 //!   to `running` by writing raw `REACT` bytes directly to its PTY (matching the definition's
 //!   own `running` rule), bypassing the chat delivery path entirely.
+//! - Only a window that declares delivery takes part in chat: the openers above declare
+//!   one with no way to wake its CLI, so a post reaches them typed while they wait. A
+//!   window opened from a raw argv (`Harness::open`) takes no part; [`open_delivering`]
+//!   opens any other command as a participant.
 //! - A **plain idle participant** (never a delivery target, only a roster entry) is opened
 //!   through [`Harness::open_idle_window`] / [`Harness::open_idle_window_with_composer`]
 //!   against [`common::CONTROL_DETECTION_NAME`], which [`common::chat_config`] wires into
@@ -50,13 +54,124 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
-    DaemonMessage, RoomRef, UnknownReason, WindowStatus,
+    DaemonMessage, RoomRef, WindowStatus,
 };
 
 /// Starts a chat-enabled daemon from a synthetic playbook (see
 /// [`common::ChatPlaybook`] / [`common::chat_config`]).
 async fn start_chat(tag: &str, dir: &Path, spec: &ChatPlaybook<'_>) -> Harness {
     Harness::start_with_chat(tag, chat_config(dir, spec)).await
+}
+
+/// The `[delivery]` table of a profile with no way to wake its CLI while it waits, read
+/// with the daemon's own defaults otherwise.
+fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
+    yagura_daemon::profile_delivery::ProfileDelivery {
+        output: yagura_daemon::inbox::OutputForm::Plain,
+        max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+        wake: yagura_daemon::profile_delivery::WakeMode::None,
+        wake_stream: yagura_protocol::DeliveryStream::Stderr,
+        wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+        wake_timeout_secs: None,
+        session_pointer: None,
+        launch_prompt: None,
+        shim_guidance: None,
+    }
+}
+
+/// Opens `command` as a window that declares delivery (see [`wake_none_delivery`]), so it
+/// takes part in chat whatever its command line.
+async fn open_delivering(
+    h: &Harness,
+    command: Vec<String>,
+    detection: Option<&str>,
+    cwd: Option<&Path>,
+    name: Option<&str>,
+) -> String {
+    h.registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command,
+                cwd: cwd.map(|cwd| yagura_daemon::RequestedCwd::from_caller(cwd.to_path_buf())),
+                name: name.map(str::to_string),
+                vendor: None,
+                detection: detection.map(str::to_string),
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(wake_none_delivery()),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("registry.open_with_extra_env should spawn the child")
+        .window_id
+}
+
+/// A participant that never leaves `Unknown`: the control definition is loaded, but
+/// nothing ever matches its rule.
+async fn open_unknown_participant(h: &Harness) -> String {
+    open_delivering(
+        h,
+        yagura_test_support::process::echo_child_command(),
+        Some(CONTROL_DETECTION_NAME),
+        None,
+        None,
+    )
+    .await
+}
+
+/// Calls `door` for `window_id` the way its CLI's hook does, and returns what it printed.
+async fn call_door(
+    client: &mut yagura_test_support::ipc::Connection,
+    door: &str,
+    window_id: &str,
+) -> String {
+    let token = common::VALID_TOKEN.to_string();
+    let window_id = window_id.to_string();
+    let message = match door {
+        "context" => ClientMessage::DeliverContext { window_id, token },
+        "take" => ClientMessage::DeliverTake { window_id, token },
+        other => panic!("no door named {other}"),
+    };
+    let (output, _, _) = common::expect_delivery(common::call_door(client, &message).await);
+    output
+}
+
+/// A post to `window_id`, whose status is `Unknown`, waits in its inbox: it is never
+/// typed, and its CLI asking for it gets it.
+async fn assert_waits_for_its_cli(
+    h: &Harness,
+    client: &mut yagura_test_support::ipc::Connection,
+    seq: u64,
+    window_id: &str,
+    needle: &str,
+) {
+    let entry = h.registry.get(window_id).expect("the window is registered");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached {window_id}'s inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let read = expect_chat_messages(read_chat_msg(client, None, Some(0), None).await);
+    assert_eq!(
+        delivery_state_for(&read.messages, seq, window_id),
+        "pending"
+    );
+
+    let mut door = h.connect().await;
+    let taken = call_door(&mut door, "take", window_id).await;
+    assert!(taken.contains(needle), "{taken:?}");
+    let state = wait_for_settled_delivery(client, seq, window_id, Duration::from_secs(10)).await;
+    assert_eq!(state, "taken");
+    assert!(
+        !String::from_utf8_lossy(&h.scrollback(window_id)).contains(needle),
+        "nothing is typed into a window whose status is Unknown"
+    );
 }
 
 const CHAT_ENVELOPE_MARKER: &str = "[yagura chat] ";
@@ -323,63 +438,6 @@ fn delivery_state_for<'a>(messages: &'a [ChatMessage], seq: u64, window_id: &str
         .as_str()
 }
 
-/// [`delivery_state_for`], for the reason carried alongside the state.
-fn delivery_reason_for(
-    messages: &[ChatMessage],
-    seq: u64,
-    window_id: &str,
-) -> Option<UnknownReason> {
-    let message = messages
-        .iter()
-        .find(|m| m.seq == seq)
-        .unwrap_or_else(|| panic!("no message with seq {seq} in {messages:?}"));
-    message
-        .deliveries
-        .iter()
-        .find(|d: &&ChatDeliveryInfo| d.window_id == window_id)
-        .unwrap_or_else(|| {
-            panic!("no delivery entry for {window_id} in message {seq}: {message:?}")
-        })
-        .unknown_reason
-}
-
-/// Polls [`ClientMessage::GetWindowStatus`] until `window_id` reports `Unknown` with
-/// `expected` as its reason, mirroring [`wait_until_status`]'s polling shape but also
-/// reading `unknown_reason`, which `query_status` discards.
-async fn wait_until_unknown_reason(
-    client: &mut yagura_test_support::ipc::Connection,
-    window_id: &str,
-    expected: UnknownReason,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        send(
-            client,
-            &ClientMessage::GetWindowStatus {
-                window_id: window_id.to_string(),
-            },
-        )
-        .await;
-        let reached = match read_reply(client, Duration::from_secs(5)).await {
-            DaemonMessage::WindowStatus {
-                status,
-                unknown_reason,
-                ..
-            } => status == WindowStatus::Unknown && unknown_reason == Some(expected),
-            other => panic!("expected window_status, got {other:?}"),
-        };
-        if reached {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {window_id} to report unknown_reason {expected:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 /// Re-reads the room until `window_id`'s delivery for `seq` has settled, and
 /// returns the state it settled on. A destination is recorded as pending
 /// before its delivery runs, so the first read after a post can legitimately
@@ -422,7 +480,7 @@ async fn wait_for_settled_delivery(
 // =============================================================================
 
 #[tokio::test]
-async fn send_chat_delivers_the_envelope_to_the_named_target_and_confirms_via_read_chat() {
+async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_taken() {
     let dir = unique_temp_dir("chat-g1-basic");
     let h = start_chat("chat-g1-basic", &dir, &ChatPlaybook::default()).await;
 
@@ -504,9 +562,9 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_confirms_via_re
         Duration::from_secs(10),
     )
     .await;
-    assert!(
-        matches!(state.as_str(), "confirmed" | "unconfirmed" | "not_observed"),
-        "an addressed, non-Unknown target must have been attempted, got {state:?}"
+    assert_eq!(
+        state, "taken",
+        "an envelope typed up to its submit key is taken, whatever the composer showed after"
     );
 }
 
@@ -560,41 +618,29 @@ async fn send_chat_still_delivers_to_a_target_that_is_currently_running() {
 }
 
 // =============================================================================
-// An Unknown destination is accepted but never written to
+// An Unknown destination is never pushed to: the post waits in its inbox for its CLI
 // =============================================================================
 
 #[tokio::test]
-async fn send_chat_to_an_unknown_window_is_accepted_but_undelivered() {
+async fn send_chat_to_an_unknown_window_waits_in_its_inbox_and_is_never_typed() {
     let dir = unique_temp_dir("chat-g2-send");
     let h = start_chat("chat-g2-send", &dir, &ChatPlaybook::default()).await;
     let mut client = h.connect().await;
 
-    // A participant (resolved detection) that is never driven past Unknown.
-    let unknown_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
+    let unknown_id = open_unknown_participant(&h).await;
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
 
-    let posted =
-        expect_chat_posted(send_chat_msg(&mut client, None, &format!("hi @{unknown_id}")).await);
+    let posted = expect_chat_posted(
+        send_chat_msg(&mut client, None, &format!("hi @{unknown_id} G2SEND")).await,
+    );
     assert_eq!(posted.targets, vec![unknown_id.clone()]);
 
-    let state = wait_for_settled_delivery(
-        &mut client,
-        posted.seq,
-        &unknown_id,
-        Duration::from_secs(10),
-    )
-    .await;
-    assert_eq!(state, "undelivered_unknown");
+    assert_waits_for_its_cli(&h, &mut client, posted.seq, &unknown_id, "G2SEND").await;
 }
 
 #[tokio::test]
-async fn broadcast_chat_to_an_unknown_window_marks_it_undelivered_unknown() {
+async fn broadcast_chat_to_an_unknown_window_waits_in_its_inbox_and_is_never_typed() {
     let dir = unique_temp_dir("chat-g2-broadcast");
     let h = start_chat(
         "chat-g2-broadcast",
@@ -607,77 +653,15 @@ async fn broadcast_chat_to_an_unknown_window_marks_it_undelivered_unknown() {
     .await;
     let mut client = h.connect().await;
 
-    let unknown_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
-    let poster_id = h.open_idle_window(&mut client).await;
-    identify(&mut client, &poster_id).await;
-
-    let posted = expect_chat_posted(broadcast_chat_msg(&mut client, None, "status update").await);
-    assert!(posted.targets.contains(&unknown_id));
-
-    let state = wait_for_settled_delivery(
-        &mut client,
-        posted.seq,
-        &unknown_id,
-        Duration::from_secs(10),
-    )
-    .await;
-    assert_eq!(state, "undelivered_unknown");
-}
-
-// =============================================================================
-// An Unknown destination's delivery record carries the reason its status was
-// Unknown, following the same "Unknown destination" convention the earlier cases established.
-// =============================================================================
-
-#[tokio::test]
-async fn send_chat_to_a_participant_whose_screen_matches_no_rule_records_the_reason() {
-    let dir = unique_temp_dir("chat-reason-no-rule");
-    let h = start_chat("chat-reason-no-rule", &dir, &ChatPlaybook::default()).await;
-    let mut client = h.connect().await;
-
-    // A participant with a resolved detection definition whose single rule never matches
-    // this line, unlike the plain destination fixture (never driven at all, so still
-    // `not_yet_judged`), so this window settles on `no_rule_matched` instead.
-    let target_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
-    h.write_input(&target_id, b"a plain line matching no rule\r\n")
-        .await;
-    wait_until_unknown_reason(
-        &mut client,
-        &target_id,
-        UnknownReason::NoRuleMatched,
-        Duration::from_secs(10),
-    )
-    .await;
-
+    let unknown_id = open_unknown_participant(&h).await;
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
 
     let posted =
-        expect_chat_posted(send_chat_msg(&mut client, None, &format!("hi @{target_id}")).await);
-    assert_eq!(posted.targets, vec![target_id.clone()]);
+        expect_chat_posted(broadcast_chat_msg(&mut client, None, "status update G2CAST").await);
+    assert!(posted.targets.contains(&unknown_id));
 
-    let state =
-        wait_for_settled_delivery(&mut client, posted.seq, &target_id, Duration::from_secs(10))
-            .await;
-    assert_eq!(state, "undelivered_unknown");
-
-    let read = expect_chat_messages(read_chat_msg(&mut client, None, Some(0), None).await);
-    assert_eq!(
-        delivery_reason_for(&read.messages, posted.seq, &target_id),
-        Some(UnknownReason::NoRuleMatched),
-        "a destination whose screen matches no detection rule must carry that reason on \
-         its delivery record"
-    );
+    assert_waits_for_its_cli(&h, &mut client, posted.seq, &unknown_id, "G2CAST").await;
 }
 
 // =============================================================================
@@ -732,9 +716,14 @@ async fn a_window_opened_with_no_detection_argument_defaults_to_the_excluded_gen
     let h = Harness::start_with_chat("chat-g3-default", config).await;
     let mut client = h.connect().await;
 
-    let default_id = h
-        .open(yagura_test_support::process::echo_child_command(), None)
-        .await;
+    let default_id = open_delivering(
+        &h,
+        yagura_test_support::process::echo_child_command(),
+        None,
+        None,
+        None,
+    )
+    .await;
     let poster_id = h
         .open(
             yagura_test_support::process::echo_child_command(),
@@ -754,39 +743,20 @@ async fn a_window_opened_with_no_detection_argument_defaults_to_the_excluded_gen
 }
 
 #[tokio::test]
-async fn a_window_whose_definition_cannot_be_read_is_unresolved() {
-    let dir = unique_temp_dir("chat-g3-unreadable");
-    let h = start_chat("chat-g3-unreadable", &dir, &ChatPlaybook::default()).await;
-    let mut client = h.connect().await;
-
-    let unreadable_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some("no-such-definition"),
-        )
-        .await;
-    let poster_id = h.open_idle_window(&mut client).await;
-    identify(&mut client, &poster_id).await;
-
-    let posted = expect_chat_posted(
-        send_chat_msg(&mut client, None, &format!("hey @{unreadable_id}")).await,
-    );
-    assert_eq!(posted.unresolved, vec![unreadable_id]);
-}
-
-#[tokio::test]
 async fn a_definition_whose_stem_differs_from_its_declared_name_is_judged_by_the_stem() {
     let dir = unique_temp_dir("chat-g3-stem");
     write_stem_mismatch_definition(&dir, "weird-stem", "totally-different-name");
     let h = start_chat("chat-g3-stem", &dir, &ChatPlaybook::default()).await;
     let mut client = h.connect().await;
 
-    let stem_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some("weird-stem"),
-        )
-        .await;
+    let stem_id = open_delivering(
+        &h,
+        yagura_test_support::process::echo_child_command(),
+        Some("weird-stem"),
+        None,
+        None,
+    )
+    .await;
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
 
@@ -804,7 +774,7 @@ async fn a_definition_whose_stem_differs_from_its_declared_name_is_judged_by_the
 }
 
 #[tokio::test]
-async fn a_window_whose_definition_declares_no_composer_is_never_a_participant_even_when_nothing_excludes_it()
+async fn a_window_that_declares_delivery_takes_part_without_a_composer_and_one_that_does_not_never_does()
  {
     let dir = unique_temp_dir("chat-g3-no-composer");
     write_participation_fixture(&dir, "g3-silent", false);
@@ -813,9 +783,8 @@ async fn a_window_whose_definition_declares_no_composer_is_never_a_participant_e
         "chat-g3-no-composer",
         &dir,
         &ChatPlaybook {
-            // Empty, not the default's `["generic-shell"]`: only the
-            // composer declaration -- not the exclude list -- may be why
-            // "g3-silent" fails to resolve.
+            // Empty, not the default's `["generic-shell"]`: only the delivery
+            // declaration -- not the exclude list -- may decide who takes part.
             exclude_detections: Some(&[]),
             ..ChatPlaybook::default()
         },
@@ -823,12 +792,16 @@ async fn a_window_whose_definition_declares_no_composer_is_never_a_participant_e
     .await;
     let mut client = h.connect().await;
 
-    let silent_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some("g3-silent"),
-        )
-        .await;
+    // Declares delivery, and its definition no composer.
+    let silent_id = open_delivering(
+        &h,
+        yagura_test_support::process::echo_child_command(),
+        Some("g3-silent"),
+        None,
+        None,
+    )
+    .await;
+    // Its definition declares a composer and a probe, and it was opened from a raw argv.
     let drawn_id = h
         .open(
             yagura_test_support::process::echo_child_command(),
@@ -848,20 +821,18 @@ async fn a_window_whose_definition_declares_no_composer_is_never_a_participant_e
     );
     assert_eq!(
         posted.targets,
-        vec![drawn_id.clone()],
-        "only the composer-declaring mention may resolve, with nothing excluded so the \
-         composer gate is the only thing that could be responsible"
+        vec![silent_id.clone()],
+        "taking part is decided by declaring delivery, never by declaring a composer"
     );
-    assert_eq!(posted.unresolved, vec![silent_id.clone()]);
+    assert_eq!(posted.unresolved, vec![drawn_id.clone()]);
 
     let read = expect_chat_messages(read_chat_msg(&mut client, None, Some(0), None).await);
     assert!(
-        !read.roster.iter().any(|p| p.window_id == silent_id),
-        "a window whose definition declares no composer must not appear in the roster, got \
-         {:?}",
+        !read.roster.iter().any(|p| p.window_id == drawn_id),
+        "a window that declares no delivery must not appear in the roster, got {:?}",
         read.roster
     );
-    assert!(read.roster.iter().any(|p| p.window_id == drawn_id));
+    assert!(read.roster.iter().any(|p| p.window_id == silent_id));
 }
 
 // =============================================================================
@@ -1417,7 +1388,7 @@ async fn mentioning_user_sets_needs_user_and_an_approver_reply_clears_it() {
 // =============================================================================
 
 #[tokio::test]
-async fn intro_is_delivered_once_and_the_outcome_is_sent() {
+async fn the_start_up_door_carries_the_intro_and_nothing_is_typed() {
     let dir = unique_temp_dir("chat-g8-sent");
     let h = start_chat(
         "chat-g8-sent",
@@ -1431,418 +1402,31 @@ async fn intro_is_delivered_once_and_the_outcome_is_sent() {
     let mut client = h.connect().await;
     let recipient_id = h.open_idle_window_with_composer(&mut client).await;
 
-    // A draft painted in the composer before submission is not a delivery.
-    let accepted = common::settled_count(&h, &recipient_id, 1, |scrollback| {
-        accepted_offsets(&String::from_utf8_lossy(scrollback), "welcome to the room").count()
-    })
-    .await;
-    assert_eq!(
-        accepted, 1,
-        "the intro must be submitted exactly once, not repeated on every reflect"
-    );
+    let mut door = h.connect().await;
+    let context = call_door(&mut door, "context", &recipient_id).await;
+    assert!(context.contains("welcome to the room"), "{context:?}");
 
-    let entry = h
-        .registry
-        .get(&recipient_id)
-        .expect("the recipient window must still be registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if entry.chat_intro_outcome().is_some() {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the intro outcome to be recorded");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        entry.chat_intro_outcome(),
-        Some(yagura_daemon::window::ChatIntroOutcome::Sent)
+    // Whatever the daemon queued for the window on its own is written before a later
+    // post, which is typed into this window while it waits.
+    let poster_id = h.open_idle_window(&mut client).await;
+    identify(&mut client, &poster_id).await;
+    expect_chat_posted(send_chat_msg(&mut client, None, &format!("hello @{recipient_id}")).await);
+    wait_for_accepted_chat_envelope_json(&h, &recipient_id, Duration::from_secs(10)).await;
+    assert!(
+        !String::from_utf8_lossy(&h.scrollback(&recipient_id)).contains("welcome to the room"),
+        "the intro is never typed into a window"
     );
 }
 
 #[tokio::test]
-async fn an_empty_intro_is_never_delivered_and_the_outcome_stays_none() {
+async fn an_empty_intro_leaves_the_start_up_door_with_nothing_to_say() {
     let dir = unique_temp_dir("chat-g8-empty");
     let h = start_chat("chat-g8-empty", &dir, &ChatPlaybook::default()).await;
     let mut client = h.connect().await;
     let recipient_id = h.open_idle_window_with_composer(&mut client).await;
 
-    // Give the (absent) intro watcher every chance to have run.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let entry = h
-        .registry
-        .get(&recipient_id)
-        .expect("the recipient window must still be registered");
-    assert_eq!(entry.chat_intro_outcome(), None);
-}
-
-#[tokio::test]
-async fn intro_is_never_delivered_to_a_window_excluded_by_default() {
-    let dir = unique_temp_dir("chat-g8-excluded");
-    let excluded_name = "chat-g8-excluded-detection";
-    let h = start_chat(
-        "chat-g8-excluded",
-        &dir,
-        &ChatPlaybook {
-            intro: Some("welcome to the room"),
-            exclude_detections: Some(&[excluded_name]),
-            ..ChatPlaybook::default()
-        },
-    )
-    .await;
-    let mut client = h.connect().await;
-
-    // A window bound to a definition named on the exclude list: this reaches
-    // `waiting_input` (a READY status, confirmed below before this call
-    // returns) but never becomes a chat participant, because participation
-    // is decided by this name.
-    let excluded_id = open_submit_child_window_with_composer(
-        &h,
-        &mut client,
-        &dir,
-        excluded_name,
-        "chat-g8-excluded-marker",
-        0,
-        0,
-        0,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 2,
-        },
-        0,
-    )
-    .await;
-
-    // A real participant, opened only after the excluded window is already
-    // READY, must still get the intro: this rules out the intro delivery
-    // mechanism itself being dead, and its own wait gives an intro watcher
-    // wrongly started for the excluded window the same stretch of time to
-    // have acted before it is checked below.
-    let participant_id = h.open_idle_window_with_composer(&mut client).await;
-    let participant_entry = h
-        .registry
-        .get(&participant_id)
-        .expect("the participant window must still be registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if participant_entry.chat_intro_outcome().is_some() {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the participant's intro outcome to be recorded");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        participant_entry.chat_intro_outcome(),
-        Some(yagura_daemon::window::ChatIntroOutcome::Sent)
-    );
-
-    let excluded_entry = h
-        .registry
-        .get(&excluded_id)
-        .expect("the excluded window must still be registered");
-    assert_eq!(
-        excluded_entry.chat_intro_outcome(),
-        None,
-        "a window excluded from chat must never receive an intro"
-    );
-    assert!(
-        !String::from_utf8_lossy(&h.scrollback(&excluded_id)).contains("welcome to the room"),
-        "the excluded window's scrollback must never show the intro text"
-    );
-}
-
-#[tokio::test]
-async fn intro_waits_for_the_chat_delivery_budget_and_is_delivered_once_it_frees_up() {
-    let dir = unique_temp_dir("chat-g8-budget");
-    let h = start_chat(
-        "chat-g8-budget",
-        &dir,
-        &ChatPlaybook {
-            intro: Some("welcome to the room"),
-            chat_delivery_max: Some(1),
-            auto_approve: &["close_window"],
-            ..ChatPlaybook::default()
-        },
-    )
-    .await;
-    let mut client = h.connect().await;
-
-    // The first window's own intro delivery holds the sole budget slot until
-    // the window is closed: react_on_body = 0 (non-reactive), a paste guard
-    // that takes every submit key as a line break, and the loader's longest
-    // delivery_confirm_ms, so no confirmation settles meanwhile.
-    let first_id = open_submit_child_window_with_composer(
-        &h,
-        &mut client,
-        &dir,
-        "chat-g8-first",
-        "chat-g8-first-marker",
-        0,
-        u64::MAX,
-        0,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 30_000,
-            resend_max: 0,
-        },
-        0,
-    )
-    .await;
-    h.wait_for_scrollback(&first_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
-
-    let second_id = h.open_idle_window_with_composer(&mut client).await;
-    let entry = h
-        .registry
-        .get(&second_id)
-        .expect("the second window must still be registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while entry.notice_attempts() == 0 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the second window's intro was never attempted"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(
-        entry.chat_intro_outcome(),
-        None,
-        "an intro that found the budget exhausted is kept for a later try, not settled"
-    );
-    assert_eq!(
-        common::count_marker(&h, &second_id, "welcome to the room"),
-        0,
-        "the intro must not be written while the first window holds the sole budget slot"
-    );
-
-    // Once the first delivery gives its slot back, the kept intro goes out.
-    send(
-        &mut client,
-        &ClientMessage::CloseWindow {
-            window_id: first_id.clone(),
-            force: Some(true),
-        },
-    )
-    .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
-        DaemonMessage::WindowClosed { .. } => {}
-        other => panic!("expected window_closed, got {other:?}"),
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while entry.chat_intro_outcome().is_none() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for the kept intro to be delivered"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(
-        entry.chat_intro_outcome(),
-        Some(yagura_daemon::window::ChatIntroOutcome::Sent)
-    );
-    h.wait_for_scrollback(&second_id, b"welcome to the room", Duration::from_secs(10))
-        .await;
-}
-
-/// Pins `window_id`'s status through the structured source and waits until
-/// the daemon reports it.
-async fn pin_status(
-    probe: &mut yagura_test_support::ipc::Connection,
-    window_id: &str,
-    status: WindowStatus,
-) {
-    send(
-        probe,
-        &ClientMessage::StatusEvent {
-            source: "chat-intro-test".to_string(),
-            status,
-            window_id: Some(window_id.to_string()),
-            token: common::VALID_TOKEN.to_string(),
-        },
-    )
-    .await;
-    wait_until_status(probe, window_id, status, Duration::from_secs(10)).await;
-}
-
-/// The intro is checked under the delivery lock like every other
-/// notice, so a window that stopped accepting input while the intro queued
-/// on the lock is not written into; the intro goes out once it accepts input again.
-#[tokio::test]
-async fn an_intro_queued_on_the_delivery_lock_is_not_written_once_the_window_started_running() {
-    let dir = unique_temp_dir("chat-nq4-intro-lock");
-    let h = start_chat(
-        "chat-nq4-intro-lock",
-        &dir,
-        &ChatPlaybook {
-            intro: Some("welcome to the room"),
-            ..ChatPlaybook::default()
-        },
-    )
-    .await;
-    let mut client = h.connect().await;
-    write_submit_definition(
-        &dir,
-        "chat-nq4-lock",
-        "chat-nq4-lock-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: false,
-            ready_hold_ms: 300,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 0,
-            resend_max: 0,
-        },
-    );
-    let window_id = h
-        .open(
-            yagura_test_support::process::submit_child_command_with_composer(
-                "chat-nq4-lock-marker",
-                0,
-                0,
-                0,
-                0,
-            ),
-            Some("chat-nq4-lock"),
-        )
-        .await;
-    let entry = h
-        .registry
-        .get(&window_id)
-        .expect("the window must still be registered");
-    // Taken before the window can even be ready, so the intro cannot pass it.
-    let guard = entry.lock_delivery().await;
-    // Only the intro's own agent latches this window: once it has, the agent
-    // is past its readiness wait and goes straight for the lock.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !entry.has_left_startup_phase() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the intro never got past the window's readiness wait"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    pin_status(&mut client, &window_id, WindowStatus::Running).await;
-    drop(guard);
-
-    while entry.notice_attempts() == 0 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the intro queued on the lock never finished its attempt"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert_eq!(
-        common::count_marker(&h, &window_id, "welcome to the room"),
-        0,
-        "the intro must not be written into a window that is running"
-    );
-
-    pin_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
-    h.wait_for_scrollback(
-        &window_id,
-        b"SUBMITTED welcome to the room",
-        Duration::from_secs(10),
-    )
-    .await;
-    assert_eq!(
-        common::count_marker(&h, &window_id, "SUBMITTED welcome to the room"),
-        1
-    );
-}
-
-#[tokio::test]
-async fn closing_a_window_still_starting_up_abandons_its_intro() {
-    let dir = unique_temp_dir("chat-g8-abandoned");
-    let mut config = chat_config(
-        &dir,
-        &ChatPlaybook {
-            intro: Some("welcome to the room"),
-            auto_approve: &["close_window"],
-            ..ChatPlaybook::default()
-        },
-    );
-    config.handoff_ready_timeout_secs = 60;
-    let h = Harness::start_with_chat("chat-g8-abandoned", config).await;
-    let mut client = h.connect().await;
-
-    // A window definition with a long ready_hold, so it is still considered
-    // "starting up" well past when this test closes it.
-    write_submit_definition(
-        &dir,
-        "chat-g8-abandoned-def",
-        "chat-g8-abandoned-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 8000,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 0,
-            resend_max: 0,
-        },
-    );
-    let window_id = h
-        .open(
-            yagura_test_support::process::submit_child_command("chat-g8-abandoned-marker", 0, 0, 0),
-            Some("chat-g8-abandoned-def"),
-        )
-        .await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
-
-    let entry = h
-        .registry
-        .get(&window_id)
-        .expect("the window must still be registered");
-    assert_eq!(
-        entry.chat_intro_outcome(),
-        None,
-        "the intro watcher must not have finished yet (still inside ready_hold_ms)"
-    );
-
-    send(
-        &mut client,
-        &ClientMessage::CloseWindow {
-            window_id: window_id.clone(),
-            force: Some(true),
-        },
-    )
-    .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
-        DaemonMessage::WindowClosed { .. } => {}
-        other => panic!("expected window_closed, got {other:?}"),
-    }
-
-    // The registry keeps a closed window's Arc alive, so the watcher's own
-    // Weak::upgrade still succeeds and it writes its outcome once it gives up.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if entry.chat_intro_outcome().is_some() {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the intro watcher to abandon");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(
-        entry.chat_intro_outcome(),
-        Some(yagura_daemon::window::ChatIntroOutcome::Abandoned)
-    );
+    let mut door = h.connect().await;
+    assert_eq!(call_door(&mut door, "context", &recipient_id).await, "");
 }
 
 // =============================================================================
@@ -1879,6 +1463,58 @@ async fn chat_history_survives_a_daemon_restart_with_the_same_db_path() {
         "history must survive a restart against the same DB path, got {:?}",
         read.messages
     );
+}
+
+#[tokio::test]
+async fn a_post_still_waiting_when_the_daemon_stopped_reads_back_undelivered_after_a_restart() {
+    let dir = unique_temp_dir("chat-g9-pending-restart");
+    let spec = ChatPlaybook::default();
+
+    let (room_id, seq);
+    {
+        let h = start_chat("chat-g9-pending-restart-a", &dir, &spec).await;
+        let mut client = h.connect().await;
+        // Unknown, so the post is never pushed and waits in the inbox.
+        let target_id = open_unknown_participant(&h).await;
+        let poster_id = h.open_idle_window(&mut client).await;
+        identify(&mut client, &poster_id).await;
+        let posted =
+            expect_chat_posted(send_chat_msg(&mut client, None, &format!("hi @{target_id}")).await);
+        let entry = h
+            .registry
+            .get(&target_id)
+            .expect("the window is registered");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while entry.inbox().pending_count() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the post never reached the inbox"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        room_id = posted.room_id;
+        seq = posted.seq;
+        h.registry.terminate_all().await;
+    }
+
+    // An inbox ends with its daemon: the next one reads the post as never delivered.
+    let h = start_chat("chat-g9-pending-restart-b", &dir, &spec).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let read = expect_chat_messages(
+        read_chat_msg(&mut approver, Some(room_id.as_str()), Some(0), None).await,
+    );
+    let message = read
+        .messages
+        .iter()
+        .find(|m| m.seq == seq)
+        .expect("the post survives the restart");
+    let states: Vec<&str> = message
+        .deliveries
+        .iter()
+        .map(|d| d.state.as_str())
+        .collect();
+    assert_eq!(states, vec!["undelivered_restart"]);
 }
 
 #[tokio::test]
@@ -1964,7 +1600,7 @@ async fn a_halt_and_needs_user_survive_a_daemon_restart_with_the_same_db_path() 
 // =============================================================================
 
 #[tokio::test]
-async fn silence_after_a_confirmed_send_marks_needs_user_and_notifies_the_approver() {
+async fn silence_after_a_taken_post_marks_needs_user_and_notifies_the_approver() {
     let dir = unique_temp_dir("chat-g10-silence");
     let h = start_chat(
         "chat-g10-silence",
@@ -2081,10 +1717,9 @@ async fn a_full_delivery_budget_leaves_exactly_one_destination_undelivered_exhau
         "exactly one destination must be exhausted, got {states:?}"
     );
     assert!(
-        states.iter().any(|s| matches!(
-            s.as_str(),
-            "confirmed" | "unconfirmed" | "not_observed" | "pending"
-        )),
+        states
+            .iter()
+            .any(|s| matches!(s.as_str(), "taken" | "pending")),
         "the other destination must have been attempted, got {states:?}"
     );
 }
@@ -2232,15 +1867,11 @@ async fn a_broken_playbook_disables_chat_entirely_including_the_intro() {
     let result = send_chat_msg(&mut client, None, "hi").await;
     expect_error(result, "unsupported");
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let entry = h
-        .registry
-        .get(&poster_id)
-        .expect("the window must still be registered");
+    let mut door = h.connect().await;
     assert_eq!(
-        entry.chat_intro_outcome(),
-        None,
-        "a Failed playbook must disable intro delivery too, not just the three tools"
+        call_door(&mut door, "context", &poster_id).await,
+        "",
+        "a Failed playbook must disable the intro too, not just the three tools"
     );
 }
 
@@ -2510,30 +2141,37 @@ async fn a_settled_deliverys_push_reports_the_rooms_stored_attention_flag() {
 }
 
 #[tokio::test]
-async fn an_unknown_destination_pushes_chat_changed_when_it_is_recorded() {
+async fn a_destination_whose_cli_takes_the_post_pushes_chat_changed_when_it_is_recorded() {
     let dir = unique_temp_dir("chat-unknown-push");
     let h = start_chat("chat-unknown-push", &dir, &ChatPlaybook::default()).await;
     let mut poster_conn = h.connect().await;
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
 
-    let unknown_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
+    let unknown_id = open_unknown_participant(&h).await;
     let poster_id = h.open_idle_window(&mut poster_conn).await;
     identify(&mut poster_conn, &poster_id).await;
 
     let posted = expect_chat_posted(
         send_chat_msg(&mut poster_conn, None, &format!("hi @{unknown_id}")).await,
     );
+    let entry = h
+        .registry
+        .get(&unknown_id)
+        .expect("the window is registered");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached the inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut door = h.connect().await;
+    call_door(&mut door, "take", &unknown_id).await;
 
-    // The post being recorded pushes once on its own, before the spawned
-    // delivery task has had a chance to record the destination as unknown;
-    // read after each push until that settles rather than assuming the
-    // first push already announces it.
+    // The post being recorded pushes once on its own; read after each push until the
+    // destination reads back taken rather than assuming the first push announces it.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let settled_state = loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -2547,10 +2185,10 @@ async fn an_unknown_destination_pushes_chat_changed_when_it_is_recorded() {
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "timed out waiting for a chat_changed push announcing the unknown destination"
+            "timed out waiting for a chat_changed push announcing the taken post"
         );
     };
-    assert_eq!(settled_state, "undelivered_unknown");
+    assert_eq!(settled_state, "taken");
 }
 
 #[tokio::test]
@@ -2831,13 +2469,14 @@ async fn open_identified_participant_in_cwd(
     client: &mut yagura_test_support::ipc::Connection,
     cwd: &Path,
 ) -> String {
-    let window_id = h
-        .open_in_cwd(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-            cwd,
-        )
-        .await;
+    let window_id = open_delivering(
+        h,
+        yagura_test_support::process::echo_child_command(),
+        Some(CONTROL_DETECTION_NAME),
+        Some(cwd),
+        None,
+    )
+    .await;
     identify(client, &window_id).await;
     window_id
 }
@@ -3121,7 +2760,7 @@ async fn a_room_row_appears_in_the_listing_before_any_post_or_read_and_before_th
 }
 
 #[tokio::test]
-async fn intro_delivery_creates_the_recipients_own_room_row_and_stays_plain_text() {
+async fn opening_a_participant_creates_its_own_room_row_and_its_intro_stays_plain_text() {
     let dir = unique_temp_dir("chat-room-g3b");
     let h = start_chat(
         "chat-room-g3b",
@@ -3135,26 +2774,29 @@ async fn intro_delivery_creates_the_recipients_own_room_row_and_stays_plain_text
     let mut client = h.connect().await;
     let recipient_id = h.open_idle_window_with_composer(&mut client).await;
 
-    h.wait_for_scrollback(
-        &recipient_id,
-        b"welcome to the room",
-        Duration::from_secs(10),
-    )
-    .await;
-    // Plain text, not the JSON chat envelope (module doc: intro is never
-    // wrapped, unlike a posted message).
+    let mut door = h.connect().await;
+    let context = call_door(&mut door, "context", &recipient_id).await;
+    assert!(context.contains("welcome to the room"), "{context:?}");
+    // Plain text, not the JSON chat envelope: an intro is never wrapped, unlike a post.
     assert!(
-        !String::from_utf8_lossy(&h.scrollback(&recipient_id)).contains(CHAT_ENVELOPE_MARKER),
-        "an intro must never be wrapped in the chat envelope"
+        !context.contains(CHAT_ENVELOPE_MARKER),
+        "an intro must never be wrapped in the chat envelope: {context:?}"
     );
 
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
-    let rooms = list_chat_rooms(&mut approver).await;
-    assert!(
-        rooms.iter().any(|r| r.room_id.starts_with("r-")),
-        "the recipient's own room row must exist once its intro hook has run, got {rooms:?}"
-    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let rooms = list_chat_rooms(&mut approver).await;
+        if rooms.iter().any(|r| r.room_id.starts_with("r-")) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient's own room row must exist once it is open, got {rooms:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test]
@@ -3259,7 +2901,7 @@ async fn halt_and_its_clearing_and_notification_are_independent_per_room() {
 }
 
 #[tokio::test]
-async fn silence_after_a_confirmed_send_is_independent_per_room() {
+async fn silence_after_a_taken_post_is_independent_per_room() {
     let dir = unique_temp_dir("chat-room-g4-silence");
     let h = start_chat(
         "chat-room-g4-silence",
@@ -3443,18 +3085,14 @@ async fn a_send_chat_approval_request_shows_the_rooms_own_name_and_the_mentioned
     let workspace = second_workspace_dir("chat-room-approval-names-ws");
     let mut poster_conn = h.connect().await;
     let _poster_id = open_identified_participant_in_cwd(&h, &mut poster_conn, &workspace).await;
-    let _bob_id = h
-        .registry
-        .open(yagura_daemon::OpenWindowRequest {
-            command: yagura_test_support::process::echo_child_command(),
-            cwd: Some(yagura_daemon::RequestedCwd::from_caller(workspace.clone())),
-            name: Some("Bob".to_string()),
-            vendor: None,
-            detection: None,
-        })
-        .await
-        .expect("registry.open should spawn the child")
-        .window_id;
+    let _bob_id = open_delivering(
+        &h,
+        yagura_test_support::process::echo_child_command(),
+        None,
+        Some(&workspace),
+        Some("Bob"),
+    )
+    .await;
 
     send(
         &mut poster_conn,
@@ -3563,8 +3201,8 @@ async fn two_daemon_instances_sharing_a_store_resolve_the_same_cwd_to_the_same_r
 }
 
 // A real, delivery-capable participant opened in a second workspace
-// (open_submit_child_window_with_composer_in_cwd) still gets a full,
-// confirmed delivery inside its own room.
+// (open_submit_child_window_with_composer_in_cwd) still gets a full
+// delivery inside its own room.
 #[tokio::test]
 async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() {
     let dir = unique_temp_dir("chat-room-f0-composer");
@@ -3612,9 +3250,8 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
         Duration::from_secs(10),
     )
     .await;
-    assert!(
-        matches!(state.as_str(), "confirmed" | "unconfirmed" | "not_observed"),
-        "an addressed, non-Unknown target in a second workspace must have been attempted, \
-         got {state:?}"
+    assert_eq!(
+        state, "taken",
+        "an addressed, non-Unknown target in a second workspace is typed into and taken"
     );
 }

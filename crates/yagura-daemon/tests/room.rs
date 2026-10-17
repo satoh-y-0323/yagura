@@ -652,25 +652,25 @@ fn silence_check(
 
 #[test]
 fn a_placed_message_with_no_reply_is_a_candidate_once_the_timeout_elapses() {
-    let check = silence_check(vec![ChatDeliveryState::Confirmed], false, 300_000);
+    let check = silence_check(vec![ChatDeliveryState::Taken], false, 300_000);
     assert!(is_silence_candidate(&check, 300_000));
 }
 
 #[test]
 fn a_placed_message_is_not_a_candidate_before_the_timeout_elapses() {
-    let check = silence_check(vec![ChatDeliveryState::Confirmed], false, 299_999);
+    let check = silence_check(vec![ChatDeliveryState::Taken], false, 299_999);
     assert!(!is_silence_candidate(&check, 300_000));
 }
 
 #[test]
 fn the_timeout_boundary_itself_counts_as_elapsed() {
-    let check = silence_check(vec![ChatDeliveryState::Unconfirmed], false, 300_000);
+    let check = silence_check(vec![ChatDeliveryState::Taken], false, 300_000);
     assert!(is_silence_candidate(&check, 300_000));
 }
 
 #[test]
 fn a_message_an_addressed_window_has_replied_to_is_not_a_candidate() {
-    let check = silence_check(vec![ChatDeliveryState::Confirmed], true, 300_000);
+    let check = silence_check(vec![ChatDeliveryState::Taken], true, 300_000);
     assert!(!is_silence_candidate(&check, 300_000));
 }
 
@@ -678,8 +678,8 @@ fn a_message_an_addressed_window_has_replied_to_is_not_a_candidate() {
 fn a_message_placed_nowhere_is_not_a_candidate() {
     let check = silence_check(
         vec![
-            ChatDeliveryState::NotWritten,
-            ChatDeliveryState::WriteFailed,
+            ChatDeliveryState::Pending,
+            ChatDeliveryState::UndeliveredExhausted,
             ChatDeliveryState::UndeliveredHalted,
         ],
         false,
@@ -695,7 +695,7 @@ fn a_message_placed_nowhere_is_not_a_candidate() {
 #[test]
 fn a_message_placed_in_at_least_one_window_is_a_candidate_even_if_others_failed() {
     let check = silence_check(
-        vec![ChatDeliveryState::NotWritten, ChatDeliveryState::Confirmed],
+        vec![ChatDeliveryState::Pending, ChatDeliveryState::Taken],
         false,
         300_000,
     );
@@ -704,46 +704,33 @@ fn a_message_placed_in_at_least_one_window_is_a_candidate_even_if_others_failed(
 
 #[test]
 fn a_message_is_not_a_candidate_while_the_room_is_halted() {
-    let mut check = silence_check(vec![ChatDeliveryState::Confirmed], false, 300_000);
+    let mut check = silence_check(vec![ChatDeliveryState::Taken], false, 300_000);
     check.halted = true;
     assert!(!is_silence_candidate(&check, 300_000));
 }
 
 #[test]
 fn a_message_already_noted_as_silent_is_not_a_candidate_again() {
-    let mut check = silence_check(vec![ChatDeliveryState::Confirmed], false, 300_000);
+    let mut check = silence_check(vec![ChatDeliveryState::Taken], false, 300_000);
     check.silence_noted = true;
     assert!(!is_silence_candidate(&check, 300_000));
 }
 
-#[test]
-fn a_message_placed_only_as_not_observed_is_a_candidate() {
-    let check = silence_check(vec![ChatDeliveryState::NotObserved], false, 300_000);
-    assert!(
-        is_silence_candidate(&check, 300_000),
-        "not_observed still means the envelope was written; only the window's own reaction \
-         went unseen, which is exactly the case this rule watches for"
-    );
-}
-
-// `ChatDeliveryState` carries the nine delivery states, one wire
+// `ChatDeliveryState` carries the six delivery states, one wire
 // string apiece, and `as_str` / `parse` invert each other; an unrecognized
 // string is rejected (fail-closed) rather than guessed at.
 #[test]
 fn chat_delivery_state_round_trips_through_its_wire_string_for_every_state() {
     let states = [
         (ChatDeliveryState::Pending, "pending"),
-        (ChatDeliveryState::Confirmed, "confirmed"),
-        (ChatDeliveryState::Unconfirmed, "unconfirmed"),
-        (ChatDeliveryState::NotObserved, "not_observed"),
-        (ChatDeliveryState::NotWritten, "not_written"),
-        (ChatDeliveryState::WriteFailed, "write_failed"),
+        (ChatDeliveryState::Taken, "taken"),
         (ChatDeliveryState::UndeliveredUnknown, "undelivered_unknown"),
         (ChatDeliveryState::UndeliveredHalted, "undelivered_halted"),
         (
             ChatDeliveryState::UndeliveredExhausted,
             "undelivered_exhausted",
         ),
+        (ChatDeliveryState::UndeliveredRestart, "undelivered_restart"),
     ];
     for (state, wire) in states {
         assert_eq!(
@@ -777,7 +764,7 @@ fn chat_delivery_state_parse_rejects_an_unrecognized_string() {
 // assertions:
 //
 // - `UndeliveredUnknown(Option<UnknownReason>)` is the only arm carrying
-//   data. The other eight arms are plain and share their names with
+//   data. The other five arms are plain and share their names with
 //   `ChatDeliveryState`.
 // - `state(self) -> ChatDeliveryState` and
 //   `unknown_reason(self) -> Option<UnknownReason>` are the two projections,
@@ -803,11 +790,7 @@ const ALL_UNKNOWN_REASONS: [UnknownReason; 6] = [
 fn every_outcome() -> Vec<(DeliveryOutcome, ChatDeliveryState)> {
     vec![
         (DeliveryOutcome::Pending, ChatDeliveryState::Pending),
-        (DeliveryOutcome::Confirmed, ChatDeliveryState::Confirmed),
-        (DeliveryOutcome::Unconfirmed, ChatDeliveryState::Unconfirmed),
-        (DeliveryOutcome::NotObserved, ChatDeliveryState::NotObserved),
-        (DeliveryOutcome::NotWritten, ChatDeliveryState::NotWritten),
-        (DeliveryOutcome::WriteFailed, ChatDeliveryState::WriteFailed),
+        (DeliveryOutcome::Taken, ChatDeliveryState::Taken),
         (
             DeliveryOutcome::UndeliveredUnknown(None),
             ChatDeliveryState::UndeliveredUnknown,
@@ -820,11 +803,15 @@ fn every_outcome() -> Vec<(DeliveryOutcome, ChatDeliveryState)> {
             DeliveryOutcome::UndeliveredExhausted,
             ChatDeliveryState::UndeliveredExhausted,
         ),
+        (
+            DeliveryOutcome::UndeliveredRestart,
+            ChatDeliveryState::UndeliveredRestart,
+        ),
     ]
 }
 
 #[test]
-fn every_delivery_outcome_projects_to_its_own_state_and_the_vocabulary_stays_nine_wide() {
+fn every_delivery_outcome_projects_to_its_own_state_and_the_vocabulary_stays_six_wide() {
     let pairs = every_outcome();
     let projected: Vec<ChatDeliveryState> =
         pairs.iter().map(|(outcome, _)| outcome.state()).collect();
@@ -839,8 +826,8 @@ fn every_delivery_outcome_projects_to_its_own_state_and_the_vocabulary_stays_nin
     wires.dedup();
     assert_eq!(
         wires.len(),
-        9,
-        "the outcomes must project onto nine distinct wire strings, the same vocabulary \
+        6,
+        "the outcomes must project onto six distinct wire strings, the same vocabulary \
          the delivery state already spells: {wires:?}"
     );
 
@@ -942,12 +929,12 @@ fn the_silence_rule_weighs_the_delivery_state_without_its_reason() {
     let carried = DeliveryOutcome::UndeliveredUnknown(Some(UnknownReason::ScreenLost));
 
     let with_bare = silence_check(
-        vec![DeliveryOutcome::Confirmed.state(), bare.state()],
+        vec![DeliveryOutcome::Taken.state(), bare.state()],
         false,
         300_000,
     );
     let with_carried = silence_check(
-        vec![DeliveryOutcome::Confirmed.state(), carried.state()],
+        vec![DeliveryOutcome::Taken.state(), carried.state()],
         false,
         300_000,
     );

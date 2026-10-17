@@ -208,7 +208,7 @@ fn append_message_evicts_the_oldest_rows_past_history_max_with_their_deliveries(
             ROOM_ID,
             appended.seq,
             "w-b",
-            DeliveryOutcome::Confirmed,
+            DeliveryOutcome::Taken,
             2_000 + i,
         )
         .expect("set_delivery must succeed");
@@ -240,26 +240,20 @@ fn each_write_method_commits_on_its_own_and_round_trips() {
         ROOM_ID,
         appended.seq,
         "w-b",
-        DeliveryOutcome::Confirmed,
+        DeliveryOutcome::Pending,
         2_000,
     )
     .expect("set_delivery must succeed");
     assert_eq!(
         delivery_state(&path, appended.seq, "w-b"),
-        Some("confirmed".to_string())
+        Some("pending".to_string())
     );
 
-    chat.set_delivery(
-        ROOM_ID,
-        appended.seq,
-        "w-b",
-        DeliveryOutcome::Unconfirmed,
-        2_100,
-    )
-    .expect("a second set_delivery for the same key must succeed");
+    chat.set_delivery(ROOM_ID, appended.seq, "w-b", DeliveryOutcome::Taken, 2_100)
+        .expect("a second set_delivery for the same key must succeed");
     assert_eq!(
         delivery_state(&path, appended.seq, "w-b"),
-        Some("unconfirmed".to_string()),
+        Some("taken".to_string()),
         "a second set_delivery for the same (room, seq, window) must update the row, not \
          duplicate it"
     );
@@ -296,7 +290,7 @@ fn each_write_method_commits_on_its_own_and_round_trips() {
 
 // The store takes and returns one delivery outcome, and what it writes
 // into the `state` column must be the string `room::ChatDeliveryState`
-// produces (and reads back through), for every one of the nine delivery
+// produces (and reads back through), for every one of the six delivery
 // states -- not a value only the caller's own literal happens to agree with
 // `chat.rs`'s.
 #[test]
@@ -311,15 +305,12 @@ fn set_delivery_round_trips_every_delivery_outcome_through_the_stored_wire_strin
 
     for outcome in [
         DeliveryOutcome::Pending,
-        DeliveryOutcome::Confirmed,
-        DeliveryOutcome::Unconfirmed,
-        DeliveryOutcome::NotObserved,
-        DeliveryOutcome::NotWritten,
-        DeliveryOutcome::WriteFailed,
+        DeliveryOutcome::Taken,
         DeliveryOutcome::UndeliveredUnknown(None),
         DeliveryOutcome::UndeliveredUnknown(Some(UnknownReason::DeclaredUnknown)),
         DeliveryOutcome::UndeliveredHalted,
         DeliveryOutcome::UndeliveredExhausted,
+        DeliveryOutcome::UndeliveredRestart,
     ] {
         chat.set_delivery(ROOM_ID, appended.seq, "w-b", outcome, 2_000)
             .expect("set_delivery must accept every delivery outcome");
@@ -749,18 +740,12 @@ fn set_delivery_replaces_the_pending_row_instead_of_adding_one() {
         )
         .expect("append_message must succeed");
 
-    chat.set_delivery(
-        ROOM_ID,
-        appended.seq,
-        "w-b",
-        DeliveryOutcome::Confirmed,
-        2_000,
-    )
-    .expect("set_delivery must succeed over a pending row");
+    chat.set_delivery(ROOM_ID, appended.seq, "w-b", DeliveryOutcome::Taken, 2_000)
+        .expect("set_delivery must succeed over a pending row");
 
     assert_eq!(
         deliveries_sorted(&chat, appended.seq),
-        vec![("w-b".to_string(), DeliveryOutcome::Confirmed)],
+        vec![("w-b".to_string(), DeliveryOutcome::Taken)],
         "settling a delivery must update the row the post wrote, never add a second one"
     );
 }
@@ -825,18 +810,12 @@ fn a_delivery_recorded_without_a_reason_reads_back_as_none() {
         )
         .expect("append_message must succeed");
 
-    chat.set_delivery(
-        ROOM_ID,
-        appended.seq,
-        "w-b",
-        DeliveryOutcome::Confirmed,
-        2_000,
-    )
-    .expect("set_delivery must succeed");
+    chat.set_delivery(ROOM_ID, appended.seq, "w-b", DeliveryOutcome::Taken, 2_000)
+        .expect("set_delivery must succeed");
 
     assert_eq!(
         deliveries_sorted(&chat, appended.seq),
-        vec![("w-b".to_string(), DeliveryOutcome::Confirmed)],
+        vec![("w-b".to_string(), DeliveryOutcome::Taken)],
         "a delivery settled with an outcome that carries no reason must read back that way, \
          and every outcome other than the status-unknown one carries none"
     );
@@ -932,18 +911,12 @@ fn settling_a_delivery_again_clears_a_reason_the_new_outcome_cannot_carry() {
     )
     .expect("set_delivery must succeed");
 
-    chat.set_delivery(
-        ROOM_ID,
-        appended.seq,
-        "w-b",
-        DeliveryOutcome::Confirmed,
-        2_100,
-    )
-    .expect("re-settling the same destination must succeed");
+    chat.set_delivery(ROOM_ID, appended.seq, "w-b", DeliveryOutcome::Taken, 2_100)
+        .expect("re-settling the same destination must succeed");
 
     assert_eq!(
         deliveries_sorted(&chat, appended.seq),
-        vec![("w-b".to_string(), DeliveryOutcome::Confirmed)],
+        vec![("w-b".to_string(), DeliveryOutcome::Taken)],
         "the second outcome carries no reason, so the row must no longer carry one either"
     );
     assert_eq!(

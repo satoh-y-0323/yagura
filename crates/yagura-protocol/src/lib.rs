@@ -123,6 +123,9 @@
 //! `deliver_context`, `deliver_take` and `deliver_wait`, answered with
 //! `delivery`, and `report_session`, answered with `session_recorded`. A
 //! caller establishes [`INBOX_MIN_REVISION`] before sending any of them.
+//!
+//! Revision 23 answers a handoff with `taken`, `undelivered_timeout` or
+//! `undelivered_no_delivery` in place of what a composer was seen to do.
 
 use std::collections::BTreeSet;
 
@@ -134,7 +137,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 22;
+pub const PROTOCOL_REVISION: u32 = 23;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -1815,14 +1818,16 @@ pub struct ApprovalRequest {
     pub requester: ApprovalRequester,
     /// The window the operation would act on. `None` for a chat post
     /// (`send_chat` / `broadcast_chat`), which is not addressed to any one
-    /// window, and for `open_window`, whose window does not exist yet;
-    /// omitted from the wire (rather than sent as `null`) in those cases.
+    /// window, and for `open_window` and a `send_handoff` that opens a window
+    /// from a profile, whose window does not exist yet; omitted from the wire
+    /// (rather than sent as `null`) in those cases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ApprovalTarget>,
     /// The body a human must see before deciding: the `send_message` text,
     /// the `send_handoff` / chat envelope or, for `open_window`, the lines
     /// naming what would be started (`command:` or `profile:`, `cwd:` and,
-    /// when known, `for:`). Omitted from the wire (rather than
+    /// when known, `for:`); a `send_handoff` that opens a window carries
+    /// those lines followed by its envelope. Omitted from the wire (rather than
     /// sent as `null`) for `close_window` and `interrupt_window`, which carry
     /// no body. The submit key and any paste framing the daemon adds when
     /// writing it are not part of this text.
@@ -1910,59 +1915,39 @@ pub enum WithdrawReason {
     Unknown,
 }
 
-/// What the daemon could observe after writing a handoff envelope and its
-/// submit key into the target window.
+/// What became of a handoff envelope: the receiving CLI took it, or it never
+/// will.
 ///
-/// Writing the bytes is not the same as the receiving CLI accepting them: a
-/// CLI can discard input it received while still starting up, and a submit
-/// key can be swallowed by a paste heuristic. The daemon therefore reports
-/// what it observed rather than asserting a delivery it cannot see.
-///
-/// Only what happens *after* the submit key's write completes counts as
-/// evidence: an envelope echoed into the receiver's editor can itself match
-/// a detection rule, so a status change from before that moment says nothing
-/// about delivery.
+/// The daemon does not type an envelope into a window's composer to watch what
+/// the composer does with it: a window whose profile declares how text reaches
+/// its CLI is handed the envelope through that CLI's own doors, or as the
+/// launch prompt of a window the handoff opens.
 ///
 /// # Examples
 ///
 /// ```
 /// use yagura_protocol::HandoffDelivery;
 ///
-/// let encoded = serde_json::to_string(&HandoffDelivery::NotObserved)
+/// let encoded = serde_json::to_string(&HandoffDelivery::Taken)
 ///     .expect("a plain enum always encodes");
-/// assert_eq!(encoded, "\"not_observed\"");
+/// assert_eq!(encoded, "\"taken\"");
 /// assert!(serde_json::from_str::<HandoffDelivery>("\"bogus\"").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandoffDelivery {
-    /// After the submit key was written, the daemon saw evidence that the
-    /// envelope was taken as one message: the target's composer, which held
-    /// the envelope, read empty on a fully drawn screen with nothing written
-    /// since (the receiver handled it, or queued it while busy), or the
-    /// target's confirmed status moved from one that accepts input to one
-    /// that means it is doing something.
-    Confirmed,
-    /// The envelope and its submit key were written (and that submit key
-    /// pressed again, up to the definition's `resend_max`), but no such
-    /// evidence followed: the envelope stayed in the composer and no move to
-    /// working was seen, another writer wrote into the window before the
-    /// composer emptied, or the target exited afterwards. The receiver may or
-    /// may not have taken it: read the target's output before handing it the
-    /// same work again.
-    Unconfirmed,
-    /// No reaction was looked for, or none could be: the target's definition
-    /// sets `delivery_confirm_ms = 0`, or its status stream was lagging far
-    /// enough behind that changes were dropped before they could be read.
-    NotObserved,
-    /// The daemon never wrote the envelope into the target's composer: the
-    /// screen showed content this delivery could not account for, the
-    /// composer could not be observed at all, a write it made never reached
-    /// the screen within the daemon's upper bound, or another writer's bytes
-    /// landed before the submit key could be pressed. Whether the target's
-    /// composer still holds something is a separate question this value does
-    /// not answer; a caller that needs to know reads the target's own output.
-    NotWritten,
+    /// The receiving CLI took the envelope: one of its doors returned it, the
+    /// daemon handed it over through the CLI's own command or typed it and
+    /// pressed the submit key, or the window this handoff opened was started
+    /// with it as its launch prompt.
+    Taken,
+    /// Nothing took the envelope within the daemon's limit, or the request
+    /// was withdrawn first; it was taken out of the window's inbox before
+    /// this answer, so it never arrives later.
+    UndeliveredTimeout,
+    /// The window declares no way to deliver it: it was not opened from a
+    /// profile that declares delivery, or its hooks were left out at launch.
+    UndeliveredNoDelivery,
 }
 
 /// A 24-bit color as `[red, green, blue]`.
@@ -3089,15 +3074,15 @@ pub enum DaemonMessage {
         /// The request that was settled.
         request_id: String,
     },
-    /// Response to [`ClientMessage::SendHandoff`]: the envelope was written
-    /// into the target window's PTY.
+    /// Response to [`ClientMessage::SendHandoff`]: the receiving CLI took the
+    /// envelope, or it never will.
     HandoffSent {
         /// The window that received the envelope (the newly opened one when
         /// `opened` is `true`).
         window_id: String,
         /// Whether this handoff opened the target window from a profile.
         opened: bool,
-        /// Whether the daemon saw the target react to the envelope.
+        /// What became of the envelope.
         delivery: HandoffDelivery,
     },
     /// Response to [`ClientMessage::SendChat`] / [`ClientMessage::BroadcastChat`]:
@@ -3976,10 +3961,9 @@ pub struct ChatMessage {
 pub struct ChatDeliveryInfo {
     /// The addressed window.
     pub window_id: String,
-    /// The delivery state, e.g. `"confirmed"`, `"unconfirmed"`,
-    /// `"not_observed"`, `"not_written"`, `"write_failed"`,
-    /// `"undelivered_unknown"`, `"undelivered_halted"` or
-    /// `"undelivered_exhausted"`.
+    /// The delivery state: `"pending"`, `"taken"`, `"undelivered_unknown"`,
+    /// `"undelivered_halted"`, `"undelivered_exhausted"` or
+    /// `"undelivered_restart"`.
     pub state: String,
     /// Why the addressed window's status was `Unknown` at the moment this
     /// delivery was recorded, when that is why delivery did not happen.

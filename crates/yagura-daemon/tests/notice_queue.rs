@@ -2,26 +2,24 @@
 
 //! Integration test: the per-window notice queue and its single delivery
 //! agent (NQ-*). Covers what no single notice kind's own suite can: the agent
-//! retrying a notice the window's input declined, and a notice
-//! queued before the IPC layer that delivers it exists. Every window is a
-//! `submit_child` or `echo_child` fixture, never a real vendor CLI.
+//! retrying a notice the window's input declined. The window declares delivery
+//! with no way to wake its CLI, so a notice is typed into it while it waits.
+//! Every window is a `submit_child` or `echo_child` fixture, never a real
+//! vendor CLI.
 
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    ChatPlaybook, Harness, MARKER, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, VALID_TOKEN,
-    approver_base_config, call_open_window, chat_config, identify,
-    open_submit_child_window_with_composer, open_submit_child_window_with_composer_logging_input,
-    policy, read_response, send, unique_pipe_name, unique_temp_dir, wait_until_input_log_contains,
-    wait_until_status, write_submit_definition,
+    Harness, MARKER, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, VALID_TOKEN, approver_base_config,
+    call_open_window, identify, open_submit_child_window_with_composer,
+    open_submit_child_window_with_composer_logging_input, policy, read_response, send,
+    unique_temp_dir, wait_until_input_log_contains, wait_until_status,
 };
 
-use yagura_daemon::window::ChatIntroOutcome;
-use yagura_daemon::{DaemonConfig, IpcServer, OpenWindowRequest, WindowRegistry};
+use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::echo_child_command;
@@ -317,133 +315,4 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
         "emptying the draft must deliver the notice on the very next attempt"
     );
     h.registry.terminate_all().await;
-}
-
-// --- An intro queued before the IPC layer exists -------------------------
-
-/// A daemon wired the way `main.rs` boots one: the intro hook, then the first
-/// window, then the IPC server. The window is observed accepting input before
-/// the server is built, so an intro that only the IPC layer's delivery agent
-/// writes must still reach it once that server exists.
-struct BootedDaemon {
-    registry: Arc<WindowRegistry>,
-    _server: tokio::task::JoinHandle<()>,
-}
-
-#[tokio::test]
-async fn the_first_windows_intro_is_delivered_when_it_was_queued_before_the_ipc_server_existed() {
-    let dir = unique_temp_dir("nq7-boot-order");
-    let config = chat_config(
-        &dir,
-        &ChatPlaybook {
-            intro: Some("welcome to the room"),
-            ..ChatPlaybook::default()
-        },
-    );
-    write_submit_definition(
-        &dir,
-        "nq7-first",
-        "nq7-first-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: false,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 0,
-            resend_max: 0,
-        },
-    );
-
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
-    let chat = {
-        let config = config.clone();
-        Arc::new(
-            tokio::task::spawn_blocking(move || {
-                yagura_daemon::ipc::chat::ChatRuntime::from_config(&config)
-            })
-            .await
-            .expect("ChatRuntime::from_config must not panic"),
-        )
-    };
-    yagura_daemon::ipc::chat::install_intro_hook(&registry, chat.clone());
-
-    let window_id = registry
-        .open(OpenWindowRequest {
-            command: yagura_test_support::process::submit_child_command_with_composer(
-                "nq7-first-marker",
-                0,
-                0,
-                0,
-                0,
-            ),
-            cwd: None,
-            name: None,
-            vendor: None,
-            detection: Some("nq7-first".to_string()),
-        })
-        .await
-        .expect("the first window must open")
-        .window_id;
-    let entry = registry.get(&window_id).expect("first window entry");
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while entry.current_status() != WindowStatus::WaitingInput {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the first window never accepted input"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    let ledger = Arc::new(
-        tokio::task::spawn_blocking({
-            let config = config.clone();
-            move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&config)
-        })
-        .await
-        .expect("PlanRuntime::from_config must not panic"),
-    );
-    let server = Arc::new(
-        IpcServer::new_with_chat(
-            registry.clone(),
-            unique_pipe_name("nq7-boot-order"),
-            config.clone(),
-            chat,
-        )
-        .with_ledger(ledger),
-    );
-    let daemon = BootedDaemon {
-        registry,
-        _server: tokio::spawn(async move {
-            let _ = server.run().await;
-        }),
-    };
-
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while entry.chat_intro_outcome().is_none() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for the first window's intro"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(entry.chat_intro_outcome(), Some(ChatIntroOutcome::Sent));
-    // `Sent` covers a submit key whose effect the fixture has yet to print.
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    loop {
-        let scrollback = entry
-            .session()
-            .text_tail(usize::MAX, 256 * 1024)
-            .await
-            .unwrap()
-            .0;
-        if scrollback.contains("SUBMITTED welcome to the room") {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the intro must reach the first window: {scrollback:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    daemon.registry.terminate_all().await;
 }

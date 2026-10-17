@@ -720,6 +720,28 @@ impl ChatStore {
         Ok(())
     }
 
+    /// Settles every delivery still `pending` as never delivered because the
+    /// daemon stopped: the inbox that held it ended with that daemon. Called
+    /// once, when a daemon opens its chat store, before any post of its own.
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying SQLite operation.
+    pub fn settle_pending_after_restart(&mut self) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_fixed(
+            "UPDATE chat_delivery SET state = ?1, unknown_reason = NULL WHERE state = ?2",
+            params![
+                room::ChatDeliveryState::UndeliveredRestart.as_str(),
+                room::ChatDeliveryState::Pending.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Clears `room_id`'s halted state and `needs_user` together.
     ///
     /// # Errors

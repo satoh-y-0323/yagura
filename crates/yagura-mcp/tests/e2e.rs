@@ -32,7 +32,7 @@
 //! `cargo build -p yagura-daemon --bins` must have run first: the `echo_child`
 //! binary is located next to the test executable.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -42,7 +42,6 @@ use tokio::task::JoinHandle;
 
 use yagura_test_support::detection::{
     CONTROL_DETECTION_NAME, CONTROL_READY_LINE, composer_section_toml, idle_definition_toml,
-    submit_definition_toml,
 };
 use yagura_test_support::ipc::{
     Connection, connect_with_retry, read_daemon_frame, reply_within, send_client_message,
@@ -51,8 +50,8 @@ use yagura_test_support::ipc::{
 use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::{
     COMPOSER_MARKER, COMPOSER_SEPARATOR, assert_file_len_stable, echo_child_command,
-    echo_child_command_with_composer, own_canonical_exe, ready_child_profile_source_with_composer,
-    submit_child_profile_source_with_composer, surviving_grandchild_command, wait_until_file_grows,
+    echo_child_command_with_composer, own_canonical_exe, surviving_grandchild_command,
+    wait_until_file_grows,
 };
 use yagura_test_support::scan::contains_subsequence;
 
@@ -83,27 +82,9 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// itself before a reply that never arrives fails the test.
 const ROUND_TRIP_LIMIT: Duration = CONVERGENCE_TIMEOUT.saturating_add(Duration::from_secs(2));
 
-/// Startup line the `submit_child` fixture prints, and the line it reprints
-/// after each bracketed paste it takes as body text. [`composer_submit_detection_config`]
-/// embeds it verbatim as a regex, so it must stay free of metacharacters.
-const SUBMIT_MARKER: &str = "SUBMIT-READY";
-
-/// The `[input]` body of the `submit_child` detection definition: the body
-/// goes in bracketed, and the submit key follows far enough behind it to clear
-/// the paste guard the profile arms, with a confirmation budget long enough for
-/// the debounce to settle on the reaction (the fixture's `SUBMITTED` line,
-/// printed only when the submit key was taken as a submit, is what lets the
-/// daemon call the delivery confirmed). It names the probe a judged delivery
-/// needs.
-const SUBMIT_INPUT_TOML: &str = "bracketed_paste = true\nsubmit_delay_ms = 900\nclear = \"\"\ndelivery_confirm_ms = 800\nresend_max = 0\nprobe = \"x\"";
-
 /// The `[input]` table of [`composer_detection_config`]'s definition: only the
-/// probe a judged delivery needs, the same one [`SUBMIT_INPUT_TOML`] names.
+/// probe a judged delivery needs.
 const COMPOSER_INPUT_TABLE: &str = "\n[input]\nprobe = \"x\"\n";
-
-/// File stem of the `submit_child` definition inside the injected detection
-/// directory, and therefore the `detection_name` a window resolves.
-const SUBMIT_DETECTION_NAME: &str = "submit-test";
 
 /// Replaces `DaemonConfig.interrupt_bytes` so that interrupt delivery is
 /// observable: the default `0x03` becomes an interrupt (`CTRL_C_EVENT` under
@@ -177,29 +158,6 @@ fn composer_detection_config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
         detection_dir: Some(dir.to_path_buf()),
         detection_name: CONTROL_DETECTION_NAME.to_string(),
-        approver_exe: Some(own_canonical_exe()),
-        ..DaemonConfig::default()
-    }
-}
-
-/// The `submit_child` definition plus [`composer_section_toml`], with a
-/// `bottom_line_count` of 20: a composer-draw-mode draft of a handoff envelope
-/// this size wraps across several display lines, and a narrower window risks
-/// scrolling the `SUBMIT-READY` / `SUBMITTED` marker line -- matched against
-/// the last `bottom_line_count` lines, region = "bottom" -- out of view before
-/// the delivery settles (the same risk found and widened to the same value for
-/// `yagura-daemon`'s own composer-draw submit fixtures).
-fn composer_submit_detection_config(dir: &Path) -> DaemonConfig {
-    let definition =
-        submit_definition_toml(SUBMIT_DETECTION_NAME, SUBMIT_MARKER, 20, SUBMIT_INPUT_TOML);
-    std::fs::write(
-        dir.join(format!("{SUBMIT_DETECTION_NAME}.toml")),
-        format!("{definition}{}", composer_section_toml()),
-    )
-    .expect("write the composer submit detection definition file");
-    DaemonConfig {
-        detection_dir: Some(dir.to_path_buf()),
-        detection_name: SUBMIT_DETECTION_NAME.to_string(),
         approver_exe: Some(own_canonical_exe()),
         ..DaemonConfig::default()
     }
@@ -482,19 +440,43 @@ impl DaemonHarness {
         window_id
     }
 
-    /// Same as [`DaemonHarness::open_idle_window`], but launches `echo_child`
-    /// in composer-draw mode: for the one delivery test below whose window
-    /// must actually be observable, paired with [`composer_detection_config`]
-    /// on the caller's side.
-    async fn open_idle_composer_window<T: DaemonTransport>(&self, transport: &T) -> String {
+    /// [`DaemonHarness::open_idle_window`] in composer-draw mode, opened the way a
+    /// profile that declares delivery with no way to wake its CLI would open it: a
+    /// handoff reaches it typed while it waits. A raw argv window is handed nothing.
+    async fn open_idle_delivering_composer_window<T: DaemonTransport>(
+        &self,
+        transport: &T,
+    ) -> String {
         let window_id = self
-            .open_via_tool(
-                transport,
-                echo_child_command_with_composer(0),
-                "idle-composer-window",
-                None,
+            .registry
+            .open_with_extra_env(
+                OpenWindowRequest {
+                    command: echo_child_command_with_composer(0),
+                    cwd: None,
+                    name: Some("idle-delivering-window".to_string()),
+                    vendor: None,
+                    detection: None,
+                },
+                Vec::new(),
+                Vec::new(),
+                yagura_daemon::window::WindowProvenance {
+                    delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                        output: yagura_daemon::inbox::OutputForm::Plain,
+                        max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+                        wake: yagura_daemon::profile_delivery::WakeMode::None,
+                        wake_stream: yagura_protocol::DeliveryStream::Stderr,
+                        wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+                        wake_timeout_secs: None,
+                        session_pointer: None,
+                        launch_prompt: None,
+                        shim_guidance: None,
+                    }),
+                    ..yagura_daemon::window::WindowProvenance::default()
+                },
             )
-            .await;
+            .await
+            .expect("registry.open_with_extra_env should spawn the child")
+            .window_id;
         self.write_window_input(&window_id, CONTROL_READY_LINE.as_bytes())
             .await;
         self.await_status(transport, &window_id, "idle").await;
@@ -1842,7 +1824,9 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
     let harness = DaemonHarness::start_with_config("handoff-window", config).await;
     let transport = harness.transport();
     harness.wait_until_ready(&transport).await;
-    let window_id = harness.open_idle_composer_window(&transport).await;
+    let window_id = harness
+        .open_idle_delivering_composer_window(&transport)
+        .await;
 
     let result = send_handoff(
         &transport,
@@ -1869,6 +1853,11 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
         Some(false),
         "a window_id target must not report opening a new window"
     );
+    assert_eq!(
+        result.get("delivery").and_then(|value| value.as_str()),
+        Some("taken"),
+        "the reply must carry the delivery the daemon reported, got {result}"
+    );
 
     harness.await_accepted_handoff_envelope(&window_id).await;
     let scrollback = harness.entry(&window_id).session().captured_output();
@@ -1879,14 +1868,68 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
     harness.shutdown_and_assert_children_exited().await;
 }
 
+/// The `hook_child` fixture, next to the other fixtures of this test binary.
+fn hook_child_path() -> PathBuf {
+    yagura_test_support::process::argv_probe_path()
+        .with_file_name(format!("hook_child{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// A `hook_child` profile handed a first request at launch as `--prompt <request>`,
+/// logging the argv it was started with under `logs`.
+fn launch_profile_source(display_name: &str, logs: &Path) -> String {
+    let command = [
+        hook_child_path().display().to_string(),
+        COMPOSER_MARKER.to_string(),
+        COMPOSER_SEPARATOR.to_string(),
+        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ]
+    .iter()
+    .map(|arg| format!("'{arg}'"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    format!(
+        "schema = 1\ndisplay_name = \"{display_name}\"\n\n[command]\ndefault = [{command}]\n{}",
+        "\n[delivery]\nwake = \"none\"\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]\n"
+    )
+}
+
+/// The launch prompt the `hook_child` logging under `logs` was started with.
+async fn launch_prompt_logged_in(logs: &Path) -> String {
+    let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
+        if let Some(argv) = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["event"] == "argv")
+        {
+            return argv["prompt"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the window was started with no launch prompt: {argv}"))
+                .to_string();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the window never logged its argv under {}",
+            logs.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
-async fn send_handoff_opens_a_new_window_from_a_profile_and_writes_the_envelope() {
+async fn send_handoff_opens_a_new_window_from_a_profile_with_the_envelope_as_its_launch_prompt() {
     let detection_dir = unique_temp_dir(FIXTURE_PREFIX, "handoff-profile-detection");
     let profiles_dir = unique_temp_dir(FIXTURE_PREFIX, "handoff-profile-profiles");
+    let logs = unique_temp_dir(FIXTURE_PREFIX, "handoff-profile-logs");
     let profile_id = "handoff-target";
     std::fs::write(
         profiles_dir.join(format!("{profile_id}.toml")),
-        ready_child_profile_source_with_composer("Handoff Target", 0),
+        launch_profile_source("Handoff Target", &logs),
     )
     .expect("write the profile fixture");
     let config = DaemonConfig {
@@ -1933,81 +1976,21 @@ async fn send_handoff_opens_a_new_window_from_a_profile_and_writes_the_envelope(
         "the returned window_id must not be one that already existed before the handoff"
     );
 
-    harness
-        .await_accepted_handoff_envelope(&new_window_id)
-        .await;
-    let scrollback = harness.entry(&new_window_id).session().captured_output();
-    let envelope = extract_accepted_handoff_envelope_json(&scrollback);
-    assert_eq!(envelope["reference"], "src/foo.rs");
-    assert_eq!(envelope["note"], "Please take a look.");
-
-    harness.shutdown_and_assert_children_exited().await;
-}
-
-#[tokio::test]
-async fn send_handoff_from_a_profile_reports_the_delivery_the_receiver_reacted_to() {
-    // The bridge is the only layer a real MCP client sees, so the delivery
-    // outcome has to survive the whole path: a `submit_child` window that
-    // discards nothing at startup but guards its paste edges, an envelope
-    // written bracketed with its submit key held back, and the fixture's own
-    // `SUBMITTED` line as the reaction the daemon confirms against.
-    let detection_dir = unique_temp_dir(FIXTURE_PREFIX, "handoff-delivery-detection");
-    let profiles_dir = unique_temp_dir(FIXTURE_PREFIX, "handoff-delivery-profiles");
-    let profile_id = "handoff-delivery-target";
-    std::fs::write(
-        profiles_dir.join(format!("{profile_id}.toml")),
-        submit_child_profile_source_with_composer(
-            "Handoff Delivery Target",
-            SUBMIT_MARKER,
-            0,
-            0,
-            0,
-            0,
-        ),
-    )
-    .expect("write the profile fixture");
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["send_handoff"])),
-        profiles_dir: Some(profiles_dir),
-        ..composer_submit_detection_config(&detection_dir)
-    };
-    let harness = DaemonHarness::start_with_config("handoff-delivery", config).await;
-    let transport = harness.transport();
-    harness.wait_until_ready(&transport).await;
-
-    let result = send_handoff(
-        &transport,
-        SendHandoffArgs {
-            window_id: None,
-            profile: Some(profile_id.to_string()),
-            cwd: None,
-            name: None,
-            reference: Some("src/foo.rs".to_string()),
-            note: Some("Please take a look.".to_string()),
-            model: None,
-            effort: None,
-        },
-    )
-    .await
-    .expect("an approved profile handoff must succeed");
-
-    let new_window_id = result
-        .get("window_id")
-        .and_then(|value| value.as_str())
-        .expect("send_handoff must return the new window's window_id")
-        .to_string();
     assert_eq!(
         result.get("delivery").and_then(|value| value.as_str()),
-        Some("confirmed"),
-        "the reply must report the delivery the receiver was seen to react to, got {result}"
+        Some("taken"),
+        "the reply must report the envelope taken once the window started, got {result}"
     );
 
-    // Redundant with the reply on a correct daemon, and that is the point:
-    // it is the independent evidence that "confirmed" was not asserted
-    // without the receiver ever taking the envelope as one submitted message.
-    harness
-        .await_child_output(&new_window_id, b"SUBMITTED [yagura handoff] ")
-        .await;
+    let prompt = launch_prompt_logged_in(&logs).await;
+    let envelope: serde_json::Value = serde_json::from_str(
+        prompt
+            .strip_prefix("[yagura handoff] ")
+            .unwrap_or_else(|| panic!("the launch prompt is not a handoff envelope: {prompt:?}")),
+    )
+    .expect("the envelope's body is JSON");
+    assert_eq!(envelope["reference"], "src/foo.rs");
+    assert_eq!(envelope["note"], "Please take a look.");
 
     harness.shutdown_and_assert_children_exited().await;
 }

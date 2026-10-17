@@ -24,6 +24,8 @@ use yagura_protocol::{
 use crate::approval::ApprovalBroker;
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
+use crate::handoff::compose_plan_approved_notice;
+use crate::inbox::Parcel;
 use crate::live_policy::PolicyCell;
 use crate::plan;
 use crate::plan_permit::{self, ChangeKind, LockTable, PermitError};
@@ -34,7 +36,7 @@ use crate::plan_store::{
 use crate::profile;
 use crate::roles::{RoleRow, RolesError, RolesTable, read_roles, save_roles as save_roles_file};
 use crate::store::StoreError;
-use crate::window::{QueuedNotice, WindowLiveness, WindowRegistry};
+use crate::window::{WindowLiveness, WindowRegistry};
 
 use super::store_gate::{StoreAccessError, StoreGate};
 use super::{Outbound, error_msg, window_not_found_msg};
@@ -565,6 +567,59 @@ pub(super) async fn plan_exists(
     }
 }
 
+/// Why a task notice state was not recorded under the plan's lock.
+enum NoticeRefusal {
+    Permit(PermitError),
+    Write(StoreError),
+}
+
+/// Records `state` for `task_id`'s instruction notice while the task is still
+/// bound to `window_id`, and tells the approvers the plan changed. A task
+/// rebound elsewhere since is left to its new window.
+pub(super) async fn record_task_notice(
+    ledger: &PlanRuntime,
+    broker: &ApprovalBroker,
+    window_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    state: yagura_protocol::InstructionNoticeState,
+) {
+    // Checked before locking: locking an id creates its lock-table entry.
+    if !matches!(plan_exists(ledger, plan_id).await, Ok(true)) {
+        return;
+    }
+    let guard = ledger.locks().lock(plan_id).await;
+    let window_id = window_id.to_string();
+    let task_id = task_id.to_string();
+    let recorded = ledger
+        .with_store(move |store| {
+            let permit = plan_permit::issue_notice(&window_id, &task_id, guard, store)
+                .map_err(NoticeRefusal::Permit)?;
+            store
+                .write_instruction_notice(&permit, state)
+                .map_err(NoticeRefusal::Write)
+        })
+        .await;
+    match recorded {
+        Ok(Ok(())) => {
+            broker.notify_approvers(&DaemonMessage::PlanChanged {
+                plan_id: plan_id.to_string(),
+            });
+        }
+        Ok(Err(NoticeRefusal::Permit(PermitError::PlanNotFound))) => {
+            // Deleted between the existence check and the lock.
+            ledger.locks().remove(plan_id);
+        }
+        Ok(Err(NoticeRefusal::Permit(_))) => {}
+        Ok(Err(NoticeRefusal::Write(err))) => {
+            tracing::warn!(error = %err, "task notice state write failed");
+        }
+        Err(_) => {
+            tracing::warn!("the plan store became unavailable while recording a task notice");
+        }
+    }
+}
+
 pub(super) async fn handle_delete_plan(
     ledger: &PlanRuntime,
     registry: &Arc<WindowRegistry>,
@@ -1032,11 +1087,16 @@ pub(super) async fn handle_approve_plan(
             });
             if let Some(owner_window) = notify_owner
                 && let WindowLiveness::Alive(entry) = registry.liveness(&owner_window)
-                && entry.queue_notice(QueuedNotice::PlanApproved {
-                    plan_id: info.plan_id.clone(),
-                })
+                && entry.delivers()
             {
-                registry.wake_notices(&entry);
+                let key = format!("plan:{}", info.plan_id);
+                // One notice per approved plan, however often it is approved.
+                if !entry.inbox().holds(&key) {
+                    let notice = Parcel::new(key, compose_plan_approved_notice(&info.plan_id));
+                    // A notice the owner's inbox has no room for is dropped:
+                    // the owner still reads the plan through get_plan.
+                    let _ = super::notice_queue::deposit(registry, &entry, notice, None, None);
+                }
             }
             outbound.reply(&DaemonMessage::PlanDetail { plan: info });
         }

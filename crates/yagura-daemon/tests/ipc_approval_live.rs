@@ -19,13 +19,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    ChatPlaybook, Harness, SubmitDefinitionInput, approver_base_config,
-    call_send_handoff_from_profile_within, chat_config_with_playbook_file, detection_config,
-    empty_lookup, expect_approval_requested_skipping_pushes, expect_error, expect_handoff_sent,
+    ChatPlaybook, Harness, approver_base_config, call_send_handoff_from_profile_within,
+    chat_config_with_playbook_file, detection_config, empty_lookup,
+    expect_approval_requested_skipping_pushes, expect_error, expect_handoff_sent,
     handoff_profile_config, identify, live_playbook_config, read_approver_reply, read_response,
     register_approver, reported_auto_approve, send, send_handoff_from_profile, set_auto_approve,
-    set_plan_approval_required, unique_temp_dir, with_detection_name, write_profile,
-    write_submit_definition,
+    set_plan_approval_required, unique_temp_dir, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
@@ -34,10 +33,7 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{
-    profile_source, ready_child_profile_source, ready_child_profile_source_with_composer,
-    submit_child_command_with_composer,
-};
+use yagura_test_support::process::{profile_source, ready_child_profile_source};
 
 /// How long a case watches for something that must not happen (a reply to
 /// a request still awaiting a decision).
@@ -46,8 +42,8 @@ const PENDING_OBSERVATION: Duration = Duration::from_secs(2);
 /// Upper bound for a reply that is expected to arrive.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Upper bound for a profile-addressed handoff, which spawns a window and
-/// waits out its readiness hold before it is answered.
+/// Upper bound for a profile-addressed handoff, which spawns a window before it
+/// is answered.
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 
 const NO_AUTO_APPROVE_PLAYBOOK: &str = "[approval]\nauto_approve = []\n";
@@ -406,31 +402,30 @@ async fn switching_close_window_to_automatic_and_back_takes_effect_on_the_next_r
 // --- send_handoff to a profile ------------------------------------------------
 
 const READY_PROFILE: &str = "ready";
-const SLOW_PROFILE: &str = "slow-ready";
-const SLOW_DETECTION: &str = "slow-ready-detection";
-const SLOW_MARKER: &str = "slow-ready-marker";
-/// The file that lets a [`SLOW_PROFILE`] window paint its prompt, under the
-/// tree's `gate` directory: see [`open_slow_ready_gate`].
-const SLOW_READY_GATE_FILE: &str = "go";
 
-/// `submit_child` that paints its prompt only once `gate` exists.
-fn slow_profile_source(gate: &Path) -> String {
-    let mut command = submit_child_command_with_composer(SLOW_MARKER, 0, 0, 0, 0);
-    command[5] = format!(
-        "until|{}",
-        gate.to_str().expect("the gate path must be valid UTF-8")
-    );
-    with_detection_name(&profile_source("Slow ready", &command), SLOW_DETECTION)
+/// `hook_child`, handed a first request at launch as `--prompt <request>`.
+fn launch_profile_source(logs: &Path) -> String {
+    let command: Vec<String> = vec![
+        PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
+            .display()
+            .to_string(),
+        yagura_test_support::process::COMPOSER_MARKER.to_string(),
+        yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
+        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ];
+    format!(
+        "{}{}",
+        profile_source("Ready", &command),
+        "\n[delivery]\nwake = \"none\"\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]\n"
+    )
 }
 
-/// Lets the window [`start_slow_handoff`] opened become ready.
-fn open_slow_ready_gate(tree: &TempDir) {
-    tree.write_file(&format!("gate/{SLOW_READY_GATE_FILE}"), "");
-}
-
-/// A daemon that can open windows from [`READY_PROFILE`] (ready at once) and
-/// [`SLOW_PROFILE`] (ready only once the case opens [`SLOW_READY_GATE`]),
-/// booted from a playbook whose `[approval]` table is `playbook`.
+/// A daemon that can open windows from [`READY_PROFILE`], booted from a playbook
+/// whose `[approval]` table is `playbook`.
 async fn start_profile_daemon(tag: &str, playbook: &str) -> (Harness, TempDir) {
     // Starting the window is not what these cases measure: it is auto-approved
     // on top of the playbook given.
@@ -443,27 +438,9 @@ async fn start_profile_daemon(tag: &str, playbook: &str) -> (Harness, TempDir) {
     write_profile(
         &profiles_dir,
         READY_PROFILE,
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source(&tree.make_dir("ready-logs")),
     );
-    write_submit_definition(
-        &detection_dir,
-        SLOW_DETECTION,
-        SLOW_MARKER,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 200,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 0,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        SLOW_PROFILE,
-        &slow_profile_source(&tree.make_dir("gate").join(SLOW_READY_GATE_FILE)),
-    );
-    let mut base: DaemonConfig = handoff_profile_config(
+    let base: DaemonConfig = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
         &detection_dir,
@@ -471,7 +448,6 @@ async fn start_profile_daemon(tag: &str, playbook: &str) -> (Harness, TempDir) {
         None,
         30,
     );
-    base.handoff_ready_timeout_secs = 20;
     let config: DaemonConfig = live_playbook_config(&playbook_dir, base, playbook);
     let h = Harness::start(tag, config).await;
     (h, tree)
@@ -600,73 +576,6 @@ async fn a_profile_handoff_with_an_approver_connected_is_not_refused_before_laun
         expect_approval_requested_skipping_pushes(&mut approver, HANDOFF_TIMEOUT).await;
     assert_eq!(request.tool, "send_handoff");
     deny(&mut approver, &mut requester, &request).await;
-
-    h.registry.terminate_all().await;
-}
-
-/// Sends a profile-addressed handoff to [`SLOW_PROFILE`] and returns once the
-/// window it opens is registered; it stays short of ready until
-/// [`open_slow_ready_gate`].
-async fn start_slow_handoff(h: &Harness, requester: &mut Connection) {
-    let before: usize = h.registry.list().len();
-    send_handoff_from_profile(requester, SLOW_PROFILE, None, None, "src/foo.rs", "look").await;
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
-    while h.registry.list().len() <= before {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the profile handoff never opened its window"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-#[tokio::test]
-async fn switching_send_handoff_off_while_its_window_becomes_ready_makes_the_later_judgement_wait_for_approval()
- {
-    let (h, tree) = start_profile_daemon(
-        "live-handoff-ready",
-        "[approval]\nauto_approve = [\"send_handoff\"]\n",
-    )
-    .await;
-    let mut approver = h.connect().await;
-    register_approver(&mut approver).await;
-    let mut requester = h.connect().await;
-
-    start_slow_handoff(&h, &mut requester).await;
-    switch_tool(&mut approver, "send_handoff", false).await;
-    open_slow_ready_gate(&tree);
-
-    let request: ApprovalRequest =
-        expect_approval_requested_skipping_pushes(&mut approver, HANDOFF_TIMEOUT).await;
-    assert_eq!(request.tool, "send_handoff");
-    deny(&mut approver, &mut requester, &request).await;
-
-    h.registry.terminate_all().await;
-}
-
-#[tokio::test]
-async fn switching_another_tool_while_a_handoff_window_becomes_ready_delivers_without_approval() {
-    let (h, tree) = start_profile_daemon(
-        "live-handoff-ready-control",
-        "[approval]\nauto_approve = [\"send_handoff\"]\n",
-    )
-    .await;
-    let mut approver = h.connect().await;
-    register_approver(&mut approver).await;
-    let mut requester = h.connect().await;
-
-    start_slow_handoff(&h, &mut requester).await;
-    switch_tool(&mut approver, "send_keys", true).await;
-    open_slow_ready_gate(&tree);
-
-    let reply: DaemonMessage = read_response(&mut requester, HANDOFF_TIMEOUT).await;
-    let (_window_id, opened, _delivery) = expect_handoff_sent(reply);
-    assert!(opened, "a profile target must report opened: true");
-    assert_eq!(
-        pending_request_ids(&mut approver).await,
-        Vec::<String>::new(),
-        "a handoff whose tool stayed automatic must not wait for approval"
-    );
 
     h.registry.terminate_all().await;
 }

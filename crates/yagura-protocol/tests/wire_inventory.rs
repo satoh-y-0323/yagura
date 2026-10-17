@@ -227,7 +227,7 @@ wire_sample!(enum WireWindowStatus => Running);
 wire_sample!(enum UnknownReason => NoDefinition);
 wire_sample!(enum ApprovalRequesterKind => External);
 wire_sample!(enum WithdrawReason => Resolved);
-wire_sample!(enum HandoffDelivery => Confirmed);
+wire_sample!(enum HandoffDelivery => Taken);
 wire_sample!(enum AssignmentSource => User);
 wire_sample!(enum ReportOutcome => Succeeded);
 wire_sample!(enum InstructionNoticeState => Pending);
@@ -977,18 +977,16 @@ fn withdraw_reason_wire_variants() -> BTreeSet<String> {
 
 fn handoff_delivery_wire_variants() -> BTreeSet<String> {
     [
-        HandoffDelivery::Confirmed,
-        HandoffDelivery::Unconfirmed,
-        HandoffDelivery::NotObserved,
-        HandoffDelivery::NotWritten,
+        HandoffDelivery::Taken,
+        HandoffDelivery::UndeliveredTimeout,
+        HandoffDelivery::UndeliveredNoDelivery,
     ]
     .into_iter()
     .map(|delivery| {
         let hand = match &delivery {
-            HandoffDelivery::Confirmed => "confirmed",
-            HandoffDelivery::Unconfirmed => "unconfirmed",
-            HandoffDelivery::NotObserved => "not_observed",
-            HandoffDelivery::NotWritten => "not_written",
+            HandoffDelivery::Taken => "taken",
+            HandoffDelivery::UndeliveredTimeout => "undelivered_timeout",
+            HandoffDelivery::UndeliveredNoDelivery => "undelivered_no_delivery",
         };
         serde_spelling(&delivery, hand)
     })

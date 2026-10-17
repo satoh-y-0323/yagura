@@ -10,7 +10,7 @@
 //! resolving which detection definition a window uses
 //! (`load_definition_for`).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -245,6 +245,33 @@ pub struct WindowProvenance {
     /// `None` for a window the profile did not open or one whose profile
     /// declares none: its doors answer by the daemon's own defaults.
     pub delivery: Option<ProfileDelivery>,
+    /// Whether the launch went without the profile's hooks because their
+    /// registration did not hold: the CLI never runs the doors, so nothing
+    /// the daemon sends of its own accord can reach it.
+    pub hooks_left_out: bool,
+    /// The profile's own program, run to wake the window's CLI when its
+    /// `[delivery]` table wakes by command.
+    pub wake_command: Option<WakeCommand>,
+}
+
+/// The program a profile's wake command runs, and the environment it runs
+/// under: the profile's own argv without launch options, and its `[env]`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct WakeCommand {
+    /// The program and its own arguments; the wake arguments follow them.
+    pub argv: Vec<String>,
+    /// The profile's `[env]` table.
+    pub env: Vec<(String, String)>,
+}
+
+// An environment can carry tokens, so only its size is shown.
+impl std::fmt::Debug for WakeCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WakeCommand")
+            .field("argv", &self.argv)
+            .field("env_len", &self.env.len())
+            .finish()
+    }
 }
 
 /// The profile and launch option values a profile-addressed window was
@@ -359,6 +386,8 @@ pub struct WindowParticipation {
     pub workspace: WorkspaceKey,
     /// See [`WindowEntry::composer_access`].
     pub composer_access: ComposerAccess,
+    /// See [`WindowEntry::delivers`].
+    pub delivers: bool,
 }
 
 /// What [`WindowRegistry::initialize_detection_for_window`] resolved for a
@@ -1312,14 +1341,10 @@ pub struct WindowEntry {
     take_back_call: Mutex<Option<TakeBackCall>>,
     /// What that call has of its own in the composer.
     own_part: Mutex<OwnPart>,
-    /// The chat intro's outcome, written at most once. `None`
-    /// while the intro is still queued, or when none was queued (no chat, no
-    /// intro, or not a participant).
-    chat_intro_outcome: std::sync::OnceLock<ChatIntroOutcome>,
-    /// The notices waiting for this window to accept input, and whether a
-    /// delivery agent is running for them. The agent itself lives in the IPC
-    /// layer and is started through [`WindowRegistry::wake_notices`].
-    notices: Mutex<NoticeQueue>,
+    /// Whether a delivery agent is running for this window. The agent itself
+    /// lives in the IPC layer and is started through
+    /// [`WindowRegistry::wake_notices`].
+    agent_running: Mutex<bool>,
     /// Wakes this window's running delivery agent.
     notice_wake: Notify,
     /// How many deliveries this window's agent has attempted, written or not.
@@ -1336,60 +1361,6 @@ pub struct WindowEntry {
     /// How many live connections have identified as this window. Shared with
     /// each [`McpConnectionClaim`] so a claim never keeps the entry alive.
     mcp_connections: Arc<AtomicUsize>,
-}
-
-/// The chat intro's outcome, observed through
-/// [`WindowEntry::chat_intro_outcome`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatIntroOutcome {
-    /// The intro was written into the window (`run_delivery` reached a
-    /// verdict, whether or not the target reacted to it).
-    Sent,
-    /// Not recorded by this daemon: an intro that finds the chat delivery
-    /// budget exhausted stays queued and is tried again.
-    Skipped,
-    /// Not recorded by this daemon: an intro that could not be written stays
-    /// queued and is tried again.
-    NotPlaced,
-    /// The window ended before the intro was written.
-    Abandoned,
-}
-
-/// One notice waiting in a window's own queue. A window holds at most one of
-/// each kind, except [`Self::PlanApproved`] (one owner can have several plans
-/// approved in a row, each naming a different plan); a report notice is
-/// never queued, it is derived from the window's report inbox whenever the
-/// queue is empty.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QueuedNotice {
-    /// The chat intro. Blocks the queue until the window's room is settled,
-    /// so nothing is written before the room row exists.
-    Intro { room_settled: bool },
-    /// The `[yagura task]` notice for the plan task this window is bound to.
-    Task { plan_id: String, task_id: String },
-    /// The `[yagura plan]` notice telling this plan's owner that `plan_id`
-    /// was approved.
-    PlanApproved { plan_id: String },
-}
-
-impl QueuedNotice {
-    /// Whether `self` and `other` are the same queued item: for every kind
-    /// but [`Self::PlanApproved`] this is the discriminant alone, so a window
-    /// never holds two of the same kind at once; a `PlanApproved` also
-    /// compares `plan_id`, since one owner may have several plans approved
-    /// in a row.
-    fn same_kind(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::PlanApproved { plan_id: a }, Self::PlanApproved { plan_id: b }) => a == b,
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
-        }
-    }
-}
-
-#[derive(Default)]
-struct NoticeQueue {
-    items: VecDeque<QueuedNotice>,
-    agent_running: bool,
 }
 
 impl WindowEntry {
@@ -1475,20 +1446,6 @@ impl WindowEntry {
         &self.workspace
     }
 
-    /// This window's chat intro outcome, once settled. `None`
-    /// means either no intro was queued for this window, or it is still
-    /// queued.
-    #[must_use]
-    pub fn chat_intro_outcome(&self) -> Option<ChatIntroOutcome> {
-        self.chat_intro_outcome.get().copied()
-    }
-
-    /// Records this window's chat intro outcome. A no-op if already set: it
-    /// is written at most once.
-    pub(crate) fn set_chat_intro_outcome(&self, outcome: ChatIntroOutcome) {
-        let _ = self.chat_intro_outcome.set(outcome);
-    }
-
     /// How many notice delivery attempts this window's delivery agent has
     /// finished so far, whether or not they were written. Monotonic; an
     /// attempt is counted once what it leaves behind is recorded.
@@ -1501,59 +1458,15 @@ impl WindowEntry {
         self.notice_attempts.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Queues `notice` behind whatever is already waiting, unless one of the
-    /// same kind already is. Returns whether it was queued.
-    ///
-    /// A window with no composer is queued to as well: its agent never
-    /// delivers the notice, but settles it (a task's as `window_closed`)
-    /// once the window ends.
-    pub(crate) fn queue_notice(&self, notice: QueuedNotice) -> bool {
-        let mut queue = lock_recover(&self.notices);
-        if queue.items.iter().any(|queued| queued.same_kind(&notice)) {
-            return false;
-        }
-        queue.items.push_back(notice);
-        true
-    }
-
-    /// Lets a queued intro through once its room is settled.
-    pub(crate) fn settle_intro_room(&self) {
-        let mut queue = lock_recover(&self.notices);
-        for queued in &mut queue.items {
-            if let QueuedNotice::Intro { room_settled } = queued {
-                *room_settled = true;
-            }
-        }
-    }
-
-    pub(crate) fn front_notice(&self) -> Option<QueuedNotice> {
-        lock_recover(&self.notices).items.front().cloned()
-    }
-
-    fn has_queued_notices(&self) -> bool {
-        !lock_recover(&self.notices).items.is_empty()
-    }
-
-    /// Removes the queued notice of `notice`'s kind, wherever it stands.
-    pub(crate) fn remove_notice(&self, notice: &QueuedNotice) {
-        lock_recover(&self.notices)
-            .items
-            .retain(|queued| !queued.same_kind(notice));
-    }
-
     /// Marks a delivery agent as running for this window. `false` when one
     /// already is.
     pub(crate) fn claim_notice_agent(&self) -> bool {
-        !std::mem::replace(&mut lock_recover(&self.notices).agent_running, true)
+        !std::mem::replace(&mut *lock_recover(&self.agent_running), true)
     }
 
-    /// Ends this window's delivery agent, handing back every notice it never
-    /// wrote. Under the same lock as [`Self::claim_notice_agent`], so a notice
-    /// queued after this starts a new agent rather than being stranded.
-    pub(crate) fn release_notice_agent(&self) -> Vec<QueuedNotice> {
-        let mut queue = lock_recover(&self.notices);
-        queue.agent_running = false;
-        queue.items.drain(..).collect()
+    /// Ends this window's delivery agent.
+    pub(crate) fn release_notice_agent(&self) {
+        *lock_recover(&self.agent_running) = false;
     }
 
     pub(crate) fn wake_notice_agent(&self) {
@@ -3556,6 +3469,26 @@ impl WindowEntry {
         &self.inbox
     }
 
+    /// The `[delivery]` table of the profile this window was launched from.
+    #[must_use]
+    pub fn delivery(&self) -> Option<&ProfileDelivery> {
+        self.provenance.delivery.as_ref()
+    }
+
+    /// Whether what the daemon sends of its own accord can reach this
+    /// window's CLI: its profile declares delivery, and its hooks were not
+    /// left out at launch.
+    #[must_use]
+    pub fn delivers(&self) -> bool {
+        self.provenance.delivery.is_some() && !self.provenance.hooks_left_out
+    }
+
+    /// The program a wake by command runs, when the profile declares one.
+    #[must_use]
+    pub fn wake_command(&self) -> Option<&WakeCommand> {
+        self.provenance.wake_command.as_ref()
+    }
+
     /// The session identifier the window's CLI reported, if it has.
     #[must_use]
     pub fn session_id(&self) -> Option<String> {
@@ -3572,6 +3505,8 @@ impl WindowEntry {
             return false;
         }
         *lock_recover(&self.session_id) = Some(candidate.to_string());
+        // A wake by command needs the session, so a parcel held for it can go now.
+        self.notice_wake.notify_one();
         true
     }
 
@@ -3931,6 +3866,9 @@ pub struct WindowRegistry {
     /// spawned, so an `identify` for one of these waits instead of answering
     /// `window_not_found`.
     opening: OpeningWindows,
+    /// Set once every window is being terminated with the daemon: what their
+    /// inboxes still hold is left for the next daemon to settle.
+    shutting_down: AtomicBool,
 }
 
 impl WindowRegistry {
@@ -3978,6 +3916,7 @@ impl WindowRegistry {
             workspace_walks,
             mcp_config_write: AsyncMutex::new(()),
             opening: Mutex::new(HashMap::new()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -4449,27 +4388,6 @@ impl WindowRegistry {
         }
     }
 
-    /// What the daemon may type into a window opened with the definition
-    /// named by `detection_override`, read the same way
-    /// [`Self::initialize_detection_for_window`] reads it (through
-    /// [`load_definition_for`] and
-    /// [`Self::reject_when_submit_delay_does_not_outlast_confirm`]) but
-    /// without opening anything. `None` when the definition cannot be read:
-    /// the caller's own open path is what decides then, since a window still
-    /// tells a disabled layer apart from every other unreadable case.
-    pub(crate) fn composer_access_before_open(
-        &self,
-        detection_override: Option<&str>,
-    ) -> Option<ComposerAccess> {
-        let outcome = load_definition_for(&self.config, detection_override);
-        match self.reject_when_submit_delay_does_not_outlast_confirm(outcome) {
-            DetectionLoadOutcome::Loaded(definition) => {
-                Some(definition_composer_access(&definition))
-            }
-            DetectionLoadOutcome::Failed(_) => None,
-        }
-    }
-
     /// This registry's boot nonce: the per-instance suffix every identifier
     /// minted for this daemon boot carries.
     ///
@@ -4583,8 +4501,7 @@ impl WindowRegistry {
             interrupt_bytes: self.config().interrupt_bytes.clone(),
             take_back_call: Mutex::new(None),
             own_part: Mutex::new(OwnPart::default()),
-            chat_intro_outcome: std::sync::OnceLock::new(),
-            notices: Mutex::new(NoticeQueue::default()),
+            agent_running: Mutex::new(false),
             notice_wake: Notify::new(),
             notice_attempts: AtomicU64::new(0),
             inbox,
@@ -4722,22 +4639,27 @@ impl WindowRegistry {
     }
 
     /// Installs the IPC layer's notice launcher, then runs it for every
-    /// window that already has notices queued: a window opened before the
+    /// window whose inbox already holds something: a window opened before the
     /// IPC server existed (the daemon's first) must not wait for another
-    /// notice to be woken.
+    /// delivery to be woken.
     pub(crate) fn set_notice_launcher(&self, launcher: NoticeLauncher) {
         // Held across the scan, so a notice queued meanwhile finds this
         // launcher installed rather than none.
         let mut installed = lock_recover(&self.notice_launcher);
         let waiting: Vec<Arc<WindowEntry>> = lock_recover(&self.entries)
             .iter()
-            .filter(|entry| entry.has_queued_notices())
+            .filter(|entry| entry.inbox.pending_count() > 0)
             .cloned()
             .collect();
         for entry in &waiting {
             launcher(entry);
         }
         *installed = Some(launcher);
+    }
+
+    /// Whether every window is being terminated with the daemon.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     /// Starts `entry`'s notice delivery agent, or wakes the running one. A
@@ -4762,6 +4684,7 @@ impl WindowRegistry {
                 status: entry.current_status(),
                 workspace: entry.workspace.clone(),
                 composer_access: entry.composer_access,
+                delivers: entry.delivers(),
             })
             .collect()
     }
@@ -4816,6 +4739,7 @@ impl WindowRegistry {
     /// `Exited` asynchronously as each session's exit is observed; this
     /// method does not wait for that convergence.
     pub async fn terminate_all(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
         for entry in entries {
             entry.session.terminate();
@@ -5845,7 +5769,7 @@ mod tests {
             !entry.claim_notice_agent(),
             "a second claim while an agent runs must be refused, or two agents deliver one notice"
         );
-        assert!(entry.release_notice_agent().is_empty());
+        entry.release_notice_agent();
         assert!(
             entry.claim_notice_agent(),
             "a released agent must leave the window claimable again"

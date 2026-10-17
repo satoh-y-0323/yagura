@@ -16,19 +16,17 @@ use std::time::Duration;
 use common::{
     Harness, approver_base_config, call_list_windows, decide, empty_lookup,
     expect_approval_requested, expect_approval_requested_within, expect_error,
-    handoff_profile_config, identify, policy, read_approver_reply, read_response,
-    register_approver, send, send_handoff_from_profile, write_profile,
+    handoff_profile_config, identify, launch_prompt_profile_source, policy, read_approver_reply,
+    read_response, register_approver, send, send_handoff_from_profile, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
-    ApprovalRequest, ApprovalRequesterKind, ClientMessage, DaemonMessage, PlanTaskSpec,
-    WithdrawReason,
+    ApprovalRequest, ApprovalRequesterKind, ClientMessage, DaemonMessage, HandoffDelivery,
+    PlanTaskSpec, WithdrawReason,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{
-    echo_child_command, ready_child_profile_source, ready_child_profile_source_with_composer,
-};
+use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 const PROFILE_ID: &str = "gate-profile";
 
@@ -148,6 +146,26 @@ fn assert_has_no_window_to_act_on(request: &ApprovalRequest) {
         "the window does not exist yet: {request:?}"
     );
     assert!(request.room.is_none(), "{request:?}");
+}
+
+/// A profile handoff is decided once, before its window exists: it both
+/// starts the window and hands it the envelope.
+fn assert_starts_a_window_with_the_envelope(request: &ApprovalRequest) {
+    assert_eq!(request.tool, "send_handoff");
+    assert!(
+        request.target.is_none(),
+        "the window does not exist yet: {request:?}"
+    );
+    assert!(request.room.is_none(), "{request:?}");
+}
+
+/// A profile `hook_child` that is handed its first request at launch.
+fn write_launch_profile(profiles_dir: &Path) {
+    write_profile(
+        profiles_dir,
+        "ready",
+        &launch_prompt_profile_source("Ready", None, ""),
+    );
 }
 
 // --- open_window with a command --------------------------------------------
@@ -347,15 +365,11 @@ async fn a_denied_profile_open_window_opens_nothing() {
 // --- send_handoff from a profile --------------------------------------------
 
 #[tokio::test]
-async fn a_profile_handoff_asks_to_start_the_window_before_it_exists_and_to_hand_over_after() {
+async fn a_profile_handoff_asks_once_before_the_window_exists_and_starts_it_once_approved() {
     let tree = TempDir::new("yagura-cli-test", "open-gate-handoff");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
-    write_profile(
-        &profiles_dir,
-        "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
-    );
+    write_launch_profile(&profiles_dir);
     let h = Harness::start(
         "open-gate-handoff",
         gated_handoff_config(profiles_dir, &detection_dir, &[]),
@@ -367,30 +381,35 @@ async fn a_profile_handoff_asks_to_start_the_window_before_it_exists_and_to_hand
 
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
 
-    let open_request =
-        expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
-    assert_has_no_window_to_act_on(&open_request);
-    let lines = text_lines(&open_request);
+    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    assert_starts_a_window_with_the_envelope(&request);
+    let lines = text_lines(&request);
     assert_eq!(lines[0], "profile: ready");
-    assert_eq!(lines.last().copied(), Some("for: handoff"), "{lines:?}");
+    assert!(lines.contains(&"for: handoff"), "{lines:?}");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.starts_with("[yagura handoff] ")),
+        "the envelope the window would be started with is shown last: {lines:?}"
+    );
     assert_eq!(
         window_count(&h).await,
         before,
         "the process must not be started before its start is approved"
     );
 
-    decide(&mut approver, &open_request.request_id, true).await;
+    decide(&mut approver, &request.request_id, true).await;
 
-    let handoff_request =
-        expect_approval_requested_within(&mut approver, Duration::from_secs(15)).await;
-    assert_eq!(handoff_request.tool, "send_handoff");
+    match read_response(&mut requester, Duration::from_secs(10)).await {
+        DaemonMessage::HandoffSent {
+            opened, delivery, ..
+        } => {
+            assert!(opened);
+            assert_eq!(delivery, HandoffDelivery::Taken);
+        }
+        other => panic!("expected handoff_sent, got {other:?}"),
+    }
     assert_eq!(window_count(&h).await, before + 1);
-
-    decide(&mut approver, &handoff_request.request_id, false).await;
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(10)).await,
-        "approval_denied",
-    );
 }
 
 #[tokio::test]
@@ -398,11 +417,9 @@ async fn a_profile_handoff_whose_start_is_denied_opens_no_window_and_gives_its_b
     let tree = TempDir::new("yagura-cli-test", "open-gate-handoff-deny");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
-    write_profile(
-        &profiles_dir,
-        "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
-    );
+    write_launch_profile(&profiles_dir);
+    // Handing over alone is auto-approved; starting a window is not, so the
+    // one decision is still asked for.
     let h = Harness::start(
         "open-gate-handoff-deny",
         gated_handoff_config(profiles_dir, &detection_dir, &["send_handoff"]),
@@ -413,10 +430,9 @@ async fn a_profile_handoff_whose_start_is_denied_opens_no_window_and_gives_its_b
     let before = window_count(&h).await;
 
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
-    let open_request =
-        expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
-    assert_eq!(open_request.tool, "open_window");
-    decide(&mut approver, &open_request.request_id, false).await;
+    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    assert_starts_a_window_with_the_envelope(&request);
+    decide(&mut approver, &request.request_id, false).await;
 
     expect_error(
         read_response(&mut requester, Duration::from_secs(5)).await,
@@ -683,11 +699,7 @@ async fn a_profile_handoff_whose_requester_leaves_during_the_start_approval_give
     let tree = TempDir::new("yagura-cli-test", "open-gate-handoff-leaves");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
-    write_profile(
-        &profiles_dir,
-        "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
-    );
+    write_launch_profile(&profiles_dir);
     let mut config = gated_handoff_config(profiles_dir, &detection_dir, &[]);
     config.max_open_handoffs = 1;
     let h = Harness::start("open-gate-handoff-leaves", config).await;
@@ -705,7 +717,7 @@ async fn a_profile_handoff_whose_requester_leaves_during_the_start_approval_give
     // `resource_exhausted` instead of asking.
     send_handoff_from_profile(&mut second, "ready", None, None, "src/foo.rs", "look").await;
     let again = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
-    assert_has_no_window_to_act_on(&again);
+    assert_starts_a_window_with_the_envelope(&again);
     assert_eq!(window_count(&h).await, before);
 }
 

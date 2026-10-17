@@ -24,10 +24,10 @@ use tokio::time::Instant;
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
-    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage,
-    DetectedStatus, FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    HandoffDelivery, MessageError, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
-    ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
+    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, FrameError,
+    HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, HandoffDelivery, InstructionNoticeState,
+    MessageError, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind, ProfileInfo,
+    RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
     decode_client_message, encode_daemon_message, frame_decode, frame_encode, is_valid_source,
     validate_control_keys, validate_handoff_target, validate_handoff_text,
     validate_launch_option_value, validate_send_text_body,
@@ -59,28 +59,29 @@ use crate::detector::layers::DetectionLayers;
 use crate::detector::screen_view::{self, View};
 use crate::handoff::{
     DELIVERY_REACTION_STATUSES, EnvelopeFrom, READY_STATUSES, StartupEvidence, check_envelope_len,
-    compose_envelope, hold_is_reachable_within, is_ready,
+    compose_envelope, compose_task_notice, is_ready,
 };
 use crate::health;
+use crate::inbox::{Parcel, ParcelEnd, PushBudget, Withdrawal};
 use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
 use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::plan_permit::{self, ChangeKind, PermitError};
-use crate::profile_delivery::ProfileDelivery;
+use crate::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
 use crate::pty::{InputState, PtyError};
 use crate::store::{self, SnapshotWindow, StoreError};
 use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
 use crate::window::{
     CliInjection, ComposerResidue, EnvelopeWait, InputOrigin, LaunchIdentity, McpConnectionClaim,
-    NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, QueuedNotice, RequestedCwd,
-    SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin, WindowEntry, WindowLiveness,
-    WindowOpenError, WindowProvenance, WindowRegistry, resolve_existing_dir, window_status_wire,
+    NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, RequestedCwd, SendStage,
+    SubmitJudgment, SubmitPlacement, TaskOrigin, WakeCommand, WindowEntry, WindowLiveness,
+    WindowOpenError, WindowProvenance, WindowRegistry, resolve_existing_dir,
 };
 
 use permit::{
     ApprovedOutcome, GateOutcome, OpenDescription, OpenPurpose, OpenVerdict, OpenWindow, Permit,
-    PermittedAction, await_open_verdict, gate_approved, gate_destructive, gate_open,
+    PermittedAction, Verdict, await_verdict, gate_approved, gate_destructive, gate_open,
 };
 
 /// A connection accepted from the platform transport, named through the OS
@@ -310,19 +311,11 @@ enum PendingAction {
     Close(bool),
     /// A handoff envelope, plus the requesting window's id for the audit
     /// line (the envelope's own bytes are never logged) and the budget slot
-    /// of this handoff (`slot` is `Option` because [`release_pending_handoff`]
-    /// takes it via `&mut` across the paths that cannot consume `self`).
-    /// `opened` says whether this request opened `entry` itself: only then
-    /// does releasing the slot also tear the window down.
+    /// of this handoff, given back when the action is dropped.
     SendHandoff {
         text: String,
         requester: Option<String>,
         slot: Option<HandoffSlot>,
-        opened: bool,
-        /// Carried across the approval wait so the readiness this request
-        /// already waited for before the gate is still accounted for in the
-        /// delivery that runs once it is approved.
-        ready_hold_wait_ms: u128,
     },
 }
 
@@ -386,6 +379,8 @@ struct PlannedOpen {
     launch: LaunchIdentity,
     /// The profile's `[delivery]` table: how the window's doors answer.
     delivery: Option<ProfileDelivery>,
+    /// What a wake by command runs, when the profile wakes that way.
+    wake_command: Option<WakeCommand>,
 }
 
 /// A registration whose settings-file entries must hold for a launch to keep
@@ -449,35 +444,11 @@ struct GateContext<'a> {
     policy: &'a PolicyCell,
 }
 
-/// Everything the detached task finishing a profile-addressed handoff needs,
-/// up through the gate: the readiness wait and the gate call both need the
-/// daemon-wide collaborators ([`ApprovalBroker`], the requester's
-/// [`RequestOrigin`], the connection id) that [`DeliveryJob`] does not carry,
-/// because delivery itself never re-gates.
+/// Everything a profile-addressed handoff needs to start its window once
+/// both gates allow it.
 ///
-/// Owned throughout: the task outlives the connection that asked for it, and
-/// still has to tear its window down after that connection is gone.
-struct ProfileHandoff {
-    outbound: Arc<Outbound>,
-    registry: Arc<WindowRegistry>,
-    broker: Arc<ApprovalBroker>,
-    config: DaemonConfig,
-    origin: RequestOrigin,
-    conn_id: u64,
-    closed: watch::Receiver<bool>,
-    entry: Arc<WindowEntry>,
-    envelope: String,
-    requester: Option<String>,
-    detection_warning: Option<String>,
-    slot: HandoffSlot,
-    policy: Arc<PolicyCell>,
-}
-
-/// Everything a profile-addressed handoff needs to open its window once the
-/// open gate allows it, and to carry on as [`ProfileHandoff`] from there.
-///
-/// Owned throughout, like [`ProfileHandoff`]: while an approver is asked, the
-/// handoff waits on a task of its own, holding the slot it reserved.
+/// Owned throughout: while an approver is asked, the handoff waits on a task
+/// of its own, holding the slot it reserved. Nothing has started yet.
 struct ProfileHandoffOpen {
     planned: PlannedOpen,
     provenance: WindowProvenance,
@@ -490,7 +461,9 @@ struct ProfileHandoffOpen {
     /// Raised when the requesting connection closes.
     closed: watch::Receiver<bool>,
     envelope: String,
-    requester: Option<String>,
+    /// What the approver of the envelope reads: the lines naming what would
+    /// be started, then the envelope.
+    approval_text: String,
     slot: HandoffSlot,
     policy: Arc<PolicyCell>,
 }
@@ -498,24 +471,15 @@ struct ProfileHandoffOpen {
 impl ProfileHandoffOpen {
     /// Ends the handoff before any window exists: the slot is given back,
     /// then `message` answers the requester.
-    async fn abandon(self, message: &DaemonMessage) {
-        abandon_handoff(
-            &self.outbound,
-            &self.registry,
-            &self.config,
-            self.slot,
-            None,
-            false,
-            message,
-        )
-        .await;
+    fn abandon(self, message: &DaemonMessage) {
+        abandon_handoff(&self.outbound, self.slot, message);
     }
 }
 
-/// Everything [`deliver_handoff`] needs to submit an envelope, confirm its
-/// delivery, resend it and answer the requester, entirely on its own: no
-/// gate is consulted here, so this carries none of the daemon-wide
-/// collaborators a gate call needs (see [`ProfileHandoff`], which does).
+/// Everything [`deliver_handoff`] needs to put an envelope in a window's
+/// inbox and answer once that window's CLI took it, or never will: no gate is
+/// consulted here, so this carries none of the daemon-wide collaborators a
+/// gate call needs.
 struct DeliveryJob {
     outbound: Arc<Outbound>,
     registry: Arc<WindowRegistry>,
@@ -524,28 +488,34 @@ struct DeliveryJob {
     envelope: String,
     requester: Option<String>,
     slot: Option<HandoffSlot>,
-    /// Whether this handoff opened `entry` itself, which is what
-    /// [`release_handoff_window`] uses to decide whether a write failure
-    /// tears the window down.
-    opened: bool,
-    /// Watched for the whole delivery: a requester that leaves before the
-    /// first byte gets nothing written on its behalf, and one that leaves
-    /// later ends the delivery once its own body is taken back, if it can be.
+    /// Raised when the requester left: its connection closed, or its CLI
+    /// ended the turn the request was made in.
     closed: watch::Receiver<bool>,
-    /// What the caller already spent bringing this window past its startup
-    /// phase, which this delivery adds its own wait to before it is logged.
-    ready_hold_wait_ms: u128,
-    /// The licence this delivery writes under, taken by value so a job cannot
+    /// The licence this delivery runs under, taken by value so a job cannot
     /// be assembled for a handoff no gate allowed.
     permit: Permit<permit::SendHandoff>,
 }
 
-/// What one handoff's submit loop ended with.
+/// What a typed delivery's submit loop could observe of its envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedOutcome {
+    /// After the submit key, the composer emptied or the window started
+    /// working.
+    Confirmed,
+    /// The submit key was pressed, but no such evidence followed.
+    Unconfirmed,
+    /// The submit key was pressed, and no reaction was looked for or could be.
+    NotObserved,
+    /// The submit key was never pressed for it.
+    NotWritten,
+}
+
+/// What one typed delivery's submit loop ended with.
 ///
-/// Assembled once, where the loop leaves, so the answer and the audit line
-/// read the same values rather than each recomputing part of them.
+/// Assembled once, where the loop leaves, so every reader reads the same
+/// values rather than each recomputing part of them.
 struct DeliveryVerdict {
-    delivery: HandoffDelivery,
+    delivery: TypedOutcome,
     attempts: u8,
     /// The clock the submit sequence itself stamped, so an elapsed time
     /// computed from it measures the same span the writer measured.
@@ -559,11 +529,6 @@ enum DeliveryEnd<'a> {
     /// The submit-and-confirm loop reached a verdict.
     Finished {
         verdict: DeliveryVerdict,
-        /// Whether this delivery's own bytes remain in the receiver's
-        /// composer once the loop stopped: `None` once a placement has
-        /// happened at least once, the only fact a caller
-        /// holding a window open on this delivery's behalf needs.
-        envelope_remains: Option<bool>,
         /// What the last attempt left in the composer, for a caller that
         /// retries the same delivery later.
         residue: Option<CarriedResidue>,
@@ -579,8 +544,7 @@ enum DeliveryEnd<'a> {
     /// caller may still have to tear this window down, and no other delivery
     /// may write into a window while that teardown runs.
     WriteFailed(PtyError, AsyncMutexGuard<'a, ()>),
-    /// A [`DeliveryText::Guarded`] text declined under the delivery lock, so
-    /// nothing was written. Never produced for [`DeliveryText::Fixed`].
+    /// The text declined under the delivery lock, so nothing was written.
     Skipped,
     /// Nothing was written: the delivery was turned away before its first
     /// byte, either because too many deliveries already wait for this
@@ -615,17 +579,6 @@ enum SharedBudget {
 struct CarriedResidue {
     body: String,
     write_seq: u64,
-}
-
-/// What [`run_delivery`] writes.
-#[derive(Clone, Copy)]
-enum DeliveryText<'t> {
-    /// Written as given.
-    Fixed(&'t str),
-    /// Composed under the delivery lock, right before the first byte, so what
-    /// it checks cannot change while the delivery waits its turn.
-    /// `None` writes nothing.
-    Guarded(&'t (dyn Fn() -> Option<String> + Sync)),
 }
 
 /// One outstanding-handoff slot: a handoff this connection has accepted and
@@ -923,9 +876,9 @@ pub struct IpcServer {
     open_handoffs: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
-    /// The chat room's runtime state. [`IpcServer::new`] builds this
-    /// disabled (`ChatRuntime::disabled`, no store touched); the chat-serving
-    /// entry point is [`IpcServer::new_with_chat`].
+    /// The chat room's runtime state. [`IpcServer::new`] builds this with no
+    /// chat at all (`ChatRuntime::unwired`, no store touched); the
+    /// chat-serving entry point is [`IpcServer::new_with_chat`].
     chat: Arc<chat::ChatRuntime>,
     /// The plan ledger's runtime state. [`IpcServer::new`] and
     /// [`IpcServer::new_with_chat`] build this disabled the same way `chat`
@@ -979,12 +932,8 @@ impl IpcServer {
         endpoint: impl Into<String>,
         config: DaemonConfig,
     ) -> Self {
-        Self::new_with_chat(
-            registry,
-            endpoint,
-            config,
-            Arc::new(chat::ChatRuntime::disabled()),
-        )
+        let chat = Arc::new(chat::ChatRuntime::unwired(&config));
+        Self::new_with_chat(registry, endpoint, config, chat)
     }
 
     /// Builds a server the same way [`IpcServer::new`] does, but serving
@@ -1020,13 +969,7 @@ impl IpcServer {
         let mcp_registration_changes = Arc::new(Semaphore::new(1));
         let reports = Arc::new(report::ReportInboxes::new(Arc::clone(&registry)));
         let ledger = Arc::new(plan::PlanRuntime::disabled());
-        let notice_agents = notice_queue::NoticeAgents::install(
-            &registry,
-            Arc::clone(&reports),
-            Arc::clone(&chat),
-            Arc::clone(&ledger),
-            Arc::clone(&broker),
-        );
+        let notice_agents = notice_queue::NoticeAgents::install(&registry, Arc::clone(&reports));
 
         Self {
             registry,
@@ -1075,16 +1018,6 @@ impl IpcServer {
     /// so a daemon boot serves both chat and the plan ledger together.
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<plan::PlanRuntime>) -> Self {
-        // Reinstalled so a task notice is recorded in this ledger. Only a
-        // window opened after this call can carry one, so an agent already
-        // running on the replaced ledger never needs it.
-        self._notice_agents = notice_queue::NoticeAgents::install(
-            &self.registry,
-            Arc::clone(&self.reports),
-            Arc::clone(&self.chat),
-            Arc::clone(&ledger),
-            Arc::clone(&self.broker),
-        );
         self.ledger = ledger;
         self
     }
@@ -1701,7 +1634,7 @@ impl IpcServer {
                 if let Some(entry) =
                     self.authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
                 {
-                    inbox::handle_context(&entry, outbound, &self.config.chat_intro);
+                    inbox::handle_context(&entry, outbound, self.chat.intro_for(&entry));
                 }
                 FrameOutcome::Continue
             }
@@ -2272,9 +2205,7 @@ impl IpcServer {
         };
         let provenance = WindowProvenance {
             opener: opener_of(&state.origin),
-            task_origin: None,
-            launch: None,
-            delivery: None,
+            ..WindowProvenance::default()
         };
         let cwd = match self.registry.check_open_request(&request) {
             Ok(cwd) => cwd,
@@ -2333,7 +2264,7 @@ impl IpcServer {
         } = RequestWatch::new(&self.registry, outbound, state, open_withdrawn_msg());
         let config = self.config.clone();
         tokio::spawn(async move {
-            let verdict = await_open_verdict(ticket, &config, &mut closed).await;
+            let verdict = await_verdict(ticket, &config, &mut closed).await;
             // A requester that left as the decision came in is still gone.
             let requester_left = *closed.borrow();
             // Dropped before the open runs: a watch that outlives the wait
@@ -2429,6 +2360,25 @@ impl IpcServer {
             injections.extend(crate::profile::prepare_hooks_injection(spec, config_dir));
         }
         let reports_through_entries = launch.hooks.is_none();
+        // The program alone, without this launch's options: a wake command
+        // runs the profile's own program for a session that already exists.
+        let wake_command = match launch.delivery.as_ref().map(|delivery| &delivery.wake) {
+            Some(WakeMode::Command(_)) => {
+                let base = crate::profile::resolve_launch(
+                    &self.config,
+                    profile,
+                    None,
+                    None,
+                    &crate::profile::LaunchOptionValues::default(),
+                )
+                .map_err(|err| profile_launch_error_msg(&err))?;
+                Some(WakeCommand {
+                    argv: base.argv,
+                    env: launch.env.clone().into_iter().collect(),
+                })
+            }
+            _ => None,
+        };
         let hooks_gate = launch
             .hooks_registration
             .filter(crate::mcp_registration::McpRegistrationSpec::owns_entries)
@@ -2460,6 +2410,7 @@ impl IpcServer {
             injections,
             hooks_gate,
             delivery: launch.delivery,
+            wake_command,
         })
     }
 
@@ -2684,17 +2635,21 @@ impl IpcServer {
             }
         };
         // Only a task with something to tell the window needs one that can
-        // take it: a window nobody is going to write into is refused before
-        // it starts, the same way a profile-addressed handoff is. `None`
-        // (the definition could not be read) does not refuse the task.
-        if has_instruction
-            && self
-                .registry
-                .composer_access_before_open(planned.request.detection.as_deref())
-                .is_some_and(|access| !access.is_judged())
-        {
-            outbound.reply(&no_composer_msg());
-            return;
+        // be handed it at launch: a window that could not be is refused before
+        // it starts, the same way a profile-addressed handoff is.
+        if has_instruction {
+            if planned
+                .delivery
+                .as_ref()
+                .is_none_or(|delivery| delivery.launch_prompt.is_none())
+            {
+                outbound.reply(&no_launch_prompt_msg());
+                return;
+            }
+            if launches_through_shim(&self.config, &planned.request.command) {
+                outbound.reply(&launch_prompt_through_shim_msg());
+                return;
+            }
         }
         // The plan's lock stays held while an approver is asked, so what is
         // approved is what the plan still says when the window opens.
@@ -3027,8 +2982,8 @@ impl IpcServer {
     /// Decision order: the arguments, then the
     /// envelope and its overall size, then the profile's launch content (no
     /// side effect), then -- for a profile-addressed request -- whether the
-    /// resolved definition declares a composer, then the policy
-    /// pre-judgement, then the unwritten-handoff slot, then the target
+    /// profile can be handed the envelope at launch, then the policy
+    /// pre-judgement, then the unanswered-handoff slot, then the target
     /// itself. Everything that can be refused before a child exists is
     /// refused before one is spawned, and none of those refusals depends on
     /// who is asking.
@@ -3037,10 +2992,11 @@ impl IpcServer {
     /// describes only the requester: refusing an oversized one must not
     /// depend on whether the target could be reached.
     ///
-    /// A profile-addressed request returns from here as soon as its window is
-    /// open. The readiness wait, the gate and the write run on their own task
-    /// ([`run_profile_handoff`]), so the connection keeps serving frames while
-    /// a handoff is outstanding.
+    /// An existing window is handed the envelope through its inbox, and the
+    /// request is answered on a task of its own ([`deliver_handoff`]) once the
+    /// window's CLI took it or never will. A profile-addressed request is
+    /// approved before anything starts, and its window is started with the
+    /// envelope as its launch prompt.
     async fn handle_send_handoff(
         &self,
         outbound: &Arc<Outbound>,
@@ -3089,12 +3045,9 @@ impl IpcServer {
         match (window_id, profile) {
             (Some(window_id), None) => {
                 // The slot is taken for a window_id-addressed handoff too: it
-                // is now a detached task that stays outstanding until
-                // answered, the same resource a profile-opened window's
-                // handoff spends. `opened` is always `false`
-                // here, so releasing it never closes this pre-existing
-                // window. The daemon-wide budget is drawn once the delivery
-                // holds the window's turn, not while it waits for it.
+                // is a detached task that stays outstanding until answered.
+                // The daemon-wide budget is drawn only while the envelope is
+                // being typed, not while it waits.
                 let slot = match HandoffSlot::try_acquire_per_conn(
                     &state.open_handoffs,
                     self.config.max_open_handoffs_per_conn,
@@ -3109,80 +3062,55 @@ impl IpcServer {
                 };
 
                 let Some(entry) = self.registry.get(&window_id) else {
-                    abandon_handoff(
-                        outbound,
-                        &self.registry,
-                        &self.config,
-                        slot,
-                        None,
-                        false,
-                        &window_not_found_msg(),
-                    )
-                    .await;
+                    abandon_handoff(outbound, slot, &window_not_found_msg());
                     return;
                 };
                 if is_confirmed_exited(&entry) {
-                    abandon_handoff(
-                        outbound,
-                        &self.registry,
-                        &self.config,
-                        slot,
-                        Some(&entry),
-                        false,
-                        &child_exited_msg(),
-                    )
-                    .await;
+                    abandon_handoff(outbound, slot, &child_exited_msg());
                     return;
                 }
-                let permit = match gate_destructive(
-                    &self.gate_context(state),
-                    &entry,
-                    permit::SendHandoff,
-                    Some(&envelope.text),
-                ) {
-                    GateOutcome::Proceed(permit) => permit,
-                    GateOutcome::Pending(ticket) => {
-                        let withdrawn = handoff_withdrawn_msg(entry.window_id(), false);
-                        spawn_pending(
-                            RequestWatch::new(&self.registry, outbound, state, withdrawn),
-                            Arc::clone(&self.registry),
-                            self.config.clone(),
-                            entry,
-                            PendingAction::SendHandoff {
-                                text: envelope.text,
-                                requester: requester_id,
-                                slot: Some(slot),
-                                opened: false,
-                                ready_hold_wait_ms: 0,
-                            },
-                            ticket,
-                        );
-                        return;
-                    }
-                    GateOutcome::Refused(message) => {
-                        abandon_handoff(
-                            outbound,
-                            &self.registry,
-                            &self.config,
-                            slot,
-                            Some(&entry),
-                            false,
-                            &message,
-                        )
-                        .await;
-                        return;
-                    }
-                };
+                // Answered before any gate: nothing could ever reach this
+                // window's CLI, so there is nothing to approve.
+                if !entry.delivers() {
+                    abandon_handoff(
+                        outbound,
+                        slot,
+                        &DaemonMessage::HandoffSent {
+                            window_id: entry.window_id().to_string(),
+                            opened: false,
+                            delivery: HandoffDelivery::UndeliveredNoDelivery,
+                        },
+                    );
+                    return;
+                }
+                let permit =
+                    match permit::gate_handoff(&self.gate_context(state), &entry, &envelope.text) {
+                        GateOutcome::Proceed(permit) => permit,
+                        GateOutcome::Pending(ticket) => {
+                            spawn_pending(
+                                RequestWatch::quiet(&self.registry, outbound, state),
+                                Arc::clone(&self.registry),
+                                self.config.clone(),
+                                entry,
+                                PendingAction::SendHandoff {
+                                    text: envelope.text,
+                                    requester: requester_id,
+                                    slot: Some(slot),
+                                },
+                                ticket,
+                            );
+                            return;
+                        }
+                        GateOutcome::Refused(message) => {
+                            abandon_handoff(outbound, slot, &message);
+                            return;
+                        }
+                    };
 
-                let RequestWatch { outbound, left } = RequestWatch::new(
-                    &self.registry,
-                    outbound,
-                    state,
-                    handoff_withdrawn_msg(entry.window_id(), false),
-                );
+                let RequestWatch { outbound, left } =
+                    RequestWatch::quiet(&self.registry, outbound, state);
                 // Detached so this connection's frame loop keeps serving
-                // other requests while delivery is confirmed and, if needed,
-                // resent.
+                // other requests while the envelope waits for the window's CLI.
                 tokio::spawn(deliver_handoff(DeliveryJob {
                     outbound,
                     registry: Arc::clone(&self.registry),
@@ -3191,9 +3119,7 @@ impl IpcServer {
                     envelope: envelope.text,
                     requester: requester_id,
                     slot: Some(slot),
-                    opened: false,
                     closed: left,
-                    ready_hold_wait_ms: 0,
                     permit,
                 }));
             }
@@ -3208,17 +3134,20 @@ impl IpcServer {
                         return;
                     }
                 };
-                // The resolved definition's own declaration is known before a
-                // child exists, so a handoff already known to be refused
-                // never opens a window for it. `None` (the definition could
-                // not be read) does not refuse here: the window still opens
-                // and its readiness wait ends in `window_not_ready`.
-                if self
-                    .registry
-                    .composer_access_before_open(planned.request.detection.as_deref())
-                    .is_some_and(|access| !access.is_judged())
+                // The envelope is handed over as the launch prompt, so a
+                // profile that declares none, or whose program would pass it
+                // through the command interpreter, is refused before anything
+                // starts.
+                if planned
+                    .delivery
+                    .as_ref()
+                    .is_none_or(|delivery| delivery.launch_prompt.is_none())
                 {
-                    outbound.reply(&no_composer_msg());
+                    outbound.reply(&no_launch_prompt_msg());
+                    return;
+                }
+                if launches_through_shim(&self.config, &planned.request.command) {
+                    outbound.reply(&launch_prompt_through_shim_msg());
                     return;
                 }
                 let cwd = match self.registry.check_open_request(&planned.request) {
@@ -3229,9 +3158,9 @@ impl IpcServer {
                     }
                 };
 
-                // The same policy half of the gate the window would face once
-                // it exists. Asking it now means a request nobody could ever
-                // approve is refused before a child is spawned for it.
+                // The same policy half of the gate the envelope faces below.
+                // Asking it now means a request nobody could ever approve is
+                // refused before a slot is reserved for it.
                 let policy_snapshot = self.policy.snapshot();
                 match control::policy_gate(
                     live_policy::policy_source(&policy_snapshot),
@@ -3264,8 +3193,8 @@ impl IpcServer {
                     }
                 };
 
-                // Starting the process is asked about before the window
-                // exists; the envelope's own approval follows once it is ready.
+                // One decision, before anything starts, both starts the
+                // process and hands it the envelope.
                 let description =
                     OpenDescription::for_profile(&profile, Some(&cwd), Some(OpenPurpose::Handoff));
                 let job = ProfileHandoffOpen {
@@ -3281,25 +3210,12 @@ impl IpcServer {
                     origin: state.origin.clone(),
                     conn_id: state.conn_id,
                     closed: state.closed.subscribe(),
+                    approval_text: format!("{}\n{}", description.text(), envelope.text),
                     envelope: envelope.text,
-                    requester: requester_id,
                     slot,
                     policy: Arc::clone(&self.policy),
                 };
-                self.open_when_permitted(
-                    outbound,
-                    state,
-                    &description,
-                    move |verdict| async move {
-                        match verdict {
-                            OpenVerdict::Approved(permit) => {
-                                open_profile_handoff(job, permit).await
-                            }
-                            OpenVerdict::Refused(message) => job.abandon(&message).await,
-                        }
-                    },
-                )
-                .await;
+                approve_profile_handoff(job).await;
             }
             // `validate_handoff_target` already refused a request naming
             // neither target or both of them; refusing again is the
@@ -4126,6 +4042,13 @@ const NO_COMPOSER_MESSAGE: &str = "this window declares no composer, or declares
      [input] table lets it): to run a command, open a window with it (open_window's command); \
      to press keys in it, use send_keys";
 
+/// Why a window that would be handed a request at launch is refused when its
+/// profile declares no way to hand one over. It keeps the alternatives
+/// [`NO_COMPOSER_MESSAGE`] names.
+const NO_LAUNCH_PROMPT_MESSAGE: &str = "this profile declares no launch_prompt in its [delivery] \
+     table, so a request cannot be handed to its CLI at launch: to run a command, open a window \
+     with it (open_window's command); to press keys in a window, use send_keys";
+
 /// The `no_composer` refusal, answered wherever a request would type
 /// daemon-composed text into a window that declares no composer.
 fn no_composer_msg() -> DaemonMessage {
@@ -4579,24 +4502,24 @@ fn requester_left(closed: &Option<watch::Receiver<bool>>) -> bool {
         .is_some_and(|rx| *rx.borrow() || rx.has_changed().is_err())
 }
 
-/// The delivery core shared by a handoff ([`deliver_handoff`]) and a chat
-/// post: takes `entry`'s delivery lock, waits out its startup
-/// phase if it is still building one, subscribes to its status, then writes
-/// `text` and confirms/resends it under `entry`'s own input profile. A
-/// [`DeliveryText::Guarded`] text is composed only at that point, under the
-/// lock, and ends in [`DeliveryEnd::Skipped`] when it declines.
+/// The core of typing a parcel into a window: takes `entry`'s delivery lock,
+/// waits out its startup phase if it is still building one, subscribes to its
+/// status, then composes the text (`compose`, under the lock, so what it
+/// checks cannot change while the delivery waits its turn; `None` ends in
+/// [`DeliveryEnd::Skipped`]), writes it and confirms/resends it under
+/// `entry`'s own input profile.
 ///
-/// `closed` is a handoff's requester connection, watched for the whole
-/// delivery; `None` for chat, which delivers on nobody's connection. A
-/// requester that leaves after the first byte ends the delivery in
-/// [`DeliveryEnd::Finished`], with whatever of its own still remains.
+/// `closed` is raised when whoever the text is for no longer wants it,
+/// watched for the whole delivery. One raised after the first byte ends the
+/// delivery in [`DeliveryEnd::Finished`], with whatever of its own still
+/// remains.
 /// `ready_hold_wait_ms` is the caller's own prior readiness wait, carried
 /// onward into the verdict. `carried` is what an earlier call for the
 /// same delivery left in the composer (`None` for a first call); the residue
 /// this call leaves is returned in [`DeliveryEnd::Finished`].
 async fn run_delivery<'a>(
     entry: &'a WindowEntry,
-    text: DeliveryText<'_>,
+    compose: &(dyn Fn() -> Option<String> + Sync),
     config: &DaemonConfig,
     mut closed: Option<watch::Receiver<bool>>,
     mut ready_hold_wait_ms: u128,
@@ -4696,17 +4619,10 @@ async fn run_delivery<'a>(
     // this envelope.
     let mut rx = entry.subscribe_status();
 
-    let composed;
-    let envelope = match text {
-        DeliveryText::Fixed(envelope) => envelope,
-        DeliveryText::Guarded(compose) => {
-            let Some(envelope) = compose() else {
-                return DeliveryEnd::Skipped;
-            };
-            composed = envelope;
-            composed.as_str()
-        }
+    let Some(composed) = compose() else {
+        return DeliveryEnd::Skipped;
     };
+    let envelope = composed.as_str();
     // Whether this envelope remains in the receiver's composer once the loop
     // stops; the only fact the teardown decision reads. `None` once the
     // submit key has been pressed: the envelope may already be in front of
@@ -4757,9 +4673,9 @@ async fn run_delivery<'a>(
             }) => {
                 foreign_draft = false;
                 let delivery = if reason == NotPlacedReason::Taken {
-                    HandoffDelivery::Confirmed
+                    TypedOutcome::Confirmed
                 } else {
-                    HandoffDelivery::Unconfirmed
+                    TypedOutcome::Unconfirmed
                 };
                 break DeliveryVerdict {
                     delivery,
@@ -4792,20 +4708,18 @@ async fn run_delivery<'a>(
                     // that follows an earlier placement is not: that
                     // envelope was submitted and simply went unconfirmed.
                     let delivery = if placements == 0 {
-                        // `HandoffDelivery` carries no reason of its own
-                        // (external contract); the reason a
-                        // `send_text` caller reads in its error message is
-                        // logged here instead, so an operator has the same
-                        // distinction available for a handoff.
+                        // The reason a `send_text` caller reads in its error
+                        // message is logged here instead, so an operator has
+                        // the same distinction available for a typed delivery.
                         tracing::info!(
                             window_id = %entry.window_id(),
                             reason = ?reason,
                             envelope_remains = ?envelope_remains,
-                            "handoff envelope was not written"
+                            "typed delivery was not written"
                         );
-                        HandoffDelivery::NotWritten
+                        TypedOutcome::NotWritten
                     } else {
-                        HandoffDelivery::Unconfirmed
+                        TypedOutcome::Unconfirmed
                     };
                     break DeliveryVerdict {
                         delivery,
@@ -4821,7 +4735,7 @@ async fn run_delivery<'a>(
 
         if profile.delivery_confirm.is_zero() {
             break DeliveryVerdict {
-                delivery: HandoffDelivery::NotObserved,
+                delivery: TypedOutcome::NotObserved,
                 attempts: placements,
                 submitted_at: outcome.submitted_at,
                 status_before_submit: outcome.status_before_submit,
@@ -4829,7 +4743,7 @@ async fn run_delivery<'a>(
             };
         }
         let unanswered = DeliveryVerdict {
-            delivery: HandoffDelivery::Unconfirmed,
+            delivery: TypedOutcome::Unconfirmed,
             attempts: placements,
             submitted_at: outcome.submitted_at,
             status_before_submit: outcome.status_before_submit,
@@ -4850,7 +4764,7 @@ async fn run_delivery<'a>(
         match evidence {
             SubmitEvidence::Taken => {
                 break DeliveryVerdict {
-                    delivery: HandoffDelivery::Confirmed,
+                    delivery: TypedOutcome::Confirmed,
                     attempts: placements,
                     submitted_at: outcome.submitted_at,
                     status_before_submit: outcome.status_before_submit,
@@ -4860,7 +4774,7 @@ async fn run_delivery<'a>(
             SubmitEvidence::Unanswered => break unanswered,
             SubmitEvidence::Unobservable => {
                 break DeliveryVerdict {
-                    delivery: HandoffDelivery::NotObserved,
+                    delivery: TypedOutcome::NotObserved,
                     attempts: placements,
                     submitted_at: outcome.submitted_at,
                     status_before_submit: outcome.status_before_submit,
@@ -4894,7 +4808,6 @@ async fn run_delivery<'a>(
     });
     DeliveryEnd::Finished {
         verdict,
-        envelope_remains,
         residue,
         foreign_draft,
     }
@@ -4988,6 +4901,17 @@ async fn wait_for_submit_evidence(
     }
 }
 
+/// Names each handoff's parcel, so the one this handoff put in a window's
+/// inbox can be withdrawn and no other.
+static NEXT_HANDOFF_PARCEL: AtomicU64 = AtomicU64::new(1);
+
+/// Puts a handoff's envelope in its window's inbox and answers once the
+/// window's CLI took it, or once it is known it never will: nothing took it
+/// within `handoff_delivery_timeout_secs`, or the requester left.
+///
+/// What runs out of time or is withdrawn is taken out of the inbox under the
+/// same lock its doors take a parcel under, before the answer: an answer of
+/// `undelivered_*` is never followed by the envelope reaching the CLI.
 async fn deliver_handoff(job: DeliveryJob) {
     let DeliveryJob {
         outbound,
@@ -4997,429 +4921,246 @@ async fn deliver_handoff(job: DeliveryJob) {
         envelope,
         requester,
         slot,
-        opened,
-        closed,
-        ready_hold_wait_ms,
+        mut closed,
         permit: _permit,
     } = job;
 
     if *closed.borrow() {
-        if let Some(slot) = slot {
-            release_handoff_window(slot, &registry, &config, &entry, opened).await;
-        }
+        drop(slot);
         return;
     }
 
-    // Audit trail: who asked, which window received it, whether this request
-    // opened that window, and how long the envelope was. The envelope itself
-    // is never logged, matching the rule that no raw PTY data is logged.
+    // Audit trail: who asked, which window received it, and how long the
+    // envelope was. The envelope itself is never logged, matching the rule
+    // that no raw PTY data is logged.
     tracing::info!(
         requester = ?requester,
         window_id = %entry.window_id(),
-        opened,
         envelope_len = envelope.len(),
         "accepted send_handoff"
     );
 
-    let budget = slot
-        .as_ref()
-        .map_or(SharedBudget::NotNeeded, HandoffSlot::shared_budget);
-    match run_delivery(
+    let key = format!(
+        "handoff:{}",
+        NEXT_HANDOFF_PARCEL.fetch_add(1, Ordering::Relaxed)
+    );
+    // The daemon-wide budget is drawn only while the envelope is being typed,
+    // so a window that never takes it holds none of it.
+    let budget = slot.as_ref().and_then(|slot| match slot.shared_budget() {
+        SharedBudget::Counter { counter, max } => Some(PushBudget { counter, max }),
+        SharedBudget::NotNeeded => None,
+    });
+    let end = match notice_queue::deposit(
+        &registry,
         &entry,
-        DeliveryText::Fixed(&envelope),
-        &config,
-        Some(closed),
-        ready_hold_wait_ms,
-        None,
+        Parcel::new(key.clone(), envelope),
         budget,
-    )
-    .await
-    {
-        // `Skipped` is never produced for a fixed text.
-        DeliveryEnd::Aborted | DeliveryEnd::Skipped => {
-            if let Some(slot) = slot {
-                release_handoff_window(slot, &registry, &config, &entry, opened).await;
-            }
-        }
-        DeliveryEnd::Exhausted(scarce) => {
-            let message = delivery_exhausted_msg(scarce);
-            match slot {
-                Some(slot) => {
-                    abandon_handoff(
-                        &outbound,
-                        &registry,
-                        &config,
-                        slot,
-                        Some(&entry),
-                        opened,
-                        &message,
-                    )
-                    .await;
-                }
-                None => outbound.reply(&message),
-            }
-        }
-        DeliveryEnd::WriteFailed(err, guard) => {
-            if let Some(slot) = slot {
-                release_handoff_window(slot, &registry, &config, &entry, opened).await;
-            }
-            // Released only once the window this failure may have torn down
-            // is gone, so no delivery waiting on the lock can write into a
-            // window that is being closed.
-            drop(guard);
-            outbound.reply(&match err {
-                // Secondary fail-safe for the condition the confirmed
-                // status is the primary source of truth for: the child
-                // can exit between the readiness wait and this write.
-                PtyError::ChildExited => child_exited_msg(),
-                _ => error_msg(
-                    "internal",
-                    "failed to write the handoff envelope to the PTY",
-                ),
+        Some(config.max_turn_waiters_per_window),
+    ) {
+        Ok(end) => end,
+        Err(refused) => {
+            drop(slot);
+            outbound.reply(&match refused {
+                notice_queue::Refused::Full => delivery_exhausted_msg(Scarce::TurnWaiters),
+                notice_queue::Refused::Ended => child_exited_msg(),
             });
+            return;
         }
-        DeliveryEnd::Finished {
-            verdict,
-            envelope_remains,
-            ..
-        } => {
-            let DeliveryVerdict {
-                delivery,
-                attempts,
-                submitted_at,
-                status_before_submit,
-                ready_hold_wait_ms,
-            } = verdict;
+    };
 
-            tracing::info!(
-                requester = ?requester,
-                window_id = %entry.window_id(),
-                opened,
-                attempts,
-                elapsed_since_submitted_ms = submitted_at.elapsed().as_millis(),
-                status_before_submit = %window_status_wire(status_before_submit),
-                ready_hold_wait_ms,
-                delivery = ?delivery,
-                "handoff delivery finished"
-            );
-
-            // Whether this delivery's own bytes remain in the composer alone
-            // decides teardown, whatever the `delivery` value: a delivery that
-            // placed its envelope always leaves `envelope_remains` `None` here
-            // and the window stays open.
-            match (slot, envelope_remains) {
-                (Some(slot), Some(false)) => {
-                    release_handoff_window(slot, &registry, &config, &entry, opened).await;
-                }
-                (slot, _) => drop(slot),
-            }
-            outbound.reply(&DaemonMessage::HandoffSent {
-                window_id: entry.window_id().to_string(),
-                opened,
-                delivery,
-            });
-        }
-    }
-}
-
-/// Tears down the window a handoff opened (`opened == true`) and then
-/// releases its slot, in that order, so the budget is free before whoever
-/// asked is answered. When `opened` is `false` -- an existing window
-/// addressed by `window_id` -- only the slot is released: a failed handoff
-/// never closes a window it did not open.
-///
-/// A failed teardown is a warning, not an answer: the requester's own outcome
-/// is decided by whatever refused the handoff, and the slot must come back
-/// either way.
-async fn release_handoff_window(
-    slot: HandoffSlot,
-    registry: &WindowRegistry,
-    config: &DaemonConfig,
-    entry: &WindowEntry,
-    opened: bool,
-) {
-    if opened && let Err(err) = close_for_cleanup(registry, config, entry, false).await {
-        tracing::warn!(
-            window_id = entry.window_id(),
-            error = %err,
-            "failed to close the window opened for a handoff that was never delivered"
-        );
-    }
+    let answer = await_handoff_end(&entry, &key, end, &mut closed, &config).await;
+    tracing::info!(
+        requester = ?requester,
+        window_id = %entry.window_id(),
+        "handoff delivery finished"
+    );
+    // Given back before the answer, so a caller holding the answer also has
+    // its budget back.
     drop(slot);
+    outbound.reply(&answer);
 }
 
-/// Answers a handoff that reserved a slot but will never be delivered.
-///
-/// The one ending for every such path: the window this handoff opened
-/// (`entry`, `Some` only when `opened` is also true; absent when the open
-/// itself failed, or never relevant for a `window_id`-addressed handoff) is
-/// retired, and the slot is released, both strictly before the answer goes
-/// out, so a caller holding that answer also has its budget back. The
-/// child's exit is not confirmed first, so the answer means the window was
-/// let go, not that the process is already gone.
-async fn abandon_handoff(
-    outbound: &Outbound,
-    registry: &WindowRegistry,
+/// Waits for the end of the handoff parcel named `key` and returns the answer.
+async fn await_handoff_end(
+    entry: &WindowEntry,
+    key: &str,
+    mut end: oneshot::Receiver<ParcelEnd>,
+    closed: &mut watch::Receiver<bool>,
     config: &DaemonConfig,
-    slot: HandoffSlot,
-    entry: Option<&WindowEntry>,
-    opened: bool,
-    message: &DaemonMessage,
-) {
-    match entry {
-        Some(entry) => release_handoff_window(slot, registry, config, entry, opened).await,
-        None => drop(slot),
+) -> DaemonMessage {
+    let sent = |delivery| DaemonMessage::HandoffSent {
+        window_id: entry.window_id().to_string(),
+        opened: false,
+        delivery,
+    };
+    let deadline = tokio::time::sleep(Duration::from_secs(config.handoff_delivery_timeout_secs));
+    tokio::pin!(deadline);
+    let mut timed_out = false;
+    loop {
+        tokio::select! {
+            biased;
+            ended = &mut end => {
+                return match ended {
+                    Ok(ParcelEnd::Taken) => sent(HandoffDelivery::Taken),
+                    Ok(ParcelEnd::TurnedAway) => SlotExhausted::Daemon.to_message(),
+                    Ok(ParcelEnd::Closed | ParcelEnd::Stopped) => child_exited_msg(),
+                    // Dropped unsettled: it was withdrawn under way and its
+                    // push did not get it to the CLI.
+                    Err(_) => sent(HandoffDelivery::UndeliveredTimeout),
+                };
+            }
+            _ = closed.changed() => {
+                // Withdrawn before the answer: a push under way gives up and
+                // takes its text back if it still can.
+                let _ = entry.inbox().withdraw(key);
+                return handoff_withdrawn_msg(entry.window_id());
+            }
+            () = &mut deadline, if !timed_out => {
+                match entry.inbox().withdraw(key) {
+                    Withdrawal::Removed => return sent(HandoffDelivery::UndeliveredTimeout),
+                    // Being typed: its push decides; or it already ended.
+                    Withdrawal::UnderWay | Withdrawal::Gone => timed_out = true,
+                }
+            }
+        }
     }
+}
+
+/// Answers a handoff that reserved a slot but will never be delivered: the
+/// slot is released strictly before the answer goes out, so a caller holding
+/// that answer also has its budget back.
+fn abandon_handoff(outbound: &Outbound, slot: HandoffSlot, message: &DaemonMessage) {
+    drop(slot);
     outbound.reply(message);
 }
 
-/// Releases the window and slot a pending request is holding, when that
-/// request is a handoff.
-///
-/// Called before every answer a pending request gets that is not the
-/// delivery itself, so no path out of the approval wait leaves a
-/// profile-opened window running or a budget spent.
-async fn release_pending_handoff(
-    action: &mut PendingAction,
-    registry: &WindowRegistry,
-    config: &DaemonConfig,
-    entry: &WindowEntry,
-) {
-    let PendingAction::SendHandoff { slot, opened, .. } = action else {
-        return;
-    };
-    let Some(slot) = slot.take() else {
-        return;
-    };
-    release_handoff_window(slot, registry, config, entry, *opened).await;
+/// Whether `argv`'s program is a Windows `.cmd` / `.bat` file, which the
+/// command interpreter starts and whose arguments it reads as its own syntax:
+/// a launch prompt cannot be passed through it unchanged.
+fn launches_through_shim(config: &DaemonConfig, argv: &[String]) -> bool {
+    let predicate = crate::profile::is_executable_predicate(config);
+    matches!(
+        yagura_os::program::resolve_program(
+            argv,
+            config.host_os.platform(),
+            &config.program_lookup,
+            &predicate,
+        ),
+        Ok(yagura_os::program::Resolution::CmdShim { .. })
+    )
 }
 
-/// Races `entry`'s readiness wait against the requester's own disconnect:
-/// `Ok` carries whatever the readiness wait itself observed, `Err` means
-/// `closed` fired first. What `Reached` leads to is the caller's to decide.
-async fn wait_for_ready_watching_disconnect(
-    entry: &WindowEntry,
-    closed: &mut watch::Receiver<bool>,
-    ready_hold: Duration,
-    ready_timeout: Duration,
-) -> Result<WaitOutcome, ()> {
-    tokio::select! {
-        outcome = waiter::wait_for_any_held(
-            entry.watch_status(),
-            READY_STATUSES,
-            ready_hold,
-            ready_timeout,
-        ) => Ok(outcome),
-        _ = closed.changed() => Err(()),
+/// The refusal for a window that would be handed a request at launch whose
+/// profile declares no way to.
+fn no_launch_prompt_msg() -> DaemonMessage {
+    error_msg("no_composer", NO_LAUNCH_PROMPT_MESSAGE)
+}
+
+/// The refusal for a window that would be handed a request at launch through
+/// a Windows `.cmd` / `.bat` file.
+fn launch_prompt_through_shim_msg() -> DaemonMessage {
+    error_msg(
+        "unsupported",
+        "this profile's program is a Windows .cmd / .bat file, through which a request \
+         handed over at launch cannot pass unchanged, so nothing was started",
+    )
+}
+
+/// Judges a profile-addressed handoff before anything starts, then starts its
+/// window with the envelope.
+async fn approve_profile_handoff(job: ProfileHandoffOpen) {
+    let outcome = {
+        let context = GateContext {
+            config: &job.config,
+            broker: &job.broker,
+            registry: &job.registry,
+            origin: &job.origin,
+            conn_id: job.conn_id,
+            policy: &job.policy,
+        };
+        permit::gate_launched_handoff(&context, &job.approval_text)
+    };
+    match outcome {
+        GateOutcome::Proceed(permit) => start_profile_handoff(job, permit).await,
+        GateOutcome::Refused(message) => job.abandon(&message),
+        GateOutcome::Pending(ticket) => {
+            let RequestWatch {
+                outbound,
+                left: mut closed,
+            } = RequestWatch::detached(
+                &job.registry,
+                &job.outbound,
+                &job.origin,
+                job.closed.clone(),
+                open_withdrawn_msg(),
+            );
+            let config = job.config.clone();
+            tokio::spawn(async move {
+                let verdict = await_verdict(ticket, &config, &mut closed).await;
+                let requester_left = *closed.borrow();
+                drop(closed);
+                let job = ProfileHandoffOpen { outbound, ..job };
+                match verdict {
+                    Some(Verdict::Approved(permit)) if !requester_left => {
+                        start_profile_handoff(job, permit).await;
+                    }
+                    Some(Verdict::Refused(message)) if !requester_left => job.abandon(&message),
+                    // Nobody is left to answer; dropping the job gives its slot back.
+                    _ => drop(job),
+                }
+            });
+        }
     }
 }
 
-/// Opens the window a profile-addressed handoff is for, under the permit the
-/// open gate issued, and hands the rest to [`run_profile_handoff`].
-///
-/// A window that cannot be opened ends the handoff here, with its slot given
-/// back before the requester is answered.
-async fn open_profile_handoff(job: ProfileHandoffOpen, permit: Permit<OpenWindow>) {
+/// Starts the window a profile-addressed handoff is for, with its envelope as
+/// the launch prompt, and answers `taken` once the window started: the CLI
+/// was handed the envelope by being started with it.
+async fn start_profile_handoff(job: ProfileHandoffOpen, permit: Permit<permit::LaunchHandoff>) {
+    let (open_permit, _handoff_permit) = permit.split();
     let ProfileHandoffOpen {
-        planned,
+        mut planned,
         provenance,
         outbound,
         registry,
-        broker,
         config,
-        origin,
-        conn_id,
         closed,
         envelope,
-        requester,
         slot,
-        policy,
+        ..
     } = job;
-    let opened = match open_planned(&registry, &config, planned, provenance, permit).await {
-        Ok(opened) => opened,
-        Err(err) => {
-            abandon_handoff(
-                &outbound,
-                &registry,
-                &config,
-                slot,
-                None,
-                false,
-                &window_open_error_msg(&err),
-            )
-            .await;
-            return;
-        }
-    };
-
-    let RequestWatch { outbound, left } = RequestWatch::detached(
-        &registry,
-        &outbound,
-        &origin,
-        closed,
-        handoff_withdrawn_msg(opened.entry.window_id(), true),
-    );
-    tokio::spawn(run_profile_handoff(ProfileHandoff {
-        outbound,
-        registry,
-        broker,
-        config,
-        origin,
-        conn_id,
-        closed: left,
-        entry: opened.entry,
-        envelope,
-        requester,
-        detection_warning: opened.detection_warning,
-        slot,
-        policy,
-    }));
-}
-
-/// Finishes a profile-addressed handoff: waits for the window it opened to
-/// become ready, runs the same gate every destructive tool goes through, and
-/// hands the rest -- submission, delivery confirmation, resends and the
-/// answer -- to [`deliver_handoff`].
-///
-/// Runs detached so the requesting connection keeps serving frames, and so
-/// the window stays this task's to tear down even after that connection is
-/// gone. Every path that does not deliver closes that window and releases its
-/// slot before the requester is answered.
-async fn run_profile_handoff(handoff: ProfileHandoff) {
-    let ProfileHandoff {
-        outbound,
-        registry,
-        broker,
-        config,
-        origin,
-        conn_id,
-        mut closed,
-        entry,
-        envelope,
-        requester,
-        detection_warning,
-        slot,
-        policy,
-    } = handoff;
-
-    let ready_hold = entry.input_profile().ready_hold;
-    let ready_timeout = Duration::from_secs(config.handoff_ready_timeout_secs);
-    // Only the wait itself is measured: neither spawning the child nor the
-    // approval that may follow is time this window spent becoming writable.
-    let started = Instant::now();
-    let outcome =
-        match wait_for_ready_watching_disconnect(&entry, &mut closed, ready_hold, ready_timeout)
-            .await
-        {
-            Ok(outcome) => outcome,
-            // Nobody is left to receive the envelope, but the window this request
-            // opened is still this task's to retire.
-            Err(()) => {
-                release_handoff_window(slot, &registry, &config, &entry, true).await;
-                return;
-            }
-        };
-    let ready_hold_wait_ms = started.elapsed().as_millis();
-    match outcome {
-        WaitOutcome::Reached => {}
-        // The pair the wait actually observed explains the refusal; the
-        // window is not read back for one.
-        WaitOutcome::Timeout { current } | WaitOutcome::ChildExited { current } => {
-            abandon_handoff(
-                &outbound,
-                &registry,
-                &config,
-                slot,
-                Some(&entry),
-                true,
-                &window_not_ready_msg(
-                    config.handoff_ready_timeout_secs,
-                    current,
-                    detection_warning.as_deref(),
-                    ready_hold,
-                ),
-            )
-            .await;
-            return;
-        }
-        // Nothing was observed, so the readiness wording -- which speaks of a
-        // last status -- would be a fiction. The window left the registry,
-        // which is what the caller is told instead.
-        WaitOutcome::Detached => {
-            abandon_handoff(
-                &outbound,
-                &registry,
-                &config,
-                slot,
-                Some(&entry),
-                true,
-                &window_not_found_msg(),
-            )
-            .await;
-            return;
-        }
+    if *closed.borrow() {
+        drop(slot);
+        return;
     }
-    entry.note_left_startup_phase();
-
-    let context = GateContext {
-        config: &config,
-        broker: &broker,
-        registry: &registry,
-        origin: &origin,
-        conn_id,
-        policy: &policy,
+    let Some(prompt) = planned
+        .delivery
+        .as_ref()
+        .and_then(|delivery| launch_prompt_injection(delivery, &envelope))
+    else {
+        abandon_handoff(&outbound, slot, &no_launch_prompt_msg());
+        return;
     };
-    let permit = match gate_destructive(&context, &entry, permit::SendHandoff, Some(&envelope)) {
-        GateOutcome::Proceed(permit) => permit,
-        GateOutcome::Pending(ticket) => {
-            spawn_pending(
-                RequestWatch {
-                    outbound: Arc::clone(&outbound),
-                    left: closed.clone(),
-                },
-                Arc::clone(&registry),
-                config.clone(),
-                Arc::clone(&entry),
-                PendingAction::SendHandoff {
-                    text: envelope,
-                    requester,
-                    slot: Some(slot),
-                    opened: true,
-                    ready_hold_wait_ms,
-                },
-                ticket,
+    planned.injections.push(prompt);
+    match open_planned(&registry, &config, planned, provenance, open_permit).await {
+        Ok(opened) => {
+            tracing::info!(
+                window_id = %opened.window_id,
+                envelope_len = envelope.len(),
+                "handoff envelope handed over at launch"
             );
-            return;
-        }
-        GateOutcome::Refused(message) => {
             abandon_handoff(
                 &outbound,
-                &registry,
-                &config,
                 slot,
-                Some(&entry),
-                true,
-                &message,
-            )
-            .await;
-            return;
+                &DaemonMessage::HandoffSent {
+                    window_id: opened.window_id,
+                    opened: true,
+                    delivery: HandoffDelivery::Taken,
+                },
+            );
         }
-    };
-
-    deliver_handoff(DeliveryJob {
-        outbound,
-        registry,
-        config,
-        entry,
-        envelope,
-        requester,
-        slot: Some(slot),
-        opened: true,
-        closed,
-        ready_hold_wait_ms,
-        permit,
-    })
-    .await;
+        Err(err) => abandon_handoff(&outbound, slot, &window_open_error_msg(&err)),
+    }
 }
 
 /// What opening the window of one plan task needs once the open gate allows
@@ -5454,13 +5195,27 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
         broker,
         config,
         outbound,
-        planned,
+        mut planned,
         change,
         plan_id,
         task_id,
         has_instruction,
         resolved,
     } = job;
+    // Handed over as the launch prompt only, so a window started again from
+    // what is stored is never handed the task a second time.
+    if has_instruction {
+        let notice = compose_task_notice(&plan_id, &task_id);
+        let Some(prompt) = planned
+            .delivery
+            .as_ref()
+            .and_then(|delivery| launch_prompt_injection(delivery, &notice))
+        else {
+            outbound.reply(&no_launch_prompt_msg());
+            return;
+        };
+        planned.injections.push(prompt);
+    }
     // No opener: a task window's parent comes from its plan alone, and
     // it has none once it is no longer bound to the task.
     let provenance = WindowProvenance {
@@ -5489,40 +5244,21 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
 
     match bind_result {
         Ok(Ok(())) => {
+            // The window was started with its notice, so it is delivered.
+            if has_instruction {
+                plan::record_task_notice(
+                    &ledger,
+                    &broker,
+                    &opened.window_id,
+                    &plan_id_for_bind,
+                    &task_id,
+                    InstructionNoticeState::Delivered,
+                )
+                .await;
+            }
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: plan_id_for_bind.clone(),
             });
-            // Queued unconditionally: this is also what settles the
-            // ledger for a window whose composer declaration turns out,
-            // below, not to match what the pre-open check saw. The agent
-            // this wakes finds the window already ending and records the
-            // notice `window_closed` through its own teardown, rather
-            // than this handler having to duplicate that bookkeeping.
-            if has_instruction
-                && opened.entry.queue_notice(QueuedNotice::Task {
-                    plan_id: plan_id_for_bind.clone(),
-                    task_id: task_id.clone(),
-                })
-            {
-                registry.wake_notices(&opened.entry);
-            }
-            // The pre-open check only catches a definition it could
-            // read; a definition it could not (or one that changed
-            // between that read and this window's own) is only known now,
-            // from the window actually opened.
-            if has_instruction && !opened.entry.composer_access().is_judged() {
-                if let Err(close_err) =
-                    close_for_cleanup(&registry, &config, &opened.entry, false).await
-                {
-                    tracing::warn!(
-                        error = %close_err,
-                        "cleanup close after refusing an instructed task with no composer \
-                         also failed"
-                    );
-                }
-                outbound.reply(&no_composer_msg());
-                return;
-            }
             outbound.reply(&DaemonMessage::TaskWindowOpened {
                 plan_id: plan_id_for_bind,
                 task_id,
@@ -5632,6 +5368,8 @@ async fn open_planned(
     let provenance = WindowProvenance {
         launch: Some(planned.launch),
         delivery: planned.delivery,
+        hooks_left_out: hooks_left_out.is_some(),
+        wake_command: planned.wake_command,
         ..provenance
     };
     let opened = registry
@@ -5726,7 +5464,7 @@ fn spawn_pending(
     registry: Arc<WindowRegistry>,
     config: DaemonConfig,
     entry: Arc<WindowEntry>,
-    mut action: PendingAction,
+    action: PendingAction,
     mut ticket: Ticket,
 ) {
     let RequestWatch {
@@ -5740,12 +5478,18 @@ fn spawn_pending(
         match await_approval(&mut ticket, deadline, &mut closed).await {
             ApprovalEnd::Approved => {}
             ApprovalEnd::Refused(message) => {
-                release_pending_handoff(&mut action, &registry, &config, &entry).await;
+                drop(action);
                 outbound.reply(&message);
                 return;
             }
             ApprovalEnd::RequesterGone => {
-                release_pending_handoff(&mut action, &registry, &config, &entry).await;
+                // A handoff's watch answers nothing itself; one whose
+                // requester only ended its turn still has a connection to
+                // answer on.
+                if let PendingAction::SendHandoff { .. } = action {
+                    drop(action);
+                    outbound.reply(&handoff_withdrawn_msg(entry.window_id()));
+                }
                 return;
             }
         }
@@ -5755,8 +5499,8 @@ fn spawn_pending(
         // licence to fire at the new one.
         let permitted = match gate_approved(action, entry.current_detected()) {
             ApprovedOutcome::Permitted(permitted) => permitted,
-            ApprovedOutcome::Denied(mut action, reason) => {
-                release_pending_handoff(&mut action, &registry, &config, &entry).await;
+            ApprovedOutcome::Denied(action, reason) => {
+                drop(action);
                 outbound.reply(&deny_msg(tool, reason));
                 return;
             }
@@ -5779,8 +5523,6 @@ fn spawn_pending(
                 text,
                 requester,
                 slot,
-                opened,
-                ready_hold_wait_ms,
                 permit,
             } => {
                 deliver_handoff(DeliveryJob {
@@ -5791,9 +5533,7 @@ fn spawn_pending(
                     envelope: text,
                     requester,
                     slot,
-                    opened,
                     closed,
-                    ready_hold_wait_ms,
                     permit,
                 })
                 .await;
@@ -5893,12 +5633,24 @@ impl RequestWatch {
         state: &ConnectionState,
         withdrawn: DaemonMessage,
     ) -> Self {
-        Self::detached(
+        Self::watching(
             registry,
             outbound,
             &state.origin,
             state.closed.subscribe(),
-            withdrawn,
+            Some(withdrawn),
+        )
+    }
+
+    /// [`RequestWatch::new`] that answers nothing itself when the turn ends:
+    /// the request answers once it has let go of what it holds.
+    fn quiet(registry: &WindowRegistry, outbound: &Arc<Outbound>, state: &ConnectionState) -> Self {
+        Self::watching(
+            registry,
+            outbound,
+            &state.origin,
+            state.closed.subscribe(),
+            None,
         )
     }
 
@@ -5910,6 +5662,18 @@ impl RequestWatch {
         origin: &RequestOrigin,
         closed: watch::Receiver<bool>,
         withdrawn: DaemonMessage,
+    ) -> Self {
+        Self::watching(registry, outbound, origin, closed, Some(withdrawn))
+    }
+
+    /// The watch every constructor above builds; `withdrawn` is answered at
+    /// the end of the turn when given.
+    fn watching(
+        registry: &WindowRegistry,
+        outbound: &Arc<Outbound>,
+        origin: &RequestOrigin,
+        closed: watch::Receiver<bool>,
+        withdrawn: Option<DaemonMessage>,
     ) -> Self {
         let requester = match origin {
             RequestOrigin::Window(window_id) => registry
@@ -5970,7 +5734,8 @@ impl TurnWatch {
 }
 
 /// Raises `left` once the requesting connection closes, or once `turn` ends
-/// (answering `withdrawn` first, since that connection is still open).
+/// (answering `withdrawn` first when given, since that connection is still
+/// open).
 ///
 /// Holds `left` for as long as anyone watches it: a dropped sender reads as a
 /// requester that left. Ends without raising it once nobody does, which is
@@ -5981,7 +5746,7 @@ async fn withdraw_at_turn_end(
     mut turn: TurnWatch,
     left: watch::Sender<bool>,
     outbound: Arc<Outbound>,
-    withdrawn: DaemonMessage,
+    withdrawn: Option<DaemonMessage>,
 ) {
     let mut window_open = true;
     loop {
@@ -6007,7 +5772,9 @@ async fn withdraw_at_turn_end(
                     }
                 };
                 if turn.ends_at(now) {
-                    outbound.reply(&withdrawn);
+                    if let Some(withdrawn) = &withdrawn {
+                        outbound.reply(withdrawn);
+                    }
                     let _ = left.send(true);
                     return;
                 }
@@ -6037,13 +5804,13 @@ fn open_withdrawn_msg() -> DaemonMessage {
     )
 }
 
-/// The answer to a handoff whose requester ended its turn: its envelope is
-/// never submitted.
-fn handoff_withdrawn_msg(window_id: &str, opened: bool) -> DaemonMessage {
+/// The answer to a handoff whose requester left: its envelope was taken out
+/// of the window's inbox, and nothing hands it over after this answer.
+fn handoff_withdrawn_msg(window_id: &str) -> DaemonMessage {
     DaemonMessage::HandoffSent {
         window_id: window_id.to_string(),
-        opened,
-        delivery: HandoffDelivery::NotWritten,
+        opened: false,
+        delivery: HandoffDelivery::UndeliveredTimeout,
     }
 }
 
@@ -6066,51 +5833,6 @@ fn envelope_from(requester: Option<&WindowInfo>) -> EnvelopeFrom {
 /// same to a caller.
 fn deny_no_approver(tool: DestructiveTool) -> DaemonMessage {
     deny_msg(tool, DenyReason::ApprovalRequired)
-}
-
-/// Explains a handoff whose freshly opened window never became ready.
-///
-/// The last status actually observed is spelled the way the client sees it on
-/// the wire, and a detection warning is carried in full: a window whose
-/// detection definition failed to load stays undetectable forever, and that
-/// is the operator's real problem rather than the timeout.
-///
-/// A hold the definition asked for is named in full, in the milliseconds the
-/// definition writes it in, so this message and `[input].ready_hold_ms`
-/// cannot disagree about the value that caused the wait; a hold this window's
-/// readiness timeout can never satisfy says so in the same sentence.
-fn window_not_ready_msg(
-    timeout_secs: u64,
-    status: DetectedStatus,
-    detection_warning: Option<&str>,
-    ready_hold: Duration,
-) -> DaemonMessage {
-    // Only the `last status: {status}` fragment differs for an
-    // Unknown status; every section after it (the warning, the hold and the
-    // unreachable notes) is untouched.
-    let status_text = match status.unknown_reason() {
-        Some(reason) => format!("unknown ({})", reason.phrase()),
-        None => window_status_wire(status.status()),
-    };
-    let mut message = format!(
-        "the window opened for this handoff did not become ready within {timeout_secs}s \
-         (last status: {status_text}"
-    );
-    if let Some(warning) = detection_warning {
-        message.push_str("; detection warning: ");
-        message.push_str(warning);
-    }
-    message.push(')');
-    if !ready_hold.is_zero() {
-        message.push_str(&format!(
-            "; the definition asks this window to hold a status that accepts input for {}ms",
-            ready_hold.as_millis()
-        ));
-        if !hold_is_reachable_within(ready_hold, Duration::from_secs(timeout_secs)) {
-            message.push_str(", which this window's readiness timeout can never satisfy");
-        }
-    }
-    error_msg("window_not_ready", &message)
 }
 
 /// Renders a refused window open, one answer per [`WindowOpenError`] variant.

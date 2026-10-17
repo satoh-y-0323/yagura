@@ -13,10 +13,9 @@
 //! report straight to the oldest waiter, under the same lock that drains.
 //!
 //! A report that stays in an empty inbox makes one notice due: a fixed line
-//! typed into the parent once it holds a status that accepts input, and not
-//! again until the inbox has been emptied. The parent's
-//! notice delivery agent (`notice_queue.rs`) types it; the notice counts as
-//! typed only once that delivery was written, so a declined one stays due.
+//! put in the parent window's own inbox for its CLI, and not again until the
+//! report inbox has been emptied. Its count follows the reports that arrive
+//! while it waits; emptying the report inbox withdraws it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,12 +36,16 @@ use crate::pty::lock_recover;
 use crate::store::StoreError;
 use crate::window::{TaskOrigin, WindowEntry, WindowLiveness, WindowRegistry};
 
+use super::notice_queue;
 use super::plan::{self, PlanRuntime};
 use super::{ConnectionState, Outbound, error_msg, now_ms};
 
 /// How many reports one window's inbox holds before `send_report` to it is
 /// refused with `resource_exhausted`.
 pub const REPORT_INBOX_MAX: usize = 64;
+
+/// The key a report notice is held under in its window's inbox.
+const REPORT_NOTICE_KEY: &str = "report";
 
 /// What one `send_report` request carries.
 pub(super) struct ReportBody {
@@ -140,7 +143,7 @@ impl ReportInboxes {
         from_slot: bool,
         older: bool,
     ) {
-        let fell_due = {
+        let (fell_due, due, pending, stretch) = {
             let mut inboxes = lock_recover(&self.inboxes);
             let inbox = inboxes.entry(window_id.to_string()).or_default();
             if from_slot {
@@ -159,15 +162,49 @@ impl ReportInboxes {
                 inbox.notice = Notice::Due;
                 inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
             }
-            fell_due
+            (
+                fell_due,
+                inbox.notice == Notice::Due,
+                inbox.reports.len(),
+                inbox.stretch,
+            )
+        };
+        let Some(entry) = self.registry.get(window_id) else {
+            // Window ids are never reused, so nobody could read it again.
+            self.discard(window_id);
+            return;
         };
         if fell_due {
-            match self.registry.get(window_id) {
-                Some(entry) => self.registry.wake_notices(&entry),
-                // Window ids are never reused, so nobody could read it again.
-                None => self.discard(window_id),
-            }
+            self.deposit_notice(&entry, pending, stretch);
+        } else if due {
+            // The notice still waiting tells the count as it is now.
+            let _ = entry
+                .inbox()
+                .revise(REPORT_NOTICE_KEY, notice_text(pending));
         }
+        // Woken even for a window that is handed no notice: its agent
+        // discards this inbox once the window ends.
+        self.registry.wake_notices(&entry);
+    }
+
+    /// Puts `stretch`'s notice in `entry`'s inbox for its CLI, and records it
+    /// as delivered once the CLI took it. A window that declares no delivery
+    /// is handed none: its reports stay readable through `wait_for_report`.
+    fn deposit_notice(self: &Arc<Self>, entry: &Arc<WindowEntry>, pending: usize, stretch: u64) {
+        if !entry.delivers() {
+            return;
+        }
+        let parcel = crate::inbox::Parcel::new(REPORT_NOTICE_KEY, notice_text(pending));
+        let Ok(end) = notice_queue::deposit(&self.registry, entry, parcel, None, None) else {
+            return;
+        };
+        let inboxes = Arc::clone(self);
+        let window_id = entry.window_id().to_string();
+        tokio::spawn(async move {
+            if end.await == Ok(crate::inbox::ParcelEnd::Taken) {
+                inboxes.confirm_notice(&window_id, stretch);
+            }
+        });
     }
 
     /// Gives back a reservation that was never used.
@@ -195,6 +232,8 @@ impl ReportInboxes {
             if inbox.is_idle() {
                 inboxes.remove(window_id);
             }
+            drop(inboxes);
+            self.withdraw_notice(window_id);
             return Taken::Ready(reports);
         }
         if !may_wait {
@@ -232,7 +271,16 @@ impl ReportInboxes {
         }
     }
 
-    pub(super) fn notice_due(&self, window_id: &str) -> bool {
+    /// Takes `window_id`'s waiting notice out of its window's inbox: the
+    /// reports it announced were read.
+    fn withdraw_notice(&self, window_id: &str) {
+        if let Some(entry) = self.registry.get(window_id) {
+            let _ = entry.inbox().withdraw(REPORT_NOTICE_KEY);
+        }
+    }
+
+    #[cfg(test)]
+    fn notice_due(&self, window_id: &str) -> bool {
         lock_recover(&self.inboxes)
             .get(window_id)
             .is_some_and(|inbox| inbox.notice == Notice::Due)
@@ -240,7 +288,8 @@ impl ReportInboxes {
 
     /// The text of `window_id`'s due notice and the stretch it belongs to,
     /// leaving it due; `None` when none is due or the inbox is empty.
-    pub(super) fn due_notice(&self, window_id: &str) -> Option<(String, u64)> {
+    #[cfg(test)]
+    fn due_notice(&self, window_id: &str) -> Option<(String, u64)> {
         let inboxes = lock_recover(&self.inboxes);
         let inbox = inboxes.get(window_id)?;
         if inbox.notice != Notice::Due || inbox.reports.is_empty() {
@@ -251,7 +300,7 @@ impl ReportInboxes {
 
     /// Records that `stretch`'s notice was written, so that stretch gets no
     /// other. A no-op once the inbox has been emptied since.
-    pub(super) fn confirm_notice(&self, window_id: &str, stretch: u64) {
+    fn confirm_notice(&self, window_id: &str, stretch: u64) {
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id)
             && inbox.notice == Notice::Due
@@ -285,8 +334,8 @@ fn hand_to_waiter(
     Some(reports)
 }
 
-/// The one line typed into a parent with `pending` reports waiting. Only the
-/// count varies, so nothing a child wrote ever reaches the parent's input.
+/// The one line handed to a parent with `pending` reports waiting. Only the
+/// count varies, so nothing a child wrote ever reaches the parent's CLI.
 fn notice_text(pending: usize) -> String {
     format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
 }

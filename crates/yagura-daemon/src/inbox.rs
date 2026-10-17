@@ -2,11 +2,14 @@
 //! through the doors its hooks run (`deliver_context`, `deliver_take`,
 //! `deliver_wait`).
 //!
-//! The daemon never types a parcel into the window. The CLI asks for it: at
-//! start-up, at the start of a turn, or by leaving a wait registered that the
-//! daemon answers when a parcel arrives.
+//! The CLI asks for what is waiting: at start-up, at the start of a turn, or by
+//! leaving a wait registered that the daemon answers when a parcel arrives.
+//! Anything else the daemon does of its own accord is a push ([`Inbox::begin_push`]):
+//! the parcels it carries are out of reach of the doors until it ends, so one
+//! parcel never reaches the CLI twice.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::{oneshot, watch};
@@ -219,6 +222,56 @@ impl Default for DeliverySpec {
     }
 }
 
+/// How a parcel left the inbox, as its depositor learns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParcelEnd {
+    /// The window's CLI took it.
+    Taken,
+    /// It was turned away: the inbox was over its capacity, or the budget a
+    /// push of it draws on was spent.
+    TurnedAway,
+    /// The window ended before its CLI took it.
+    Closed,
+    /// The daemon stopped with the parcel still waiting.
+    Stopped,
+}
+
+/// A daemon-wide budget a push draws one unit from while it runs.
+#[derive(Debug, Clone)]
+pub struct PushBudget {
+    /// The units in use.
+    pub counter: Arc<AtomicUsize>,
+    /// The most units there are.
+    pub max: usize,
+}
+
+/// One parcel as the inbox holds it: who learns how it left, and what its
+/// push draws on.
+struct Held {
+    parcel: Parcel,
+    end: Option<oneshot::Sender<ParcelEnd>>,
+    budget: Option<PushBudget>,
+}
+
+impl Held {
+    fn settle(self, end: ParcelEnd) {
+        if let Some(tx) = self.end {
+            // A depositor that stopped listening has nothing left to learn.
+            let _ = tx.send(end);
+        }
+    }
+}
+
+/// Parcels a push has taken out of the inbox and not yet finished with.
+struct Carried {
+    id: u64,
+    held: Vec<Held>,
+    /// Raised when the depositor withdraws it while it is under way: the push
+    /// gives up if it still can, and if it fails the parcels are dropped
+    /// instead of going back.
+    withdrawn: watch::Sender<bool>,
+}
+
 struct Waiter {
     id: u64,
     answer: oneshot::Sender<DaemonMessage>,
@@ -226,7 +279,11 @@ struct Waiter {
 
 #[derive(Default)]
 struct State {
-    parcels: VecDeque<Parcel>,
+    parcels: VecDeque<Held>,
+    carrying: Vec<Carried>,
+    next_push: u64,
+    /// How the inbox ended, once it has: nothing more is accepted.
+    closed: Option<ParcelEnd>,
     waiter: Option<Waiter>,
     next_waiter: u64,
 }
@@ -255,7 +312,7 @@ impl Shared {
     /// Takes the parcels that fit in one answer, oldest first, behind `intro`
     /// when there is one. A parcel is never cut: the first one that does not
     /// fit stays for the next answer.
-    fn take_within(&self, state: &mut State, intro: &str) -> (Vec<Parcel>, String) {
+    fn take_within(&self, state: &mut State, intro: &str) -> (Vec<Held>, String) {
         let limit = self.spec.max_chars;
         // An intro longer than the limit cannot be carried whole by any answer.
         let mut text: String = intro.chars().take(limit).collect();
@@ -263,17 +320,17 @@ impl Shared {
         let mut taken = Vec::new();
         while let Some(front) = state.parcels.front() {
             let separator = if text.is_empty() { "" } else { SEPARATOR };
-            let needed = separator.chars().count() + front.text.chars().count();
+            let needed = separator.chars().count() + front.parcel.text.chars().count();
             if used + needed > limit {
                 break;
             }
-            let Some(parcel) = state.parcels.pop_front() else {
+            let Some(held) = state.parcels.pop_front() else {
                 break;
             };
             text.push_str(separator);
-            text.push_str(&parcel.text);
+            text.push_str(&held.parcel.text);
             used += needed;
-            taken.push(parcel);
+            taken.push(held);
         }
         (taken, text)
     }
@@ -307,9 +364,13 @@ impl Shared {
         if waiter.answer.send(self.wake_message(&text)).is_err() {
             // The wait ended between the registration and now: nobody read the
             // answer, so the parcels go back in front of the ones that arrived.
-            for parcel in taken.into_iter().rev() {
-                state.parcels.push_front(parcel);
+            for held in taken.into_iter().rev() {
+                state.parcels.push_front(held);
             }
+            return;
+        }
+        for held in taken {
+            held.settle(ParcelEnd::Taken);
         }
     }
 }
@@ -360,6 +421,53 @@ impl Drop for WaitGuard {
     }
 }
 
+/// What depositing a parcel came to.
+pub struct Deposited {
+    /// The parcels the inbox turned away: the oldest ones when it is over its
+    /// capacity, or the new one itself when it could not be taken in.
+    pub turned_away: Vec<Parcel>,
+    /// Yields how the new parcel left the inbox; `None` when it was turned
+    /// away at once.
+    pub end: Option<oneshot::Receiver<ParcelEnd>>,
+}
+
+/// A push under way: what it carries and what it draws on.
+pub struct Push {
+    /// Names the push to [`Inbox::finish_push`].
+    pub id: u64,
+    /// The key of the first parcel it carries.
+    pub key: String,
+    /// The text the push hands over.
+    pub text: String,
+    /// The budget the first parcel it carries draws on, if any.
+    pub budget: Option<PushBudget>,
+    /// Raised when what it carries is withdrawn while it is under way.
+    pub withdrawn: watch::Receiver<bool>,
+}
+
+/// How a push ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushEnd {
+    /// The CLI has what the push carried.
+    Taken,
+    /// Nothing reached the CLI: the parcels go back in front of the inbox.
+    Failed,
+    /// The budget the push draws on was spent: the parcels are turned away.
+    TurnedAway,
+}
+
+/// What withdrawing a parcel came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawal {
+    /// It was waiting and is out of the inbox: it never reaches the CLI.
+    Removed,
+    /// A push is carrying it: it ends with that push, and does not come back
+    /// if the push fails.
+    UnderWay,
+    /// It already left the inbox; its end says how.
+    Gone,
+}
+
 /// The parcels held for one window, and the one wait that may be registered
 /// for it.
 #[derive(Clone)]
@@ -396,26 +504,68 @@ impl Inbox {
     /// longer than one answer can carry. A registered wait is answered when
     /// the window can be pushed to.
     pub fn deposit(&self, parcel: Parcel) -> Vec<Parcel> {
+        self.deposit_tracked(parcel, None, None).turned_away
+    }
+
+    /// [`Self::deposit`], telling the depositor how the parcel leaves the
+    /// inbox. `budget` is what a push of it draws on. With `waiting_limit`,
+    /// a parcel that would find that many already waiting is turned away
+    /// instead of pushing the oldest out.
+    pub fn deposit_tracked(
+        &self,
+        parcel: Parcel,
+        budget: Option<PushBudget>,
+        waiting_limit: Option<usize>,
+    ) -> Deposited {
+        let refused = |parcel| Deposited {
+            turned_away: vec![parcel],
+            end: None,
+        };
         if parcel.text.chars().count() > self.shared.spec.max_chars {
-            return vec![parcel];
+            return refused(parcel);
         }
         let mut state = self.shared.lock();
-        state.parcels.push_back(parcel);
+        let full = waiting_limit.is_some_and(|limit| state.parcels.len() >= limit);
+        if state.closed.is_some() || full {
+            return refused(parcel);
+        }
+        let (tx, rx) = oneshot::channel();
+        state.parcels.push_back(Held {
+            parcel,
+            end: Some(tx),
+            budget,
+        });
         let mut turned_away = Vec::new();
         while state.parcels.len() > self.shared.capacity {
             let Some(oldest) = state.parcels.pop_front() else {
                 break;
             };
-            turned_away.push(oldest);
+            turned_away.push(oldest.parcel.clone());
+            oldest.settle(ParcelEnd::TurnedAway);
         }
         self.shared.wake(&mut state);
-        turned_away
+        Deposited {
+            turned_away,
+            end: Some(rx),
+        }
     }
 
-    /// How many parcels wait to be read.
+    /// How many parcels wait to be read; the ones a push carries are not
+    /// counted.
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.shared.lock().parcels.len()
+    }
+
+    /// Whether a parcel named `key` is waiting or being pushed.
+    #[must_use]
+    pub fn holds(&self, key: &str) -> bool {
+        let state = self.shared.lock();
+        state.parcels.iter().any(|held| held.parcel.key == key)
+            || state
+                .carrying
+                .iter()
+                .any(|carried| carried.held.iter().any(|held| held.parcel.key == key))
     }
 
     /// Whether a wait is registered.
@@ -428,7 +578,10 @@ impl Inbox {
     /// behind it. The parcels it carries are taken.
     pub fn context(&self, intro: &str) -> DaemonMessage {
         let mut state = self.shared.lock();
-        let (_, text) = self.shared.take_within(&mut state, intro);
+        let (taken, text) = self.shared.take_within(&mut state, intro);
+        for held in taken {
+            held.settle(ParcelEnd::Taken);
+        }
         self.shared.read_message(&text)
     }
 
@@ -447,7 +600,10 @@ impl Inbox {
             let _ = replaced.answer.send(silence());
         }
         if !state.parcels.is_empty() && self.shared.pushable() {
-            let (_, text) = self.shared.take_within(&mut state, "");
+            let (taken, text) = self.shared.take_within(&mut state, "");
+            for held in taken {
+                held.settle(ParcelEnd::Taken);
+            }
             return Wait::Answered(Box::new(self.shared.wake_message(&text)));
         }
         state.next_waiter += 1;
@@ -463,6 +619,162 @@ impl Inbox {
                 id,
             },
             answer,
+        }
+    }
+
+    /// Answers the registered wait with what is waiting, when the window can
+    /// be pushed to now.
+    pub fn wake_waiter(&self) {
+        let mut state = self.shared.lock();
+        self.shared.wake(&mut state);
+    }
+
+    /// The budget a push of the oldest waiting parcel would draw on.
+    #[must_use]
+    pub fn next_budget(&self) -> Option<PushBudget> {
+        self.shared
+            .lock()
+            .parcels
+            .front()
+            .and_then(|held| held.budget.clone())
+    }
+
+    /// Takes what one push hands over out of the inbox: everything that fits
+    /// in one answer when `whole`, otherwise the oldest parcel alone. `None`
+    /// when nothing is waiting. The doors do not return what a push carries.
+    pub fn begin_push(&self, whole: bool) -> Option<Push> {
+        let mut state = self.shared.lock();
+        let held = if whole {
+            self.shared.take_within(&mut state, "").0
+        } else {
+            state.parcels.pop_front().into_iter().collect()
+        };
+        let first = held.first()?;
+        let text = held
+            .iter()
+            .map(|held| held.parcel.text.as_str())
+            .collect::<Vec<_>>()
+            .join(SEPARATOR);
+        let budget = first.budget.clone();
+        let key = first.parcel.key.clone();
+        state.next_push += 1;
+        let id = state.next_push;
+        let (withdrawn_tx, withdrawn) = watch::channel(false);
+        state.carrying.push(Carried {
+            id,
+            held,
+            withdrawn: withdrawn_tx,
+        });
+        Some(Push {
+            id,
+            key,
+            text,
+            budget,
+            withdrawn,
+        })
+    }
+
+    /// Whether what push `id` carries was withdrawn while it was under way.
+    #[must_use]
+    pub fn push_withdrawn(&self, id: u64) -> bool {
+        self.shared
+            .lock()
+            .carrying
+            .iter()
+            .any(|carried| carried.id == id && *carried.withdrawn.borrow())
+    }
+
+    /// Ends push `id`: what it carried is taken, goes back in front of the
+    /// inbox, or is turned away.
+    pub fn finish_push(&self, id: u64, end: PushEnd) {
+        let mut state = self.shared.lock();
+        let Some(position) = state.carrying.iter().position(|carried| carried.id == id) else {
+            return;
+        };
+        let carried = state.carrying.remove(position);
+        match end {
+            PushEnd::Taken => {
+                for held in carried.held {
+                    held.settle(ParcelEnd::Taken);
+                }
+            }
+            PushEnd::TurnedAway => {
+                for held in carried.held {
+                    held.settle(ParcelEnd::TurnedAway);
+                }
+            }
+            // A withdrawn parcel is dropped unsettled: its depositor answers
+            // for it.
+            PushEnd::Failed if *carried.withdrawn.borrow() => {}
+            PushEnd::Failed => match state.closed {
+                Some(closed) => {
+                    for held in carried.held {
+                        held.settle(closed);
+                    }
+                }
+                None => {
+                    for held in carried.held.into_iter().rev() {
+                        state.parcels.push_front(held);
+                    }
+                    self.shared.wake(&mut state);
+                }
+            },
+        }
+    }
+
+    /// Withdraws the parcel named `key`. A waiting one is removed under the
+    /// same lock the doors take it under, so once this returns
+    /// [`Withdrawal::Removed`] nothing hands it to the CLI; its depositor
+    /// learns nothing more from it.
+    pub fn withdraw(&self, key: &str) -> Withdrawal {
+        let mut state = self.shared.lock();
+        if let Some(position) = state.parcels.iter().position(|held| held.parcel.key == key) {
+            state.parcels.remove(position);
+            return Withdrawal::Removed;
+        }
+        match state
+            .carrying
+            .iter_mut()
+            .find(|carried| carried.held.iter().any(|held| held.parcel.key == key))
+        {
+            Some(carried) => {
+                carried.withdrawn.send_replace(true);
+                Withdrawal::UnderWay
+            }
+            None => Withdrawal::Gone,
+        }
+    }
+
+    /// Replaces the text of the waiting parcel named `key`. `false` when no
+    /// such parcel waits, or the new text is longer than one answer carries.
+    pub fn revise(&self, key: &str, text: String) -> bool {
+        if text.chars().count() > self.shared.spec.max_chars {
+            return false;
+        }
+        let mut state = self.shared.lock();
+        match state.parcels.iter_mut().find(|held| held.parcel.key == key) {
+            Some(held) => {
+                held.parcel.text = text;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Ends the inbox: every waiting parcel ends as `end`, a push under way
+    /// ends that way if it fails, the registered wait is answered with
+    /// nothing, and nothing more is accepted.
+    pub fn close(&self, end: ParcelEnd) {
+        let mut state = self.shared.lock();
+        if state.closed.is_some() {
+            return;
+        }
+        state.closed = Some(end);
+        for held in std::mem::take(&mut state.parcels) {
+            held.settle(end);
+        }
+        if let Some(waiter) = state.waiter.take() {
+            let _ = waiter.answer.send(silence());
         }
     }
 }

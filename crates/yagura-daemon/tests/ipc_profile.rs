@@ -30,13 +30,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Harness, SubmitDefinitionInput, call_list_windows, call_send_handoff_from_profile,
-    call_send_handoff_from_profile_with_options, call_send_handoff_from_profile_within,
-    count_marker, decide, empty_lookup, expect_approval_requested_within, expect_error,
-    expect_handoff_sent, handoff_profile_config, identify, policy, read_response,
-    register_approver, send, send_handoff_from_profile,
-    submit_child_profile_source_with_detection_and_composer,
-    wait_for_accepted_handoff_envelope_json, write_profile, write_submit_definition,
+    Harness, call_list_windows, call_send_handoff_from_profile,
+    call_send_handoff_from_profile_with_options, call_send_handoff_from_profile_within, decide,
+    empty_lookup, expect_approval_requested_within, expect_error, expect_handoff_sent,
+    handoff_profile_config, identify, policy, read_response, register_approver, send,
+    send_handoff_from_profile, write_profile,
 };
 
 use yagura_daemon::profile::ProfileOs;
@@ -44,14 +42,13 @@ use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    HandoffDelivery, ProfileInfo, WindowInfo,
+    HandoffDelivery, ProfileInfo, WindowInfo, WithdrawReason,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::paths::strip_extended_length_prefix;
 use yagura_test_support::process::{
-    argv_probe_profile_source, echo_child_command, echo_child_path, ready_child_path,
-    ready_child_profile_source_with_composer,
+    argv_probe_profile_source, echo_child_command, echo_child_path,
 };
 // `file_len` / `wait_until_file_grows` back the Windows-only shim-argument
 // fixtures below (npm-style extensionless shim, cmd.exe verbatim-argument
@@ -112,18 +109,104 @@ fn echo_child_profile_source_with_detection(display_name: &str, detection: &str)
 
 /// Same as [`ready_child_profile_source_with_composer`], with a `cwd` default
 /// the launch carries unless the caller overrides it.
-fn ready_child_profile_source_with_cwd(display_name: &str, cwd: &Path) -> String {
-    let path = ready_child_path();
+/// What a profile declares to hand a first request over at launch, as
+/// `--prompt <request>`, with no way to wake its CLI later.
+const LAUNCH_PROMPT_TABLE: &str =
+    "\n[delivery]\nwake = \"none\"\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]\n";
+
+/// A `hook_child` profile that is handed a first request at launch
+/// ([`LAUNCH_PROMPT_TABLE`]) and logs the argv it was started with under `logs`.
+fn launch_profile_source(
+    display_name: &str,
+    cwd: Option<&Path>,
+    detection: Option<&str>,
+    logs: &Path,
+) -> String {
+    let command = [
+        PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
+            .display()
+            .to_string(),
+        yagura_test_support::process::COMPOSER_MARKER.to_string(),
+        yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
+        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ]
+    .iter()
+    .map(|arg| format!("'{arg}'"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    let cwd = cwd.map_or(String::new(), |cwd| format!("cwd = '{}'\n", cwd.display()));
+    let detection = detection.map_or(String::new(), |name| format!("detection = \"{name}\"\n"));
     format!(
-        "schema = 1\ndisplay_name = \"{display_name}\"\ncwd = '{}'\n\n[command]\ndefault = \
-         ['{}', '{}', '{}', \"{}\", \"{}\", '0']\n",
-        cwd.display(),
-        path.display(),
-        yagura_test_support::detection::CONTROL_READY_MARKER,
-        yagura_test_support::process::COMPOSER_MARKER,
-        yagura_test_support::process::COMPOSER_SEPARATOR,
-        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX,
+        "schema = 1\ndisplay_name = \"{display_name}\"\n{cwd}{detection}\n\
+         [command]\ndefault = [{command}]\n{LAUNCH_PROMPT_TABLE}"
     )
+}
+
+/// The launch prompt the `hook_child` logging under `logs` was started with, once it
+/// has logged its argv.
+async fn launch_prompt_logged_in(logs: &Path) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
+        let argv = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["event"] == "argv");
+        if let Some(argv) = argv {
+            return argv["prompt"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the window was started with no launch prompt: {argv}"))
+                .to_string();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hang guard: the window never logged its argv under {}",
+            logs.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Whether the `hook_child` logging under `logs` was ever started.
+fn was_started(logs: &Path) -> bool {
+    logs.join("events.jsonl").exists()
+}
+
+/// A handoff envelope handed over as a launch prompt, parsed as JSON.
+fn envelope_json(prompt: &str) -> serde_json::Value {
+    let json = prompt
+        .strip_prefix("[yagura handoff] ")
+        .unwrap_or_else(|| panic!("the launch prompt is not a handoff envelope: {prompt:?}"));
+    serde_json::from_str(json)
+        .unwrap_or_else(|err| panic!("the envelope's body is not JSON ({err}): {prompt:?}"))
+}
+
+/// A handoff's answer as its wire string.
+fn wire(delivery: HandoffDelivery) -> String {
+    serde_json::to_value(delivery)
+        .expect("a delivery encodes")
+        .as_str()
+        .expect("a delivery is a string on the wire")
+        .to_string()
+}
+
+/// Reads `approver`'s next message, which must withdraw `request_id` because its
+/// requester left.
+async fn expect_withdrawn_for_a_departed_requester(approver: &mut Connection, request_id: &str) {
+    match read_response(approver, Duration::from_secs(10)).await {
+        DaemonMessage::ApprovalWithdrawn {
+            request_id: withdrawn,
+            reason,
+        } => {
+            assert_eq!(withdrawn, request_id);
+            assert_eq!(reason, WithdrawReason::RequesterDisconnected);
+        }
+        other => panic!("expected approval_withdrawn, got {other:?}"),
+    }
 }
 
 /// A profile whose `[command]` names no program at all for the host
@@ -247,34 +330,6 @@ fn find_window<'a>(windows: &'a [WindowInfo], id: &str) -> &'a WindowInfo {
         .iter()
         .find(|w| w.window_id == id)
         .unwrap_or_else(|| panic!("window {id:?} not found in window_list: {windows:?}"))
-}
-
-/// Polls `list_windows` on `client` until a window with the given `vendor`
-/// (the profile identifier) appears, and returns it. Used to observe
-/// that a profile-addressed handoff has already opened its window --
-/// synchronously, before the readiness wait -- without knowing the new
-/// window's id ahead of time, and without racing the connection's own
-/// still-pending handoff response (which, for every fixture this helper is
-/// used with, never arrives during the polling window).
-async fn wait_for_window_with_vendor(
-    client: &mut Connection,
-    vendor: &str,
-    timeout: Duration,
-) -> WindowInfo {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let windows = call_list_windows(client).await;
-        if let Some(found) = windows
-            .into_iter()
-            .find(|w| w.vendor.as_deref() == Some(vendor))
-        {
-            return found;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for a window with vendor {vendor:?} to appear");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 // =============================================================================
@@ -1079,20 +1134,27 @@ async fn profile_launch_delivers_a_whitespace_argument_verbatim_through_a_shim_i
 // =============================================================================
 // send_handoff: profile-addressed delivery.
 //
+// A profile-addressed handoff hands its envelope over as the launch prompt of
+// the window it opens, and is taken once that window started. Nothing is ever
+// typed into the window, so nothing waits for it to be ready; and since the
+// envelope reaches the CLI the moment it starts, the approval is decided before
+// anything starts.
+//
 // Approval prerequisite: a profile-addressed request is pre-judged by
 // policy before any window opens, so every case below either injects
 // `auto_approve = ["send_handoff"]` (via `policy`) or registers an approver.
 // =============================================================================
 
 #[tokio::test]
-async fn send_handoff_from_a_profile_opens_a_new_window_and_delivers_the_envelope_once_ready() {
+async fn send_handoff_from_a_profile_opens_a_new_window_with_the_envelope_as_its_launch_prompt() {
     let tree = TempDir::new("yagura-cli-test", "handoff-profile-basic");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
+    let logs = tree.make_dir("ready-logs");
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &logs),
     );
 
     // auto_approve injected: no approver needed.
@@ -1118,11 +1180,14 @@ async fn send_handoff_from_a_profile_opens_a_new_window_and_delivers_the_envelop
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(delivery, HandoffDelivery::NotObserved);
+    assert_eq!(
+        wire(delivery),
+        "taken",
+        "handed over as the launch prompt, the envelope is taken once the window started"
+    );
     assert!(opened, "a profile target must always report opened: true");
 
-    let json =
-        wait_for_accepted_handoff_envelope_json(&h, &window_id, Duration::from_secs(10)).await;
+    let json = envelope_json(&launch_prompt_logged_in(&logs).await);
     assert_eq!(
         json["from"], "external",
         "an unidentified connection's envelope must carry \"from\":\"external\": {json}"
@@ -1130,6 +1195,11 @@ async fn send_handoff_from_a_profile_opens_a_new_window_and_delivers_the_envelop
     assert!(json.get("reply").is_none());
     assert_eq!(json["reference"], "src/foo.rs");
     assert_eq!(json["note"], "look here");
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
+    assert!(
+        !text.contains("[yagura handoff] "),
+        "the envelope is never typed into the window: {text:?}"
+    );
 
     h.registry.terminate_all().await;
 }
@@ -1145,7 +1215,12 @@ async fn send_handoff_from_a_profile_uses_the_explicit_cwd_argument_over_everyth
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_cwd("Ready", &profile_default_cwd),
+        &launch_profile_source(
+            "Ready",
+            Some(&profile_default_cwd),
+            None,
+            &tree.make_dir("ready-logs"),
+        ),
     );
 
     let config = handoff_profile_config(
@@ -1190,7 +1265,7 @@ async fn send_handoff_from_a_profile_uses_the_explicit_cwd_argument_over_everyth
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(delivery, HandoffDelivery::NotObserved);
+    assert_eq!(wire(delivery), "taken");
     assert!(opened);
 
     let windows = call_list_windows(&mut requester).await;
@@ -1220,7 +1295,12 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_uses_the_requesters_ow
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_cwd("Ready", &profile_default_cwd),
+        &launch_profile_source(
+            "Ready",
+            Some(&profile_default_cwd),
+            None,
+            &tree.make_dir("ready-logs"),
+        ),
     );
 
     let config = handoff_profile_config(
@@ -1260,7 +1340,7 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_uses_the_requesters_ow
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(delivery, HandoffDelivery::NotObserved);
+    assert_eq!(wire(delivery), "taken");
     assert!(opened);
 
     let windows = call_list_windows(&mut requester).await;
@@ -1301,7 +1381,12 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_and_an_external_reques
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_cwd("Ready", &profile_default_cwd),
+        &launch_profile_source(
+            "Ready",
+            Some(&profile_default_cwd),
+            None,
+            &tree.make_dir("ready-logs"),
+        ),
     );
 
     let config = handoff_profile_config(
@@ -1328,7 +1413,7 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_and_an_external_reques
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(delivery, HandoffDelivery::NotObserved);
+    assert_eq!(wire(delivery), "taken");
     assert!(opened);
 
     let windows = call_list_windows(&mut client).await;
@@ -1354,7 +1439,7 @@ async fn send_handoff_from_a_profile_with_a_nonexistent_cwd_is_invalid_argument_
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
     let nonexistent = tree.make_dir("cwd-parent").join("does-not-exist-anywhere");
 
@@ -1397,7 +1482,7 @@ async fn send_handoff_from_a_profile_with_a_control_character_in_name_is_invalid
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let config = handoff_profile_config(
@@ -1427,14 +1512,15 @@ async fn send_handoff_from_a_profile_with_a_control_character_in_name_is_invalid
 }
 
 #[tokio::test]
-async fn send_handoff_from_a_profile_that_is_denied_closes_the_window_it_opened() {
+async fn send_handoff_from_a_profile_starts_nothing_until_approved_and_nothing_once_denied() {
     let tree = TempDir::new("yagura-cli-test", "handoff-profile-denied");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
+    let logs = tree.make_dir("ready-logs");
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &logs),
     );
 
     // No auto_approve: a human decision is required.
@@ -1453,117 +1539,34 @@ async fn send_handoff_from_a_profile_that_is_denied_closes_the_window_it_opened(
     let mut requester = h.connect().await;
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
 
-    // Same rationale as the slot-pending test below: this request just
-    // launched a fresh profile window, so the wait covers a process spawn
-    // plus detection, not just an IPC round trip.
     let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
     assert_eq!(request.tool, "send_handoff");
-    let window_id = request
-        .target
-        .as_ref()
-        .expect("send_handoff must carry a target")
-        .window_id
-        .clone();
+    assert!(
+        call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
+        "the envelope reaches the CLI the moment it starts, so nothing starts before approval"
+    );
 
     decide(&mut approver, &request.request_id, false).await;
     let msg = read_response(&mut requester, Duration::from_secs(5)).await;
     expect_error(msg, "approval_denied");
-
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
-}
-
-/// A `ready_hold_ms` of 2000 can never be satisfied within a
-/// `handoff_ready_timeout_secs` of 1 (`hold_is_reachable_within` is false
-/// for this pair), so the readiness wait exhausts the timeout and
-/// `window_not_ready`'s message must name both the hold the definition
-/// asked for and the fact that this window's timeout can never satisfy it.
-/// The definition itself still loads successfully -- the window reports
-/// `waiting_input`, never `Unknown` -- which is what distinguishes this
-/// case from an out-of-range `ready_hold_ms`.
-#[tokio::test]
-async fn send_handoff_from_a_profile_whose_hold_can_never_fit_the_readiness_timeout_is_window_not_ready()
- {
-    let tree = TempDir::new("yagura-cli-test", "handoff-a6-hold-unreachable");
-    let profiles_dir = tree.make_dir("profiles");
-    let detection_dir = tree.make_dir("detection");
-    write_submit_definition(
-        &detection_dir,
-        "handoff-a6",
-        "handoff-a6-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 2000,
-            submit_delay_ms: 900,
-            clear: "",
-            delivery_confirm_ms: 5000,
-            resend_max: 0,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        "submit-a6",
-        &submit_child_profile_source_with_detection_and_composer(
-            "Submit A6",
-            "handoff-a6-marker",
-            0,
-            0,
-            0,
-            "handoff-a6",
-            0,
-        ),
-    );
-
-    let mut config = handoff_profile_config(
-        Some(profiles_dir),
-        empty_lookup(),
-        &detection_dir,
-        None,
-        Some(policy(&["send_handoff"])),
-        30,
-    );
-    config.handoff_ready_timeout_secs = 1;
-    let h = Harness::start("handoff-a6-hold-unreachable", config).await;
-    let mut client = h.connect().await;
-
-    let msg = call_send_handoff_from_profile_within(
-        &mut client,
-        "submit-a6",
-        None,
-        None,
-        "src/foo.rs",
-        "look here",
-        Duration::from_secs(10),
-    )
-    .await;
-    let message = expect_error(msg, "window_not_ready");
     assert!(
-        message.contains("2000ms"),
-        "message must name the hold the definition asked for, in the milliseconds the \
-         definition wrote it in: {message:?}"
+        call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
+        "a denied handoff never starts its window"
     );
-    assert!(
-        message.contains("can never satisfy"),
-        "message must say this window's readiness timeout can never satisfy that hold: {message:?}"
-    );
-
-    let opened =
-        wait_for_window_with_vendor(&mut client, "submit-a6", Duration::from_secs(5)).await;
-    h.wait_until_child_exited(&opened.window_id, Duration::from_secs(10))
-        .await;
 }
 
 #[tokio::test]
-async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_window_not_ready() {
+async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_still_taken_at_launch() {
     let tree = TempDir::new("yagura-cli-test", "handoff-profile-not-ready");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
+    let logs = tree.make_dir("unresolvable-logs");
     // A detection name nothing in `detection_dir` defines: the window stays
-    // Unknown forever, the same fail-safe fixture `open_unknown_window` uses.
+    // Unknown forever. The envelope never waits on the window's status.
     write_profile(
         &profiles_dir,
         "unresolvable",
-        &echo_child_profile_source_with_detection("Unresolvable", "does-not-exist-anywhere"),
+        &launch_profile_source("Unresolvable", None, Some("does-not-exist-anywhere"), &logs),
     );
 
     let mut config = handoff_profile_config(
@@ -1587,30 +1590,33 @@ async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_window_no
         "look",
     )
     .await;
-    let message = expect_error(msg, "window_not_ready");
+    let (window_id, opened, delivery) = expect_handoff_sent(msg);
+    assert!(opened);
+    assert_eq!(wire(delivery), "taken");
+    assert_eq!(
+        envelope_json(&launch_prompt_logged_in(&logs).await)["note"],
+        "look"
+    );
+    let windows = call_list_windows(&mut client).await;
     assert!(
-        message.contains("unknown"),
-        "message must carry the last observed status (wire spelling): {message:?}"
+        find_window(&windows, &window_id).exit_code.is_none(),
+        "a window that took its envelope at launch is never closed for its status"
     );
 
-    let opened =
-        wait_for_window_with_vendor(&mut client, "unresolvable", Duration::from_secs(5)).await;
-    h.wait_until_child_exited(&opened.window_id, Duration::from_secs(10))
-        .await;
+    h.registry.terminate_all().await;
 }
 
 #[tokio::test]
-async fn send_handoff_from_a_profile_closes_the_window_if_the_requester_disconnects_while_waiting_for_readiness()
+async fn send_handoff_from_a_profile_starts_nothing_if_the_requester_disconnects_while_approval_is_pending()
  {
     let tree = TempDir::new("yagura-cli-test", "handoff-profile-requester-gone");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
-    // echo_child prints nothing on startup, so this window never reaches
-    // WaitingInput / Idle on its own.
+    let logs = tree.make_dir("ready-logs");
     write_profile(
         &profiles_dir,
-        "never-ready",
-        &echo_child_profile_source("Never Ready"),
+        "ready",
+        &launch_profile_source("Ready", None, None, &logs),
     );
 
     let config = handoff_profile_config(
@@ -1618,45 +1624,23 @@ async fn send_handoff_from_a_profile_closes_the_window_if_the_requester_disconne
         empty_lookup(),
         &detection_dir,
         None,
-        Some(policy(&["send_handoff"])),
+        None,
         30,
     );
     let h = Harness::start("handoff-profile-requester-gone", config).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
     let mut requester = h.connect().await;
 
-    send_handoff_from_profile(
-        &mut requester,
-        "never-ready",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-    )
-    .await;
-    let opened =
-        wait_for_window_with_vendor(&mut requester, "never-ready", Duration::from_secs(5)).await;
+    send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
+    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
     drop(requester);
+    expect_withdrawn_for_a_departed_requester(&mut approver, &request.request_id).await;
 
-    h.wait_until_child_exited(&opened.window_id, Duration::from_secs(10))
-        .await;
-    // A requester disconnect while still waiting for readiness must abort
-    // before the first byte of the submit plan is ever written. Scrollback
-    // is not empty by itself: ConPTY/conhost writes its own session-startup
-    // negotiation sequence before either side of the daemon ever touches the
-    // child's input, so an `is_empty()` check is unsatisfiable regardless of
-    // whether the daemon wrote anything (confirmed by direct measurement).
-    // Checking for the absence of the daemon's own vocabulary -- the
-    // envelope prefix, and `submit_child`'s explicit `PASTE ` / `SUBMITTED `
-    // output -- stays a decisive, non-vacuous proof that no submit plan step
-    // reached the window, without depending on that startup sequence.
-    let text = String::from_utf8_lossy(&h.scrollback(&opened.window_id)).into_owned();
-    for needle in ["[yagura handoff] ", "PASTE ", "SUBMITTED "] {
-        assert!(
-            !text.contains(needle),
-            "a requester disconnect before readiness must never write anything into the \
-             window, found {needle:?} in scrollback: {text:?}"
-        );
-    }
+    assert!(
+        call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
+        "a handoff whose requester left before approval never starts its window"
+    );
 }
 
 #[tokio::test]
@@ -1668,7 +1652,7 @@ async fn send_handoff_with_an_unknown_profile_identifier_is_invalid_argument_wit
     write_profile(
         &profiles_dir,
         "the-only-profile",
-        &ready_child_profile_source_with_composer("Only", 0),
+        &launch_profile_source("Only", None, None, &tree.make_dir("only-logs")),
     );
 
     let config = handoff_profile_config(
@@ -1706,7 +1690,7 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let config = handoff_profile_config(
@@ -1848,7 +1832,7 @@ async fn send_handoff_to_a_profile_with_no_approver_connected_is_approval_requir
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let config = handoff_profile_config(
@@ -1887,7 +1871,7 @@ async fn send_handoff_to_a_profile_with_a_playbook_that_failed_to_load_is_approv
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     // `playbook: Some(_)` with no `approval_policy` is exactly how a
@@ -1924,16 +1908,28 @@ async fn send_handoff_to_a_profile_with_a_playbook_that_failed_to_load_is_approv
 // daemon-wide.
 // -----------------------------------------------------------------------
 
+/// Starts a profile handoff on `requester` that waits for `approver`'s decision, and
+/// returns its approval request: until decided, the handoff holds its slot.
+async fn hold_a_slot_pending_approval(
+    requester: &mut Connection,
+    approver: &mut Connection,
+    profile: &str,
+) -> yagura_protocol::ApprovalRequest {
+    send_handoff_from_profile(requester, profile, None, None, "r", "t").await;
+    expect_approval_requested_within(approver, Duration::from_secs(10)).await
+}
+
 #[tokio::test]
-async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_readiness_is_resource_exhausted_per_connection()
+async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_approval_is_resource_exhausted_per_connection()
  {
     let tree = TempDir::new("yagura-cli-test", "handoff-slot-per-conn");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
+    let logs = tree.make_dir("ready-logs");
     write_profile(
         &profiles_dir,
-        "never-ready",
-        &echo_child_profile_source("Never Ready"),
+        "ready",
+        &launch_profile_source("Ready", None, None, &logs),
     );
 
     let mut config = handoff_profile_config(
@@ -1941,53 +1937,46 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
         empty_lookup(),
         &detection_dir,
         None,
-        Some(policy(&["send_handoff"])),
+        None,
         30,
     );
     config.max_open_handoffs_per_conn = 1;
     let h = Harness::start("handoff-slot-per-conn", config).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
     let mut client = h.connect().await;
 
-    send_handoff_from_profile(&mut client, "never-ready", None, None, "r", "t").await;
-    let first =
-        wait_for_window_with_vendor(&mut client, "never-ready", Duration::from_secs(5)).await;
+    let first = hold_a_slot_pending_approval(&mut client, &mut approver, "ready").await;
 
-    send_handoff_from_profile(&mut client, "never-ready", None, None, "r", "t").await;
+    send_handoff_from_profile(&mut client, "ready", None, None, "r", "t").await;
     let msg = read_response(&mut client, Duration::from_secs(5)).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("per-connection"),
         "message must name the per-connection limit: {message:?}"
     );
-
-    // Only the first request's window was opened.
-    let windows = call_list_windows(&mut client).await;
-    assert_eq!(
-        windows
-            .iter()
-            .filter(|w| w.vendor.as_deref() == Some("never-ready"))
-            .count(),
-        1,
-        "the refused second request must not have opened a second window"
+    assert!(
+        call_list_windows(&mut client).await.is_empty() && !was_started(&logs),
+        "neither request has started a window"
     );
 
-    // Clean up: disconnecting the requester lets the daemon close the
-    // window the first request is still holding open.
-    drop(client);
-    h.wait_until_child_exited(&first.window_id, Duration::from_secs(10))
-        .await;
+    decide(&mut approver, &first.request_id, false).await;
+    expect_error(
+        read_response(&mut client, Duration::from_secs(5)).await,
+        "approval_denied",
+    );
 }
 
 #[tokio::test]
-async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awaits_readiness_is_resource_exhausted_daemon_wide()
+async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awaits_approval_is_resource_exhausted_daemon_wide()
  {
     let tree = TempDir::new("yagura-cli-test", "handoff-slot-daemon-wide");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
     write_profile(
         &profiles_dir,
-        "never-ready",
-        &echo_child_profile_source("Never Ready"),
+        "ready",
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let mut config = handoff_profile_config(
@@ -1995,20 +1984,20 @@ async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awai
         empty_lookup(),
         &detection_dir,
         None,
-        Some(policy(&["send_handoff"])),
+        None,
         30,
     );
     config.max_open_handoffs = 1;
     config.max_open_handoffs_per_conn = 10;
     let h = Harness::start("handoff-slot-daemon-wide", config).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
 
     let mut first_conn = h.connect().await;
-    send_handoff_from_profile(&mut first_conn, "never-ready", None, None, "r", "t").await;
-    let first =
-        wait_for_window_with_vendor(&mut first_conn, "never-ready", Duration::from_secs(5)).await;
+    let first = hold_a_slot_pending_approval(&mut first_conn, &mut approver, "ready").await;
 
     let mut second_conn = h.connect().await;
-    send_handoff_from_profile(&mut second_conn, "never-ready", None, None, "r", "t").await;
+    send_handoff_from_profile(&mut second_conn, "ready", None, None, "r", "t").await;
     let msg = read_response(&mut second_conn, Duration::from_secs(5)).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
@@ -2016,9 +2005,11 @@ async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awai
         "message must name the daemon-wide limit: {message:?}"
     );
 
-    drop(first_conn);
-    h.wait_until_child_exited(&first.window_id, Duration::from_secs(10))
-        .await;
+    decide(&mut approver, &first.request_id, false).await;
+    expect_error(
+        read_response(&mut first_conn, Duration::from_secs(5)).await,
+        "approval_denied",
+    );
 }
 
 #[tokio::test]
@@ -2030,11 +2021,11 @@ async fn a_pending_profile_handoff_holds_its_slot_until_decided_and_releases_it_
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
-    // No auto_approve: the first request reaches readiness and then waits
-    // for a human decision, holding its slot the whole time.
+    // No auto_approve: the first request waits for a human decision, holding
+    // its slot the whole time.
     let mut config = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
@@ -2092,13 +2083,8 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
     let detection_dir = tree.make_dir("detection");
     write_profile(
         &profiles_dir,
-        "never-ready",
-        &echo_child_profile_source("Never Ready"),
-    );
-    write_profile(
-        &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let mut config = handoff_profile_config(
@@ -2106,17 +2092,18 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
         empty_lookup(),
         &detection_dir,
         None,
-        Some(policy(&["send_handoff"])),
+        None,
         30,
     );
     config.max_open_handoffs = 1;
     config.max_open_handoffs_per_conn = 1;
     let h = Harness::start("handoff-slot-rollback", config).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
 
     // Connection X holds the only daemon-wide slot.
     let mut x = h.connect().await;
-    send_handoff_from_profile(&mut x, "never-ready", None, None, "r", "t").await;
-    let held = wait_for_window_with_vendor(&mut x, "never-ready", Duration::from_secs(5)).await;
+    let held = hold_a_slot_pending_approval(&mut x, &mut approver, "ready").await;
 
     // Connection Y's first attempt fails on the daemon-wide limit. If the
     // two-stage acquisition (`HandoffSlot::try_acquire`) failed to roll back
@@ -2133,13 +2120,13 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
          {message:?}"
     );
 
-    // Freeing X's slot: disconnect lets the daemon close X's held window.
+    // Freeing X's slot: disconnecting withdraws its pending request.
     drop(x);
-    h.wait_until_child_exited(&held.window_id, Duration::from_secs(10))
-        .await;
+    expect_withdrawn_for_a_departed_requester(&mut approver, &held.request_id).await;
 
     // Y's next attempt must now succeed.
-    send_handoff_from_profile(&mut y, "ready", None, None, "r", "t").await;
+    let retry = hold_a_slot_pending_approval(&mut y, &mut approver, "ready").await;
+    decide(&mut approver, &retry.request_id, true).await;
     match read_response(&mut y, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { opened, .. } => assert!(opened),
         DaemonMessage::Error { code, message, .. } => panic!(
@@ -2149,18 +2136,21 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
         ),
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+
+    h.registry.terminate_all().await;
 }
 
 #[tokio::test]
-async fn send_handoff_from_a_profile_approved_by_a_registered_approver_delivers_the_envelope_and_keeps_the_window()
+async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_the_window_with_the_envelope_and_keeps_it()
  {
     let tree = TempDir::new("yagura-cli-test", "handoff-profile-approved");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
+    let logs = tree.make_dir("ready-logs");
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &logs),
     );
 
     // No auto_approve: a human decision is required.
@@ -2187,28 +2177,21 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_delivers_
     )
     .await;
 
-    // Same rationale as the denied/pending profile cases above: this
-    // request just launched a fresh profile window, so the wait covers a
-    // process spawn plus detection, not just an IPC round trip.
     let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
     assert_eq!(request.tool, "send_handoff");
-    let window_id = request
-        .target
-        .as_ref()
-        .expect("send_handoff must carry a target")
-        .window_id
-        .clone();
+    assert!(
+        !was_started(&logs),
+        "nothing starts before the approval is decided"
+    );
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
-    let (acked, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(delivery, HandoffDelivery::NotObserved);
-    assert_eq!(acked, window_id);
+    let msg = read_response(&mut requester, Duration::from_secs(10)).await;
+    let (window_id, opened, delivery) = expect_handoff_sent(msg);
+    assert_eq!(wire(delivery), "taken");
     assert!(opened, "a profile target must always report opened: true");
 
-    let json =
-        wait_for_accepted_handoff_envelope_json(&h, &window_id, Duration::from_secs(10)).await;
+    let json = envelope_json(&launch_prompt_logged_in(&logs).await);
     assert_eq!(
         json["from"], "external",
         "an unidentified connection's envelope must carry \"from\":\"external\": {json}"
@@ -2242,7 +2225,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
     write_profile(
         &profiles_dir,
         "ready",
-        &ready_child_profile_source_with_composer("Ready", 0),
+        &launch_profile_source("Ready", None, None, &tree.make_dir("ready-logs")),
     );
 
     let mut config = handoff_profile_config(
@@ -2323,195 +2306,6 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
         ),
         other => panic!("expected handoff_sent, got {other:?}"),
     }
-}
-
-// =============================================================================
-// send_handoff: submit-plan / delivery-confirmation contract, profile-
-// addressed.
-// =============================================================================
-
-/// The window a profile handoff has opened, once the first attempt has written
-/// into it; then another writer's keystroke, typed and erased in one write so
-/// the composer is as empty as before, ends that attempt's wait.
-async fn end_the_first_attempts_wait_with_a_keystroke(h: &Harness) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let window = loop {
-        if let Some(info) = h.registry.list().into_iter().next()
-            && let Some(window) = h.registry.get(&info.window_id)
-            && window.write_seq() > 0
-        {
-            break window;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the handoff never wrote into its window"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    window
-        .write_pty_input(b"Z\x7f", yagura_daemon::window::InputOrigin::Interactive)
-        .await
-        .expect("the keystroke must not fail");
-}
-
-#[tokio::test]
-async fn send_handoff_from_a_profile_waits_on_a_probe_the_startup_drain_dropped_and_resends_once_another_writer_ends_the_wait()
- {
-    // (j), defect B: the fixture drops its first read whole -- the first
-    // attempt's probe -- so that attempt waits for a probe that never shows,
-    // with no clock to end it. Another writer's keystroke does, and only a
-    // later attempt gets as far as the body.
-    let tree = TempDir::new("yagura-cli-test", "handoff-j-defect-b");
-    let profiles_dir = tree.make_dir("profiles");
-    let detection_dir = tree.make_dir("detection");
-    write_submit_definition(
-        &detection_dir,
-        "handoff-j",
-        "handoff-j-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 900,
-            clear: "\\u0015",
-            delivery_confirm_ms: 800,
-            resend_max: 4,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        "submit-j",
-        &submit_child_profile_source_with_detection_and_composer(
-            "Submit J",
-            "handoff-j-marker",
-            1,
-            0,
-            0,
-            "handoff-j",
-            0,
-        ),
-    );
-
-    let config = handoff_profile_config(
-        Some(profiles_dir),
-        empty_lookup(),
-        &detection_dir,
-        None,
-        Some(policy(&["send_handoff"])),
-        30,
-    );
-    let h = Harness::start("handoff-j-defect-b", config).await;
-    let mut client = h.connect().await;
-
-    let (msg, ()) = tokio::join!(
-        call_send_handoff_from_profile_within(
-            &mut client,
-            "submit-j",
-            None,
-            None,
-            "src/foo.rs",
-            "look here",
-            Duration::from_secs(40),
-        ),
-        end_the_first_attempts_wait_with_a_keystroke(&h),
-    );
-    let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert!(opened);
-    assert_eq!(delivery, HandoffDelivery::Confirmed);
-
-    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1, Duration::from_secs(10))
-        .await;
-    assert_eq!(
-        count_marker(&h, &window_id, "SUBMITTED "),
-        1,
-        "the body is accepted exactly once"
-    );
-    assert_eq!(
-        count_marker(&h, &window_id, "PASTE "),
-        1,
-        "the body is written once: the attempt the startup discard swallowed never got as far \
-         as writing it"
-    );
-
-    h.registry.terminate_all().await;
-}
-
-/// Control for the test above: the same fixture, but `resend_max = 0` -- the
-/// first (and only) attempt's probe is dropped and its wait ended by the
-/// keystroke, with nothing left to retry it.
-#[tokio::test]
-async fn send_handoff_from_a_profile_with_no_resend_budget_never_recovers_from_the_startup_discard_window()
- {
-    let tree = TempDir::new("yagura-cli-test", "handoff-j-control");
-    let profiles_dir = tree.make_dir("profiles");
-    let detection_dir = tree.make_dir("detection");
-    write_submit_definition(
-        &detection_dir,
-        "handoff-j-control",
-        "handoff-j-control-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 900,
-            clear: "\\u0015",
-            delivery_confirm_ms: 800,
-            resend_max: 0,
-        },
-    );
-    write_profile(
-        &profiles_dir,
-        "submit-j-control",
-        &submit_child_profile_source_with_detection_and_composer(
-            "Submit J Control",
-            "handoff-j-control-marker",
-            1,
-            0,
-            0,
-            "handoff-j-control",
-            0,
-        ),
-    );
-
-    let config = handoff_profile_config(
-        Some(profiles_dir),
-        empty_lookup(),
-        &detection_dir,
-        None,
-        Some(policy(&["send_handoff"])),
-        30,
-    );
-    let h = Harness::start("handoff-j-control", config).await;
-    let mut client = h.connect().await;
-
-    let (msg, ()) = tokio::join!(
-        call_send_handoff_from_profile_within(
-            &mut client,
-            "submit-j-control",
-            None,
-            None,
-            "src/foo.rs",
-            "look here",
-            Duration::from_secs(15),
-        ),
-        end_the_first_attempts_wait_with_a_keystroke(&h),
-    );
-    let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert!(opened);
-    assert_eq!(
-        delivery,
-        HandoffDelivery::NotWritten,
-        "the sole attempt's probe is swallowed by the startup discard and its wait ended by \
-         another writer, so the delivery outcome itself must report that no body was ever \
-         written"
-    );
-
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED "), 0);
-    assert_eq!(
-        count_marker(&h, &window_id, "PASTE "),
-        0,
-        "the only attempt never gets as far as writing its body"
-    );
-
-    h.registry.terminate_all().await;
 }
 
 // =============================================================================
@@ -2758,7 +2552,10 @@ async fn send_handoff_from_a_profile_refuses_a_value_a_launcher_could_reinterpre
     write_profile(
         &profiles_dir,
         "with-options",
-        &argv_probe_profile_source("With Options", BOTH_AXES_TABLES),
+        &argv_probe_profile_source(
+            "With Options",
+            &format!("{BOTH_AXES_TABLES}{LAUNCH_PROMPT_TABLE}"),
+        ),
     );
 
     let config = handoff_profile_config(
@@ -2863,7 +2660,10 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
     write_profile(
         &profiles_dir,
         "with-options",
-        &argv_probe_profile_source("With Options", BOTH_AXES_TABLES),
+        &argv_probe_profile_source(
+            "With Options",
+            &format!("{BOTH_AXES_TABLES}{LAUNCH_PROMPT_TABLE}"),
+        ),
     );
 
     let mut config = handoff_profile_config(
@@ -2889,26 +2689,27 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
         Some("tier-b"),
     )
     .await;
-    // The probe writes its argv and exits at once, so it never reaches a
-    // ready state and the handoff is abandoned rather than delivered. The
-    // window it opened is retired, but its entry and scrollback stay.
-    expect_error(msg, "window_not_ready");
+    // The probe writes its argv and exits at once: the envelope it was started
+    // with is taken all the same, since it was handed over at launch.
+    let (window_id, opened, delivery) = expect_handoff_sent(msg);
+    assert!(opened);
+    assert_eq!(wire(delivery), "taken");
 
-    let opened =
-        wait_for_window_with_vendor(&mut client, "with-options", Duration::from_secs(10)).await;
     h.wait_for_scrollback(
-        &opened.window_id,
-        b"<<argv[4]=tier=tier-b>>",
+        &window_id,
+        b"<<argv[6]=[yagura handoff] ",
         Duration::from_secs(10),
     )
     .await;
     assert_in_order(
-        &h.scrollback(&opened.window_id),
+        &h.scrollback(&window_id),
         &[
             "<<argv[1]=--tier>>",
             "<<argv[2]=tier-a>>",
             "<<argv[3]=-c>>",
             "<<argv[4]=tier=tier-b>>",
+            "<<argv[5]=--prompt>>",
+            "<<argv[6]=[yagura handoff] ",
         ],
     );
 }

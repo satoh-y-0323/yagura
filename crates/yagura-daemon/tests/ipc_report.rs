@@ -13,11 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, call_open_window,
-    call_send_handoff_from_profile_within, empty_lookup, expect_error, expect_handoff_sent,
-    handoff_profile_config, identify, policy, read_response, register_approver, send,
-    submit_child_profile_source_with_detection_and_composer, unique_temp_dir, write_profile,
-    write_submit_definition,
+    Harness, approver_base_config, call_open_window, call_send_handoff_from_profile_within,
+    empty_lookup, expect_error, expect_handoff_sent, handoff_profile_config, identify,
+    launch_prompt_profile_source, policy, read_response, register_approver, send, unique_temp_dir,
+    write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -408,33 +407,12 @@ async fn a_window_opened_via_a_profile_addressed_send_handoff_becomes_its_opener
     let tree = TempDir::new("yagura-cli-test", "report-opener-handoff-profile");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
-    write_submit_definition(
-        &detection_dir,
-        "report-handoff",
-        "report-handoff-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 200,
-            submit_delay_ms: 150,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 0,
-        },
-    );
     write_profile(
         &profiles_dir,
         "report-handoff-profile",
-        &submit_child_profile_source_with_detection_and_composer(
-            "Report Handoff Profile",
-            "report-handoff-marker",
-            0,
-            1,
-            0,
-            "report-handoff",
-            0,
-        ),
+        &launch_prompt_profile_source("Report Handoff Profile", None, ""),
     );
-    let mut config = handoff_profile_config(
+    let config = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
         &detection_dir,
@@ -442,7 +420,6 @@ async fn a_window_opened_via_a_profile_addressed_send_handoff_becomes_its_opener
         Some(policy(&["send_handoff"])),
         30,
     );
-    config.handoff_ready_timeout_secs = 20;
     let h = Harness::start("report-opener-handoff-profile", config).await;
 
     let window_a = h.open(echo_child_command(), None).await;

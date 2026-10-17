@@ -245,22 +245,23 @@ fn send_handoff_explains_every_argument_in_its_schema() {
 /// Guidance a caller cannot act on the tool without, measured against what a
 /// truncating client actually delivers rather than against the full string:
 /// how to answer a handoff (`reply.window_id`), the reference/note/envelope
-/// byte limits, and the actionable instruction attached to the one delivery
-/// outcome that asks the caller to go and look before handing the receiver
-/// the same work again.
+/// byte limits, and every delivery outcome the reply can carry, so a caller can
+/// tell an envelope the receiving CLI took from one it never will.
 ///
-/// The last needle targets that instruction specifically, not merely the
-/// outcome's name: the name alone also appears earlier in the description as
-/// a plain mention with no actionable follow-up, so a needle that matched
-/// only the name could stay green even after the instruction sentence itself
-/// was deleted. A description that grows loses its tail first, so every
-/// sentence added for the delivery outcome has to be paid for by compressing
-/// another one, and this test is what says whether that payment was made.
+/// A description that grows loses its tail first, so every sentence added for
+/// the delivery outcome has to be paid for by compressing another one, and this
+/// test is what says whether that payment was made.
 const REQUIRED_DELIVERED_GUIDANCE: &[&str] = &[
     "reply.window_id",
     "512 and 1024 bytes",
-    "before handing it the same work again",
+    "taken",
+    "undelivered_timeout",
+    "undelivered_no_delivery",
 ];
+
+/// Delivery outcomes of a handoff that no longer exist: the daemon no longer types an
+/// envelope into a window and watches its composer.
+const RETIRED_HANDOFF_OUTCOMES: &[&str] = &["unconfirmed", "not_observed", "not_written"];
 
 #[test]
 fn send_handoff_keeps_the_reply_instruction_inside_the_delivered_description() {
@@ -288,6 +289,13 @@ fn send_handoff_keeps_the_reply_instruction_inside_the_delivered_description() {
         "guidance the caller needs falls outside the first {MAX_TOOL_DESCRIPTION_CHARS} chars \
          a truncating client actually delivers: {missing:?}"
     );
+    for retired in RETIRED_HANDOFF_OUTCOMES {
+        assert!(
+            !description.contains(retired),
+            "send_handoff description still names the retired outcome {retired:?}: \
+             {description:?}"
+        );
+    }
 }
 
 /// `open_window` and `send_handoff` both accept `model` and `effort` only
@@ -372,14 +380,26 @@ fn the_three_new_chat_tool_descriptions_fit_the_clients_2048_char_limit() {
 /// Guidance a caller cannot page through the room's history without: that
 /// `next_after_seq` from one reply is the `after_seq` to send on the next
 /// call, that a message mentioning `@user` asks a human to decide something,
-/// and that the room's current participants come back as `roster`.
+/// that the room's current participants come back as `roster`, and every state a
+/// delivery record can be in.
 const READ_CHAT_REQUIRED_GUIDANCE: &[&str] = &[
     "next_after_seq",
     "back as after_seq",
     "@user",
     "asks a human to decide",
     "roster",
+    "pending",
+    "taken",
+    "undelivered_unknown",
+    "undelivered_halted",
+    "undelivered_exhausted",
+    "undelivered_restart",
 ];
+
+/// Delivery states of a chat post that no longer exist: they described what a
+/// window's composer showed after the daemon typed into it.
+const RETIRED_CHAT_DELIVERY_STATES: &[&str] =
+    &["confirmed", "not_observed", "not_written", "write_failed"];
 
 #[test]
 fn read_chat_description_documents_after_seq_persistence_at_mentions_and_roster() {
@@ -402,6 +422,12 @@ fn read_chat_description_documents_after_seq_persistence_at_mentions_and_roster(
         missing.is_empty(),
         "read_chat description is missing required guidance: {missing:?}, got: {description:?}"
     );
+    for retired in RETIRED_CHAT_DELIVERY_STATES {
+        assert!(
+            !description.contains(retired),
+            "read_chat description still names the retired state {retired:?}: {description:?}"
+        );
+    }
 }
 
 /// Guidance a caller needs to address a chat post: the mention syntax for a

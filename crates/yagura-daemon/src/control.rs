@@ -220,13 +220,21 @@ pub struct PolicyLimits {
     /// instead of silently taking effect.
     #[serde(default, deserialize_with = "deserialize_approval_timeout_secs")]
     pub approval_timeout_secs: Option<u64>,
-    /// Deadline for a handoff's target window to become ready for input, in
-    /// seconds. Validated the same way, and against the same range, as
-    /// [`PolicyLimits::approval_timeout_secs`].
+    /// How long a delivery the daemon types into a window waits for that
+    /// window to leave its startup phase, in seconds. Validated the same way,
+    /// and against the same range, as [`PolicyLimits::approval_timeout_secs`].
     #[serde(default, deserialize_with = "deserialize_handoff_ready_timeout_secs")]
     pub handoff_ready_timeout_secs: Option<u64>,
-    /// Upper bound on how many chat deliveries (posts and intros together)
-    /// may be in flight at once (1..=256). Validated the same
+    /// How long a handoff to an existing window waits for that window's CLI
+    /// to take its envelope, in seconds. Validated the same way, and against
+    /// the same range, as [`PolicyLimits::approval_timeout_secs`].
+    #[serde(
+        default,
+        deserialize_with = "deserialize_handoff_delivery_timeout_secs"
+    )]
+    pub handoff_delivery_timeout_secs: Option<u64>,
+    /// Upper bound on how many chat posts may be typed into windows at once
+    /// (1..=256). Validated the same
     /// way as the other `[limits]` deadlines.
     #[serde(default, deserialize_with = "deserialize_chat_delivery_max")]
     pub chat_delivery_max: Option<u64>,
@@ -333,6 +341,15 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_timeout_secs(deserializer, "handoff_ready_timeout_secs")
+}
+
+fn deserialize_handoff_delivery_timeout_secs<'de, D>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_timeout_secs(deserializer, "handoff_delivery_timeout_secs")
 }
 
 /// Lower and upper bound (inclusive) accepted for `[limits] chat_delivery_max`.
@@ -757,6 +774,9 @@ pub fn apply_limits(config: &mut DaemonConfig, limits: Option<&PolicyLimits>) {
     }
     if let Some(seconds) = limits.handoff_ready_timeout_secs {
         config.handoff_ready_timeout_secs = seconds;
+    }
+    if let Some(seconds) = limits.handoff_delivery_timeout_secs {
+        config.handoff_delivery_timeout_secs = seconds;
     }
     if let Some(max) = limits.chat_delivery_max {
         config.chat_delivery_max = usize::try_from(max).unwrap_or(usize::MAX);

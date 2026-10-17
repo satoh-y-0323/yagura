@@ -453,6 +453,9 @@ pub fn guaranteed_nonexistent_exe_path() -> PathBuf {
 pub struct Harness {
     pub registry: Arc<WindowRegistry>,
     pub endpoint: String,
+    // How the daemon was configured to answer at a window's doors, which the windows
+    // opened by `open_delivering` declare as their profile's own.
+    delivery: yagura_daemon::inbox::DeliverySpec,
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -471,6 +474,7 @@ impl Harness {
         Self {
             registry,
             endpoint,
+            delivery: config.delivery.clone(),
             _server: handle,
         }
     }
@@ -509,6 +513,7 @@ impl Harness {
         Self {
             registry,
             endpoint,
+            delivery: config.delivery.clone(),
             _server: handle,
         }
     }
@@ -549,6 +554,7 @@ impl Harness {
             Self {
                 registry,
                 endpoint,
+                delivery: config.delivery.clone(),
                 _server: handle,
             },
             locks,
@@ -600,6 +606,7 @@ impl Harness {
             Self {
                 registry,
                 endpoint,
+                delivery: config.delivery.clone(),
                 _server: handle,
             },
             locks,
@@ -645,6 +652,48 @@ impl Harness {
             })
             .await
             .expect("registry.open should spawn the child")
+            .window_id
+    }
+
+    /// [`Self::open`], for a window whose profile declares delivery with no way to
+    /// wake its CLI ([`wake_none_delivery`]): it takes part in chat and notices
+    /// whatever its command line, and is typed into while it waits. Its doors answer
+    /// as the daemon's own `delivery` configuration says.
+    pub async fn open_delivering(&self, command: Vec<String>, detection: Option<&str>) -> String {
+        self.open_delivering_in(command, detection, None).await
+    }
+
+    /// [`Self::open_delivering`], with an explicit `cwd` when one is given.
+    pub async fn open_delivering_in(
+        &self,
+        command: Vec<String>,
+        detection: Option<&str>,
+        cwd: Option<&Path>,
+    ) -> String {
+        self.registry
+            .open_with_extra_env(
+                OpenWindowRequest {
+                    command,
+                    cwd: cwd.map(|cwd| RequestedCwd::from_caller(cwd.to_path_buf())),
+                    name: None,
+                    vendor: None,
+                    detection: detection.map(str::to_string),
+                },
+                Vec::new(),
+                Vec::new(),
+                yagura_daemon::window::WindowProvenance {
+                    delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                        max_chars: self.delivery.max_chars,
+                        output: self.delivery.output.clone(),
+                        wake_stream: self.delivery.wake_stream,
+                        wake_exit: self.delivery.wake_exit,
+                        ..wake_none_delivery()
+                    }),
+                    ..yagura_daemon::window::WindowProvenance::default()
+                },
+            )
+            .await
+            .expect("registry.open_with_extra_env should spawn the child")
             .window_id
     }
 
@@ -853,13 +902,103 @@ pub fn detection_config(dir: &Path, base: DaemonConfig) -> DaemonConfig {
     }
 }
 
+/// What a profile declares to hand a first request over at launch, as
+/// `--prompt <request>`, with no way to wake its CLI later.
+pub const LAUNCH_PROMPT_TABLE: &str = "
+[delivery]
+wake = \"none\"
+launch_prompt = [\"--prompt\", \"{prompt}\"]
+";
+
+/// A `hook_child` profile that is handed a first request at launch
+/// ([`LAUNCH_PROMPT_TABLE`]), logging what it was started with under `logs` when
+/// given. `extra_tables` is appended after the `[delivery]` table.
+pub fn launch_prompt_profile_source(
+    display_name: &str,
+    logs: Option<&Path>,
+    extra_tables: &str,
+) -> String {
+    let mut command = vec![
+        PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
+            .display()
+            .to_string(),
+        process::COMPOSER_MARKER.to_string(),
+        process::COMPOSER_SEPARATOR.to_string(),
+        process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+    ];
+    if let Some(logs) = logs {
+        command.push("--log".to_string());
+        command.push(logs.display().to_string());
+    }
+    let command = command
+        .iter()
+        .map(|arg| format!("'{arg}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "schema = 1
+display_name = \"{display_name}\"
+
+         [command]
+default = [{command}]
+{LAUNCH_PROMPT_TABLE}{extra_tables}"
+    )
+}
+
+/// The `args` the `hook_child` logging under `logs` was started with, once it has
+/// logged them.
+pub async fn launch_args_logged_in(logs: &Path) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
+        let argv = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|line| line["event"] == "argv");
+        if let Some(argv) = argv {
+            return argv["args"]
+                .as_array()
+                .map(|args| {
+                    args.iter()
+                        .filter_map(|arg| arg.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hang guard: the window never logged its argv under {}",
+            logs.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The `[delivery]` table of a profile with no way to wake its CLI while it waits,
+/// with the daemon's own defaults otherwise.
+pub fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
+    yagura_daemon::profile_delivery::ProfileDelivery {
+        output: yagura_daemon::inbox::OutputForm::Plain,
+        max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+        wake: yagura_daemon::profile_delivery::WakeMode::None,
+        wake_stream: yagura_protocol::DeliveryStream::Stderr,
+        wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+        wake_timeout_secs: None,
+        session_pointer: None,
+        launch_prompt: None,
+        shim_guidance: None,
+    }
+}
+
 impl Harness {
     /// Opens an `echo_child` window with no detection definition: its status
     /// is permanently `Unknown` (fail-safe rule).
     pub async fn open_unknown_window(&self) -> String {
         let path = echo_child_path();
         let path = path.to_str().expect("echo_child path must be valid UTF-8");
-        self.open(vec![path.to_string()], None).await
+        self.open_delivering(vec![path.to_string()], None).await
     }
 
     /// Opens an `echo_child` window bound to [`CONTROL_DETECTION_NAME`], drives it to
@@ -891,7 +1030,9 @@ impl Harness {
         client: &mut Connection,
         command: Vec<String>,
     ) -> String {
-        let window_id = self.open(command, Some(CONTROL_DETECTION_NAME)).await;
+        let window_id = self
+            .open_delivering(command, Some(CONTROL_DETECTION_NAME))
+            .await;
         self.write_input(&window_id, READY_MARKER).await;
         wait_until_status(
             client,
@@ -1094,9 +1235,13 @@ pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowSta
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
-        DaemonMessage::WindowStatus { status, .. } => status,
-        other => panic!("expected window_status, got {other:?}"),
+    // An approver connection is also sent room and plan changes as they settle.
+    loop {
+        match read_response(client, Duration::from_secs(5)).await {
+            DaemonMessage::WindowStatus { status, .. } => return status,
+            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
+            other => panic!("expected window_status, got {other:?}"),
+        }
     }
 }
 
@@ -1940,7 +2085,7 @@ pub async fn open_submit_child_window_with_clear_scope(
         reflect_delay_ms,
         clear_scope,
     );
-    let window_id = h.open(command, Some(name)).await;
+    let window_id = h.open_delivering(command, Some(name)).await;
     wait_until_status(
         client,
         &window_id,
@@ -2404,10 +2549,7 @@ async fn open_submit_child_window_in_mode_with_cwd(
                 .to_string(),
         );
     }
-    let window_id = match cwd {
-        Some(cwd) => h.open_in_cwd(command, Some(name), cwd).await,
-        None => h.open(command, Some(name)).await,
-    };
+    let window_id = h.open_delivering_in(command, Some(name), cwd).await;
     wait_until_status(
         client,
         &window_id,
@@ -3486,7 +3628,7 @@ pub async fn open_gate_window(
                 .to_string(),
         );
     }
-    let window_id = h.open(command, Some(window.name)).await;
+    let window_id = h.open_delivering(command, Some(window.name)).await;
     wait_until_status(
         client,
         &window_id,
@@ -3571,6 +3713,7 @@ impl Harness {
         Self {
             registry,
             endpoint,
+            delivery: config.delivery.clone(),
             _server: handle,
         }
     }

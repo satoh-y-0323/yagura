@@ -69,6 +69,44 @@ fn detection_config(dir: &Path) -> DaemonConfig {
     common::detection_config(dir, base_config())
 }
 
+/// A handoff's answer as its wire string.
+fn wire(delivery: HandoffDelivery) -> String {
+    serde_json::to_value(delivery)
+        .expect("a delivery encodes")
+        .as_str()
+        .expect("a delivery is a string on the wire")
+        .to_string()
+}
+
+/// `config` under a playbook that auto-approves `send_handoff` and answers a handoff
+/// the window has not taken within `secs` as undelivered.
+fn with_handoff_delivery_limit(mut config: DaemonConfig, secs: u64) -> DaemonConfig {
+    let source = format!(
+        "[approval]\nauto_approve = [\"send_handoff\"]\n\n\
+         [limits]\nhandoff_delivery_timeout_secs = {secs}\n"
+    );
+    let policy = yagura_daemon::control::parse_policy(&source)
+        .unwrap_or_else(|err| panic!("the playbook must load ({err}):\n{source}"));
+    yagura_daemon::control::apply_limits(&mut config, policy.limits());
+    config.approval_policy = Some(policy);
+    config
+}
+
+/// Waits until `window_id`'s inbox holds `count` parcels.
+async fn wait_until_inbox_holds(h: &Harness, window_id: &str, count: usize) {
+    let entry = h.registry.get(window_id).expect("window must exist");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() != count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hang guard: the inbox never held {count} parcel(s), it holds {}",
+            entry.inbox().pending_count()
+        );
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// A fixed command whose direct child prints the value of each environment
 /// variable named in `vars` (space-separated, in order) and then stays alive well
 /// past this file's timeouts, so the line can be read back from the scrollback.
@@ -3714,7 +3752,7 @@ async fn send_handoff_to_ones_own_window_needs_no_playbook_and_delivers_the_enve
             assert!(!opened, "a window_id target must never report opened: true");
             // common::control_definition sets delivery_confirm_ms = 0: no reaction is
             // ever looked for.
-            assert_eq!(delivery, HandoffDelivery::NotObserved);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -3796,7 +3834,7 @@ async fn send_handoff_between_two_windows_succeeds_when_the_playbook_lists_send_
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(delivery, HandoffDelivery::NotObserved);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4128,7 +4166,7 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_deli
         } => {
             assert_eq!(acked, window_b);
             assert!(!opened, "a window_id target must never report opened: true");
-            assert_eq!(delivery, HandoffDelivery::NotObserved);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4221,7 +4259,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(delivery, HandoffDelivery::Confirmed);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4245,8 +4283,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_returns_not_observed_quickly()
- {
+async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_is_taken_quickly() {
     // (b): delivery_confirm_ms = 0 disables the wait entirely.
     let dir = unique_temp_dir("handoff-b-confirm-disabled");
     let config = DaemonConfig {
@@ -4293,9 +4330,9 @@ async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_returns
     match read_response(&mut client, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
-                delivery,
-                HandoffDelivery::NotObserved,
-                "delivery_confirm_ms = 0 must skip the confirmation wait entirely"
+                wire(delivery),
+                "taken",
+                "delivery_confirm_ms = 0 skips the confirmation wait: the typed envelope is taken"
             );
         }
         other => panic!("expected handoff_sent, got {other:?}"),
@@ -4303,7 +4340,7 @@ async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_returns
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_window_id_that_never_reacts_is_unconfirmed_and_the_window_survives() {
+async fn send_handoff_to_a_window_id_that_never_reacts_is_taken_and_the_window_survives() {
     // (c): the paste guard takes every submit key as a line break -- the
     // fixture never reacts, and resend_max = 0 means no retry is attempted
     // either.
@@ -4357,15 +4394,15 @@ async fn send_handoff_to_a_window_id_that_never_reacts_is_unconfirmed_and_the_wi
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(delivery, HandoffDelivery::Unconfirmed);
+            assert_eq!(wire(delivery), "taken");
         }
-        other => panic!("expected handoff_sent (unconfirmed is a success), got {other:?}"),
+        other => panic!("expected handoff_sent (a submitted envelope is taken), got {other:?}"),
     }
 
     let windows = call_list_windows(&mut client).await;
     assert!(
         windows.iter().any(|w| w.window_id == window_id),
-        "an unconfirmed delivery must never close the target window: {windows:?}"
+        "a delivery with no reaction must never close the target window: {windows:?}"
     );
 }
 
@@ -4465,7 +4502,7 @@ async fn send_handoff_to_a_window_id_delivers_through_the_same_submit_sequence_a
             delivery, opened, ..
         } => {
             assert!(!opened);
-            assert_eq!(delivery, HandoffDelivery::Confirmed);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4555,7 +4592,7 @@ async fn send_handoff_to_a_window_id_is_resource_exhausted_after_the_per_connect
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_not_confirmed() {
+async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_written_once() {
     // react_on_body = 1 makes the fixture behave like a
     // receiver whose observable state moves as soon as it accepts the body,
     // before any submit key arrives. A confirmation that does not fix its
@@ -4607,9 +4644,9 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_not_confirmed
     match read_response(&mut client, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
-                delivery,
-                HandoffDelivery::Unconfirmed,
-                "a status change caused by the body's own echo must never count as delivery"
+                wire(delivery),
+                "taken",
+                "a submitted envelope is taken however its submission was judged"
             );
         }
         other => panic!("expected handoff_sent, got {other:?}"),
@@ -4690,7 +4727,7 @@ async fn send_handoff_to_a_window_id_does_not_resend_once_the_window_leaves_the_
 
     match read_response(&mut client, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
-            assert_eq!(delivery, HandoffDelivery::Unconfirmed);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4771,7 +4808,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
 
     match read_response(&mut client, Duration::from_secs(15)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
-            assert_eq!(delivery, HandoffDelivery::Confirmed);
+            assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4782,19 +4819,17 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_window_id_does_not_wait_for_a_working_window_to_hold_still() {
-    // (a5''): the window is working when the request arrives and has never
-    // held a ready status, so its readiness latch was never set. The gate
-    // must not treat that as "this window is unsafe to write to": a gate that
-    // waited for readiness here would wait out handoff_ready_timeout_secs
-    // against a window that stays working, and answer window_not_ready.
-    let dir = unique_temp_dir("handoff-a5-double-prime-fail-open");
+async fn send_handoff_to_a_working_window_waits_in_its_inbox_and_is_typed_once_it_waits_again() {
+    // (a5''): the window is working when the request arrives. Nothing is typed into a
+    // working window: the envelope waits in its inbox, and is typed once the window
+    // waits for input again.
+    let dir = unique_temp_dir("handoff-a5-double-prime-inbox");
     let config = DaemonConfig {
         handoff_ready_timeout_secs: 10,
         approval_policy: Some(policy(&["send_handoff"])),
         ..detection_config(&dir)
     };
-    let h = Harness::start("handoff-a5-double-prime-fail-open", config).await;
+    let h = Harness::start("handoff-a5-double-prime-inbox", config).await;
     let mut client = h.connect().await;
     let window_id = open_submit_child_window_with_composer(
         &h,
@@ -4807,7 +4842,7 @@ async fn send_handoff_to_a_window_id_does_not_wait_for_a_working_window_to_hold_
         0,
         SubmitDefinitionInput {
             bracketed_paste: true,
-            ready_hold_ms: 4000,
+            ready_hold_ms: 0,
             submit_delay_ms: 300,
             clear: "",
             delivery_confirm_ms: 5000,
@@ -4816,14 +4851,17 @@ async fn send_handoff_to_a_window_id_does_not_wait_for_a_working_window_to_hold_
         0,
     )
     .await;
-    report_status(&mut client, &window_id, WindowStatus::Running).await;
+    let receiver = h.registry.get(&window_id).expect("window must exist");
+    let mut reporter = h.connect().await;
+    report_status(&mut reporter, &window_id, WindowStatus::Running).await;
     wait_until_status(
-        &mut client,
+        &mut reporter,
         &window_id,
         WindowStatus::Running,
         Duration::from_secs(10),
     )
     .await;
+    let seq_before = receiver.write_seq();
 
     send(
         &mut client,
@@ -4839,17 +4877,25 @@ async fn send_handoff_to_a_window_id_does_not_wait_for_a_working_window_to_hold_
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(8)).await {
-        DaemonMessage::HandoffSent { .. } => {}
-        other => panic!(
-            "a window observed busy at request time must be judged at once, never waited on \
-             for ready_hold_ms nor answered window_not_ready, got {other:?}"
-        ),
+    wait_until_inbox_holds(&h, &window_id, 1).await;
+    assert_eq!(
+        receiver.write_seq(),
+        seq_before,
+        "nothing is typed into a working window"
+    );
+
+    report_status(&mut reporter, &window_id, WindowStatus::WaitingInput).await;
+    match read_response(&mut client, Duration::from_secs(15)).await {
+        DaemonMessage::HandoffSent { delivery, .. } => {
+            assert_eq!(wire(delivery), "taken");
+        }
+        other => panic!("expected handoff_sent, got {other:?}"),
     }
+    assert_eq!(receiver.inbox().pending_count(), 0);
     assert_eq!(
         count_marker(&h, &window_id, "PASTE "),
         1,
-        "the body must have been written without waiting for the window to hold still"
+        "the envelope is typed exactly once, when the window waits again"
     );
 }
 
@@ -5260,11 +5306,10 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
     match read_response(&mut client_a, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
-                delivery,
-                HandoffDelivery::Confirmed,
-                "handoff a's status_before_submit is captured while the window is still \
-                 ready (nothing else has written to it yet), so its own submit key must be \
-                 confirmed"
+                wire(delivery),
+                "taken",
+                "handoff a is typed while the window is still ready (nothing else has written \
+                 to it yet), so its envelope is taken"
             );
         }
         other => panic!("expected handoff_sent for a, got {other:?}"),
@@ -5325,10 +5370,8 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
 async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_later_handoff_to_the_same_window()
  {
     let dir = unique_temp_dir("handoff-delivery-lock");
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["send_handoff"])),
-        ..detection_config(&dir)
-    };
+    // Every push fails, so neither envelope is ever taken: each answer is the limit's.
+    let config = with_handoff_delivery_limit(detection_config(&dir), 8);
     let h = Harness::start("handoff-delivery-lock", config).await;
     let mut opener = h.connect().await;
     // `discard-paste:`: every pasted body is thrown away and the probe behind
@@ -5392,15 +5435,24 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
         match read_response(&mut client, Duration::from_secs(20)).await {
             DaemonMessage::HandoffSent { delivery, .. } => {
                 assert_eq!(
-                    delivery,
-                    HandoffDelivery::NotWritten,
-                    "every attempt writes a body the receiver throws away, so the submit \
-                     key is never pressed"
+                    wire(delivery),
+                    "undelivered_timeout",
+                    "every attempt writes a body the receiver throws away, so the envelope is \
+                     never taken: a failed push puts it back in the inbox until the limit"
                 );
             }
             other => panic!("expected handoff_sent, got {other:?}"),
         }
     }
+    assert_eq!(
+        h.registry
+            .get(&window_id)
+            .expect("window must exist")
+            .inbox()
+            .pending_count(),
+        0,
+        "an envelope answered as undelivered is no longer waiting"
+    );
 
     // What each body landed on: the delivery lock is broken exactly when one
     // handoff's bytes (a probe it has typed and not yet erased) are still in
@@ -5408,9 +5460,8 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
     // that write reports is the only place that shows. The receiver throws a
     // body away, so a clean landing reports none.
     let buffered = paste_buffered_values(&h, &window_id);
-    assert_eq!(
-        buffered.len(),
-        4,
+    assert!(
+        buffered.len() >= 4,
         "two deliveries, each writing its body on both of its attempts, got {buffered:?}"
     );
     assert!(
@@ -5431,10 +5482,7 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
 #[tokio::test]
 async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the_whole_time() {
     let dir = unique_temp_dir("handoff-residue-carryover");
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["send_handoff"])),
-        ..detection_config(&dir)
-    };
+    let config = with_handoff_delivery_limit(detection_config(&dir), 3);
     let h = Harness::start("handoff-residue-carryover", config).await;
     let mut opener = h.connect().await;
     let window_id = open_submit_child_window_with_composer(
@@ -5492,10 +5540,10 @@ async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the
     match read_response(&mut client, Duration::from_secs(10)).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
-                delivery,
-                HandoffDelivery::NotWritten,
+                wire(delivery),
+                "undelivered_timeout",
                 "a foreign body sitting in the composer the whole time must decline every \
-                 attempt: nothing of this delivery's own is there to resend"
+                 attempt, so the envelope is never taken before the limit"
             );
         }
         other => panic!("expected handoff_sent, got {other:?}"),

@@ -712,7 +712,7 @@ mod tests {
             reply_for(DaemonMessage::HandoffSent {
                 window_id: "window-a".to_owned(),
                 opened: true,
-                delivery: HandoffDelivery::Confirmed,
+                delivery: HandoffDelivery::Taken,
             })
             .is_none()
         );

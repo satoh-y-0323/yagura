@@ -36,6 +36,41 @@ fn notice_for(pending: usize) -> String {
     format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
 }
 
+/// Opens `command` as a window whose profile declares delivery with no way to wake its
+/// CLI: a notice reaches it typed while it waits. A window opened from a raw argv takes
+/// no part in notices.
+async fn open_delivering(h: &Harness, command: Vec<String>, detection: &str) -> String {
+    h.registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command,
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(detection.to_string()),
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                    output: yagura_daemon::inbox::OutputForm::Plain,
+                    max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+                    wake: yagura_daemon::profile_delivery::WakeMode::None,
+                    wake_stream: yagura_protocol::DeliveryStream::Stderr,
+                    wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+                    wake_timeout_secs: None,
+                    session_pointer: None,
+                    launch_prompt: None,
+                    shim_guidance: None,
+                }),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("registry.open_with_extra_env should spawn the child")
+        .window_id
+}
+
 fn report_config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
         detection_dir: Some(dir.to_path_buf()),
@@ -179,7 +214,7 @@ async fn scene_with_first_notice_waiting(tag: &str, clear_scope: &str, style: &s
             .expect("the dialog path must be valid UTF-8")
     ));
     command.push(APPROVAL_HEADING.to_string());
-    let parent = h.open(command, Some("parent")).await;
+    let parent = open_delivering(&h, command, "parent").await;
     wait_until_status(
         &mut observer,
         &parent,

@@ -3642,7 +3642,7 @@ async fn send_handoff_accepts_a_reference_exactly_at_the_512_byte_limit() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
         window_id: "w1".to_string(),
         opened: false,
-        delivery: HandoffDelivery::Confirmed,
+        delivery: delivery("taken"),
     }));
     let mut args = valid_window_handoff_args();
     args.reference = Some("a".repeat(512));
@@ -3669,7 +3669,7 @@ async fn send_handoff_accepts_a_note_exactly_at_the_1024_byte_limit() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
         window_id: "w1".to_string(),
         opened: false,
-        delivery: HandoffDelivery::NotObserved,
+        delivery: delivery("taken"),
     }));
     let mut args = valid_window_handoff_args();
     args.note = Some("a".repeat(1024));
@@ -3684,7 +3684,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_window_target_resp
     let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
         window_id: "w1".to_string(),
         opened: false,
-        delivery: HandoffDelivery::Confirmed,
+        delivery: delivery("taken"),
     }));
     let args = valid_window_handoff_args();
 
@@ -3706,7 +3706,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_window_target_resp
     );
     assert_eq!(result["window_id"], "w1");
     assert_eq!(result["opened"], serde_json::Value::Bool(false));
-    assert_eq!(result["delivery"], "confirmed");
+    assert_eq!(result["delivery"], "taken");
 }
 
 #[tokio::test]
@@ -3714,7 +3714,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_profile_target_res
     let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
         window_id: "w9".to_string(),
         opened: true,
-        delivery: HandoffDelivery::Unconfirmed,
+        delivery: delivery("taken"),
     }));
     let args = valid_profile_handoff_args();
 
@@ -3736,7 +3736,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_profile_target_res
     );
     assert_eq!(result["window_id"], "w9");
     assert_eq!(result["opened"], serde_json::Value::Bool(true));
-    assert_eq!(result["delivery"], "unconfirmed");
+    assert_eq!(result["delivery"], "taken");
 }
 
 #[tokio::test]
@@ -3744,7 +3744,7 @@ async fn send_handoff_forwards_the_model_launch_option_of_a_profile_target() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
         window_id: "w9".to_string(),
         opened: true,
-        delivery: HandoffDelivery::Unconfirmed,
+        delivery: delivery("taken"),
     }));
     let mut args = valid_profile_handoff_args();
     args.model = Some("strong".to_string());
@@ -3760,25 +3760,27 @@ async fn send_handoff_forwards_the_model_launch_option_of_a_profile_target() {
     }
 }
 
-/// Every `HandoffDelivery` the daemon can answer with, paired with the wire
-/// spelling the caller reads out of the reply. The three are listed together
-/// because the bridge's job here is to relay, not to judge: a reply that
-/// dropped the outcome, or that reported the same outcome whatever the
-/// daemon observed, would tell the caller a handoff landed that nobody saw
-/// land.
-const HANDOFF_DELIVERY_WIRE_SPELLINGS: [(HandoffDelivery, &str); 3] = [
-    (HandoffDelivery::Confirmed, "confirmed"),
-    (HandoffDelivery::Unconfirmed, "unconfirmed"),
-    (HandoffDelivery::NotObserved, "not_observed"),
-];
+/// Every `HandoffDelivery` the daemon can answer with, by its wire spelling. The
+/// three are listed together because the bridge's job here is to relay, not to
+/// judge: a reply that dropped the outcome, or that reported the same outcome
+/// whatever the daemon answered, would tell the caller a handoff landed that
+/// nobody took.
+const HANDOFF_DELIVERY_WIRE_SPELLINGS: [&str; 3] =
+    ["taken", "undelivered_timeout", "undelivered_no_delivery"];
+
+/// The `HandoffDelivery` whose wire spelling is `wire`.
+fn delivery(wire: &str) -> HandoffDelivery {
+    serde_json::from_value(serde_json::Value::String(wire.to_string()))
+        .unwrap_or_else(|err| panic!("{wire:?} must be a handoff delivery ({err})"))
+}
 
 #[tokio::test]
 async fn send_handoff_relays_every_delivery_outcome_the_daemon_can_report() {
-    for (delivery, spelling) in HANDOFF_DELIVERY_WIRE_SPELLINGS {
+    for spelling in HANDOFF_DELIVERY_WIRE_SPELLINGS {
         let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
             window_id: "w1".to_string(),
             opened: false,
-            delivery,
+            delivery: delivery(spelling),
         }));
 
         let result = send_handoff(&transport, valid_window_handoff_args())
@@ -3787,7 +3789,7 @@ async fn send_handoff_relays_every_delivery_outcome_the_daemon_can_report() {
 
         assert_eq!(
             result["delivery"], spelling,
-            "the reply must carry the delivery outcome the daemon reported ({delivery:?}), got {result}"
+            "the reply must carry the delivery outcome the daemon reported ({spelling}), got {result}"
         );
     }
 }
@@ -3798,7 +3800,7 @@ async fn send_handoff_reports_a_window_requester_once_the_daemon_accepted_the_id
         Ok(DaemonMessage::HandoffSent {
             window_id: "w1".to_string(),
             opened: false,
-            delivery: HandoffDelivery::NotObserved,
+            delivery: delivery("taken"),
         }),
         RequesterIdentity::Window(IDENTIFIED_WINDOW_ID.to_string()),
     );
@@ -4189,7 +4191,7 @@ fn sample_chat_message(seq: u64) -> ChatMessage {
         broadcast: false,
         deliveries: vec![ChatDeliveryInfo {
             window_id: "w1".to_string(),
-            state: "confirmed".to_string(),
+            state: "taken".to_string(),
             unknown_reason: None,
         }],
     }

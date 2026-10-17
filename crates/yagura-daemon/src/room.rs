@@ -430,26 +430,20 @@ pub fn evaluate_limits(history: &[HistoryEntry], limits: &ChatLimits) -> Option<
 /// store persists and `read_chat` reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatDeliveryState {
-    /// Recorded when the message was appended, before any delivery ran.
+    /// Waiting in the window's inbox for its CLI to take it.
     Pending,
-    /// Written, and the window was seen taking it: its composer emptied
-    /// after the submit key, or it started working.
-    Confirmed,
-    /// Written, but the window was not seen taking it.
-    Unconfirmed,
-    /// Written, but the window's reaction could not be observed at all.
-    NotObserved,
-    /// Never written to the window.
-    NotWritten,
-    /// Writing to the window failed.
-    WriteFailed,
-    /// The destination could not be delivered to: it is gone, or its status
-    /// does not accept a write.
+    /// The window's CLI took it.
+    Taken,
+    /// The destination could not be delivered to: it is gone, or it ended
+    /// before its CLI took the message.
     UndeliveredUnknown,
     /// Withheld because the room was halted.
     UndeliveredHalted,
-    /// Withheld because the chat delivery budget was already spent.
+    /// Turned away: the window's inbox, or the chat delivery budget, was
+    /// already full.
     UndeliveredExhausted,
+    /// Still waiting when the daemon stopped; an inbox ends with its daemon.
+    UndeliveredRestart,
 }
 
 impl ChatDeliveryState {
@@ -458,14 +452,11 @@ impl ChatDeliveryState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
-            Self::Confirmed => "confirmed",
-            Self::Unconfirmed => "unconfirmed",
-            Self::NotObserved => "not_observed",
-            Self::NotWritten => "not_written",
-            Self::WriteFailed => "write_failed",
+            Self::Taken => "taken",
             Self::UndeliveredUnknown => "undelivered_unknown",
             Self::UndeliveredHalted => "undelivered_halted",
             Self::UndeliveredExhausted => "undelivered_exhausted",
+            Self::UndeliveredRestart => "undelivered_restart",
         }
     }
 
@@ -475,14 +466,11 @@ impl ChatDeliveryState {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
-            "confirmed" => Some(Self::Confirmed),
-            "unconfirmed" => Some(Self::Unconfirmed),
-            "not_observed" => Some(Self::NotObserved),
-            "not_written" => Some(Self::NotWritten),
-            "write_failed" => Some(Self::WriteFailed),
+            "taken" => Some(Self::Taken),
             "undelivered_unknown" => Some(Self::UndeliveredUnknown),
             "undelivered_halted" => Some(Self::UndeliveredHalted),
             "undelivered_exhausted" => Some(Self::UndeliveredExhausted),
+            "undelivered_restart" => Some(Self::UndeliveredRestart),
             _ => None,
         }
     }
@@ -490,23 +478,15 @@ impl ChatDeliveryState {
 
 /// The recorded outcome of one destination's delivery: one value, of which only the
 /// status-unknown arm can carry the reason the destination's status was unknown.
-/// The other eight arms share their names with [`ChatDeliveryState`], which
+/// The other arms share their names with [`ChatDeliveryState`], which
 /// [`Self::state`] projects onto -- the same shape `yagura_protocol::DetectedStatus` uses for
 /// the state/reason pair it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryOutcome {
     /// See [`ChatDeliveryState::Pending`].
     Pending,
-    /// See [`ChatDeliveryState::Confirmed`].
-    Confirmed,
-    /// See [`ChatDeliveryState::Unconfirmed`].
-    Unconfirmed,
-    /// See [`ChatDeliveryState::NotObserved`].
-    NotObserved,
-    /// See [`ChatDeliveryState::NotWritten`].
-    NotWritten,
-    /// See [`ChatDeliveryState::WriteFailed`].
-    WriteFailed,
+    /// See [`ChatDeliveryState::Taken`].
+    Taken,
     /// See [`ChatDeliveryState::UndeliveredUnknown`]. The only arm that can carry a reason;
     /// `None` when nothing was observed about the destination.
     UndeliveredUnknown(Option<UnknownReason>),
@@ -514,6 +494,8 @@ pub enum DeliveryOutcome {
     UndeliveredHalted,
     /// See [`ChatDeliveryState::UndeliveredExhausted`].
     UndeliveredExhausted,
+    /// See [`ChatDeliveryState::UndeliveredRestart`].
+    UndeliveredRestart,
 }
 
 impl DeliveryOutcome {
@@ -522,14 +504,11 @@ impl DeliveryOutcome {
     pub fn state(self) -> ChatDeliveryState {
         match self {
             Self::Pending => ChatDeliveryState::Pending,
-            Self::Confirmed => ChatDeliveryState::Confirmed,
-            Self::Unconfirmed => ChatDeliveryState::Unconfirmed,
-            Self::NotObserved => ChatDeliveryState::NotObserved,
-            Self::NotWritten => ChatDeliveryState::NotWritten,
-            Self::WriteFailed => ChatDeliveryState::WriteFailed,
+            Self::Taken => ChatDeliveryState::Taken,
             Self::UndeliveredUnknown(_) => ChatDeliveryState::UndeliveredUnknown,
             Self::UndeliveredHalted => ChatDeliveryState::UndeliveredHalted,
             Self::UndeliveredExhausted => ChatDeliveryState::UndeliveredExhausted,
+            Self::UndeliveredRestart => ChatDeliveryState::UndeliveredRestart,
         }
     }
 
@@ -540,13 +519,10 @@ impl DeliveryOutcome {
         match self {
             Self::UndeliveredUnknown(reason) => reason,
             Self::Pending
-            | Self::Confirmed
-            | Self::Unconfirmed
-            | Self::NotObserved
-            | Self::NotWritten
-            | Self::WriteFailed
+            | Self::Taken
             | Self::UndeliveredHalted
-            | Self::UndeliveredExhausted => None,
+            | Self::UndeliveredExhausted
+            | Self::UndeliveredRestart => None,
         }
     }
 
@@ -557,14 +533,11 @@ impl DeliveryOutcome {
     pub fn from_parts(state: ChatDeliveryState, reason: Option<UnknownReason>) -> Self {
         match state {
             ChatDeliveryState::Pending => Self::Pending,
-            ChatDeliveryState::Confirmed => Self::Confirmed,
-            ChatDeliveryState::Unconfirmed => Self::Unconfirmed,
-            ChatDeliveryState::NotObserved => Self::NotObserved,
-            ChatDeliveryState::NotWritten => Self::NotWritten,
-            ChatDeliveryState::WriteFailed => Self::WriteFailed,
+            ChatDeliveryState::Taken => Self::Taken,
             ChatDeliveryState::UndeliveredUnknown => Self::UndeliveredUnknown(reason),
             ChatDeliveryState::UndeliveredHalted => Self::UndeliveredHalted,
             ChatDeliveryState::UndeliveredExhausted => Self::UndeliveredExhausted,
+            ChatDeliveryState::UndeliveredRestart => Self::UndeliveredRestart,
         }
     }
 }
@@ -585,10 +558,7 @@ pub struct SilenceCheck {
 }
 
 /// Whether `check` describes a message that should be flagged for silence:
-/// it actually landed somewhere ([`ChatDeliveryState::Confirmed`],
-/// [`ChatDeliveryState::Unconfirmed`] or [`ChatDeliveryState::NotObserved`]
-/// for at least one addressed window -- all three mean the envelope was
-/// written, and only the window's own reaction differs),
+/// at least one addressed window's CLI took it ([`ChatDeliveryState::Taken`]),
 /// nobody has replied, `elapsed_ms` has reached `silence_timeout_ms`
 /// (equality counts as elapsed), the room is not halted, and it has not
 /// already been noted.
@@ -599,7 +569,7 @@ pub struct SilenceCheck {
 /// use yagura_daemon::room::{ChatDeliveryState, SilenceCheck, is_silence_candidate};
 ///
 /// let check = SilenceCheck {
-///     deliveries: vec![ChatDeliveryState::Confirmed],
+///     deliveries: vec![ChatDeliveryState::Taken],
 ///     replied_since: false,
 ///     elapsed_ms: 300_000,
 ///     halted: false,
@@ -612,14 +582,7 @@ pub fn is_silence_candidate(check: &SilenceCheck, silence_timeout_ms: u64) -> bo
     if check.halted || check.silence_noted || check.replied_since {
         return false;
     }
-    let placed = check.deliveries.iter().any(|state| {
-        matches!(
-            state,
-            ChatDeliveryState::Confirmed
-                | ChatDeliveryState::Unconfirmed
-                | ChatDeliveryState::NotObserved
-        )
-    });
+    let placed = check.deliveries.contains(&ChatDeliveryState::Taken);
     placed && check.elapsed_ms >= silence_timeout_ms
 }
 

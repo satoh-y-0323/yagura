@@ -21,9 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    GateWindow, Harness, SubmitDefinitionInput, WORKING_HEADING, approver_base_config,
-    count_marker, input_log_read_so_far, let_every_clock_bound_run_out,
-    let_every_clock_bound_run_out_while_a_thread_is_awaited, open_gate_window, policy,
+    Harness, SubmitDefinitionInput, approver_base_config, count_marker, input_log_read_so_far,
+    let_every_clock_bound_run_out, let_every_clock_bound_run_out_while_a_thread_is_awaited, policy,
     read_composer_now, read_response, report_status, send, settled_marker_count, unique_temp_dir,
     wait_until_composer_is, wait_until_frame_satisfies, wait_until_input_log_contains,
     wait_until_status, write_submit_definition,
@@ -34,7 +33,7 @@ use yagura_daemon::window::{
     SubmitPlacement, WindowEntry,
 };
 use yagura_daemon::{DaemonConfig, PtyError};
-use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
@@ -1019,7 +1018,7 @@ async fn open_receiving_window(
     );
     command.push("0".to_string()); // paste_enter_window_ms
     command.push(window.receive_mode.to_string());
-    let window_id = h.open(command, Some(window.name)).await;
+    let window_id = h.open_delivering(command, Some(window.name)).await;
     wait_until_status(
         client,
         &window_id,
@@ -1048,9 +1047,14 @@ async fn request_handoff(client: &mut Connection, window_id: &str, note: &str) {
     .await;
 }
 
-async fn handoff_reply(client: &mut Connection) -> HandoffDelivery {
+/// The handoff's answer as its wire string.
+async fn handoff_reply(client: &mut Connection) -> String {
     match read_response(client, REPLY_TIMEOUT).await {
-        DaemonMessage::HandoffSent { delivery, .. } => delivery,
+        DaemonMessage::HandoffSent { delivery, .. } => serde_json::to_value(delivery)
+            .expect("a delivery encodes")
+            .as_str()
+            .expect("a delivery is a string on the wire")
+            .to_string(),
         other => panic!("expected handoff_sent, got {other:?}"),
     }
 }
@@ -1126,8 +1130,7 @@ fn note_taller_than_the_screen() -> String {
 /// of view and the status before the submit key is `unknown`. The composer
 /// emptying after the key is the evidence the delivery has.
 #[tokio::test]
-async fn a_body_taller_than_the_screen_is_confirmed_once_its_composer_empties_after_the_submit_key()
-{
+async fn a_body_taller_than_the_screen_is_taken_once_its_composer_empties_after_the_submit_key() {
     let dir = unique_temp_dir("events-confirm-tall");
     let log = dir.join("child-input.log");
     let probe_read = dir.join("probe-may-be-read");
@@ -1151,7 +1154,7 @@ async fn a_body_taller_than_the_screen_is_confirmed_once_its_composer_empties_af
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        HandoffDelivery::Confirmed,
+        "taken",
         "the composer emptied after the submit key, whatever the status before it was"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
@@ -1159,64 +1162,11 @@ async fn a_body_taller_than_the_screen_is_confirmed_once_its_composer_empties_af
     assert_eq!(count_of(&read, b"\r"), 1, "the submit key is pressed once");
 }
 
-/// R2: a window that is working takes a message into its queue: its composer
-/// empties although it never stops working.
-#[tokio::test]
-async fn a_working_window_that_queues_the_message_is_confirmed_once_its_composer_empties() {
-    let dir = unique_temp_dir("events-confirm-working");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("events-confirm-working", handoff_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_gate_window(
-        &h,
-        &mut client,
-        &dir,
-        GateWindow {
-            input_log: Some(&log),
-            ..GateWindow::new(
-                "confirm-working",
-                "confirm-working-marker",
-                "key:working",
-                WORKING_HEADING,
-            )
-        },
-    )
-    .await;
-    entry(&h, &window_id)
-        .write_pty_input(&[0x01], InputOrigin::Message)
-        .await
-        .expect("the key that draws the working status line");
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(10),
-    )
-    .await;
-
-    request_handoff(&mut client, &window_id, "look here").await;
-
-    assert_eq!(
-        handoff_reply(&mut client).await,
-        HandoffDelivery::Confirmed,
-        "a working window whose composer emptied after the submit key took the message"
-    );
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
-    assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
-}
-
 /// R3: the receiver takes the submit key as a line break, so the envelope
 /// stays in its composer. Nothing is confirmed, and only the submit key goes
 /// out again, as many times as `resend_max` allows.
 #[tokio::test]
-async fn a_receiver_that_keeps_the_envelope_is_unconfirmed_and_gets_only_the_submit_key_again() {
+async fn a_receiver_that_keeps_the_envelope_gets_only_the_submit_key_again() {
     let dir = unique_temp_dir("events-confirm-kept");
     let log = dir.join("child-input.log");
     let h = Harness::start("events-confirm-kept", handoff_config(&dir)).await;
@@ -1233,7 +1183,8 @@ async fn a_receiver_that_keeps_the_envelope_is_unconfirmed_and_gets_only_the_sub
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        HandoffDelivery::Unconfirmed
+        "taken",
+        "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
@@ -1278,8 +1229,7 @@ async fn a_receiver_that_empties_its_composer_without_reacting_is_not_written_to
         "the body must reach the receiver once; it read {read:?}"
     );
     assert_eq!(
-        delivery,
-        HandoffDelivery::Confirmed,
+        delivery, "taken",
         "the composer emptied after the submit key"
     );
 }
@@ -1322,8 +1272,8 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        HandoffDelivery::Unconfirmed,
-        "an empty composer after another writer's write is not the envelope being received"
+        "taken",
+        "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert_eq!(
@@ -1339,8 +1289,7 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
 /// That the key was pressed and the composer is empty is enough: the body is
 /// not written again, and the delivery is confirmed.
 #[tokio::test]
-async fn a_composer_that_empties_only_after_the_confirmation_window_is_confirmed_without_a_rewrite()
-{
+async fn a_composer_that_empties_only_after_the_confirmation_window_is_taken_without_a_rewrite() {
     let dir = unique_temp_dir("events-confirm-late-empty");
     let log = dir.join("child-input.log");
     let take_now = dir.join("take-now");
@@ -1367,8 +1316,7 @@ async fn a_composer_that_empties_only_after_the_confirmation_window_is_confirmed
         "the body must not be written again over an envelope the receiver took; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery,
-        HandoffDelivery::Confirmed,
+        delivery, "taken",
         "the composer the submit key was pressed in read empty on a finished screen"
     );
 }
@@ -1404,8 +1352,8 @@ async fn another_writer_between_the_submit_key_and_the_empty_composer_does_not_g
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        HandoffDelivery::Unconfirmed,
-        "another writer wrote after the submit key, so the empty composer is not evidence"
+        "taken",
+        "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert_eq!(
@@ -1485,9 +1433,8 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
         "the body must not be written again; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery,
-        HandoffDelivery::Unconfirmed,
-        "another writer wrote after the submit key"
+        delivery, "taken",
+        "a submitted envelope is taken however its submission was judged"
     );
 }
 
@@ -1537,9 +1484,8 @@ async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_
         "after the submit key, only the other writer's byte reaches the receiver; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery,
-        HandoffDelivery::Unconfirmed,
-        "another writer wrote after the submit key"
+        delivery, "taken",
+        "a submitted envelope is taken however its submission was judged"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }
@@ -1578,8 +1524,7 @@ async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_wri
         "after the submit key nothing more is written, a probe included; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery,
-        HandoffDelivery::Confirmed,
+        delivery, "taken",
         "the composer the submit key was pressed in read empty on a finished screen"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
@@ -1594,8 +1539,8 @@ const FOLD_PLACEHOLDER: &str = "[Pasted text #1]";
 /// writes then shows alone, which says the envelope left the composer: it was
 /// taken, and the probe is erased, not left behind.
 #[tokio::test]
-async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_confirmed_and_leaves_no_probe()
- {
+async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_and_leaves_no_probe()
+{
     let dir = unique_temp_dir("events-confirm-folded-taken-by-probe");
     let log = dir.join("child-input.log");
     let h = Harness::start("events-confirm-folded-taken-by-probe", handoff_config(&dir)).await;
@@ -1630,8 +1575,7 @@ async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_confirm
     wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty, HANG_GUARD).await;
     let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
     assert_eq!(
-        delivery,
-        HandoffDelivery::Confirmed,
+        delivery, "taken",
         "the probe the receiver read after the submit key showed alone: the envelope was taken; the receiver read {read:?}"
     );
     let after_the_key = read_after_the_submit_key(&read);

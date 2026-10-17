@@ -2,8 +2,7 @@
 
 //! Contract for the Unknown-reason surface over IPC: `WindowStatus` /
 //! `WindowList` (via `WindowInfo`), `StatusChanged`, the destructive-tool
-//! refusal text and the profile-handoff "not ready" message, plus the confirmed-transition
-//! log line.
+//! refusal text, plus the confirmed-transition log line.
 //!
 //! Every case drives a real `WindowRegistry` + `IpcServer` pair over a real
 //! IPC endpoint through `common::Harness`, the same convention every other
@@ -24,7 +23,6 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::layers::LayerError;
 use yagura_protocol::{ClientMessage, DaemonMessage, UnknownReason, WindowStatus};
 use yagura_test_support::ipc::{Connection, ReadOutcome, read_daemon_frame, send_client_message};
-use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::echo_child_command;
 
 /// Six lines of plain text, none containing common::control_definition's `CTRL-READY`
@@ -370,82 +368,6 @@ async fn send_text_to_an_unknown_window_with_no_definition_names_the_reason_in_t
         "the entry gate must not report a different window's reason (no_rule_matched), which \
          would indicate a hardcoded or misrouted value: {message:?}"
     );
-}
-
-#[tokio::test]
-async fn send_handoff_from_a_profile_whose_detection_never_resolves_names_the_reason_in_the_not_ready_message()
- {
-    // Only the "last status: {status}" fragment carries the reason; the
-    // detection-warning section, the ready-hold section and their order are
-    // the same as for any other not-ready status.
-    let tree = TempDir::new("yagura-cli-test", "t4g-not-ready-reason");
-    let profiles_dir = tree.make_dir("profiles");
-    let detection_dir = tree.make_dir("detection");
-    // A detection name nothing in `detection_dir` defines: the window stays
-    // Unknown(NoDefinition) forever, the same fail-safe fixture
-    // `open_unknown_window` uses.
-    common::write_profile(
-        &profiles_dir,
-        "unresolvable",
-        &echo_child_profile_source_with_detection("Unresolvable", "does-not-exist-anywhere"),
-    );
-
-    let mut config = common::handoff_profile_config(
-        Some(profiles_dir),
-        common::empty_lookup(),
-        &detection_dir,
-        None,
-        Some(common::policy(&["send_handoff"])),
-        30,
-    );
-    config.handoff_ready_timeout_secs = 1;
-    let h = Harness::start("t4g-not-ready-reason", config).await;
-    let mut client = h.connect().await;
-
-    let msg = common::call_send_handoff_from_profile(
-        &mut client,
-        "unresolvable",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-    )
-    .await;
-    let message = expect_error(msg, "window_not_ready");
-
-    assert!(
-        message.starts_with(
-            "the window opened for this handoff did not become ready within 1s (last status: \
-             unknown ("
-        ),
-        "the fragment must be replaced with the reason-carrying form: {message:?}"
-    );
-    assert!(
-        message.contains(&format!(
-            "last status: unknown ({})",
-            UnknownReason::NoDefinition.phrase()
-        )),
-        "the phrase named must be no_definition's, since the profile names a detection nothing \
-         resolves: {message:?}"
-    );
-    assert!(
-        message.contains("; detection warning: "),
-        "the detection-warning section must survive unchanged: {message:?}"
-    );
-    assert!(
-        !message.contains("the definition asks this window to hold"),
-        "echo_child's profile carries no [input] table, so ready_hold is zero and the \
-         ready-hold section must stay absent: {message:?}"
-    );
-}
-
-fn echo_child_profile_source_with_detection(display_name: &str, detection: &str) -> String {
-    let path = yagura_test_support::process::echo_child_path();
-    format!(
-        "schema = 1\ndisplay_name = \"{display_name}\"\ndetection = \"{detection}\"\n\n\
-         [command]\ndefault = ['{}']\n",
-        path.display()
-    )
 }
 
 // =============================================================================

@@ -1,7 +1,12 @@
 //! The chat rooms' IPC surface: [`ChatRuntime`] (store lifecycle, limits,
-//! delivery budget), the room a request belongs to ([`resolve_room`]), the
-//! intro hook ([`install_intro_hook`]) and the `send_chat` /
-//! `broadcast_chat` / `read_chat` / `list_chat_rooms` handlers.
+//! delivery budget, the intro a participant's start-up door carries), the
+//! room a request belongs to ([`resolve_room`]), the window-opened hook
+//! ([`install_intro_hook`]) and the `send_chat` / `broadcast_chat` /
+//! `read_chat` / `list_chat_rooms` handlers.
+//!
+//! A post reaches each addressed window through that window's inbox: its CLI
+//! takes it through its own doors, or the window's agent pushes it the way the
+//! window's profile declares.
 //!
 //! A window belongs to exactly one room -- the one its workspace key maps to
 //! -- and `"main"` is the one room every caller may reach. Which room a
@@ -20,19 +25,21 @@ use std::time::Duration;
 
 use yagura_protocol::{
     CHAT_READ_LIMIT_MAX, ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo,
-    DaemonMessage, HandoffDelivery, WindowStatus, is_valid_token, validate_chat_body,
+    DaemonMessage, WindowStatus, is_valid_token, validate_chat_body,
 };
 
 use crate::approval::{ApprovalBroker, ApprovalDraft, ApprovalRoomRef, SubmitError};
 use crate::chat_store::{self, ChatStore, NewChatMessage};
 use crate::config::DaemonConfig;
-use crate::control::{self, ComposerAccess, DestructiveTool, GateVerdict, RequestOrigin};
+use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
+use crate::inbox::{Parcel, ParcelEnd, PushBudget};
 use crate::live_policy::{self, PolicyCell};
 use crate::room::{self, ChatLimits, DeliveryOutcome};
 use crate::store::StoreError;
-use crate::window::{QueuedNotice, WindowEntry, WindowParticipation, WindowRegistry};
+use crate::window::{WindowEntry, WindowParticipation, WindowRegistry};
 use crate::workspace::{self, WorkspaceKey, WorkspaceKind};
 
+use super::notice_queue;
 use super::plan::PlanRuntime;
 use super::report;
 use super::store_gate::{StoreAccessError, StoreGate};
@@ -55,12 +62,14 @@ pub struct ChatRuntime {
     exclude_detections: Vec<String>,
     chat_delivery_max: usize,
     open_deliveries: Arc<AtomicUsize>,
+    /// Whether this daemon was built with no chat at all, rather than with
+    /// a chat that failed to come up.
+    unwired: bool,
 }
 
 impl ChatRuntime {
     /// A disabled runtime: every chat tool answers `unsupported`, and no
-    /// intro is ever queued. [`super::IpcServer::new`] uses this so
-    /// its own construction never touches a database.
+    /// window's start-up door carries an intro.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
@@ -70,6 +79,20 @@ impl ChatRuntime {
             exclude_detections: Vec::new(),
             chat_delivery_max: 32,
             open_deliveries: Arc::new(AtomicUsize::new(0)),
+            unwired: false,
+        }
+    }
+
+    /// The runtime of a daemon built with no chat ([`super::IpcServer::new`]),
+    /// so its construction never touches a database: every chat tool answers
+    /// `unsupported`, and with no room to decide who takes part, every
+    /// window's start-up door carries `config`'s intro.
+    #[must_use]
+    pub fn unwired(config: &DaemonConfig) -> Self {
+        Self {
+            intro: config.chat_intro.clone(),
+            unwired: true,
+            ..Self::disabled()
         }
     }
 
@@ -101,8 +124,13 @@ impl ChatRuntime {
             return Self::disabled_with_reason("no store database path is resolved");
         };
         match ChatStore::open(db_path) {
-            Ok(store) => {
+            Ok(mut store) => {
                 tracing::info!("chat store: {}", db_path.display());
+                // An inbox ends with its daemon: what a previous one still held
+                // was never delivered.
+                if let Err(err) = store.settle_pending_after_restart() {
+                    tracing::warn!(error = %err, "could not settle the deliveries a previous daemon left pending");
+                }
                 Self {
                     store: StoreGate::opened(store),
                     limits: config.chat_limits,
@@ -110,6 +138,7 @@ impl ChatRuntime {
                     exclude_detections: config.chat_exclude_detections.clone(),
                     chat_delivery_max: config.chat_delivery_max,
                     open_deliveries: Arc::new(AtomicUsize::new(0)),
+                    unwired: false,
                 }
             }
             Err(err) => {
@@ -118,15 +147,23 @@ impl ChatRuntime {
         }
     }
 
-    /// The configured `[chat] intro`, empty when none is.
-    pub(super) fn intro_text(&self) -> &str {
-        &self.intro
+    /// The intro `entry`'s start-up door carries: the configured `[chat]
+    /// intro` for a chat participant, nothing for any other window or when
+    /// chat failed to come up.
+    pub(super) fn intro_for(&self, entry: &WindowEntry) -> &str {
+        let introduced = self.unwired
+            || (self.store.is_enabled()
+                && is_participant(
+                    entry.delivers(),
+                    entry.detection_definition(),
+                    &self.exclude_detections,
+                ));
+        if introduced { &self.intro } else { "" }
     }
 
-    /// The chat delivery budget a post and an intro share, drawn on by
-    /// `run_delivery` once the delivery holds its window's turn.
-    pub(super) fn delivery_budget(&self) -> super::SharedBudget {
-        super::SharedBudget::Counter {
+    /// The chat delivery budget every post draws on while it is being typed.
+    fn delivery_budget(&self) -> PushBudget {
+        PushBudget {
             counter: Arc::clone(&self.open_deliveries),
             max: self.chat_delivery_max,
         }
@@ -561,22 +598,17 @@ fn display_name_in(
         .unwrap_or_else(|| key.map_or_else(|| room_id.to_string(), workspace::display_name_for))
 }
 
-/// Whether a window is a chat participant: its definition declares a
-/// composer and a probe, and its name is not in `exclude`. A chat delivery is
-/// judged against the composer, so a window the daemon cannot judge could
-/// never read what the room sends it.
-fn is_participant(
-    composer_access: ComposerAccess,
-    detection_definition: Option<&str>,
-    exclude: &[String],
-) -> bool {
-    composer_access.is_judged()
-        && detection_definition.is_some_and(|name| !exclude.iter().any(|excluded| excluded == name))
+/// Whether a window is a chat participant: what the daemon sends of its own
+/// accord can reach its CLI (`delivers`), and its detection definition's name
+/// is not in `exclude`.
+fn is_participant(delivers: bool, detection_definition: Option<&str>, exclude: &[String]) -> bool {
+    delivers
+        && detection_definition.is_none_or(|name| !exclude.iter().any(|excluded| excluded == name))
 }
 
 /// Everyone in `room`: a current chat
-/// participant -- not `Exited`, and [`is_participant`] against its composer
-/// declaration and resolved detection definition -- whose own workspace is
+/// participant -- not `Exited`, and [`is_participant`] against whether it
+/// delivers and its resolved detection definition -- whose own workspace is
 /// the room's. `"main"` stands for no workspace, so every participant is in
 /// it.
 // The one reader of the registry's participant list, so every roster applies this rule.
@@ -590,13 +622,7 @@ pub(super) fn room_members(
         .list_participation()
         .into_iter()
         .filter(|p| p.status != WindowStatus::Exited)
-        .filter(|p| {
-            is_participant(
-                p.composer_access,
-                p.detection_definition.as_deref(),
-                exclude,
-            )
-        })
+        .filter(|p| is_participant(p.delivers, p.detection_definition.as_deref(), exclude))
         .filter(|p| room.key.as_ref().is_none_or(|key| &p.workspace == key))
         .collect()
 }
@@ -608,17 +634,6 @@ fn chat_halt_reason_str(reason: room::HaltReason) -> &'static str {
         room::HaltReason::Repetition => "repetition",
         room::HaltReason::Monologue => "monologue",
         room::HaltReason::TurnBudget => "turn_budget",
-    }
-}
-
-/// The delivery outcome a completed [`HandoffDelivery`] is recorded as.
-/// None of these four carry a reason.
-fn delivery_outcome(delivery: HandoffDelivery) -> DeliveryOutcome {
-    match delivery {
-        HandoffDelivery::Confirmed => DeliveryOutcome::Confirmed,
-        HandoffDelivery::Unconfirmed => DeliveryOutcome::Unconfirmed,
-        HandoffDelivery::NotObserved => DeliveryOutcome::NotObserved,
-        HandoffDelivery::NotWritten => DeliveryOutcome::NotWritten,
     }
 }
 
@@ -695,10 +710,13 @@ async fn resolve_parent_mention(
         Some(window_id) => report::resolve_parent(ledger, registry, window_id).await,
         None => None,
     };
+    // A plan owner may nominate its own task window; a mention of oneself is
+    // dropped without becoming unresolved, as `parse_mentions` does, whether or
+    // not the poster takes part in this room.
+    if parent.is_some() && parent.as_deref() == from_window_id {
+        return;
+    }
     match parent.filter(|parent| roster.iter().any(|entry| &entry.window_id == parent)) {
-        // A plan owner may nominate its own task window; a mention of oneself
-        // is dropped without becoming unresolved, as `parse_mentions` does.
-        Some(parent) if Some(parent.as_str()) == from_window_id => {}
         Some(parent) => {
             if !mentions.targets.contains(&parent) {
                 mentions.targets.push(parent);
@@ -712,13 +730,11 @@ async fn resolve_parent_mention(
     }
 }
 
-/// Installs the window-opened hook every chat participant gets:
-/// settles the window's own room -- so the room
-/// exists whether or not the window ever becomes ready, and whether or not an
-/// intro is configured -- and, when `[chat] intro` is non-empty, queues the
-/// intro on the window. The IPC layer's notice delivery agent writes it once
-/// the room is settled and the window accepts input, spending the same chat
-/// delivery budget a post does. A no-op call when chat is disabled.
+/// Installs the window-opened hook every chat participant gets: settles the
+/// window's own room, so the room exists whether or not the window's CLI ever
+/// asks for anything. The intro itself is not sent: the window's start-up door
+/// carries it ([`ChatRuntime::intro_for`]). A no-op call when chat is
+/// disabled.
 pub fn install_intro_hook(registry: &Arc<WindowRegistry>, chat: Arc<ChatRuntime>) {
     let registry_weak = Arc::downgrade(registry);
     registry.set_window_opened_hook(Box::new(move |entry: &Arc<WindowEntry>| {
@@ -726,19 +742,12 @@ pub fn install_intro_hook(registry: &Arc<WindowRegistry>, chat: Arc<ChatRuntime>
             return;
         }
         if !is_participant(
-            entry.composer_access(),
+            entry.delivers(),
             entry.detection_definition(),
             &chat.exclude_detections,
         ) {
             return;
         }
-        // Queued before this hook returns, so a notice queued for the window
-        // later (a task's) always lands behind its intro.
-        let intro_queued = !chat.intro.is_empty()
-            && entry.queue_notice(QueuedNotice::Intro {
-                room_settled: false,
-            });
-        let entry_weak = Arc::downgrade(entry);
         let origin = RequestOrigin::Window(entry.window_id().to_string());
         let chat = Arc::clone(&chat);
         let registry_weak = registry_weak.clone();
@@ -748,12 +757,6 @@ pub fn install_intro_hook(registry: &Arc<WindowRegistry>, chat: Arc<ChatRuntime>
             };
             if let Err(err) = resolve_room(&chat, &origin, None, &registry, false).await {
                 tracing::warn!(error = ?err, "could not settle a new window's chat room");
-            }
-            // Released whether or not the room settled: a failed attempt must
-            // not hold the window's other notices back for good.
-            if intro_queued && let Some(entry) = entry_weak.upgrade() {
-                entry.settle_intro_room();
-                registry.wake_notices(&entry);
             }
         });
     }));
@@ -931,7 +934,7 @@ async fn post_chat(
         None,
     ) {
         Ok(GateVerdict::Allow) => {
-            complete_post(chat, registry, broker, config, outbound, post).await;
+            complete_post(chat, registry, broker, outbound, post).await;
         }
         Ok(GateVerdict::NeedsApproval) => {
             submit_for_approval(chat, registry, broker, config, outbound, state, post).await;
@@ -978,7 +981,7 @@ async fn submit_for_approval(
             tokio::spawn(async move {
                 match await_approval(&mut ticket, deadline, &mut closed).await {
                     ApprovalEnd::Approved => {
-                        complete_post(&chat, &registry, &broker, &config, &outbound, post).await;
+                        complete_post(&chat, &registry, &broker, &outbound, post).await;
                     }
                     ApprovalEnd::Refused(message) => outbound.reply(&message),
                     ApprovalEnd::RequesterGone => {}
@@ -999,7 +1002,6 @@ async fn complete_post(
     chat: &Arc<ChatRuntime>,
     registry: &Arc<WindowRegistry>,
     broker: &Arc<ApprovalBroker>,
-    config: &DaemonConfig,
     outbound: &Arc<Outbound>,
     post: PendingChatPost,
 ) {
@@ -1101,10 +1103,8 @@ async fn complete_post(
             Arc::clone(chat),
             Arc::clone(registry),
             Arc::clone(broker),
-            config.clone(),
             room_id.clone(),
             seq,
-            tool,
             target_id,
             envelope.clone(),
         );
@@ -1114,23 +1114,23 @@ async fn complete_post(
     }
 }
 
+/// Puts the post in `target_id`'s inbox and records how it left: taken by the
+/// window's CLI, or never delivered.
 #[allow(clippy::too_many_arguments)]
 fn spawn_delivery_task(
     chat: Arc<ChatRuntime>,
     registry: Arc<WindowRegistry>,
     broker: Arc<ApprovalBroker>,
-    config: DaemonConfig,
     room_id: String,
     seq: i64,
-    tool: DestructiveTool,
     target_id: String,
     envelope: String,
 ) {
     tokio::spawn(async move {
         // A destination the registry no longer has (closed between the
-        // roster read and here) settles the same as one `status_gate`
-        // refuses: the `pending` row `append_message` wrote must never be
-        // left unsettled.
+        // roster read and here) is settled the same as one that ends before
+        // its CLI takes the post: the `pending` row `append_message` wrote
+        // must never be left unsettled.
         let Some(entry) = registry.get(&target_id) else {
             chat.record_delivery_and_notify(
                 &broker,
@@ -1142,41 +1142,23 @@ fn spawn_delivery_task(
             .await;
             return;
         };
-        // One read of the destination's status decides the gate and supplies
-        // the reason recorded with the refusal, so the two can never describe
-        // different moments.
-        let detected = entry.current_detected();
-        if control::status_gate(tool, detected).is_err() {
-            chat.record_delivery_and_notify(
-                &broker,
-                &room_id,
-                seq,
-                &target_id,
-                DeliveryOutcome::UndeliveredUnknown(detected.unknown_reason()),
-            )
-            .await;
-            return;
-        }
-        let outcome = match super::run_delivery(
+        let parcel = Parcel::new(format!("chat:{room_id}:{seq}"), envelope);
+        let outcome = match notice_queue::deposit(
+            &registry,
             &entry,
-            super::DeliveryText::Fixed(&envelope),
-            &config,
+            parcel,
+            Some(chat.delivery_budget()),
             None,
-            0,
-            None,
-            chat.delivery_budget(),
-        )
-        .await
-        {
-            super::DeliveryEnd::Finished { verdict, .. } => delivery_outcome(verdict.delivery),
-            super::DeliveryEnd::Exhausted(
-                super::Scarce::TurnWaiters | super::Scarce::SharedBudget,
-            ) => DeliveryOutcome::UndeliveredExhausted,
-            // `Aborted` and `Skipped` are never produced here (`closed: None`,
-            // a fixed text); a write failure is reported rather than dropped.
-            super::DeliveryEnd::WriteFailed(..)
-            | super::DeliveryEnd::Aborted
-            | super::DeliveryEnd::Skipped => DeliveryOutcome::WriteFailed,
+        ) {
+            Ok(end) => match end.await {
+                Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
+                Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
+                // The next daemon settles it.
+                Ok(ParcelEnd::Stopped) => return,
+                Ok(ParcelEnd::Closed) | Err(_) => DeliveryOutcome::UndeliveredUnknown(None),
+            },
+            Err(notice_queue::Refused::Full) => DeliveryOutcome::UndeliveredExhausted,
+            Err(notice_queue::Refused::Ended) => DeliveryOutcome::UndeliveredUnknown(None),
         };
         chat.record_delivery_and_notify(&broker, &room_id, seq, &target_id, outcome)
             .await;

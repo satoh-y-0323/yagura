@@ -419,6 +419,7 @@ fn apply_limits_overrides_every_specified_field() {
         wait_timeout_max_secs: Some(120),
         approval_timeout_secs: Some(90),
         handoff_ready_timeout_secs: Some(120),
+        handoff_delivery_timeout_secs: None,
         chat_delivery_max: Some(64),
     };
 
@@ -469,6 +470,7 @@ fn apply_limits_overrides_only_the_specified_field() {
         wait_timeout_max_secs: Some(42),
         approval_timeout_secs: None,
         handoff_ready_timeout_secs: None,
+        handoff_delivery_timeout_secs: None,
         chat_delivery_max: None,
     };
 

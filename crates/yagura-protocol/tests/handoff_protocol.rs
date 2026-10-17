@@ -95,7 +95,7 @@ fn send_handoff_round_trips_through_encode_and_decode() {
 
 #[test]
 fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
-    let body = br#"{"type":"handoff_sent","window_id":"w2","opened":true,"delivery":"confirmed"}"#;
+    let body = br#"{"type":"handoff_sent","window_id":"w2","opened":true,"delivery":"taken"}"#;
     let decoded = decode_daemon_message(body).expect("handoff_sent must decode");
     match decoded {
         DaemonMessage::HandoffSent {
@@ -105,7 +105,7 @@ fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
         } => {
             assert_eq!(window_id, "w2");
             assert!(opened);
-            assert_eq!(delivery, HandoffDelivery::Confirmed);
+            assert_eq!(wire_of(delivery), "\"taken\"");
         }
         other => panic!("expected DaemonMessage::HandoffSent, got {other:?}"),
     }
@@ -114,7 +114,7 @@ fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
 #[test]
 fn handoff_sent_round_trips_through_encode_and_decode() {
     let body =
-        br#"{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"not_observed"}"#;
+        br#"{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"undelivered_timeout"}"#;
     let decoded = decode_daemon_message(body).expect("must decode");
     let encoded = encode_daemon_message(&decoded);
     let decoded2 = decode_daemon_message(&encoded).expect("must decode a second time");
@@ -127,12 +127,7 @@ fn handoff_sent_round_trips_through_encode_and_decode() {
 /// two fields decode, in either direction.
 #[test]
 fn handoff_sent_round_trips_every_delivery_value_through_the_message() {
-    for delivery in [
-        HandoffDelivery::Confirmed,
-        HandoffDelivery::Unconfirmed,
-        HandoffDelivery::NotObserved,
-        HandoffDelivery::NotWritten,
-    ] {
+    for delivery in DELIVERY_WIRES.map(delivery_of) {
         let message = DaemonMessage::HandoffSent {
             window_id: "w2".to_string(),
             opened: false,
@@ -144,25 +139,28 @@ fn handoff_sent_round_trips_every_delivery_value_through_the_message() {
     }
 }
 
-/// The daemon reports `not_written` when it never wrote the envelope into
-/// the target's input at all, distinct from the three existing outcomes
-/// (which all presuppose that the envelope was written).
+/// A handoff the CLI never took is answered as undelivered, with why: the limit on how
+/// long it may wait ran out, or the window declares no way to deliver it.
 #[test]
-fn handoff_sent_decodes_with_delivery_not_written() {
-    let body =
-        br#"{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"not_written"}"#;
-    let decoded = decode_daemon_message(body).expect("handoff_sent with not_written must decode");
-    match decoded {
-        DaemonMessage::HandoffSent {
-            window_id,
-            opened,
-            delivery,
-        } => {
-            assert_eq!(window_id, "w2");
-            assert!(!opened);
-            assert_eq!(delivery, HandoffDelivery::NotWritten);
+fn handoff_sent_decodes_with_each_undelivered_delivery() {
+    for wire in ["undelivered_timeout", "undelivered_no_delivery"] {
+        let body = format!(
+            r#"{{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"{wire}"}}"#
+        );
+        match decode_daemon_message(body.as_bytes())
+            .unwrap_or_else(|err| panic!("handoff_sent with {wire} must decode: {err}"))
+        {
+            DaemonMessage::HandoffSent {
+                window_id,
+                opened,
+                delivery,
+            } => {
+                assert_eq!(window_id, "w2");
+                assert!(!opened);
+                assert_eq!(wire_of(delivery), format!("\"{wire}\""));
+            }
+            other => panic!("expected DaemonMessage::HandoffSent, got {other:?}"),
         }
-        other => panic!("expected DaemonMessage::HandoffSent, got {other:?}"),
     }
 }
 
@@ -616,20 +614,40 @@ fn the_four_handoff_byte_limits_have_the_documented_values() {
 fn handoff_delivery_round_trips_every_wire_string() {
     // Checked against literal wire text, so a change to the rename mapping
     // itself shows up here, not just a change to the variant list.
-    for (delivery, wire) in [
-        (HandoffDelivery::Confirmed, "\"confirmed\""),
-        (HandoffDelivery::Unconfirmed, "\"unconfirmed\""),
-        (HandoffDelivery::NotObserved, "\"not_observed\""),
-        (HandoffDelivery::NotWritten, "\"not_written\""),
-    ] {
-        assert_eq!(
-            serde_json::to_string(&delivery).expect("HandoffDelivery must encode"),
-            wire
-        );
-        let decoded: HandoffDelivery =
-            serde_json::from_str(wire).unwrap_or_else(|err| panic!("{wire} must decode: {err}"));
-        assert_eq!(decoded, delivery, "decoded value mismatch for {wire}");
+    for wire in DELIVERY_WIRES {
+        assert_eq!(wire_of(delivery_of(wire)), wire);
     }
+}
+
+/// What a composer did is no longer a handoff's answer: the CLI took the envelope or it
+/// did not.
+#[test]
+fn handoff_delivery_no_longer_spells_what_a_composer_did() {
+    for wire in [
+        "\"confirmed\"",
+        "\"unconfirmed\"",
+        "\"not_observed\"",
+        "\"not_written\"",
+    ] {
+        let result: Result<HandoffDelivery, _> = serde_json::from_str(wire);
+        assert!(result.is_err(), "{wire} must not decode, got {result:?}");
+    }
+}
+
+/// Every answer a handoff can carry, as its literal wire text: a change to the rename
+/// mapping itself shows up here, not just a change to the variant list.
+const DELIVERY_WIRES: [&str; 3] = [
+    "\"taken\"",
+    "\"undelivered_timeout\"",
+    "\"undelivered_no_delivery\"",
+];
+
+fn delivery_of(wire: &str) -> HandoffDelivery {
+    serde_json::from_str(wire).unwrap_or_else(|err| panic!("{wire} must decode: {err}"))
+}
+
+fn wire_of(delivery: HandoffDelivery) -> String {
+    serde_json::to_string(&delivery).expect("HandoffDelivery must encode")
 }
 
 #[test]

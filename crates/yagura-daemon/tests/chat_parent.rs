@@ -100,28 +100,55 @@ fn expect_chat_posted(msg: DaemonMessage) -> ChatPostedResult {
     }
 }
 
-/// Opens an `echo_child` window directly through the registry (bypassing
-/// IPC, like `Harness::open`), with an explicit display `name` -- the
-/// `@name` case needs a plain `@name` mention target alongside `@parent`, and
-/// `Harness::open` cannot give a window a name.
-async fn open_named(h: &Harness, name: &str) -> String {
+/// The `[delivery]` table of a profile with no way to wake its CLI while it waits: every
+/// window here declares it, since only such a window takes part in chat.
+fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
+    yagura_daemon::profile_delivery::ProfileDelivery {
+        output: yagura_daemon::inbox::OutputForm::Plain,
+        max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+        wake: yagura_daemon::profile_delivery::WakeMode::None,
+        wake_stream: yagura_protocol::DeliveryStream::Stderr,
+        wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+        wake_timeout_secs: None,
+        session_pointer: None,
+        launch_prompt: None,
+        shim_guidance: None,
+    }
+}
+
+/// Opens an `echo_child` window directly through the registry (bypassing IPC, like
+/// `Harness::open`), declaring delivery, with an explicit display `name` when given -- the
+/// `@name` case needs a plain `@name` mention target alongside `@parent`.
+async fn open_delivering(h: &Harness, name: Option<&str>) -> String {
     h.registry
-        .open(OpenWindowRequest {
-            command: echo_child_command(),
-            cwd: None,
-            name: Some(name.to_string()),
-            vendor: None,
-            detection: None,
-        })
+        .open_with_extra_env(
+            OpenWindowRequest {
+                command: echo_child_command(),
+                cwd: None,
+                name: name.map(str::to_string),
+                vendor: None,
+                detection: None,
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(wake_none_delivery()),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
         .await
-        .expect("registry.open should spawn the child")
+        .expect("registry.open_with_extra_env should spawn the child")
         .window_id
+}
+
+async fn open_named(h: &Harness, name: &str) -> String {
+    open_delivering(h, Some(name)).await
 }
 
 /// Opens a plain `echo_child` window through the registry directly
 /// (bypassing IPC, like `Harness::open`) and identifies `client` as it.
 async fn open_and_identify(h: &Harness, client: &mut Connection) -> String {
-    let window_id = h.open(echo_child_command(), None).await;
+    let window_id = open_delivering(h, None).await;
     identify(client, &window_id).await;
     window_id
 }
@@ -336,7 +363,9 @@ async fn at_parent_is_unresolved_outside_the_parents_room_but_resolves_in_main()
     .await;
 
     let second_ws = second_workspace_dir("chat-parent-room-scope");
-    let parent_window = h.open_in_cwd(echo_child_command(), None, &second_ws).await;
+    let parent_window = h
+        .open_delivering_in(echo_child_command(), None, Some(&second_ws))
+        .await;
     let mut parent_conn = h.connect().await;
     identify(&mut parent_conn, &parent_window).await;
 
@@ -386,7 +415,7 @@ async fn at_parent_from_a_speaker_with_no_parent_is_unresolved() {
     );
     assert_eq!(from_approver.unresolved, vec!["parent".to_string()]);
 
-    let opener_less_window = h.open(echo_child_command(), None).await;
+    let opener_less_window = open_delivering(&h, None).await;
     let mut conn = h.connect().await;
     identify(&mut conn, &opener_less_window).await;
     let from_opener_less =
@@ -473,7 +502,7 @@ async fn at_parent_and_at_name_in_the_same_message_both_become_targets() {
     )
     .await;
 
-    let parent_window = h.open(echo_child_command(), None).await;
+    let parent_window = open_delivering(&h, None).await;
     let mut parent_conn = h.connect().await;
     identify(&mut parent_conn, &parent_window).await;
 

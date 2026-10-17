@@ -21,14 +21,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Harness, VALID_TOKEN, call_list_windows, call_open_window, call_send_handoff_from_profile,
-    detection_config, empty_lookup, expect_error, identify, policy, read_response, send,
-    write_profile,
+    Harness, VALID_TOKEN, call_open_window, call_send_handoff_from_profile, detection_config,
+    empty_lookup, expect_handoff_sent, identify, policy, read_response, send, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
-use yagura_protocol::{ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec, WindowInfo};
+use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, PlanInfo, PlanTaskSpec};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::{argv_probe_path, argv_probe_profile_source, env_probe_path};
@@ -137,32 +136,6 @@ fn expect_window_opened(msg: DaemonMessage) -> String {
     match msg {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
-    }
-}
-
-/// Polls `list_windows` on `client` until a window with the given `vendor`
-/// (the profile identifier) appears, and returns it. Used the way
-/// `ipc_profile.rs`'s own copy is: to observe a profile-addressed handoff's
-/// window without knowing its id ahead of time, and without racing the
-/// connection's own still-pending handoff response.
-async fn wait_for_window_with_vendor(
-    client: &mut Connection,
-    vendor: &str,
-    timeout: Duration,
-) -> WindowInfo {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let windows = call_list_windows(client).await;
-        if let Some(found) = windows
-            .into_iter()
-            .find(|w| w.vendor.as_deref() == Some(vendor))
-        {
-            return found;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for a window with vendor {vendor:?} to appear");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -594,7 +567,14 @@ async fn send_handoff_from_a_profile_carries_the_same_mcp_injection_into_the_chi
     write_profile(
         &profiles_dir,
         "argv-probe",
-        &argv_probe_profile_source("Argv Probe", &mcp_config_file_table(MCP_CONFIG_FILE_JSON)),
+        &argv_probe_profile_source(
+            "Argv Probe",
+            &format!(
+                "{}{}",
+                mcp_config_file_table(MCP_CONFIG_FILE_JSON),
+                common::LAUNCH_PROMPT_TABLE
+            ),
+        ),
     );
     let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
     let mut config = detection_config(
@@ -602,7 +582,6 @@ async fn send_handoff_from_a_profile_carries_the_same_mcp_injection_into_the_chi
         mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge)),
     );
     config.approval_policy = Some(policy(&["send_handoff", "open_window"]));
-    config.handoff_ready_timeout_secs = 1;
     let h = Harness::start("mcp-inject-handoff", config).await;
     let mut client = h.connect().await;
 
@@ -615,16 +594,15 @@ async fn send_handoff_from_a_profile_carries_the_same_mcp_injection_into_the_chi
         "look here",
     )
     .await;
-    // `argv_probe` writes its report and exits at once, so it never reaches a
-    // ready state and the handoff is abandoned; the window it opened stays
-    // around with its scrollback intact.
-    expect_error(msg, "window_not_ready");
+    // The window is started with the envelope, so the handoff is taken at
+    // launch; `argv_probe` then writes its argv and exits.
+    let (window_id, opened, delivery) = expect_handoff_sent(msg);
+    assert!(opened);
+    assert_eq!(delivery, HandoffDelivery::Taken);
 
-    let opened =
-        wait_for_window_with_vendor(&mut client, "argv-probe", Duration::from_secs(10)).await;
-    h.wait_for_scrollback(&opened.window_id, b"<<argv[2]=", Duration::from_secs(10))
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
         .await;
-    let text = String::from_utf8_lossy(&h.scrollback(&opened.window_id)).into_owned();
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         text.contains("<<argv[1]=--mcp-config>>"),
         "a handoff-opened window must carry the same MCP injection; scrollback: {text:?}"

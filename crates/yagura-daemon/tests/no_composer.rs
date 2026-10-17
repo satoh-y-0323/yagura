@@ -13,6 +13,11 @@
 //! so "nothing written" is checked against what reached the child, and every
 //! negative observation is paired with the same write succeeding on a window
 //! whose definition does declare a composer.
+//!
+//! What the daemon sends of its own accord (a handoff, a task's instruction) is no
+//! longer typed into a window at all: it reaches a window whose profile declares
+//! delivery through that CLI's own doors, or as the launch prompt of a window it
+//! opens. A window that declares no delivery is handed nothing, composer or not.
 
 mod common;
 
@@ -20,12 +25,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{
-    CONTROL_INPUT_TABLE, ChatPlaybook, Harness, READY_MARKER, SUBMIT_CHILD_PROBE, VALID_TOKEN,
+    CONTROL_INPUT_TABLE, Harness, READY_MARKER, SUBMIT_CHILD_PROBE, VALID_TOKEN,
     approver_base_config, call_list_windows, call_open_window, call_send_handoff_from_profile,
-    call_send_handoff_from_profile_within, chat_config, composer_section_toml, detection_config,
-    empty_lookup, expect_approval_requested, expect_error, expect_handoff_sent,
-    handoff_profile_config, identify, policy, read_response, register_approver, send,
-    unique_temp_dir, wait_until_status, write_profile,
+    call_send_handoff_from_profile_within, composer_section_toml, detection_config, empty_lookup,
+    expect_approval_requested, expect_error, expect_handoff_sent, handoff_profile_config, identify,
+    policy, read_response, register_approver, send, unique_temp_dir, wait_until_status,
+    write_profile,
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
@@ -133,6 +138,74 @@ async fn open_ready_running(h: &Harness, detection: &str, command: Vec<String>) 
     )
     .await;
     window_id
+}
+
+/// [`open_ready_running`], for a window whose profile declares delivery with no way to
+/// wake its CLI: a notice reaches it typed while it waits, if it can be typed into.
+async fn open_ready_delivering(h: &Harness, detection: &str, command: Vec<String>) -> String {
+    let mut client = h.connect().await;
+    let window_id = h
+        .registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command,
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(detection.to_string()),
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                    output: yagura_daemon::inbox::OutputForm::Plain,
+                    max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+                    wake: yagura_daemon::profile_delivery::WakeMode::None,
+                    wake_stream: yagura_protocol::DeliveryStream::Stderr,
+                    wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
+                    wake_timeout_secs: None,
+                    session_pointer: None,
+                    launch_prompt: None,
+                    shim_guidance: None,
+                }),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("registry.open_with_extra_env should spawn the child")
+        .window_id;
+    h.write_input(&window_id, READY_MARKER).await;
+    wait_until_status(
+        &mut client,
+        &window_id,
+        WindowStatus::Idle,
+        Duration::from_secs(10),
+    )
+    .await;
+    window_id
+}
+
+/// A handoff's answer as its wire string.
+fn delivery_wire(message: DaemonMessage) -> String {
+    let (_, _, delivery) = expect_handoff_sent(message);
+    serde_json::to_value(delivery)
+        .expect("a delivery encodes")
+        .as_str()
+        .expect("a delivery is a string on the wire")
+        .to_string()
+}
+
+fn handoff_to(window_id: &str) -> ClientMessage {
+    ClientMessage::SendHandoff {
+        window_id: Some(window_id.to_string()),
+        profile: None,
+        cwd: None,
+        name: None,
+        model: None,
+        effort: None,
+        reference: "src/foo.rs".to_string(),
+        note: "please look at the error handling".to_string(),
+    }
 }
 
 // Reads the registry's participant list directly to check a window's membership.
@@ -401,7 +474,7 @@ async fn send_message_to_a_composerless_window_is_refused_with_no_composer_from_
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_composerless_window_id_is_refused_with_no_composer_and_frees_its_slot() {
+async fn send_handoff_to_a_window_that_declares_no_delivery_is_undelivered_and_frees_its_slot() {
     let h = start_with_base(
         "no-composer-entry-handoff",
         DaemonConfig {
@@ -410,43 +483,35 @@ async fn send_handoff_to_a_composerless_window_id_is_refused_with_no_composer_an
         },
     )
     .await;
-    let window_id = open_ready(&h, SILENT).await;
+    let window_id = open_ready(&h, DRAWN).await;
+    let entry = h.registry.get(&window_id).expect("drawn window");
+    let seq_before: u64 = entry.write_seq();
     let mut client = h.connect().await;
 
-    // With the per-connection slot cap set to one, a second refusal that
-    // still reports no_composer (rather than resource_exhausted) proves the
-    // first refusal released the slot it reserved.
+    // With the per-connection slot cap set to one, a second answer that still
+    // reads undelivered (rather than resource_exhausted) proves the first
+    // answer released the slot it reserved.
     for attempt in 1..=2 {
-        send(
-            &mut client,
-            &ClientMessage::SendHandoff {
-                window_id: Some(window_id.clone()),
-                profile: None,
-                cwd: None,
-                name: None,
-                model: None,
-                effort: None,
-                reference: "src/foo.rs".to_string(),
-                note: "please look at the error handling".to_string(),
-            },
-        )
-        .await;
-        let message = expect_error(
-            read_response(&mut client, Duration::from_secs(5)).await,
-            "no_composer",
-        );
-        assert!(
-            message.contains("send_keys") && message.contains("open_window"),
-            "attempt {attempt} must carry the same guidance as send_message's refusal, \
-             got {message:?}"
+        send(&mut client, &handoff_to(&window_id)).await;
+        assert_eq!(
+            delivery_wire(read_response(&mut client, Duration::from_secs(5)).await),
+            "undelivered_no_delivery",
+            "attempt {attempt}: a window opened from a raw argv declares no way to deliver, \
+             whatever its definition declares"
         );
     }
+    assert_eq!(
+        entry.write_seq(),
+        seq_before,
+        "nothing is typed into a window a handoff cannot be delivered to"
+    );
 
     h.registry.terminate_all().await;
 }
 
 #[tokio::test]
-async fn a_window_with_no_definition_answers_send_message_and_send_handoff_alike() {
+async fn a_window_with_no_definition_refuses_send_message_as_unknown_and_a_handoff_as_undeliverable()
+ {
     let h = start("no-composer-entry-undefined").await;
     let window_id = h
         .open(echo_child_command(), Some("absent-definition"))
@@ -461,35 +526,17 @@ async fn a_window_with_no_definition_answers_send_message_and_send_handoff_alike
         },
     )
     .await;
-    let send_text_message = expect_error(
+    expect_error(
         read_response(&mut client, Duration::from_secs(5)).await,
         "status_unknown",
     );
 
-    send(
-        &mut client,
-        &ClientMessage::SendHandoff {
-            window_id: Some(window_id.clone()),
-            profile: None,
-            cwd: None,
-            name: None,
-            model: None,
-            effort: None,
-            reference: "src/foo.rs".to_string(),
-            note: "please look at the error handling".to_string(),
-        },
-    )
-    .await;
-    let send_handoff_message = expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "status_unknown",
-    );
-
+    send(&mut client, &handoff_to(&window_id)).await;
     assert_eq!(
-        send_text_message, send_handoff_message,
-        "a window with no definition at all must read status_unknown the same way \
-         whichever writing tool asked, since the composer gate never reasons about a \
-         missing definition"
+        delivery_wire(read_response(&mut client, Duration::from_secs(5)).await),
+        "undelivered_no_delivery",
+        "a handoff is never typed: a window that declares no delivery is answered so, \
+         whatever its status"
     );
 
     h.registry.terminate_all().await;
@@ -572,7 +619,40 @@ fn ready_profile_source_with_detection(display_name: &str, detection: &str) -> S
     with_detection
 }
 
+/// A `hook_child` profile under [`SILENT_LAUNCH`] (no composer) that hands a first
+/// request over as `--prompt <request>`: a launch that needs no composer at all.
+fn prompted_profile_source(logs: &Path) -> String {
+    let command = [
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_hook_child"))
+            .display()
+            .to_string(),
+        yagura_test_support::process::COMPOSER_MARKER.to_string(),
+        yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
+        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ]
+    .iter()
+    .map(|arg| format!("'{arg}'"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    format!(
+        "schema = 1\ndisplay_name = \"Prompted\"\ndetection = \"{SILENT_LAUNCH}\"\n\n\
+         [command]\ndefault = [{command}]\n\n[delivery]\nwake = \"none\"\n\
+         launch_prompt = [\"--prompt\", \"{{prompt}}\"]\n"
+    )
+}
+
 fn write_launch_profiles(profiles_dir: &Path) {
+    let logs = profiles_dir.join("prompted-logs");
+    std::fs::create_dir_all(&logs).expect("create the prompted profile's log directory");
+    write_profile(
+        profiles_dir,
+        "prompted-profile",
+        &prompted_profile_source(&logs),
+    );
     for (id, display_name, detection) in [
         ("silent-profile", "Silent", SILENT_LAUNCH),
         ("drawn-profile", "Drawn", DRAWN_LAUNCH),
@@ -652,7 +732,7 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
 
     let control = call_send_handoff_from_profile_within(
         &mut client,
-        "drawn-profile",
+        "prompted-profile",
         None,
         None,
         "r",
@@ -660,10 +740,16 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
         LAUNCH_REPLY_TIMEOUT,
     )
     .await;
-    let (_window_id, opened, _delivery) = expect_handoff_sent(control);
+    let (_window_id, opened, delivery) = expect_handoff_sent(control);
     assert!(
         opened,
-        "the same launch under a definition that declares a composer must open and deliver"
+        "a launch under a definition with no composer that hands the envelope over at launch \
+         must open"
+    );
+    assert_eq!(
+        serde_json::to_value(delivery).expect("a delivery encodes"),
+        "taken",
+        "handed over as the launch prompt, the envelope is taken once the window started"
     );
     assert_eq!(
         window_count(&mut client).await,
@@ -705,12 +791,12 @@ async fn the_composer_refusal_follows_the_launch_content_check_and_precedes_the_
     assert_no_composer_guidance(&message, "a handoff under a broken playbook");
 
     let control =
-        call_send_handoff_from_profile(&mut client, "drawn-profile", None, None, "r", "t").await;
+        call_send_handoff_from_profile(&mut client, "prompted-profile", None, None, "r", "t").await;
     let control_message = expect_error(control, "approval_required");
     assert!(
         control_message.contains("the configured playbook failed to load"),
-        "the broken playbook must still refuse a composer-declaring launch, or the composer \
-         refusal above was never tested against it: {control_message:?}"
+        "the broken playbook must still refuse a launch that can be handed the envelope, or \
+         the refusal above was never tested against it: {control_message:?}"
     );
 
     assert_eq!(
@@ -855,7 +941,7 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         vec![
             task_spec("instructed", "silent-profile", Some("do the thing")),
             task_spec("bare", "silent-profile", None),
-            task_spec("drawn", "drawn-profile", Some("do the thing")),
+            task_spec("prompted", "prompted-profile", Some("do the thing")),
         ],
     )
     .await;
@@ -888,10 +974,11 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         bare,
         "the same profile with nothing to tell the window must open",
     );
-    let drawn = open_task_window(&mut owner, &plan.plan_id, "drawn", "drawn-window").await;
-    let drawn_window: String = expect_task_window_opened(
-        drawn,
-        "an instructed task whose definition declares a composer must open",
+    let prompted = open_task_window(&mut owner, &plan.plan_id, "prompted", "prompted-window").await;
+    let prompted_window: String = expect_task_window_opened(
+        prompted,
+        "an instructed task whose profile hands its notice over at launch must open, \
+         composer or not",
     );
     assert_eq!(
         stored_task(&mut owner, &plan.plan_id, "bare")
@@ -901,10 +988,10 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         "the control must be bound, or an unbound refused task proves nothing"
     );
     assert_eq!(
-        stored_task(&mut owner, &plan.plan_id, "drawn")
+        stored_task(&mut owner, &plan.plan_id, "prompted")
             .await
             .window_id,
-        Some(drawn_window)
+        Some(prompted_window)
     );
 
     h.registry.terminate_all().await;
@@ -1031,7 +1118,7 @@ async fn open_parent_with_reporting_child(h: &Harness, detection: &str) -> Strin
     } else {
         echo_child_command()
     };
-    let parent_id = open_ready_running(h, detection, parent_command).await;
+    let parent_id = open_ready_delivering(h, detection, parent_command).await;
     let mut parent_conn = h.connect().await;
     identify(&mut parent_conn, &parent_id).await;
     let child_id = call_open_window(&mut parent_conn, echo_child_command()).await;
@@ -1149,9 +1236,9 @@ async fn a_composerless_windows_report_inbox_is_discarded_once_it_ends() {
 // =====================================================================
 // A composer without a probe: the daemon may type into it, but cannot
 // judge whether a line it wrote showed there. Every judged write -- one
-// terminated send_message line, a handoff, a chat post, an intro or a
-// notice -- is refused at the same points a missing composer is, while a
-// write with nothing to judge still goes through.
+// terminated send_message line, a notice -- is refused at the same points
+// a missing composer is, while a write with nothing to judge still goes
+// through.
 // =====================================================================
 
 fn probe_char() -> char {
@@ -1322,50 +1409,6 @@ async fn a_send_message_with_no_line_to_judge_is_written_into_a_composer_without
 }
 
 #[tokio::test]
-async fn send_handoff_to_a_composer_without_a_probe_is_refused_with_no_composer_even_when_approved()
-{
-    let h = start_with_base(
-        "no-probe-handoff",
-        DaemonConfig {
-            approval_policy: Some(policy(&["send_handoff", "open_window"])),
-            ..common::opening_config()
-        },
-    )
-    .await;
-    let window_id = open_ready(&h, RAW_ONLY).await;
-    let entry = h.registry.get(&window_id).expect("raw-only window");
-    let seq_before: u64 = entry.write_seq();
-    let mut client = h.connect().await;
-
-    send(
-        &mut client,
-        &ClientMessage::SendHandoff {
-            window_id: Some(window_id.clone()),
-            profile: None,
-            cwd: None,
-            name: None,
-            model: None,
-            effort: None,
-            reference: "src/foo.rs".to_string(),
-            note: "please look at the error handling".to_string(),
-        },
-    )
-    .await;
-    let message = expect_error(
-        read_response(&mut client, LAUNCH_REPLY_TIMEOUT).await,
-        "no_composer",
-    );
-    assert_no_composer_guidance(&message, "a window-addressed handoff without a probe");
-    assert_eq!(
-        entry.write_seq(),
-        seq_before,
-        "a refused handoff must not have written anything"
-    );
-
-    h.registry.terminate_all().await;
-}
-
-#[tokio::test]
 async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_child() {
     let (h, _dir) = start_launch(
         "no-probe-pre-open-handoff",
@@ -1393,93 +1436,6 @@ async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_chi
         before,
         "a handoff known to be refused must not have opened a window for it"
     );
-
-    h.registry.terminate_all().await;
-}
-
-/// Reads the next reply, skipping any `chat_changed` push that overtakes it.
-async fn read_chat_reply(client: &mut Connection) -> DaemonMessage {
-    loop {
-        let frame = read_response(client, Duration::from_secs(5)).await;
-        if !matches!(frame, DaemonMessage::ChatChanged { .. }) {
-            return frame;
-        }
-    }
-}
-
-/// A chat-enabled daemon over this file's definitions, with nothing excluded
-/// from the rooms so the composer access is the only thing that can keep a
-/// window out of them.
-async fn start_chat(tag: &str, intro: Option<&str>) -> Harness {
-    let dir = unique_temp_dir(tag);
-    write_definitions(&dir);
-    Harness::start_with_chat(
-        tag,
-        chat_config(
-            &dir,
-            &ChatPlaybook {
-                exclude_detections: Some(&[]),
-                intro,
-                ..ChatPlaybook::default()
-            },
-        ),
-    )
-    .await
-}
-
-#[tokio::test]
-async fn a_window_with_a_composer_but_no_probe_is_never_a_chat_participant() {
-    let h = start_chat("no-probe-chat", None).await;
-    let mut client = h.connect().await;
-    let raw_id = h.open(echo_child_command(), Some(RAW_ONLY)).await;
-    let drawn_id = h.open(echo_child_command(), Some(DRAWN)).await;
-    let poster_id = h.open_idle_window(&mut client).await;
-    identify(&mut client, &poster_id).await;
-
-    send(
-        &mut client,
-        &ClientMessage::SendChat {
-            room_id: None,
-            body: format!("hey @{raw_id} and @{drawn_id}"),
-        },
-    )
-    .await;
-    match read_chat_reply(&mut client).await {
-        DaemonMessage::ChatPosted {
-            targets,
-            unresolved,
-            ..
-        } => {
-            assert_eq!(
-                targets,
-                vec![drawn_id.clone()],
-                "only the mention whose window can judge a delivered line may resolve"
-            );
-            assert_eq!(unresolved, vec![raw_id.clone()]);
-        }
-        other => panic!("expected chat_posted, got {other:?}"),
-    }
-
-    send(
-        &mut client,
-        &ClientMessage::ReadChat {
-            room_id: None,
-            after_seq: Some(0),
-            limit: None,
-        },
-    )
-    .await;
-    match read_chat_reply(&mut client).await {
-        DaemonMessage::ChatMessages { roster, .. } => {
-            assert!(
-                !roster.iter().any(|p| p.window_id == raw_id),
-                "a window with a composer but no probe must not appear in the roster, got \
-                 {roster:?}"
-            );
-            assert!(roster.iter().any(|p| p.window_id == drawn_id));
-        }
-        other => panic!("expected chat_messages, got {other:?}"),
-    }
 
     h.registry.terminate_all().await;
 }
