@@ -32,7 +32,7 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 use yagura_os::program;
-use yagura_protocol::{LaunchOptionAlias, LaunchOptionInfo};
+use yagura_protocol::{LaunchOptionAlias, LaunchOptionInfo, ProfileUnavailableKind};
 
 use crate::child_env::is_reserved_env_name;
 use crate::config::DaemonConfig;
@@ -59,24 +59,26 @@ const MCP_ENV_NAMES_TOML_PLACEHOLDER: &str = "{env_names_toml}";
 /// The one placeholder a `[hooks]` table's `args` may spell.
 const HOOKS_CONFIG_FILE_PLACEHOLDER: &str = "{hooks_config_file}";
 
-/// Reason text: kind 1 -- the selected argv's
+/// Reason text for [`ProfileUnavailableKind::NotFound`]: the selected argv's
 /// executable could not be found by the injected resolution environment.
 const REASON_NOT_FOUND: &str = "the executable for this profile could not be found";
-/// Reason text: kind 2 -- the command interpreter would reinterpret part of
-/// the command line (a `.cmd` / `.bat` shim path or a trailing argument
-/// carrying one of its metacharacters).
+/// Reason text for [`ProfileUnavailableKind::Metacharacter`]: the command
+/// interpreter would reinterpret part of the command line (a `.cmd` / `.bat`
+/// shim path or a trailing argument carrying one of its metacharacters).
 const REASON_METACHARACTER: &str =
     "the command line contains a character the command interpreter would reinterpret";
-/// Reason text: kind 3 -- the profile's `[command]` table has neither this
-/// operating system's key nor `default`.
+/// Reason text for [`ProfileUnavailableKind::NoCommand`]: the profile's
+/// `[command]` table has neither this operating system's key nor `default`.
 const REASON_NO_ARGV: &str = "no command is defined for this operating system";
-/// Reason text: kind 4 -- the profile omits `[command]` (meaning "the
-/// daemon's default shell"), but no default shell was resolved at start-up.
+/// Reason text for [`ProfileUnavailableKind::NoDefaultShell`]: the profile
+/// omits `[command]` (meaning "the daemon's default shell"), but no default
+/// shell was resolved at start-up.
 const REASON_NO_DEFAULT_SHELL: &str = "no default shell was resolved when the daemon started";
-/// Reason text: kind 5 -- the profile wakes a waiting CLI by running its own
-/// program, which resolved to a Windows `.cmd` / `.bat` file, and the command
-/// interpreter would reinterpret the text that is passed to it. The profile's
-/// own `shim_guidance` follows this sentence.
+/// Reason text for [`ProfileUnavailableKind::NeedsNativeProgram`]: the profile
+/// wakes a waiting CLI by running its own program, which resolved to a Windows
+/// `.cmd` / `.bat` file, and the command interpreter would reinterpret the
+/// text that is passed to it. The profile's own `shim_guidance` follows this
+/// sentence.
 const REASON_WAKE_NEEDS_NATIVE_PROGRAM: &str =
     "this profile cannot be used through a Windows .cmd / .bat file";
 /// The refusal text for a profile its `enabled` key switches off: the
@@ -328,6 +330,12 @@ pub struct ProfileEntry {
     pub available: bool,
     /// English reason text when `available` is `false`.
     pub unavailable_reason: Option<String>,
+    /// The kind of [`ProfileEntry::unavailable_reason`], decided with it;
+    /// `None` exactly when that reason is.
+    pub unavailable_kind: Option<ProfileUnavailableKind>,
+    /// The profile's own guidance that follows the reason text, carried
+    /// apart from it ([`Unavailability::guidance`]).
+    pub unavailable_guidance: Option<String>,
     /// The `model` option this profile maps, `None` when it accepts none.
     pub model: Option<LaunchOptionInfo>,
     /// The `effort` option this profile maps, `None` when it accepts none.
@@ -1343,30 +1351,64 @@ pub(crate) fn is_executable_predicate(config: &DaemonConfig) -> impl Fn(&Path) -
     move |path: &Path| predicate(path)
 }
 
+/// Why a profile cannot be launched right now, as [`unavailability`] decides
+/// it: the kind, its reason text and the profile's own guidance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unavailability {
+    /// The kind of reason. Never [`ProfileUnavailableKind::Unknown`].
+    pub kind: ProfileUnavailableKind,
+    /// The English reason text: one fixed sentence per kind naming no path,
+    /// followed by [`Unavailability::guidance`] when there is one.
+    pub reason: String,
+    /// The profile's own `shim_guidance`, for
+    /// [`ProfileUnavailableKind::NeedsNativeProgram`] only, and only when the
+    /// profile declares one.
+    pub guidance: Option<String>,
+}
+
+impl Unavailability {
+    fn fixed(kind: ProfileUnavailableKind, sentence: &str) -> Self {
+        Self {
+            kind,
+            reason: sentence.to_string(),
+            guidance: None,
+        }
+    }
+}
+
 /// Reports why `profile` cannot be launched right now, or `None` when it
 /// can. The single function both [`list_profiles`] and [`resolve_launch`]'s
-/// callers consult, so a listing and a launch attempt never disagree.
+/// callers consult, so a listing and a launch attempt never disagree, and the
+/// one place a reason's kind and its text are decided together.
 ///
-/// The reason text is one of five fixed sentences, each naming no path: kind 1
-/// (executable not found), kind 2 (a metacharacter the command interpreter
-/// would reinterpret), kind 3 (no argv for this operating system), kind 4 (no
-/// default shell resolved) and kind 5 (a wake by command through a Windows
-/// `.cmd` / `.bat` file, followed by the profile's own guidance).
-/// Kind 3 is answered for any `profile` passed in, but never reaches a
-/// listing: [`list_profiles`] leaves such a profile out. Whether the profile
-/// is switched off ([`Profile::enabled`]) is not a reason here.
+/// The reason text is one of five fixed sentences, each naming no path:
+/// executable not found, a metacharacter the command interpreter would
+/// reinterpret, no argv for this operating system, no default shell resolved,
+/// and a wake by command through a Windows `.cmd` / `.bat` file (followed by
+/// the profile's own guidance). No argv for this operating system is answered
+/// for any `profile` passed in, but never reaches a listing: [`list_profiles`]
+/// leaves such a profile out. Whether the profile is switched off
+/// ([`Profile::enabled`]) is not a reason here.
 #[must_use]
-pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<String> {
+pub fn unavailability(profile: &Profile, config: &DaemonConfig) -> Option<Unavailability> {
     let argv = match &profile.command {
         Some(command) => match argv_for_os(command, config.host_os) {
             Some(argv) => argv,
-            None => return Some(REASON_NO_ARGV.to_string()),
+            None => {
+                return Some(Unavailability::fixed(
+                    ProfileUnavailableKind::NoCommand,
+                    REASON_NO_ARGV,
+                ));
+            }
         },
         None => {
             return if config.default_shell.is_some() {
                 None
             } else {
-                Some(REASON_NO_DEFAULT_SHELL.to_string())
+                Some(Unavailability::fixed(
+                    ProfileUnavailableKind::NoDefaultShell,
+                    REASON_NO_DEFAULT_SHELL,
+                ))
             };
         }
     };
@@ -1375,17 +1417,28 @@ pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<St
     let predicate = is_executable_predicate(config);
 
     if program::is_available(argv, platform, &config.program_lookup, &predicate) {
-        return wake_command_unusable_reason(profile, argv, config);
+        return wake_command_unavailability(profile, argv, config);
     }
 
     // `is_available` judged the argv unlaunchable; `resolve_program` is
     // asked again only to tell "rejected" (a metacharacter) apart from
     // "simply not found" for the reason text. This holds for a path-form
     // `.cmd` / `.bat` argv[0] too, which goes through the same check.
-    match program::resolve_program(argv, platform, &config.program_lookup, &predicate) {
-        Err(_rejected) => Some(REASON_METACHARACTER.to_string()),
-        Ok(_) => Some(REASON_NOT_FOUND.to_string()),
-    }
+    Some(
+        match program::resolve_program(argv, platform, &config.program_lookup, &predicate) {
+            Err(_rejected) => {
+                Unavailability::fixed(ProfileUnavailableKind::Metacharacter, REASON_METACHARACTER)
+            }
+            Ok(_) => Unavailability::fixed(ProfileUnavailableKind::NotFound, REASON_NOT_FOUND),
+        },
+    )
+}
+
+/// The reason text [`unavailability`] gives, or `None` when `profile` can be
+/// launched right now.
+#[must_use]
+pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<String> {
+    unavailability(profile, config).map(|found| found.reason)
 }
 
 /// Why `profile`, whose `argv` can be started, still cannot be used: it wakes a
@@ -1393,11 +1446,11 @@ pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<St
 /// that program is a Windows `.cmd` / `.bat` file, through which the text
 /// cannot be passed unchanged. The profile's own guidance follows the fixed
 /// sentence.
-fn wake_command_unusable_reason(
+fn wake_command_unavailability(
     profile: &Profile,
     argv: &[String],
     config: &DaemonConfig,
-) -> Option<String> {
+) -> Option<Unavailability> {
     let delivery = profile.delivery.as_ref()?;
     if !matches!(delivery.wake, WakeMode::Command(_)) {
         return None;
@@ -1413,9 +1466,14 @@ fn wake_command_unusable_reason(
     if !matches!(resolution, program::Resolution::CmdShim { .. }) {
         return None;
     }
-    Some(match &delivery.shim_guidance {
-        Some(guidance) => format!("{REASON_WAKE_NEEDS_NATIVE_PROGRAM} {guidance}"),
-        None => REASON_WAKE_NEEDS_NATIVE_PROGRAM.to_string(),
+    let guidance = delivery.shim_guidance.clone();
+    Some(Unavailability {
+        kind: ProfileUnavailableKind::NeedsNativeProgram,
+        reason: match &guidance {
+            Some(guidance) => format!("{REASON_WAKE_NEEDS_NATIVE_PROGRAM} {guidance}"),
+            None => REASON_WAKE_NEEDS_NATIVE_PROGRAM.to_string(),
+        },
+        guidance,
     })
 }
 
@@ -1675,7 +1733,11 @@ fn error_chain(err: &dyn std::error::Error) -> String {
 
 /// The listing entry for `profile`.
 fn listed_entry(profile: Profile, config: &DaemonConfig) -> ProfileEntry {
-    let reason = unavailable_reason(&profile, config);
+    let (unavailable_kind, unavailable_reason, unavailable_guidance) =
+        match unavailability(&profile, config) {
+            Some(found) => (Some(found.kind), Some(found.reason), found.guidance),
+            None => (None, None, None),
+        };
     let command = listed_argv(&profile, config);
     ProfileEntry {
         id: profile.id,
@@ -1685,8 +1747,10 @@ fn listed_entry(profile: Profile, config: &DaemonConfig) -> ProfileEntry {
         cwd: profile.cwd,
         command,
         enabled: profile.enabled,
-        available: reason.is_none(),
-        unavailable_reason: reason,
+        available: unavailable_reason.is_none(),
+        unavailable_reason,
+        unavailable_kind,
+        unavailable_guidance,
         model: launch_option_info(profile.options.model.as_ref()),
         effort: launch_option_info(profile.options.effort.as_ref()),
     }

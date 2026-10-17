@@ -33,12 +33,12 @@ use common::store_fixtures::capture_warns;
 use yagura_daemon::profile::{
     LaunchOptionAxis, LaunchOptionSpec, LaunchOptionValues, LaunchOptions, Profile, ProfileCommand,
     ProfileLaunch, ProfileLaunchError, ProfileListing, ProfileOs, ProfileParseError,
-    apply_launch_options, argv_for_os, list_profiles, parse_profile, resolve_launch,
-    resolve_option_value, unavailable_reason,
+    Unavailability, apply_launch_options, argv_for_os, list_profiles, parse_profile,
+    resolve_launch, resolve_option_value, unavailability, unavailable_reason,
 };
 use yagura_daemon::{DaemonConfig, RequestedCwd};
 use yagura_os::program::{Platform, ProgramLookup};
-use yagura_protocol::{LaunchOptionAlias, LaunchOptionInfo};
+use yagura_protocol::{LaunchOptionAlias, LaunchOptionInfo, ProfileUnavailableKind};
 use yagura_test_support::paths::TempDir;
 
 // --- fixtures ---------------------------------------------------------------
@@ -1209,6 +1209,135 @@ fn the_availability_a_listing_reports_is_the_one_the_launch_path_would_decide() 
             entry.id
         );
     }
+}
+
+#[test]
+fn each_reason_is_decided_together_with_its_kind() {
+    let tree = TempDir::new("yagura-cli-test", "profile-reason-kind-pairs");
+    let bin = tree.make_dir("bin");
+    tree.write_file("bin/shim-program.cmd", "");
+    let meta_bin = tree.make_dir("meta^dir");
+    tree.write_file("meta^dir/shim-program.cmd", "");
+    let host = ProfileOs::host();
+
+    let metachar_argument = parse_profile(
+        "metachar-argument",
+        "schema = 1\ndisplay_name = \"Metachar Argument\"\n\n[command]\nwindows = \
+         [\"shim-program\", \"%PATH%\"]\n",
+    )
+    .expect("a valid profile");
+    let plain_shim = parse_profile(
+        "plain-shim",
+        "schema = 1\ndisplay_name = \"Plain Shim\"\n\n[command]\nwindows = \
+         [\"shim-program\"]\n",
+    )
+    .expect("a valid profile");
+
+    let cases: [(&str, Profile, DaemonConfig, ProfileUnavailableKind); 5] = [
+        (
+            "not found",
+            fixture_profile("valid-default.toml"),
+            config_with(None, empty_lookup(), host, None),
+            ProfileUnavailableKind::NotFound,
+        ),
+        (
+            "metacharacter in an argument",
+            metachar_argument,
+            config_with(None, lookup_in(&bin), ProfileOs::Windows, None),
+            ProfileUnavailableKind::Metacharacter,
+        ),
+        (
+            "metacharacter in the shim path",
+            plain_shim,
+            config_with(None, lookup_in(&meta_bin), ProfileOs::Windows, None),
+            ProfileUnavailableKind::Metacharacter,
+        ),
+        (
+            "no argv for this operating system",
+            fixture_profile("valid-windows-only.toml"),
+            config_with(None, empty_lookup(), ProfileOs::Linux, None),
+            ProfileUnavailableKind::NoCommand,
+        ),
+        (
+            "no default shell",
+            fixture_profile("valid-shell-omitted.toml"),
+            config_with(None, empty_lookup(), host, None),
+            ProfileUnavailableKind::NoDefaultShell,
+        ),
+    ];
+
+    for (label, profile, config, kind) in cases {
+        let found: Unavailability =
+            unavailability(&profile, &config).unwrap_or_else(|| panic!("{label}: unavailable"));
+        assert_eq!(found.kind, kind, "{label}");
+        assert_eq!(
+            Some(found.reason),
+            unavailable_reason(&profile, &config),
+            "{label}: the kind travels with the very sentence the reason gives"
+        );
+        assert_eq!(
+            found.guidance, None,
+            "{label}: only a profile's own shim guidance is guidance"
+        );
+    }
+
+    let shell_tree = TempDir::new("yagura-cli-test", "profile-reason-kind-available");
+    shell_tree.make_dir("bin");
+    let shell = shell_tree.write_file("bin/some-shell", "");
+    assert_eq!(
+        unavailability(
+            &fixture_profile("valid-shell-omitted.toml"),
+            &config_with(None, empty_lookup(), host, Some(shell)),
+        ),
+        None,
+        "a launchable profile has no kind to report"
+    );
+}
+
+#[test]
+fn a_listing_entry_carries_the_kind_beside_its_reason() {
+    let tree = TempDir::new("yagura-cli-test", "profile-list-reason-kind");
+    let dir = tree.make_dir("profiles");
+    copy_fixtures(&dir, &["valid-default.toml", "valid-shell-omitted.toml"]);
+    let config = config_with(Some(dir), empty_lookup(), ProfileOs::host(), None);
+
+    let listing: ProfileListing = list_profiles(&config);
+
+    for (id, kind) in [
+        ("valid-default", ProfileUnavailableKind::NotFound),
+        (
+            "valid-shell-omitted",
+            ProfileUnavailableKind::NoDefaultShell,
+        ),
+    ] {
+        let entry = listing
+            .profiles
+            .iter()
+            .find(|entry| entry.id == id)
+            .unwrap_or_else(|| panic!("{id} is listed"));
+        assert!(!entry.available, "{id}");
+        assert_eq!(entry.unavailable_kind, Some(kind), "{id}");
+        assert_eq!(entry.unavailable_guidance, None, "{id}");
+    }
+
+    let tree = TempDir::new("yagura-cli-test", "profile-list-reason-kind-available");
+    let dir = tree.make_dir("profiles");
+    copy_fixtures(&dir, &["valid-default.toml"]);
+    let bin = tree.make_dir("bin");
+    write_available_program(&bin, "codex");
+    let listing = list_profiles(&config_with(
+        Some(dir),
+        lookup_in(&bin),
+        ProfileOs::host(),
+        None,
+    ));
+    let entry = listing.profiles.first().expect("valid-default is listed");
+    assert!(entry.available);
+    assert_eq!(
+        (&entry.unavailable_kind, &entry.unavailable_guidance),
+        (&None, &None),
+        "an available entry explains nothing"
+    );
 }
 
 #[test]

@@ -3777,6 +3777,8 @@ fn to_profile_info(entry: crate::profile::ProfileEntry) -> ProfileInfo {
         model: entry.model,
         effort: entry.effort,
         enabled: entry.enabled,
+        unavailable_kind: entry.unavailable_kind,
+        unavailable_guidance: entry.unavailable_guidance,
     }
 }
 

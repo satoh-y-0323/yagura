@@ -42,7 +42,7 @@ use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    HandoffDelivery, ProfileInfo, WindowInfo, WithdrawReason,
+    HandoffDelivery, ProfileInfo, ProfileUnavailableKind, WindowInfo, WithdrawReason,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
@@ -379,6 +379,54 @@ async fn list_profiles_reports_availability_and_a_reason_per_entry() {
     assert!(
         unavail.unavailable_reason.is_some(),
         "an unavailable entry must carry a reason: {unavail:?}"
+    );
+    assert_eq!(
+        (avail.unavailable_kind, &avail.unavailable_guidance),
+        (None, &None),
+        "an available entry must carry no kind and no guidance: {avail:?}"
+    );
+    assert_eq!(
+        unavail.unavailable_kind,
+        Some(ProfileUnavailableKind::NotFound),
+        "the kind travels beside the reason: {unavail:?}"
+    );
+    assert_eq!(unavail.unavailable_guidance, None, "{unavail:?}");
+}
+
+#[tokio::test]
+async fn list_profiles_carries_a_shim_profiles_guidance_apart_from_its_reason() {
+    let tree = TempDir::new("yagura-cli-test", "ipc-profile-list-shim-kind");
+    let bin = tree.make_dir("bin");
+    tree.write_file("bin/shimmed.cmd", "");
+    let profiles_dir = tree.make_dir("profiles");
+    write_profile(
+        &profiles_dir,
+        "shimmed",
+        "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"shimmed\"]\n\n\
+         [delivery]\nwake = \"command\"\nwake_args = [\"queue\", \"{text}\"]\n\
+         shim_guidance = \"Use the native build.\"\n",
+    );
+
+    let config = DaemonConfig {
+        host_os: ProfileOs::Windows,
+        ..config_with(Some(profiles_dir), lookup_in(&bin))
+    };
+    let harness = Harness::start("ipc-profile-list-shim-kind", config).await;
+    let mut client = harness.connect().await;
+
+    let (profiles, _warnings) = call_list_profiles(&mut client).await;
+
+    let shimmed = find_profile(&profiles, "shimmed");
+    assert!(!shimmed.available, "{shimmed:?}");
+    assert_eq!(
+        shimmed.unavailable_kind,
+        Some(ProfileUnavailableKind::NeedsNativeProgram),
+        "{shimmed:?}"
+    );
+    assert_eq!(
+        shimmed.unavailable_guidance.as_deref(),
+        Some("Use the native build."),
+        "{shimmed:?}"
     );
 }
 

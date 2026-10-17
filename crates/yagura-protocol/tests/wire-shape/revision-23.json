@@ -1017,6 +1017,8 @@
                 }
               ]
             },
+            "unavailable_guidance": "string",
+            "unavailable_kind": "string",
             "unavailable_reason": "string"
           }
         ],
@@ -1322,6 +1324,14 @@
       "down",
       "move",
       "up"
+    ],
+    "ProfileUnavailableKind": [
+      "metacharacter",
+      "needs_native_program",
+      "no_command",
+      "no_default_shell",
+      "not_found",
+      "unknown"
     ],
     "ReportOutcome": [
       "failed",

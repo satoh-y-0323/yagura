@@ -12,10 +12,13 @@
 //! - A `ProfileInfo` without `enabled` decodes as enabled (a peer that does not
 //!   carry the field has no disabled state), `false` decodes as disabled, a
 //!   mistyped value fails the frame, and encoding always writes the key.
+//! - An unavailable `ProfileInfo` carries the kind of reason beside its text, and
+//!   the profile's own guidance when it has one; an unknown kind decodes as
+//!   `Unknown` and a peer without the fields decodes with neither.
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, MessageError, ProfileInfo, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
+    ClientMessage, DaemonMessage, MessageError, ProfileInfo, ProfileUnavailableKind,
+    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -227,6 +230,8 @@ fn sample_profile(enabled: bool) -> ProfileInfo {
         model: None,
         effort: None,
         enabled,
+        unavailable_kind: None,
+        unavailable_guidance: None,
     }
 }
 
@@ -253,6 +258,98 @@ fn a_profile_list_round_trips_a_disabled_profile() {
         decode_daemon_message(&encoded).expect("profile_list must round trip"),
         decoded
     );
+}
+
+// =============================================================================
+// `ProfileInfo.unavailable_kind` and `ProfileInfo.unavailable_guidance`
+// =============================================================================
+
+fn unavailable_profile(kind: ProfileUnavailableKind, guidance: Option<&str>) -> ProfileInfo {
+    ProfileInfo {
+        available: false,
+        unavailable_reason: Some("reason".to_string()),
+        unavailable_kind: Some(kind),
+        unavailable_guidance: guidance.map(str::to_string),
+        ..sample_profile(true)
+    }
+}
+
+#[test]
+fn every_unavailable_kind_is_written_in_snake_case() {
+    for (kind, wire) in [
+        (ProfileUnavailableKind::NotFound, "not_found"),
+        (ProfileUnavailableKind::Metacharacter, "metacharacter"),
+        (ProfileUnavailableKind::NoCommand, "no_command"),
+        (ProfileUnavailableKind::NoDefaultShell, "no_default_shell"),
+        (
+            ProfileUnavailableKind::NeedsNativeProgram,
+            "needs_native_program",
+        ),
+    ] {
+        let value = as_json(&unavailable_profile(kind, None));
+        assert_eq!(
+            value.get("unavailable_kind"),
+            Some(&serde_json::json!(wire)),
+            "{kind:?} must travel as {wire:?}, got: {value}"
+        );
+    }
+}
+
+#[test]
+fn the_kind_and_the_guidance_round_trip_beside_the_reason() {
+    let decoded = DaemonMessage::ProfileList {
+        profiles: vec![
+            unavailable_profile(
+                ProfileUnavailableKind::NeedsNativeProgram,
+                Some("Use the native build."),
+            ),
+            unavailable_profile(ProfileUnavailableKind::NotFound, None),
+            sample_profile(true),
+        ],
+        warnings: vec![],
+    };
+    let encoded = encode_daemon_message(&decoded);
+    assert_eq!(
+        decode_daemon_message(&encoded).expect("profile_list must round trip"),
+        decoded
+    );
+}
+
+#[test]
+fn an_available_profile_carries_no_kind_and_no_guidance_on_the_wire() {
+    let value = as_json(&sample_profile(true));
+    for key in ["unavailable_kind", "unavailable_guidance"] {
+        assert!(
+            value.get(key).is_none_or(serde_json::Value::is_null),
+            "an available profile has nothing to explain under {key}, got: {value}"
+        );
+    }
+}
+
+#[test]
+fn a_kind_this_build_does_not_know_decodes_as_unknown() {
+    let mut profile = profile_json(None);
+    let object = profile.as_object_mut().expect("the profile is an object");
+    object.insert("available".to_string(), serde_json::json!(false));
+    object.insert("unavailable_reason".to_string(), serde_json::json!("why"));
+    object.insert(
+        "unavailable_kind".to_string(),
+        serde_json::json!("a_kind_from_a_newer_daemon"),
+    );
+    let decoded = decoded_single_profile(&profile_list_frame(profile));
+    assert_eq!(
+        decoded.unavailable_kind,
+        Some(ProfileUnavailableKind::Unknown),
+        "a newer daemon's kind must not fail the whole listing"
+    );
+    assert_eq!(decoded.unavailable_reason.as_deref(), Some("why"));
+}
+
+#[test]
+fn a_profile_from_a_daemon_without_the_kind_decodes_with_none() {
+    let decoded = decoded_single_profile(&profile_list_frame(profile_json(None)));
+    assert_eq!(decoded.unavailable_kind, None);
+    assert_eq!(decoded.unavailable_guidance, None);
 }
 
 // =============================================================================

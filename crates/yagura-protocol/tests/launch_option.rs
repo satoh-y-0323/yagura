@@ -449,6 +449,8 @@ fn profile_info_with(
         model,
         effort,
         enabled: true,
+        unavailable_kind: None,
+        unavailable_guidance: None,
     }
 }
 

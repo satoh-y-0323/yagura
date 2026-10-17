@@ -86,9 +86,9 @@ use yagura_protocol::{
     McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, Palette,
     PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState,
     PointerButton, PointerInput, PointerKind, ProfileCommandDetail, ProfileDetailEntry,
-    ProfileInfo, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
-    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
-    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
+    ProfileInfo, ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef,
+    ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment,
+    TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
     WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
@@ -238,6 +238,7 @@ wire_sample!(enum McpRegistrationState => Registered);
 wire_sample!(enum McpRegistrationAction => Register);
 wire_sample!(enum DaemonProblemKind => WindowsUnavailable);
 wire_sample!(enum DeliveryStream => Stdout);
+wire_sample!(enum ProfileUnavailableKind => NotFound);
 wire_sample!(enum NamedKey => ArrowUp);
 wire_sample!(enum PointerKind => Down);
 wire_sample!(enum PointerButton => Left);
@@ -318,6 +319,8 @@ wire_sample!(struct ProfileInfo {
     model,
     effort,
     enabled,
+    unavailable_kind,
+    unavailable_guidance,
 });
 wire_sample!(struct LaunchOptionInfo { aliases });
 wire_sample!(struct LaunchOptionAlias { alias, value });
@@ -1092,6 +1095,30 @@ fn playbook_state_wire_variants() -> BTreeSet<String> {
     .collect()
 }
 
+fn profile_unavailable_kind_wire_variants() -> BTreeSet<String> {
+    [
+        ProfileUnavailableKind::NotFound,
+        ProfileUnavailableKind::Metacharacter,
+        ProfileUnavailableKind::NoCommand,
+        ProfileUnavailableKind::NoDefaultShell,
+        ProfileUnavailableKind::NeedsNativeProgram,
+        ProfileUnavailableKind::Unknown,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let hand = match &kind {
+            ProfileUnavailableKind::NotFound => "not_found",
+            ProfileUnavailableKind::Metacharacter => "metacharacter",
+            ProfileUnavailableKind::NoCommand => "no_command",
+            ProfileUnavailableKind::NoDefaultShell => "no_default_shell",
+            ProfileUnavailableKind::NeedsNativeProgram => "needs_native_program",
+            ProfileUnavailableKind::Unknown => "unknown",
+        };
+        serde_spelling(&kind, hand)
+    })
+    .collect()
+}
+
 fn mcp_registration_state_wire_variants() -> BTreeSet<String> {
     [
         McpRegistrationState::Registered,
@@ -1426,6 +1453,10 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         (
             "DeliveryStream".to_string(),
             delivery_stream_wire_variants(),
+        ),
+        (
+            "ProfileUnavailableKind".to_string(),
+            profile_unavailable_kind_wire_variants(),
         ),
         ("NamedKey".to_string(), named_key_wire_variants()),
         ("Key".to_string(), key_wire_variants()),

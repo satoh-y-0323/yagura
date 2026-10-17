@@ -29,7 +29,8 @@ use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ClientMessage, ControlKey,
     DaemonMessage, HandoffDelivery, LaunchOptionAlias, LaunchOptionInfo,
-    OpenWindowExclusivityError, ProfileInfo, RoomRef, UnknownReason, WindowInfo, WindowStatus,
+    OpenWindowExclusivityError, ProfileInfo, ProfileUnavailableKind, RoomRef, UnknownReason,
+    WindowInfo, WindowStatus,
 };
 
 /// A scripted [`DaemonTransport`] double: replays queued responses in order
@@ -2341,6 +2342,8 @@ fn sample_profile(id: &str, display_name: &str) -> ProfileInfo {
         model: None,
         effort: None,
         enabled: true,
+        unavailable_kind: None,
+        unavailable_guidance: None,
     }
 }
 
@@ -2377,6 +2380,8 @@ async fn list_profiles_maps_profile_list_response_to_a_profiles_array() {
             model: None,
             effort: None,
             enabled: true,
+            unavailable_kind: Some(ProfileUnavailableKind::NotFound),
+            unavailable_guidance: None,
         },
     ];
     let transport = MockTransport::with_response(Ok(DaemonMessage::ProfileList {
@@ -2436,6 +2441,8 @@ async fn list_profiles_omits_every_key_the_daemon_left_empty() {
             model: None,
             effort: None,
             enabled: true,
+            unavailable_kind: None,
+            unavailable_guidance: None,
         }],
         warnings: Vec::new(),
     }));
@@ -4463,6 +4470,8 @@ async fn list_profiles_leaves_out_a_disabled_profile_and_keeps_the_others_in_ord
         model: None,
         effort: None,
         enabled: true,
+        unavailable_kind: None,
+        unavailable_guidance: None,
     };
     let transport = MockTransport::with_response(Ok(DaemonMessage::ProfileList {
         profiles: vec![

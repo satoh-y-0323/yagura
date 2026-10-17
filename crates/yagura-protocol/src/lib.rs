@@ -125,7 +125,8 @@
 //! caller establishes [`INBOX_MIN_REVISION`] before sending any of them.
 //!
 //! Revision 23 answers a handoff with `taken`, `undelivered_timeout` or
-//! `undelivered_no_delivery` in place of what a composer was seen to do.
+//! `undelivered_no_delivery` in place of what a composer was seen to do, and
+//! adds `unavailable_kind` and `unavailable_guidance` to [`ProfileInfo`].
 
 use std::collections::BTreeSet;
 
@@ -1744,10 +1745,49 @@ pub struct ProfileInfo {
     /// so reading absence as enabled states a fact about that older peer.
     #[serde(default = "enabled_when_absent")]
     pub enabled: bool,
+    /// The kind of reason [`ProfileInfo::unavailable_reason`] gives, decided
+    /// together with that text. `None` when `available` is `true`, and when
+    /// the peer does not carry the field.
+    #[serde(default)]
+    pub unavailable_kind: Option<ProfileUnavailableKind>,
+    /// The profile's own guidance for a
+    /// [`ProfileUnavailableKind::NeedsNativeProgram`] reason, carried apart
+    /// from the reason text it is also appended to. `None` for every other
+    /// kind, when the profile declares none, and when the peer does not carry
+    /// the field.
+    #[serde(default)]
+    pub unavailable_guidance: Option<String>,
 }
 
 fn enabled_when_absent() -> bool {
     true
+}
+
+/// Why a profile is not launchable right now, as [`ProfileInfo`] reports it.
+///
+/// Being switched off by the user is not a kind: [`ProfileInfo::enabled`]
+/// carries that. An unrecognized wire value decodes as
+/// [`ProfileUnavailableKind::Unknown`] rather than failing the frame, so a
+/// peer built against a newer protocol that adds a kind stays interoperable.
+/// This build never sends `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileUnavailableKind {
+    /// The executable the profile names could not be found.
+    NotFound,
+    /// The command interpreter would reinterpret part of the command line.
+    Metacharacter,
+    /// The profile names no command for this operating system.
+    NoCommand,
+    /// The profile means the default shell, but none was resolved when the
+    /// daemon started.
+    NoDefaultShell,
+    /// The profile wakes its CLI by running its program with the text as an
+    /// argument, and that program is a Windows `.cmd` / `.bat` file.
+    NeedsNativeProgram,
+    /// A kind this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One launch option a profile accepts, as [`ClientMessage::ListProfiles`]

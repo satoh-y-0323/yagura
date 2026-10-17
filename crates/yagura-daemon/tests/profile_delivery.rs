@@ -28,12 +28,12 @@ use yagura_daemon::OpenWindowRequest;
 use yagura_daemon::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, OutputForm};
 use yagura_daemon::profile::{
     LaunchOptionValues, Profile, ProfileOs, list_profiles, parse_profile, resolve_launch,
-    unavailable_reason,
+    unavailability, unavailable_reason,
 };
 use yagura_daemon::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
 use yagura_daemon::window::{CliInjection, InjectionKind, WindowProvenance};
 use yagura_os::program::ProgramLookup;
-use yagura_protocol::DeliveryStream;
+use yagura_protocol::{DeliveryStream, ProfileUnavailableKind};
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::argv_probe_path;
 
@@ -600,6 +600,42 @@ fn the_shim_reason_is_listed_beside_the_entry_and_matches_the_availability_flag(
     assert!(!entry.available);
     let reason = entry.unavailable_reason.as_deref().expect("a reason");
     assert!(reason.ends_with("Use the native build."), "{reason:?}");
+    assert_eq!(
+        entry.unavailable_kind,
+        Some(ProfileUnavailableKind::NeedsNativeProgram)
+    );
+    assert_eq!(
+        entry.unavailable_guidance.as_deref(),
+        Some("Use the native build."),
+        "the guidance is carried on its own, so a reader can show or copy it without \
+         taking the reason apart"
+    );
+}
+
+#[test]
+fn the_shim_unavailability_carries_its_kind_and_the_profiles_guidance_alone() {
+    let tree = TempDir::new("yagura-cli-test", "delivery-shim-kind");
+    let bin = tree.make_dir("bin");
+    tree.write_file("bin/shimmed.cmd", "");
+    let config = config_with(None, lookup_in(&bin), ProfileOs::Windows);
+    let guidance = "Install the standalone build: see the profile notes.";
+
+    let guided = profile_running(
+        "shimmed",
+        &format!("{WAKE_COMMAND}shim_guidance = \"{guidance}\"\n"),
+    );
+    let found = unavailability(&guided, &config).expect("unavailable");
+    assert_eq!(found.kind, ProfileUnavailableKind::NeedsNativeProgram);
+    assert_eq!(found.guidance.as_deref(), Some(guidance));
+    assert_eq!(Some(found.reason), unavailable_reason(&guided, &config));
+
+    let bare = profile_running("shimmed", WAKE_COMMAND);
+    let found = unavailability(&bare, &config).expect("unavailable");
+    assert_eq!(found.kind, ProfileUnavailableKind::NeedsNativeProgram);
+    assert_eq!(
+        found.guidance, None,
+        "a profile that declares no guidance has none to carry"
+    );
 }
 
 #[test]
