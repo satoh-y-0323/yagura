@@ -11,9 +11,10 @@
 //!
 //! Flags are scoped to one command: `--detection` / `--detection-dir` /
 //! `--playbook` / `--profiles-dir` / `--approver-exe` / `--roles` configure
-//! the daemon itself and are ignored on the `--emit-status` and `--shutdown`
-//! paths (neither starts a detection engine nor an approval gate), just as
-//! `--source` qualifies `--emit-status` only.
+//! the daemon itself and are ignored on the client-side paths -- `--emit-status`,
+//! `--deliver-context`, `--deliver-take`, `--deliver-wait`, `--report-session` and
+//! `--shutdown` -- none of which starts a detection engine or an approval gate,
+//! just as `--source` qualifies `--emit-status` only.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -70,6 +71,36 @@ pub enum CliCommand {
         /// Reporting source name, defaulting to `"cli"`.
         source: String,
     },
+    /// Print the start-up context of the window the hook runs in
+    /// (`--deliver-context`).
+    DeliverContext,
+    /// Print the parcels waiting for the window the hook runs in
+    /// (`--deliver-take`).
+    DeliverTake,
+    /// Wait for a parcel for the window the hook runs in (`--deliver-wait`).
+    DeliverWait,
+    /// Tell the daemon the session the CLI's hook input names
+    /// (`--report-session`).
+    ReportSession {
+        /// The JSON pointer (RFC 6901) of the string in the hook's stdin.
+        pointer: String,
+    },
+}
+
+impl CliCommand {
+    /// Whether a CLI's hook runs this command: it only acts inside a window
+    /// and is silent anywhere else.
+    #[must_use]
+    pub fn is_hook_command(&self) -> bool {
+        matches!(
+            self,
+            Self::EmitStatus { .. }
+                | Self::DeliverContext
+                | Self::DeliverTake
+                | Self::DeliverWait
+                | Self::ReportSession { .. }
+        )
+    }
 }
 
 /// Why a command line was rejected.
@@ -96,7 +127,10 @@ pub enum CliError {
         value: String,
     },
     /// Two mutually exclusive commands were requested at once.
-    #[error("--shutdown and --emit-status cannot be combined")]
+    #[error(
+        "only one of --shutdown, --emit-status, --deliver-context, --deliver-take, \
+         --deliver-wait and --report-session may be given"
+    )]
     ConflictingCommands,
 }
 
@@ -111,12 +145,12 @@ pub enum CliError {
 /// # Errors
 ///
 /// Returns [`CliError`] for an unknown argument, a flag missing its value, a
-/// value that fails validation, or `--shutdown` combined with
-/// `--emit-status`.
+/// value that fails validation, or two of the client-side commands combined.
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut shutdown = false;
     let mut emit_status: Option<WindowStatus> = None;
     let mut source: Option<String> = None;
+    let mut hook_door: Option<CliCommand> = None;
     let mut detection_name: Option<String> = None;
     let mut detection_dir_arg: Option<PathBuf> = None;
     let mut playbook_arg: Option<PathBuf> = None;
@@ -132,6 +166,21 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                 let value = next_value(&mut remaining, "--emit-status")?;
                 emit_status =
                     Some(parse_status(value).ok_or_else(|| invalid("--emit-status", value))?);
+            }
+            "--deliver-context" => set_hook_door(&mut hook_door, CliCommand::DeliverContext)?,
+            "--deliver-take" => set_hook_door(&mut hook_door, CliCommand::DeliverTake)?,
+            "--deliver-wait" => set_hook_door(&mut hook_door, CliCommand::DeliverWait)?,
+            "--report-session" => {
+                let value = next_value(&mut remaining, "--report-session")?;
+                if !value.starts_with('/') {
+                    return Err(invalid("--report-session", value));
+                }
+                set_hook_door(
+                    &mut hook_door,
+                    CliCommand::ReportSession {
+                        pointer: value.clone(),
+                    },
+                )?;
             }
             "--source" => {
                 let value = next_value(&mut remaining, "--source")?;
@@ -186,9 +235,17 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         }
     }
 
+    let requested = usize::from(shutdown)
+        + usize::from(emit_status.is_some())
+        + usize::from(hook_door.is_some());
+    if requested > 1 {
+        return Err(CliError::ConflictingCommands);
+    }
+    if let Some(door) = hook_door {
+        return Ok(door);
+    }
     match (shutdown, emit_status) {
-        (true, Some(_)) => Err(CliError::ConflictingCommands),
-        (true, None) => Ok(CliCommand::Shutdown),
+        (true, _) => Ok(CliCommand::Shutdown),
         (false, Some(status)) => Ok(CliCommand::EmitStatus {
             status,
             source: source.unwrap_or_else(|| DEFAULT_EMIT_STATUS_SOURCE.to_string()),
@@ -202,6 +259,18 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             roles_arg,
         }),
     }
+}
+
+/// Records `command` as the hook door asked for. Repeating one door keeps the
+/// last occurrence; two different doors conflict.
+fn set_hook_door(slot: &mut Option<CliCommand>, command: CliCommand) -> Result<(), CliError> {
+    if let Some(existing) = slot
+        && std::mem::discriminant(existing) != std::mem::discriminant(&command)
+    {
+        return Err(CliError::ConflictingCommands);
+    }
+    *slot = Some(command);
+    Ok(())
 }
 
 /// Where the directory layer of the detection definitions came from.

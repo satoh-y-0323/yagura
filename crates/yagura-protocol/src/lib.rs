@@ -118,6 +118,11 @@
 //! daemon starts with no window, so there is no start-up window to fail. A
 //! `status_event` without `window_id` is now refused as `invalid_argument`
 //! instead of being attributed to the first window the daemon opened.
+//!
+//! Revision 22 adds the doors a CLI's hook reads a window's inbox through:
+//! `deliver_context`, `deliver_take` and `deliver_wait`, answered with
+//! `delivery`, and `report_session`, answered with `session_recorded`. A
+//! caller establishes [`INBOX_MIN_REVISION`] before sending any of them.
 
 use std::collections::BTreeSet;
 
@@ -129,7 +134,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 21;
+pub const PROTOCOL_REVISION: u32 = 22;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -238,6 +243,13 @@ pub const FRAME_MIN_REVISION: u32 = 19;
 /// An older daemon refuses the request by name, and that refusal means it has
 /// no problem to report, so a caller establishes this revision before asking.
 pub const DAEMON_HEALTH_MIN_REVISION: u32 = 20;
+
+/// The first wire revision that carries `deliver_context`, `deliver_take`,
+/// `deliver_wait` and `report_session`.
+///
+/// An older daemon refuses them by name, so a hook command built for this
+/// revision does nothing useful against it.
+pub const INBOX_MIN_REVISION: u32 = 22;
 
 /// The most JSON bytes (as [`encode_daemon_message`] produces them) one
 /// [`Frame`] part may take; a larger frame is split into several parts by
@@ -2485,6 +2497,43 @@ pub enum ClientMessage {
     /// [`DaemonMessage::DaemonHealth`]. Needs no permission: the answer names
     /// no window, path or user data.
     GetDaemonHealth,
+    /// A CLI's start-up hook asks for the window's start-up context: the
+    /// introduction plus whatever its inbox holds; answered with
+    /// [`DaemonMessage::Delivery`]. Authenticated like a status event.
+    DeliverContext {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+    },
+    /// A CLI's turn-start hook takes the parcels waiting in the window's
+    /// inbox; answered with [`DaemonMessage::Delivery`].
+    DeliverTake {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+    },
+    /// An idle window's hook waits for a parcel. The daemon answers with
+    /// [`DaemonMessage::Delivery`] when one arrives, or with an empty one
+    /// when a newer wait for the same window replaces this one. The wait ends
+    /// when the connection closes.
+    DeliverWait {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+    },
+    /// A CLI's hook tells the daemon its session identifier; answered with
+    /// [`DaemonMessage::SessionRecorded`].
+    ReportSession {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+        /// The identifier the hook read from the CLI's input.
+        session: String,
+    },
     /// Records a new plan owned by the calling window; answered with
     /// [`DaemonMessage::PlanDetail`].
     CreatePlan {
@@ -2772,6 +2821,10 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
             MCP_REGISTRATION_MIN_REVISION
         }
         ClientMessage::GetDaemonHealth => DAEMON_HEALTH_MIN_REVISION,
+        ClientMessage::DeliverContext { .. }
+        | ClientMessage::DeliverTake { .. }
+        | ClientMessage::DeliverWait { .. }
+        | ClientMessage::ReportSession { .. } => INBOX_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -3109,6 +3162,24 @@ pub enum DaemonMessage {
         /// Every problem the daemon has right now; empty when it has none.
         problems: Vec<DaemonProblem>,
     },
+    /// Response to [`ClientMessage::DeliverContext`],
+    /// [`ClientMessage::DeliverTake`] and [`ClientMessage::DeliverWait`]: what
+    /// the hook prints and how it ends.
+    Delivery {
+        /// The text for the hook to print; empty when there is nothing to
+        /// say.
+        output: String,
+        /// The stream the hook prints `output` on.
+        stream: DeliveryStream,
+        /// The exit code the hook ends with.
+        exit_code: u8,
+    },
+    /// Response to [`ClientMessage::ReportSession`].
+    SessionRecorded {
+        /// Whether the daemon now holds the reported identifier. `false` for
+        /// a value of a shape the daemon does not keep.
+        held: bool,
+    },
     /// Response carrying one whole plan: to [`ClientMessage::CreatePlan`],
     /// [`ClientMessage::UpdatePlan`], [`ClientMessage::GetPlan`],
     /// [`ClientMessage::SetTaskAssignment`],
@@ -3307,6 +3378,16 @@ pub enum DaemonMessage {
         /// The registration state read after the operation.
         status: McpRegistrationStatusInfo,
     },
+}
+
+/// The stream a hook prints a [`DaemonMessage::Delivery`] on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStream {
+    /// Standard output.
+    Stdout,
+    /// Standard error.
+    Stderr,
 }
 
 /// Why a daemon cannot do its job, as [`DaemonProblem::kind`] names it.
@@ -4185,6 +4266,10 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "set_plan_approval_required",
     "list_mcp_registrations",
     "run_mcp_registration",
+    "deliver_context",
+    "deliver_take",
+    "deliver_wait",
+    "report_session",
 ];
 
 /// The `type` values recognized by [`DaemonMessage`].
@@ -4243,6 +4328,8 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "mcp_registration_status",
     "mcp_registration_requested",
     "mcp_registration_result",
+    "delivery",
+    "session_recorded",
 ];
 
 /// Every `type` value [`decode_client_message`] accepts.

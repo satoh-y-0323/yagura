@@ -369,7 +369,11 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // ReportSent and Reports are never received: this client sends
         // neither `send_report` nor `wait_for_report`.
         | DaemonMessage::ReportSent { .. }
-        | DaemonMessage::Reports { .. } => None,
+        | DaemonMessage::Reports { .. }
+        // Delivery and SessionRecorded answer the doors a CLI's hook reads a
+        // window's inbox through; this client never sends those.
+        | DaemonMessage::Delivery { .. }
+        | DaemonMessage::SessionRecorded { .. } => None,
     }
 }
 

@@ -79,8 +79,8 @@ use yagura_protocol::{
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
-    DaemonProblemKind, Frame, FrameLine, FrameRun, HandoffDelivery, InstructionNotice,
-    InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
+    DaemonProblemKind, DeliveryStream, Frame, FrameLine, FrameRun, HandoffDelivery,
+    InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
     McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry, McpRegistrationRow,
     McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
     McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, Palette,
@@ -237,6 +237,7 @@ wire_sample!(enum PlaybookState => Loaded);
 wire_sample!(enum McpRegistrationState => Registered);
 wire_sample!(enum McpRegistrationAction => Register);
 wire_sample!(enum DaemonProblemKind => WindowsUnavailable);
+wire_sample!(enum DeliveryStream => Stdout);
 wire_sample!(enum NamedKey => ArrowUp);
 wire_sample!(enum PointerKind => Down);
 wire_sample!(enum PointerButton => Left);
@@ -623,6 +624,14 @@ fn client_message_corpus() -> Vec<ClientMessage> {
         wire_sample!(ClientMessage::ListChatRooms),
         wire_sample!(ClientMessage::GetProtocolRevision),
         wire_sample!(ClientMessage::GetDaemonHealth),
+        wire_sample!(ClientMessage::DeliverContext { window_id, token }),
+        wire_sample!(ClientMessage::DeliverTake { window_id, token }),
+        wire_sample!(ClientMessage::DeliverWait { window_id, token }),
+        wire_sample!(ClientMessage::ReportSession {
+            window_id,
+            token,
+            session,
+        }),
         wire_sample!(ClientMessage::CreatePlan { title, tasks }),
         wire_sample!(ClientMessage::UpdatePlan {
             plan_id,
@@ -776,6 +785,12 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::ChatRooms { rooms }),
         wire_sample!(DaemonMessage::ProtocolRevision { revision }),
         wire_sample!(DaemonMessage::DaemonHealth { problems }),
+        wire_sample!(DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+        }),
+        wire_sample!(DaemonMessage::SessionRecorded { held }),
         wire_sample!(DaemonMessage::PlanDetail { plan }),
         wire_sample!(DaemonMessage::PlanList { plans }),
         wire_sample!(DaemonMessage::PlanDeleted { plan_id }),
@@ -1353,6 +1368,19 @@ fn daemon_problem_kind_wire_variants() -> BTreeSet<String> {
         .collect()
 }
 
+fn delivery_stream_wire_variants() -> BTreeSet<String> {
+    [DeliveryStream::Stdout, DeliveryStream::Stderr]
+        .into_iter()
+        .map(|stream| {
+            let hand = match &stream {
+                DeliveryStream::Stdout => "stdout",
+                DeliveryStream::Stderr => "stderr",
+            };
+            serde_spelling(&stream, hand)
+        })
+        .collect()
+}
+
 fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
     BTreeMap::from([
         ("WindowStatus".to_string(), window_status_wire_variants()),
@@ -1396,6 +1424,10 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         (
             "DaemonProblemKind".to_string(),
             daemon_problem_kind_wire_variants(),
+        ),
+        (
+            "DeliveryStream".to_string(),
+            delivery_stream_wire_variants(),
         ),
         ("NamedKey".to_string(), named_key_wire_variants()),
         ("Key".to_string(), key_wire_variants()),

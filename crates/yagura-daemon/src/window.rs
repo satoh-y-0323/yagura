@@ -39,6 +39,7 @@ use crate::detector::engine::{
 use crate::detector::layers::{DefinitionSource, DetectionLayers, LayerError, ResolvedDefinition};
 use crate::detector::screen::ComposerReadout;
 use crate::handoff::{ReadyHoldLatch, StartupEvidence};
+use crate::inbox::{Inbox, is_session_id};
 use crate::input::{
     InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack, plan_submit_line,
 };
@@ -1314,6 +1315,12 @@ pub struct WindowEntry {
     notice_wake: Notify,
     /// How many deliveries this window's agent has attempted, written or not.
     notice_attempts: AtomicU64,
+    /// The parcels waiting for this window's CLI to read them through the
+    /// doors its hooks run.
+    inbox: Inbox,
+    /// The identifier the window's CLI reported for its own session, as the
+    /// daemon keeps it ([`WindowEntry::record_session_id`]).
+    session_id: Mutex<Option<String>>,
     /// Fixed at open time and never rewritten, so a later request can never
     /// move who this window reports to.
     provenance: WindowProvenance,
@@ -3535,6 +3542,30 @@ impl WindowEntry {
         self.status_token.verify(candidate)
     }
 
+    /// The parcels waiting for this window's CLI.
+    pub fn inbox(&self) -> &Inbox {
+        &self.inbox
+    }
+
+    /// The session identifier the window's CLI reported, if it has.
+    #[must_use]
+    pub fn session_id(&self) -> Option<String> {
+        lock_recover(&self.session_id).clone()
+    }
+
+    /// Keeps `candidate` as the window's session identifier when it has the
+    /// shape of one -- 1 to 128 ASCII letters, digits and `-_.:`, not starting
+    /// with `-` -- and returns whether it did. Anything else is refused and
+    /// the held identifier stays: the value ends up in command lines and
+    /// must never be able to carry an option, a path or a shell word.
+    pub fn record_session_id(&self, candidate: &str) -> bool {
+        if !is_session_id(candidate) {
+            return false;
+        }
+        *lock_recover(&self.session_id) = Some(candidate.to_string());
+        true
+    }
+
     /// Records a structured-source status event on this window's detector.
     /// Returns `false` without effect once the window has exited.
     pub fn record_status_event(&self, status: WindowStatus) -> bool {
@@ -4500,6 +4531,11 @@ impl WindowRegistry {
             generation: 0,
         });
         let ready_hold = ReadyHoldLatch::new(input.ready_hold);
+        let inbox = Inbox::new(
+            self.config().inbox_capacity,
+            self.config().delivery.clone(),
+            current_status_tx.subscribe(),
+        );
         let detector_weak = Arc::downgrade(&detector_handle);
 
         Arc::new(WindowEntry {
@@ -4538,6 +4574,8 @@ impl WindowRegistry {
             notices: Mutex::new(NoticeQueue::default()),
             notice_wake: Notify::new(),
             notice_attempts: AtomicU64::new(0),
+            inbox,
+            session_id: Mutex::new(None),
             provenance,
             mcp_connections: Arc::new(AtomicUsize::new(0)),
         })

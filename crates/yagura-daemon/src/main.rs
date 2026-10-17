@@ -3,7 +3,7 @@
 //! platform's local transport ([`yagura_os`]).
 //!
 //! Execution order is fixed: argument parsing (`--shutdown`,
-//! `--emit-status`) -> instance identifier resolution -> the children's base
+//! `--emit-status`, the `--deliver-*` doors, `--report-session`) -> instance identifier resolution -> the children's base
 //! environment -> multi-instance prevention -> connection acceptance. The
 //! daemon starts with no window: every window is opened by a client, so none
 //! is spawned before the endpoint is protected and a losing multi-instance
@@ -12,7 +12,9 @@
 //! collected with its whole process tree before the endpoint is bound, not a
 //! window's shell.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,12 +34,13 @@ use yagura_daemon::config::{
 use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
+use yagura_daemon::inbox::{is_session_id, session_at_pointer};
 use yagura_daemon::ipc::{chat, plan};
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, STATUS_TOKEN_ENV, WINDOW_ID_ENV, WindowStatus,
+    ClientMessage, DaemonMessage, DeliveryStream, STATUS_TOKEN_ENV, WINDOW_ID_ENV, WindowStatus,
     decode_daemon_message, encode_client_message, frame_encode,
 };
 
@@ -52,13 +55,24 @@ const PING_TIMEOUT: Duration = Duration::from_millis(500);
 /// Stands in for a startup-log field the OS would not tell us.
 const UNKNOWN_LOG_FIELD: &str = "unknown";
 
-fn main() -> Result<()> {
+/// How long a hook waits for the daemon to answer a door that is not a wait.
+const DOOR_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much of a hook's stdin is looked at for the session it names.
+const HOOK_STDIN_PARSED_BYTES: usize = 64 * 1024;
+
+fn main() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = cli::parse_args(&args).context("invalid command line")?;
     // A CLI started by hand outside any window still runs its hooks; decided
     // before logging is set up so such a hook stays silent and leaves no trace.
-    if matches!(command, CliCommand::EmitStatus { .. }) && !runs_inside_window() {
-        return Ok(());
+    if command.is_hook_command() && !runs_inside_window() {
+        if matches!(command, CliCommand::ReportSession { .. }) {
+            // The CLI writes its input to the hook; a hook that leaves it
+            // unread would make that write fail.
+            read_hook_stdin();
+        }
+        return Ok(ExitCode::SUCCESS);
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -69,7 +83,7 @@ fn main() -> Result<()> {
     runtime.block_on(async_main(command))
 }
 
-async fn async_main(command: CliCommand) -> Result<()> {
+async fn async_main(command: CliCommand) -> Result<ExitCode> {
     // Resolved before anything else that derives from it (the log directory,
     // the endpoint name): every command needs a namespace, and the logger is
     // not yet installed, so a rejection here reaches stderr through this
@@ -102,10 +116,16 @@ async fn async_main(command: CliCommand) -> Result<()> {
         approver_exe_arg,
         roles_arg,
     ) = match command {
-        CliCommand::Shutdown => return send_shutdown(&ipc, &endpoint).await,
+        CliCommand::Shutdown => return send_shutdown(&ipc, &endpoint).await.map(succeeded),
         CliCommand::EmitStatus { status, source } => {
-            return send_status_event(&ipc, &endpoint, status, source).await;
+            return send_status_event(&ipc, &endpoint, status, source)
+                .await
+                .map(succeeded);
         }
+        door @ (CliCommand::DeliverContext
+        | CliCommand::DeliverTake
+        | CliCommand::DeliverWait
+        | CliCommand::ReportSession { .. }) => return run_hook_door(&ipc, &endpoint, door).await,
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` configure the
         // daemon this process is about to start, and are meaningless for
@@ -175,7 +195,7 @@ async fn async_main(command: CliCommand) -> Result<()> {
         Err(_) => {
             if try_ping(&ipc, &endpoint).await {
                 tracing::info!("an existing yagura-daemon is already running; exiting");
-                return Ok(());
+                return Ok(ExitCode::SUCCESS);
             }
             tracing::error!(
                 "failed to claim the ipc endpoint and no daemon responded to ping; \
@@ -478,7 +498,11 @@ async fn async_main(command: CliCommand) -> Result<()> {
         .run_with_listener(listener, daemon_sid)
         .await
         .context("IPC server loop failed")?;
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+fn succeeded((): ()) -> ExitCode {
+    ExitCode::SUCCESS
 }
 
 /// Directory, under the instance's state directory, holding the MCP
@@ -668,6 +692,116 @@ async fn send_status_event(
         .await
         .context("failed to flush the status event")?;
     Ok(())
+}
+
+/// Runs one of the commands a CLI's hook uses to reach its window's inbox,
+/// only reached from inside a window (see [`runs_inside_window`]): the token and
+/// window id are the ones the window's child inherited.
+///
+/// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
+/// with the exit code the window's profile declares. A refusal prints nothing
+/// to stdout and ends with 1, which is never a code a hook reads as a wake.
+async fn run_hook_door(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Result<ExitCode> {
+    let token = std::env::var(STATUS_TOKEN_ENV)
+        .with_context(|| format!("{STATUS_TOKEN_ENV} is not valid Unicode"))?;
+    let window_id = std::env::var(WINDOW_ID_ENV)
+        .with_context(|| format!("{WINDOW_ID_ENV} is not valid Unicode"))?;
+    let waits = matches!(command, CliCommand::DeliverWait);
+    let message = match command {
+        CliCommand::DeliverContext => ClientMessage::DeliverContext { window_id, token },
+        CliCommand::DeliverTake => ClientMessage::DeliverTake { window_id, token },
+        CliCommand::DeliverWait => ClientMessage::DeliverWait { window_id, token },
+        CliCommand::ReportSession { pointer } => {
+            let input = tokio::task::spawn_blocking(read_hook_stdin)
+                .await
+                .context("reading the hook input panicked")?;
+            let Some(session) = session_at_pointer(&input, &pointer).filter(|s| is_session_id(s))
+            else {
+                return Ok(ExitCode::SUCCESS);
+            };
+            ClientMessage::ReportSession {
+                window_id,
+                token,
+                session,
+            }
+        }
+        other => anyhow::bail!("{other:?} is not a hook door"),
+    };
+
+    let mut client = ipc.connect(endpoint).await.with_context(|| {
+        format!("failed to connect to the daemon endpoint {endpoint} for a hook door")
+    })?;
+    client
+        .write_all(&frame_encode(&encode_client_message(&message)))
+        .await
+        .context("failed to send the request")?;
+    client
+        .flush()
+        .await
+        .context("failed to flush the request")?;
+
+    let answer = if waits {
+        read_one_daemon_message(&mut client).await
+    } else {
+        tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(&mut client))
+            .await
+            .context("the daemon did not answer")?
+    };
+    match answer {
+        Some(DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+        }) => {
+            write_hook_output(stream, &output)?;
+            Ok(ExitCode::from(exit_code))
+        }
+        Some(DaemonMessage::SessionRecorded { .. }) => Ok(ExitCode::SUCCESS),
+        Some(DaemonMessage::Error { code, .. }) => {
+            anyhow::bail!("the daemon refused the request: {code}")
+        }
+        // The daemon went away while a wait was registered: nothing to wake for.
+        None if waits => Ok(ExitCode::SUCCESS),
+        _ => anyhow::bail!("the daemon sent no usable answer"),
+    }
+}
+
+/// Prints `output` on `stream`. Nothing is printed for an empty text.
+fn write_hook_output(stream: DeliveryStream, output: &str) -> Result<()> {
+    if output.is_empty() {
+        return Ok(());
+    }
+    match stream {
+        DeliveryStream::Stdout => {
+            let mut out = std::io::stdout().lock();
+            out.write_all(output.as_bytes())?;
+            out.flush()?;
+        }
+        DeliveryStream::Stderr => {
+            let mut err = std::io::stderr().lock();
+            err.write_all(output.as_bytes())?;
+            err.flush()?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads the whole of stdin, so the CLI that wrote it never sees its write
+/// fail, and keeps only the first [`HOOK_STDIN_PARSED_BYTES`] of it.
+fn read_hook_stdin() -> Vec<u8> {
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        match stdin.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = HOOK_STDIN_PARSED_BYTES.saturating_sub(kept.len());
+                kept.extend_from_slice(&chunk[..n.min(room)]);
+            }
+        }
+    }
+    kept
 }
 
 /// Reads a single length-prefixed frame from `client` and decodes it as a

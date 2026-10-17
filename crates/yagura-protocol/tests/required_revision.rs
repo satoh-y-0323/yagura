@@ -295,6 +295,23 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             action: McpRegistrationAction::Register,
             request_id: 1,
         },
+        ClientMessage::DeliverContext {
+            window_id: "w1".to_string(),
+            token: "tok".to_string(),
+        },
+        ClientMessage::DeliverTake {
+            window_id: "w1".to_string(),
+            token: "tok".to_string(),
+        },
+        ClientMessage::DeliverWait {
+            window_id: "w1".to_string(),
+            token: "tok".to_string(),
+        },
+        ClientMessage::ReportSession {
+            window_id: "w1".to_string(),
+            token: "tok".to_string(),
+            session: "s".to_string(),
+        },
     ]
 }
 
@@ -431,6 +448,10 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::ListMcpRegistrations { .. }
                         | ClientMessage::RunMcpRegistration { .. }
                         | ClientMessage::GetDaemonHealth
+                        | ClientMessage::DeliverContext { .. }
+                        | ClientMessage::DeliverTake { .. }
+                        | ClientMessage::DeliverWait { .. }
+                        | ClientMessage::ReportSession { .. }
                 )
         })
     {

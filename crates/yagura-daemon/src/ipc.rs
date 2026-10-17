@@ -35,6 +35,7 @@ use yagura_protocol::{
 
 mod approval_settings;
 pub mod chat;
+mod inbox;
 mod mcp_registration;
 mod model;
 mod notice_queue;
@@ -1691,6 +1692,42 @@ impl IpcServer {
                 outbound.reply(&DaemonMessage::DaemonHealth {
                     problems: health::daemon_problems(conpty_fault.as_deref()),
                 });
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::DeliverContext { window_id, token }) => {
+                if let Some(entry) =
+                    self.authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
+                {
+                    inbox::handle_context(&entry, outbound, &self.config.chat_intro);
+                }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::DeliverTake { window_id, token }) => {
+                if let Some(entry) =
+                    self.authenticate_window(outbound, "deliver_take", &token, Some(&window_id))
+                {
+                    inbox::handle_take(&entry, outbound);
+                }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::DeliverWait { window_id, token }) => {
+                if let Some(entry) =
+                    self.authenticate_window(outbound, "deliver_wait", &token, Some(&window_id))
+                {
+                    inbox::handle_wait(&entry, outbound, state, self.config.max_waiters_per_conn);
+                }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::ReportSession {
+                window_id,
+                token,
+                session,
+            }) => {
+                if let Some(entry) =
+                    self.authenticate_window(outbound, "report_session", &token, Some(&window_id))
+                {
+                    inbox::handle_report_session(&entry, outbound, &session);
+                }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::CreatePlan { title, tasks }) => {
@@ -3519,37 +3556,10 @@ impl IpcServer {
         status: WindowStatus,
         window_id: Option<&str>,
     ) {
-        if !StatusToken::is_well_formed(token) {
-            tracing::warn!("rejected a status_event carrying a malformed auth token");
-            outbound.reply(&error_msg(
-                "auth_failed",
-                "status_event token is missing or does not match",
-            ));
-            return;
-        }
-
-        let Some(target) = window_id else {
-            outbound.reply(&error_msg(
-                "invalid_argument",
-                "status_event requires window_id",
-            ));
+        let Some(entry) = self.authenticate_window(outbound, "status_event", token, window_id)
+        else {
             return;
         };
-        let Some(entry) = self.registry.get(target) else {
-            outbound.reply(&window_not_found_msg());
-            return;
-        };
-        if !entry.verify_status_token(token) {
-            tracing::warn!(
-                window_id = %entry.window_id(),
-                "rejected a status_event carrying a token that is not this window's"
-            );
-            outbound.reply(&error_msg(
-                "auth_failed",
-                "status_event token is missing or does not match",
-            ));
-            return;
-        }
 
         if !self.charge_status_event_budget() {
             outbound.reply(&error_msg(
@@ -3576,6 +3586,51 @@ impl IpcServer {
             // condition as the state check above, observed one step later.
             outbound.reply(&child_exited_msg());
         }
+    }
+
+    /// Resolves the window a hook's request (`door` names it) speaks for,
+    /// answering the refusal itself when it cannot: the token's shape is
+    /// checked first, then the window is resolved, then the candidate is
+    /// compared against that window's own token. See
+    /// [`IpcServer::handle_status_event`] for why this order.
+    fn authenticate_window(
+        &self,
+        outbound: &Outbound,
+        door: &str,
+        token: &str,
+        window_id: Option<&str>,
+    ) -> Option<Arc<WindowEntry>> {
+        let auth_failed = || {
+            error_msg(
+                "auth_failed",
+                &format!("{door} token is missing or does not match"),
+            )
+        };
+        if !StatusToken::is_well_formed(token) {
+            tracing::warn!("rejected a {door} carrying a malformed auth token");
+            outbound.reply(&auth_failed());
+            return None;
+        }
+        let Some(target) = window_id else {
+            outbound.reply(&error_msg(
+                "invalid_argument",
+                &format!("{door} requires window_id"),
+            ));
+            return None;
+        };
+        let Some(entry) = self.registry.get(target) else {
+            outbound.reply(&window_not_found_msg());
+            return None;
+        };
+        if !entry.verify_status_token(token) {
+            tracing::warn!(
+                window_id = %entry.window_id(),
+                "rejected a {door} carrying a token that is not this window's"
+            );
+            outbound.reply(&auth_failed());
+            return None;
+        }
+        Some(entry)
     }
 
     /// Takes one token from the daemon-wide `StatusEvent` bucket,

@@ -3546,3 +3546,50 @@ pub fn take_back_in_front_of<'a>(after_body: &'a [u8], foreign: &[u8]) -> (&'a [
     let run = before.iter().rev().take_while(|&&b| b == CLEAR).count();
     (&before[..before.len() - run], run)
 }
+
+// --- inbox / delivery-door fixtures -------------------------------------------
+
+impl Harness {
+    /// [`Harness::start`] bound to the endpoint a `yagura-daemon` child resolves from
+    /// `YAGURA_INSTANCE=instance`, so a hook command run as a real process reaches this
+    /// in-process daemon.
+    pub async fn start_on_instance(instance: &str, config: DaemonConfig) -> Self {
+        let user = yagura_os::PeerAuth::current_user_id(&yagura_os::PlatformIpc::default())
+            .expect("the current user id must resolve");
+        let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
+            .expect("the instance identifier must be valid");
+        let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
+        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let server = Arc::new(IpcServer::new(
+            registry.clone(),
+            endpoint.clone(),
+            config.clone(),
+        ));
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        Self {
+            registry,
+            endpoint,
+            _server: handle,
+        }
+    }
+}
+
+/// Sends one inbox door message and reads its single reply.
+pub async fn call_door(client: &mut Connection, msg: &ClientMessage) -> DaemonMessage {
+    send(client, msg).await;
+    read_response(client, Duration::from_secs(10)).await
+}
+
+/// Unwraps a `delivery` reply into (output, stream, exit code).
+pub fn expect_delivery(msg: DaemonMessage) -> (String, yagura_protocol::DeliveryStream, u8) {
+    match msg {
+        DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+        } => (output, stream, exit_code),
+        other => panic!("expected delivery, got {other:?}"),
+    }
+}

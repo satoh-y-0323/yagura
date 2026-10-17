@@ -10,6 +10,7 @@ use yagura_os::program::ProgramLookup;
 
 use crate::child_env::ChildBaseEnv;
 use crate::control::ApprovalPolicy;
+use crate::inbox::DeliverySpec;
 use crate::profile::ProfileOs;
 use crate::room;
 
@@ -317,6 +318,15 @@ pub struct DaemonConfig {
     /// Defaults to a built-in text explaining how to use the room.
     pub chat_intro: String,
 
+    /// How the doors a CLI's hook reads a window's inbox through answer:
+    /// the form of the text, how much of it one answer carries, and how a
+    /// wake is worded.
+    pub delivery: DeliverySpec,
+
+    /// How many parcels one window's inbox holds before the oldest is turned
+    /// away. Defaults to [`DEFAULT_INBOX_CAPACITY`].
+    pub inbox_capacity: usize,
+
     /// Detection definition names excluded from chat participation.
     /// Defaults to `["generic-shell"]`.
     pub chat_exclude_detections: Vec<String>,
@@ -493,6 +503,9 @@ const DEFAULT_CHAT_INTRO: &str = "A chat room for this workspace is available. U
      window's @name, @parent for the window that opened you or owns your plan, or @user to ask \
      for a ruling.";
 
+/// Default value of [`DaemonConfig::inbox_capacity`].
+pub const DEFAULT_INBOX_CAPACITY: usize = 64;
+
 /// Default value of [`DaemonConfig::chat_delivery_max`].
 const DEFAULT_CHAT_DELIVERY_MAX: usize = 32;
 
@@ -658,6 +671,8 @@ impl Default for DaemonConfig {
             default_window_cwd: None,
             chat_limits: room::ChatLimits::default(),
             chat_intro: DEFAULT_CHAT_INTRO.to_string(),
+            delivery: DeliverySpec::default(),
+            inbox_capacity: DEFAULT_INBOX_CAPACITY,
             chat_exclude_detections: vec![DEFAULT_DETECTION_NAME.to_string()],
             chat_delivery_max: DEFAULT_CHAT_DELIVERY_MAX,
             max_turn_waiters_per_window: DEFAULT_MAX_TURN_WAITERS_PER_WINDOW,
