@@ -285,10 +285,17 @@ async fn the_codex_row_previews_the_trust_entries_next_to_its_settings_preview()
                 "each entry carries the hash Codex checks: {}",
                 entry.content
             );
-            entry
-                .name
-                .strip_suffix(":0:0")
-                .and_then(|name| name.rsplit(':').next())
+            let mut parts = entry.name.rsplitn(3, ':');
+            let is_index =
+                |part: Option<&str>| part.is_some_and(|text| text.parse::<u32>().is_ok());
+            let (handler, group) = (parts.next(), parts.next());
+            assert!(
+                is_index(handler) && is_index(group),
+                "an entry ends in the hook's group and handler index: {entry:?}"
+            );
+            parts
+                .next()
+                .and_then(|head| head.rsplit(':').next())
                 .unwrap_or_else(|| {
                     panic!("an entry names one hook of the command-line layer: {entry:?}")
                 })
@@ -302,7 +309,10 @@ async fn the_codex_row_previews_the_trust_entries_next_to_its_settings_preview()
             "permission_request",
             "post_tool_use",
             "pre_tool_use",
+            "session_start",
             "stop",
+            "user_prompt_submit",
+            "user_prompt_submit",
             "user_prompt_submit",
         ],
         "one trust entry per hook the profile injects"

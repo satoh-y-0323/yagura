@@ -47,9 +47,10 @@ const WINDOW_ALIVE_MS: &str = "8000";
 
 /// The vocabulary of yagura's own entry. A user's entries in the seeds below
 /// never use these names, so they can be told apart by key alone.
-const YAGURA_KEYS: [&str; 9] = [
+const YAGURA_KEYS: [&str; 10] = [
     "yagura",
     "PreInvocation",
+    "SessionStart",
     "PostToolUse",
     "matcher",
     "hooks",
@@ -134,6 +135,15 @@ impl Layout {
         };
         format!("{path} --emit-status running --source antigravity-cli")
     }
+}
+
+/// The daemon path `command` (a running report) starts, to build the commands of the doors
+/// the same entry reads the inbox through.
+fn door_command(command: &str, door: &str) -> String {
+    let program = command
+        .strip_suffix(" --emit-status running --source antigravity-cli")
+        .unwrap_or_else(|| panic!("{command:?} is the running report"));
+    format!("{program} --deliver-{door}")
 }
 
 fn str_array(items: &[&str]) -> toml::Value {
@@ -385,21 +395,27 @@ fn assert_handler(handler: &Value, command: &str, context: &str) {
     );
 }
 
-/// The shape agy's file takes for a running report on a new call and after
-/// each tool: nothing else is written, and not the events whose empty output
-/// agy may treat as a decision.
+/// The shape agy's file takes: a running report on a new call and after each tool, and the
+/// doors the CLI reads its inbox through -- the start-up context when a session starts, and the
+/// start of a turn beside the report on each new call. Nothing else is written, and not the
+/// events whose empty output agy may treat as a decision.
 fn assert_yagura_entry(file: &Value, command: &str) {
     let entry = file
         .get("yagura")
         .unwrap_or_else(|| panic!("the file has a yagura entry: {file}"));
     assert_eq!(
         keys_of(entry),
-        set_of(&["PreInvocation", "PostToolUse"]),
-        "only the two running events are used: {entry}"
+        set_of(&["PreInvocation", "PostToolUse", "SessionStart"]),
+        "the running events and the start-up door are used: {entry}"
     );
     let pre = entry["PreInvocation"].as_array().expect("an array");
-    assert_eq!(pre.len(), 1, "{entry}");
+    assert_eq!(pre.len(), 2, "{entry}");
     assert_handler(&pre[0], command, "PreInvocation");
+    assert_handler(&pre[1], &door_command(command, "take"), "PreInvocation");
+
+    let start = entry["SessionStart"].as_array().expect("an array");
+    assert_eq!(start.len(), 1, "{entry}");
+    assert_handler(&start[0], &door_command(command, "context"), "SessionStart");
 
     let post = entry["PostToolUse"].as_array().expect("an array");
     assert_eq!(post.len(), 1, "{entry}");
@@ -621,6 +637,19 @@ async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_sh
             .expect("a command string")
             .to_string();
         assert_eq!(command, layout.expected_command(profile), "{profile}");
+        let doors = [
+            file["yagura"]["PreInvocation"][1]["command"].clone(),
+            file["yagura"]["SessionStart"][0]["command"].clone(),
+        ];
+        for door in doors {
+            let door = door.as_str().expect("a command string");
+            assert!(
+                door.starts_with(command.split(" --").next().unwrap())
+                    && !contains_cmd_metacharacter(door)
+                    && !door.contains('"'),
+                "{profile}: {door:?} runs the same daemon and needs no quoting"
+            );
+        }
         assert!(
             !contains_cmd_metacharacter(&command) && !command.contains('"'),
             "{profile}: {command:?} must not need quoting"
@@ -697,6 +726,31 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
                     .as_object_mut()
                     .unwrap()
                     .remove("PostToolUse");
+            }),
+        ),
+        (
+            "SessionStart is missing",
+            Box::new(|_, file| {
+                file["yagura"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("SessionStart");
+            }),
+        ),
+        (
+            "the inbox door beside the running report is gone",
+            Box::new(|_, file| {
+                file["yagura"]["PreInvocation"]
+                    .as_array_mut()
+                    .unwrap()
+                    .remove(1);
+            }),
+        ),
+        (
+            "the start-up door points at another daemon",
+            Box::new(|_, file| {
+                file["yagura"]["SessionStart"][0]["command"] =
+                    json!("/elsewhere/yagura-daemon --deliver-context");
             }),
         ),
         (

@@ -872,6 +872,7 @@ fn expected_wording(err: &ProfileParseError) -> &'static str {
         ProfileParseError::InvalidLaunchOption(_) => "invalid launch option",
         ProfileParseError::InvalidMcp(_) => "invalid mcp table",
         ProfileParseError::InvalidHooks(_) => "invalid hooks table",
+        ProfileParseError::InvalidDelivery(_) => "invalid delivery table",
         ProfileParseError::InvalidMcpRegistration(_) => "invalid mcp registration table",
     }
 }
@@ -890,9 +891,29 @@ fn enumeration_states_a_fixed_reason_for_each_parse_failure_variant_without_the_
         "invalid-launch-option-no-args.toml",
     ];
     copy_fixtures(&dir, &file_names);
+    // A `[delivery]` table whose value is outside its domain is the one kind no shared
+    // fixture file carries.
+    let delivery_source = "schema = 1\ndisplay_name = \"Delivery\"\n\n[delivery]\nmax_chars = 0\n";
+    write_profile(&dir, "invalid-delivery", delivery_source);
 
     let config = config_with(Some(dir), empty_lookup(), ProfileOs::host(), None);
     let listing: ProfileListing = list_profiles(&config);
+
+    let delivery_err = parse_profile("invalid-delivery", delivery_source)
+        .expect_err("a delivery table outside its domain must be rejected");
+    assert!(
+        matches!(delivery_err, ProfileParseError::InvalidDelivery(_)),
+        "{delivery_err:?}"
+    );
+    let delivery_expected = format!(
+        "profile file \"invalid-delivery.toml\" {}",
+        expected_wording(&delivery_err)
+    );
+    assert!(
+        listing.warnings.contains(&delivery_expected),
+        "the warning must read exactly {delivery_expected:?}, got {:?}",
+        listing.warnings
+    );
 
     for file_name in file_names {
         let id = fixture_id(file_name);

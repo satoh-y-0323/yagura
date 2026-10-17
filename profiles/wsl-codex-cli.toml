@@ -49,15 +49,29 @@ args = [
 # config (the `entries` of `[mcp_registration.toml_set]` below), so the
 # daemon injects these only while that registration holds. Checked with
 # codex 0.158.0 inside WSL.
+# The `--deliver-*` handlers read the window's inbox; `additionalContextLimit`
+# is the delivery table's `max_chars`.
 [hooks]
 args = [
-  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon.exe --deliver-context',additionalContextLimit=10000}]}]",
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'},{type='command',command='yagura-daemon.exe --deliver-take',additionalContextLimit=10000},{type='command',command='yagura-daemon.exe --report-session /session_id'}]}]",
   "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
   "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
   "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_approval --source codex-cli'}]}]",
   "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
   "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
 ]
+
+# How the daemon hands text to this CLI without typing it into the composer.
+# A waiting CLI is woken by queueing a message on its session, which the hook's
+# stdin names (`session_pointer`).
+[delivery]
+output = "plain"
+max_chars = 10000
+wake = "command"
+wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
+session_pointer = "/session_id"
+launch_prompt = ["{prompt}"]
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same
@@ -104,6 +118,9 @@ under = ["hooks", "state"]
 '/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:44f1ce78ae1ed855ad7b9bf53ef66a9a9b12d6b3a03c1eb63c9ac361e9a577a2" }
 '/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:8918ebfbb7a4fd5c7aae8798514ca10d115b5ef648ef3704a11afcfc7840f666" }
 '/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:19a4ee2712cd73414b2c13f19a8183731238195ddd118946ee8fb9d210193f2b" }
+'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:4797ec0bdc9f2dd9beb2dc55e20215a4609c6f6d15ff49f8c2f2e493e6bb6dc5" }
+'/<session-flags>/config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:5be51c65610812ad8b436954dbec8df94f5845db00dfbd5baa17ec8b8092dd00" }
+'/<session-flags>/config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:dab1ea0140be7aef663bdd6dc37130d16134a4b43755295d4d043eaf78b1f4b4" }
 
 [mcp_registration.files]
 # `{file}` is a positional argument to `sh`, resolved against $HOME inside

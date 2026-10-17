@@ -66,6 +66,7 @@ use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
 use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::plan_permit::{self, ChangeKind, PermitError};
+use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{InputState, PtyError};
 use crate::store::{self, SnapshotWindow, StoreError};
 use crate::token::StatusToken;
@@ -383,6 +384,8 @@ struct PlannedOpen {
     /// Recorded on the window, so a restore can launch it through the same
     /// profile again.
     launch: LaunchIdentity,
+    /// The profile's `[delivery]` table: how the window's doors answer.
+    delivery: Option<ProfileDelivery>,
 }
 
 /// A registration whose settings-file entries must hold for a launch to keep
@@ -2271,6 +2274,7 @@ impl IpcServer {
             opener: opener_of(&state.origin),
             task_origin: None,
             launch: None,
+            delivery: None,
         };
         let cwd = match self.registry.check_open_request(&request) {
             Ok(cwd) => cwd,
@@ -2455,6 +2459,7 @@ impl IpcServer {
             extra_env: launch.env.into_iter().collect(),
             injections,
             hooks_gate,
+            delivery: launch.delivery,
         })
     }
 
@@ -5626,6 +5631,7 @@ async fn open_planned(
     }
     let provenance = WindowProvenance {
         launch: Some(planned.launch),
+        delivery: planned.delivery,
         ..provenance
     };
     let opened = registry

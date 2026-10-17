@@ -46,15 +46,30 @@ args = [
 # config (the `entries` of `[mcp_registration.toml_set]` below), so the
 # daemon injects these only while that registration holds. Checked with
 # codex 0.159.2 on Windows.
+# The `--deliver-*` handlers read the window's inbox; `additionalContextLimit`
+# is the delivery table's `max_chars`.
 [hooks]
 args = [
-  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
+  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon --deliver-context',additionalContextLimit=10000}]}]",
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'},{type='command',command='yagura-daemon --deliver-take',additionalContextLimit=10000},{type='command',command='yagura-daemon --report-session /session_id'}]}]",
   "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
   "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
   "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_approval --source codex-cli'}]}]",
   "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
   "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
 ]
+
+# How the daemon hands text to this CLI without typing it into the composer.
+# A waiting CLI is woken by queueing a message on its session, which the hook's
+# stdin names (`session_pointer`).
+[delivery]
+output = "plain"
+max_chars = 10000
+wake = "command"
+wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
+session_pointer = "/session_id"
+launch_prompt = ["{prompt}"]
+shim_guidance = 'This profile needs the standalone Codex build, not the npm package. Install it from PowerShell with: irm https://chatgpt.com/codex/install.ps1 | iex (see https://learn.chatgpt.com/docs/codex/cli.md).'
 
 # `codex mcp add` rewrites the whole `[mcp_servers.<name>]` table, dropping
 # any hand-written key -- including `tool_timeout_sec` -- so it is written
@@ -93,6 +108,9 @@ under = ["hooks", "state"]
 'C:\<session-flags>\config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
 'C:\<session-flags>\config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
 'C:\<session-flags>\config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }
+'C:\<session-flags>\config.toml:session_start:0:0' = { trusted_hash = "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4" }
+'C:\<session-flags>\config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f" }
+'C:\<session-flags>\config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a" }
 
 [mcp_registration.toml_set.entries.default]
 '/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2" }
@@ -101,3 +119,6 @@ under = ["hooks", "state"]
 '/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
 '/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
 '/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }
+'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4" }
+'/<session-flags>/config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f" }
+'/<session-flags>/config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a" }

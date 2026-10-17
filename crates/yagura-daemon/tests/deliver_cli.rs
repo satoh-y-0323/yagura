@@ -456,3 +456,204 @@ fn collect_files(dir: &Path, found: &mut Vec<PathBuf>) {
         }
     }
 }
+
+// --- the doors answer as the window's profile says ------------------------------------
+//
+// The same doors, on a window opened from a profile that declares a `[delivery]` table:
+// the profile's output form, limit, wake stream and wake exit replace the daemon's own
+// defaults, which the windows above are measured against.
+
+const PROFILE_ID: &str = "delivery-test";
+
+impl Setup {
+    /// A daemon whose only profile is `delivery-test`: `echo_child` bound to the control
+    /// detection, with `delivery_lines` as its `[delivery]` table.
+    async fn start_with_profile(
+        delivery_lines: &str,
+        tweak: impl FnOnce(&mut DaemonConfig),
+    ) -> Self {
+        let profiles_dir = unique_temp_dir("deliver-cli-profiles");
+        std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+        common::write_profile(
+            &profiles_dir,
+            PROFILE_ID,
+            &format!(
+                "schema = 1\ndisplay_name = \"Delivery Test\"\ndetection = \"{}\"\n\n\
+                 [command]\ndefault = ['{}']\n\n[delivery]\n{delivery_lines}",
+                common::CONTROL_DETECTION_NAME,
+                echo_child_path().display(),
+            ),
+        );
+        Self::start(move |config| {
+            config.profiles_dir = Some(profiles_dir);
+            config.host_os = yagura_daemon::profile::ProfileOs::host();
+            config.program_lookup = common::empty_lookup();
+            config.program_is_executable = |path| path.is_file();
+            config.default_shell = None;
+            tweak(config);
+        })
+        .await
+    }
+
+    /// Opens a window from the profile and returns it once it is idle, so that a push to it
+    /// is allowed.
+    async fn profile_window(&self) -> String {
+        let mut client = self.h.connect().await;
+        common::send(
+            &mut client,
+            &yagura_protocol::ClientMessage::OpenWindowFromProfile {
+                profile: PROFILE_ID.to_string(),
+                cwd: None,
+                name: None,
+                model: None,
+                effort: None,
+            },
+        )
+        .await;
+        let id = match common::read_response(&mut client, Duration::from_secs(5)).await {
+            yagura_protocol::DaemonMessage::WindowOpened { window_id, .. } => window_id,
+            other => panic!("expected window_opened, got {other:?}"),
+        };
+        self.h.write_input(&id, common::READY_MARKER).await;
+        common::wait_until_status(
+            &mut client,
+            &id,
+            yagura_protocol::WindowStatus::Idle,
+            Duration::from_secs(10),
+        )
+        .await;
+        id
+    }
+}
+
+fn json_out(output: &Output) -> serde_json::Value {
+    serde_json::from_str(out(output).trim())
+        .unwrap_or_else(|err| panic!("stdout must be one JSON document ({err}): {}", out(output)))
+}
+
+const SYSTEM_MESSAGE_TEMPLATE: &str =
+    r#"output = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}'"#;
+
+#[tokio::test]
+async fn a_json_template_in_the_profile_shapes_what_take_prints() {
+    let setup = Setup::start_with_profile(SYSTEM_MESSAGE_TEMPLATE, |_| {}).await;
+    let id = setup.profile_window().await;
+    // Quotes, a backslash, a line break and the template's own slot names: none of it is
+    // special to the embedding.
+    let text = "say \"hi\"\\ now\nline two {text} {session}";
+    setup.deposit(&id, "a", text);
+
+    let output = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert_eq!(
+        json_out(&output),
+        serde_json::json!({"injectSteps": [{"systemMessage": {"systemMessage": text}}]})
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[tokio::test]
+async fn a_json_template_in_the_profile_shapes_what_context_prints() {
+    let setup = Setup::start_with_profile(SYSTEM_MESSAGE_TEMPLATE, |config| {
+        config.chat_intro = "WELCOME-INTRO".into();
+    })
+    .await;
+    let id = setup.profile_window().await;
+    setup.deposit(&id, "a", "PARCEL-ALPHA");
+
+    let output = setup.run(&["--deliver-context"], &id, VALID_TOKEN).await;
+
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    let document = json_out(&output);
+    let text = document["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the text is embedded as a JSON string: {document}"));
+    assert!(
+        text.starts_with("WELCOME-INTRO") && text.contains("PARCEL-ALPHA"),
+        "{text:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_profiles_limit_caps_one_answer_and_the_rest_comes_with_the_next() {
+    let setup = Setup::start_with_profile("max_chars = 20", |_| {}).await;
+    let id = setup.profile_window().await;
+    setup.deposit(&id, "a", "AAAAAAAAAAAAAAA");
+    setup.deposit(&id, "b", "BBBBBBBBBBBBBBB");
+
+    let first = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
+    assert_eq!(first.status.code(), Some(0), "{}", err(&first));
+    assert!(out(&first).contains("AAAAAAAAAAAAAAA"), "{}", out(&first));
+    assert!(
+        !out(&first).contains('B'),
+        "the second parcel does not fit within the profile's 20 characters: {}",
+        out(&first)
+    );
+
+    let second = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
+    assert!(out(&second).contains("BBBBBBBBBBBBBBB"), "{}", out(&second));
+    assert!(!out(&second).contains('A'));
+}
+
+#[tokio::test]
+async fn a_parcel_longer_than_the_profiles_limit_is_turned_away_at_the_inbox() {
+    let setup = Setup::start_with_profile("max_chars = 20", |_| {}).await;
+    let id = setup.profile_window().await;
+
+    let turned_away = setup
+        .entry(&id)
+        .inbox()
+        .deposit(Parcel::new("long", "L".repeat(21)));
+
+    assert_eq!(
+        turned_away.len(),
+        1,
+        "the profile's limit, not the daemon's"
+    );
+    assert_eq!(setup.entry(&id).inbox().pending_count(), 0);
+}
+
+#[tokio::test]
+async fn the_profiles_wake_stream_and_exit_code_end_a_wait() {
+    let setup = Setup::start_with_profile(
+        "wake = \"wait\"\nwake_stream = \"stdout\"\nwake_exit = 3\n",
+        |_| {},
+    )
+    .await;
+    let id = setup.profile_window().await;
+    let child = setup.spawn(&["--deliver-wait"], &id, VALID_TOKEN);
+    setup
+        .until("the wait to be registered", || {
+            setup.entry(&id).inbox().has_waiter()
+        })
+        .await;
+
+    setup.deposit(&id, "a", "PARCEL-ALPHA");
+
+    let output = finish(child).await;
+    assert_eq!(output.status.code(), Some(3), "{}", err(&output));
+    assert!(out(&output).contains("PARCEL-ALPHA"), "{}", out(&output));
+    assert!(
+        output.stderr.is_empty(),
+        "the text goes to the stream the profile names only: {}",
+        err(&output)
+    );
+}
+
+#[tokio::test]
+async fn a_window_the_profile_did_not_open_keeps_the_daemons_defaults() {
+    let setup = Setup::start_with_profile("max_chars = 20\nwake_exit = 3\n", |_| {}).await;
+    // Opened by argv, not from the profile: the profile's table does not apply to it.
+    let id = setup.window().await;
+    setup.deposit(&id, "a", "AAAAAAAAAAAAAAA");
+    setup.deposit(&id, "b", "BBBBBBBBBBBBBBB");
+
+    let output = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
+
+    assert!(
+        out(&output).contains("AAAAAAAAAAAAAAA") && out(&output).contains("BBBBBBBBBBBBBBB"),
+        "{}",
+        out(&output)
+    );
+}

@@ -43,6 +43,7 @@ use crate::inbox::{Inbox, is_session_id};
 use crate::input::{
     InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack, plan_submit_line,
 };
+use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
     GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix, TakeBackRegistration,
     lock_recover,
@@ -240,6 +241,10 @@ pub struct WindowProvenance {
     /// The profile launch this window came from. `None` for a window opened
     /// from a raw argv.
     pub launch: Option<LaunchIdentity>,
+    /// The `[delivery]` table of the profile this window was launched from.
+    /// `None` for a window the profile did not open or one whose profile
+    /// declares none: its doors answer by the daemon's own defaults.
+    pub delivery: Option<ProfileDelivery>,
 }
 
 /// The profile and launch option values a profile-addressed window was
@@ -256,15 +261,17 @@ pub struct LaunchIdentity {
     pub effort: Option<String>,
 }
 
-/// Which profile table an injection comes from. Only what tells the two
-/// apart in a log line and in a file name lives here; the rules each table
-/// follows are shared.
+/// Which profile table an injection comes from. Only what tells them apart
+/// in a log line lives here; the rules each table follows are shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionKind {
     /// The `[mcp]` table: points the CLI at the daemon's MCP bridge.
     Mcp,
     /// The `[hooks]` table: makes the CLI report its turn boundaries.
     Hooks,
+    /// The `[delivery]` table's `launch_prompt`: hands the CLI a first
+    /// request at start-up.
+    LaunchPrompt,
 }
 
 impl InjectionKind {
@@ -274,12 +281,14 @@ impl InjectionKind {
         match self {
             Self::Mcp => "MCP",
             Self::Hooks => "hooks",
+            Self::LaunchPrompt => "launch prompt",
         }
     }
 }
 
-/// Argv elements a profile's `[mcp]` or `[hooks]` table contributes to one
-/// launch, already rendered, plus the settings file they may name.
+/// Argv elements a profile's `[mcp]`, `[hooks]` or `[delivery]` table
+/// contributes to one launch, already rendered, plus the settings file they
+/// may name.
 ///
 /// Travels beside the request rather than inside it: the elements are
 /// appended to the spawn argv only, so neither the window's recorded argv nor
@@ -4531,9 +4540,13 @@ impl WindowRegistry {
             generation: 0,
         });
         let ready_hold = ReadyHoldLatch::new(input.ready_hold);
+        let delivery_spec = provenance
+            .delivery
+            .as_ref()
+            .map_or_else(|| self.config().delivery.clone(), ProfileDelivery::spec);
         let inbox = Inbox::new(
             self.config().inbox_capacity,
-            self.config().delivery.clone(),
+            delivery_spec,
             current_status_tx.subscribe(),
         );
         let detector_weak = Arc::downgrade(&detector_handle);

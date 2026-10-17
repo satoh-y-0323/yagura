@@ -50,11 +50,18 @@ pub(crate) fn normalized_document(source: &str) -> Result<Document, toml_edit::T
 /// way in one document merges with the same table written the other way in
 /// the other.
 fn tables_from_inline(table: &mut Table) {
-    for (_, item) in table.iter_mut() {
+    for (mut key, item) in table.iter_mut() {
         if matches!(item, Item::Value(Value::InlineTable(_)))
             && let Item::Value(Value::InlineTable(inline)) = std::mem::take(item)
         {
-            *item = Item::Table(inline.into_table());
+            let mut converted = inline.into_table();
+            // A standard table prints its key inside the header, so the blank
+            // lines and comments written before the key must move ahead of it.
+            if let Some(prefix) = key.decor().prefix().cloned() {
+                converted.decor_mut().set_prefix(prefix);
+            }
+            key.decor_mut().clear();
+            *item = Item::Table(converted);
         }
         if let Item::Table(child) = item {
             tables_from_inline(child);
@@ -104,6 +111,18 @@ mod tests {
         let value = merged("[t.f]\na = 1\nb = 2\n", "t = { f = { b = 5 } }\n");
         assert_eq!(value["t"]["f"]["a"].as_integer(), Some(1));
         assert_eq!(value["t"]["f"]["b"].as_integer(), Some(5));
+    }
+
+    #[test]
+    fn a_blank_line_or_comment_before_an_inline_table_does_not_enter_its_header() {
+        let value = merged(
+            "[t]\nf = 1\n",
+            "[t.u]\n\n# why this is here\ng = { b = 2 }\n",
+        );
+        assert_eq!(value["t"]["f"].as_integer(), Some(1));
+        assert_eq!(value["t"]["u"]["g"]["b"].as_integer(), Some(2));
+        let value = merged("[t]\nf = 1\n", "[t]\n# why this is here\nu = { v = 1 }\n");
+        assert_eq!(value["t"]["u"]["v"].as_integer(), Some(1));
     }
 
     #[test]

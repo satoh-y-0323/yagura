@@ -56,63 +56,92 @@ const EVENTS: [(&str, &str, &str); 6] = [
     ("Interrupt", "interrupt", "waiting_input"),
 ];
 
-/// `trusted_hash` per snake_case event for the hook command
-/// `yagura-daemon --emit-status <status> --source codex-cli`.
-const HOST_HASHES: [(&str, &str); 6] = [
+/// `trusted_hash` per hook, keyed by the part of its trust key after the layer path
+/// (`<event>:<group>:<handler>`), for the commands
+/// `yagura-daemon --emit-status <status> --source codex-cli` and the three doors a window's CLI
+/// reads its inbox through. The first handler of `UserPromptSubmit` is the status report; the
+/// doors are the handlers added next to it and the new `SessionStart` event.
+const HOST_HASHES: [(&str, &str); 9] = [
     (
-        "user_prompt_submit",
+        "user_prompt_submit:0:0",
         "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2",
     ),
     (
-        "pre_tool_use",
+        "pre_tool_use:0:0",
         "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379",
     ),
     (
-        "post_tool_use",
+        "post_tool_use:0:0",
         "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f",
     ),
     (
-        "permission_request",
+        "permission_request:0:0",
         "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7",
     ),
     (
-        "stop",
+        "stop:0:0",
         "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807",
     ),
     (
-        "interrupt",
+        "interrupt:0:0",
         "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9",
+    ),
+    (
+        "session_start:0:0",
+        "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4",
+    ),
+    (
+        "user_prompt_submit:0:1",
+        "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f",
+    ),
+    (
+        "user_prompt_submit:0:2",
+        "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a",
     ),
 ];
 
-/// The same, for `yagura-daemon.exe --emit-status <status> --source codex-cli`
-/// (the WSL profile calls the Windows executable).
-const WSL_HASHES: [(&str, &str); 6] = [
+/// The same, for `yagura-daemon.exe ...` (the WSL profile calls the Windows executable).
+const WSL_HASHES: [(&str, &str); 9] = [
     (
-        "user_prompt_submit",
+        "user_prompt_submit:0:0",
         "sha256:83f84d8a25f526a1ada8a56b0bf9fc47f4994145ed7427c23932aa675dd79aa4",
     ),
     (
-        "pre_tool_use",
+        "pre_tool_use:0:0",
         "sha256:98dabe6d33c4c6d7ab045cd4bd62f35293a7bc6d2dfbd925ead971024f6feb25",
     ),
     (
-        "post_tool_use",
+        "post_tool_use:0:0",
         "sha256:eaa6e89082c12ced1b86bb9d2a230c3918e7943c03cf54f2ad713ed0b1edea91",
     ),
     (
-        "permission_request",
+        "permission_request:0:0",
         "sha256:44f1ce78ae1ed855ad7b9bf53ef66a9a9b12d6b3a03c1eb63c9ac361e9a577a2",
     ),
     (
-        "stop",
+        "stop:0:0",
         "sha256:8918ebfbb7a4fd5c7aae8798514ca10d115b5ef648ef3704a11afcfc7840f666",
     ),
     (
-        "interrupt",
+        "interrupt:0:0",
         "sha256:19a4ee2712cd73414b2c13f19a8183731238195ddd118946ee8fb9d210193f2b",
     ),
+    (
+        "session_start:0:0",
+        "sha256:4797ec0bdc9f2dd9beb2dc55e20215a4609c6f6d15ff49f8c2f2e493e6bb6dc5",
+    ),
+    (
+        "user_prompt_submit:0:1",
+        "sha256:5be51c65610812ad8b436954dbec8df94f5845db00dfbd5baa17ec8b8092dd00",
+    ),
+    (
+        "user_prompt_submit:0:2",
+        "sha256:dab1ea0140be7aef663bdd6dc37130d16134a4b43755295d4d043eaf78b1f4b4",
+    ),
 ];
+
+/// What a hook's `additionalContextLimit` must be: the profile's `max_chars`.
+const CONTEXT_LIMIT: i64 = 10_000;
 
 fn program_of(profile: &str) -> &'static str {
     if profile == WSL_PROFILE {
@@ -138,7 +167,7 @@ fn expected_trust(profile: &str) -> BTreeMap<String, String> {
     };
     hashes
         .iter()
-        .map(|(event, hash)| (format!("{root}:{event}:0:0"), (*hash).to_string()))
+        .map(|(suffix, hash)| (format!("{root}:{suffix}"), (*hash).to_string()))
         .collect()
 }
 
@@ -150,55 +179,96 @@ fn shipped_source(profile: &str) -> String {
 // The injected arguments
 // =============================================================================
 
-/// Each event's hook command in the `-c hooks.<Event>=...` arguments of
-/// `args`, decoding every value as TOML on the way.
-fn hook_commands(args: &[String]) -> BTreeMap<String, String> {
+/// One handler of an event: its command and the `additionalContextLimit` it carries.
+type Handler = (String, Option<i64>);
+
+/// Each event's `-c hooks.<Event>=...` assignment text, as written in the arguments.
+fn hook_assignments(args: &[String]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         assert_eq!(flag, "-c", "hooks args are -c overrides only: {args:?}");
         let assignment = iter.next().expect("-c carries an assignment");
+        let event = assignment
+            .strip_prefix("hooks.")
+            .and_then(|rest| rest.split('=').next())
+            .unwrap_or_else(|| panic!("unexpected override: {assignment}"));
         assert!(
-            assignment.starts_with("hooks."),
-            "unexpected override: {assignment}"
-        );
-        let document: toml::Table = assignment
-            .parse()
-            .unwrap_or_else(|err| panic!("{assignment} must decode as TOML: {err}"));
-        let hooks = document["hooks"].as_table().expect("a hooks table");
-        assert_eq!(hooks.len(), 1, "one event per override: {assignment}");
-        let (event, groups) = hooks.iter().next().unwrap();
-        let groups = groups.as_array().expect("an array of groups");
-        assert_eq!(groups.len(), 1, "{event}: one group");
-        let handlers = groups[0]["hooks"].as_array().expect("group hooks");
-        assert_eq!(handlers.len(), 1, "{event}: one handler");
-        assert_eq!(handlers[0]["type"].as_str(), Some("command"), "{event}");
-        let command = handlers[0]["command"].as_str().expect("a command string");
-        assert!(
-            out.insert(event.clone(), command.to_string()).is_none(),
+            out.insert(event.to_string(), assignment.clone()).is_none(),
             "{event} appears twice"
         );
     }
     out
 }
 
-fn expected_commands(profile: &str) -> BTreeMap<String, String> {
-    EVENTS
+/// Each event's handlers, in order, in the `-c hooks.<Event>=...` arguments of `args`,
+/// decoding every value as TOML on the way. Every event is one override with one group.
+fn hook_commands(args: &[String]) -> BTreeMap<String, Vec<Handler>> {
+    let mut out = BTreeMap::new();
+    for (event_name, assignment) in hook_assignments(args) {
+        let document: toml::Table = assignment
+            .parse()
+            .unwrap_or_else(|err| panic!("{assignment} must decode as TOML: {err}"));
+        let hooks = document["hooks"].as_table().expect("a hooks table");
+        assert_eq!(hooks.len(), 1, "one event per override: {assignment}");
+        let (event, groups) = hooks.iter().next().unwrap();
+        assert_eq!(*event, event_name);
+        let groups = groups.as_array().expect("an array of groups");
+        assert_eq!(groups.len(), 1, "{event}: one group");
+        let handlers = groups[0]["hooks"].as_array().expect("group hooks");
+        let decoded: Vec<Handler> = handlers
+            .iter()
+            .map(|handler| {
+                assert_eq!(handler["type"].as_str(), Some("command"), "{event}");
+                (
+                    handler["command"]
+                        .as_str()
+                        .expect("a command string")
+                        .to_string(),
+                    handler
+                        .get("additionalContextLimit")
+                        .map(|limit| limit.as_integer().expect("an integer limit")),
+                )
+            })
+            .collect();
+        out.insert(event.clone(), decoded);
+    }
+    out
+}
+
+/// The handlers each event carries: the status report alone for the events that only report,
+/// and for `UserPromptSubmit` the report first, then the door that reads the inbox and the one
+/// that tells the daemon the session; `SessionStart` is the door for the start-up context.
+fn expected_commands(profile: &str) -> BTreeMap<String, Vec<Handler>> {
+    let program = program_of(profile);
+    let mut expected: BTreeMap<String, Vec<Handler>> = EVENTS
         .iter()
         .map(|(event, _, status)| {
             (
                 (*event).to_string(),
-                format!(
-                    "{} --emit-status {status} --source codex-cli",
-                    program_of(profile)
-                ),
+                vec![(
+                    format!("{program} --emit-status {status} --source codex-cli"),
+                    None,
+                )],
             )
         })
-        .collect()
+        .collect();
+    expected
+        .get_mut("UserPromptSubmit")
+        .expect("the status events include UserPromptSubmit")
+        .extend([
+            (format!("{program} --deliver-take"), Some(CONTEXT_LIMIT)),
+            (format!("{program} --report-session /session_id"), None),
+        ]);
+    expected.insert(
+        "SessionStart".to_string(),
+        vec![(format!("{program} --deliver-context"), Some(CONTEXT_LIMIT))],
+    );
+    expected
 }
 
 #[test]
-fn the_shipped_codex_profiles_inject_one_status_hook_per_event_as_plain_overrides() {
+fn the_shipped_codex_profiles_inject_their_hooks_as_plain_overrides_one_event_each() {
     for profile in [HOST_PROFILE, WSL_PROFILE] {
         let parsed = parse_profile(profile, &shipped_source(profile))
             .unwrap_or_else(|err| panic!("{profile} must parse: {err}"));
@@ -210,7 +280,7 @@ fn the_shipped_codex_profiles_inject_one_status_hook_per_event_as_plain_override
             "{profile}: the hooks are command-line overrides, not a settings file"
         );
         let args = render_hooks_args(&spec, None);
-        assert_eq!(args.len(), EVENTS.len() * 2, "{profile}: {args:?}");
+        assert_eq!(args.len(), (EVENTS.len() + 1) * 2, "{profile}: {args:?}");
         assert_eq!(
             hook_commands(&args),
             expected_commands(profile),
@@ -219,6 +289,48 @@ fn the_shipped_codex_profiles_inject_one_status_hook_per_event_as_plain_override
         assert!(
             args.iter().all(|arg| !arg.contains("hooks.state")),
             "{profile}: trust lives in the user's config file, not on the command line: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn the_doors_are_added_to_the_user_prompt_group_without_dropping_the_status_report() {
+    for profile in [HOST_PROFILE, WSL_PROFILE] {
+        let program = program_of(profile);
+        let spec = parse_profile(profile, &shipped_source(profile))
+            .unwrap_or_else(|err| panic!("{profile} must parse: {err}"))
+            .hooks
+            .unwrap_or_else(|| panic!("{profile} must ship a [hooks] table"));
+        let assignments = hook_assignments(&render_hooks_args(&spec, None));
+
+        let submit = &assignments["UserPromptSubmit"];
+        let running = format!(
+            "{{type='command',command='{program} --emit-status running --source codex-cli'}}"
+        );
+        let take = format!(
+            "{{type='command',command='{program} --deliver-take',additionalContextLimit=10000}}"
+        );
+        let report = format!("{{type='command',command='{program} --report-session /session_id'}}");
+        let positions: Vec<usize> = [&running, &take, &report]
+            .iter()
+            .map(|handler| {
+                submit
+                    .find(handler.as_str())
+                    .unwrap_or_else(|| panic!("{profile}: {handler} is missing from {submit}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{profile}: the handlers keep their indexes (status report 0, inbox 1, session 2), \
+             which the trust keys name: {submit}"
+        );
+        let start = format!(
+            "{{type='command',command='{program} --deliver-context',additionalContextLimit=10000}}"
+        );
+        assert!(
+            assignments["SessionStart"].contains(&start),
+            "{profile}: {}",
+            assignments["SessionStart"]
         );
     }
 }

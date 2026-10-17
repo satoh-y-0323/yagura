@@ -33,6 +33,14 @@ args = ["models"]
 format = "lines"
 separator = "\t"
 
+# How the daemon hands text to this CLI without typing it into the composer.
+# agy has no way to wake an idle session, so `wake` stays `none`.
+[delivery]
+output = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}'
+max_chars = 10000
+wake = "none"
+launch_prompt = ["-i", "{prompt}"]
+
 # agy keeps its registrations in a settings file, not behind a status
 # command, so the daemon reads that file through the read tool below rather
 # than running a status command.
@@ -53,11 +61,13 @@ command = "/mcpServers/{server}/command"
 # registration adds yagura's entry there and removal takes it out (checked
 # with agy 1.2.14). PreToolUse and Stop are not used: agy requires a
 # `decision` in their output, which a status report does not give.
+# `--deliver-take` and `--deliver-context` read the window's inbox.
 [mcp_registration.json_entry]
 file = ".gemini/config/hooks.json"
 
 [mcp_registration.json_entry.entries."{server}"]
-PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }]
+PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }, { type = "command", command = "{daemon} --deliver-take", timeout = 10 }]
+SessionStart = [{ type = "command", command = "{daemon} --deliver-context", timeout = 10 }]
 PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }] }]
 
 [mcp_registration.files]

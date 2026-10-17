@@ -38,6 +38,7 @@ use crate::child_env::is_reserved_env_name;
 use crate::config::DaemonConfig;
 use crate::detector::definition::is_valid_detection_name;
 use crate::detector::layers::{DetectionLayers, LayerError};
+use crate::profile_delivery::{DeliveryError, ProfileDelivery, WakeMode, parse_delivery};
 use crate::window::{CliInjection, InjectedConfigFile, InjectionKind, RequestedCwd};
 
 /// Schema version this loader accepts. Any other declared value is
@@ -72,6 +73,12 @@ const REASON_NO_ARGV: &str = "no command is defined for this operating system";
 /// Reason text: kind 4 -- the profile omits `[command]` (meaning "the
 /// daemon's default shell"), but no default shell was resolved at start-up.
 const REASON_NO_DEFAULT_SHELL: &str = "no default shell was resolved when the daemon started";
+/// Reason text: kind 5 -- the profile wakes a waiting CLI by running its own
+/// program, which resolved to a Windows `.cmd` / `.bat` file, and the command
+/// interpreter would reinterpret the text that is passed to it. The profile's
+/// own `shim_guidance` follows this sentence.
+const REASON_WAKE_NEEDS_NATIVE_PROGRAM: &str =
+    "this profile cannot be used through a Windows .cmd / .bat file";
 /// The refusal text for a profile its `enabled` key switches off: the
 /// `Display` of [`ProfileLaunchError::Disabled`] and the reason
 /// [`resolve_model_choices`] gives, so both read the same.
@@ -280,6 +287,10 @@ pub struct Profile {
     /// window from this profile: it only describes how the daemon can
     /// register its own MCP bridge with the CLI outside any window.
     pub mcp_registration: Option<crate::mcp_registration::McpRegistrationSpec>,
+    /// The `[delivery]` table, already validated. `None` means the document
+    /// has no such table: the daemon hands this profile's windows nothing
+    /// without typing it into the composer.
+    pub delivery: Option<ProfileDelivery>,
     /// Values that were dropped or ignored while staying valid overall
     /// (a relative/`~` `cwd`, a reserved environment key). Empty when
     /// nothing needed to be reported.
@@ -373,6 +384,11 @@ pub struct ProfileLaunch {
     /// -- whether the CLI will report. `None` when the profile has neither
     /// `[hooks]` nor a `json_entry`, or has no registration table.
     pub hooks_registration: Option<crate::mcp_registration::McpRegistrationSpec>,
+    /// The profile's `[delivery]` table, as declared. What it contributes to a
+    /// spawn argv (a launch prompt) is rendered by
+    /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
+    /// [`ProfileLaunch::argv`].
+    pub delivery: Option<ProfileDelivery>,
 }
 
 /// A profile's `[mcp]` or `[hooks]` table: argv elements (and the settings
@@ -434,6 +450,9 @@ pub enum ProfileParseError {
     /// A `[hooks]` table breaks an injection rule ([`InjectionSpecError`]).
     #[error("invalid hooks table")]
     InvalidHooks(#[source] InjectionSpecError),
+    /// A `[delivery]` table breaks its rule ([`DeliveryError`]).
+    #[error("invalid delivery table")]
+    InvalidDelivery(#[source] DeliveryError),
     /// A `[mcp_registration]` table breaks its rule
     /// ([`crate::mcp_registration::McpRegistrationError`]). A valid table
     /// never changes how a window launches, but a broken one still excludes
@@ -617,6 +636,11 @@ struct RawProfile {
     /// would produce if this were decoded directly into a typed struct here.
     #[serde(default)]
     mcp_registration: Option<toml::Value>,
+    /// Untyped for the same reason as `mcp_registration`: every rule it breaks
+    /// is [`ProfileParseError::InvalidDelivery`] with a document-independent
+    /// `Display`.
+    #[serde(default)]
+    delivery: Option<toml::Value>,
 }
 
 /// A `[mcp]` or `[hooks]` table before validation. `args` is `Option` for the
@@ -806,10 +830,11 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         effort: parse_launch_option(raw.effort)?,
         model_choices,
     };
-    let mcp = parse_injection_spec(raw.mcp, InjectionKind::Mcp)?;
-    let hooks = parse_injection_spec(raw.hooks, InjectionKind::Hooks)?;
+    let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp)?;
+    let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks)?;
     let mcp_registration = crate::mcp_registration::parse_mcp_registration(raw.mcp_registration)
         .map_err(ProfileParseError::InvalidMcpRegistration)?;
+    let delivery = parse_delivery(raw.delivery).map_err(ProfileParseError::InvalidDelivery)?;
 
     let mut warnings = Vec::new();
 
@@ -854,6 +879,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         mcp,
         hooks,
         mcp_registration,
+        delivery,
         warnings,
     })
 }
@@ -975,23 +1001,41 @@ pub(crate) fn is_json_pointer(pointer: &str) -> bool {
     pointer.is_empty() || pointer.starts_with('/')
 }
 
+/// The two tables whose `args` are argv injections with a settings file
+/// behind them. [`InjectionKind`] names every injection a launch carries,
+/// including ones that come from other tables and have neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TableKind {
+    Mcp,
+    Hooks,
+}
+
+impl TableKind {
+    fn injection_kind(self) -> InjectionKind {
+        match self {
+            Self::Mcp => InjectionKind::Mcp,
+            Self::Hooks => InjectionKind::Hooks,
+        }
+    }
+}
+
 /// The placeholder `kind`'s `args` spell where the settings file's path goes.
-fn config_file_placeholder(kind: InjectionKind) -> &'static str {
+fn config_file_placeholder(kind: TableKind) -> &'static str {
     match kind {
-        InjectionKind::Mcp => MCP_CONFIG_FILE_PLACEHOLDER,
-        InjectionKind::Hooks => HOOKS_CONFIG_FILE_PLACEHOLDER,
+        TableKind::Mcp => MCP_CONFIG_FILE_PLACEHOLDER,
+        TableKind::Hooks => HOOKS_CONFIG_FILE_PLACEHOLDER,
     }
 }
 
 /// Every placeholder `kind`'s `args` may spell.
-fn known_placeholders(kind: InjectionKind) -> &'static [&'static str] {
+fn known_placeholders(kind: TableKind) -> &'static [&'static str] {
     match kind {
-        InjectionKind::Mcp => &[
+        TableKind::Mcp => &[
             MCP_CONFIG_FILE_PLACEHOLDER,
             MCP_BRIDGE_TOML_PLACEHOLDER,
             MCP_ENV_NAMES_TOML_PLACEHOLDER,
         ],
-        InjectionKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER],
+        TableKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER],
     }
 }
 
@@ -1001,14 +1045,14 @@ fn known_placeholders(kind: InjectionKind) -> &'static [&'static str] {
 /// alongside a `config_file`.
 fn parse_injection_spec(
     raw: Option<RawInjection>,
-    kind: InjectionKind,
+    kind: TableKind,
 ) -> Result<Option<InjectionSpec>, ProfileParseError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let invalid = match kind {
-        InjectionKind::Mcp => ProfileParseError::InvalidMcp,
-        InjectionKind::Hooks => ProfileParseError::InvalidHooks,
+        TableKind::Mcp => ProfileParseError::InvalidMcp,
+        TableKind::Hooks => ProfileParseError::InvalidHooks,
     };
     let args = raw.args.ok_or(invalid(InjectionSpecError::MissingArgs))?;
     if args
@@ -1161,7 +1205,7 @@ pub fn prepare_mcp_injection(
     bridge_path: &Path,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    prepare_injection(InjectionKind::Mcp, spec, config_dir, |config_file_path| {
+    prepare_injection(TableKind::Mcp, spec, config_dir, |config_file_path| {
         let args = render_mcp_args(spec, bridge_path, config_file_path);
         if args.is_none() {
             tracing::warn!(
@@ -1185,7 +1229,7 @@ pub fn prepare_hooks_injection(
     spec: &InjectionSpec,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    prepare_injection(InjectionKind::Hooks, spec, config_dir, |config_file_path| {
+    prepare_injection(TableKind::Hooks, spec, config_dir, |config_file_path| {
         Some(render_hooks_args(spec, config_file_path))
     })
 }
@@ -1195,7 +1239,7 @@ pub fn prepare_hooks_injection(
 /// name it. `render` turns the file's path into the argv elements and logs
 /// its own refusal.
 fn prepare_injection(
-    kind: InjectionKind,
+    kind: TableKind,
     spec: &InjectionSpec,
     config_dir: Option<&Path>,
     render: impl FnOnce(Option<&Path>) -> Option<Vec<String>>,
@@ -1209,7 +1253,7 @@ fn prepare_injection(
         (Some(_), None) => {
             tracing::warn!(
                 "no settings directory is configured; the window opens without {} injection",
-                kind.label()
+                kind.injection_kind().label()
             );
             return None;
         }
@@ -1218,7 +1262,7 @@ fn prepare_injection(
     let config_file_path = config_file.as_ref().map(InjectedConfigFile::path);
     let args = render(config_file_path.as_deref())?;
     Some(CliInjection {
-        kind,
+        kind: kind.injection_kind(),
         args,
         config_file,
     })
@@ -1226,13 +1270,13 @@ fn prepare_injection(
 
 /// `<mcp|hooks>-<sha-256 of content, hex>.json`: equal content always maps to
 /// the same name, so a file already present under it never needs rewriting.
-fn config_file_name(kind: InjectionKind, content: &str) -> String {
+fn config_file_name(kind: TableKind, content: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(content.as_bytes());
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     let prefix = match kind {
-        InjectionKind::Mcp => "mcp",
-        InjectionKind::Hooks => "hooks",
+        TableKind::Mcp => "mcp",
+        TableKind::Hooks => "hooks",
     };
     format!("{prefix}-{hex}.json")
 }
@@ -1303,10 +1347,11 @@ pub(crate) fn is_executable_predicate(config: &DaemonConfig) -> impl Fn(&Path) -
 /// can. The single function both [`list_profiles`] and [`resolve_launch`]'s
 /// callers consult, so a listing and a launch attempt never disagree.
 ///
-/// The reason text is one of four fixed sentences,
-/// each naming no path: kind 1 (executable not found), kind 2 (a
-/// metacharacter the command interpreter would reinterpret), kind 3 (no
-/// argv for this operating system) and kind 4 (no default shell resolved).
+/// The reason text is one of five fixed sentences, each naming no path: kind 1
+/// (executable not found), kind 2 (a metacharacter the command interpreter
+/// would reinterpret), kind 3 (no argv for this operating system), kind 4 (no
+/// default shell resolved) and kind 5 (a wake by command through a Windows
+/// `.cmd` / `.bat` file, followed by the profile's own guidance).
 /// Kind 3 is answered for any `profile` passed in, but never reaches a
 /// listing: [`list_profiles`] leaves such a profile out. Whether the profile
 /// is switched off ([`Profile::enabled`]) is not a reason here.
@@ -1330,7 +1375,7 @@ pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<St
     let predicate = is_executable_predicate(config);
 
     if program::is_available(argv, platform, &config.program_lookup, &predicate) {
-        return None;
+        return wake_command_unusable_reason(profile, argv, config);
     }
 
     // `is_available` judged the argv unlaunchable; `resolve_program` is
@@ -1341,6 +1386,37 @@ pub fn unavailable_reason(profile: &Profile, config: &DaemonConfig) -> Option<St
         Err(_rejected) => Some(REASON_METACHARACTER.to_string()),
         Ok(_) => Some(REASON_NOT_FOUND.to_string()),
     }
+}
+
+/// Why `profile`, whose `argv` can be started, still cannot be used: it wakes a
+/// waiting CLI by running its own program with the text as an argument, and
+/// that program is a Windows `.cmd` / `.bat` file, through which the text
+/// cannot be passed unchanged. The profile's own guidance follows the fixed
+/// sentence.
+fn wake_command_unusable_reason(
+    profile: &Profile,
+    argv: &[String],
+    config: &DaemonConfig,
+) -> Option<String> {
+    let delivery = profile.delivery.as_ref()?;
+    if !matches!(delivery.wake, WakeMode::Command(_)) {
+        return None;
+    }
+    let predicate = is_executable_predicate(config);
+    let resolution = program::resolve_program(
+        argv,
+        config.host_os.platform(),
+        &config.program_lookup,
+        &predicate,
+    )
+    .ok()?;
+    if !matches!(resolution, program::Resolution::CmdShim { .. }) {
+        return None;
+    }
+    Some(match &delivery.shim_guidance {
+        Some(guidance) => format!("{REASON_WAKE_NEEDS_NATIVE_PROGRAM} {guidance}"),
+        None => REASON_WAKE_NEEDS_NATIVE_PROGRAM.to_string(),
+    })
 }
 
 /// English reason text for what the listing side can confirm about this
@@ -1768,6 +1844,7 @@ pub fn resolve_launch(
         mcp: profile.mcp,
         hooks: profile.hooks,
         hooks_registration,
+        delivery: profile.delivery,
     })
 }
 

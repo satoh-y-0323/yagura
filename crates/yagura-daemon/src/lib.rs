@@ -23,6 +23,7 @@ pub mod playbook_rewrite;
 pub mod profile;
 pub mod profile_aliases;
 pub mod profile_command;
+pub mod profile_delivery;
 pub mod profile_detail;
 pub mod profile_enabled;
 mod profile_layers;

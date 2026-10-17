@@ -45,7 +45,18 @@ args = ["--mcp-config", '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE
 # the Windows executable is called by name because a Linux shell does not
 # resolve the bare name.
 [hooks]
-args = ["--settings", '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}]}}']
+args = ["--settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --deliver-context"},{"type":"command","command":"yagura-daemon.exe --deliver-wait","asyncRewake":true,"timeout":86400}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"},{"type":"command","command":"yagura-daemon.exe --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"},{"type":"command","command":"yagura-daemon.exe --deliver-wait","asyncRewake":true,"timeout":86400}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}]}}']
+
+# How the daemon hands text to this CLI without typing it into the composer
+# (see claude-code.toml).
+[delivery]
+output = "plain"
+max_chars = 10000
+wake = "wait"
+wake_stream = "stderr"
+wake_exit = 2
+wake_timeout_secs = 86400
+launch_prompt = ["--", "{prompt}"]
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same

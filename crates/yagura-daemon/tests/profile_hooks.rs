@@ -120,9 +120,9 @@ fn shipped_hooks_table(id: &str) -> toml::Table {
     }
 }
 
-/// Each event's hook commands in a Claude Code `hooks` settings document,
-/// checking the document's shape on the way.
-fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
+/// Every hook of an event in a Claude Code `hooks` settings document, across all of its
+/// groups, checking the document's shape on the way.
+fn hooks_by_event(document: &str) -> BTreeMap<String, Vec<serde_json::Value>> {
     let value: serde_json::Value =
         serde_json::from_str(document).expect("the hooks settings must be valid JSON");
     let hooks = value["hooks"]
@@ -135,45 +135,60 @@ fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
     );
     let mut out = BTreeMap::new();
     for (event, groups) in hooks {
-        let mut commands = Vec::new();
+        let mut found = Vec::new();
         for group in groups
             .as_array()
             .expect("an event maps to an array of groups")
         {
             for hook in group["hooks"].as_array().expect("a group carries hooks") {
                 assert_eq!(hook["type"], "command", "{event}: {hook}");
-                commands.push(
-                    hook["command"]
-                        .as_str()
-                        .expect("a command string")
-                        .to_string(),
-                );
+                assert!(hook["command"].is_string(), "{event}: {hook}");
+                found.push(hook.clone());
             }
         }
-        out.insert(event.clone(), commands);
+        out.insert(event.clone(), found);
     }
     out
 }
 
+/// Each event's hook commands, sorted so the order the groups are written in is not part of
+/// the contract.
+fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
+    hooks_by_event(document)
+        .into_iter()
+        .map(|(event, hooks)| {
+            let mut commands: Vec<String> = hooks
+                .iter()
+                .map(|hook| hook["command"].as_str().unwrap().to_string())
+                .collect();
+            commands.sort();
+            (event, commands)
+        })
+        .collect()
+}
+
+/// The hooks the shipped profiles inject: the status reports, and the three doors a window's
+/// CLI reads its inbox through (start-up context, the start of a turn, and a wait that the
+/// daemon answers when something arrives for a waiting CLI).
 fn expected_commands(program: &str) -> BTreeMap<String, Vec<String>> {
-    [
-        ("UserPromptSubmit", "running"),
-        ("PreToolUse", "running"),
-        ("PostToolUse", "running"),
-        ("PermissionRequest", "waiting_approval"),
-        ("Stop", "waiting_input"),
-        ("StopFailure", "waiting_input"),
+    let report = |status: &str| format!("{program} --emit-status {status} --source claude-code");
+    let door = |name: &str| format!("{program} --deliver-{name}");
+    let mut expected: BTreeMap<String, Vec<String>> = [
+        ("PreToolUse", vec![report("running")]),
+        ("PostToolUse", vec![report("running")]),
+        ("PermissionRequest", vec![report("waiting_approval")]),
+        ("StopFailure", vec![report("waiting_input")]),
+        ("UserPromptSubmit", vec![report("running"), door("take")]),
+        ("SessionStart", vec![door("context"), door("wait")]),
+        ("Stop", vec![report("waiting_input"), door("wait")]),
     ]
     .into_iter()
-    .map(|(event, status)| {
-        (
-            event.to_string(),
-            vec![format!(
-                "{program} --emit-status {status} --source claude-code"
-            )],
-        )
-    })
-    .collect()
+    .map(|(event, commands)| (event.to_string(), commands))
+    .collect();
+    for commands in expected.values_mut() {
+        commands.sort();
+    }
+    expected
 }
 
 #[test]
@@ -212,6 +227,97 @@ fn wsl_claude_code_ships_the_same_mapping_calling_the_windows_executable() {
         commands_by_event(args[1]),
         expected_commands("yagura-daemon.exe")
     );
+}
+
+/// The settings document each shipped Claude Code profile injects: a file for the host
+/// profile, inline in the arguments for the WSL one.
+fn shipped_documents() -> [(&'static str, &'static str, String); 2] {
+    let host = shipped_hooks_table("claude-code");
+    let wsl = shipped_hooks_table("wsl-claude-code");
+    [
+        (
+            "claude-code",
+            "yagura-daemon",
+            host["config_file"]
+                .as_str()
+                .expect("config_file")
+                .to_string(),
+        ),
+        (
+            "wsl-claude-code",
+            "yagura-daemon.exe",
+            wsl["args"].as_array().expect("args")[1]
+                .as_str()
+                .expect("inline settings")
+                .to_string(),
+        ),
+    ]
+}
+
+/// The profile's wake timeout, as the hook that waits must carry it.
+const WAKE_TIMEOUT_SECS: u64 = 86_400;
+
+#[test]
+fn the_hook_that_waits_for_the_daemon_is_asynchronous_and_outlives_a_long_idle() {
+    for (id, program, document) in shipped_documents() {
+        let wait = format!("{program} --deliver-wait");
+        let by_event = hooks_by_event(&document);
+        for event in ["SessionStart", "Stop"] {
+            let waits: Vec<_> = by_event[event]
+                .iter()
+                .filter(|hook| hook["command"] == wait.as_str())
+                .collect();
+            assert_eq!(
+                waits.len(),
+                1,
+                "{id}: {event} carries one wait: {:?}",
+                by_event[event]
+            );
+            let hook = waits[0];
+            assert_eq!(
+                hook["asyncRewake"],
+                serde_json::Value::Bool(true),
+                "{id}: {event}: Claude Code wakes an idle session from a background hook that                  exits with 2: {hook}"
+            );
+            assert_eq!(
+                hook["timeout"].as_u64(),
+                Some(WAKE_TIMEOUT_SECS),
+                "{id}: {event}: the hook outlives the default timeout: {hook}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_hooks_that_answer_at_once_are_not_asynchronous() {
+    for (id, program, document) in shipped_documents() {
+        let wait = format!("{program} --deliver-wait");
+        let doors = [
+            format!("{program} --deliver-context"),
+            format!("{program} --deliver-take"),
+        ];
+        let mut doors_seen = 0;
+        for (event, hooks) in hooks_by_event(&document) {
+            for hook in hooks {
+                if hook["command"] == wait.as_str() {
+                    continue;
+                }
+                doors_seen += doors
+                    .iter()
+                    .filter(|door| hook["command"] == door.as_str())
+                    .count();
+                assert!(
+                    hook.get("asyncRewake").is_none()
+                        && hook.get("async") != Some(&serde_json::Value::Bool(true)),
+                    "{id}: {event}: a hook whose output Claude Code reads must run in the                      foreground: {hook}"
+                );
+            }
+        }
+        assert_eq!(
+            doors_seen, 2,
+            "{id}: both doors that print into the session are shipped"
+        );
+    }
 }
 
 #[tokio::test]
