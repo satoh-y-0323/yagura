@@ -46,10 +46,10 @@ use std::time::Duration;
 
 use common::{
     CONTROL_DETECTION_NAME, ChatPlaybook, Harness, SubmitDefinitionInput, chat_config,
-    composer_section_toml, decide, expect_approval_requested_skipping_pushes, expect_error,
-    identify, open_submit_child_window_with_composer,
-    open_submit_child_window_with_composer_in_cwd, read_response, register_approver,
-    second_workspace_dir, send, unique_temp_dir, wait_until_status, write_submit_definition,
+    composer_section_toml, decide, expect_approval_requested, expect_error, identify,
+    open_submit_child_window_with_composer, open_submit_child_window_with_composer_in_cwd,
+    read_response, register_approver, second_workspace_dir, send, unique_temp_dir,
+    wait_until_status, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
@@ -294,10 +294,7 @@ async fn read_reply(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
         let frame = read_response(client, remaining).await;
-        if !matches!(
-            frame,
-            DaemonMessage::ChatChanged { .. } | DaemonMessage::ChatParticipantsChanged
-        ) {
+        if !matches!(frame, DaemonMessage::ChatChanged { .. }) {
             return frame;
         }
     }
@@ -893,8 +890,7 @@ async fn window_origin_broadcast_chat_awaits_a_targetless_approval_and_delivers_
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "broadcast_chat");
     assert!(
         request.target.is_none(),
@@ -937,8 +933,7 @@ async fn window_origin_broadcast_chat_denied_returns_approval_denied() {
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
     let result = read_response(&mut poster_conn, Duration::from_secs(5)).await;
@@ -971,8 +966,7 @@ async fn window_origin_broadcast_chat_approval_times_out_and_withdraws() {
         },
     )
     .await;
-    let _request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let _request = expect_approval_requested(&mut approver).await;
 
     let result = read_response(&mut poster_conn, Duration::from_secs(10)).await;
     expect_error(result, "approval_timeout");
@@ -1035,8 +1029,7 @@ async fn an_external_connections_send_chat_awaits_approval_when_not_auto_approve
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "send_chat");
     assert!(request.target.is_none());
 
@@ -1094,8 +1087,7 @@ async fn window_origin_send_chat_awaits_a_targetless_approval_and_delivers_once_
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "send_chat");
     assert!(
         request.target.is_none(),
@@ -1154,8 +1146,7 @@ async fn window_origin_send_chat_denied_returns_approval_denied() {
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
     let result = read_response(&mut poster_conn, Duration::from_secs(5)).await;
@@ -3063,8 +3054,7 @@ async fn a_broadcast_chat_approval_request_carries_the_rooms_id_and_display_name
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     let room: RoomRef = request
         .room
         .expect("a chat post's approval request must carry a room");
@@ -3110,8 +3100,7 @@ async fn a_send_chat_approval_request_shows_the_rooms_own_name_and_the_mentioned
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
 
     let room: RoomRef = request
         .room
@@ -3158,8 +3147,7 @@ async fn a_close_window_approval_request_carries_no_room() {
         },
     )
     .await;
-    let request =
-        expect_approval_requested_skipping_pushes(&mut approver, Duration::from_secs(5)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "close_window");
     assert_eq!(
         request.room, None,

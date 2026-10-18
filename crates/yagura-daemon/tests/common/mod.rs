@@ -1181,9 +1181,22 @@ pub async fn read_frame(client: &mut Connection, timeout: Duration) -> DaemonMes
 }
 
 /// Reads the next *response* frame, skipping the asynchronous notification
-/// kinds (view `Frame` parts / `StatusChanged`) that an attached connection may
-/// interleave.
+/// kinds (view `Frame` parts / `StatusChanged` / `ChatParticipantsChanged`)
+/// that a connection may interleave at any moment.
 pub async fn read_response(client: &mut Connection, timeout: Duration) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match read_message(client, remaining).await {
+            DaemonMessage::ChatParticipantsChanged => continue,
+            other => return other,
+        }
+    }
+}
+
+/// [`read_response`] without skipping `ChatParticipantsChanged`, for a test
+/// that waits for that push itself.
+pub async fn read_message(client: &mut Connection, timeout: Duration) -> DaemonMessage {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1237,9 +1250,7 @@ pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowSta
     loop {
         match read_response(client, Duration::from_secs(5)).await {
             DaemonMessage::WindowStatus { status, .. } => return status,
-            DaemonMessage::ChatChanged { .. }
-            | DaemonMessage::ChatParticipantsChanged
-            | DaemonMessage::PlanChanged { .. } => continue,
+            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => panic!("expected window_status, got {other:?}"),
         }
     }
@@ -1626,9 +1637,7 @@ pub async fn read_approver_reply(client: &mut Connection, timeout: Duration) -> 
         );
         let frame: DaemonMessage = read_response(client, remaining).await;
         match frame {
-            DaemonMessage::ChatChanged { .. }
-            | DaemonMessage::ChatParticipantsChanged
-            | DaemonMessage::PlanChanged { .. } => continue,
+            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => return other,
         }
     }

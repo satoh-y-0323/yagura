@@ -17,8 +17,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{
-    CONTROL_DETECTION_NAME, ChatPlaybook, Harness, chat_config, identify, read_response,
-    register_approver, second_workspace_dir, send, unique_temp_dir,
+    CONTROL_DETECTION_NAME, ChatPlaybook, Harness, chat_config, identify, read_message,
+    read_response, register_approver, second_workspace_dir, send, unique_temp_dir,
 };
 use yagura_protocol::{ChatParticipant, ChatRoomInfo, ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
@@ -61,7 +61,7 @@ async fn next_participants_changed(approver: &mut Connection) {
             !remaining.is_zero(),
             "timed out waiting for chat_participants_changed"
         );
-        match read_response(approver, remaining).await {
+        match read_message(approver, remaining).await {
             DaemonMessage::ChatParticipantsChanged => return,
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => panic!("expected chat_participants_changed, got {other:?}"),

@@ -537,7 +537,6 @@ async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
         match read_response(client, EVENT_TIMEOUT).await {
             DaemonMessage::ChatChanged { .. }
-            | DaemonMessage::ChatParticipantsChanged
             | DaemonMessage::PlanChanged { .. }
             | DaemonMessage::ApprovalRequested { .. } => continue,
             other => return other,
