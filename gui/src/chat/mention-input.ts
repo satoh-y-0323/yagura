@@ -4,8 +4,8 @@
  * chosen name back into the text.
  *
  * Pure, and matching the daemon's mention parser: names are compared with
- * case and `_` / `-` folded, and a name carrying a space is inserted quoted so
- * it stays one target.
+ * case and `_` / `-` folded, and a name the parser could cut short is
+ * inserted quoted so it stays one target.
  */
 
 import type { ChatParticipant } from '../ipc/session-boundary';
@@ -96,6 +96,20 @@ export function filterMentionCandidates(
   return candidates.filter((candidate) => normalize(candidate.name).startsWith(prefix));
 }
 
+// A bare mention ends where the daemon's word characters end. Quoting every
+// name outside this ASCII subset costs nothing: a quoted mention always resolves.
+const BARE_MENTION_NAME = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Writes `name` as a mention that addresses it whole: bare when the daemon's
+ * parser reads it to its end, quoted otherwise.
+ *
+ * @param name the participant's name
+ */
+export function formatMention(name: string): string {
+  return BARE_MENTION_NAME.test(name) ? `@${name}` : `@"${name}"`;
+}
+
 /**
  * Writes `name` into `text` in place of the mention being typed, followed by
  * one space so the next word starts cleanly.
@@ -110,7 +124,7 @@ export function insertMention(
   mention: MentionQuery,
   name: string
 ): { text: string; caret: number } {
-  const inserted = /\s/.test(name) ? `@"${name}" ` : `@${name} `;
+  const inserted = `${formatMention(name)} `;
   return {
     text: text.slice(0, mention.start) + inserted + text.slice(mention.end),
     caret: mention.start + inserted.length,

@@ -16,6 +16,7 @@
   import { isImeKey } from '../keymap/key-chord';
   import { resolveDisplayName, type ChatRoomState } from '../chat/chat-store';
   import { splitForMiddleEllipsis } from '../chat/middle-ellipsis';
+  import { describeUnresolved } from '../chat/unresolved-notice';
   import {
     dismissMention,
     filterMentionCandidates,
@@ -39,6 +40,7 @@
     ChatDeliveryState,
     ChatParticipant,
     ChatMessageFromKind,
+    ChatPosted,
     ChatRoomInfo,
   } from '../ipc/session-boundary';
   import { isResizedByUser, type PanelSize } from '../settings/panel-size';
@@ -48,6 +50,7 @@
     describeDeliveryState,
     describeHaltReason,
     describeUndeliveredUnknownReason,
+    hints,
   } from '../ui-messages';
 
   /** One run of the message body: a mention, or the plain text around it. */
@@ -58,10 +61,10 @@
 
   export let room: ChatRoomState;
   export let onClose: () => void;
-  /** Posts the body as written; resolves true once it is on its way. */
-  export let onSend: (body: string) => Promise<boolean>;
-  /** Posts the body to every participant; resolves true once it is on its way. */
-  export let onBroadcast: (body: string) => Promise<boolean>;
+  /** Posts the body as written; resolves to the daemon's reply once it is on its way, else `null`. */
+  export let onSend: (body: string) => Promise<ChatPosted | null>;
+  /** Posts the body to every participant; resolves like {@link onSend}. */
+  export let onBroadcast: (body: string) => Promise<ChatPosted | null>;
   /** The room list, in wire order, for the left-hand room rail. */
   export let rooms: ChatRoomInfo[];
   /** The room shown on the right; marks its row selected in the rail. */
@@ -92,8 +95,14 @@
   let dismissed: DismissedMention | null = null;
   let candidates: MentionCandidate[] = [];
   let activeCandidate = 0;
+  /** The last post's mentions that reached no one, kept with the room it went to. */
+  let unresolvedNotice: { roomId: string; text: string } | null = null;
 
   $: halt = room.halted;
+  $: shownUnresolved =
+    unresolvedNotice !== null && unresolvedNotice.roomId === currentRoomId
+      ? unresolvedNotice.text
+      : null;
   $: refreshOpenMention(room.roster);
   $: isMentionOpen = mention !== null && candidates.length > 0;
   $: canPost = draft.trim() !== '' && !isPosting;
@@ -281,11 +290,15 @@
       return;
     }
     isPosting = true;
+    unresolvedNotice = null;
+    const roomId = currentRoomId;
     try {
       const posted = broadcast ? await onBroadcast(body) : await onSend(body);
-      if (posted) {
+      if (posted !== null) {
         draft = '';
         closeMention();
+        const text = describeUnresolved(posted.unresolved);
+        unresolvedNotice = text === null ? null : { roomId, text };
       }
     } finally {
       isPosting = false;
@@ -410,8 +423,8 @@
     </div>
 
     {#if halt !== null}
-      <p class="halt-banner" role="status">
-        <span class="halt-banner__text">{describeHaltReason(halt.reason)}</span>
+      <p class="chat-notice" role="status">
+        <span class="chat-notice__text">{describeHaltReason(halt.reason)}</span>
       </p>
     {/if}
 
@@ -483,6 +496,19 @@
         </article>
       {/each}
     </div>
+
+    {#if shownUnresolved !== null}
+      <p class="chat-notice" role="status">
+        <span class="chat-notice__text">{shownUnresolved}</span>
+        <IconButton
+          class="banner-close"
+          label={hints.dismissBanner}
+          on:click={() => (unresolvedNotice = null)}
+        >
+          ✕
+        </IconButton>
+      </p>
+    {/if}
 
     <div class="chat-panel__footer">
       <div class="chat-panel__mention-anchor">
@@ -936,7 +962,7 @@
     color: var(--color-text-secondary);
   }
 
-  .halt-banner {
+  .chat-notice {
     flex: 0 0 auto;
     display: flex;
     align-items: flex-start;
@@ -948,7 +974,7 @@
     font-size: var(--font-size-xs);
   }
 
-  .halt-banner__text {
+  .chat-notice__text {
     flex: 1 1 auto;
     min-width: 0;
   }

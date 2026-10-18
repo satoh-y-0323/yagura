@@ -366,15 +366,6 @@
     color: var(--color-warning);
   }
 
-  .form-error {
-    padding: var(--space-xs) var(--space-sm);
-    border-radius: var(--radius-sm);
-    background-color: var(--color-background);
-    color: var(--color-error);
-    border: 1px solid var(--color-error);
-    font-size: var(--font-size-sm);
-  }
-
   /* components.css gives .dialog-input no disabled state, and every field is
      disabled while a submission is in flight. */
   .dialog-input:disabled,

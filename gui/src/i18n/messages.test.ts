@@ -118,6 +118,7 @@ export const dummyMessages: Messages = {
     renameWindowFailed: 'DUMMY_renameWindowFailed',
     shortcutFailed: 'DUMMY_shortcutFailed',
     openWindowFailed: 'DUMMY_openWindowFailed',
+    nameTakenOpenHint: 'DUMMY_nameTakenOpenHint',
     detectionLoadFailed: 'DUMMY_detectionLoadFailed',
     // One summary per boundary-failure call site, plus the prefix that
     // puts the count in front of a multi-diagnosis detail.
@@ -495,6 +496,8 @@ export const dummyMessages: Messages = {
     roomNeedsYouLabel: 'DUMMY_chat_roomNeedsYouLabel',
     broadcastConfirmRoomMessage: (name: string) =>
       `DUMMY_chat_broadcastConfirmRoomMessage(${name})`,
+    unresolvedMentions: (mentions: readonly string[]) =>
+      `DUMMY_chat_unresolvedMentions(${mentions.join(',')})`,
   },
 
   /**

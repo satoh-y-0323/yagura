@@ -80,6 +80,7 @@ import {
   type DisconnectedPayload,
   type ExitPayload,
   type Frame,
+  type OnNameTaken,
   type RecoveryStatusReport,
   type Rgb,
   type RestoreEntry,
@@ -374,6 +375,8 @@ export interface OpenWindowRequest {
   model?: string | undefined;
   /** The effort level; requires `profile`. */
   effort?: string | undefined;
+  /** What to do when the name is taken; the core refuses when absent. */
+  onNameTaken?: OnNameTaken | undefined;
 }
 
 /** Result of `invokeOpenWindow`: the new window, and how its detection went. */
@@ -656,8 +659,9 @@ export async function invokeSetPlanApprovalRequired(
  * The command is an argument vector, never a shell string, so nothing in it
  * can be interpreted by a shell (CWE-78).
  *
- * `name`, `detection`, `profile`, `vendor`, `model` and `effort` are omitted
- * from the call entirely when absent or empty, rather than sent as `null`:
+ * `name`, `detection`, `profile`, `vendor`, `model`, `effort` and
+ * `onNameTaken` are omitted from the call entirely when absent or empty,
+ * rather than sent as `null`:
  * the core distinguishes "not provided" from an empty string, and value
  * validation (including that `profile` excludes the other three, and that
  * `model` / `effort` require `profile`) is left to the core and daemon.
@@ -666,7 +670,7 @@ export async function invokeSetPlanApprovalRequired(
  * @throws when the core rejects the request or the reply fails validation.
  */
 export async function invokeOpenWindow(request: OpenWindowRequest): Promise<OpenWindowResult> {
-  const { command, cwd, name, detection, profile, vendor, model, effort } = request;
+  const { command, cwd, name, detection, profile, vendor, model, effort, onNameTaken } = request;
   const args: Record<string, unknown> = { command, cwd };
   for (const [key, value] of [
     ['name', name],
@@ -675,6 +679,7 @@ export async function invokeOpenWindow(request: OpenWindowRequest): Promise<Open
     ['vendor', vendor],
     ['model', model],
     ['effort', effort],
+    ['on_name_taken', onNameTaken],
   ] as const) {
     if (value !== undefined && value !== '') {
       args[key] = value;

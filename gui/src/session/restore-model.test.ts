@@ -520,6 +520,7 @@ describe('restoreLaunchOf', () => {
       name: 'main',
       model: 'opus',
       effort: 'high',
+      onNameTaken: 'number',
     });
   });
 
@@ -533,6 +534,7 @@ describe('restoreLaunchOf', () => {
       name: 'main',
       model: null,
       effort: null,
+      onNameTaken: 'number',
     });
   });
 
@@ -552,7 +554,18 @@ describe('restoreLaunchOf', () => {
       name: 'shell',
       detection: 'shell',
       vendor: 'generic',
+      onNameTaken: 'number',
     });
+  });
+
+  it('asks for a number on a name another live window already carries, for either launch kind', () => {
+    const fromProfile = restoreLaunchOf(makeEntry({ profile: 'claude-code' }));
+    const fromArgv = restoreLaunchOf(makeEntry({ profile: null }));
+
+    expect(fromProfile.kind).toBe('profile');
+    expect(fromProfile.onNameTaken).toBe('number');
+    expect(fromArgv.kind).toBe('argv');
+    expect(fromArgv.onNameTaken).toBe('number');
   });
 });
 
@@ -583,6 +596,7 @@ describe('restoreFallbackOf', () => {
       name: 'main',
       detection: 'claude-code',
       vendor: 'claude-code',
+      onNameTaken: 'number',
     });
   });
 

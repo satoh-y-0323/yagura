@@ -342,6 +342,74 @@ describe('invokeOpenWindow: model / effort fields', () => {
 });
 
 /**
+ * `invokeOpenWindow`'s `onNameTaken` reaches the core as `on_name_taken`:
+ * `'number'` asks the daemon to open under `<name> <n>` when the name is
+ * taken, `'refuse'` asks it to refuse. Absent, the field is left off and the
+ * core applies its default (refuse).
+ */
+describe('invokeOpenWindow: what to do when the name is taken', () => {
+  const WINDOW_ID = 'w1-k3f9xa';
+
+  it.each(['number', 'refuse'] as const)(
+    'sends on_name_taken %s alongside a profile launch',
+    async (onNameTaken) => {
+      invokeMock.mockResolvedValueOnce({ window_id: WINDOW_ID, detection_warning: null });
+
+      await invokeOpenWindow({
+        command: [],
+        cwd: 'C:\\work',
+        name: 'Claude Code',
+        profile: 'claude-code',
+        onNameTaken,
+      });
+
+      expect(invokeMock).toHaveBeenCalledWith('open_window', {
+        command: [],
+        cwd: 'C:\\work',
+        name: 'Claude Code',
+        profile: 'claude-code',
+        on_name_taken: onNameTaken,
+      });
+    }
+  );
+
+  it.each(['number', 'refuse'] as const)(
+    'sends on_name_taken %s alongside an argv launch',
+    async (onNameTaken) => {
+      invokeMock.mockResolvedValueOnce({ window_id: WINDOW_ID, detection_warning: null });
+
+      await invokeOpenWindow({
+        command: ['bash', '-l'],
+        cwd: '/srv',
+        name: 'shell',
+        detection: 'shell',
+        vendor: 'generic',
+        onNameTaken,
+      });
+
+      expect(invokeMock).toHaveBeenCalledWith('open_window', {
+        command: ['bash', '-l'],
+        cwd: '/srv',
+        name: 'shell',
+        detection: 'shell',
+        vendor: 'generic',
+        on_name_taken: onNameTaken,
+      });
+    }
+  );
+
+  it('leaves on_name_taken off when the call does not say', async () => {
+    invokeMock.mockResolvedValueOnce({ window_id: WINDOW_ID, detection_warning: null });
+
+    await invokeOpenWindow({ command: ['claude'], cwd: 'C:\\work', name: 'Claude Code' });
+
+    const [, args] = invokeMock.mock.calls[0] as [string, Record<string, unknown>];
+    expect(Object.prototype.hasOwnProperty.call(args, 'on_name_taken')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(args, 'onNameTaken')).toBe(false);
+  });
+});
+
+/**
  * `list_profiles` narrows the daemon's `ProfileInfo` list
  * (`crates/yagura-protocol/src/lib.rs`) into the camelCase shape the dialog
  * consumes. Field names on the wire stay the daemon's own

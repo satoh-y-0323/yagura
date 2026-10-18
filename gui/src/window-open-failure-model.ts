@@ -7,7 +7,11 @@
  * the i18n resources.
  */
 
-import { WindowOpenFailureError, type WindowOpenFailure } from './ipc/session-boundary';
+import {
+  NAME_TAKEN_CODE,
+  WindowOpenFailureError,
+  type WindowOpenFailure,
+} from './ipc/session-boundary';
 // The same folding and capping every other operation failure goes through:
 // the reason is external text of the same kind, so it gets the same
 // treatment rather than a second copy of it. `errors` is the fixed line for
@@ -42,6 +46,9 @@ export function windowOpenFailureOf(error: unknown): WindowOpenFailure {
  * is the one handle left on the refusal. Whether the reason carries anything
  * is decided by the formatter rather than restated here.
  *
+ * A taken name is followed by how to get past it: an empty name gets the
+ * default name, which the daemon numbers instead of refusing.
+ *
  * @param summary the operation-specific wording, supplied by the caller
  * @param failure why the attempt failed
  */
@@ -53,10 +60,12 @@ export function describeWindowOpenFailure(summary: string, failure: WindowOpenFa
     return describeOperationFailure(summary, errors.launchOptionUnsupported);
   }
   const line = describeOperationFailure(summary, failure.message);
-  if (failure.kind !== 'rejected' || line !== summary) {
+  if (failure.kind !== 'rejected') {
     return line;
   }
-  return describeOperationFailure(summary, failure.code);
+  const reason = line !== summary ? line : describeOperationFailure(summary, failure.code);
+  // The daemon's reason carries no closing period.
+  return failure.code === NAME_TAKEN_CODE ? `${reason}. ${errors.nameTakenOpenHint}` : reason;
 }
 
 /**

@@ -5,6 +5,7 @@
  */
 import {
   PROFILE_DISABLED_CODE,
+  type OnNameTaken,
   type RestoreEntry,
   type WindowInfo,
   type WindowOpenFailure,
@@ -311,6 +312,12 @@ export interface LayoutTarget {
   moveTab: (windowId: string, targetIndex: number) => void;
 }
 
+/**
+ * A restored name was chosen in an earlier session, not typed now, so one a
+ * live window already carries is numbered rather than refused.
+ */
+const RESTORE_ON_NAME_TAKEN: OnNameTaken = 'number';
+
 /** How to open one restore candidate: from a launch profile, or from a saved argv. */
 export type RestoreLaunch =
   | {
@@ -320,6 +327,7 @@ export type RestoreLaunch =
       name: string;
       model: string | null;
       effort: string | null;
+      onNameTaken: OnNameTaken;
     }
   | {
       kind: 'argv';
@@ -328,6 +336,7 @@ export type RestoreLaunch =
       name: string;
       detection: string | null;
       vendor: string | null;
+      onNameTaken: OnNameTaken;
     };
 
 /**
@@ -343,6 +352,7 @@ export function restoreLaunchOf(candidate: RestoreEntry): RestoreLaunch {
       name: candidate.name,
       model: candidate.model,
       effort: candidate.effort,
+      onNameTaken: RESTORE_ON_NAME_TAKEN,
     };
   }
   return argvLaunchOf(candidate);
@@ -356,6 +366,7 @@ function argvLaunchOf(candidate: RestoreEntry): RestoreLaunch {
     name: candidate.name,
     detection: candidate.detection,
     vendor: candidate.vendor,
+    onNameTaken: RESTORE_ON_NAME_TAKEN,
   };
 }
 

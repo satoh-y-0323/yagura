@@ -211,6 +211,28 @@ describe('insertMention: writing the chosen name back', () => {
     });
   });
 
+  it.each(['builder', 'code_planner', 'code-planner', 'Agent2', 'X'])(
+    'leaves a name of only ASCII letters, digits, - and _ unquoted (%s)',
+    (name) => {
+      const text = 'ping @';
+      expect(insertMention(text, query(text, 6), name)).toEqual({
+        text: `ping @${name} `,
+        caret: `ping @${name} `.length,
+      });
+    }
+  );
+
+  it.each(['a.b', 'Claude Code 2', '名前', 'x(1)', 'host:dev', 'café', 'build/test'])(
+    'quotes a name carrying any other character, which would cut a bare mention short (%s)',
+    (name) => {
+      const text = 'ping @';
+      expect(insertMention(text, query(text, 6), name)).toEqual({
+        text: `ping @"${name}" `,
+        caret: `ping @"${name}" `.length,
+      });
+    }
+  );
+
   it('writes the reserved human entry as a plain mention', () => {
     const text = 'thanks @';
     expect(insertMention(text, query(text, 8), MENTION_USER_NAME)).toEqual({

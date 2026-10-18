@@ -1,25 +1,38 @@
 <script lang="ts">
-  import { buttons } from '../ui-messages';
+  import { buttons, describeOperationFailure, errors } from '../ui-messages';
   import ModalDialog from './ModalDialog.svelte';
 
   export let title: string;
   export let label: string;
   export let initialValue: string = '';
   export let isOpen: boolean = false;
-  export let onConfirm: (value: string) => void;
+  /** Renames to `value`; rejects with the daemon's reason when it refuses the name. */
+  export let onConfirm: (value: string) => Promise<void>;
   export let onCancel: () => void;
 
   let value = initialValue;
+  let formError: string | null = null;
+  let isSubmitting = false;
 
   // Reopening the dialog for another window must not show the previous entry.
   // `value` is not a dependency here, so typing does not reset the field.
   $: if (isOpen) {
     value = initialValue;
+    formError = null;
   }
 
-  function handleConfirm(): void {
-    onConfirm(value);
-    isOpen = false;
+  // The dialog stays open on a refusal, so the name can be corrected in place.
+  async function handleConfirm(): Promise<void> {
+    formError = null;
+    isSubmitting = true;
+    try {
+      await onConfirm(value);
+      isOpen = false;
+    } catch (error) {
+      formError = describeOperationFailure(errors.renameWindowFailed, error);
+    } finally {
+      isSubmitting = false;
+    }
   }
 
   function handleCancel(): void {
@@ -37,11 +50,14 @@
       <span class="dialog-label">{label}</span>
       <input type="text" class="dialog-input" bind:value />
     </label>
+    {#if formError}
+      <div class="form-error">{formError}</div>
+    {/if}
     <div class="dialog-actions">
       <button type="button" class="btn btn-secondary" on:click={handleCancel}>
         {buttons.cancel}
       </button>
-      <button type="submit" class="btn btn-primary">
+      <button type="submit" class="btn btn-primary" disabled={isSubmitting}>
         {buttons.rename}
       </button>
     </div>

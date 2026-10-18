@@ -99,6 +99,12 @@ const KEYBOARD_EDIT_BLOCKS = {
     `${location} is too large to read, so keyboard changes are turned off. Make it smaller, then restart yagura.`,
 };
 
+/** `a`, `a and b`, `a, b, and c`: the English list form, serial comma included. */
+function englishList(items: readonly string[]): string {
+  const last = items[items.length - 1] ?? '';
+  return items.length <= 2 ? items.join(' and ') : `${items.slice(0, -1).join(', ')}, and ${last}`;
+}
+
 /**
  * English display strings — the only place display text lives.
  *
@@ -225,6 +231,8 @@ export const messagesEn = {
     renameWindowFailed: 'Could not rename the window',
     shortcutFailed: 'Could not carry out the keyboard shortcut',
     openWindowFailed: 'Could not open the window',
+    /** Follows a `name_taken` refusal when opening a window, whose default name the daemon numbers. */
+    nameTakenOpenHint: 'Choose another name, or leave the name empty to get a numbered one.',
     detectionLoadFailed: 'Could not load the detection definition',
 
     // One summary per boundary-failure call site. Each names only the
@@ -492,6 +500,12 @@ export const messagesEn = {
       'The room stopped: turn budget spent. The participants used up the messages allowed since your last one. Write something to start it again.',
     haltedUnknown: 'The room stopped. Write something to start it again.',
 
+    /** `mentions` arrive written as mentions (`@name`), in the order the daemon reported them. */
+    unresolvedMentions: (mentions: readonly string[]): string =>
+      `Not delivered to ${englishList(mentions)}: no one in this room has ${
+        mentions.length === 1 ? 'that name' : 'those names'
+      }. The message stays in the room.`,
+
     /** The post waits in the window's inbox until its CLI takes it, which can be at its next turn. */
     deliveryPending: 'Queued',
     deliveryTaken: 'Delivered',
@@ -630,9 +644,7 @@ export const messagesEn = {
 
     /** List and plural form policy lives with the resource, not the machinery. */
     profileUsedByRoles: (roles: readonly string[]): string => {
-      const last = roles[roles.length - 1] ?? '';
-      const listed =
-        roles.length <= 2 ? roles.join(' and ') : `${roles.slice(0, -1).join(', ')}, and ${last}`;
+      const listed = englishList(roles);
       return roles.length === 1
         ? `Used by the role ${listed}. Its tasks cannot open windows while this profile is disabled.`
         : `Used by the roles ${listed}. Their tasks cannot open windows while this profile is disabled.`;

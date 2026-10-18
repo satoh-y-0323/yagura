@@ -106,6 +106,16 @@
   box-shadow: 0 0 0 2px var(--color-primary-hover);
 }
 
+/* The line a dialog shows when the daemon refused what was submitted. */
+.form-error {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-background);
+  color: var(--color-error);
+  border: 1px solid var(--color-error);
+  font-size: var(--font-size-sm);
+}
+
 /* A horizontal strip whose children sit on one baseline with the standard
    gap. The three shared declarations live here; each component <style> keeps
    only its genuinely local declarations. */
@@ -177,7 +187,7 @@
 }
 
 /* A dismiss glyph that borrows the colour of whatever surface it sits on:
-   the banner's ✕ and the add-window dialog's ✕. */
+   a banner's ✕ and the add-window dialog's ✕. */
 .banner-close,
 .dialog-close {
   flex: 0 0 auto;

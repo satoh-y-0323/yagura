@@ -52,6 +52,7 @@
     ATTACH_VIEW_MIN_REVISION,
     type ApprovalRequest,
     type ChatChanged,
+    type ChatPosted,
     type ChatRoomInfo,
     type RestoreEntry,
   } from './ipc/session-boundary';
@@ -916,27 +917,26 @@
     void refreshChat(chatRoomStates.get(currentRoomId)?.nextAfterSeq);
   }
 
-  /** Posts one message; `false` leaves the composer holding what was typed. */
-  async function postChat(body: string, broadcast: boolean): Promise<boolean> {
+  /** Posts one message; `null` leaves the composer holding what was typed. */
+  async function postChat(body: string, broadcast: boolean): Promise<ChatPosted | null> {
     const roomId = currentRoomId === '' ? undefined : currentRoomId;
     operationError = null;
+    let posted: ChatPosted;
     try {
-      if (broadcast) {
-        await invokeBroadcastChat(body, roomId);
-      } else {
-        await invokeSendChat(body, roomId);
-      }
+      posted = broadcast
+        ? await invokeBroadcastChat(body, roomId)
+        : await invokeSendChat(body, roomId);
     } catch (error) {
       reportOperationFailure(chat.panelTitle, error);
-      return false;
+      return null;
     }
     await refreshChat();
-    return true;
+    return posted;
   }
 
-  async function broadcastChat(body: string): Promise<boolean> {
+  async function broadcastChat(body: string): Promise<ChatPosted | null> {
     if (!(await requestConfirmation('broadcast'))) {
-      return false;
+      return null;
     }
     return postChat(body, true);
   }
@@ -1698,14 +1698,13 @@
   });
 
   // The view starts these operations without awaiting them, so a refusal has
-  // to become a banner here, where the banner is owned.
+  // to become a banner here, where the banner is owned. Rename is awaited by
+  // its dialog, which shows the refusal itself.
   const actions: WindowActions = {
     ...contractedActions,
     close: (entry) => reportFailures(errors.closeWindowFailed, contractedActions.close(entry)),
     interrupt: (entry) =>
       reportFailures(errors.interruptWindowFailed, contractedActions.interrupt(entry)),
-    rename: (entry, name) =>
-      reportFailures(errors.renameWindowFailed, contractedActions.rename(entry, name)),
   };
 
   // The jump to the next window needing the user reads the rooms as the sidebar
@@ -2428,6 +2427,7 @@
         profile: launch.profile,
         model: launch.model ?? undefined,
         effort: launch.effort ?? undefined,
+        onNameTaken: launch.onNameTaken,
       });
     }
     return invokeOpenWindow({
@@ -2436,6 +2436,7 @@
       name: launch.name,
       detection: launch.detection ?? undefined,
       vendor: launch.vendor ?? undefined,
+      onNameTaken: launch.onNameTaken,
     });
   }
 
@@ -3168,10 +3169,10 @@
   title={dialogs.renameTitle}
   label={forms.windowNameLabel}
   initialValue={renameDialog.entry?.name ?? ''}
-  onConfirm={(name: string) => {
+  onConfirm={async (name: string) => {
     const entry = renameDialog.entry;
     if (entry !== null) {
-      void actions.rename(entry, name);
+      await actions.rename(entry, name);
     }
   }}
   onCancel={() => {

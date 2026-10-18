@@ -161,6 +161,35 @@ describe('describeWindowOpenFailure: the daemon has not settled a wire revision 
   });
 });
 
+describe('describeWindowOpenFailure: a taken name says how to get past it', () => {
+  const HINT = 'Choose another name, or leave the name empty to get a numbered one.';
+  const TAKEN = 'a window named “Claude Code” is already open';
+
+  it('follows a name_taken refusal with the hint, as its own sentence', () => {
+    const failure: WindowOpenFailure = {
+      kind: 'rejected',
+      code: 'name_taken',
+      message: TAKEN,
+      rejectedArgument: 'name',
+    };
+
+    expect(describeWindowOpenFailure(SUMMARY, failure)).toBe(`${SUMMARY}: ${TAKEN}. ${HINT}`);
+  });
+
+  it('leaves the hint off any other refusal, a refused directory included', () => {
+    const others: WindowOpenFailure[] = [
+      rejection(CWD_ARGUMENT, 'no such directory'),
+      { kind: 'rejected', code: 'profile_disabled', message: TAKEN, rejectedArgument: 'profile' },
+      { kind: 'local', message: TAKEN },
+      { kind: 'bare', message: TAKEN },
+    ];
+
+    for (const failure of others) {
+      expect(describeWindowOpenFailure(SUMMARY, failure)).not.toContain(HINT);
+    }
+  });
+});
+
 describe('shouldDropRememberedCwd: the directory is dropped only when the rejection names it', () => {
   it('drops it when the rejection names the working-directory argument', () => {
     expect(shouldDropRememberedCwd(rejection(CWD_ARGUMENT))).toBe(true);

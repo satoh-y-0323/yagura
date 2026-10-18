@@ -82,6 +82,9 @@ export const MCP_REGISTRATION_MIN_REVISION = 13;
 /** The `error.code` a daemon answers with when asked to launch a disabled profile. */
 export const PROFILE_DISABLED_CODE = 'profile_disabled';
 
+/** The `error.code` a daemon answers with when a live window already carries the name. */
+export const NAME_TAKEN_CODE = 'name_taken';
+
 /**
  * Fields every window-scoped payload carries.
  *
@@ -360,6 +363,13 @@ export interface ApprovalResetPayload {
  * fallback (unlike the fail-safe normalization above).
  */
 export type DecideApprovalOutcome = 'decided' | 'not_pending';
+
+/**
+ * What the daemon does when a window name is already carried by a live
+ * window (`yagura_protocol::OnNameTaken`): refuse the launch, or open under
+ * `<name> <n>`.
+ */
+export type OnNameTaken = 'refuse' | 'number';
 
 /**
  * Outcome of the `close_window` command. A window the daemon does not hold,
