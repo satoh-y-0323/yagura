@@ -438,7 +438,9 @@ fn the_host_codex_profile_says_how_to_get_a_build_that_is_not_a_windows_shim() {
         shipped_delivery("codex-cli").shim_guidance,
         Some(guidance(
             "Install the standalone Codex from a new PowerShell window, then restart yagura:",
-            Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
+            Some(
+                r#"powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex""#
+            ),
             Some("https://learn.chatgpt.com/docs/codex/cli.md"),
         )),
         "the text, the command to copy and the page are carried apart"
