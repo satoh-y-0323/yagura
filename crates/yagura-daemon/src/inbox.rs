@@ -319,6 +319,8 @@ struct Shared {
     capacity: usize,
     spec: DeliverySpec,
     status: watch::Receiver<StatusAt>,
+    #[cfg(test)]
+    before_withdraw: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Shared {
@@ -528,6 +530,8 @@ impl Inbox {
                 capacity,
                 spec,
                 status,
+                #[cfg(test)]
+                before_withdraw: Mutex::new(None),
             }),
         }
     }
@@ -535,8 +539,9 @@ impl Inbox {
     /// Adds `parcel` and returns the parcels the inbox turned away: `parcel`
     /// itself when the inbox is full of other parcels, has ended, or `parcel`
     /// alone is longer than one answer can carry. Nothing already inside is
-    /// pushed out. A registered wait is answered when the window can be pushed
-    /// to.
+    /// pushed out, except that a notice replaces the notice waiting under its
+    /// key, which is not returned (see [`Parcel::notice`]). A registered wait
+    /// is answered when the window can be pushed to.
     pub fn deposit(&self, parcel: Parcel) -> Vec<Parcel> {
         self.deposit_tracked(parcel, None, None).turned_away
     }
@@ -544,7 +549,8 @@ impl Inbox {
     /// [`Self::deposit`], telling the depositor how the parcel leaves the
     /// inbox. `budget` is what a push of it draws on. With `waiting_limit`,
     /// a parcel that would find that many already waiting is turned away
-    /// sooner than the capacity alone would.
+    /// sooner than the capacity alone would. A notice that replaces another
+    /// leaves the replaced one's end dropped unsettled.
     pub fn deposit_tracked(
         &self,
         parcel: Parcel,
@@ -579,7 +585,10 @@ impl Inbox {
             held.parcel.notice && waiting.parcel.notice && waiting.parcel.key == held.parcel.key
         });
         match waiting {
-            Some(waiting) => *waiting = held,
+            Some(waiting) => {
+                tracing::debug!(key = %held.parcel.key, "notice replaced the one waiting under its key");
+                *waiting = held;
+            }
             None => state.parcels.push_back(held),
         }
         self.shared.wake(&mut state);
@@ -605,6 +614,17 @@ impl Inbox {
                 .carrying
                 .iter()
                 .any(|carried| carried.held.iter().any(|held| held.parcel.key == key))
+    }
+
+    /// Runs `hook` at the start of the next [`Self::withdraw`], before it
+    /// takes the inbox's lock.
+    #[cfg(test)]
+    pub(crate) fn before_next_withdraw(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self
+            .shared
+            .before_withdraw
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
     /// Whether a wait is registered.
@@ -772,6 +792,18 @@ impl Inbox {
     /// [`Withdrawal::Removed`] nothing hands it to the CLI; its depositor
     /// learns nothing more from it.
     pub fn withdraw(&self, key: &str) -> Withdrawal {
+        #[cfg(test)]
+        {
+            let hook = self
+                .shared
+                .before_withdraw
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut state = self.shared.lock();
         if let Some(position) = state.parcels.iter().position(|held| held.parcel.key == key) {
             state.parcels.remove(position);

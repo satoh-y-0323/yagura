@@ -133,10 +133,25 @@ pub(super) fn deposit(
         entry.delivery().map(|delivery| &delivery.wake),
         Some(WakeMode::None)
     );
-    let Deposited { turned_away, end } =
-        entry
-            .inbox()
-            .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
+    let deposited = entry
+        .inbox()
+        .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
+    after_deposit(registry, entry, deposited)
+}
+
+/// What [`deposit`] does once the inbox has answered, for a caller that
+/// deposits into the inbox itself: logs what was turned away and wakes the
+/// window's agent.
+///
+/// # Errors
+///
+/// [`Refused`] when the inbox did not take the parcel.
+pub(super) fn after_deposit(
+    registry: &WindowRegistry,
+    entry: &Arc<WindowEntry>,
+    deposited: Deposited,
+) -> Result<oneshot::Receiver<ParcelEnd>, Refused> {
+    let Deposited { turned_away, end } = deposited;
     if !turned_away.is_empty() {
         let keys: Vec<&str> = turned_away
             .iter()

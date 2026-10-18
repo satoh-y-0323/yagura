@@ -60,6 +60,9 @@ pub(super) struct ReportBody {
 /// inbox.
 pub struct ReportInboxes {
     registry: Arc<WindowRegistry>,
+    /// Held across every change to a notice's state and the matching deposit,
+    /// revision or withdrawal in the window's own inbox, so the two never
+    /// disagree. Taken before that inbox's lock, which never calls back here.
     inboxes: Mutex<HashMap<String, Inbox>>,
     next_waiter_id: AtomicU64,
     /// Numbers every inbox's stretches. Kept outside the inboxes because an
@@ -143,7 +146,10 @@ impl ReportInboxes {
         from_slot: bool,
         older: bool,
     ) {
-        let (fell_due, due, pending, stretch) = {
+        // Looked up before the inboxes' lock, which the registry's is never
+        // taken under.
+        let entry = self.registry.get(window_id);
+        let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
             let inbox = inboxes.entry(window_id.to_string()).or_default();
             if from_slot {
@@ -162,40 +168,49 @@ impl ReportInboxes {
                 inbox.notice = Notice::Due;
                 inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
             }
-            (
-                fell_due,
-                inbox.notice == Notice::Due,
-                inbox.reports.len(),
-                inbox.stretch,
-            )
+            let pending = inbox.reports.len();
+            // A window that declares no delivery is handed no notice: its
+            // reports stay readable through `wait_for_report`.
+            match entry.as_ref().filter(|entry| entry.delivers()) {
+                Some(entry) if fell_due => {
+                    let parcel =
+                        crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending));
+                    Some((
+                        entry.inbox().deposit_tracked(parcel, None, None),
+                        inbox.stretch,
+                    ))
+                }
+                Some(entry) if inbox.notice == Notice::Due => {
+                    // The notice still waiting tells the count as it is now.
+                    let _ = entry
+                        .inbox()
+                        .revise(REPORT_NOTICE_KEY, notice_text(pending));
+                    None
+                }
+                _ => None,
+            }
         };
-        let Some(entry) = self.registry.get(window_id) else {
+        let Some(entry) = entry else {
             // Window ids are never reused, so nobody could read it again.
             self.discard(window_id);
             return;
         };
-        if fell_due {
-            self.deposit_notice(&entry, pending, stretch);
-        } else if due {
-            // The notice still waiting tells the count as it is now.
-            let _ = entry
-                .inbox()
-                .revise(REPORT_NOTICE_KEY, notice_text(pending));
+        if let Some((deposited, stretch)) = deposited {
+            self.confirm_when_taken(&entry, deposited, stretch);
         }
         // Woken even for a window that is handed no notice: its agent
         // discards this inbox once the window ends.
         self.registry.wake_notices(&entry);
     }
 
-    /// Puts `stretch`'s notice in `entry`'s inbox for its CLI, and records it
-    /// as delivered once the CLI took it. A window that declares no delivery
-    /// is handed none: its reports stay readable through `wait_for_report`.
-    fn deposit_notice(self: &Arc<Self>, entry: &Arc<WindowEntry>, pending: usize, stretch: u64) {
-        if !entry.delivers() {
-            return;
-        }
-        let parcel = crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending));
-        let Ok(end) = notice_queue::deposit(&self.registry, entry, parcel, None, None) else {
+    /// Records `stretch`'s notice as delivered once the CLI took it.
+    fn confirm_when_taken(
+        self: &Arc<Self>,
+        entry: &Arc<WindowEntry>,
+        deposited: crate::inbox::Deposited,
+        stretch: u64,
+    ) {
+        let Ok(end) = notice_queue::after_deposit(&self.registry, entry, deposited) else {
             return;
         };
         let inboxes = Arc::clone(self);
@@ -223,17 +238,20 @@ impl ReportInboxes {
     /// One lock covers both, so a report can never slip into the inbox
     /// between the emptiness check and the waiter's registration.
     fn take_or_wait(self: &Arc<Self>, window_id: &str, may_wait: bool, budget_left: bool) -> Taken {
+        let entry = self.registry.get(window_id);
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id)
             && !inbox.reports.is_empty()
         {
             let reports = std::mem::take(&mut inbox.reports);
             inbox.notice = Notice::Lowered;
+            // The reports it announced were read.
+            if let Some(entry) = &entry {
+                let _ = entry.inbox().withdraw(REPORT_NOTICE_KEY);
+            }
             if inbox.is_idle() {
                 inboxes.remove(window_id);
             }
-            drop(inboxes);
-            self.withdraw_notice(window_id);
             return Taken::Ready(reports);
         }
         if !may_wait {
@@ -271,19 +289,23 @@ impl ReportInboxes {
         }
     }
 
-    /// Takes `window_id`'s waiting notice out of its window's inbox: the
-    /// reports it announced were read.
-    fn withdraw_notice(&self, window_id: &str) {
-        if let Some(entry) = self.registry.get(window_id) {
-            let _ = entry.inbox().withdraw(REPORT_NOTICE_KEY);
-        }
-    }
-
     #[cfg(test)]
     fn notice_due(&self, window_id: &str) -> bool {
         lock_recover(&self.inboxes)
             .get(window_id)
             .is_some_and(|inbox| inbox.notice == Notice::Due)
+    }
+
+    /// `window_id`'s notice state, `Some(None)` when it has no inbox, or
+    /// `None` while another thread holds the inboxes' lock.
+    #[cfg(test)]
+    fn try_notice(&self, window_id: &str) -> Option<Option<Notice>> {
+        let inboxes = match self.inboxes.try_lock() {
+            Ok(inboxes) => inboxes,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(inboxes.get(window_id).map(|inbox| inbox.notice))
     }
 
     /// The text of `window_id`'s due notice and the stretch it belongs to,
@@ -828,6 +850,82 @@ mod tests {
             .await
             .expect("open a registered window");
         (Arc::new(ReportInboxes::new(registry)), opened.window_id)
+    }
+
+    async fn delivering_window() -> (Arc<ReportInboxes>, Arc<WindowEntry>) {
+        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+        let delivery = crate::profile_delivery::ProfileDelivery {
+            output: crate::inbox::OutputForm::Plain,
+            max_chars: crate::inbox::DEFAULT_MAX_CHARS,
+            wake: crate::profile_delivery::WakeMode::Wait,
+            wake_stream: yagura_protocol::DeliveryStream::Stderr,
+            wake_exit: crate::inbox::DEFAULT_WAKE_EXIT,
+            launch_prompt: None,
+            shim_guidance: None,
+        };
+        let opened = registry
+            .open_with_extra_env(
+                OpenWindowRequest {
+                    command: idle_command(),
+                    cwd: None,
+                    name: None,
+                    vendor: None,
+                    detection: None,
+                },
+                Vec::new(),
+                Vec::new(),
+                WindowProvenance {
+                    delivery: Some(delivery),
+                    ..WindowProvenance::default()
+                },
+            )
+            .await
+            .expect("open a registered window");
+        let entry = registry.get(&opened.window_id).expect("registered");
+        (Arc::new(ReportInboxes::new(registry)), entry)
+    }
+
+    /// A report put while `wait_for_report` is taking the notice of the
+    /// reports it drained back out of the window's inbox must leave its own
+    /// notice there: the drain withdraws the old notice, never the new one.
+    #[tokio::test]
+    async fn a_report_put_while_a_drain_withdraws_its_notice_keeps_a_notice_of_its_own() {
+        let (inboxes, entry) = delivering_window().await;
+        let window = entry.window_id().to_string();
+        inboxes.put(&window, vec![report("first")], false, false);
+        assert!(entry.inbox().holds(REPORT_NOTICE_KEY));
+        let late: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        entry.inbox().before_next_withdraw(Box::new({
+            let inboxes = Arc::clone(&inboxes);
+            let window = window.clone();
+            let late = Arc::clone(&late);
+            let runtime = tokio::runtime::Handle::current();
+            move || {
+                // It lands in the gap when the drain leaves the inboxes' lock
+                // before withdrawing, and right after the drain otherwise.
+                let gap = inboxes.try_notice(&window).is_some();
+                let put = move || {
+                    let _runtime = runtime.enter();
+                    inboxes.put(&window, vec![report("second")], false, false);
+                };
+                if gap {
+                    put();
+                } else {
+                    *lock_recover(&late) = Some(std::thread::spawn(put));
+                }
+            }
+        }));
+
+        assert_eq!(drained(inboxes.take_or_wait(&window, false, true)).len(), 1);
+        if let Some(putting) = lock_recover(&late).take() {
+            putting.join().expect("the put finishes");
+        }
+
+        assert!(inboxes.notice_due(&window), "the second report is unread");
+        assert!(
+            entry.inbox().holds(REPORT_NOTICE_KEY),
+            "a due notice must be waiting in the window's inbox"
+        );
     }
 
     fn drained(taken: Taken) -> Vec<ReceivedReport> {

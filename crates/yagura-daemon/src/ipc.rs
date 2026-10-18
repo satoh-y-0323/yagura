@@ -5008,8 +5008,12 @@ async fn await_handoff_end(
                     Ok(ParcelEnd::Taken) => sent(HandoffDelivery::Taken),
                     Ok(ParcelEnd::TurnedAway) => SlotExhausted::Daemon.to_message(),
                     Ok(ParcelEnd::Closed | ParcelEnd::Stopped) => child_exited_msg(),
-                    // Dropped unsettled: it was withdrawn under way and its
-                    // push did not get it to the CLI.
+                    // Dropped unsettled: it was withdrawn under way, and its
+                    // push failed -- after the submit key it still reached
+                    // the CLI.
+                    Err(_) if submitted.as_ref().is_some_and(|pressed| *pressed.borrow()) => {
+                        sent(HandoffDelivery::Taken)
+                    }
                     Err(_) => sent(HandoffDelivery::UndeliveredTimeout),
                 };
             }
@@ -5995,6 +5999,77 @@ mod tests {
         assert_eq!(
             rx.try_recv().ok(),
             Some(encode_frame(&window_not_found_msg()))
+        );
+    }
+
+    #[cfg(windows)]
+    fn idle_command() -> Vec<String> {
+        vec!["cmd.exe".into(), "/c".into(), "exit".into()]
+    }
+
+    #[cfg(not(windows))]
+    fn idle_command() -> Vec<String> {
+        vec!["sh".into(), "-c".into(), "true".into()]
+    }
+
+    /// A handoff withdrawn at its bound while its push was still short of the
+    /// submit key, whose push then pressed the key and failed a later write,
+    /// reached the CLI: it is answered taken, never undelivered.
+    #[tokio::test]
+    async fn a_withdrawn_handoff_whose_push_pressed_the_key_before_failing_is_answered_taken() {
+        let config = DaemonConfig {
+            handoff_delivery_timeout_secs: 0,
+            ..DaemonConfig::default()
+        };
+        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let opened = registry
+            .open_with_extra_env(
+                OpenWindowRequest {
+                    command: idle_command(),
+                    cwd: None,
+                    name: None,
+                    vendor: None,
+                    detection: None,
+                },
+                Vec::new(),
+                Vec::new(),
+                WindowProvenance::default(),
+            )
+            .await
+            .expect("open a registered window");
+        let entry = registry.get(&opened.window_id).expect("registered");
+        let key = "handoff:test".to_string();
+        let end = entry
+            .inbox()
+            .deposit_tracked(Parcel::new(key.clone(), "envelope"), None, None)
+            .end
+            .expect("taken in");
+        let mut push = entry.inbox().begin_push(false).expect("the parcel waits");
+        let (_closed_tx, mut closed) = watch::channel(false);
+
+        let answering = tokio::spawn({
+            let entry = Arc::clone(&entry);
+            async move { await_handoff_end(&entry, &key, end, &mut closed, &config).await }
+        });
+        push.withdrawn
+            .wait_for(|withdrawn| *withdrawn)
+            .await
+            .expect("the inbox holds the push");
+        push.submitted.send_replace(true);
+        entry
+            .inbox()
+            .finish_push(push.id, crate::inbox::PushEnd::Failed);
+
+        let answer = answering.await.expect("the answer");
+        assert!(
+            matches!(
+                answer,
+                DaemonMessage::HandoffSent {
+                    delivery: HandoffDelivery::Taken,
+                    ..
+                }
+            ),
+            "{answer:?}"
         );
     }
 }
