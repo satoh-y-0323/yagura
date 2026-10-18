@@ -13,6 +13,9 @@
   let value = initialValue;
   let formError: string | null = null;
   let isSubmitting = false;
+  // Bumped on cancel, so a rename still in flight from a cancelled dialog
+  // cannot close or annotate the dialog opened after it.
+  let attempt = 0;
 
   // Reopening the dialog for another window must not show the previous entry.
   // `value` is not a dependency here, so typing does not reset the field.
@@ -23,19 +26,28 @@
 
   // The dialog stays open on a refusal, so the name can be corrected in place.
   async function handleConfirm(): Promise<void> {
+    const current = attempt;
     formError = null;
     isSubmitting = true;
     try {
       await onConfirm(value);
-      isOpen = false;
+      if (current === attempt) {
+        isOpen = false;
+      }
     } catch (error) {
-      formError = describeOperationFailure(errors.renameWindowFailed, error);
+      if (current === attempt) {
+        formError = describeOperationFailure(errors.renameWindowFailed, error);
+      }
     } finally {
-      isSubmitting = false;
+      if (current === attempt) {
+        isSubmitting = false;
+      }
     }
   }
 
   function handleCancel(): void {
+    attempt += 1;
+    isSubmitting = false;
     onCancel();
     isOpen = false;
   }
