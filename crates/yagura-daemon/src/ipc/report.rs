@@ -194,7 +194,7 @@ impl ReportInboxes {
         if !entry.delivers() {
             return;
         }
-        let parcel = crate::inbox::Parcel::new(REPORT_NOTICE_KEY, notice_text(pending));
+        let parcel = crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending));
         let Ok(end) = notice_queue::deposit(&self.registry, entry, parcel, None, None) else {
             return;
         };

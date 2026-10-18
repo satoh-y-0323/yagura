@@ -606,7 +606,7 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
 // --- I10 --------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_inbox_over_its_limit_drops_the_oldest_and_says_which() {
+async fn an_inbox_over_its_limit_turns_the_new_parcel_away_and_says_which() {
     let (h, mut client) = start("inbox-i10", |config| {
         config.inbox_capacity = 3;
     })
@@ -618,12 +618,70 @@ async fn an_inbox_over_its_limit_drops_the_oldest_and_says_which() {
             dropped.push(parcel.key);
         }
     }
-    assert_eq!(dropped, ["k0", "k1"]);
+    assert_eq!(dropped, ["k3", "k4"]);
     assert_eq!(pending(&h, &id), 3);
     let got = take(&mut client, &id).await;
-    assert!(!got.contains("PARCEL-0") && !got.contains("PARCEL-1"));
-    assert!(pos(&got, "PARCEL-2") < pos(&got, "PARCEL-3"));
-    assert!(pos(&got, "PARCEL-3") < pos(&got, "PARCEL-4"));
+    assert!(!got.contains("PARCEL-3") && !got.contains("PARCEL-4"));
+    assert!(pos(&got, "PARCEL-0") < pos(&got, "PARCEL-1"));
+    assert!(pos(&got, "PARCEL-1") < pos(&got, "PARCEL-2"));
+}
+
+#[tokio::test]
+async fn a_notice_is_not_pushed_out_by_the_parcels_that_fill_the_inbox() {
+    let (h, mut client) = start("inbox-i10-notice-kept", |config| {
+        config.inbox_capacity = 3;
+    })
+    .await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    assert!(
+        inbox
+            .deposit(Parcel::notice("report", "NOTICE-REPORT"))
+            .is_empty()
+    );
+    for n in 0..5 {
+        deposit(&h, &id, &format!("k{n}"), &format!("PARCEL-{n}"));
+    }
+    assert!(
+        inbox.holds("report"),
+        "the notice stays however full the inbox gets"
+    );
+    let got = take(&mut client, &id).await;
+    assert!(got.contains("NOTICE-REPORT"), "{got:?}");
+}
+
+#[tokio::test]
+async fn a_notice_is_taken_in_by_an_inbox_full_of_other_parcels() {
+    let (h, mut client) = start("inbox-i10-notice-room", |config| {
+        config.inbox_capacity = 2;
+    })
+    .await;
+    let id = h.open_idle_window(&mut client).await;
+    for n in 0..2 {
+        assert!(deposit(&h, &id, &format!("k{n}"), &format!("PARCEL-{n}")).is_empty());
+    }
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    assert!(
+        inbox
+            .deposit(Parcel::notice("plan:p1", "NOTICE-PLAN"))
+            .is_empty()
+    );
+    assert_eq!(pending(&h, &id), 3);
+    let got = take(&mut client, &id).await;
+    assert!(got.contains("PARCEL-0") && got.contains("PARCEL-1") && got.contains("NOTICE-PLAN"));
+}
+
+#[tokio::test]
+async fn a_wait_on_an_inbox_that_has_ended_is_answered_at_once_and_not_registered() {
+    let (h, mut client) = start("inbox-closed-wait", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    inbox.close(yagura_daemon::inbox::ParcelEnd::Closed);
+    assert!(matches!(
+        inbox.wait(),
+        yagura_daemon::inbox::Wait::Answered(_)
+    ));
+    assert!(!inbox.has_waiter());
 }
 
 #[tokio::test]

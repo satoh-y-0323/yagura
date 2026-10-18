@@ -95,7 +95,8 @@
                 <button
                   type="button"
                   class="btn btn-secondary profile-settings__copy"
-                  on:click={() => detailActions.onCopyText(command)}>{settings.profileCopy}</button
+                  on:click={() => detailActions.onCopyText(command)}
+                  >{settings.profileCopyCommand}</button
                 >
               </div>
             {/if}
@@ -107,7 +108,8 @@
                 <button
                   type="button"
                   class="btn btn-secondary profile-settings__copy"
-                  on:click={() => detailActions.onCopyText(url)}>{settings.profileCopy}</button
+                  on:click={() => detailActions.onCopyText(url)}
+                  >{settings.profileCopyInstallGuide}</button
                 >
               </div>
             {/if}

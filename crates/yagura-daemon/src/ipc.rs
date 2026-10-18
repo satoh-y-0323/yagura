@@ -4511,10 +4511,10 @@ fn requester_left(closed: &Option<watch::Receiver<bool>>) -> bool {
 /// [`DeliveryEnd::Skipped`]), writes it and confirms/resends it under
 /// `entry`'s own input profile.
 ///
-/// `closed` is raised when whoever the text is for no longer wants it,
-/// watched for the whole delivery. One raised after the first byte ends the
-/// delivery in [`DeliveryEnd::Finished`], with whatever of its own still
-/// remains.
+/// `closed` is raised when whoever the text is for no longer wants it. Raised
+/// before the submit key, it ends the delivery and takes the body back; once
+/// the key is pressed it is no longer watched, so the delivery runs to its
+/// real outcome and cleans up after itself.
 /// `ready_hold_wait_ms` is the caller's own prior readiness wait, carried
 /// onward into the verdict. `carried` is what an earlier call for the
 /// same delivery left in the composer (`None` for a first call); the residue
@@ -4665,6 +4665,10 @@ async fn run_delivery<'a>(
             SubmitPlacement::Placed(outcome) => {
                 placements += 1;
                 envelope_remains = None;
+                // Submitted: nothing of the envelope can be taken back now, so
+                // what follows (a resend's probe included) runs to its end
+                // instead of stopping with a probe left in the composer.
+                closed = None;
                 foreign_draft = false;
                 last_submit = Some(outcome);
                 (outcome, judgment.residue_write_seq)
@@ -4751,18 +4755,9 @@ async fn run_delivery<'a>(
             status_before_submit: outcome.status_before_submit,
             ready_hold_wait_ms,
         };
-        if requester_left(&closed) {
-            break unanswered;
-        }
-        let evidence = wait_for_submit_evidence(
-            entry,
-            &mut rx,
-            &mut closed,
-            outcome,
-            after_key,
-            profile.delivery_confirm,
-        )
-        .await;
+        let evidence =
+            wait_for_submit_evidence(entry, &mut rx, outcome, after_key, profile.delivery_confirm)
+                .await;
         match evidence {
             SubmitEvidence::Taken => {
                 break DeliveryVerdict {
@@ -4791,7 +4786,7 @@ async fn run_delivery<'a>(
                 // so it is never written to again on the daemon's own
                 // judgement.
                 let left_ready = !is_ready(entry.current_status());
-                if out_of_resends || left_ready || requester_left(&closed) {
+                if out_of_resends || left_ready {
                     break unanswered;
                 }
                 // Otherwise loop again with this placement's own envelope
@@ -4826,8 +4821,8 @@ enum SubmitEvidence {
     Quiet,
     /// Status changes were lost, so a reaction may have been missed.
     Unobservable,
-    /// Nothing more can show: the child exited or the requester left, or
-    /// status changes were lost after another writer had already written.
+    /// Nothing more can show: the child exited, or status changes were lost
+    /// after another writer had already written.
     Unanswered,
 }
 
@@ -4839,7 +4834,6 @@ enum SubmitEvidence {
 async fn wait_for_submit_evidence(
     entry: &WindowEntry,
     rx: &mut broadcast::Receiver<StatusAt>,
-    closed: &mut Option<watch::Receiver<bool>>,
     outcome: SubmitOutcome,
     after_key: Option<u64>,
     bound: Duration,
@@ -4874,7 +4868,6 @@ async fn wait_for_submit_evidence(
         }
         tokio::select! {
             biased;
-            () = wait_for_disconnect(closed) => return SubmitEvidence::Unanswered,
             taken = &mut composer, if composer_open => match taken {
                 EnvelopeWait::Taken => return SubmitEvidence::Taken,
                 EnvelopeWait::Exited => return SubmitEvidence::Unanswered,

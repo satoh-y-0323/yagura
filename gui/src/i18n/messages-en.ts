@@ -621,7 +621,9 @@ export const messagesEn = {
       needs_native_program:
         "yagura passes messages to this CLI as arguments, which a Windows .cmd / .bat file can't carry unchanged",
     },
-    profileCopy: 'Copy',
+    /** The visible text is the accessible name, so the two buttons differ for a screen reader too. */
+    profileCopyCommand: 'Copy command',
+    profileCopyInstallGuide: 'Copy install guide address',
     /** Labels the page a profile's guidance points to; shown as text to copy, not a link. */
     profileInstallGuide: 'Install guide',
     profileSwitchLabel: (name: string): string => `Use ${name}`,

@@ -1541,14 +1541,63 @@ const FOLD_PLACEHOLDER: &str = "[Pasted text #1]";
 #[tokio::test]
 async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_and_leaves_no_probe()
 {
-    let dir = unique_temp_dir("events-confirm-folded-taken-by-probe");
+    // The confirmation window runs out on its own; the test waits on the
+    // receiver's input and screen, never on the clock.
+    let delivery = folded_envelope_taken_by_the_resend_probe(
+        "events-confirm-folded-taken-by-probe",
+        "0",
+        ClockBounds::RunOnTheirOwn,
+    )
+    .await;
+    assert_eq!(delivery, "taken");
+}
+
+/// R10 again, with the handoff's own delivery bound running out while the
+/// resend probe is on its way to the receiver: the probe a delivery has begun
+/// is carried to its end and erased, not left in the receiver's composer.
+#[tokio::test]
+async fn a_handoff_that_times_out_while_its_resend_probe_is_on_its_way_leaves_no_probe() {
+    let delivery = folded_envelope_taken_by_the_resend_probe(
+        "events-confirm-folded-probe-after-timeout",
+        // The receiver reflects what it reads after a delay, so the probe is
+        // still on its way when the hour passes.
+        "30",
+        ClockBounds::RunOutBeforeTheProbe,
+    )
+    .await;
+    assert_eq!(
+        delivery, "taken",
+        "the push that began the probe settled the handoff when it finished"
+    );
+}
+
+/// How the clock bounds of R10's delivery end.
+#[derive(Clone, Copy)]
+enum ClockBounds {
+    /// The test's clock is left alone.
+    RunOnTheirOwn,
+    /// An hour of the test's clock passes once the folded envelope is drawn,
+    /// whatever the receiver still has to do.
+    RunOutBeforeTheProbe,
+}
+
+/// Plays R10 and checks what the receiver was left with; returns the handoff's
+/// delivery.
+async fn folded_envelope_taken_by_the_resend_probe(
+    name: &str,
+    timing: &str,
+    clock: ClockBounds,
+) -> String {
+    let dir = unique_temp_dir(name);
     let log = dir.join("child-input.log");
-    let h = Harness::start("events-confirm-folded-taken-by-probe", handoff_config(&dir)).await;
+    let h = Harness::start(name, handoff_config(&dir)).await;
     let mut client = h.connect().await;
     let window = ReceivingWindow {
         paste_guard_keys: u64::MAX,
         receive_mode: "take-on-typing-after-key",
+        delivery_confirm_ms: 600,
         resend_max: 2,
+        timing,
         fold_placeholder: FOLD_PLACEHOLDER,
         ..ReceivingWindow::new("confirm-folded-taken-by-probe")
     };
@@ -1568,7 +1617,9 @@ async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_a
         },
     )
     .await;
-    let_every_clock_bound_run_out().await;
+    if matches!(clock, ClockBounds::RunOutBeforeTheProbe) {
+        let_every_clock_bound_run_out().await;
+    }
 
     let delivery = handoff_reply(&mut client).await;
     // Before the sentinel below, which this receiver paints as typed text.
@@ -1589,4 +1640,5 @@ async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_a
         "the probe was erased; the receiver read {after_the_key:?} after the key"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
+    delivery
 }

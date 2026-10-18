@@ -1092,9 +1092,9 @@ pub(super) async fn handle_approve_plan(
                 let key = format!("plan:{}", info.plan_id);
                 // One notice per approved plan, however often it is approved.
                 if !entry.inbox().holds(&key) {
-                    let notice = Parcel::new(key, compose_plan_approved_notice(&info.plan_id));
-                    // A notice the owner's inbox has no room for is dropped:
-                    // the owner still reads the plan through get_plan.
+                    let notice = Parcel::notice(key, compose_plan_approved_notice(&info.plan_id));
+                    // Refused only once the owner's window has ended; the owner
+                    // still reads the plan through get_plan.
                     let _ = super::notice_queue::deposit(registry, &entry, notice, None, None);
                 }
             }

@@ -151,6 +151,7 @@ pub struct Parcel {
     pub key: String,
     /// What the CLI reads.
     pub text: String,
+    notice: bool,
 }
 
 impl Parcel {
@@ -160,6 +161,18 @@ impl Parcel {
         Self {
             key: key.into(),
             text: text.into(),
+            notice: false,
+        }
+    }
+
+    /// A notice: the daemon's own word, kept once per `key` (its depositor
+    /// revises or withdraws it by that key and never sends it again). It is
+    /// not counted against the inbox's capacity.
+    #[must_use]
+    pub fn notice(key: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            notice: true,
+            ..Self::new(key, text)
         }
     }
 }
@@ -227,8 +240,7 @@ impl Default for DeliverySpec {
 pub enum ParcelEnd {
     /// The window's CLI took it.
     Taken,
-    /// It was turned away: the inbox was over its capacity, or the budget a
-    /// push of it draws on was spent.
+    /// It was turned away: the budget a push of it draws on was spent.
     TurnedAway,
     /// The window ended before its CLI took it.
     Closed,
@@ -286,6 +298,16 @@ struct State {
     closed: Option<ParcelEnd>,
     waiter: Option<Waiter>,
     next_waiter: u64,
+}
+
+impl State {
+    /// How many waiting parcels are not notices: the ones the capacity bounds.
+    fn waiting_others(&self) -> usize {
+        self.parcels
+            .iter()
+            .filter(|held| !held.parcel.notice)
+            .count()
+    }
 }
 
 struct Shared {
@@ -423,8 +445,7 @@ impl Drop for WaitGuard {
 
 /// What depositing a parcel came to.
 pub struct Deposited {
-    /// The parcels the inbox turned away: the oldest ones when it is over its
-    /// capacity, or the new one itself when it could not be taken in.
+    /// The new parcel itself when it could not be taken in; empty otherwise.
     pub turned_away: Vec<Parcel>,
     /// Yields how the new parcel left the inbox; `None` when it was turned
     /// away at once.
@@ -485,7 +506,8 @@ impl std::fmt::Debug for Inbox {
 }
 
 impl Inbox {
-    /// An empty inbox holding at most `capacity` parcels, answering by `spec`
+    /// An empty inbox holding at most `capacity` parcels besides notices,
+    /// answering by `spec`
     /// and pushing only while `status` allows it.
     #[must_use]
     pub fn new(capacity: usize, spec: DeliverySpec, status: watch::Receiver<StatusAt>) -> Self {
@@ -499,10 +521,11 @@ impl Inbox {
         }
     }
 
-    /// Adds `parcel` and returns the parcels the inbox turned away: the oldest
-    /// ones when it is over its capacity, or `parcel` itself when it alone is
-    /// longer than one answer can carry. A registered wait is answered when
-    /// the window can be pushed to.
+    /// Adds `parcel` and returns the parcels the inbox turned away: `parcel`
+    /// itself when the inbox is full of other parcels, has ended, or `parcel`
+    /// alone is longer than one answer can carry. Nothing already inside is
+    /// pushed out. A registered wait is answered when the window can be pushed
+    /// to.
     pub fn deposit(&self, parcel: Parcel) -> Vec<Parcel> {
         self.deposit_tracked(parcel, None, None).turned_away
     }
@@ -510,7 +533,7 @@ impl Inbox {
     /// [`Self::deposit`], telling the depositor how the parcel leaves the
     /// inbox. `budget` is what a push of it draws on. With `waiting_limit`,
     /// a parcel that would find that many already waiting is turned away
-    /// instead of pushing the oldest out.
+    /// sooner than the capacity alone would.
     pub fn deposit_tracked(
         &self,
         parcel: Parcel,
@@ -525,7 +548,11 @@ impl Inbox {
             return refused(parcel);
         }
         let mut state = self.shared.lock();
-        let full = waiting_limit.is_some_and(|limit| state.parcels.len() >= limit);
+        // A notice is one per key, so it bounds itself; it is never turned
+        // away, and never counted, for the room other parcels take.
+        let full = !parcel.notice
+            && (state.waiting_others() >= self.shared.capacity
+                || waiting_limit.is_some_and(|limit| state.parcels.len() >= limit));
         if state.closed.is_some() || full {
             return refused(parcel);
         }
@@ -535,17 +562,9 @@ impl Inbox {
             end: Some(tx),
             budget,
         });
-        let mut turned_away = Vec::new();
-        while state.parcels.len() > self.shared.capacity {
-            let Some(oldest) = state.parcels.pop_front() else {
-                break;
-            };
-            turned_away.push(oldest.parcel.clone());
-            oldest.settle(ParcelEnd::TurnedAway);
-        }
         self.shared.wake(&mut state);
         Deposited {
-            turned_away,
+            turned_away: Vec::new(),
             end: Some(rx),
         }
     }
@@ -595,6 +614,9 @@ impl Inbox {
     /// that one is answered with nothing to print and a success exit.
     pub fn wait(&self) -> Wait {
         let mut state = self.shared.lock();
+        if state.closed.is_some() {
+            return Wait::Answered(Box::new(silence()));
+        }
         if let Some(replaced) = state.waiter.take() {
             // The replaced wait may have ended already; then nobody reads this.
             let _ = replaced.answer.send(silence());

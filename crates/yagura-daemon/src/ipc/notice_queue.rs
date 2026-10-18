@@ -115,8 +115,9 @@ pub(super) enum Refused {
 }
 
 /// Puts `parcel` in `entry`'s inbox and wakes the window's agent. `budget` is
-/// what typing it draws on; `waiting_limit` turns it away rather than pushing
-/// an older parcel out when that many already wait to be typed.
+/// what typing it draws on; `waiting_limit` turns it away when that many
+/// already wait to be typed. A full inbox turns the new parcel away and never
+/// pushes an older one out, except that a notice is always taken in.
 ///
 /// # Errors
 ///
@@ -137,10 +138,14 @@ pub(super) fn deposit(
             .inbox()
             .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
     if !turned_away.is_empty() {
+        let keys: Vec<&str> = turned_away
+            .iter()
+            .map(|parcel| parcel.key.as_str())
+            .collect();
         tracing::info!(
             window_id = entry.window_id(),
-            count = turned_away.len(),
-            "parcels turned away by a full inbox"
+            ?keys,
+            "parcel turned away by the inbox"
         );
     }
     let Some(end) = end else {

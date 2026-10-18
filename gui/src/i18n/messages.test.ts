@@ -290,7 +290,8 @@ export const dummyMessages: Messages = {
       no_default_shell: 'DUMMY_settings_profileUnavailableReason_no_default_shell',
       needs_native_program: 'DUMMY_settings_profileUnavailableReason_needs_native_program',
     },
-    profileCopy: 'DUMMY_settings_profileCopy',
+    profileCopyCommand: 'DUMMY_settings_profileCopyCommand',
+    profileCopyInstallGuide: 'DUMMY_settings_profileCopyInstallGuide',
     profileInstallGuide: 'DUMMY_settings_profileInstallGuide',
     profileSwitchLabel: (name: string) => `DUMMY_settings_profileSwitchLabel(${name})`,
     profileUsedByRoles: (roles: readonly string[]) =>
