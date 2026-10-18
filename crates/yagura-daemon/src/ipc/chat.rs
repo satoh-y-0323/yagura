@@ -830,7 +830,9 @@ pub(super) fn spawn_participation_watch(
                         return;
                     }
                 }
-                _ = shutdown.changed() => {}
+                // Shutdown only ever turns true, and a dropped sender means the
+                // server is gone: either way the watch ends.
+                _ = shutdown.changed() => return,
             }
             let Some(now) = room_rosters(&chat, &registry).await else {
                 continue;
