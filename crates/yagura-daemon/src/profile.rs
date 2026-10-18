@@ -32,7 +32,9 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 use yagura_os::program;
-use yagura_protocol::{LaunchOptionAlias, LaunchOptionInfo, ProfileUnavailableKind};
+use yagura_protocol::{
+    LaunchOptionAlias, LaunchOptionInfo, ProfileGuidance, ProfileUnavailableKind,
+};
 
 use crate::child_env::is_reserved_env_name;
 use crate::config::DaemonConfig;
@@ -335,7 +337,7 @@ pub struct ProfileEntry {
     pub unavailable_kind: Option<ProfileUnavailableKind>,
     /// The profile's own guidance that follows the reason text, carried
     /// apart from it ([`Unavailability::guidance`]).
-    pub unavailable_guidance: Option<String>,
+    pub unavailable_guidance: Option<ProfileGuidance>,
     /// The `model` option this profile maps, `None` when it accepts none.
     pub model: Option<LaunchOptionInfo>,
     /// The `effort` option this profile maps, `None` when it accepts none.
@@ -1358,12 +1360,13 @@ pub struct Unavailability {
     /// The kind of reason. Never [`ProfileUnavailableKind::Unknown`].
     pub kind: ProfileUnavailableKind,
     /// The English reason text: one fixed sentence per kind naming no path,
-    /// followed by [`Unavailability::guidance`] when there is one.
+    /// followed by every part of [`Unavailability::guidance`] when there is
+    /// one, so a reader of this text alone still learns the remedy.
     pub reason: String,
     /// The profile's own `shim_guidance`, for
     /// [`ProfileUnavailableKind::NeedsNativeProgram`] only, and only when the
     /// profile declares one.
-    pub guidance: Option<String>,
+    pub guidance: Option<ProfileGuidance>,
 }
 
 impl Unavailability {
@@ -1470,11 +1473,29 @@ fn wake_command_unavailability(
     Some(Unavailability {
         kind: ProfileUnavailableKind::NeedsNativeProgram,
         reason: match &guidance {
-            Some(guidance) => format!("{REASON_WAKE_NEEDS_NATIVE_PROGRAM} {guidance}"),
+            Some(guidance) => format!(
+                "{REASON_WAKE_NEEDS_NATIVE_PROGRAM}. {}",
+                guidance_sentence(guidance)
+            ),
             None => REASON_WAKE_NEEDS_NATIVE_PROGRAM.to_string(),
         },
         guidance,
     })
+}
+
+/// `guidance` as one line: the text, then the command, then the page.
+fn guidance_sentence(guidance: &ProfileGuidance) -> String {
+    let mut sentence = guidance.text.clone();
+    if let Some(command) = &guidance.command {
+        sentence.push(' ');
+        sentence.push_str(command);
+    }
+    if let Some(url) = &guidance.url {
+        sentence.push_str(" (see ");
+        sentence.push_str(url);
+        sentence.push(')');
+    }
+    sentence
 }
 
 /// English reason text for what the listing side can confirm about this

@@ -126,7 +126,8 @@
 //!
 //! Revision 23 answers a handoff with `taken`, `undelivered_timeout` or
 //! `undelivered_no_delivery` in place of what a composer was seen to do, and
-//! adds `unavailable_kind` and `unavailable_guidance` to [`ProfileInfo`].
+//! adds `unavailable_kind` and `unavailable_guidance` ([`ProfileGuidance`])
+//! to [`ProfileInfo`].
 
 use std::collections::BTreeSet;
 
@@ -1756,11 +1757,24 @@ pub struct ProfileInfo {
     /// kind, when the profile declares none, and when the peer does not carry
     /// the field.
     #[serde(default)]
-    pub unavailable_guidance: Option<String>,
+    pub unavailable_guidance: Option<ProfileGuidance>,
 }
 
 fn enabled_when_absent() -> bool {
     true
+}
+
+/// What a launch profile tells its user to do about a reason it cannot be
+/// used, in the parts a client shows apart: the explanation, a command to copy
+/// and a page to open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileGuidance {
+    /// The explanation, a single line.
+    pub text: String,
+    /// A command the user can copy and run, if the profile names one.
+    pub command: Option<String>,
+    /// An `https` page that says more, if the profile names one.
+    pub url: Option<String>,
 }
 
 /// Why a profile is not launchable right now, as [`ProfileInfo`] reports it.

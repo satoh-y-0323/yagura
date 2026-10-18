@@ -72,8 +72,6 @@ fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
         wake: yagura_daemon::profile_delivery::WakeMode::None,
         wake_stream: yagura_protocol::DeliveryStream::Stderr,
         wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
-        wake_timeout_secs: None,
-        session_pointer: None,
         launch_prompt: None,
         shim_guidance: None,
     }

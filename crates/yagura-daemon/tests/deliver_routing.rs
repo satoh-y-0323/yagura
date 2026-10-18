@@ -392,8 +392,7 @@ fn write_hook_definition(dir: &Path) {
 const WAIT_DELIVERY: &str = "wake = \"wait\"\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]";
 /// ... of a profile whose CLI is woken by running its own program.
 const COMMAND_DELIVERY: &str = "wake = \"command\"\nwake_args = [\"--woken\", \"{session}\", \
-                                \"{text}\"]\nsession_pointer = \"/session_id\"\n\
-                                launch_prompt = [\"--prompt\", \"{prompt}\"]";
+                                \"{text}\"]\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]";
 /// ... of a profile with no way to wake its CLI while it waits.
 const NONE_DELIVERY: &str = "wake = \"none\"\nlaunch_prompt = [\"--prompt\", \"{prompt}\"]";
 

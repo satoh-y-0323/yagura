@@ -42,7 +42,8 @@ use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    HandoffDelivery, ProfileInfo, ProfileUnavailableKind, WindowInfo, WithdrawReason,
+    HandoffDelivery, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, WindowInfo,
+    WithdrawReason,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
@@ -404,7 +405,8 @@ async fn list_profiles_carries_a_shim_profiles_guidance_apart_from_its_reason() 
         "shimmed",
         "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"shimmed\"]\n\n\
          [delivery]\nwake = \"command\"\nwake_args = [\"queue\", \"{text}\"]\n\
-         shim_guidance = \"Use the native build.\"\n",
+         shim_guidance = { text = \"Use the native build:\", command = \"get-native\", \
+         url = \"https://a.test/native\" }\n",
     );
 
     let config = DaemonConfig {
@@ -424,9 +426,13 @@ async fn list_profiles_carries_a_shim_profiles_guidance_apart_from_its_reason() 
         "{shimmed:?}"
     );
     assert_eq!(
-        shimmed.unavailable_guidance.as_deref(),
-        Some("Use the native build."),
-        "{shimmed:?}"
+        shimmed.unavailable_guidance,
+        Some(ProfileGuidance {
+            text: "Use the native build:".to_string(),
+            command: Some("get-native".to_string()),
+            url: Some("https://a.test/native".to_string()),
+        }),
+        "the three parts travel apart, so a client can show, copy and open each: {shimmed:?}"
     );
 }
 

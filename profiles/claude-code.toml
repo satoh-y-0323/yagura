@@ -40,15 +40,14 @@ config_file = '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"
 args = ["--settings", "{hooks_config_file}"]
 
 # How the daemon hands text to this CLI without typing it into the composer.
-# `wake_timeout_secs` is the wait hook's timeout. The launch prompt follows `--`
-# because `--mcp-config` takes several values and would otherwise swallow it.
+# The launch prompt follows `--` because `--mcp-config` takes several values
+# and would otherwise swallow it.
 [delivery]
 output = "plain"
 max_chars = 10000
 wake = "wait"
 wake_stream = "stderr"
 wake_exit = 2
-wake_timeout_secs = 86400
 launch_prompt = ["--", "{prompt}"]
 
 # Claude Code reports its own registrations as `Prefix: value` lines and

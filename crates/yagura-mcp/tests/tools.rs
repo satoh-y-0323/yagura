@@ -3830,8 +3830,7 @@ async fn send_handoff_reports_a_window_requester_once_the_daemon_accepted_the_id
 /// Every daemon error code a `send_handoff` request can come back with. Each
 /// must reach the caller as the *same* MCP code: the bridge must never
 /// collapse a specific refusal into `internal`.
-const SEND_HANDOFF_DAEMON_ERROR_CODES: [&str; 8] = [
-    "window_not_ready",
+const SEND_HANDOFF_DAEMON_ERROR_CODES: [&str; 7] = [
     "approval_denied",
     "approval_timeout",
     "status_unknown",
@@ -3866,14 +3865,6 @@ async fn send_handoff_maps_an_unexpected_daemon_message_variant_to_internal() {
     let err = send_handoff(&transport, args).await.expect_err("must fail");
 
     assert_eq!(err.code(), "internal");
-}
-
-#[test]
-fn tool_error_code_covers_window_not_ready() {
-    assert_eq!(
-        ToolError::WindowNotReady("x".to_string()).code(),
-        "window_not_ready"
-    );
 }
 
 // =====================================================================

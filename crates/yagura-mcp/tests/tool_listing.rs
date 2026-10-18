@@ -298,6 +298,29 @@ fn send_handoff_keeps_the_reply_instruction_inside_the_delivered_description() {
     }
 }
 
+/// Both tools hand a request to a CLI at launch, which a Windows `.cmd` / `.bat` program
+/// cannot carry: a caller has to learn from the delivered description that such a profile
+/// is refused, and as which code.
+#[test]
+fn the_tools_that_hand_a_request_at_launch_say_a_windows_shim_profile_is_refused() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+    for tool_name in ["send_handoff", "open_task_window"] {
+        let delivered: String = find_tool(tools, tool_name)
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{tool_name} has a description"))
+            .chars()
+            .take(MAX_TOOL_DESCRIPTION_CHARS)
+            .collect();
+        assert!(
+            delivered.contains(".cmd / .bat") && delivered.contains("unsupported"),
+            "{tool_name} must say a profile whose program is a Windows .cmd / .bat file is \
+             refused as unsupported, within what a truncating client delivers: {delivered:?}"
+        );
+    }
+}
+
 /// `open_window` and `send_handoff` both accept `model` and `effort` only
 /// alongside a launch profile; the alias vocabulary they draw from lives on
 /// the profile, not on the tool itself, so each property's own description

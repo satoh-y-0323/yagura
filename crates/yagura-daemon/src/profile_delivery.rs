@@ -5,7 +5,7 @@
 //! which CLI a profile is for.
 
 use thiserror::Error;
-use yagura_protocol::DeliveryStream;
+use yagura_protocol::{DeliveryStream, ProfileGuidance};
 
 use crate::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DeliverySpec, OutputForm};
 use crate::profile::contains_placeholder_outside;
@@ -44,17 +44,12 @@ pub struct ProfileDelivery {
     pub wake_stream: DeliveryStream,
     /// The exit code that wait ends with.
     pub wake_exit: u8,
-    /// The timeout, in seconds, the CLI is told to give the wait's hook.
-    pub wake_timeout_secs: Option<u64>,
-    /// Where a hook's stdin holds the CLI's session identifier, as a JSON
-    /// pointer.
-    pub session_pointer: Option<String>,
     /// The arguments that hand the CLI a first request at start-up, where
     /// `{prompt}` is filled in.
     pub launch_prompt: Option<Vec<String>>,
     /// What to tell a user whose program cannot be used for a wake by command
     /// because it is a Windows `.cmd` / `.bat` file.
-    pub shim_guidance: Option<String>,
+    pub shim_guidance: Option<ProfileGuidance>,
 }
 
 impl ProfileDelivery {
@@ -121,20 +116,6 @@ pub(crate) fn parse_delivery(
         None => DEFAULT_WAKE_EXIT,
         Some(value) => u8::try_from(value).map_err(|_| DeliveryError::Invalid("wake_exit"))?,
     };
-    let wake_timeout_secs = match take_integer(&mut table, "wake_timeout_secs")? {
-        None => None,
-        Some(value) => Some(
-            u64::try_from(value)
-                .ok()
-                .filter(|secs| *secs >= 1)
-                .ok_or(DeliveryError::Invalid("wake_timeout_secs"))?,
-        ),
-    };
-    let session_pointer = match take_string(&mut table, "session_pointer")? {
-        None => None,
-        Some(pointer) if pointer.starts_with('/') => Some(pointer),
-        Some(_) => return Err(DeliveryError::Invalid("session_pointer")),
-    };
     let launch_prompt = match take_strings(&mut table, "launch_prompt")? {
         None => None,
         Some(args) => Some(
@@ -142,7 +123,10 @@ pub(crate) fn parse_delivery(
                 .ok_or(DeliveryError::Invalid("launch_prompt"))?,
         ),
     };
-    let shim_guidance = take_string(&mut table, "shim_guidance")?;
+    let shim_guidance = match table.remove("shim_guidance") {
+        None => None,
+        Some(raw) => Some(parse_guidance(raw)?),
+    };
 
     if let Some((key, _)) = table.into_iter().next() {
         return Err(DeliveryError::UnknownKey(key));
@@ -153,11 +137,47 @@ pub(crate) fn parse_delivery(
         wake,
         wake_stream,
         wake_exit,
-        wake_timeout_secs,
-        session_pointer,
         launch_prompt,
         shim_guidance,
     }))
+}
+
+/// `{ text, command, url }`: `text` is required, the others optional. Each is
+/// one line of visible text, and `url` is an `https` address, because a client
+/// offers it to be opened.
+fn parse_guidance(raw: toml::Value) -> Result<ProfileGuidance, DeliveryError> {
+    let invalid = || DeliveryError::Invalid("shim_guidance");
+    let toml::Value::Table(mut table) = raw else {
+        return Err(invalid());
+    };
+    let mut take_line = |key: &'static str| -> Result<Option<String>, DeliveryError> {
+        match take_string(&mut table, key).map_err(|_| invalid())? {
+            Some(line) if !is_visible_line(&line) => Err(invalid()),
+            other => Ok(other),
+        }
+    };
+    let text = take_line("text")?.ok_or_else(invalid)?;
+    let command = take_line("command")?;
+    let url = take_line("url")?;
+    if url.as_deref().is_some_and(|url| !is_https_url(url)) {
+        return Err(invalid());
+    }
+    if !table.is_empty() {
+        return Err(invalid());
+    }
+    Ok(ProfileGuidance { text, command, url })
+}
+
+/// Some visible character, and no control character a reader would act on.
+fn is_visible_line(line: &str) -> bool {
+    !line.trim().is_empty() && !line.chars().any(char::is_control)
+}
+
+/// `https://` followed by a host, with no whitespace anywhere.
+fn is_https_url(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+        && !url.chars().any(char::is_whitespace)
 }
 
 /// `plain`, or a JSON template that is still JSON once the text is in it.

@@ -60,16 +60,20 @@ args = [
 ]
 
 # How the daemon hands text to this CLI without typing it into the composer.
-# A waiting CLI is woken by queueing a message on its session, which the hook's
-# stdin names (`session_pointer`).
+# A waiting CLI is woken by queueing a message on its session, which the
+# `--report-session` hook above tells the daemon.
 [delivery]
 output = "plain"
 max_chars = 10000
 wake = "command"
 wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
-session_pointer = "/session_id"
 launch_prompt = ["{prompt}"]
-shim_guidance = 'This profile needs the standalone Codex build, not the npm package. Install it from PowerShell with: irm https://chatgpt.com/codex/install.ps1 | iex (see https://learn.chatgpt.com/docs/codex/cli.md).'
+
+# What to tell a user whose `codex` is the npm package's `.cmd` launcher.
+[delivery.shim_guidance]
+text = "Install the standalone Codex from a new PowerShell window, then restart yagura:"
+command = "irm https://chatgpt.com/codex/install.ps1 | iex"
+url = "https://learn.chatgpt.com/docs/codex/cli.md"
 
 # `codex mcp add` rewrites the whole `[mcp_servers.<name>]` table, dropping
 # any hand-written key -- including `tool_timeout_sec` -- so it is written

@@ -63,14 +63,13 @@ args = [
 ]
 
 # How the daemon hands text to this CLI without typing it into the composer.
-# A waiting CLI is woken by queueing a message on its session, which the hook's
-# stdin names (`session_pointer`).
+# A waiting CLI is woken by queueing a message on its session, which the
+# `--report-session` hook above tells the daemon.
 [delivery]
 output = "plain"
 max_chars = 10000
 wake = "command"
 wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
-session_pointer = "/session_id"
 launch_prompt = ["{prompt}"]
 
 # The registration commands below run the same way any other window from

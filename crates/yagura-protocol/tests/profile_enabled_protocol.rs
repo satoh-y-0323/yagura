@@ -17,8 +17,9 @@
 //!   `Unknown` and a peer without the fields decodes with neither.
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, MessageError, ProfileInfo, ProfileUnavailableKind,
-    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
+    ClientMessage, DaemonMessage, MessageError, ProfileGuidance, ProfileInfo,
+    ProfileUnavailableKind, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -264,14 +265,62 @@ fn a_profile_list_round_trips_a_disabled_profile() {
 // `ProfileInfo.unavailable_kind` and `ProfileInfo.unavailable_guidance`
 // =============================================================================
 
-fn unavailable_profile(kind: ProfileUnavailableKind, guidance: Option<&str>) -> ProfileInfo {
+fn unavailable_profile(
+    kind: ProfileUnavailableKind,
+    guidance: Option<ProfileGuidance>,
+) -> ProfileInfo {
     ProfileInfo {
         available: false,
         unavailable_reason: Some("reason".to_string()),
         unavailable_kind: Some(kind),
-        unavailable_guidance: guidance.map(str::to_string),
+        unavailable_guidance: guidance,
         ..sample_profile(true)
     }
+}
+
+fn full_guidance() -> ProfileGuidance {
+    ProfileGuidance {
+        text: "Use the native build:".to_string(),
+        command: Some("get-native | run".to_string()),
+        url: Some("https://a.test/native".to_string()),
+    }
+}
+
+#[test]
+fn the_guidance_travels_as_its_text_its_command_and_its_page() {
+    let value = as_json(&unavailable_profile(
+        ProfileUnavailableKind::NeedsNativeProgram,
+        Some(full_guidance()),
+    ));
+    assert_eq!(
+        value.get("unavailable_guidance"),
+        Some(&serde_json::json!({
+            "text": "Use the native build:",
+            "command": "get-native | run",
+            "url": "https://a.test/native",
+        })),
+        "got: {value}"
+    );
+}
+
+#[test]
+fn a_guidance_with_text_alone_round_trips_without_a_command_or_a_page() {
+    let decoded = DaemonMessage::ProfileList {
+        profiles: vec![unavailable_profile(
+            ProfileUnavailableKind::NeedsNativeProgram,
+            Some(ProfileGuidance {
+                text: "Read the notes.".to_string(),
+                command: None,
+                url: None,
+            }),
+        )],
+        warnings: vec![],
+    };
+    let encoded = encode_daemon_message(&decoded);
+    assert_eq!(
+        decode_daemon_message(&encoded).expect("profile_list must round trip"),
+        decoded
+    );
 }
 
 #[test]
@@ -301,7 +350,7 @@ fn the_kind_and_the_guidance_round_trip_beside_the_reason() {
         profiles: vec![
             unavailable_profile(
                 ProfileUnavailableKind::NeedsNativeProgram,
-                Some("Use the native build."),
+                Some(full_guidance()),
             ),
             unavailable_profile(ProfileUnavailableKind::NotFound, None),
             sample_profile(true),

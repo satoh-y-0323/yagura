@@ -55,7 +55,6 @@ max_chars = 10000
 wake = "wait"
 wake_stream = "stderr"
 wake_exit = 2
-wake_timeout_secs = 86400
 launch_prompt = ["--", "{prompt}"]
 
 # The registration commands below run the same way any other window from

@@ -52,10 +52,6 @@ pub enum ToolError {
     /// is `Unknown` (fail-safe; not relaxable by a playbook).
     #[error("the window's status is unknown: {0}")]
     StatusUnknown(String),
-    /// The window a handoff opened from a launch profile never reached a
-    /// status that accepts input, so the envelope was not delivered.
-    #[error("the window is not ready: {0}")]
-    WindowNotReady(String),
     /// The daemon judged the target window's composer and never wrote the
     /// text there, so the submit key was never pressed for it.
     #[error("the text was not written into the window: {0}")]
@@ -120,7 +116,6 @@ impl ToolError {
             Self::SpawnFailed(_) => "spawn_failed",
             Self::ApprovalRequired(_) => "approval_required",
             Self::StatusUnknown(_) => "status_unknown",
-            Self::WindowNotReady(_) => "window_not_ready",
             Self::NotWritten(_) => "not_written",
             Self::NoComposer(_) => "no_composer",
             Self::RateLimited(_) => "rate_limited",
@@ -318,7 +313,6 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "spawn_failed" => ToolError::SpawnFailed(message),
         "approval_required" => ToolError::ApprovalRequired(message),
         "status_unknown" => ToolError::StatusUnknown(message),
-        "window_not_ready" => ToolError::WindowNotReady(message),
         "not_written" => ToolError::NotWritten(message),
         "no_composer" => ToolError::NoComposer(message),
         "rate_limited" => ToolError::RateLimited(message),

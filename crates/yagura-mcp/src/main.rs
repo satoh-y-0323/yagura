@@ -319,7 +319,8 @@ impl YaguraMcpServer {
             a window opened from a profile is started with it as its first request, \
             after its start and the envelope are both approved -- nothing starts \
             before that. A profile that cannot be handed a request at launch is \
-            refused as no_composer. delivery in the reply is taken once the receiving CLI took \
+            refused as no_composer, and one whose program is a Windows .cmd / .bat file \
+            as unsupported. delivery in the reply is taken once the receiving CLI took \
             the envelope (for a new window, once it started with it), \
             undelivered_timeout when nothing took it within the daemon's limit or you \
             left first (it is withdrawn, so it never arrives later), and \
@@ -989,7 +990,8 @@ impl YaguraMcpServer {
             the window is open and bound, with or without an instruction. When the task \
             carries an instruction, the window is started with a short notice naming the task \
             and telling it to call get_plan as its first request; a profile that cannot be \
-            handed one at launch is refused as no_composer before anything starts. Read how \
+            handed one at launch is refused as no_composer, and one whose program is a \
+            Windows .cmd / .bat file as unsupported, before anything starts. Read how \
             that went from the task's instruction_notice in get_plan. While the plan is still awaiting approval this is refused with \
             plan_not_approved; once an approver approves the plan, a one-line notice starting \
             with [yagura plan] is handed to the owner's CLI and this call opens the task.",

@@ -1017,7 +1017,11 @@
                 }
               ]
             },
-            "unavailable_guidance": "string",
+            "unavailable_guidance": {
+              "command": "string",
+              "text": "string",
+              "url": "string"
+            },
             "unavailable_kind": "string",
             "unavailable_reason": "string"
           }

@@ -86,10 +86,10 @@ use yagura_protocol::{
     McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, Palette,
     PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState,
     PointerButton, PointerInput, PointerKind, ProfileCommandDetail, ProfileDetailEntry,
-    ProfileInfo, ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef,
-    ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment,
-    TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
-    WindowStatus as WireWindowStatus, WithdrawReason,
+    ProfileGuidance, ProfileInfo, ProfileUnavailableKind, ReceivedReport, ReportOutcome,
+    ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef,
+    TaskAssignment, TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState,
+    WheelInput, WindowInfo, WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -322,6 +322,7 @@ wire_sample!(struct ProfileInfo {
     unavailable_kind,
     unavailable_guidance,
 });
+wire_sample!(struct ProfileGuidance { text, command, url });
 wire_sample!(struct LaunchOptionInfo { aliases });
 wire_sample!(struct LaunchOptionAlias { alias, value });
 wire_sample!(struct ModelChoice { id, label });

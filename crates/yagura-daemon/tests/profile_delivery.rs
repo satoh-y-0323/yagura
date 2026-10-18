@@ -33,7 +33,7 @@ use yagura_daemon::profile::{
 use yagura_daemon::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
 use yagura_daemon::window::{CliInjection, InjectionKind, WindowProvenance};
 use yagura_os::program::ProgramLookup;
-use yagura_protocol::{DeliveryStream, ProfileUnavailableKind};
+use yagura_protocol::{DeliveryStream, ProfileGuidance, ProfileUnavailableKind};
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::argv_probe_path;
 
@@ -93,8 +93,6 @@ fn an_empty_delivery_table_takes_the_documented_defaults() {
     assert_eq!(delivery.wake, WakeMode::None);
     assert_eq!(delivery.wake_stream, DeliveryStream::Stderr);
     assert_eq!(delivery.wake_exit, DEFAULT_WAKE_EXIT);
-    assert_eq!(delivery.wake_timeout_secs, None);
-    assert_eq!(delivery.session_pointer, None);
     assert_eq!(delivery.launch_prompt, None);
     assert_eq!(delivery.shim_guidance, None);
 }
@@ -109,10 +107,9 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
          wake_args = [\"queue\", \"--thread\", \"{session}\", \"--message\", \"{text}\"]\n\
          wake_stream = \"stdout\"\n\
          wake_exit = 3\n\
-         wake_timeout_secs = 120\n\
-         session_pointer = \"/a/b\"\n\
          launch_prompt = [\"-i\", \"{prompt}\"]\n\
-         shim_guidance = \"Install the standalone build.\"\n",
+         shim_guidance = { text = \"Install the standalone build:\", command = \"get it | run\", \
+         url = \"https://example.test/install\" }\n",
     );
 
     assert_eq!(
@@ -132,12 +129,35 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
     );
     assert_eq!(delivery.wake_stream, DeliveryStream::Stdout);
     assert_eq!(delivery.wake_exit, 3);
-    assert_eq!(delivery.wake_timeout_secs, Some(120));
-    assert_eq!(delivery.session_pointer.as_deref(), Some("/a/b"));
     assert_eq!(delivery.launch_prompt, Some(strings(&["-i", "{prompt}"])));
     assert_eq!(
-        delivery.shim_guidance.as_deref(),
-        Some("Install the standalone build.")
+        delivery.shim_guidance,
+        Some(guidance(
+            "Install the standalone build:",
+            Some("get it | run"),
+            Some("https://example.test/install")
+        ))
+    );
+}
+
+#[test]
+fn a_shim_guidance_needs_only_its_text() {
+    assert_eq!(
+        delivery_of("[delivery]\nshim_guidance = { text = \"Use the native build.\" }\n")
+            .shim_guidance,
+        Some(guidance("Use the native build.", None, None))
+    );
+    assert_eq!(
+        delivery_of(
+            "[delivery]\n[delivery.shim_guidance]\ntext = \"Read the notes.\"\n\
+             url = \"https://example.test/notes\"\n"
+        )
+        .shim_guidance,
+        Some(guidance(
+            "Read the notes.",
+            None,
+            Some("https://example.test/notes")
+        ))
     );
 }
 
@@ -163,10 +183,6 @@ fn the_edges_of_each_value_domain_are_accepted() {
         ("max_chars of one", "[delivery]\nmax_chars = 1\n"),
         ("wake_exit of zero", "[delivery]\nwake_exit = 0\n"),
         ("wake_exit of 255", "[delivery]\nwake_exit = 255\n"),
-        (
-            "wake_timeout_secs of one",
-            "[delivery]\nwake_timeout_secs = 1\n",
-        ),
         ("the plain output form", "[delivery]\noutput = \"plain\"\n"),
         (
             "a template with the text twice",
@@ -177,8 +193,8 @@ fn the_edges_of_each_value_domain_are_accepted() {
             "[delivery]\nwake_stream = \"stderr\"\n",
         ),
         (
-            "a nested pointer",
-            "[delivery]\nsession_pointer = \"/a/0/b\"\n",
+            "a guidance url with a path, a query and a fragment",
+            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://a.test/b?c=d#e\" }\n",
         ),
     ] {
         parse_with(fragment)
@@ -188,7 +204,7 @@ fn the_edges_of_each_value_domain_are_accepted() {
 
 #[test]
 fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
-    let cases: [(&str, &str); 27] = [
+    let cases: [(&str, &str); 36] = [
         ("an unknown key", "[delivery]\nbogus = 1\n"),
         ("a delivery that is not a table", "delivery = 1\n"),
         ("max_chars as a string", "[delivery]\nmax_chars = \"10\"\n"),
@@ -232,20 +248,12 @@ fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
         ("a negative wake exit", "[delivery]\nwake_exit = -1\n"),
         ("a wake exit as a string", "[delivery]\nwake_exit = \"2\"\n"),
         (
-            "a wake timeout of zero",
-            "[delivery]\nwake_timeout_secs = 0\n",
+            "a wake timeout, which the hook command carries",
+            "[delivery]\nwake_timeout_secs = 86400\n",
         ),
         (
-            "a negative wake timeout",
-            "[delivery]\nwake_timeout_secs = -1\n",
-        ),
-        (
-            "a wake timeout as a string",
-            "[delivery]\nwake_timeout_secs = \"10\"\n",
-        ),
-        (
-            "a session pointer that is not a JSON pointer",
-            "[delivery]\nsession_pointer = \"session_id\"\n",
+            "a session pointer, which the hook command carries",
+            "[delivery]\nsession_pointer = \"/session_id\"\n",
         ),
         (
             "a launch prompt that is not a list",
@@ -264,8 +272,52 @@ fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
             "[delivery]\nlaunch_prompt = [\"\", \"{prompt}\"]\n",
         ),
         (
-            "a shim guidance that is not a string",
+            "a shim guidance that is a number",
             "[delivery]\nshim_guidance = 5\n",
+        ),
+        (
+            "a shim guidance that is a bare string",
+            "[delivery]\nshim_guidance = \"Use the native build.\"\n",
+        ),
+        (
+            "a shim guidance without its text",
+            "[delivery]\nshim_guidance = { command = \"get it\" }\n",
+        ),
+        (
+            "a shim guidance with an empty text",
+            "[delivery]\nshim_guidance = { text = \" \" }\n",
+        ),
+        (
+            "a shim guidance with an empty command",
+            "[delivery]\nshim_guidance = { text = \"t\", command = \"\" }\n",
+        ),
+        (
+            "a shim guidance with a key nothing reads",
+            "[delivery]\nshim_guidance = { text = \"t\", link = \"https://a.test\" }\n",
+        ),
+        (
+            "a shim guidance command that is not a string",
+            "[delivery]\nshim_guidance = { text = \"t\", command = [\"a\"] }\n",
+        ),
+        (
+            "a shim guidance url that is not https",
+            "[delivery]\nshim_guidance = { text = \"t\", url = \"http://a.test\" }\n",
+        ),
+        (
+            "a shim guidance url that runs script",
+            "[delivery]\nshim_guidance = { text = \"t\", url = \"javascript:alert(1)\" }\n",
+        ),
+        (
+            "a shim guidance url with no host",
+            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://\" }\n",
+        ),
+        (
+            "a shim guidance url with a space in it",
+            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://a.test/b c\" }\n",
+        ),
+        (
+            "a shim guidance text with a control character",
+            "[delivery]\nshim_guidance = { text = \"a\\u001bb\" }\n",
         ),
     ];
     for (what, fragment) in cases {
@@ -294,7 +346,7 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
         ),
         (
             "delivery-secret",
-            "[delivery]\nshim_guidance = \"SECRET-TOKEN-XYZ\"\nbogus = 1\n",
+            "[delivery]\nshim_guidance = { text = \"SECRET-TOKEN-XYZ\" }\nbogus = 1\n",
         ),
     ];
     for (id, fragment) in invalid {
@@ -350,8 +402,6 @@ fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_
         assert_eq!(delivery.wake, WakeMode::Wait, "{id}");
         assert_eq!(delivery.wake_stream, DeliveryStream::Stderr, "{id}");
         assert_eq!(delivery.wake_exit, 2, "{id}");
-        assert_eq!(delivery.wake_timeout_secs, Some(86_400), "{id}");
-        assert_eq!(delivery.session_pointer, None, "{id}");
         assert_eq!(
             delivery.launch_prompt,
             Some(strings(&["--", "{prompt}"])),
@@ -378,25 +428,26 @@ fn the_codex_profiles_wake_a_waiting_cli_by_queueing_a_message_on_its_session() 
             ])),
             "{id}"
         );
-        assert_eq!(
-            delivery.session_pointer.as_deref(),
-            Some("/session_id"),
-            "{id}: the hook's stdin names the session"
-        );
         assert_eq!(delivery.launch_prompt, Some(strings(&["{prompt}"])), "{id}");
     }
 }
 
 #[test]
 fn the_host_codex_profile_says_how_to_get_a_build_that_is_not_a_windows_shim() {
-    let guidance = shipped_delivery("codex-cli")
-        .shim_guidance
-        .expect("the profile that cannot work through a shim carries guidance");
-    assert!(
-        guidance.contains("standalone") && guidance.contains("install.ps1"),
-        "{guidance:?}"
+    assert_eq!(
+        shipped_delivery("codex-cli").shim_guidance,
+        Some(guidance(
+            "Install the standalone Codex from a new PowerShell window, then restart yagura:",
+            Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
+            Some("https://learn.chatgpt.com/docs/codex/cli.md"),
+        )),
+        "the text, the command to copy and the page are carried apart"
     );
-    assert!(guidance.contains("https://"), "{guidance:?}");
+    assert_eq!(
+        shipped_delivery("wsl-codex-cli").shim_guidance,
+        None,
+        "a WSL program is never a Windows shim"
+    );
 }
 
 #[test]
@@ -410,7 +461,6 @@ fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way
         );
         assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(delivery.wake, WakeMode::None, "{id}");
-        assert_eq!(delivery.session_pointer, None, "{id}");
         assert_eq!(
             delivery.launch_prompt,
             Some(strings(&["-i", "{prompt}"])),
@@ -436,9 +486,6 @@ fn the_limits_the_hooks_carry_are_the_profiles_own_values() {
         "wsl-claude-code",
     ] {
         assert_eq!(shipped_delivery(id).max_chars, 10_000, "{id}");
-    }
-    for id in ["claude-code", "wsl-claude-code"] {
-        assert_eq!(shipped_delivery(id).wake_timeout_secs, Some(86_400), "{id}");
     }
 }
 
@@ -495,13 +542,50 @@ fn profile_running(program: &str, delivery_lines: &str) -> Profile {
     .expect("the profile is valid")
 }
 
-/// The reason with `guidance` taken off its end: the fixed sentence the core owns.
-fn fixed_sentence(reason: &str, guidance: &str) -> String {
+fn guidance(text: &str, command: Option<&str>, url: Option<&str>) -> ProfileGuidance {
+    ProfileGuidance {
+        text: text.to_string(),
+        command: command.map(str::to_string),
+        url: url.map(str::to_string),
+    }
+}
+
+/// A `shim_guidance` inline table holding `guidance`'s fields.
+fn guidance_line(guidance: &ProfileGuidance) -> String {
+    let mut fields = vec![format!("text = \"{}\"", guidance.text)];
+    if let Some(command) = &guidance.command {
+        fields.push(format!("command = \"{command}\""));
+    }
+    if let Some(url) = &guidance.url {
+        fields.push(format!("url = \"{url}\""));
+    }
+    format!("shim_guidance = {{ {} }}\n", fields.join(", "))
+}
+
+fn guided_profile(guidance: &ProfileGuidance) -> Profile {
+    profile_running(
+        "shimmed",
+        &format!("{WAKE_COMMAND}{}", guidance_line(guidance)),
+    )
+}
+
+/// What follows `sentence` in `reason`, after checking that `reason` starts with it.
+fn after_sentence<'a>(reason: &'a str, sentence: &str) -> &'a str {
     reason
-        .strip_suffix(guidance)
-        .unwrap_or_else(|| panic!("{reason:?} must end with the profile's guidance {guidance:?}"))
-        .trim_end()
-        .to_string()
+        .strip_prefix(sentence)
+        .unwrap_or_else(|| panic!("{reason:?} must start with the core's sentence {sentence:?}"))
+}
+
+/// Whether `parts` appear in `text` in this order, none overlapping the next.
+fn in_order(text: &str, parts: &[&str]) -> bool {
+    let mut rest = text;
+    for part in parts {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 #[test]
@@ -523,43 +607,39 @@ fn a_command_wake_profile_that_resolves_to_a_windows_shim_is_unavailable() {
 }
 
 #[test]
-fn the_reason_is_a_fixed_sentence_followed_by_the_profiles_own_guidance() {
+fn the_reason_is_a_fixed_sentence_followed_by_every_part_of_the_profiles_own_guidance() {
     let tree = TempDir::new("yagura-cli-test", "delivery-shim-reason");
     let bin = tree.make_dir("bin");
     tree.write_file("bin/shimmed.cmd", "");
     let config = config_with(None, lookup_in(&bin), ProfileOs::Windows);
-    let guidance_a = "Guidance A: install the other build.";
-    let guidance_b = "Guidance B, a different text.";
+    let guidance_a = guidance(
+        "Guidance A: install the other build:",
+        Some("fetch-a | run-a"),
+        Some("https://a.test/install"),
+    );
+    let guidance_b = guidance("Guidance B, a different text.", None, None);
 
-    let reason_a = unavailable_reason(
-        &profile_running(
-            "shimmed",
-            &format!("{WAKE_COMMAND}shim_guidance = \"{guidance_a}\"\n"),
-        ),
-        &config,
-    )
-    .expect("unavailable");
-    let reason_b = unavailable_reason(
-        &profile_running(
-            "shimmed",
-            &format!("{WAKE_COMMAND}shim_guidance = \"{guidance_b}\"\n"),
-        ),
-        &config,
-    )
-    .expect("unavailable");
     let reason_bare = unavailable_reason(&profile_running("shimmed", WAKE_COMMAND), &config)
         .expect("unavailable");
+    let reason_a = unavailable_reason(&guided_profile(&guidance_a), &config).expect("unavailable");
+    let reason_b = unavailable_reason(&guided_profile(&guidance_b), &config).expect("unavailable");
 
-    let sentence = fixed_sentence(&reason_a, guidance_a);
-    assert_eq!(
-        sentence,
-        fixed_sentence(&reason_b, guidance_b),
-        "the core's sentence is the same whatever the profile adds"
+    let sentence = reason_bare.as_str();
+    assert!(
+        in_order(
+            after_sentence(&reason_a, sentence),
+            &[
+                "Guidance A: install the other build:",
+                "fetch-a | run-a",
+                "https://a.test/install"
+            ]
+        ),
+        "a reader of the reason alone (list_profiles over MCP) still gets the text, the \
+         command and the page, in that order: {reason_a:?}"
     );
-    assert_eq!(
-        reason_bare.trim_end(),
-        sentence,
-        "without guidance the reason is the sentence alone"
+    assert!(
+        after_sentence(&reason_b, sentence).contains("Guidance B, a different text."),
+        "{reason_b:?}"
     );
     assert!(
         sentence.contains(".cmd") && sentence.contains(".bat") && sentence.contains("Windows"),
@@ -580,12 +660,18 @@ fn the_shim_reason_is_listed_beside_the_entry_and_matches_the_availability_flag(
     let bin = tree.make_dir("bin");
     tree.write_file("bin/shimmed.cmd", "");
     let profiles_dir = tree.make_dir("profiles");
+    let declared = guidance(
+        "Use the native build:",
+        Some("get-native"),
+        Some("https://a.test/native"),
+    );
     write_profile(
         &profiles_dir,
         "shimmed",
         &format!(
             "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"shimmed\"]\n\n\
-             [delivery]\n{WAKE_COMMAND}shim_guidance = \"Use the native build.\"\n"
+             [delivery]\n{WAKE_COMMAND}{}",
+            guidance_line(&declared)
         ),
     );
     let config = config_with(Some(profiles_dir), lookup_in(&bin), ProfileOs::Windows);
@@ -599,16 +685,26 @@ fn the_shim_reason_is_listed_beside_the_entry_and_matches_the_availability_flag(
         .expect("the profile is listed");
     assert!(!entry.available);
     let reason = entry.unavailable_reason.as_deref().expect("a reason");
-    assert!(reason.ends_with("Use the native build."), "{reason:?}");
+    assert!(
+        in_order(
+            reason,
+            &[
+                "Use the native build:",
+                "get-native",
+                "https://a.test/native"
+            ]
+        ),
+        "{reason:?}"
+    );
     assert_eq!(
         entry.unavailable_kind,
         Some(ProfileUnavailableKind::NeedsNativeProgram)
     );
     assert_eq!(
-        entry.unavailable_guidance.as_deref(),
-        Some("Use the native build."),
-        "the guidance is carried on its own, so a reader can show or copy it without \
-         taking the reason apart"
+        entry.unavailable_guidance,
+        Some(declared),
+        "the guidance is carried on its own, so a reader can show the text, copy the command \
+         and open the page without taking the reason apart"
     );
 }
 
@@ -618,15 +714,16 @@ fn the_shim_unavailability_carries_its_kind_and_the_profiles_guidance_alone() {
     let bin = tree.make_dir("bin");
     tree.write_file("bin/shimmed.cmd", "");
     let config = config_with(None, lookup_in(&bin), ProfileOs::Windows);
-    let guidance = "Install the standalone build: see the profile notes.";
-
-    let guided = profile_running(
-        "shimmed",
-        &format!("{WAKE_COMMAND}shim_guidance = \"{guidance}\"\n"),
+    let declared = guidance(
+        "Install the standalone build: see the profile notes.",
+        None,
+        None,
     );
+
+    let guided = guided_profile(&declared);
     let found = unavailability(&guided, &config).expect("unavailable");
     assert_eq!(found.kind, ProfileUnavailableKind::NeedsNativeProgram);
-    assert_eq!(found.guidance.as_deref(), Some(guidance));
+    assert_eq!(found.guidance, Some(declared));
     assert_eq!(Some(found.reason), unavailable_reason(&guided, &config));
 
     let bare = profile_running("shimmed", WAKE_COMMAND);
