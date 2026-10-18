@@ -92,7 +92,7 @@ fn non_empty(entries: Vec<PathBuf>) -> Vec<PathBuf> {
 /// that is not the daemon's own `PATH`, so it has to be observed. The blocking file is
 /// left in place and the daemon is stopped before this returns.
 async fn original_child_path(sandbox: &Sandbox) -> Vec<PathBuf> {
-    std::fs::create_dir_all(sandbox.state_root()).unwrap();
+    std::fs::create_dir_all(sandbox.report_dir().parent().unwrap()).unwrap();
     std::fs::write(sandbox.report_dir(), b"in the way").unwrap();
     let mut daemon = sandbox.start().await;
     non_empty(daemon.probed_path(sandbox, "probe").await)
@@ -302,8 +302,8 @@ async fn window_opens_without_the_report_folder_in_path_when_it_cannot_be_made()
     assert!(
         !entries
             .iter()
-            .any(|entry| entry.starts_with(sandbox.state_root())),
-        "no entry may point into the state root when the report folder does not exist; got          {entries:?}"
+            .any(|entry| entry.starts_with(sandbox.report_dir().parent().unwrap())),
+        "no entry may point into the report folder's instance root when the report folder does not exist; got          {entries:?}"
     );
     if cfg!(windows) {
         let system32 = Path::new(&std::env::var_os("SystemRoot").unwrap()).join("System32");

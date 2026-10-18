@@ -23,6 +23,7 @@ pub mod bundled_conpty;
 mod bundled_conpty_pins;
 pub mod capture;
 pub mod file_replace;
+pub mod hook_path;
 pub mod instance;
 pub mod locale;
 pub mod login_shell;
@@ -40,6 +41,7 @@ pub use capture::{
     CaptureEnv, CaptureLimits, CaptureOutcome, CapturedChild, MarkerOutcome, spawn_captured,
 };
 pub use file_replace::replace_existing_file;
+pub use hook_path::{SpacelessPathError, spaceless_path, spaceless_path_from};
 pub use instance::{
     APP_IDENTIFIER, InstanceIdError, InstanceNamespace, StartupEnvError, instance_dir,
     resolve_instance_from, resolve_startup_env, store_override_conflicts,
@@ -476,10 +478,37 @@ pub fn state_base_dir_from(_primary: Option<&OsStr>, home: Option<&OsStr>) -> Op
 #[cfg(all(not(windows), not(target_os = "macos")))]
 #[must_use]
 pub fn state_base_dir_from(primary: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    xdg_state_base_dir_from(primary, home)
+}
+
+/// XDG state base directory: `primary` (`XDG_STATE_HOME`) unchanged when
+/// present, otherwise `{home}/.local/state`. Pure mapping compiled on every OS
+/// so that it stays unit-testable off the platforms that use it. `None` when
+/// both are absent. Never reads the environment.
+#[must_use]
+pub fn xdg_state_base_dir_from(primary: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
     unix_base_dir_from(primary, home, ".local/state")
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+/// Base directory the daemon places the executable a CLI hook runs under (its
+/// report directory): the seam behind [`default_report_base_dir`].
+///
+/// Windows and XDG-family Unix: the same value as [`state_base_dir_from`].
+/// macOS: [`xdg_state_base_dir_from`] instead of `Application Support`,
+/// because some CLIs cannot run a hook command whose path holds a space.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn report_base_dir_from(primary: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    state_base_dir_from(primary, home)
+}
+
+/// macOS branch of [`report_base_dir_from`].
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn report_base_dir_from(primary: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    xdg_state_base_dir_from(primary, home)
+}
+
 fn unix_base_dir_from(
     primary: Option<&OsStr>,
     home: Option<&OsStr>,
@@ -491,11 +520,8 @@ fn unix_base_dir_from(
     home.map(|home| PathBuf::from(home).join(home_suffix))
 }
 
-/// Windows counterpart of `unix_base_dir_from` (not an intra-doc link here:
-/// that function is compiled only under
-/// `#[cfg(all(not(windows), not(target_os = "macos")))]`, and this doc
-/// comment is attached to the `#[cfg(windows)]` branch): `LOCALAPPDATA` is
-/// the only input, so there is no fallback branch to share.
+/// Windows counterpart of [`unix_base_dir_from`]: `LOCALAPPDATA` is the only
+/// input, so there is no fallback branch to share.
 #[cfg(windows)]
 fn windows_base_dir_from(primary: Option<&OsStr>) -> Option<PathBuf> {
     primary.map(PathBuf::from)
@@ -577,6 +603,24 @@ pub fn default_state_base_dir() -> Option<PathBuf> {
     #[cfg(not(windows))]
     {
         state_base_dir_from(
+            std::env::var_os("XDG_STATE_HOME").as_deref(),
+            std::env::var_os("HOME").as_deref(),
+        )
+    }
+}
+
+/// Report-directory counterpart of [`default_state_base_dir`] (see
+/// [`report_base_dir_from`]): `LOCALAPPDATA` on Windows, and `XDG_STATE_HOME`
+/// falling back to `HOME` on every Unix, macOS included.
+#[must_use]
+pub fn default_report_base_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        report_base_dir_from(std::env::var_os("LOCALAPPDATA").as_deref(), None)
+    }
+    #[cfg(not(windows))]
+    {
+        report_base_dir_from(
             std::env::var_os("XDG_STATE_HOME").as_deref(),
             std::env::var_os("HOME").as_deref(),
         )

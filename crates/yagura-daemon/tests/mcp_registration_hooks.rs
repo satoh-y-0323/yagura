@@ -864,25 +864,54 @@ async fn without_a_report_folder_the_entry_cannot_be_written_and_the_row_differs
 }
 
 #[tokio::test]
-async fn a_report_folder_whose_path_needs_quoting_is_never_written_into_the_entry() {
+async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name_or_refused() {
     let tag = "agy-hooks-report-folder-space";
     let mut layout = Layout::new(tag);
-    // A space would split the command a shell runs, and the CLI's quoting is unknown.
+    // A space would split the command a shell runs, and the CLI escapes any quotes.
     layout.report_dir = layout.home_dir.with_file_name("report folder").join("bin");
+    std::fs::create_dir_all(&layout.report_dir).expect("create the report folder");
+    let daemon = layout.report_dir.join(REPORT_EXE_NAME);
+    std::fs::write(&daemon, b"stand-in daemon").expect("place the report daemon");
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert!(
-        error.is_some(),
-        "a daemon path that needs quoting is refused rather than written"
-    );
-    assert_eq!(
-        layout.read_hooks(),
-        SEED_HOOKS,
-        "the hooks file is left as it was"
-    );
+    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    match yagura_os::spaceless_path(&daemon) {
+        Ok(spaceless) => {
+            assert_eq!(error, None, "a daemon with a spaceless name is registered");
+            let command = layout.hooks_value()["yagura"]["PreInvocation"][0]["command"]
+                .as_str()
+                .expect("a command string")
+                .to_string();
+            assert_eq!(
+                command,
+                format!("{spaceless} --emit-status running --source antigravity-cli")
+            );
+            assert!(!spaceless.contains(' '), "{spaceless:?}");
+            assert_eq!(
+                status.state,
+                McpRegistrationState::Registered,
+                "the entry is read back by the name it was written with: {status:?}"
+            );
+            assert_eq!(
+                listed_state(&mut approver, 2).await,
+                McpRegistrationState::Registered
+            );
+        }
+        Err(refusal) => {
+            let error = error.expect("a daemon path with no spaceless name is refused");
+            assert!(
+                error.contains(&refusal.to_string()),
+                "the refusal says why: {error:?}"
+            );
+            assert_eq!(
+                layout.read_hooks(),
+                SEED_HOOKS,
+                "the hooks file is left as it was"
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -714,13 +714,14 @@ pub fn log_dir(state_base: &Path, namespace: &InstanceNamespace) -> PathBuf {
     yagura_os::instance_dir(state_base, namespace).join("logs")
 }
 
-/// Composes the daemon's report directory: `<state_base>/<namespace>/bin`.
+/// Composes the daemon's report directory: `<report_base>/<namespace>/bin`,
+/// with `report_base` from [`yagura_os::report_base_dir_from`].
 ///
 /// Not the installation folder: that one also holds files (an uninstaller)
 /// a shell in a window must not resolve by name.
 #[must_use]
-pub fn report_dir(state_base: &Path, namespace: &InstanceNamespace) -> PathBuf {
-    yagura_os::instance_dir(state_base, namespace).join("bin")
+pub fn report_dir(report_base: &Path, namespace: &InstanceNamespace) -> PathBuf {
+    yagura_os::instance_dir(report_base, namespace).join("bin")
 }
 
 /// The fixed name a CLI's hook runs the daemon by.
@@ -730,21 +731,21 @@ pub const REPORT_EXE_NAME: &str = if cfg!(windows) {
     "yagura-daemon"
 };
 
-/// Blocking: places `exe` in `dir` (below `state_base`) as
+/// Blocking: places `exe` in `dir` (below `report_base`) as
 /// [`REPORT_EXE_NAME`], replacing whatever an earlier start left there.
 ///
 /// A hard link when the filesystem allows one, otherwise a copy; either is
 /// staged under a temporary name and renamed over the target, so a hook never
-/// runs a half-written file. On Unix `dir` is narrowed to owner-only like the
-/// rest of the state directory.
+/// runs a half-written file. On Unix every directory from below `report_base`
+/// down to `dir` is narrowed to owner-only, as under the state directory.
 ///
 /// # Errors
 ///
 /// A description of the step that failed: `dir` could not be created (for
 /// example a file is in its place), `exe` could be neither linked nor
 /// copied, or the rename failed while the target still differs from `exe`.
-pub fn prepare_report_dir(state_base: &Path, dir: &Path, exe: &Path) -> Result<(), String> {
-    yagura_os::secure_owned_dir(state_base, dir)?;
+pub fn prepare_report_dir(report_base: &Path, dir: &Path, exe: &Path) -> Result<(), String> {
+    yagura_os::secure_owned_dir(report_base, dir)?;
     std::fs::create_dir_all(dir)
         .map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
     let target = dir.join(REPORT_EXE_NAME);

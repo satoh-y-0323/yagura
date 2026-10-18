@@ -90,8 +90,14 @@ impl Sandbox {
         yagura_os::instance_dir(&base, &self.namespace())
     }
 
+    /// The instance's report directory, derived the way the daemon derives it.
     pub fn report_dir(&self) -> PathBuf {
-        self.state_root().join("bin")
+        let base = yagura_os::report_base_dir_from(
+            Some(self.state_home.as_os_str()),
+            Some(self.tree.make_dir("home").as_os_str()),
+        )
+        .expect("the redirected report base must resolve");
+        yagura_daemon::config::report_dir(&base, &self.namespace())
     }
 
     /// The instance's data root (the session store's home), derived the way the daemon

@@ -89,6 +89,86 @@ fn macos_base_dir_from_returns_none_when_home_is_absent() {
 }
 
 // ---------------------------------------------------------------------
+// Report directory base: where the daemon copy a CLI hook runs lives. Some
+// CLIs cannot run a hook command whose path holds a space, so on macOS it
+// sits under the XDG state base rather than `Application Support`.
+// ---------------------------------------------------------------------
+
+#[test]
+fn xdg_state_base_dir_from_maps_a_macos_home_to_dot_local_state_without_spaces() {
+    let home = std::ffi::OsStr::new("/Users/example");
+    let base =
+        yagura_os::xdg_state_base_dir_from(None, Some(home)).expect("a present home must resolve");
+    assert_eq!(
+        base,
+        std::path::PathBuf::from("/Users/example/.local/state"),
+        "xdg_state_base_dir_from must map home to {{home}}/.local/state"
+    );
+    assert!(
+        !base.to_string_lossy().contains(' '),
+        "the report base under a space-free home must hold no space: {}",
+        base.display()
+    );
+}
+
+#[test]
+fn xdg_state_base_dir_from_prefers_primary_over_home() {
+    let primary = std::ffi::OsStr::new("/Users/example/state");
+    assert_eq!(
+        yagura_os::xdg_state_base_dir_from(Some(primary), Some(std::ffi::OsStr::new("/Users/x"))),
+        Some(std::path::PathBuf::from(primary)),
+        "an explicit XDG_STATE_HOME must win over the home fallback"
+    );
+}
+
+#[test]
+fn xdg_state_base_dir_from_returns_none_when_both_are_absent() {
+    assert_eq!(yagura_os::xdg_state_base_dir_from(None, None), None);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn report_base_dir_from_is_the_state_base_off_macos() {
+    let primary = std::ffi::OsStr::new("/somewhere/state");
+    let home = std::ffi::OsStr::new("/home/example");
+    for (p, h) in [
+        (Some(primary), Some(home)),
+        (None, Some(home)),
+        (None, None),
+    ] {
+        assert_eq!(
+            yagura_os::report_base_dir_from(p, h),
+            yagura_os::state_base_dir_from(p, h),
+            "off macOS the report base must stay the state base"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn report_base_dir_from_uses_the_xdg_state_base_on_macos() {
+    let primary = std::ffi::OsStr::new("/Users/example/state");
+    let home = std::ffi::OsStr::new("/Users/example");
+    for (p, h) in [
+        (Some(primary), Some(home)),
+        (None, Some(home)),
+        (None, None),
+    ] {
+        assert_eq!(
+            yagura_os::report_base_dir_from(p, h),
+            yagura_os::xdg_state_base_dir_from(p, h),
+            "macOS: the report base must be the XDG state base, not Application Support"
+        );
+    }
+    let base = yagura_os::report_base_dir_from(None, Some(home)).expect("home must resolve");
+    assert!(
+        !base.to_string_lossy().contains(' '),
+        "macOS: the report base must hold no space: {}",
+        base.display()
+    );
+}
+
+// ---------------------------------------------------------------------
 // Windows: verbatim representation + identifiers.
 // ---------------------------------------------------------------------
 

@@ -899,7 +899,9 @@ reports and are left out of the table.
 **How a hook finds the daemon.** When the daemon starts, it places a copy of
 its own executable (a hard link where the file system allows one) in a `bin`
 folder under the instance's state directory -- on Windows,
-`%LOCALAPPDATA%\io.github.satoh-y-0323.yagura\bin\yagura-daemon.exe` for the default instance -- and
+`%LOCALAPPDATA%\io.github.satoh-y-0323.yagura\bin\yagura-daemon.exe` for the default instance;
+on macOS, `~/.local/state/yagura/bin/yagura-daemon` (under `$XDG_STATE_HOME` when it is set)
+rather than under `~/Library/Application Support`, whose space a hook command cannot carry -- and
 puts that folder, which holds nothing else, in front of every window's
 `PATH`. A hook can then run `yagura-daemon --emit-status ...` from whatever
 shell its CLI uses. A profile's own `[env]` `PATH` replaces this one. Inside
@@ -929,6 +931,10 @@ passed at launch. Registering yagura with it from Settings > Integrations also
 adds an entry named `yagura` (`yagura-<instance>` for a named instance) to
 `~/.gemini/config/hooks.json`, which runs the daemon's copy in the `bin`
 folder by its absolute path; removing the registration takes the entry out.
+`agy` passes the command to a shell and escapes any quotes around a path, so
+a path holding whitespace cannot be written: on Windows the entry names the
+daemon by its 8.3 short name instead, and registration fails with a message
+saying so when there is none (8.3 names can be turned off on a volume).
 Every other entry in the file is left as it was. The entry applies to every
 `agy` session on the machine, but outside a window `--emit-status` does
 nothing (see above). An `agy` you start by hand inside a yagura shell window

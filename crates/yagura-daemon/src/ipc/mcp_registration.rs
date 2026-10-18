@@ -350,7 +350,7 @@ fn hook_entries_preview(
     let daemon = if spec.has_bridge_probe() {
         None
     } else {
-        hook_daemon_path(config)
+        hook_daemon_path(config).ok().flatten()
     };
     let context = EditContext {
         target: target.clone(),
@@ -562,7 +562,8 @@ async fn resolve_status_daemon(
     spec: &mcp_registration::McpRegistrationSpec,
     env: &[(OsString, OsString)],
 ) -> Result<Option<String>, ()> {
-    let Some(daemon) = hook_daemon_path(config) else {
+    // A path the entries cannot carry is read as entries that cannot hold.
+    let Ok(Some(daemon)) = hook_daemon_path(config) else {
         return Ok(None);
     };
     match probe_path(config, spec, env, &daemon).await {
@@ -574,15 +575,28 @@ async fn resolve_status_daemon(
     }
 }
 
-/// The daemon's own copy in the report folder, the one a hook command runs:
-/// `None` when there is no report folder, or its path cannot be written into
-/// a command unquoted.
-fn hook_daemon_path(config: &DaemonConfig) -> Option<String> {
-    let path = config.report_dir.as_ref()?.join(REPORT_EXE_NAME);
-    path.to_str()
-        .filter(|path| usable_in_hook_command(path))
-        .map(str::to_string)
+/// The daemon's own copy in the report folder, the one a hook command runs,
+/// by the one name both writing an entry and reading it back use: `Ok(None)`
+/// when there is no report folder.
+///
+/// A path holding whitespace is named by [`yagura_os::spaceless_path`], since
+/// a CLI escapes any quotes around it. `Err` when no such name exists, or the
+/// path cannot be written into a command unquoted for another reason.
+fn hook_daemon_path(config: &DaemonConfig) -> Result<Option<String>, String> {
+    let Some(dir) = config.report_dir.as_ref() else {
+        return Ok(None);
+    };
+    let path =
+        yagura_os::spaceless_path(&dir.join(REPORT_EXE_NAME)).map_err(|err| err.to_string())?;
+    if usable_in_hook_command(&path) {
+        Ok(Some(path))
+    } else {
+        Err(HOOK_DAEMON_NEEDS_QUOTING.to_string())
+    }
 }
+
+const HOOK_DAEMON_NEEDS_QUOTING: &str =
+    "the daemon's path holds a character a hook command would need quoted";
 
 /// Whether `path` can start a hook command as is. The CLI hands the command
 /// to a shell (`sh -c`, `cmd /c`), and how it would quote is not known, so a
@@ -1125,7 +1139,7 @@ async fn resolve_operation_daemon(
     source: &RowSource,
     steps: &mut Vec<McpRegistrationStep>,
 ) -> Result<Option<String>, String> {
-    let Some(daemon) = hook_daemon_path(config) else {
+    let Some(daemon) = hook_daemon_path(config)? else {
         return Ok(None);
     };
     let converted = resolve_operation_path(config, source, &daemon, steps).await?;

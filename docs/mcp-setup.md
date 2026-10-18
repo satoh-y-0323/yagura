@@ -170,7 +170,10 @@ they were:
 - **Antigravity CLI's hooks entry**: an entry named after the registration (`yagura`, or
   `yagura-<instance>`) in `~/.gemini/config/hooks.json`, which runs the daemon at session start, on
   each model call and after each tool. The file is created when it is missing; one that is not valid JSON is left
-  untouched and the step fails.
+  untouched and the step fails. The entry names the daemon by a path with no whitespace in it, since
+  Antigravity CLI cannot run one that has any: on Windows a path that holds a space is written by its
+  8.3 short name, and the step fails when it has none (see
+  [How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)).
 
 **Remove** takes the hook trust tables and the hooks entry out again, along with the CLI's own `mcp
 remove`; it leaves `tool_timeout_sec` alone. Any failed step stops the operation there. The output

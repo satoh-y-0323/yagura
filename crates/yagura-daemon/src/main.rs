@@ -536,8 +536,8 @@ fn resolve_mcp_bridge(platform: yagura_os::program::Platform) -> Option<PathBuf>
 /// [`prepare_report_dir`]). `None`, with one warning, when it cannot be
 /// prepared: windows then open with their `PATH` unchanged.
 fn resolve_report_dir(namespace: &yagura_os::InstanceNamespace) -> Option<PathBuf> {
-    let prepared = yagura_os::default_state_base_dir()
-        .ok_or_else(|| "failed to resolve the state directory".to_string())
+    let prepared = yagura_os::default_report_base_dir()
+        .ok_or_else(|| "failed to resolve the report directory's base".to_string())
         .and_then(|base| {
             let exe = std::env::current_exe()
                 .map_err(|err| format!("failed to resolve the daemon executable: {err}"))?;

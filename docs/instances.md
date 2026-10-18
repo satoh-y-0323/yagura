@@ -56,6 +56,7 @@ instance -- except inside a leaf file name, which never changes.
 | Unix endpoint lock (beside the socket) | `{socket}.lock` | `{socket}.lock` |
 | Config root | `<config_base>/yagura` | `<config_base>/yagura-dev` |
 | State root (logs) | `<state_base>/yagura/logs` | `<state_base>/yagura-dev/logs` |
+| Report folder (the daemon copy CLI hooks run) | `<report_base>/yagura/bin` | `<report_base>/yagura-dev/bin` |
 | Data root (session store) | `<data_base>/yagura/yagura.db` | `<data_base>/yagura-dev/yagura.db` |
 
 In the fallback directory the socket is always `ipc.sock`: the directory already names the
@@ -68,7 +69,9 @@ inside that directory. `<config_base>`, `<state_base>` and `<data_base>` are the
 per-user directories (`%LOCALAPPDATA%` on Windows for all three; `~/Library/Application Support` on
 macOS; `$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` / `$XDG_DATA_HOME`, each falling back to a directory
 under `~`, on other Unix) and are the same for every instance -- only the namespace directory under
-them changes.
+them changes. `<report_base>` is `<state_base>` everywhere except macOS, where it is
+`$XDG_STATE_HOME`, falling back to `~/.local/state`: a CLI cannot run a hook command whose path
+holds the space in `Application Support`.
 
 On Windows the three directories use the app's bundle identifier in place of `yagura`:
 `%LOCALAPPDATA%\io.github.satoh-y-0323.yagura` for the default instance and
