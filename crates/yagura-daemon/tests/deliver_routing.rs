@@ -23,10 +23,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+#[cfg(windows)]
+use common::call_list_windows;
 use common::{
-    CONTROL_INPUT_TABLE, VALID_TOKEN, approver_base_config, call_list_windows,
-    composer_section_toml, detection_config, empty_lookup, identify, read_response,
-    register_approver, send, unique_temp_dir, wait_until_status, write_profile,
+    CONTROL_INPUT_TABLE, VALID_TOKEN, approver_base_config, composer_section_toml,
+    detection_config, empty_lookup, identify, read_response, register_approver, send,
+    unique_temp_dir, wait_until_status, write_profile,
 };
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, OpenWindowRequest, WindowRegistry};
@@ -81,6 +83,7 @@ fn daemon_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_yagura-daemon"))
 }
 
+#[cfg(windows)]
 fn toml_path(path: &Path) -> String {
     format!("'{}'", path.display())
 }
@@ -849,6 +852,8 @@ async fn a_handoff_to_an_existing_window_arrives_through_its_wait_and_answers_ta
 
     assert_eq!((window_id.as_str(), opened), (id.as_str(), false));
     assert_eq!(delivery, "taken", "answered once the CLI took the envelope");
+    // The answer comes once the door is handed the envelope; the CLI logs it after.
+    logs.until_received("R3HANDOFF").await;
     assert!(logs.door("wait").contains("R3HANDOFF"));
     assert_eq!(logs.received("R3HANDOFF"), 1);
     logs.assert_never_typed("R3HANDOFF");
