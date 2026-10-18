@@ -73,7 +73,7 @@ function chatMessageWire(overrides: Record<string, unknown> = {}): Record<string
     body: 'hello',
     mentions: [],
     broadcast: false,
-    deliveries: [{ window_id: 'w-b', state: 'confirmed' }],
+    deliveries: [{ window_id: 'w-b', state: 'taken' }],
     ...overrides,
   };
 }
@@ -171,7 +171,7 @@ describe('narrowChatMessages', () => {
           body: 'hello',
           mentions: [],
           broadcast: false,
-          deliveries: [{ window_id: 'w-b', state: 'confirmed' }],
+          deliveries: [{ window_id: 'w-b', state: 'taken' }],
         },
       ],
       next_after_seq: 1,

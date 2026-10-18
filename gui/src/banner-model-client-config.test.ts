@@ -34,6 +34,8 @@ function baseState(overrides: Partial<BannerState> = {}): BannerState {
     clientConfigFailure: null,
     isDaemonProtocolStale: false,
     startupEnvFailure: null,
+    profilesNeedingNativeProgram: [],
+    isProfileUnavailableDismissed: false,
     ...overrides,
   };
 }

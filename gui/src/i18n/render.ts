@@ -120,7 +120,7 @@ export function describeUnknownExplanation(
 /**
  * Describes how one delivery ended, naming the reason when the outcome is the
  * `'undelivered_unknown'` arm and carries one. Every other arm -- and that arm
- * with no reason -- renders exactly as the nine-state
+ * with no reason -- renders exactly as
  * {@link describeDeliveryState} does, so the outcome the record names, not the
  * presence of a reason, decides the wording.
  */
@@ -166,22 +166,16 @@ export function describeDeliveryState(messages: Messages, state: string): string
   switch (state) {
     case 'pending':
       return messages.chat.deliveryPending;
-    case 'confirmed':
-      return messages.chat.deliveryConfirmed;
-    case 'unconfirmed':
-      return messages.chat.deliveryUnconfirmed;
-    case 'not_observed':
-      return messages.chat.deliveryNotObserved;
-    case 'not_written':
-      return messages.chat.deliveryNotWritten;
-    case 'write_failed':
-      return messages.chat.deliveryWriteFailed;
+    case 'taken':
+      return messages.chat.deliveryTaken;
     case 'undelivered_unknown':
       return messages.chat.deliveryUndeliveredUnknown;
     case 'undelivered_halted':
       return messages.chat.deliveryUndeliveredHalted;
     case 'undelivered_exhausted':
       return messages.chat.deliveryUndeliveredExhausted;
+    case 'undelivered_restart':
+      return messages.chat.deliveryUndeliveredRestart;
     default:
       return messages.chat.deliveryUnknown;
   }

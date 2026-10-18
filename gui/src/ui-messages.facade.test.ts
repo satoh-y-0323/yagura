@@ -18,8 +18,8 @@ const BLOCKED: ConfirmTarget = { allowed: false, requiresConfirmation: false, re
 const CASES: ReadonlyArray<[string, () => unknown, () => unknown]> = [
   [
     'describeDeliveryState',
-    () => facade.describeDeliveryState('confirmed'),
-    () => render.describeDeliveryState(messages, 'confirmed'),
+    () => facade.describeDeliveryState('taken'),
+    () => render.describeDeliveryState(messages, 'taken'),
   ],
   [
     'describeHaltReason',

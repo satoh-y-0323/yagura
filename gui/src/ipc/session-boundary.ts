@@ -305,7 +305,9 @@ export interface ApprovalRequest {
   /**
    * The window the operation would act on. Omitted from the wire -- and from
    * this object as an own property -- for a chat post, which is addressed to
-   * the room rather than to one window (`exactOptionalPropertyTypes`).
+   * the room rather than to one window, and for `open_window` and a
+   * `send_handoff` that opens a window from a profile, whose window does not
+   * exist yet (`exactOptionalPropertyTypes`).
    */
   target?: ApprovalTarget;
   /** The message body, `null` for the operations that carry none. */
@@ -411,25 +413,19 @@ const CHAT_FROM_KIND_VALUES: ReadonlySet<string> = new Set([
 /** How one chat message landed in one addressed window. */
 export type ChatDeliveryState =
   | 'pending'
-  | 'confirmed'
-  | 'unconfirmed'
-  | 'not_observed'
-  | 'not_written'
-  | 'write_failed'
+  | 'taken'
   | 'undelivered_unknown'
   | 'undelivered_halted'
-  | 'undelivered_exhausted';
+  | 'undelivered_exhausted'
+  | 'undelivered_restart';
 
 const CHAT_DELIVERY_STATE_VALUES: ReadonlySet<string> = new Set([
   'pending',
-  'confirmed',
-  'unconfirmed',
-  'not_observed',
-  'not_written',
-  'write_failed',
+  'taken',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',
+  'undelivered_restart',
 ]);
 
 /**

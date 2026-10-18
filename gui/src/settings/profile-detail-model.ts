@@ -141,6 +141,8 @@ export interface ProfileDetailActions {
   onSaveCommand: (id: string, argv: string[]) => void;
   onResetCommand: (id: string) => void;
   onOpenModels: (id: string) => void;
+  /** Puts `text` (a command or a page a row shows) on the clipboard. */
+  onCopyText: (text: string) => void;
 }
 
 /** The operating system name a keyboard platform stands for. */

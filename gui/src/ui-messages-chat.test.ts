@@ -17,14 +17,11 @@ import {
 /** Every delivery state the daemon can report for one target. */
 const DELIVERY_STATES = [
   'pending',
-  'confirmed',
-  'unconfirmed',
-  'not_observed',
-  'not_written',
-  'write_failed',
+  'taken',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',
+  'undelivered_restart',
 ] as const;
 
 /** The delivery states that can never carry a reason. */
@@ -41,7 +38,7 @@ describe('describeDeliveryState', () => {
     expect(describeDeliveryState(state).length).toBeGreaterThan(0);
   });
 
-  it('renders the nine states as nine distinct strings', () => {
+  it('renders the six states as six distinct strings', () => {
     const rendered = DELIVERY_STATES.map((state) => describeDeliveryState(state));
     expect(new Set(rendered).size).toBe(DELIVERY_STATES.length);
   });
@@ -54,7 +51,7 @@ describe('describeDeliveryState', () => {
     expect(describeDeliveryState('nonsense')).toBe(describeDeliveryState(''));
   });
 
-  it('does not render an unrecognized state as any of the nine', () => {
+  it('does not render an unrecognized state as any of the six', () => {
     const rendered = DELIVERY_STATES.map((state) => describeDeliveryState(state));
     expect(rendered).not.toContain(describeDeliveryState('nonsense'));
   });
@@ -82,7 +79,7 @@ describe('describeHaltReason', () => {
 
 /**
  * A separate function, not a change to `describeDeliveryState` itself -- the
- * nine-state distinct set and its signature above are unchanged. It takes the
+ * six-state distinct set and its signature above are unchanged. It takes the
  * delivery outcome as one value, so the arm it names, not the presence of a
  * reason, decides which wording comes out.
  */
@@ -109,7 +106,7 @@ describe('describeUndeliveredUnknownReason', () => {
   });
 
   it.each(REASONLESS_DELIVERY_STATES)(
-    'renders the %s arm exactly as the nine-state rendering does',
+    'renders the %s arm exactly as the six-state rendering does',
     (state) => {
       expect(describeUndeliveredUnknownReason({ state })).toBe(describeDeliveryState(state));
     }

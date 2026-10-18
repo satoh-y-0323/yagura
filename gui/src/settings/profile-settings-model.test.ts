@@ -13,6 +13,7 @@ import {
 import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
 import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { RoleEntry } from '../ipc/plan-boundary';
+import { settings } from '../ui-messages';
 
 function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
   return {
@@ -24,12 +25,20 @@ function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
     command: ['codex'],
     available: true,
     reason: null,
+    unavailableKind: null,
+    guidance: null,
     model: null,
     effort: null,
     enabled: true,
     ...overrides,
   };
 }
+
+const GUIDANCE = {
+  text: 'Install the standalone build.',
+  command: 'install-it',
+  url: 'https://example.com/install',
+};
 
 function role(name: string, profile: string): RoleEntry {
   return { name, profile, model: null, effort: null };
@@ -76,7 +85,8 @@ describe('profileSettingsRows', () => {
         displayName: 'Codex CLI',
         commandLine: 'codex --sandbox workspace-write',
         isReady: true,
-        reason: null,
+        unavailableLine: null,
+        guidance: null,
         enabled: false,
         rolesUsing: ['reviewer', 'tester'],
       },
@@ -90,7 +100,7 @@ describe('profileSettingsRows', () => {
     expect(rows[0]?.rolesUsing).toEqual([]);
   });
 
-  it('carries an unavailable profile with the reason the daemon gave', () => {
+  it('falls back to the reason the daemon gave when it names no kind', () => {
     const rows = profileSettingsRows(
       [
         option({
@@ -102,7 +112,62 @@ describe('profileSettingsRows', () => {
       []
     );
 
-    expect(rows[0]).toMatchObject({ isReady: false, reason: 'executable not found' });
+    expect(rows[0]).toMatchObject({
+      isReady: false,
+      unavailableLine: settings.profileUnavailable('executable not found'),
+    });
+  });
+
+  it('falls back to the reason the daemon gave for a kind this build does not know', () => {
+    const rows = profileSettingsRows(
+      [option({ available: false, reason: 'some new reason', unavailableKind: 'unknown' })],
+      []
+    );
+
+    expect(rows[0]?.unavailableLine).toBe(settings.profileUnavailable('some new reason'));
+  });
+
+  it('heads only a program that could not be found as not found', () => {
+    const rows = profileSettingsRows(
+      [
+        option({ id: 'a', available: false, reason: 'x', unavailableKind: 'not_found' }),
+        option({ id: 'b', available: false, reason: 'y', unavailableKind: 'no_command' }),
+      ],
+      []
+    );
+
+    expect(rows.map((row) => row.unavailableLine)).toEqual([
+      settings.profileNotFound(settings.profileUnavailableReason.not_found),
+      settings.profileUnavailable(settings.profileUnavailableReason.no_command),
+    ]);
+  });
+
+  it('shows a native-program reason in its own words with the guidance apart, never twice', () => {
+    const rows = profileSettingsRows(
+      [
+        option({
+          available: false,
+          reason: 'daemon sentence. Install the standalone build.',
+          unavailableKind: 'needs_native_program',
+          guidance: GUIDANCE,
+        }),
+      ],
+      []
+    );
+
+    expect(rows[0]).toMatchObject({
+      unavailableLine: settings.profileUnavailable(
+        settings.profileUnavailableReason.needs_native_program
+      ),
+      guidance: GUIDANCE,
+    });
+    expect(rows[0]?.unavailableLine).not.toContain('Install the standalone build.');
+  });
+
+  it('shows no guidance for a ready profile', () => {
+    const rows = profileSettingsRows([option({ guidance: GUIDANCE })], []);
+
+    expect(rows[0]?.guidance).toBeNull();
   });
 
   it('shows the argv the daemon returned for a profile with no command table of its own', () => {

@@ -36,9 +36,12 @@ allow it.
 - `yagura-mcp` gives an agent tools to list, open, read, message and close windows. Windows opened
   from the bundled Claude Code and Codex CLI profiles are connected automatically.
 - **Handoff**: pass a reference and a note to another window -- or to a new one, opened with the
-  CLI you choose -- and learn whether it picked it up.
+  CLI you choose -- and learn whether its CLI took it.
 - **Chat rooms**: agents and you post to each other with `@name`, `@parent` and `@user`. A room
   stops itself on loops or runaway turns and waits for you.
+- What yagura sends on its own -- handoffs, chat, notices -- reaches a CLI through that CLI's own
+  hooks and start-up request instead of being typed into its input line, except for a CLI that has
+  no way to be woken. See [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
 - **Plans**: an agent hands yagura a plan of tasks with dependencies. yagura works out what can
   run in parallel, refuses tasks that would write the same files at the same time, and opens each
   task's window with the CLI, model and effort you assign.
@@ -73,7 +76,11 @@ allow it.
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI), installed
-and signed in as usual. yagura does not install or sign in to them for you.
+and signed in as usual. yagura does not install or sign in to them for you. On Windows, install
+Codex CLI's standalone build rather than the npm package: yagura wakes a waiting Codex CLI with a
+command that the npm package's `.cmd` launcher cannot pass text through, and lists the Codex CLI
+profile as unavailable until the standalone build is first on `PATH` (see
+[profiles/README.md](profiles/README.md#delivery)).
 
 ## Quick Start
 
@@ -99,6 +106,7 @@ To use yagura's tools from a CLI session that yagura did not start, register the
 - [Plans](docs/plans.md)
 - [Launch profiles](profiles/README.md)
 - [Detection definitions](crates/yagura-daemon/detection/README.md)
+- [Adding a CLI](docs/adding-a-cli.md)
 - [Themes](docs/themes.md)
 - [Keyboard shortcuts](docs/keymap.md)
 - [WSL](docs/wsl.md)

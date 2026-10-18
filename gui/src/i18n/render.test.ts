@@ -361,21 +361,21 @@ describe('describeUnknownExplanation', () => {
 });
 
 describe('describeUndeliveredUnknownReason', () => {
-  it('falls back to the existing reason-less wording when the outcome carries no reason (the nine-state facade stays untouched)', () => {
+  it('falls back to the existing reason-less wording when the outcome carries no reason (the reason-less facade stays untouched)', () => {
     expect(describeUndeliveredUnknownReason(english, undeliveredUnknown(null))).toBe(
       english.chat.deliveryUndeliveredUnknown
     );
   });
 
-  it('renders every other outcome exactly as the nine-state facade does, reason or not', () => {
-    expect(describeUndeliveredUnknownReason(english, { state: 'confirmed' })).toBe(
-      describeDeliveryState(english, 'confirmed')
+  it('renders every other outcome exactly as the reason-less facade does, reason or not', () => {
+    expect(describeUndeliveredUnknownReason(english, { state: 'taken' })).toBe(
+      describeDeliveryState(english, 'taken')
     );
     expect(describeUndeliveredUnknownReason(english, { state: 'undelivered_halted' })).toBe(
       describeDeliveryState(english, 'undelivered_halted')
     );
-    expect(describeUndeliveredUnknownReason(english, { state: 'write_failed' })).toBe(
-      describeDeliveryState(english, 'write_failed')
+    expect(describeUndeliveredUnknownReason(english, { state: 'undelivered_restart' })).toBe(
+      describeDeliveryState(english, 'undelivered_restart')
     );
   });
 

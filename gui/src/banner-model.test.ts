@@ -5,6 +5,7 @@ import {
   dismissBanner,
   recordApprovalExpiredUnseen,
   dismissApprovalExpiredUnseen,
+  profilesNeedingNativeProgram,
 } from './banner-model';
 import type { BannerEntry, BannerId, BannerState, ApprovalExpiredSummary } from './banner-model';
 import { banners, describeThemeIssues } from './ui-messages';
@@ -30,6 +31,8 @@ function baseState(overrides: Partial<BannerState> = {}): BannerState {
     clientConfigFailure: null,
     isDaemonProtocolStale: false,
     startupEnvFailure: null,
+    profilesNeedingNativeProgram: [],
+    isProfileUnavailableDismissed: false,
     ...overrides,
   };
 }
@@ -98,6 +101,14 @@ const BANNERS: { on: Partial<BannerState>; entry: BannerEntry }[] = [
   {
     on: { isDaemonProtocolStale: true },
     entry: { id: 'daemon-protocol-stale', text: banners.daemonProtocolStale },
+  },
+  {
+    on: { profilesNeedingNativeProgram: [{ id: 'codex-cli', displayName: 'Codex CLI' }] },
+    entry: {
+      id: 'profile-unavailable',
+      text: banners.profileNeedsNativeProgram(['Codex CLI']),
+      action: { labelKey: 'howToInstall', profileId: 'codex-cli' },
+    },
   },
 ];
 
@@ -233,5 +244,53 @@ describe('dismissApprovalExpiredUnseen', () => {
     const next = dismissApprovalExpiredUnseen(state);
     expect(next.approvalExpiredUnseen).toBeNull();
     expect(next.boundaryNotice).toBe('probe: boundary notice');
+  });
+});
+
+describe('the profile-unavailable banner', () => {
+  it('names every profile and points its button at the first one', () => {
+    const [entry] = buildBanners(
+      baseState({
+        profilesNeedingNativeProgram: [
+          { id: 'codex-cli', displayName: 'Codex CLI' },
+          { id: 'other-cli', displayName: 'Other CLI' },
+        ],
+      })
+    );
+
+    expect(entry).toEqual({
+      id: 'profile-unavailable',
+      text: banners.profileNeedsNativeProgram(['Codex CLI', 'Other CLI']),
+      action: { labelKey: 'howToInstall', profileId: 'codex-cli' },
+    });
+  });
+
+  it('stays closed once dismissed', () => {
+    const state = baseState({
+      profilesNeedingNativeProgram: [{ id: 'codex-cli', displayName: 'Codex CLI' }],
+    });
+
+    expect(buildBanners(dismissBanner(state, 'profile-unavailable'))).toEqual([]);
+  });
+});
+
+describe('profilesNeedingNativeProgram', () => {
+  function entry(id: string, unavailableKind: string | null, enabled = true) {
+    return { id, displayName: id.toUpperCase(), enabled, unavailableKind };
+  }
+
+  it('keeps only the enabled profiles whose reason is a .cmd / .bat program, in list order', () => {
+    expect(
+      profilesNeedingNativeProgram([
+        entry('a', 'needs_native_program'),
+        entry('b', 'not_found'),
+        entry('c', null),
+        entry('d', 'needs_native_program', false),
+        entry('e', 'needs_native_program'),
+      ])
+    ).toEqual([
+      { id: 'a', displayName: 'A' },
+      { id: 'e', displayName: 'E' },
+    ]);
   });
 });

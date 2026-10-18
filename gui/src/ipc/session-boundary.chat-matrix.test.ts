@@ -16,14 +16,11 @@ const FROM_KINDS = ['window', 'user', 'external', 'system'] as const;
 /** Every delivery state a chat envelope can be in. */
 const DELIVERY_STATES = [
   'pending',
-  'confirmed',
-  'unconfirmed',
-  'not_observed',
-  'not_written',
-  'write_failed',
+  'taken',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',
+  'undelivered_restart',
 ] as const;
 
 /** One message wire shape for `from_kind` x `state`. */
@@ -66,7 +63,7 @@ describe('narrowChatMessages: every from_kind crossed with every delivery state'
     }
   }
 
-  it('ran the full 4x9 direct product', () => {
+  it('ran the full 4x6 direct product', () => {
     let count = 0;
     for (const fromKind of FROM_KINDS) {
       for (const state of DELIVERY_STATES) {
@@ -81,14 +78,14 @@ describe('narrowChatMessages: every from_kind crossed with every delivery state'
 describe('narrowChatMessages: from_window_id Option discipline across from_kind', () => {
   it('accepts null from_window_id for every non-window kind', () => {
     for (const fromKind of ['user', 'external', 'system'] as const) {
-      const decoded = narrowChatMessages(messagesWire(messageWire(fromKind, 'confirmed')));
+      const decoded = narrowChatMessages(messagesWire(messageWire(fromKind, 'taken')));
       const [message] = decoded.messages;
       expect(message?.from_window_id).toBeNull();
     }
   });
 
   it('accepts a present from_window_id for the window kind', () => {
-    const decoded = narrowChatMessages(messagesWire(messageWire('window', 'confirmed')));
+    const decoded = narrowChatMessages(messagesWire(messageWire('window', 'taken')));
     const [message] = decoded.messages;
     expect(message?.from_window_id).toBe('w-a');
   });
@@ -97,15 +94,29 @@ describe('narrowChatMessages: from_window_id Option discipline across from_kind'
 describe('narrowChatMessages: fail-closed on values outside the closed sets', () => {
   it('rejects every from_kind value not in the documented set, one at a time', () => {
     for (const bogus of ['agent', 'daemon', '', 'Window']) {
-      expect(() => narrowChatMessages(messagesWire(messageWire(bogus, 'confirmed')))).toThrow(
+      expect(() => narrowChatMessages(messagesWire(messageWire(bogus, 'taken')))).toThrow(
         BoundaryError
       );
     }
   });
 
   it('rejects every delivery state value not in the documented set, one at a time', () => {
-    for (const bogus of ['delivered', 'queued', '', 'Confirmed']) {
+    for (const bogus of ['delivered', 'queued', '', 'Taken']) {
       expect(() => narrowChatMessages(messagesWire(messageWire('window', bogus)))).toThrow(
+        BoundaryError
+      );
+    }
+  });
+
+  it('rejects the states that described what a composer did, which the daemon no longer sends', () => {
+    for (const retired of [
+      'confirmed',
+      'unconfirmed',
+      'not_observed',
+      'not_written',
+      'write_failed',
+    ]) {
+      expect(() => narrowChatMessages(messagesWire(messageWire('window', retired)))).toThrow(
         BoundaryError
       );
     }

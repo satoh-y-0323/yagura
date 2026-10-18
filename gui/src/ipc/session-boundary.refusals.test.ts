@@ -70,7 +70,7 @@ function windowInfoWire(overrides: Wire = {}): Wire {
 }
 
 function deliveryWire(overrides: Wire = {}): Wire {
-  return { window_id: 'w2', state: 'confirmed', ...overrides };
+  return { window_id: 'w2', state: 'taken', ...overrides };
 }
 
 function chatMessageWire(overrides: Wire = {}): Wire {
@@ -272,12 +272,12 @@ describe('the unknown_reason and status generation of a record', () => {
       chatMessagesWire({
         messages: [
           chatMessageWire({
-            deliveries: [deliveryWire({ state: 'confirmed', unknown_reason: 'screen_lost' })],
+            deliveries: [deliveryWire({ state: 'taken', unknown_reason: 'screen_lost' })],
           }),
         ],
       })
     );
-    expect(room.messages[0]?.deliveries[0]).toEqual({ window_id: 'w2', state: 'confirmed' });
+    expect(room.messages[0]?.deliveries[0]).toEqual({ window_id: 'w2', state: 'taken' });
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -415,12 +415,10 @@ describe('the chat replies', () => {
 
   it.each([
     'pending',
-    'confirmed',
-    'unconfirmed',
-    'not_observed',
-    'not_written',
-    'write_failed',
+    'taken',
     'undelivered_halted',
+    'undelivered_exhausted',
+    'undelivered_restart',
   ])('keeps the delivery state %s', (state) => {
     const room = narrowChatMessages(
       chatMessagesWire({ messages: [chatMessageWire({ deliveries: [deliveryWire({ state })] })] })

@@ -410,6 +410,39 @@ export interface LaunchOptionInfo {
   aliases: { alias: string; value: string }[];
 }
 
+/**
+ * Why a profile cannot be launched right now (protocol `ProfileUnavailableKind`).
+ * `'unknown'` stands for a kind this build does not know.
+ */
+export type ProfileUnavailableKind =
+  | 'not_found'
+  | 'metacharacter'
+  | 'no_command'
+  | 'no_default_shell'
+  | 'needs_native_program'
+  | 'unknown';
+
+const PROFILE_UNAVAILABLE_KINDS: ReadonlySet<string> = new Set<ProfileUnavailableKind>([
+  'not_found',
+  'metacharacter',
+  'no_command',
+  'no_default_shell',
+  'needs_native_program',
+]);
+
+/**
+ * What a profile tells its user to do about a reason it cannot be used
+ * (protocol `ProfileGuidance`): an explanation, a command to copy and a page.
+ */
+export interface ProfileGuidance {
+  /** The explanation, one line. */
+  text: string;
+  /** A command the user can copy and run, `null` when the profile names none. */
+  command: string | null;
+  /** An `https://` page that says more, `null` when there is none to show. */
+  url: string | null;
+}
+
 /** One launch profile the daemon offers, in the WebView's vocabulary. */
 export interface ProfileEntry {
   /** The profile identifier, which `invokeOpenWindow`'s `profile` takes. */
@@ -431,6 +464,10 @@ export interface ProfileEntry {
   available: boolean;
   /** The daemon's English reason text when `available` is false. */
   reason: string | null;
+  /** The kind of that reason, `null` when available or from a daemon that does not say. */
+  unavailableKind: ProfileUnavailableKind | null;
+  /** The profile's own guidance for a `needs_native_program` reason, `null` otherwise. */
+  guidance: ProfileGuidance | null;
   /** This profile's `model` launch option, `null` when it maps no such axis. */
   model: LaunchOptionInfo | null;
   /** This profile's `effort` launch option, `null` when it maps no such axis. */
@@ -692,10 +729,40 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     command: narrowStringArray(readOwnField(record, 'command'), `${context}.profiles.command`),
     available,
     reason: readOptionalString(record, 'unavailable_reason', context),
+    unavailableKind: narrowUnavailableKind(readOptionalString(record, 'unavailable_kind', context)),
+    guidance: narrowProfileGuidance(readOwnField(record, 'unavailable_guidance'), context),
     model: narrowLaunchOptionInfo(readOwnField(record, 'model'), `${context}.profiles.model`),
     effort: narrowLaunchOptionInfo(readOwnField(record, 'effort'), `${context}.profiles.effort`),
     enabled: narrowProfileEnabled(readOwnField(record, 'enabled'), `${context}.profiles.enabled`),
   };
+}
+
+/**
+ * Validates a profile's install guidance. A page that is not `https://` is
+ * dropped rather than shown, whatever the daemon let through.
+ *
+ * @throws {BoundaryError} when it is present and not of the guidance shape.
+ */
+function narrowProfileGuidance(value: unknown, context: string): ProfileGuidance | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const guidanceContext = `${context}.unavailable_guidance`;
+  const record = requireRecord(value, guidanceContext);
+  const url = readOptionalString(record, 'url', guidanceContext);
+  return {
+    text: requireString(record, 'text', guidanceContext),
+    command: readOptionalString(record, 'command', guidanceContext),
+    url: url !== null && url.startsWith('https://') ? url : null,
+  };
+}
+
+/** Reads a kind this build does not know as `'unknown'`, as the native side does. */
+function narrowUnavailableKind(value: string | null): ProfileUnavailableKind | null {
+  if (value === null) {
+    return null;
+  }
+  return PROFILE_UNAVAILABLE_KINDS.has(value) ? (value as ProfileUnavailableKind) : 'unknown';
 }
 
 /**

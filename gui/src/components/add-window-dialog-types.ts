@@ -8,7 +8,11 @@
  * both sides, where the two could drift without a compiler error.
  */
 
-import type { LaunchOptionInfo } from '../ipc/session-client';
+import type {
+  LaunchOptionInfo,
+  ProfileGuidance,
+  ProfileUnavailableKind,
+} from '../ipc/session-client';
 
 /**
  * One launch profile the dialog offers, already narrowed to the WebView's
@@ -34,6 +38,10 @@ export interface ProfileOption {
   available: boolean;
   /** The daemon's English reason text when `available` is false. */
   reason: string | null;
+  /** The kind of that reason, `null` when available or from a daemon that does not say. */
+  unavailableKind: ProfileUnavailableKind | null;
+  /** The profile's own guidance for a `needs_native_program` reason, `null` otherwise. */
+  guidance: ProfileGuidance | null;
   /** This profile's `model` launch option, `null` when it maps no such axis. */
   model: LaunchOptionInfo | null;
   /** This profile's `effort` launch option, `null` when it maps no such axis. */

@@ -11,8 +11,10 @@ import type { LaunchOptionInfo, ProfileEntry } from '../ipc/session-client';
 import {
   launchOptionAxes,
   mappedLaunchOptionValues,
+  profileChoiceLabel,
   profileChoices,
 } from './launch-profile-choices';
+import { forms } from '../ui-messages';
 
 function profile(
   id: string,
@@ -30,6 +32,8 @@ function profile(
     command: [id],
     available: reason === null,
     reason,
+    unavailableKind: null,
+    guidance: null,
     model,
     effort,
     enabled: true,
@@ -162,6 +166,39 @@ describe('profileChoices: a selection the list no longer holds', () => {
       displayName: 'removed-profile',
       available: false,
       reason: null,
+      unavailableKind: null,
     });
+  });
+});
+
+describe('profileChoiceLabel', () => {
+  const native: ProfileEntry = {
+    ...profile('codex-cli', 'Codex CLI', null, null, 'daemon sentence. Install guidance.'),
+    unavailableKind: 'needs_native_program',
+    guidance: { text: 'Install guidance.', command: null, url: null },
+  };
+
+  it('carries the kind of reason into the choice', () => {
+    expect(profileChoices([native], '')[0]?.unavailableKind).toBe('needs_native_program');
+  });
+
+  it('follows an unavailable profile with the short wording for its kind, not the daemon sentence', () => {
+    const [choice] = profileChoices([native], '');
+
+    expect(choice && profileChoiceLabel(choice)).toBe(
+      `Codex CLI — ${forms.profileUnavailableShort.needs_native_program}`
+    );
+  });
+
+  it('falls back to the reason the daemon gave when it names no kind', () => {
+    const shell = profileChoices(profiles, '').find((choice) => choice.id === 'plain-shell');
+
+    expect(shell && profileChoiceLabel(shell)).toBe('Shell — not installed');
+  });
+
+  it('shows only the name of an available profile', () => {
+    const [choice] = profileChoices(profiles, '');
+
+    expect(choice && profileChoiceLabel(choice)).toBe('Codex CLI');
   });
 });

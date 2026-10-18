@@ -7,8 +7,10 @@
     applyRecoveryUpdate,
     buildBanners,
     dismissBanner,
+    profilesNeedingNativeProgram,
     recordApprovalExpiredUnseen,
     type ApprovalExpiredSummary,
+    type BannerAction,
     type BannerId,
   } from './banner-model';
   import { describeBoundaryNotice, type BoundaryOperation } from './boundary-notice-model';
@@ -42,6 +44,7 @@
   import { serializeRefresh } from './chat/refresh-serializer';
   import { daemonProblemNotices } from './daemon-health-notice';
   import type { DropSignal } from './ipc/folder-drop-model';
+  import { writeClipboardText } from './ipc/clipboard';
   import { pickFolder, subscribeFolderDrop } from './ipc/folder-picker';
   import { startFramePull, type FramePull } from './ipc/frame-pull';
   import {
@@ -328,6 +331,8 @@
   let restoreCandidates: RestoreEntry[] = [];
   let restoreTakenAtEpochS: number | null = null;
   let isRestoreBannerDismissed = false;
+  // Dismissing the banner naming unusable profiles holds for this run only.
+  let isProfileUnavailableDismissed = false;
   let isRestoreDialogOpen = false;
   let restoreSelection: Set<number> = new Set();
   // Checkboxes the user toggled by hand (position -> checked); never rendered
@@ -664,6 +669,8 @@
     clientConfigFailure,
     isDaemonProtocolStale,
     startupEnvFailure,
+    profilesNeedingNativeProgram: profilesNeedingNativeProgram(profileOptions),
+    isProfileUnavailableDismissed,
   };
   $: activeBanners = buildBanners(bannerState);
   // Recomputed on every registry change so the already-open hint (cwd + name
@@ -1419,11 +1426,20 @@
     requestedModelProfile = { id, seq: (requestedModelProfile?.seq ?? 0) + 1 };
   }
 
+  async function copyText(text: string): Promise<void> {
+    try {
+      await writeClipboardText(text);
+    } catch (error) {
+      console.error('failed to copy to the clipboard:', error);
+    }
+  }
+
   const profileDetailActions: ProfileDetailActions = {
     onToggle: toggleProfileDetail,
     onSaveCommand: (id, argv) => void saveProfileCommand(id, argv),
     onResetCommand: (id) => void saveProfileCommand(id, null),
     onOpenModels: (id) => void openModelsFor(id),
+    onCopyText: (text) => void copyText(text),
   };
 
   async function applyPlanReload(reload: PlanReload): Promise<void> {
@@ -2803,6 +2819,29 @@
     isDaemonRecoveryDismissed = next.isDaemonRecoveryDismissed;
     clientConfigFailure = next.clientConfigFailure;
     startupEnvFailure = next.startupEnvFailure;
+    isProfileUnavailableDismissed = next.isProfileUnavailableDismissed;
+  }
+
+  function handleBannerAction(action: BannerAction): void {
+    switch (action.labelKey) {
+      case 'reconnect':
+        void handleReconnect();
+        return;
+      case 'howToInstall':
+        void showProfileInSettings(action.profileId);
+        return;
+    }
+  }
+
+  /** Opens Settings on the Profiles tab with `id`'s row open, where its guidance is shown. */
+  async function showProfileInSettings(id: string): Promise<void> {
+    if (!isSettingsOpen) {
+      await toggleSettings();
+    }
+    selectSettingsTab('profiles');
+    if (openProfileDetailId !== id) {
+      toggleProfileDetail(id);
+    }
   }
 
   /**
@@ -2858,7 +2897,7 @@
       <span class="banner-text">{banner.text}</span>
       {#if banner.action}
         {@const action = banner.action}
-        <button class="banner-action" type="button" on:click={handleReconnect}>
+        <button class="banner-action" type="button" on:click={() => handleBannerAction(action)}>
           {buttons[action.labelKey]}
         </button>
       {/if}

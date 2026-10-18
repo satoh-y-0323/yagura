@@ -5,11 +5,14 @@ PTY output against: one TOML file per CLI, named `<name>.toml`.
 
 A definition holds both directions of that terminal: how to *read* it -- the
 patterns and clocks below -- and, in its `[composer]` and `[input]` tables,
-how to *write* to it. `[composer]` says whether the daemon may write into a
+how to *write* to it. `[composer]` says whether the daemon may type into a
 window running this definition at all, and where on screen to look before it
-does; `[input]` says how, once it may. A definition that leaves `[composer]`
-out declares no composer, so the daemon never puts a line of its own
-composition in front of that CLI (see [`[composer]`](#composer)); one that
+does; `[input]` says how, once it may. The daemon types in two cases only: a
+caller's `send_message`, and the text it sends of its own accord to a CLI whose
+profile declares no way to wake it (see
+[How the daemon delivers text](../../../docs/mcp-setup.md#how-the-daemon-delivers-text)).
+A definition that leaves `[composer]` out declares no composer, so the daemon
+never types a line into that CLI (see [`[composer]`](#composer)); one that
 declares a composer but names no `[input].probe` gets no such line either.
 
 Definitions are data, not code. When a CLI changes its TUI, only the file
@@ -54,7 +57,10 @@ command works without an absolute path or a manual `cmd /c` prefix. A shim
 path or argument containing a command-interpreter metacharacter (`%` `&` `|`
 `<` `>` `^` `"`, or a newline) is rejected instead of being passed through --
 see [`.cmd` / `.bat` shims](../../../profiles/README.md#cmd--bat-shims) for the
-full rule.
+full rule. The bundled `codex-cli` profile nonetheless needs Codex CLI's
+standalone build on Windows, because the daemon wakes a waiting Codex CLI with
+a command that passes text as an argument (see
+[Delivery](../../../profiles/README.md#delivery)).
 
 ## Selecting a definition
 
@@ -260,26 +266,27 @@ distinction is not cosmetic -- a plain shell's screen alone cannot tell its
 prompt apart from a program's own output (see the `generic-shell` paragraph
 above), so a definition for one leaves this table out rather than guess.
 
-A window whose definition declares no composer is never written to by the
-daemon, through any path: `send_message`, a `send_handoff` envelope, a task
-instruction's notice and a chat delivery are all refused there as
-`no_composer` before anything is read, and the window is never a chat
-participant either, regardless of `[chat].exclude_detections`. `send_keys` is
-unaffected, since it writes a caller's own bytes rather than anything the
-daemon composed.
+A window whose definition declares no composer is never typed into by the
+daemon: `send_message` is refused there as `no_composer` before anything is
+read, and so is text the daemon would type of its own accord (see above). A
+CLI whose profile can hand it text another way (a hook, a start-up request or
+a wake command) needs no composer for that, so whether a window takes part in
+chat or receives a handoff is decided by its profile, not by this table (see
+[Delivery](../../../profiles/README.md#delivery)). `send_keys` is unaffected,
+since it writes a caller's own bytes rather than anything the daemon
+composed.
 
 A definition that declares a composer but names no `[input].probe` is
 written to only as far as needs no judgement. Whether a line the daemon
 writes has shown in the composer is decided by the probe typed behind it
-(see [`[input]`](#input)), so without one the daemon writes no such line: a
-one-line `send_message` (text ending in its single terminator), a
-`send_handoff` envelope and a task instruction's notice are refused there as
-`no_composer` the same way, no notice or chat intro is typed there, and the
-window is not a chat participant. A `send_message` text with no terminator, or one
-that is only a terminator, is still written as it is, behind the same screen
-check every write goes through. The definition still loads and the window's
-status is still detected; naming a `probe` is all it takes for the daemon to
-write lines into it.
+(see [`[input]`](#input)), so without one the daemon types no such line: a
+one-line `send_message` (text ending in its single terminator) is refused there
+as `no_composer` the same way, and text the daemon would type of its own
+accord waits in the window's inbox instead. A `send_message` text with no
+terminator, or one that is only a terminator, is still written as it is,
+behind the same screen check every write goes through. The definition still
+loads and the window's status is still detected; naming a `probe` is all it
+takes for the daemon to type lines into it.
 
 The daemon writes only on a screen the CLI has finished painting: the cursor
 is shown and no synchronized update (`CSI ? 2026 h`) is open. A screen that
@@ -331,14 +338,14 @@ so text being typed never decides the window's status.
 
 ### `[input]`
 
-`[input]` is read when the daemon writes into a window running this
-definition -- delivering a [`send_handoff`](../../../docs/mcp-setup.md#send_handoff)
-envelope, for instance. The body and the submit bytes are written as two
-steps, `submit_delay_ms` apart, because a CLI that reads a fast burst of input
+`[input]` is read when the daemon types into a window running this
+definition -- a [`send_message`](../../../docs/mcp-setup.md#send_message), or a
+text it sends of its own accord to a CLI it cannot wake. The body and the
+submit bytes are written as two steps, `submit_delay_ms` apart, because a CLI that reads a fast burst of input
 as a paste takes a carriage return arriving inside that burst as a line break
 rather than as "submit". After the submit bytes are written, the daemon
 watches the window for `delivery_confirm_ms` to see whether the receiver
-took the envelope: its painted composer empties with nothing else written into
+took the text: its painted composer empties with nothing else written into
 the window, or its status moves from waiting for input to working. When
 neither shows, the daemon may press the submit key
 again, up to `resend_max` times. A re-send only ever presses that key: it
@@ -375,7 +382,7 @@ takes another write:
 
 So a CLI that stops handling its input -- a dialog this definition has no rule
 for, for instance -- holds a write into its window until one of those events
-comes; see [`send_handoff`'s Maximum wait](../../../docs/mcp-setup.md#send_handoff)
+comes; see [`send_message`'s Maximum wait](../../../docs/mcp-setup.md#send_message)
 for how to end one. This is also why the daemon writes no line of its own
 into a window whose definition names no `probe` (see
 [`[composer]`](#composer)): nothing would say whether the line showed.
@@ -419,7 +426,7 @@ else. The CLI handles its input in order, so at that point the body and the
 take-back have both been handled and nothing of the body is left; the daemon
 then types `erase` and reports the retraction as leaving nothing behind once
 the composer reads empty. Everything else is reported as leaving something
-behind, and a window a handoff opened for it stays open:
+behind:
 
 - The probe shows behind something -- the take-back left part of the body.
   The daemon types `erase` (input is handled in order, so it removes the
@@ -453,6 +460,15 @@ since.
 
 #### Choosing `probe` for a CLI
 
+A definition needs a `probe` wherever the daemon types: for `send_message`,
+and for the text it sends of its own accord to a CLI whose profile declares
+no way to wake it (`wake = "none"`; the bundled Antigravity CLI profiles). A
+CLI whose profile hands it text through hooks, a start-up request or a wake
+command is never typed daemon-composed text, so its definition needs a
+`probe` only for `send_message`. The procedure for a new CLI, including how
+to find out which of these applies, is in
+[Adding a CLI](../../../docs/adding-a-cli.md).
+
 `probe` is a character the daemon types into the CLI's composer, so it has
 to be harmless there. Check a candidate on the CLI itself, with an empty
 composer, before putting it in a definition:
@@ -467,8 +483,8 @@ composer, before putting it in a definition:
    the composer empty.
 
 `[` is never accepted as `probe`, and a definition naming it fails to load:
-every line the daemon writes on its own -- a `[yagura handoff] ` envelope,
-and the chat, task, plan and report lines -- starts with `[`, so such a probe
+every line the daemon types of its own accord -- a `[yagura handoff] `
+envelope, and the chat, task, plan and report lines -- starts with `[`, so such a probe
 showing alone could not be told apart from one of those lines beginning to
 show.
 
@@ -485,9 +501,9 @@ waits as described above.
 An empty `clear` cannot retract anything -- the body the daemon wrote for a
 requester that left, or in front of which another writer typed, is left
 sitting in the composer instead, and the
-delivery ends as `not_written` with the envelope still in front of the
-receiver (see
-[`send_handoff`'s delivery outcomes](../../../docs/mcp-setup.md#send_handoff)).
+write ends as `not_written` with the text still in front of the receiver (see
+the `not_written` error under
+[Error Handling](../../../docs/mcp-setup.md#error-handling)).
 
 `ready_hold_ms` decides *when* the daemon may start writing. A CLI that is
 still starting up can alternate between drawing its prompt and drawing a
@@ -497,11 +513,10 @@ once per window: once a window has been seen to hold a status that accepts
 input for that long, nothing written to it afterwards waits for it again. The
 wait applies only while a window has not yet been seen to hold, and only when
 the write is requested at a moment that window is in one of those statuses --
-a write into a busy window is never delayed, and a write into an existing
-window never fails because of this key, though a window a handoff's `profile`
-opened and that never holds does end as `window_not_ready`. A definition that
-leaves this key out may see a delivery into a freshly started window reported
-as `unconfirmed`, so a new vendor definition should measure it: sample the
+a write into a busy window is never delayed, and a write never fails because
+of this key. A definition that leaves this key out may see a write into a
+freshly started window dropped by a CLI that is not yet taking input, so a new
+vendor definition should measure it: sample the
 confirmed status every 50 ms over the first ten seconds of a window's life,
 read the longest run of a status that accepts input within the startup phase,
 and take that sample under load as well -- with other windows working, an
@@ -538,7 +553,7 @@ written to.
 
 | Key | Meaning |
 | --- | --- |
-| `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered `not_written` at once and its text is taken back, as for a cancelled call. `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
+| `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered at once (a `send_message` as `not_written`, with its text taken back as for a cancelled call; a `send_handoff` as `undelivered_timeout`, with its envelope withdrawn from the inbox). `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
 
 The bundled `codex-cli` definition sets it to `true`; `claude-code` and
 `antigravity-cli` set it to `false`.
@@ -642,8 +657,8 @@ window reports `unknown` until that text changes.
 ### Why a window is `unknown`
 
 Every `unknown` the daemon confirms carries a reason for it. The reason
-travels as `unknown_reason` on the wire (`list_windows`, `get_window_status`,
-and a chat delivery that was never attempted), as a field of the same name on
+travels as `unknown_reason` on the wire (`list_windows`, `get_window_status`),
+as a field of the same name on
 the `window status confirmed` log line, and as a suffix beside the status in
 the GUI. The six reasons, and what produces each:
 
@@ -725,7 +740,7 @@ Typing at a shell prompt is itself output: the terminal echoes every keystroke
 back. Counting those echoes as activity would report a window as `running`
 while someone is merely editing a line. What decides this is the payload, not
 who wrote it: a write whose bytes carry no CR or LF submits nothing, whether
-it came from a person typing, from a tool, or from a handoff's body, so a
+it came from a person typing, from a tool, or from a typed delivery's body, so a
 chunk arriving within `input_echo_window_ms` of such a write is attributed to
 that write's echo and does not advance `a`. The chunk still reaches the
 screen, so rules match it exactly as before; only the activity clock ignores
@@ -750,7 +765,7 @@ way a submitted line disarms echo attribution below.
 
 Writes that may start work are never attributed: any write whose payload does
 contain CR or LF -- a typed line, a `send_message` or `send_text` carrying
-one, a handoff's submit bytes -- and an interrupt, which carries no terminator
+one, a typed delivery's submit bytes -- and an interrupt, which carries no terminator
 of its own but is never line editing, all leave the following output counting
 as activity evidence -- and, the same way, immediately disarm any resize
 window still open, so a submitted line's own output counts right away even if
@@ -876,7 +891,10 @@ named:
 | Antigravity CLI 1.2.14 (`antigravity-cli`, `wsl-antigravity-cli`) | a `yagura` entry in `~/.gemini/config/hooks.json`, written by registration | `PreInvocation`, `PostToolUse` | -- | -- |
 
 How the hooks are placed, and what the profile tables look like, is in
-[profiles/README.md](../../../profiles/README.md#hooks-injection).
+[profiles/README.md](../../../profiles/README.md#hooks-injection). The same hooks
+also run the commands a CLI reads its inbox through (see
+[Delivery](../../../profiles/README.md#delivery)); those are not status
+reports and are left out of the table.
 
 **How a hook finds the daemon.** When the daemon starts, it places a copy of
 its own executable (a hard link where the file system allows one) in a `bin`

@@ -21,6 +21,17 @@
   export let onSetEnabled: (id: string, enabled: boolean) => void;
   export let details: ProfileDetailsState;
   export let detailActions: ProfileDetailActions;
+
+  // The shell opens a row's details to point at it, so that row is brought into view.
+  function revealWhenOpen(node: HTMLElement, isOpen: boolean): { update: (next: boolean) => void } {
+    const reveal = (open: boolean): void => {
+      if (open) {
+        node.scrollIntoView({ block: 'nearest' });
+      }
+    };
+    reveal(isOpen);
+    return { update: reveal };
+  }
 </script>
 
 <div class="profile-settings">
@@ -33,7 +44,11 @@
   {/if}
   <div class="profile-settings__list">
     {#each profileSettingsRows(profileOptions, roles) as row (row.id)}
-      <div class="profile-settings__row" class:profile-settings__row--off={!row.enabled}>
+      <div
+        class="profile-settings__row"
+        class:profile-settings__row--off={!row.enabled}
+        use:revealWhenOpen={details.openId === row.id}
+      >
         <div class="profile-settings__name">
           <b>{row.displayName}</b>
           <span class="profile-settings__id">{row.id}</span>
@@ -66,11 +81,38 @@
           {#if row.isReady}
             <span class="profile-settings__status-ok">{settings.profileReady}</span>
           {:else}
-            <span class="profile-settings__status-missing"
-              >{settings.profileNotFound(row.reason ?? '')}</span
-            >
+            <span class="profile-settings__status-missing">{row.unavailableLine}</span>
           {/if}
         </div>
+        {#if row.guidance !== null}
+          {@const guidance = row.guidance}
+          <div class="profile-settings__guidance">
+            <p class="profile-settings__guidance-text">{guidance.text}</p>
+            {#if guidance.command !== null}
+              {@const command = guidance.command}
+              <div class="profile-settings__copyable">
+                <code class="profile-settings__copy-value">{command}</code>
+                <button
+                  type="button"
+                  class="btn btn-secondary profile-settings__copy"
+                  on:click={() => detailActions.onCopyText(command)}>{settings.profileCopy}</button
+                >
+              </div>
+            {/if}
+            {#if guidance.url !== null}
+              {@const url = guidance.url}
+              <span class="profile-settings__guide-label">{settings.profileInstallGuide}</span>
+              <div class="profile-settings__copyable">
+                <code class="profile-settings__copy-value">{url}</code>
+                <button
+                  type="button"
+                  class="btn btn-secondary profile-settings__copy"
+                  on:click={() => detailActions.onCopyText(url)}>{settings.profileCopy}</button
+                >
+              </div>
+            {/if}
+          </div>
+        {/if}
         {#if row.rolesUsing.length > 0}
           <p class="profile-settings__roles">{settings.profileUsedByRoles(row.rolesUsing)}</p>
         {/if}
@@ -202,6 +244,55 @@
 
   .profile-settings__status-missing {
     color: var(--color-warning);
+  }
+
+  .profile-settings__guidance {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-sm);
+    border-radius: var(--radius-sm);
+    background-color: var(--color-background);
+    border: 1px solid var(--color-warning);
+    font-size: var(--font-size-sm);
+  }
+
+  .profile-settings__guidance-text {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .profile-settings__guide-label {
+    color: var(--color-text-secondary);
+  }
+
+  .profile-settings__copyable {
+    display: flex;
+    gap: var(--space-sm);
+    align-items: stretch;
+  }
+
+  /* 44px is the smallest comfortable pointer target. */
+  .profile-settings__copy-value {
+    flex: 1;
+    min-width: 0;
+    min-height: 44px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    padding: 0 var(--space-sm);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-family-mono);
+    overflow-wrap: anywhere;
+    user-select: text;
+  }
+
+  .profile-settings__copy {
+    flex-shrink: 0;
+    min-height: 44px;
+    white-space: nowrap;
   }
 
   .profile-settings__roles {

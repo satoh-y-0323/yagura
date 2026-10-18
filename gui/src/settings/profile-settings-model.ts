@@ -3,8 +3,11 @@
  * the component renders these rows and hands the switch back to its caller.
  */
 import type { ProfileOption } from '../components/add-window-dialog-types';
+import type { ProfileGuidance } from '../ipc/session-client';
 import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
 import type { RoleEntry } from '../ipc/plan-boundary';
+import { unavailableText } from '../profile/launch-profile-choices';
+import { settings } from '../ui-messages';
 
 /** What one row of the Profiles tab shows. */
 export interface ProfileSettingsRow {
@@ -16,8 +19,14 @@ export interface ProfileSettingsRow {
   commandLine: string;
   /** Whether the profile currently resolves to something launchable. */
   isReady: boolean;
-  /** The daemon's English reason text when the profile is not ready. */
-  reason: string | null;
+  /**
+   * What the row says when the profile is not ready: "Not found" only for a
+   * program that could not be found, "Unavailable" for every other reason.
+   * `null` when ready.
+   */
+  unavailableLine: string | null;
+  /** The profile's own install guidance, shown under the heading; `null` when it has none. */
+  guidance: ProfileGuidance | null;
   /** Whether the user left this profile switched on. */
   enabled: boolean;
   /**
@@ -32,6 +41,15 @@ export function rolesUsingProfile(roles: readonly RoleEntry[], profileId: string
   return roles.filter((role) => role.profile === profileId).map((role) => role.name);
 }
 
+function unavailableLine(profile: ProfileOption): string {
+  const why =
+    unavailableText(profile.unavailableKind, profile.reason, settings.profileUnavailableReason) ??
+    '';
+  return profile.unavailableKind === 'not_found'
+    ? settings.profileNotFound(why)
+    : settings.profileUnavailable(why);
+}
+
 /** Builds one row per profile, in the order the profiles arrived in. */
 export function profileSettingsRows(
   profiles: readonly ProfileOption[],
@@ -42,7 +60,11 @@ export function profileSettingsRows(
     displayName: profile.displayName,
     commandLine: profile.command.join(' '),
     isReady: profile.available,
-    reason: profile.reason,
+    unavailableLine: profile.available ? null : unavailableLine(profile),
+    guidance:
+      !profile.available && profile.unavailableKind === 'needs_native_program'
+        ? profile.guidance
+        : null,
     enabled: profile.enabled,
     rolesUsing: profile.enabled ? [] : rolesUsingProfile(roles, profile.id),
   }));

@@ -98,8 +98,8 @@ sits only on opening a task's window. `create_plan` and `list_plans` report a pe
 and stays that way for its whole life -- turning the setting back on does not retroactively gate a
 plan that already exists (see [docs/mcp-setup.md](mcp-setup.md#playbooks-approval-and-limits)).
 
-Once an approver approves it, `review` becomes `"approved"`, a one-line notice is typed into the
-owner window --
+Once an approver approves it, `review` becomes `"approved"`, a one-line notice is handed to the
+owner window's CLI (see [How the daemon delivers text](mcp-setup.md#how-the-daemon-delivers-text)) --
 
 ```
 [yagura plan] Plan <plan_id> was approved. You can open its tasks now.
@@ -164,9 +164,9 @@ closed or its process exits, opening the task again starts a fresh window and re
 ## Task instructions
 
 A task can carry an `instruction`: the request the parent has for the window opened for that task,
-in as many lines as it needs. yagura never types the request itself into that window's terminal.
-It stores it with the task, types a short fixed notice into the window, and the window reads the
-request back with `get_plan`. This is how a parent hands a window a multi-line request:
+in as many lines as it needs. yagura never hands the request itself to that window.
+It stores it with the task, starts the window with a short fixed notice as its first request, and
+the window reads the request back with `get_plan`. This is how a parent hands a window a multi-line request:
 `send_message` refuses text with a line break anywhere but at its very end (see
 [docs/mcp-setup.md](mcp-setup.md#send_message)).
 
@@ -178,55 +178,44 @@ request back with `get_plan`. This is how a parent hands a window a multi-line r
   control character, and any character that could reorder or hide text, is rejected as
   `invalid_argument`. `yagura-mcp` converts `\r\n` and lone `\r` line endings to `\n` before sending
   it.
-- **A task with an instruction needs a window that can actually be notified.** When the resolved
-  assignment's profile resolves to a detection definition that declares no composer or names no
-  `[input].probe`, `open_task_window` is refused as `no_composer` instead. When the definition can be read beforehand, no child is started
-  and the task is not bound; when it can only be told from the window just opened, that window is bound,
-  closed before the reply goes out, and its instruction is recorded as `window_closed` rather than left
-  pending. A task with no instruction still opens under
-  the same profile, since nothing needs to be typed into it. See
-  [docs/mcp-setup.md](mcp-setup.md#error-handling).
+- **A task with an instruction needs a profile that can be handed a request at launch.** When the
+  resolved assignment's profile declares no `launch_prompt` in its `[delivery]` table (see
+  [profiles/README.md](../profiles/README.md#delivery)), `open_task_window` is refused as
+  `no_composer` before any child is started, and the task is not bound. When the profile's program
+  is a Windows `.cmd` / `.bat` file, through which the notice cannot pass unchanged, it is refused as
+  `unsupported`. A task with no instruction still opens under any profile, since nothing needs to be
+  handed over. See [docs/mcp-setup.md](mcp-setup.md#error-handling).
 - **Otherwise, `open_task_window` replies at once and leaves the notice to the daemon.** For a task
   with an instruction, it opens the window, binds it to the task and replies, without waiting for the
-  window. The daemon then types this line into the window and submits it once the window accepts
-  input -- a status of `waiting_input` or `idle`, held for its detection definition's `ready_hold_ms`
-  when set, and never `unknown`:
+  window. The window is started with this line as the CLI's first request:
 
   ```
   [yagura task] Task <task_id> of plan <plan_id> is assigned to this window. Call get_plan with plan_id "<plan_id>" and task_id "<task_id>" to read its instruction.
   ```
 
-  Only the plan id and the task id vary; nothing from the instruction appears in the notice. The
-  notice uses the same delivery machinery as a `send_handoff` envelope, and immediately before
-  writing it checks again that the window still accepts input and is not `unknown`.
+  Only the plan id and the task id vary; nothing from the instruction appears in the notice.
 - **The window reads its request with `get_plan`, narrowed by `task_id`.** A task window can read
   its own plan (see [Who can read what](#who-can-read-what)); passing `task_id` keeps the reply to
   its own task, so it does not also receive every other task's instruction.
-- **The notice comes after the chat intro.** When the window also gets the chat intro (the
-  playbook's `[chat].intro`, see [docs/mcp-setup.md](mcp-setup.md#playbooks-approval-and-limits)),
-  the intro is typed first and the task notice after it. Each is typed at most once per window.
-- **A notice that could not be typed is tried again for as long as the window is alive.** When
-  the write does not go through -- the window stopped accepting input just before it, text someone
-  else typed is already in its input box, the delivery stopped short for one of the reasons a
-  `send_handoff` delivery can end `not_written` (see
-  [docs/mcp-setup.md](mcp-setup.md#send_handoff)), or the write itself failed -- the notice stays
-  queued and is tried again when the window's status changes, or every 2 seconds while it does not.
-  There is no deadline: a window that never accepts input never gets the notice. The notice does
-  not depend on the connection that called `open_task_window`, which may close at any time.
+- **The chat announcement does not compete with the notice.** When the window also gets the chat
+  intro (the playbook's `[chat].intro`, see
+  [docs/mcp-setup.md](mcp-setup.md#playbooks-approval-and-limits)), the CLI reads it from its
+  start-up hook, while the notice is its first request.
+- **The notice does not depend on the connection that called `open_task_window`**, which may close
+  at any time: it is part of how the window is started.
 - **`get_plan` shows where the notice stands**, as the task's `instruction_notice`, an object of
   `state` and `at`:
-  - `pending` -- the notice has not been typed yet; `at` is `null`.
-  - `delivered` -- the notice was typed into the window and submitted; `at` is when, in Unix epoch
-    seconds. It says the line was written, not that the window acted on it.
+  - `pending` -- the notice has not been handed over yet; `at` is `null`.
+  - `delivered` -- the window was started with the notice; `at` is when, in Unix epoch seconds. It
+    says the CLI was given the line, not that the window acted on it.
   - `window_closed` -- the window exited or was closed, or the daemon restarted, before the notice
-    was typed; `at` is when that was recorded, in Unix epoch seconds.
+    was handed over; `at` is when that was recorded, in Unix epoch seconds.
 
   `instruction_notice` is left out for a task with no instruction and for one whose window has
   never been opened. Opening the task's window again starts it over at `pending`.
 - **The window is not closed when the notice does not arrive.** Whatever `instruction_notice`
-  says, the window stays open and bound to its task, unlike a window a `send_handoff` opened for an
-  envelope it never got. The instruction stays readable with `get_plan`; to prompt the window
-  without waiting for the notice, send it a one-line `send_message` telling it to call `get_plan`
+  says, the window stays open and bound to its task. The instruction stays readable with
+  `get_plan`; to prompt the window, send it a one-line `send_message` telling it to call `get_plan`
   (which goes through the approval gate like any other `send_message`).
 - **Changing an instruction does not notify a window already open for the task.** yagura has no
   separate path for handing an open window a second multi-line request: change the instruction with
@@ -246,8 +235,7 @@ only record of that, and it is only as reliable as the window that wrote it.
   `report`) and on the GUI's Plans board. A later report from the same window replaces the earlier
   one.
 - **It is also handed to the plan's owner window**, which collects it with `wait_for_report`. When
-  the owner is not waiting, the daemon types a one-line notice into the owner's window once it
-  accepts input. When the plan has no live owner, the report is still recorded. See
+  the owner is not waiting, the daemon hands the owner's CLI a one-line notice. When the plan has no live owner, the report is still recorded. See
   [docs/mcp-setup.md](mcp-setup.md#send_report) for the delivery rules and limits.
 - **Opening the task's window again clears its report**: `open_task_window` on a task starts a new
   attempt, so the previous attempt's report no longer describes the task. Dropping the task with
@@ -356,7 +344,7 @@ window. Reaching either plan limit refuses creation with `resource_exhausted`.
   [Task reports](#task-reports)). The window is named after the task's title unless you pass
   `name`.
 - Call `wait_for_report` to collect the reports of the task windows you opened, and whenever the
-  `[yagura report]` notice appears in your window.
+  `[yagura report]` notice reaches your CLI.
 - Put a request that spans more than one line in the task's `instruction` rather than sending it
   with `send_message`, and check the task's `instruction_notice` in `get_plan` to see whether the
   window has been told about it (see [Task instructions](#task-instructions)).

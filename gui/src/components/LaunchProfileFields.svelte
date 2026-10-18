@@ -8,7 +8,11 @@
    * list, and a model / effort field for each axis that profile maps. It holds
    * no state of its own; every edit is reported through the callbacks.
    */
-  import { launchOptionAxes, profileChoices } from '../profile/launch-profile-choices';
+  import {
+    launchOptionAxes,
+    profileChoiceLabel,
+    profileChoices,
+  } from '../profile/launch-profile-choices';
   import { forms } from '../ui-messages';
   import type { ProfileOption } from './add-window-dialog-types';
 
@@ -73,7 +77,7 @@
     >
       {#each profileChoices(profileOptions, profileValue) as choice (choice.id)}
         <option value={choice.id} disabled={!choice.available}>
-          {choice.reason === null ? choice.displayName : `${choice.displayName} — ${choice.reason}`}
+          {profileChoiceLabel(choice)}
         </option>
       {/each}
       {#if customOptionLabel !== null}

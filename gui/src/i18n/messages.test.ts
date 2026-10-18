@@ -44,6 +44,7 @@ export const dummyMessages: Messages = {
     deny: 'DUMMY_deny',
     // The manual reconnect trigger on the recovery banner.
     reconnect: 'DUMMY_reconnect',
+    howToInstall: 'DUMMY_howToInstall',
   },
   dialogs: {
     closeConfirm: 'DUMMY_closeConfirm',
@@ -82,6 +83,13 @@ export const dummyMessages: Messages = {
     // The launch-profile field and its read-only summary in
     // AddWindowDialog.svelte.
     profileLabel: 'DUMMY_profileLabel',
+    profileUnavailableShort: {
+      not_found: 'DUMMY_profileUnavailableShort_not_found',
+      metacharacter: 'DUMMY_profileUnavailableShort_metacharacter',
+      no_command: 'DUMMY_profileUnavailableShort_no_command',
+      no_default_shell: 'DUMMY_profileUnavailableShort_no_default_shell',
+      needs_native_program: 'DUMMY_profileUnavailableShort_needs_native_program',
+    },
     customOption: 'DUMMY_customOption',
     profileSummaryCommandLabel: 'DUMMY_profileSummaryCommandLabel',
     profileSummaryCommandUnavailable: 'DUMMY_profileSummaryCommandUnavailable',
@@ -154,6 +162,8 @@ export const dummyMessages: Messages = {
     clientConfigLoadFailed: 'DUMMY_clientConfigLoadFailed',
     // The daemon needs a restart before launch options work.
     daemonProtocolStale: 'DUMMY_daemonProtocolStale',
+    profileNeedsNativeProgram: (names: readonly string[]) =>
+      `DUMMY_profileNeedsNativeProgram(${names.join(',')})`,
     // The two reasons start-up could not resolve
     // this process's instance.
     invalidInstanceId: 'DUMMY_invalidInstanceId',
@@ -272,6 +282,16 @@ export const dummyMessages: Messages = {
     profileDisabled: 'DUMMY_settings_profileDisabled',
     profileReady: 'DUMMY_settings_profileReady',
     profileNotFound: (reason: string) => `DUMMY_settings_profileNotFound(${reason})`,
+    profileUnavailable: (reason: string) => `DUMMY_settings_profileUnavailable(${reason})`,
+    profileUnavailableReason: {
+      not_found: 'DUMMY_settings_profileUnavailableReason_not_found',
+      metacharacter: 'DUMMY_settings_profileUnavailableReason_metacharacter',
+      no_command: 'DUMMY_settings_profileUnavailableReason_no_command',
+      no_default_shell: 'DUMMY_settings_profileUnavailableReason_no_default_shell',
+      needs_native_program: 'DUMMY_settings_profileUnavailableReason_needs_native_program',
+    },
+    profileCopy: 'DUMMY_settings_profileCopy',
+    profileInstallGuide: 'DUMMY_settings_profileInstallGuide',
     profileSwitchLabel: (name: string) => `DUMMY_settings_profileSwitchLabel(${name})`,
     profileUsedByRoles: (roles: readonly string[]) =>
       `DUMMY_settings_profileUsedByRoles(${roles.join(',')})`,
@@ -453,12 +473,7 @@ export const dummyMessages: Messages = {
     haltedTurnBudget: 'DUMMY_chat_haltedTurnBudget',
     haltedUnknown: 'DUMMY_chat_haltedUnknown',
     deliveryPending: 'DUMMY_chat_deliveryPending',
-    deliveryConfirmed: 'DUMMY_chat_deliveryConfirmed',
-    deliveryUnconfirmed: 'DUMMY_chat_deliveryUnconfirmed',
-    deliveryUnconfirmedHint: 'DUMMY_chat_deliveryUnconfirmedHint',
-    deliveryNotObserved: 'DUMMY_chat_deliveryNotObserved',
-    deliveryNotWritten: 'DUMMY_chat_deliveryNotWritten',
-    deliveryWriteFailed: 'DUMMY_chat_deliveryWriteFailed',
+    deliveryTaken: 'DUMMY_chat_deliveryTaken',
     deliveryUndeliveredUnknown: 'DUMMY_chat_deliveryUndeliveredUnknown',
     // The reason-aware variant, shown when the daemon reported why
     // the addressed window's status is unknown.
@@ -466,6 +481,7 @@ export const dummyMessages: Messages = {
       `DUMMY_chat_deliveryUndeliveredUnknownReason(${word})`,
     deliveryUndeliveredHalted: 'DUMMY_chat_deliveryUndeliveredHalted',
     deliveryUndeliveredExhausted: 'DUMMY_chat_deliveryUndeliveredExhausted',
+    deliveryUndeliveredRestart: 'DUMMY_chat_deliveryUndeliveredRestart',
     deliveryUnknown: 'DUMMY_chat_deliveryUnknown',
     broadcastConfirmTitle: 'DUMMY_chat_broadcastConfirmTitle',
     broadcastConfirmMessage: 'DUMMY_chat_broadcastConfirmMessage',

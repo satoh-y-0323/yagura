@@ -154,6 +154,13 @@ args = ["-c", "mcp_servers.yagura.command={bridge_toml}"]
 # args = ["--settings", "{hooks_config_file}"]
 # config_file = '...'          # optional; content of a settings file the
                                 # daemon writes for `{hooks_config_file}`
+
+[delivery]                     # optional table; how the daemon hands the
+                                # CLI the text it sends of its own accord.
+                                # See "Delivery" below
+# output = "plain"
+# wake = "none"
+# launch_prompt = ["{prompt}"]
 ```
 
 The identifier is the file name without its `.toml` extension, and must
@@ -166,9 +173,10 @@ A profile document fails validation outright (and is excluded) when: `schema`
 is not `1`; `display_name` is missing or violates the window-label rule; any
 argv element under `[command]` is empty or contains a NUL byte; a
 `[model]` / `[effort]` table breaks one of the rules under
-[Launch options](#launch-options); or an `[mcp]` or `[hooks]` table breaks
+[Launch options](#launch-options); an `[mcp]` or `[hooks]` table breaks
 one of the rules under [MCP injection](#mcp-injection) and
-[Hooks injection](#hooks-injection). A profile stays valid, with the offending
+[Hooks injection](#hooks-injection); or a `[delivery]` table breaks a rule
+under [Delivery](#delivery). A profile stays valid, with the offending
 value dropped and a warning attached, when: `cwd` is relative or starts with
 `~`; or an `[env]` key starts with `YAGURA_` (case-insensitively; see
 below).
@@ -348,7 +356,9 @@ wins. This never happens on Windows.
 
 A profile's listed `available` flag, and the reason text beside it when
 `available` is `false`, describe one thing only: **whether `argv[0]` can
-currently be resolved to something that can be started at all.** It does not
+currently be resolved to something that can be started at all** -- and, for a
+profile that wakes its CLI by running its own program, whether that program
+can be handed text (kind 5). It does not
 guarantee that launching it will actually succeed -- the child process can
 still fail to start or exit immediately for reasons resolution cannot see
 (a missing subcommand, a bad working directory, the program itself failing).
@@ -358,7 +368,7 @@ is legible) rather than being hidden -- with one exception: a profile with no
 argv at all for this operating system (kind 3 below) does not exist here at
 all, and is left out of the listing entirely rather than shown as
 unavailable (see [OS-specific `[command]` selection](#os-specific-command-selection)).
-The reason is always one of four kinds, and never names a path or a user
+The reason is always one of five kinds, and never names a path or a user
 name:
 
 1. the executable could not be found
@@ -367,6 +377,12 @@ name:
 3. no argv is defined for this operating system
 4. no default shell was resolved when the daemon started (`[command]`
    omitted profiles only)
+5. the profile wakes its CLI by running its own program with the text as an
+   argument (`wake = "command"` in [`[delivery]`](#delivery)), and that
+   program is a Windows `.cmd` / `.bat` file, through which the text cannot
+   pass unchanged. The profile's own `shim_guidance` follows the fixed
+   sentence as `text command (see url)`, and is also carried on its own
+   beside the reason, in three parts, so a client can show them apart
 
 ## Disabling a profile
 
@@ -461,6 +477,14 @@ the shim's bare name** (for example
 `C:\Program Files\nodejs\node_modules\...\codex.js` run through `node`, or
 whatever the shim itself wraps) if an argument genuinely needs one of those
 characters.
+
+Text the daemon hands a CLI on its command line is the same kind of argument,
+but it is arbitrary text, so it cannot be vetted for these characters ahead of
+time. A request that must be passed that way -- a `launch_prompt`, or a wake
+command's arguments (see [Delivery](#delivery)) -- is therefore never passed
+through a shim: a window that needs a `launch_prompt` is refused, and a profile
+that wakes its CLI by command is listed as unavailable (kind 5 under
+[Availability](#availability)).
 
 ## Unix
 
@@ -827,6 +851,9 @@ A profile's optional `[hooks]` table hands the launched CLI the hooks that
 make it report its turn boundaries to the daemon with
 `yagura-daemon --emit-status` (what the reports do is in
 [Structured sources](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status)).
+The same hooks carry the doors a CLI reads its inbox through,
+`yagura-daemon --deliver-context`, `--deliver-take`, `--deliver-wait` and
+`--report-session` (see [Delivery](#delivery)).
 It follows the `[mcp]` rules above -- the same `args` and `config_file` keys,
 the same settings directory, argv order and drop rules -- with three
 differences:
@@ -895,11 +922,54 @@ were checked with):
 | `codex-cli` (Codex CLI 0.159.2), `wsl-codex-cli` (0.158.0) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
 
+The bundled profiles also call the delivery doors from the hooks above: at
+session start, at the start of a turn and, for Claude Code, in a background
+wait. Antigravity CLI's `json_entry` carries its doors the same way.
+
 `wsl-claude-code` passes the JSON on the command line, since the Windows path
 of a settings file is unreadable from inside WSL. Changing a Codex hook's
 command changes the hash Codex trusts it by, so the matching
 `toml_set.entries` value has to be taken again (see
 [MCP registration](#mcp-registration)).
+
+## Delivery
+
+A profile's optional `[delivery]` table says how the daemon hands the profile's CLI the text it sends of its own accord -- chat, handoffs and notices -- without typing it into the composer. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
+
+The table is data: the daemon reads it and never branches on which CLI a profile is for. A window is handed text this way only if its profile declares `[delivery]` **and** the hooks that call the doors were put in place when it opened (`[hooks]`, or a `json_entry` for a CLI that reads hooks only from its own file; see [Hooks injection](#hooks-injection)). A window that is not -- a profile with no `[delivery]` table, a raw `command`, a hook table that was dropped on the way -- is no chat participant, gets no announcement, and a handoff addressed to it is answered `undelivered_no_delivery`.
+
+```toml
+[delivery]
+output = "plain"                # "plain", or a JSON template containing {text}
+max_chars = 10000               # the most characters one answer carries
+wake = "wait"                   # "none" (default), "wait" or "command"
+wake_stream = "stderr"          # "stderr" (default) or "stdout"
+wake_exit = 2                   # exit code of an answered wait (default 2)
+launch_prompt = ["--", "{prompt}"]
+
+[delivery.shim_guidance]        # optional; for wake = "command" only
+text = "Install the standalone build, then restart yagura:"
+command = "irm https://example.com/install.ps1 | iex"
+url = "https://example.com/docs"
+```
+
+| Key | Meaning |
+| --- | --- |
+| `output` | How a door prints the text. `"plain"` (the default) prints it as it is. Anything else is a JSON template that contains `{text}`: the text is inserted as a JSON string (quoted and escaped), and the template must still be valid JSON with it in. A CLI that wants its hook output wrapped in a structure takes this form |
+| `max_chars` | The most characters one answer carries, the chat announcement included (default 10000). Texts are never cut; the ones that do not fit wait for the next answer. Where the CLI limits a hook's output itself, set this to that limit |
+| `wake` | How a CLI that is waiting for input is woken. `"none"` (the default): the daemon cannot, so it types the oldest waiting text into the composer while the window waits for input (this needs a composer and an `[input].probe` in the window's detection definition, see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)). `"wait"`: the CLI leaves a wait registered through the `--deliver-wait` door and the daemon answers it. `"command"`: the daemon runs the profile's own program with `wake_args` |
+| `wake_args` | Required with `wake = "command"` and rejected otherwise. The arguments the program is run with; each is a non-empty argv element, at least one contains `{text}`, and `{session}` stands for the session identifier a hook reported with `--report-session`. The command runs once the CLI has reported its session, so not before its first turn |
+| `wake_stream`, `wake_exit` | For `wake = "wait"`: the stream an answered wait prints on and the exit code it ends with. The CLI's own hook documentation says which code wakes it |
+| `launch_prompt` | Arguments that hand the CLI a first request when it starts; `{prompt}` (required in at least one element) is replaced with the text. The elements are appended after the launch's other elements, after `[mcp]` and `[hooks]`. A task window with an instruction, and a window a `send_handoff` opens from this profile, are started this way. A profile without it cannot be used for either (`no_composer`) |
+| `shim_guidance` | A sub-table `[delivery.shim_guidance]` saying what to do when `wake = "command"` cannot work because the program is a Windows `.cmd` / `.bat` file. `text` is required (a single line); `command` (something to copy and run) and `url` (an `https` address only) are optional. The reason text of an unavailable profile reads `text command (see url)` after its fixed sentence (see [Availability](#availability)), and the three parts are also carried separately as `unavailable_guidance` |
+
+`wake_timeout_secs` and `session_pointer` are not keys: writing either is an error. An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
+
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI has no way to be woken (`wake = "none"`), so while an Antigravity CLI window waits for input the daemon types the text. Their start-up requests are given on each CLI's command line.
+
+**Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's `shim_guidance` gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [`.cmd` / `.bat` shims](#cmd--bat-shims)).
+
+To add a profile for a new CLI, work out which doors and wake it supports first; the procedure is in [Adding a CLI](../docs/adding-a-cli.md).
 
 ## MCP registration
 
@@ -1099,12 +1169,14 @@ profile's id and the `model` / `effort` values it was opened with, next to
 the argv, detection definition and `vendor` it was spawned with. When the
 GUI restores such a window, it opens it **from the profile again**, with the
 same working directory, name and launch option values, so edits to the
-profile since -- and its MCP injection -- apply to the restored window.
+profile since -- and its MCP injection, hooks and `[delivery]` table -- apply to the
+restored window.
 
 Only when the daemon refuses that launch (for example, the profile no longer
 exists, or no longer runs on this operating system) does the GUI fall back
 to re-spawning the saved argv, detection definition and `vendor` as they
-were recorded; a restored window opened that way gets no MCP injection --
+were recorded; a restored window opened that way gets no MCP injection and takes no part in
+[delivery](#delivery) --
 except when the refusal is `profile_disabled` (see
 [Disabling a profile](#disabling-a-profile)): retrying the saved argv would
 launch the very CLI the user switched off, so that window is left unopened

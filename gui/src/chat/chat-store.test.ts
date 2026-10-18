@@ -120,12 +120,12 @@ describe('mergeChatMessages: message list', () => {
     const second = mergeChatMessages(
       first,
       page({
-        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'confirmed' }] })],
+        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'taken' }] })],
         next_after_seq: 1,
       })
     );
     expect(second.messages).toHaveLength(1);
-    expect(second.messages[0]?.deliveries).toEqual([{ window_id: 'w-b', state: 'confirmed' }]);
+    expect(second.messages[0]?.deliveries).toEqual([{ window_id: 'w-b', state: 'taken' }]);
   });
 
   it('sorts a page that arrives out of order', () => {

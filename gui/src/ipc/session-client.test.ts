@@ -382,6 +382,8 @@ describe('invokeListProfiles', () => {
         cwd: null,
         available: true,
         reason: null,
+        unavailableKind: null,
+        guidance: null,
         command: ['codex'],
         model: null,
         effort: null,
@@ -406,6 +408,28 @@ describe('invokeListProfiles', () => {
     const result = await invokeListProfiles();
 
     expect(result.profiles[0]).toMatchObject({ available: false, reason: 'executable not found' });
+  });
+
+  it('reads a kind of reason this build does not know as unknown, keeping the reason text', async () => {
+    invokeMock.mockResolvedValueOnce({
+      profiles: [
+        {
+          ...RAW_PROFILE,
+          available: false,
+          unavailable_reason: 'a newer reason',
+          unavailable_kind: 'needs_a_newer_thing',
+        },
+      ],
+      warnings: [],
+    });
+
+    const result = await invokeListProfiles();
+
+    expect(result.profiles[0]).toMatchObject({
+      reason: 'a newer reason',
+      unavailableKind: 'unknown',
+      guidance: null,
+    });
   });
 
   it('returns the warnings array unchanged', async () => {

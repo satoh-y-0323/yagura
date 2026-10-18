@@ -4,7 +4,8 @@
  * kept for the chosen profile. The window dialog, the role table and the plan
  * board all read these, so the three pickers cannot drift apart.
  */
-import type { LaunchOptionInfo } from '../ipc/session-client';
+import type { LaunchOptionInfo, ProfileUnavailableKind } from '../ipc/session-client';
+import { forms } from '../ui-messages';
 
 /** The least of a daemon profile entry the pickers read. */
 export interface LaunchProfile {
@@ -12,6 +13,7 @@ export interface LaunchProfile {
   displayName: string;
   available: boolean;
   reason: string | null;
+  unavailableKind: ProfileUnavailableKind | null;
   model: LaunchOptionInfo | null;
   effort: LaunchOptionInfo | null;
 }
@@ -22,6 +24,7 @@ export interface ProfileChoice {
   displayName: string;
   available: boolean;
   reason: string | null;
+  unavailableKind: ProfileUnavailableKind | null;
 }
 
 /** One launch-option field the chosen profile maps, with its alias candidates. */
@@ -50,11 +53,37 @@ export function profileChoices(
     displayName: profile.displayName,
     available: profile.available,
     reason: profile.reason,
+    unavailableKind: profile.unavailableKind,
   }));
   if (selected === '' || profiles.some((profile) => profile.id === selected)) {
     return choices;
   }
-  return [...choices, { id: selected, displayName: selected, available: false, reason: null }];
+  return [
+    ...choices,
+    { id: selected, displayName: selected, available: false, reason: null, unavailableKind: null },
+  ];
+}
+
+/**
+ * The wording for why a profile is unavailable, from `wording` for a kind
+ * this build knows. A daemon that names no kind, or one this build does not
+ * know, is answered with its own reason text.
+ */
+export function unavailableText(
+  kind: ProfileUnavailableKind | null,
+  reason: string | null,
+  wording: Readonly<Record<Exclude<ProfileUnavailableKind, 'unknown'>, string>>
+): string | null {
+  if (kind === null || kind === 'unknown') {
+    return reason;
+  }
+  return wording[kind];
+}
+
+/** What a profile option reads: its name, then why it cannot be chosen when it cannot. */
+export function profileChoiceLabel(choice: ProfileChoice): string {
+  const why = unavailableText(choice.unavailableKind, choice.reason, forms.profileUnavailableShort);
+  return why === null ? choice.displayName : `${choice.displayName} — ${why}`;
 }
 
 /** The axes the chosen profile maps, model before effort; none for an unlisted profile. */

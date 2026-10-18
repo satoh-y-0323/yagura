@@ -36,6 +36,8 @@ function profileEntry(overrides: Partial<ProfileEntry> = {}): ProfileEntry {
     command: [],
     available: true,
     reason: null,
+    unavailableKind: null,
+    guidance: null,
     model: { aliases: [{ alias: 'fast', value: 'haiku' }] },
     effort: null,
     enabled: true,

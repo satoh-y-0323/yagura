@@ -912,8 +912,8 @@ fn tools_rs_error_codes_are_documented_in_error_handling_section() {
     );
 }
 
-// docs/mcp-setup.md's send_handoff section documents its four delivery
-// outcomes (confirmed / unconfirmed / not_observed / not_written) directly
+// docs/mcp-setup.md's send_handoff section documents its three delivery
+// outcomes (taken / undelivered_timeout / undelivered_no_delivery) directly
 // under the "**Delivery**:" label that introduces them, so a value added to,
 // or dropped from, that outcome set without updating the documented list is
 // caught here, the same discipline already applied to gated tools and error
@@ -929,14 +929,14 @@ fn send_handoff_delivery_outcomes_are_documented() {
         )
     });
 
-    let missing: Vec<&str> = ["confirmed", "unconfirmed", "not_observed", "not_written"]
+    let missing: Vec<&str> = ["taken", "undelivered_timeout", "undelivered_no_delivery"]
         .into_iter()
         .filter(|value| !delivery_block.contains(value))
         .collect();
     assert!(
         missing.is_empty(),
-        "docs/mcp-setup.md's \"**Delivery**:\" block must document all four delivery outcomes \
-         (confirmed / unconfirmed / not_observed / not_written); missing: {missing:?}"
+        "docs/mcp-setup.md's \"**Delivery**:\" block must document all three delivery outcomes \
+         (taken / undelivered_timeout / undelivered_no_delivery); missing: {missing:?}"
     );
 }
 

@@ -122,6 +122,23 @@ from its own global registration, the same as its Windows-native counterpart (se
 yagura opens carries the same `YAGURA_MCP_BRIDGE` (translated by `/p`, as above), so the variable
 resolves there exactly as it does for the two profiles above.
 
+## Delivery from a WSL Window
+
+Chat, handoffs and notices reach a WSL window's CLI the way they reach any other window's: through the
+window's inbox and the CLI's own hooks (see
+[How the daemon delivers text](mcp-setup.md#how-the-daemon-delivers-text)). The WSL profiles' hooks call
+`yagura-daemon.exe`, which a Linux shell finds through the Windows part of WSL's `PATH`; a
+distribution with `appendWindowsPath = false` cannot find it, so its hooks do nothing and nothing is
+delivered (see
+[How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)).
+
+`wsl-codex-cli` wakes a waiting Codex CLI with the profile's own launch form followed by
+`queue --thread <session> --message <text>`, the same way a model listing runs (see
+[Model Lists from the WSL Profiles](#model-lists-from-the-wsl-profiles)), so the Linux build inside
+the distribution receives the text unchanged. The program the daemon starts is `wsl.exe`, not an npm
+`.cmd` shim, so this profile needs no standalone build of Codex CLI the way the Windows-native
+`codex-cli` profile does (see [Delivery](../profiles/README.md#delivery)).
+
 ## Folder Trust Is Separate Inside the Distribution
 
 Antigravity CLI keeps its own list of trusted working directories, and that list is not shared

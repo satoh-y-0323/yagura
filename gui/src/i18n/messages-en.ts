@@ -140,6 +140,8 @@ export const messagesEn = {
     approve: 'Approve',
     deny: 'Deny',
     reconnect: 'Reconnect',
+    /** Opens a profile's row in Settings, where its install guidance is shown. */
+    howToInstall: 'How to install',
   },
 
   dialogs: {
@@ -174,6 +176,14 @@ export const messagesEn = {
     detectionLabel: 'Detection definition',
     detectionDefaultOption: 'Use the default detection definition',
     profileLabel: 'Launch profile',
+    /** Why a profile cannot be chosen, short enough to follow its name in a select. */
+    profileUnavailableShort: {
+      not_found: 'not found',
+      metacharacter: "command can't be passed safely",
+      no_command: 'no command for this OS',
+      no_default_shell: 'no default shell',
+      needs_native_program: 'needs a different install (see Settings › Profiles)',
+    },
     customOption: 'Custom…',
     profileSummaryCommandLabel: 'Command:',
     profileSummaryCommandUnavailable: 'Provided by the daemon at launch',
@@ -299,6 +309,12 @@ export const messagesEn = {
     // separately from approverRegistrationRefused because it is a fact about
     // the wire revision, not about approver registration.
     daemonProtocolStale: `This daemon is too old to show windows: restart it (yagura-daemon --shutdown). ${RESTART_CLOSES_ALL_WINDOWS}`,
+
+    /** Enabled profiles whose program is installed as a Windows .cmd / .bat file, which they cannot run through. */
+    profileNeedsNativeProgram: (names: readonly string[]): string =>
+      names.length === 1
+        ? `${names[0] ?? ''} can't be used: it's installed as a Windows .cmd / .bat file.`
+        : `${names.join(', ')} can't be used: they're installed as Windows .cmd / .bat files.`,
 
     // Start-up could not work out which instance
     // this window belongs to, so no daemon was started or connected. The
@@ -476,21 +492,16 @@ export const messagesEn = {
       'The room stopped: turn budget spent. The participants used up the messages allowed since your last one. Write something to start it again.',
     haltedUnknown: 'The room stopped. Write something to start it again.',
 
-    deliveryPending: 'Sending…',
-    deliveryConfirmed: 'Delivered',
-    deliveryUnconfirmed: 'Sent',
-    /** The `unconfirmed` chip's tooltip: the message was written, but the window was not seen to take it. */
-    deliveryUnconfirmedHint:
-      "Sent to the window, but delivery couldn't be confirmed — check the window.",
-    deliveryNotObserved: 'Not observed',
-    deliveryNotWritten: 'Not sent',
-    deliveryWriteFailed: 'Write failed',
+    /** The post waits in the window's inbox until its CLI takes it, which can be at its next turn. */
+    deliveryPending: 'Queued',
+    deliveryTaken: 'Delivered',
     deliveryUndeliveredUnknown: 'Not sent (status unknown)',
     /** The reason-aware variant, shown when the daemon reported why the addressed window's status is unknown. */
     deliveryUndeliveredUnknownReason: (word: string): string =>
       `Not sent (status unknown: ${word})`,
     deliveryUndeliveredHalted: 'Not sent (room halted)',
     deliveryUndeliveredExhausted: 'Not sent (too many deliveries)',
+    deliveryUndeliveredRestart: 'Not sent (daemon restarted)',
     deliveryUnknown: 'Unknown delivery state',
 
     broadcastConfirmTitle: 'Send to everyone?',
@@ -599,6 +610,20 @@ export const messagesEn = {
     profileDisabled: 'Disabled',
     profileReady: 'Ready',
     profileNotFound: (reason: string): string => `Not found — ${reason}`,
+    profileUnavailable: (reason: string): string => `Unavailable — ${reason}`,
+    /** Why a profile cannot be launched, after the row's "Not found" / "Unavailable" heading. */
+    profileUnavailableReason: {
+      not_found: 'the program this profile runs could not be found',
+      metacharacter:
+        'the command line contains a character the Windows command interpreter would change',
+      no_command: 'no command is set for this operating system',
+      no_default_shell: 'no default shell was found when the daemon started',
+      needs_native_program:
+        "yagura passes messages to this CLI as arguments, which a Windows .cmd / .bat file can't carry unchanged",
+    },
+    profileCopy: 'Copy',
+    /** Labels the page a profile's guidance points to; shown as text to copy, not a link. */
+    profileInstallGuide: 'Install guide',
     profileSwitchLabel: (name: string): string => `Use ${name}`,
 
     /** List and plural form policy lives with the resource, not the machinery. */

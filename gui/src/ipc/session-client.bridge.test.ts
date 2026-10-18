@@ -247,6 +247,8 @@ function profileWire(overrides: Wire = {}): Wire {
     command: ['p'],
     available: true,
     unavailable_reason: 'why',
+    unavailable_kind: 'needs_native_program',
+    unavailable_guidance: { text: 'guide', command: 'run-it', url: 'https://example.com/guide' },
     model: { aliases: [{ alias: 'fast', value: 'm' }] },
     effort: null,
     enabled: false,
@@ -268,11 +270,32 @@ describe('invokeListProfiles', () => {
       command: ['p'],
       available: true,
       reason: 'why',
+      unavailableKind: 'needs_native_program',
+      guidance: { text: 'guide', command: 'run-it', url: 'https://example.com/guide' },
       model: { aliases: [{ alias: 'fast', value: 'm' }] },
       effort: null,
       enabled: false,
     });
     expect(result.warnings).toEqual(['w']);
+  });
+
+  it.each(['http://example.com/guide', 'javascript:alert(1)', 'file:///etc/passwd'])(
+    'shows no page for guidance whose page %s is not https',
+    async (url) => {
+      invokeMock.mockResolvedValueOnce({
+        profiles: [profileWire({ unavailable_guidance: { text: 't', command: 'c', url } })],
+      });
+      const result = await invokeListProfiles();
+      expect(result.profiles[0]?.guidance).toEqual({ text: 't', command: 'c', url: null });
+    }
+  );
+
+  it('reads guidance with no command or page as nulls', async () => {
+    invokeMock.mockResolvedValueOnce({
+      profiles: [profileWire({ unavailable_guidance: { text: 't', command: null, url: null } })],
+    });
+    const result = await invokeListProfiles();
+    expect(result.profiles[0]?.guidance).toEqual({ text: 't', command: null, url: null });
   });
 
   it('reads a missing or null warnings list as empty', async () => {
@@ -285,6 +308,31 @@ describe('invokeListProfiles', () => {
   it.each<[string, Wire, RegExp]>([
     ['profiles not an array', { profiles: 5 }, /^list_profiles\.profiles: expected an array/],
     ['a profile not an object', { profiles: [5] }, /^list_profiles\.profiles: expected an object/],
+    [
+      'unavailable_kind not a string',
+      { profiles: [profileWire({ unavailable_kind: 5 })] },
+      /^list_profiles\.unavailable_kind: expected a string/,
+    ],
+    [
+      'guidance not an object',
+      { profiles: [profileWire({ unavailable_guidance: 'guide' })] },
+      /^list_profiles\.unavailable_guidance: expected an object/,
+    ],
+    [
+      'guidance text missing',
+      { profiles: [profileWire({ unavailable_guidance: { command: null, url: null } })] },
+      /^list_profiles\.unavailable_guidance\.text: expected a string/,
+    ],
+    [
+      'guidance command not a string',
+      { profiles: [profileWire({ unavailable_guidance: { text: 't', command: 5, url: null } })] },
+      /^list_profiles\.unavailable_guidance\.command: expected a string/,
+    ],
+    [
+      'guidance url not a string',
+      { profiles: [profileWire({ unavailable_guidance: { text: 't', command: null, url: 5 } })] },
+      /^list_profiles\.unavailable_guidance\.url: expected a string/,
+    ],
     [
       'available not a boolean',
       { profiles: [profileWire({ available: 'yes' })] },

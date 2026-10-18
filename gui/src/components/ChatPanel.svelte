@@ -181,14 +181,10 @@
   /** The status tone vocabulary the delivery chip is coloured from. */
   function deliveryTone(state: ChatDeliveryState): string {
     switch (state) {
-      case 'confirmed':
+      case 'taken':
         return 'active';
       case 'pending':
-      case 'unconfirmed':
-      case 'not_observed':
         return 'quiet';
-      case 'write_failed':
-        return 'halted';
       default:
         return 'unknown';
     }
@@ -454,13 +450,7 @@
           {#if message.deliveries.length > 0}
             <div class="msg__deliveries">
               {#each message.deliveries as delivery (delivery.window_id)}
-                <span
-                  class="delivery"
-                  data-tone={deliveryTone(delivery.state)}
-                  title={delivery.state === 'unconfirmed'
-                    ? chat.deliveryUnconfirmedHint
-                    : undefined}
-                >
+                <span class="delivery" data-tone={deliveryTone(delivery.state)}>
                   <span class="delivery__to">{deliveryTarget(delivery.window_id)}</span>
                   <span
                     >{delivery.state === 'undelivered_unknown'
@@ -917,11 +907,6 @@
 
   .delivery[data-tone='quiet'] {
     background-color: var(--color-text-secondary);
-    color: var(--color-background);
-  }
-
-  .delivery[data-tone='halted'] {
-    background-color: var(--color-error);
     color: var(--color-background);
   }
 

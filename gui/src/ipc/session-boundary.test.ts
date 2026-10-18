@@ -726,13 +726,10 @@ function chatMessagesWireWithDelivery(delivery: Record<string, unknown>): Record
 /** The delivery states that can never carry a reason. */
 const REASONLESS_DELIVERY_STATES = [
   'pending',
-  'confirmed',
-  'unconfirmed',
-  'not_observed',
-  'not_written',
-  'write_failed',
+  'taken',
   'undelivered_halted',
   'undelivered_exhausted',
+  'undelivered_restart',
 ];
 
 /** The single delivery record of a narrowed one-message reply. */
@@ -748,7 +745,7 @@ describe('narrowChatMessages: a delivery record narrows to one value', () => {
   });
 
   it('keeps the delivery state readable as a top-level key of the record', () => {
-    const delivery = soleDelivery({ window_id: 'w-b', state: 'confirmed' });
+    const delivery = soleDelivery({ window_id: 'w-b', state: 'taken' });
     expect(Object.prototype.hasOwnProperty.call(delivery ?? {}, 'state')).toBe(true);
   });
 
@@ -822,7 +819,7 @@ describe('narrowChatMessages: the history route drops the reason instead of the 
         state: 'undelivered_unknown',
         unknown_reason: 'screen_lost',
       });
-      soleDelivery({ window_id: 'w-b', state: 'confirmed' });
+      soleDelivery({ window_id: 'w-b', state: 'taken' });
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

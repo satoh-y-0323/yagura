@@ -20,7 +20,8 @@ export type BannerId =
   | 'themes-issues'
   | 'approval-expired-unseen'
   | 'approver-registration-refused'
-  | 'daemon-protocol-stale';
+  | 'daemon-protocol-stale'
+  | 'profile-unavailable';
 
 /** A one-line summary of the approval request a banner reports. */
 export interface ApprovalExpiredSummary {
@@ -44,7 +45,25 @@ export type DaemonRecoveryUpdate = {
  * The button a banner offers. A label key, never a handler: the view owns
  * what a click does, so this module stays free of behavior.
  */
-export type BannerAction = { labelKey: 'reconnect' };
+export type BannerAction =
+  | { labelKey: 'reconnect' }
+  | {
+      labelKey: 'howToInstall';
+      /** The profile whose Settings row shows the install guidance. */
+      profileId: string;
+    };
+
+/** A profile a banner names. */
+export interface NamedProfile {
+  id: string;
+  displayName: string;
+}
+
+/** The least of a profile entry {@link profilesNeedingNativeProgram} reads. */
+export interface ProfileAvailability extends NamedProfile {
+  enabled: boolean;
+  unavailableKind: string | null;
+}
 
 /** A banner ready to render: which one, what it says, and what it offers. */
 export type BannerEntry = { id: BannerId; text: string; action?: BannerAction };
@@ -102,6 +121,13 @@ export type BannerState = {
    * never echoed back.
    */
   startupEnvFailure: StartupEnvFailure | null;
+  /**
+   * The enabled profiles that cannot be used because their program is a
+   * Windows `.cmd` / `.bat` file, in list order.
+   */
+  profilesNeedingNativeProgram: readonly NamedProfile[];
+  /** Whether the user has dismissed the banner naming them. */
+  isProfileUnavailableDismissed: boolean;
 };
 
 /**
@@ -110,7 +136,7 @@ export type BannerState = {
  * client-config-failure -> operation-error -> detection-warning ->
  * keymap-notice -> boundary-error -> themes-load-failure -> themes-issues ->
  * approval-expired-unseen -> approver-registration-refused ->
- * daemon-protocol-stale.
+ * daemon-protocol-stale -> profile-unavailable.
  * @param state the current banner-relevant application state
  */
 export function buildBanners(state: BannerState): BannerEntry[] {
@@ -183,6 +209,16 @@ export function buildBanners(state: BannerState): BannerEntry[] {
   if (state.isDaemonProtocolStale) {
     entries.push({ id: 'daemon-protocol-stale', text: banners.daemonProtocolStale });
   }
+  const [firstNative] = state.profilesNeedingNativeProgram;
+  if (firstNative !== undefined && !state.isProfileUnavailableDismissed) {
+    entries.push({
+      id: 'profile-unavailable',
+      text: banners.profileNeedsNativeProgram(
+        state.profilesNeedingNativeProgram.map((profile) => profile.displayName)
+      ),
+      action: { labelKey: 'howToInstall', profileId: firstNative.id },
+    });
+  }
 
   return entries;
 }
@@ -222,7 +258,23 @@ export function dismissBanner(state: BannerState, id: BannerId): BannerState {
       return { ...state, approverRegistrationRefused: false };
     case 'daemon-protocol-stale':
       return { ...state, isDaemonProtocolStale: false };
+    case 'profile-unavailable':
+      return { ...state, isProfileUnavailableDismissed: true };
   }
+}
+
+/**
+ * The enabled profiles that cannot be used because their program is a Windows
+ * `.cmd` / `.bat` file. A disabled one is left out: the user already chose not
+ * to use it.
+ * @param profiles the profiles the daemon listed, in list order
+ */
+export function profilesNeedingNativeProgram(
+  profiles: readonly ProfileAvailability[]
+): NamedProfile[] {
+  return profiles
+    .filter((profile) => profile.enabled && profile.unavailableKind === 'needs_native_program')
+    .map((profile) => ({ id: profile.id, displayName: profile.displayName }));
 }
 
 /**

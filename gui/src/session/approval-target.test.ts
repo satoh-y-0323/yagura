@@ -32,9 +32,16 @@ describe('describeUntargeted', () => {
     expect(describeUntargeted(opening)).toBe(dialogs.approvalTargetNewWindow);
   });
 
-  it('falls back to the chat room as a whole for a chat request that names no room', () => {
-    expect(describeUntargeted(request({ tool: 'broadcast_chat' }))).toBe(
-      dialogs.approvalTargetRoom
-    );
+  it('names a new window for a handoff that opens one from a profile', () => {
+    const opening = request({ tool: 'send_handoff', text: 'profile: claude-code\n\nenvelope' });
+
+    expect(describeUntargeted(opening)).toBe(dialogs.approvalTargetNewWindow);
   });
+
+  it.each(['send_chat', 'broadcast_chat'])(
+    'falls back to the chat room as a whole for a %s request that names no room',
+    (tool) => {
+      expect(describeUntargeted(request({ tool }))).toBe(dialogs.approvalTargetRoom);
+    }
+  );
 });
