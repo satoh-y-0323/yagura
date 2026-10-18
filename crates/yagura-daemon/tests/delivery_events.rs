@@ -1321,6 +1321,40 @@ async fn a_composer_that_empties_only_after_the_confirmation_window_is_taken_wit
     );
 }
 
+/// The submit key was pressed and the composer then stays unreadable (drawn
+/// unfinished, never emptied): once the handoff's own bound runs out the
+/// requester is told `taken` -- the key reached the CLI -- instead of waiting
+/// on a push that has no end of its own. The push goes on alone and finishes
+/// when the receiver does.
+#[tokio::test]
+async fn a_handoff_whose_key_was_pressed_is_answered_taken_when_its_bound_runs_out_with_the_composer_unreadable()
+ {
+    let dir = unique_temp_dir("events-confirm-bound-after-key");
+    let log = dir.join("child-input.log");
+    let take_now = dir.join("take-now");
+    let h = Harness::start("events-confirm-bound-after-key", handoff_config(&dir)).await;
+    let mut client = h.connect().await;
+    let mode = format!("take-on|{}", take_now.display());
+    let window = ReceivingWindow {
+        receive_mode: &mode,
+        ..ReceivingWindow::new("confirm-bound-after-key")
+    };
+    let window_id = open_receiving_window(&h, &mut client, &dir, &window, &log).await;
+
+    request_handoff(&mut client, &window_id, "look here").await;
+    wait_for_the_submit_key(&log).await;
+    wait_until_the_held_envelope_is_drawn_unfinished(&h, &window_id).await;
+    let_every_clock_bound_run_out().await;
+
+    // The receiver has not been let take the line: only the bound can answer.
+    let delivery = handoff_reply(&mut client).await;
+    assert_eq!(delivery, "taken", "the submit key reached the receiver");
+    // Let the push finish, so nothing is left running.
+    create_signal_file(&take_now);
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
+}
+
 /// R7: another writer wrote between the submit key and the composer emptying.
 /// What the composer reads then is not evidence about the envelope either way,
 /// and the body is not written a second time.

@@ -4518,7 +4518,10 @@ fn requester_left(closed: &Option<watch::Receiver<bool>>) -> bool {
 /// `ready_hold_wait_ms` is the caller's own prior readiness wait, carried
 /// onward into the verdict. `carried` is what an earlier call for the
 /// same delivery left in the composer (`None` for a first call); the residue
-/// this call leaves is returned in [`DeliveryEnd::Finished`].
+/// this call leaves is returned in [`DeliveryEnd::Finished`]. `submitted` is
+/// raised when the submit key is pressed, for a caller that answers its
+/// requester before the delivery's cleanup is done.
+#[allow(clippy::too_many_arguments)] // each is a distinct input of the one delivery
 async fn run_delivery<'a>(
     entry: &'a WindowEntry,
     compose: &(dyn Fn() -> Option<String> + Sync),
@@ -4527,6 +4530,7 @@ async fn run_delivery<'a>(
     mut ready_hold_wait_ms: u128,
     carried: Option<CarriedResidue>,
     budget: SharedBudget,
+    submitted: Option<&watch::Sender<bool>>,
 ) -> DeliveryEnd<'a> {
     let profile = entry.input_profile();
     let mut resent = 0u8;
@@ -4669,6 +4673,9 @@ async fn run_delivery<'a>(
                 // what follows (a resend's probe included) runs to its end
                 // instead of stopping with a probe left in the composer.
                 closed = None;
+                if let Some(submitted) = submitted {
+                    submitted.send_replace(true);
+                }
                 foreign_draft = false;
                 last_submit = Some(outcome);
                 (outcome, judgment.residue_write_seq)
@@ -4991,6 +4998,8 @@ async fn await_handoff_end(
     let deadline = tokio::time::sleep(Duration::from_secs(config.handoff_delivery_timeout_secs));
     tokio::pin!(deadline);
     let mut timed_out = false;
+    // Watched once the bound has run out under a push still typing.
+    let mut submitted: Option<watch::Receiver<bool>> = None;
     loop {
         tokio::select! {
             biased;
@@ -5011,11 +5020,34 @@ async fn await_handoff_end(
                 return handoff_withdrawn_msg(entry.window_id());
             }
             () = &mut deadline, if !timed_out => {
+                timed_out = true;
                 match entry.inbox().withdraw(key) {
                     Withdrawal::Removed => return sent(HandoffDelivery::UndeliveredTimeout),
-                    // Being typed: its push decides; or it already ended.
-                    Withdrawal::UnderWay | Withdrawal::Gone => timed_out = true,
+                    // The submit key reached the CLI: the push cleans up alone,
+                    // and a composer that never reads back must not hold the
+                    // requester. Short of the key, the push gives up and takes
+                    // the body back, which ends it.
+                    Withdrawal::UnderWay { submitted: pressed } => {
+                        if *pressed.borrow() {
+                            return sent(HandoffDelivery::Taken);
+                        }
+                        submitted = Some(pressed);
+                    }
+                    // It already ended.
+                    Withdrawal::Gone => {}
                 }
+            }
+            pressed = async {
+                match &mut submitted {
+                    Some(pressed) => pressed.wait_for(|pressed| *pressed).await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            }, if submitted.is_some() => {
+                if pressed {
+                    return sent(HandoffDelivery::Taken);
+                }
+                // The push ended without pressing it: `end` says how.
+                submitted = None;
             }
         }
     }

@@ -330,8 +330,9 @@ pub struct DaemonConfig {
     /// wake is worded.
     pub delivery: DeliverySpec,
 
-    /// How many parcels one window's inbox holds before the oldest is turned
-    /// away. Defaults to [`DEFAULT_INBOX_CAPACITY`].
+    /// How many parcels one window's inbox holds, notices not counted, before
+    /// a new one is turned away; what is already inside stays. Defaults to
+    /// [`DEFAULT_INBOX_CAPACITY`].
     pub inbox_capacity: usize,
 
     /// Detection definition names excluded from chat participation.

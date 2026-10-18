@@ -696,3 +696,57 @@ async fn the_default_inbox_holds_sixty_four() {
     assert_eq!(dropped, 1);
     assert_eq!(pending(&h, &id), 64);
 }
+
+#[tokio::test]
+async fn a_notice_deposited_again_replaces_the_one_waiting_under_its_key() {
+    let (h, mut client) = start("inbox-notice-replaced", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    let first = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-OLD"), None, None);
+    let mut first_end = first.end.expect("the first notice is taken in");
+    let second = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-NEW"), None, None);
+    assert!(second.turned_away.is_empty());
+    assert!(second.end.is_some());
+
+    assert_eq!(
+        pending(&h, &id),
+        1,
+        "one notice per key, however often deposited"
+    );
+    assert!(
+        matches!(
+            first_end.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ),
+        "the replaced notice's owner is left unsettled, as for a withdrawn parcel"
+    );
+    let got = take(&mut client, &id).await;
+    assert!(
+        got.contains("NOTICE-NEW") && !got.contains("NOTICE-OLD"),
+        "{got:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_replacing_notice_is_the_one_whose_owner_learns_it_was_taken() {
+    let (h, mut client) = start("inbox-notice-replaced-taken", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    let _ = inbox.deposit_tracked(Parcel::notice("plan:p1", "NOTICE-OLD"), None, None);
+    let end = inbox
+        .deposit_tracked(Parcel::notice("plan:p1", "NOTICE-NEW"), None, None)
+        .end
+        .expect("taken in");
+    let _ = take(&mut client, &id).await;
+    assert_eq!(end.await, Ok(yagura_daemon::inbox::ParcelEnd::Taken));
+}
+
+#[tokio::test]
+async fn a_notice_does_not_replace_a_parcel_that_merely_shares_its_key() {
+    let (h, mut client) = start("inbox-notice-not-replacing-parcel", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    assert!(deposit(&h, &id, "same", "PARCEL").is_empty());
+    assert!(inbox.deposit(Parcel::notice("same", "NOTICE")).is_empty());
+    assert_eq!(pending(&h, &id), 2);
+}

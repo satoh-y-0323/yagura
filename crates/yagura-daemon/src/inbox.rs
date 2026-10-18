@@ -165,9 +165,10 @@ impl Parcel {
         }
     }
 
-    /// A notice: the daemon's own word, kept once per `key` (its depositor
-    /// revises or withdraws it by that key and never sends it again). It is
-    /// not counted against the inbox's capacity.
+    /// A notice: the daemon's own word, kept once per `key`: depositing one
+    /// while another waits under the same `key` replaces it (the replaced
+    /// depositor learns nothing more), and its depositor revises or withdraws
+    /// it by that key. It is not counted against the inbox's capacity.
     #[must_use]
     pub fn notice(key: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
@@ -282,6 +283,9 @@ struct Carried {
     /// gives up if it still can, and if it fails the parcels are dropped
     /// instead of going back.
     withdrawn: watch::Sender<bool>,
+    /// Raised once the push has pressed the submit key: what it carries has
+    /// reached the CLI, whatever its cleanup still has to do.
+    submitted: Arc<watch::Sender<bool>>,
 }
 
 struct Waiter {
@@ -464,6 +468,8 @@ pub struct Push {
     pub budget: Option<PushBudget>,
     /// Raised when what it carries is withdrawn while it is under way.
     pub withdrawn: watch::Receiver<bool>,
+    /// To be raised by the push when it presses the submit key.
+    pub submitted: Arc<watch::Sender<bool>>,
 }
 
 /// How a push ended.
@@ -478,13 +484,18 @@ pub enum PushEnd {
 }
 
 /// What withdrawing a parcel came to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Withdrawal {
     /// It was waiting and is out of the inbox: it never reaches the CLI.
     Removed,
     /// A push is carrying it: it ends with that push, and does not come back
-    /// if the push fails.
-    UnderWay,
+    /// if the push fails. `submitted` turns true once the push has pressed
+    /// the submit key, which it may do despite the withdrawal: the parcel has
+    /// then reached the CLI.
+    UnderWay {
+        /// Whether the push has pressed the submit key.
+        submitted: watch::Receiver<bool>,
+    },
     /// It already left the inbox; its end says how.
     Gone,
 }
@@ -557,11 +568,20 @@ impl Inbox {
             return refused(parcel);
         }
         let (tx, rx) = oneshot::channel();
-        state.parcels.push_back(Held {
+        let held = Held {
             parcel,
             end: Some(tx),
             budget,
+        };
+        // A notice is one per key: the newer word takes the older one's place
+        // in the queue, and the older depositor's end is dropped unsettled.
+        let waiting = state.parcels.iter_mut().find(|waiting| {
+            held.parcel.notice && waiting.parcel.notice && waiting.parcel.key == held.parcel.key
         });
+        match waiting {
+            Some(waiting) => *waiting = held,
+            None => state.parcels.push_back(held),
+        }
         self.shared.wake(&mut state);
         Deposited {
             turned_away: Vec::new(),
@@ -682,10 +702,12 @@ impl Inbox {
         state.next_push += 1;
         let id = state.next_push;
         let (withdrawn_tx, withdrawn) = watch::channel(false);
+        let submitted = Arc::new(watch::channel(false).0);
         state.carrying.push(Carried {
             id,
             held,
             withdrawn: withdrawn_tx,
+            submitted: Arc::clone(&submitted),
         });
         Some(Push {
             id,
@@ -693,6 +715,7 @@ impl Inbox {
             text,
             budget,
             withdrawn,
+            submitted,
         })
     }
 
@@ -761,7 +784,9 @@ impl Inbox {
         {
             Some(carried) => {
                 carried.withdrawn.send_replace(true);
-                Withdrawal::UnderWay
+                Withdrawal::UnderWay {
+                    submitted: carried.submitted.subscribe(),
+                }
             }
             None => Withdrawal::Gone,
         }
