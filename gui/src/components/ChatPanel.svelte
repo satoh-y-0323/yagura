@@ -20,6 +20,7 @@
     dismissMention,
     filterMentionCandidates,
     insertMention,
+    keepMentionSelection,
     openMention,
     type DismissedMention,
     type MentionCandidate,
@@ -36,6 +37,7 @@
   } from '../chat/chat-panel-rect';
   import type {
     ChatDeliveryState,
+    ChatParticipant,
     ChatMessageFromKind,
     ChatRoomInfo,
   } from '../ipc/session-boundary';
@@ -92,6 +94,7 @@
   let activeCandidate = 0;
 
   $: halt = room.halted;
+  $: refreshOpenMention(room.roster);
   $: isMentionOpen = mention !== null && candidates.length > 0;
   $: canPost = draft.trim() !== '' && !isPosting;
   /** The current room's display name, from the room list rather than its raw id. */
@@ -238,9 +241,25 @@
       closeMention();
       return;
     }
+    placeMention(found, room.roster);
+  }
+
+  /** Offers `found`'s candidates from `roster`, keeping the highlight on the same candidate. */
+  function placeMention(found: MentionQuery, roster: ChatParticipant[]): void {
+    const nextCandidates = filterMentionCandidates(roster, found.query);
+    activeCandidate = keepMentionSelection(
+      { mention, candidates, active: activeCandidate },
+      { mention: found, candidates: nextCandidates }
+    );
     mention = found;
-    candidates = filterMentionCandidates(room.roster, found.query);
-    activeCandidate = 0;
+    candidates = nextCandidates;
+  }
+
+  /** A roster that changed under an open mention changes what it offers. */
+  function refreshOpenMention(roster: ChatParticipant[]): void {
+    if (mention !== null) {
+      placeMention(mention, roster);
+    }
   }
 
   async function applyCandidate(candidate: MentionCandidate): Promise<void> {

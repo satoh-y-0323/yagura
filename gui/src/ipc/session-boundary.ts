@@ -27,6 +27,7 @@ export const SESSION_EVENT = {
   approvalReset: 'session://approval-reset',
   approvalRegistrationRefused: 'session://approval-registration-refused',
   chatChanged: 'session://chat-changed',
+  chatParticipantsChanged: 'session://chat-participants-changed',
   planChanged: 'session://plan-changed',
   modelChoices: 'session://model-choices',
   daemonRecovery: 'session://daemon-recovery',

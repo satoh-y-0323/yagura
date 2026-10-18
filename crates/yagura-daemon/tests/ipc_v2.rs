@@ -281,6 +281,7 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::ChatPosted { .. } => "ChatPosted".to_string(),
         DaemonMessage::ChatMessages { .. } => "ChatMessages".to_string(),
         DaemonMessage::ChatChanged { .. } => "ChatChanged".to_string(),
+        DaemonMessage::ChatParticipantsChanged => "ChatParticipantsChanged".to_string(),
         DaemonMessage::ChatRooms { .. } => "ChatRooms".to_string(),
         DaemonMessage::ProtocolRevision { .. } => "ProtocolRevision".to_string(),
         DaemonMessage::DaemonHealth { .. } => "DaemonHealth".to_string(),

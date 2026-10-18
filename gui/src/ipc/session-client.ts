@@ -1382,6 +1382,27 @@ export async function subscribeChatChanged(
 }
 
 /**
+ * Subscribes to the pushes saying the chat rooms, or who takes part in one,
+ * changed. The push carries nothing, so there is nothing to validate and the
+ * callback takes no arguments.
+ *
+ * @returns a function that cancels the subscription.
+ */
+export async function subscribeChatParticipantsChanged(
+  onChanged: () => void,
+  onBoundaryError: (error: unknown) => void
+): Promise<UnlistenFn> {
+  return listenAppEvent(
+    SESSION_EVENT.chatParticipantsChanged,
+    () => undefined,
+    () => {
+      onChanged();
+    },
+    onBoundaryError
+  );
+}
+
+/**
  * Listens to one window-scoped event, validating its payload and routing it to
  * the window it names. A payload that fails validation is reported and
  * dropped: the terminal keeps whatever it already shows instead of acting on

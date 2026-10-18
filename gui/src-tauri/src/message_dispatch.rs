@@ -25,10 +25,11 @@ use crate::commands::{
 use crate::constants::READ_CHUNK_LEN;
 use crate::events::{
     ApprovalRequestedPayload, ApprovalWithdrawnPayload, AttachResponse, ChatChangedPayload,
-    EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_WITHDRAWN, EVENT_CHAT_CHANGED, EVENT_EXIT,
-    EVENT_MCP_REGISTRATION_RESULT, EVENT_MCP_REGISTRATION_STATUS, EVENT_MODEL_CHOICES,
-    EVENT_PLAN_CHANGED, EVENT_STATUS, ExitPayload, McpRegistrationResultPayload,
-    McpRegistrationStatusPayload, ModelChoicesPayload, PlanChangedPayload, StatusPayload,
+    ChatParticipantsChangedPayload, EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_WITHDRAWN,
+    EVENT_CHAT_CHANGED, EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_EXIT, EVENT_MCP_REGISTRATION_RESULT,
+    EVENT_MCP_REGISTRATION_STATUS, EVENT_MODEL_CHOICES, EVENT_PLAN_CHANGED, EVENT_STATUS,
+    ExitPayload, McpRegistrationResultPayload, McpRegistrationStatusPayload, ModelChoicesPayload,
+    PlanChangedPayload, StatusPayload,
 };
 use crate::host::GuiHost;
 use crate::ipc_client::{
@@ -362,6 +363,7 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // pushes are turned into events by `dispatch`; the ones answering a
         // request follow its acknowledgement rather than answering it.
         | DaemonMessage::ChatChanged { .. }
+        | DaemonMessage::ChatParticipantsChanged
         | DaemonMessage::PlanChanged { .. }
         | DaemonMessage::ModelChoices { .. }
         | DaemonMessage::McpRegistrationStatus { .. }
@@ -591,6 +593,13 @@ async fn dispatch(
                     seq,
                     needs_user,
                 },
+            );
+            false
+        }
+        DaemonMessage::ChatParticipantsChanged => {
+            app.emit_event(
+                EVENT_CHAT_PARTICIPANTS_CHANGED,
+                ChatParticipantsChangedPayload {},
             );
             false
         }

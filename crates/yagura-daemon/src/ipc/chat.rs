@@ -755,11 +755,92 @@ pub fn install_intro_hook(registry: &Arc<WindowRegistry>, chat: Arc<ChatRuntime>
             let Some(registry) = registry_weak.upgrade() else {
                 return;
             };
-            if let Err(err) = resolve_room(&chat, &origin, None, &registry, false).await {
-                tracing::warn!(error = ?err, "could not settle a new window's chat room");
+            match resolve_room(&chat, &origin, None, &registry, false).await {
+                // The room's row may have been created just now, after the
+                // registration the participation watch already reacted to.
+                Ok(_) => registry.announce_participation_change(),
+                Err(err) => {
+                    tracing::warn!(error = ?err, "could not settle a new window's chat room");
+                }
             }
         });
     }));
+}
+
+/// One room as the participation watch compares it: the room, its display
+/// name and who is in it.
+#[derive(PartialEq, Eq)]
+struct RoomRoster {
+    room_id: String,
+    name: String,
+    members: Vec<(String, String)>,
+}
+
+/// Every room with its members, built from the same [`room_members`] rule
+/// every roster uses. `None` when the store could not list the rooms.
+async fn room_rosters(chat: &ChatRuntime, registry: &WindowRegistry) -> Option<Vec<RoomRoster>> {
+    let Ok(Ok(rows)) = chat.store.with_store(|store| store.list_rooms()).await else {
+        return None;
+    };
+    Some(
+        rows.iter()
+            .map(|row| {
+                let resolved = ResolvedRoom {
+                    room_id: row.room_id.clone(),
+                    key: row_workspace_key(row),
+                    name: None,
+                };
+                RoomRoster {
+                    name: display_name_in(&rows, &row.room_id, resolved.key.as_ref()),
+                    members: room_members(registry, &chat.exclude_detections, &resolved)
+                        .into_iter()
+                        .map(|member| (member.window_id, member.name))
+                        .collect(),
+                    room_id: row.room_id.clone(),
+                }
+            })
+            .collect(),
+    )
+}
+
+/// Tells every approver, by [`DaemonMessage::ChatParticipantsChanged`], when
+/// the rooms or their members differ from what it last saw. The comparison
+/// runs after the change is already visible, so a `read_chat` made on
+/// receiving the push reflects it. A no-op when chat has no store.
+pub(super) fn spawn_participation_watch(
+    chat: Arc<ChatRuntime>,
+    registry: Arc<WindowRegistry>,
+    broker: Arc<ApprovalBroker>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    if !chat.store.is_enabled() {
+        return;
+    }
+    // Subscribed before the first listing, so a change in between is not lost.
+    let mut changes = registry.subscribe_participation();
+    tokio::spawn(async move {
+        let mut last = room_rosters(&chat, &registry).await;
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            tokio::select! {
+                woke = changes.changed() => {
+                    if woke.is_err() {
+                        return;
+                    }
+                }
+                _ = shutdown.changed() => {}
+            }
+            let Some(now) = room_rosters(&chat, &registry).await else {
+                continue;
+            };
+            if last.as_ref() != Some(&now) {
+                last = Some(now);
+                broker.notify_approvers(&DaemonMessage::ChatParticipantsChanged);
+            }
+        }
+    });
 }
 
 /// Posts a message to the room, addressed to the window(s) its `@` mentions

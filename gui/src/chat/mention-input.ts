@@ -147,3 +147,39 @@ export function openMention(
   }
   return { mention, dismissed: null };
 }
+
+/** Whether two candidates stand for the same participant (or the reserved entry). */
+function isSameCandidate(a: MentionCandidate, b: MentionCandidate): boolean {
+  return a.windowId === null || b.windowId === null
+    ? a.name === b.name && a.windowId === b.windowId
+    : a.windowId === b.windowId;
+}
+
+/**
+ * Where the highlight goes when the mention is read again: the chosen
+ * candidate's new position while it is still the same mention and still
+ * offered, otherwise the first candidate.
+ *
+ * @param previous the mention, its candidates and the highlighted position before
+ * @param next the mention and candidates now
+ */
+export function keepMentionSelection(
+  previous: { mention: MentionQuery | null; candidates: MentionCandidate[]; active: number },
+  next: { mention: MentionQuery; candidates: MentionCandidate[] }
+): number {
+  const before = previous.mention;
+  if (
+    before === null ||
+    before.start !== next.mention.start ||
+    before.query !== next.mention.query ||
+    before.quoted !== next.mention.quoted
+  ) {
+    return 0;
+  }
+  const chosen = previous.candidates[previous.active];
+  if (chosen === undefined) {
+    return 0;
+  }
+  const position = next.candidates.findIndex((candidate) => isSameCandidate(candidate, chosen));
+  return position === -1 ? 0 : position;
+}

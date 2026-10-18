@@ -12,8 +12,10 @@ import {
   filterMentionCandidates,
   findMentionQuery,
   insertMention,
+  keepMentionSelection,
   openMention,
   type DismissedMention,
+  type MentionCandidate,
   type MentionQuery,
 } from './mention-input';
 import type { ChatParticipant } from '../ipc/session-boundary';
@@ -319,5 +321,141 @@ describe('openMention: a mention closed with Escape stays closed until the text 
     const closed = closedWithEscape(text, 4);
     const other = step(closed, text, 13);
     expect(other.mention).toEqual(findMentionQuery(text, 13));
+  });
+});
+
+describe('keepMentionSelection: the chosen candidate survives a re-read of the same mention', () => {
+  /** The mention located at the caret; the test fixtures always have one. */
+  function at(text: string, caret: number = text.length): MentionQuery {
+    const found = findMentionQuery(text, caret);
+    if (found === null) {
+      throw new Error(`fixture has no mention at ${caret} in ${JSON.stringify(text)}`);
+    }
+    return found;
+  }
+
+  function offered(roster: ChatParticipant[], mention: MentionQuery): MentionCandidate[] {
+    return filterMentionCandidates(roster, mention.query);
+  }
+
+  it('keeps the position chosen with the arrow keys when the mention and the list are unchanged', () => {
+    const mention = at('hello @');
+    const candidates = offered(ROSTER, mention);
+    expect(
+      keepMentionSelection(
+        { mention, candidates, active: 2 },
+        { mention: at('hello @'), candidates }
+      )
+    ).toBe(2);
+  });
+
+  it('keeps the reserved human entry chosen when the list is unchanged', () => {
+    const mention = at('hello @');
+    const candidates = offered(ROSTER, mention);
+    const user = candidates.length - 1;
+    expect(candidates[user]?.name).toBe(MENTION_USER_NAME);
+    expect(
+      keepMentionSelection({ mention, candidates, active: user }, { mention, candidates })
+    ).toBe(user);
+  });
+
+  it('goes back to the first candidate once the query grows', () => {
+    const before = at('hello @');
+    const after = at('hello @r');
+    expect(
+      keepMentionSelection(
+        { mention: before, candidates: offered(ROSTER, before), active: 1 },
+        { mention: after, candidates: offered(ROSTER, after) }
+      )
+    ).toBe(0);
+  });
+
+  it('goes back to the first candidate when the caret moves to another @', () => {
+    const text = '@ and @';
+    const first = at(text, 1);
+    const second = at(text, text.length);
+    expect(first.query).toBe(second.query);
+    expect(
+      keepMentionSelection(
+        { mention: first, candidates: offered(ROSTER, first), active: 2 },
+        { mention: second, candidates: offered(ROSTER, second) }
+      )
+    ).toBe(0);
+  });
+
+  it('goes back to the first candidate when the mention turns into the quoted form', () => {
+    const bare = at('hello @');
+    const quoted: MentionQuery = { ...bare, quoted: true };
+    expect(
+      keepMentionSelection(
+        { mention: bare, candidates: offered(ROSTER, bare), active: 2 },
+        { mention: quoted, candidates: offered(ROSTER, quoted) }
+      )
+    ).toBe(0);
+  });
+
+  it('starts at the first candidate when no mention was open before', () => {
+    const mention = at('hello @');
+    const candidates = offered(ROSTER, mention);
+    expect(
+      keepMentionSelection({ mention: null, candidates: [], active: 2 }, { mention, candidates })
+    ).toBe(0);
+  });
+
+  it('follows the chosen participant to its new position when a participant joins ahead of it', () => {
+    const mention = at('hello @');
+    const before = offered(ROSTER, mention);
+    expect(before[1]?.windowId).toBe('win2');
+    const joined: ChatParticipant[] = [{ window_id: 'win9', name: 'newcomer' }, ...ROSTER];
+    const after = offered(joined, mention);
+    expect(
+      keepMentionSelection(
+        { mention, candidates: before, active: 1 },
+        { mention, candidates: after }
+      )
+    ).toBe(2);
+  });
+
+  it('follows the chosen participant by window id, not by a name another window now carries', () => {
+    const mention = at('hello @');
+    const before = offered(ROSTER, mention);
+    const renamed: ChatParticipant[] = [
+      { window_id: 'win7', name: 'reviewer' },
+      { window_id: 'win1', name: 'builder' },
+      { window_id: 'win2', name: 'reviewer-renamed' },
+    ];
+    const after = offered(renamed, mention);
+    expect(
+      keepMentionSelection(
+        { mention, candidates: before, active: 1 },
+        { mention, candidates: after }
+      )
+    ).toBe(2);
+  });
+
+  it('follows the reserved human entry by its name when the list grows', () => {
+    const mention = at('hello @');
+    const before = offered(ROSTER, mention);
+    const joined: ChatParticipant[] = [...ROSTER, { window_id: 'win9', name: 'newcomer' }];
+    const after = offered(joined, mention);
+    expect(
+      keepMentionSelection(
+        { mention, candidates: before, active: before.length - 1 },
+        { mention, candidates: after }
+      )
+    ).toBe(after.length - 1);
+  });
+
+  it('goes back to the first candidate when the chosen participant left', () => {
+    const mention = at('hello @');
+    const before = offered(ROSTER, mention);
+    expect(before[2]?.windowId).toBe('win4');
+    const left = ROSTER.filter((participant) => participant.window_id !== 'win4');
+    expect(
+      keepMentionSelection(
+        { mention, candidates: before, active: 2 },
+        { mention, candidates: offered(left, mention) }
+      )
+    ).toBe(0);
   });
 });

@@ -58,6 +58,7 @@
   import {
     invokeNextFrames,
     subscribeChatChanged,
+    subscribeChatParticipantsChanged,
     subscribeSession,
     subscribeWindowList,
     invokeBroadcastChat,
@@ -463,6 +464,7 @@
   let chatRoomStates: Map<string, ChatRoomState> = new Map();
   let chatNeedsUser = false;
   let unsubscribeChatChanged: (() => void) | null = null;
+  let unsubscribeChatParticipantsChanged: (() => void) | null = null;
 
   // The plan ledger, open independently of the chat panel. Liveness and the
   // owner candidates are derived by the panel from the window registry, so
@@ -899,6 +901,19 @@
       chatRooms = applyChatChangedToRooms(chatRooms, payload);
       chatNeedsUser = anyNeedsUser(chatRooms);
     }
+  }
+
+  /**
+   * Who takes part in the rooms changed: re-list the rooms and read the shown
+   * room again, which is where the roster comes from. While the panel is
+   * closed the next open reads both.
+   */
+  function applyChatParticipantsChanged(): void {
+    if (!isChatOpen) {
+      return;
+    }
+    void refreshChatRooms();
+    void refreshChat(chatRoomStates.get(currentRoomId)?.nextAfterSeq);
   }
 
   /** Posts one message; `false` leaves the composer holding what was typed. */
@@ -1962,6 +1977,7 @@
     void framePull?.stop();
     unsubscribeWindowList?.();
     unsubscribeChatChanged?.();
+    unsubscribeChatParticipantsChanged?.();
     unsubscribePlanChanged?.();
     unsubscribeModelChoices?.();
     unsubscribeMcpRegistrationStatus?.();
@@ -2076,6 +2092,13 @@
     unsubscribeChatChanged = await subscribeChatChanged(applyChatChanged, (error) => {
       reportBoundaryNotice('chatChanged', error);
     });
+
+    unsubscribeChatParticipantsChanged = await subscribeChatParticipantsChanged(
+      applyChatParticipantsChanged,
+      (error) => {
+        reportBoundaryNotice('chatChanged', error);
+      }
+    );
 
     // A dropped plan push leaves the board at most one push behind, and the
     // next push or reopening the panel reads it again.

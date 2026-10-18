@@ -292,6 +292,26 @@ fn daemon_message_chat_changed_round_trips() {
 }
 
 // =============================================================================
+// DaemonMessage::ChatParticipantsChanged
+// =============================================================================
+
+#[test]
+fn daemon_message_chat_participants_changed_round_trips_as_a_bare_type_tag() {
+    let decoded = decode_daemon_message(br#"{"type":"chat_participants_changed"}"#)
+        .expect("chat_participants_changed must decode");
+    assert_eq!(decoded, DaemonMessage::ChatParticipantsChanged);
+    assert_eq!(
+        as_json(&decoded),
+        serde_json::json!({ "type": "chat_participants_changed" }),
+        "the push carries nothing but its type tag"
+    );
+    assert_eq!(
+        decode_daemon_message(&encode_daemon_message(&decoded)).expect("round trip must succeed"),
+        decoded
+    );
+}
+
+// =============================================================================
 // Direction: each new chat type belongs to exactly one enum, same discipline
 // as the existing approval types (approval_protocol.rs).
 // =============================================================================

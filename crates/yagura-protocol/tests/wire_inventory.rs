@@ -786,6 +786,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             seq,
             needs_user,
         }),
+        wire_sample!(DaemonMessage::ChatParticipantsChanged),
         wire_sample!(DaemonMessage::ChatRooms { rooms }),
         wire_sample!(DaemonMessage::ProtocolRevision { revision }),
         wire_sample!(DaemonMessage::DaemonHealth { problems }),

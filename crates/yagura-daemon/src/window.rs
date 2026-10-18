@@ -1361,6 +1361,9 @@ pub struct WindowEntry {
     /// How many live connections have identified as this window. Shared with
     /// each [`McpConnectionClaim`] so a claim never keeps the entry alive.
     mcp_connections: Arc<AtomicUsize>,
+    /// Raised when this window's display name or exit changes who takes part
+    /// in a chat room.
+    participation: Arc<ParticipationSignal>,
 }
 
 impl WindowEntry {
@@ -3681,9 +3684,13 @@ impl WindowEntry {
     /// a name reaches storage -- cannot drift apart.
     pub fn rename(&self, name: &str) -> Result<String, WindowNameError> {
         validate_window_name(name)?;
-        let mut stored = lock_recover(&self.name);
-        name.clone_into(&mut stored);
-        Ok(stored.clone())
+        let stored = {
+            let mut stored = lock_recover(&self.name);
+            name.clone_into(&mut stored);
+            stored.clone()
+        };
+        self.participation.raise();
+        Ok(stored)
     }
 
     /// Replaces the presentation layout this window carries. The value is
@@ -3796,6 +3803,26 @@ impl std::fmt::Debug for WindowEntry {
     }
 }
 
+/// A generation counter raised whenever the set of windows, or a value a chat
+/// roster shows, may have changed. It says only that something may have
+/// changed; who takes part in a room is decided elsewhere.
+pub(crate) struct ParticipationSignal(watch::Sender<u64>);
+
+impl Default for ParticipationSignal {
+    fn default() -> Self {
+        Self(watch::channel(0).0)
+    }
+}
+
+impl ParticipationSignal {
+    /// Raises the generation; raises that land before a watcher wakes
+    /// collapse into one wake-up.
+    pub(crate) fn raise(&self) {
+        self.0
+            .send_modify(|generation| *generation = generation.saturating_add(1));
+    }
+}
+
 /// A callback run at the end of every successful `open`; see
 /// [`WindowRegistry::set_window_opened_hook`].
 type WindowOpenedHook = Box<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
@@ -3869,6 +3896,8 @@ pub struct WindowRegistry {
     /// Set once every window is being terminated with the daemon: what their
     /// inboxes still hold is left for the next daemon to settle.
     shutting_down: AtomicBool,
+    /// Raised on registration, on a window reaching `Exited` and on a rename.
+    participation: Arc<ParticipationSignal>,
 }
 
 impl WindowRegistry {
@@ -3917,6 +3946,7 @@ impl WindowRegistry {
             mcp_config_write: AsyncMutex::new(()),
             opening: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
+            participation: Arc::default(),
         }
     }
 
@@ -4508,6 +4538,7 @@ impl WindowRegistry {
             session_id: Mutex::new(None),
             provenance,
             mcp_connections: Arc::new(AtomicUsize::new(0)),
+            participation: Arc::clone(&self.participation),
         })
     }
 
@@ -4529,7 +4560,20 @@ impl WindowRegistry {
         drop(detector_handle);
 
         lock_recover(&self.entries).push(entry);
+        self.participation.raise();
         Ok(())
+    }
+
+    /// A receiver that wakes whenever the set of windows, or a name or
+    /// status a chat roster shows, may have changed.
+    pub(crate) fn subscribe_participation(&self) -> watch::Receiver<u64> {
+        self.participation.0.subscribe()
+    }
+
+    /// Raises the participation signal for a change the registry cannot see
+    /// itself, such as a chat room becoming available for a window.
+    pub(crate) fn announce_participation_change(&self) {
+        self.participation.raise();
     }
 
     /// Lists every window, in registration order, decorating each
@@ -5334,6 +5378,7 @@ pub(crate) fn spawn_status_forwarder(
             );
             if confirmed.status == DetectedStatus::Exited {
                 *lock_recover(&entry.detector) = None;
+                entry.participation.raise();
             }
         }
         // The stream ended, so no further status can ever be confirmed for this

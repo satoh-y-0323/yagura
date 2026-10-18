@@ -128,6 +128,10 @@
 //! `undelivered_no_delivery` in place of what a composer was seen to do, and
 //! adds `unavailable_kind` and `unavailable_guidance` ([`ProfileGuidance`])
 //! to [`ProfileInfo`].
+//!
+//! Revision 24 adds the [`DaemonMessage::ChatParticipantsChanged`] push, sent
+//! to every approver when a chat room appears or who takes part in one
+//! changes.
 
 use std::collections::BTreeSet;
 
@@ -139,7 +143,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 23;
+pub const PROTOCOL_REVISION: u32 = 24;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -3183,6 +3187,11 @@ pub enum DaemonMessage {
         /// The room's `needs_user` state at the moment of this push.
         needs_user: bool,
     },
+    /// Sent to every registered approver connection when a chat room appears
+    /// or the participants of one change (a window opened, ended or renamed).
+    /// A `list_chat_rooms` or `read_chat` made on receiving it reflects the
+    /// change.
+    ChatParticipantsChanged,
     /// Response to [`ClientMessage::ListChatRooms`].
     ChatRooms {
         /// Every room the daemon knows of: `"main"` first, then the rest by
@@ -4342,6 +4351,7 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "chat_posted",
     "chat_messages",
     "chat_changed",
+    "chat_participants_changed",
     "chat_rooms",
     "protocol_revision",
     "daemon_health",

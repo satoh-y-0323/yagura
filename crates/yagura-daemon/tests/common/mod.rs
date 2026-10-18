@@ -1237,7 +1237,9 @@ pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowSta
     loop {
         match read_response(client, Duration::from_secs(5)).await {
             DaemonMessage::WindowStatus { status, .. } => return status,
-            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
+            DaemonMessage::ChatChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged
+            | DaemonMessage::PlanChanged { .. } => continue,
             other => panic!("expected window_status, got {other:?}"),
         }
     }
@@ -1624,7 +1626,9 @@ pub async fn read_approver_reply(client: &mut Connection, timeout: Duration) -> 
         );
         let frame: DaemonMessage = read_response(client, remaining).await;
         match frame {
-            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
+            DaemonMessage::ChatChanged { .. }
+            | DaemonMessage::ChatParticipantsChanged
+            | DaemonMessage::PlanChanged { .. } => continue,
             other => return other,
         }
     }

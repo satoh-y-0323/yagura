@@ -68,6 +68,10 @@ pub const EVENT_APPROVAL_REGISTRATION_REFUSED: &str = "session://approval-regist
 /// [`ChatChangedPayload`].
 pub const EVENT_CHAT_CHANGED: &str = "session://chat-changed";
 
+/// The chat rooms, or who takes part in one, changed, so a displayed roster
+/// should be read again. Payload: [`ChatParticipantsChangedPayload`].
+pub const EVENT_CHAT_PARTICIPANTS_CHANGED: &str = "session://chat-participants-changed";
+
 /// A plan's stored content changed, so a displayed copy should be read
 /// again. Payload: [`PlanChangedPayload`].
 pub const EVENT_PLAN_CHANGED: &str = "session://plan-changed";
@@ -208,6 +212,13 @@ pub struct ChatChangedPayload {
     /// The room's `needs_user` state at the moment of this push.
     pub needs_user: bool,
 }
+
+/// Payload of [`EVENT_CHAT_PARTICIPANTS_CHANGED`].
+///
+/// Fieldless on purpose, serializing to `{}` rather than `null` for the same
+/// reason as [`ApprovalRegistrationRefusedPayload`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatParticipantsChangedPayload {}
 
 /// Payload of [`EVENT_PLAN_CHANGED`].
 #[derive(Debug, Clone, Serialize)]

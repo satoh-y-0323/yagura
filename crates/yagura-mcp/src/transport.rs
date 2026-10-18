@@ -41,6 +41,7 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::ChatPosted { .. } => "ChatPosted",
         DaemonMessage::ChatMessages { .. } => "ChatMessages",
         DaemonMessage::ChatChanged { .. } => "ChatChanged",
+        DaemonMessage::ChatParticipantsChanged => "ChatParticipantsChanged",
         DaemonMessage::ChatRooms { .. } => "ChatRooms",
         DaemonMessage::ProtocolRevision { .. } => "ProtocolRevision",
         DaemonMessage::DaemonHealth { .. } => "DaemonHealth",

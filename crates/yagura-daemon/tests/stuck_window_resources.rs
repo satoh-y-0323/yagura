@@ -99,7 +99,10 @@ fn chat_spec<'a>(intro: Option<&'a str>, chat_delivery_max: u64) -> ChatPlaybook
 async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
         let frame = read_response(client, HANG_GUARD).await;
-        if !matches!(frame, DaemonMessage::ChatChanged { .. }) {
+        if !matches!(
+            frame,
+            DaemonMessage::ChatChanged { .. } | DaemonMessage::ChatParticipantsChanged
+        ) {
             return frame;
         }
     }

@@ -1081,6 +1081,14 @@ impl IpcServer {
         let ipc = PlatformIpc::default();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let owner: Arc<str> = owner.into();
+        // Started here, where a runtime exists and no approver can have
+        // connected yet.
+        chat::spawn_participation_watch(
+            Arc::clone(&self.chat),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.broker),
+            self.shutdown_rx.clone(),
+        );
 
         loop {
             if *shutdown_rx.borrow() {

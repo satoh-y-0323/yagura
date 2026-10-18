@@ -44,6 +44,7 @@ import {
   invokeReadChat,
   invokeListChatRooms,
   subscribeChatChanged,
+  subscribeChatParticipantsChanged,
 } from './session-client';
 
 /** A Tauri event callback, as registered through the mocked `listen`. */
@@ -422,6 +423,44 @@ describe('subscribeChatChanged', () => {
     listenMock.mockResolvedValueOnce(unlistenMock);
 
     const cancel = await subscribeChatChanged(vi.fn(), vi.fn());
+    cancel();
+
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('subscribeChatParticipantsChanged', () => {
+  it('subscribes to session://chat-participants-changed, the name the core emits it under', () => {
+    expect(SESSION_EVENT.chatParticipantsChanged).toBe('session://chat-participants-changed');
+  });
+
+  it('calls onChanged with no arguments for each push, which carries nothing to validate', async () => {
+    let registered: ListenCallback | undefined;
+    listenMock.mockImplementation((name: string, callback: ListenCallback) => {
+      expect(name).toBe(SESSION_EVENT.chatParticipantsChanged);
+      registered = callback;
+      return Promise.resolve(unlistenMock);
+    });
+    const onChanged = vi.fn<() => void>();
+    const onBoundaryError = vi.fn<(error: unknown) => void>();
+
+    await subscribeChatParticipantsChanged(onChanged, onBoundaryError);
+    registered?.({ payload: null });
+    registered?.({ payload: null });
+
+    expect(onChanged).toHaveBeenCalledTimes(2);
+    expect(onChanged).toHaveBeenNthCalledWith(1);
+    expect(onChanged).toHaveBeenNthCalledWith(2);
+    expect(onBoundaryError).toHaveBeenCalledTimes(0);
+  });
+
+  it('returns a function that cancels the subscription', async () => {
+    listenMock.mockResolvedValueOnce(unlistenMock);
+
+    const cancel = await subscribeChatParticipantsChanged(
+      vi.fn<() => void>(),
+      vi.fn<(error: unknown) => void>()
+    );
     cancel();
 
     expect(unlistenMock).toHaveBeenCalledTimes(1);

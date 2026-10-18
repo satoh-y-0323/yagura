@@ -58,7 +58,9 @@ async fn read_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage
         let frame = read_response(client, remaining).await;
         if !matches!(
             frame,
-            DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. }
+            DaemonMessage::ChatChanged { .. }
+                | DaemonMessage::ChatParticipantsChanged
+                | DaemonMessage::PlanChanged { .. }
         ) {
             return frame;
         }
