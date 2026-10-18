@@ -84,10 +84,40 @@ fn extract_mention_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
+/// The text of the mention that addresses the window's parent.
+pub const PARENT_MENTION: &str = "parent";
+
+/// A mention that addresses no window by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedMention {
+    /// `@user`: the human user.
+    User,
+    /// `@parent`: the poster's parent window.
+    Parent,
+    /// `@all`: recognized and dropped.
+    All,
+}
+
 /// Normalizes mention text for roster matching: lowercased, with `-` and `_`
 /// treated as the same separator.
-fn normalize_mention(s: &str) -> String {
+///
+/// This is the one rule for "do two names address the same window": roster
+/// matching and the registry's uniqueness check both compare these keys.
+#[must_use]
+pub fn mention_key(s: &str) -> String {
     s.to_lowercase().replace('-', "_")
+}
+
+/// The reserved mention `text` spells, if any. A window named like one can
+/// never be reached by name, so the registry also refuses such a name.
+#[must_use]
+pub fn reserved_mention(text: &str) -> Option<ReservedMention> {
+    match mention_key(text).as_str() {
+        "user" => Some(ReservedMention::User),
+        PARENT_MENTION => Some(ReservedMention::Parent),
+        "all" => Some(ReservedMention::All),
+        _ => None,
+    }
 }
 
 /// Resolves every `@` mention in `text` against `roster`.
@@ -120,23 +150,23 @@ pub fn parse_mentions(text: &str, roster: &[RosterEntry], self_window_id: &str) 
     let mut parent = false;
 
     for raw in extract_mention_tokens(text) {
-        let lower = raw.to_lowercase();
-        if lower == "user" {
-            user = true;
-            continue;
-        }
-        if lower == "parent" {
-            parent = true;
-            continue;
-        }
-        if lower == "all" {
-            continue;
+        match reserved_mention(&raw) {
+            Some(ReservedMention::User) => {
+                user = true;
+                continue;
+            }
+            Some(ReservedMention::Parent) => {
+                parent = true;
+                continue;
+            }
+            Some(ReservedMention::All) => continue,
+            None => {}
         }
 
-        let normalized = normalize_mention(&raw);
+        let normalized = mention_key(&raw);
         let name_matches: Vec<&RosterEntry> = roster
             .iter()
-            .filter(|entry| normalize_mention(&entry.name) == normalized)
+            .filter(|entry| mention_key(&entry.name) == normalized)
             .collect();
 
         let resolved = if name_matches.len() == 1 {
@@ -144,7 +174,7 @@ pub fn parse_mentions(text: &str, roster: &[RosterEntry], self_window_id: &str) 
         } else if name_matches.is_empty() {
             let id_matches: Vec<&RosterEntry> = roster
                 .iter()
-                .filter(|entry| normalize_mention(&entry.window_id) == normalized)
+                .filter(|entry| mention_key(&entry.window_id) == normalized)
                 .collect();
             if id_matches.len() == 1 {
                 Some(id_matches[0].window_id.clone())

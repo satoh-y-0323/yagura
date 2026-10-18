@@ -355,6 +355,7 @@ async fn open_task_window_reports_an_assignment_taken_from_the_default_role() {
             source: AssignmentSource::Default,
             assignment: Some(assignment("claude-code")),
         },
+        name: None,
     });
 
     let result = open_task(&transport)

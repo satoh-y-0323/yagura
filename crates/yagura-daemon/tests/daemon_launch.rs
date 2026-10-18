@@ -182,6 +182,7 @@ async fn a_window_opened_without_a_cwd_starts_in_the_home_directory() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -340,6 +341,7 @@ mod bundled_pair {
                 name: None,
                 model: None,
                 effort: None,
+                on_name_taken: Default::default(),
             },
         )
         .await;
@@ -387,6 +389,7 @@ mod bundled_pair {
                 name: None,
                 model: None,
                 effort: None,
+                on_name_taken: Default::default(),
             },
         )
         .await;

@@ -153,6 +153,7 @@ async fn open_ready_delivering(h: &Harness, detection: &str, command: Vec<String
                 name: None,
                 vendor: None,
                 detection: Some(detection.to_string()),
+                on_name_taken: Default::default(),
             },
             Vec::new(),
             Vec::new(),

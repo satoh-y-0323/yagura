@@ -31,6 +31,7 @@ async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open should spawn the child")
@@ -212,6 +213,7 @@ async fn a_window_whose_program_cannot_start_leaves_no_pseudoconsole_host_behind
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
     assert!(opened.is_err(), "a missing program must not open a window");

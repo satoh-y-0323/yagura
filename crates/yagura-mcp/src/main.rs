@@ -360,7 +360,8 @@ impl YaguraMcpServer {
                     "type": "string",
                     "description": "Display name of the window profile opens, \
                         overriding the profile's own. Only valid with profile; sending \
-                        it alongside window_id is rejected.",
+                        it alongside window_id is rejected. A name a running window \
+                        carries is refused as name_taken.",
                 },
                 "reference": {
                     "type": "string",
@@ -415,7 +416,11 @@ impl YaguraMcpServer {
             reports: the definitions bundled with the daemon and its detection \
             directory, where a directory definition hides a bundled one of the same \
             name and an explicitly configured directory is used alone. The daemon's \
-            default applies when omitted. model and effort (only with \
+            default applies when omitted. A window name is unique among the running \
+            windows (compared as chat mentions are): a name you send that is taken, or \
+            that is user, parent or all, is refused as name_taken; with no name the \
+            default gets a number (Claude Code 2), and the output's name is the one the \
+            window has. model and effort (only with \
             profile) pick the launched CLI's model and reasoning effort through the \
             profile's own mapping; see list_profiles. Starting a process is a gated \
             operation: unless the playbook auto-approves open_window (the shipped \
@@ -646,7 +651,7 @@ impl YaguraMcpServer {
         description = "Post a message to one chat room -- your own workspace room unless \
             room_id names main -- that the room's participant windows and the human user \
             read. Address it with @ mentions: @name for a name \
-            without spaces, @\"a b\" for a name with spaces, @parent for the window that opened \
+            of letters, digits, - and _ only, @\"a b\" for any other name, @parent for the window that opened \
             you or owns the plan whose task you run, and @user to ask the human. Names \
             match case-insensitively and treat - and _ as the same separator; a window_id works \
             as a mention too, @all is ignored, and a mention matching nothing or more than one \
@@ -983,7 +988,9 @@ impl YaguraMcpServer {
             again for a task whose previously opened window is still alive is refused \
             (invalid_state); once that window is closed or its process has exited, calling \
             again opens a fresh one and replaces the binding. name overrides the window's \
-            display name; omitted, the task's title is used. Starting the window is \
+            display name, refused as name_taken when a running window carries it; \
+            omitted, the task's title is used, numbered when taken, and the output's \
+            name is the one the window has. Starting the window is \
             gated as open_window is, so unless the playbook auto-approves open_window \
             the call is held for a human approver. The reply reports which \
             assignment source won and its full profile/model/effort. It returns as soon as \

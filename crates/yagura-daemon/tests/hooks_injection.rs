@@ -77,6 +77,7 @@ async fn open_from_profile(client: &mut Connection, profile: &str, model: Option
             name: None,
             model: model.map(str::to_string),
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

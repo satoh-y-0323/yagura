@@ -264,16 +264,21 @@ pub async fn open_task_window<T: DaemonTransport>(
             plan_id,
             task_id,
             window_id,
+            name,
             assignment,
         } => {
             let assignment_json = serde_json::to_value(assignment)
                 .map_err(|err| ToolError::Internal(err.to_string()))?;
-            Ok(json!({
+            let mut result = json!({
                 "plan_id": plan_id,
                 "task_id": task_id,
                 "window_id": window_id,
                 "assignment": assignment_json,
-            }))
+            });
+            if let (Some(name), Some(object)) = (name, result.as_object_mut()) {
+                object.insert("name".to_string(), Value::String(name));
+            }
+            Ok(result)
         }
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),

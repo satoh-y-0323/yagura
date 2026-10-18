@@ -1089,7 +1089,7 @@ fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRe
     let invalid = || McpRegistrationError::InvalidShape;
 
     if let Some(group) = &raw.group {
-        yagura_protocol::validate_window_name(group).map_err(|_| invalid())?;
+        yagura_protocol::validate_display_label(group).map_err(|_| invalid())?;
     }
 
     validate_add_placeholders(&raw.add)?;

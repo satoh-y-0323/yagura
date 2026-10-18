@@ -150,10 +150,12 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         DaemonMessage::WindowOpened {
             window_id,
             detection_warning,
+            name,
         } => Some((
             PendingKind::OpenWindow,
             Reply::WindowOpened(OpenWindowReply {
                 window_id,
+                name,
                 detection_warning,
             }),
         )),
@@ -259,6 +261,7 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
             task_id,
             window_id,
             assignment,
+            ..
         } => Some((
             PendingKind::TaskWindowOpened,
             Reply::TaskWindowOpened(TaskWindowOpenedReply {
@@ -722,6 +725,7 @@ mod tests {
                 window_id: "window-a".to_owned(),
                 opened: true,
                 delivery: HandoffDelivery::Taken,
+                name: None,
             })
             .is_none()
         );

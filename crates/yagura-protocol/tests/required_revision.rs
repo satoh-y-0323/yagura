@@ -125,6 +125,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
         ClientMessage::ListWindows,
         ClientMessage::GetWindowStatus {
@@ -171,6 +172,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
         ClientMessage::Identify {
             window_id: "w1".to_string(),
@@ -339,6 +341,7 @@ fn launch_option_bearing_messages() -> Vec<ClientMessage> {
             name: None,
             model: Some("m".to_string()),
             effort: None,
+            on_name_taken: Default::default(),
         },
         ClientMessage::OpenWindowFromProfile {
             profile: "p".to_string(),
@@ -346,6 +349,7 @@ fn launch_option_bearing_messages() -> Vec<ClientMessage> {
             name: None,
             model: None,
             effort: Some("e".to_string()),
+            on_name_taken: Default::default(),
         },
         ClientMessage::SendHandoff {
             window_id: None,

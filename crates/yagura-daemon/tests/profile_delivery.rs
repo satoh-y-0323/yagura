@@ -931,6 +931,7 @@ async fn the_prompt_arrives_in_the_childs_argv_after_every_other_injection_and_v
                 name: None,
                 vendor: None,
                 detection: None,
+                on_name_taken: Default::default(),
             },
             Vec::new(),
             injections,

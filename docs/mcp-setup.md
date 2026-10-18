@@ -520,10 +520,13 @@ Hand work over to another window: an existing one (`window_id`) or a new one ope
 ```json
 {
   "window_id": "w2-k3f9xa",
+  "name": "codex-reviewer",
   "opened": true,
   "delivery": "taken"
 }
 ```
+
+`name` is the name of the window that received the envelope. A `name` you send with `profile` follows the rules [`open_window` documents](#open_window): a name a running window already carries is refused as `name_taken`, and when you send none the profile's `display_name` is numbered if taken.
 
 `window_id` and `profile` are mutually exclusive, and exactly one of them must be present -- omitting both, or sending both, is `invalid_argument`. `cwd` and `name` apply only to the `profile` form and are rejected alongside `window_id` as `invalid_argument`. `reference` and `note` are both required, must be non-empty, and must each be a single line -- no line breaks, control characters, or characters that could reorder or hide text (the same forbidden-character rule a window's display name is held to): a violation is refused as `invalid_argument`, naming the offending character's byte offset and Unicode code point without echoing the character itself. `reference` is limited to 512 bytes and `note` to 1024 bytes; the whole envelope described below is limited to 2048 bytes -- all three limits are checked independently, and any violation is `invalid_argument`.
 
@@ -580,9 +583,12 @@ Spawn a new child window with a specified command.
 ```json
 {
   "window_id": "w2-k3f9xa",
+  "name": "my-powershell",
   "detection_warning": "failed to load the detection definition (no detection definition named \"claude-code\" was found in the directory C:\\Users\\you\\detection); status stays unknown"
 }
 ```
+
+`name` (optional): the window's display name. A name is unique among the windows that are running: the daemon compares names the way chat mentions do (case does not matter, and `-` and `_` count as the same), so `Code-Review`, `code_review` and `CODE-REVIEW` are one name. A `name` you send that a running window already carries, or that is one of the names chat reserves (`user`, `parent` and `all`), is refused as `name_taken` and no window is opened. A name that contains `"` is `invalid_argument`. When you send no `name`, the default (the command's file stem, or the profile's `display_name`) gets a number if it is taken: `Claude Code`, then `Claude Code 2`, `Claude Code 3`, using the smallest number not in use. The output's `name` is the name the window actually has; use it to mention the window in chat, as `@"Claude Code 2"`. A window that has exited no longer holds its name.
 
 `detection` (optional): the name of a detection definition, without the `.toml` extension (matching `[a-z0-9_-]{1,64}`), taken from either of the daemon's two layers -- the definitions bundled with the daemon and its detection directory, where a directory definition hides a bundled one of the same name and an explicitly configured directory is used alone (see [Detection definitions](../crates/yagura-daemon/detection/README.md#selecting-a-definition); [list_detections](#list_detections) reports the names a running daemon serves). When omitted, the daemon's default definition applies.
 
@@ -1093,7 +1099,7 @@ Opens a window for one task of a plan, using the task's resolved assignment to p
 |---|---|---|
 | `plan_id` | yes | The plan holding the task; empty is `invalid_argument` |
 | `task_id` | yes | The task to open a window for; empty is `invalid_argument` |
-| `name` | no | Display name for the new window; omitted keeps the task's own title |
+| `name` | no | Display name for the new window; omitted keeps the task's own title, numbered (`<title> 2`) if a running window already carries it. A `name` you send that is taken is refused as `name_taken` |
 
 **Output:**
 ```json
@@ -1101,6 +1107,7 @@ Opens a window for one task of a plan, using the task's resolved assignment to p
   "plan_id": "plan-7",
   "task_id": "build-parser",
   "window_id": "w-task",
+  "name": "parser",
   "assignment": { "source": "role", "assignment": { "profile": "profile-a", "model": "model-a", "effort": "high" } }
 }
 ```
@@ -1219,6 +1226,7 @@ All tools return errors in the standard MCP format:
 - **daemon_unavailable**: The yagura daemon is not running or connection failed
 - **window_not_found**: The specified `window_id` does not exist. This also covers a `window_id` that was valid but has since been evicted from the registry (an unattached `exited` window can be evicted once the daemon needs the slot back), and a `window_id` from before the daemon's last restart (see [Window ID Validity](#window-id-validity))
 - **invalid_argument**: Invalid input (e.g., empty command array, a NUL byte in an argv element, a character the command interpreter would reinterpret in a command line resolved through a `.cmd` / `.bat` shim, an unknown `profile` id, non-existent cwd, out-of-range `lines` / `timeout_sec`, `target_status: "unknown"`, a `send_handoff` with both or neither of `window_id` / `profile`, a `send_handoff` text field that is empty, over its byte limit, or carries a forbidden character, a `send_chat` / `broadcast_chat` / `read_chat` `room_id` that is neither `"main"` nor the caller's own workspace room (an approver's connection may name any room that exists), a `send_chat` / `broadcast_chat` `body` that has no visible character (empty, or only whitespace and zero-width joiners), over `CHAT_BODY_MAX_BYTES`, or carries a forbidden character, a `read_chat` `limit` outside `1..=CHAT_READ_LIMIT_MAX`, a `read_chat` from an unidentified connection with no `after_seq`, or a `status_event` with no `window_id`). A `model` or `effort` is refused the same way for any of three reasons: it was sent with a `command` (`open_window`) or with a `window_id` (`send_handoff`) instead of a `profile`; the named profile does not map that option at all; or the value is outside the launch option value rule (ASCII letters, digits and `. _ - : / + @`, not starting with `-`, at most 128 bytes). All three are refused before any process is started
+- **name_taken**: A `name` sent to `open_window`, `send_handoff` (with `profile`) or `open_task_window` is carried by a running window already, or is reserved for chat mentions (`user`, `parent`, `all`). Nothing was opened; send another name, or none to get a numbered default
 - **spawn_failed**: Failed to start the child process
 - **resource_exhausted**: Maximum window limit reached (`open_window`, `open_task_window`), too many concurrent `wait_for_status`, `wait_for_report` and `send_message` calls already outstanding on this connection (`this connection already holds the maximum number of pending waits`), a target window whose inbox is full (`send_handoff`: `too many deliveries are already waiting on this window`; see [send_handoff](#send_handoff)), too many approval requests are already pending (daemon-wide or on this connection; see [Approval Flow](#approval-flow)), or too many `send_handoff` calls are still unanswered on this connection or across the daemon, whether each opened a window from a `profile` or addressed an existing `window_id` (see [send_handoff](#send_handoff)'s two-stage limit); the `message` names which of the two ran out: `too many handoffs are in flight (per-connection limit)` or `(daemon-wide limit)`
 - **child_exited**: The target window has exited (`send_message`, `send_keys`, `interrupt_window`, a `send_handoff` addressed to an existing `window_id`, or a `wait_for_status` whose target status can no longer be reached), reported the same way to every caller regardless of origin. For a `send_handoff` this also covers a child that goes away before its CLI takes the envelope; a child that exits after the envelope was taken is not an error at all but a successful reply carrying `delivery: "taken"` (see [send_handoff](#send_handoff))

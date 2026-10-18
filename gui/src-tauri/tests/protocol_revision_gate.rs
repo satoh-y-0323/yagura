@@ -33,6 +33,7 @@ fn plain_request() -> ClientMessage {
         name: None,
         model: None,
         effort: None,
+        on_name_taken: Default::default(),
     }
 }
 
@@ -45,6 +46,7 @@ fn launch_option_request() -> ClientMessage {
         name: None,
         model: Some("opus".to_owned()),
         effort: None,
+        on_name_taken: Default::default(),
     }
 }
 

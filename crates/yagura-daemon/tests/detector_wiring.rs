@@ -315,6 +315,7 @@ async fn child_exit_reaches_attached_client_as_status_changed_exited() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open should spawn a delayed-exit child")

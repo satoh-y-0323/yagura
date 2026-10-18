@@ -306,6 +306,7 @@ async fn call_open_window_from_profile_with_options(
             name: name.map(str::to_string),
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -865,6 +866,7 @@ async fn open_window_with_a_bare_name_missing_from_the_injected_lookup_returns_s
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -899,6 +901,7 @@ async fn open_window_with_a_nul_byte_in_an_argv_element_is_rejected() {
             name: Some("explicit-name".to_string()),
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -925,6 +928,7 @@ async fn open_window_with_a_metacharacter_argument_against_a_shim_returns_invali
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -994,6 +998,7 @@ async fn open_window_with_an_extensionless_argv0_opens_through_the_cmd_shim_in_a
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -1046,6 +1051,7 @@ async fn assert_absolute_shim_delivers(dir_name: &str, argument: &str, tag: &str
             name: Some("abs-shim".to_string()),
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -1108,6 +1114,7 @@ async fn open_window_with_an_absolute_cmd_shim_path_and_a_metacharacter_argument
             name: Some("abs-shim".to_string()),
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -1299,6 +1306,7 @@ async fn send_handoff_from_a_profile_uses_the_explicit_cwd_argument_over_everyth
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("requester window should spawn")
@@ -1375,6 +1383,7 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_uses_the_requesters_ow
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("requester window should spawn")
@@ -1823,6 +1832,7 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("requester window should spawn")
@@ -2307,6 +2317,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

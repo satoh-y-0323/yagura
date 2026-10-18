@@ -40,6 +40,7 @@ fn echo_request() -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: None,
+        on_name_taken: Default::default(),
     }
 }
 
@@ -323,6 +324,7 @@ async fn registry_cwd_is_reflected_in_child_process_working_directory() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open with a valid, existing cwd should succeed")
@@ -370,6 +372,7 @@ async fn registry_window_info_cwd_has_no_extended_length_prefix() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open with a valid, existing cwd should succeed")
@@ -435,6 +438,7 @@ async fn registry_open_with_nonexistent_cwd_returns_invalid_argument_without_pan
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -459,6 +463,7 @@ async fn registry_open_returns_spawn_failed_on_missing_command_without_panicking
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -483,6 +488,7 @@ async fn registry_detection_name_rejects_path_traversal() {
             name: None,
             vendor: None,
             detection: Some("../escape".to_string()),
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -509,6 +515,7 @@ async fn registry_detection_name_rejects_path_separator() {
             name: None,
             vendor: None,
             detection: Some("foo/bar".to_string()),
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -535,6 +542,7 @@ async fn registry_detection_name_rejects_backslash() {
             name: None,
             vendor: None,
             detection: Some(r"foo\bar".to_string()),
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -561,6 +569,7 @@ async fn registry_detection_name_with_valid_syntax_is_accepted() {
             name: None,
             vendor: None,
             detection: Some("my-detection_1".to_string()),
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -598,6 +607,7 @@ async fn registry_unknown_detection_definition_fails_safe_and_other_windows_unaf
             name: None,
             vendor: None,
             detection: Some("nonexistent-detection".to_string()),
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open with a missing detection definition must not error or panic")
@@ -624,6 +634,7 @@ async fn registry_unknown_detection_definition_fails_safe_and_other_windows_unaf
             name: None,
             vendor: None,
             detection: Some("known-def".to_string()),
+            on_name_taken: Default::default(),
         })
         .await
         .expect("second open with a valid detection definition should succeed")
@@ -1265,6 +1276,7 @@ async fn registry_list_keeps_matching_room_ids_for_two_living_windows_around_an_
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open the window that exits on its own")

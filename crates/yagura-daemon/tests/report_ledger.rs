@@ -54,6 +54,7 @@ fn echo_request() -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: None,
+        on_name_taken: Default::default(),
     }
 }
 
@@ -66,6 +67,7 @@ fn short_lived_request() -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: None,
+        on_name_taken: Default::default(),
     }
 }
 

@@ -432,6 +432,7 @@ fn daemon_message_task_window_opened_round_trips() {
         task_id: "t1".to_string(),
         window_id: "w1-abc".to_string(),
         assignment: sample_resolved_assignment(),
+        name: None,
     };
     let value = as_json(&decoded);
     assert_wire_tag(&value, "task_window_opened");

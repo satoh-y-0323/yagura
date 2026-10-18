@@ -126,6 +126,7 @@ async fn call_open_window_from_profile_with_options(
             name: None,
             model: model.map(str::to_string),
             effort: effort.map(str::to_string),
+            on_name_taken: Default::default(),
         },
     )
     .await;

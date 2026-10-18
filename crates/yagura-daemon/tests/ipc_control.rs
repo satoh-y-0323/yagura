@@ -2455,6 +2455,7 @@ async fn a_failed_open_does_not_appear_in_list_windows() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
     assert!(
@@ -3747,6 +3748,7 @@ async fn send_handoff_to_ones_own_window_needs_no_playbook_and_delivers_the_enve
             window_id: acked,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened, "a window_id target must never report opened: true");
@@ -3831,6 +3833,7 @@ async fn send_handoff_between_two_windows_succeeds_when_the_playbook_lists_send_
             window_id: acked,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
@@ -4163,6 +4166,7 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_deli
             window_id: acked,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(acked, window_b);
             assert!(!opened, "a window_id target must never report opened: true");
@@ -4256,6 +4260,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
             window_id: acked,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
@@ -4391,6 +4396,7 @@ async fn send_handoff_to_a_window_id_that_never_reacts_is_taken_and_the_window_s
             window_id: acked,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);

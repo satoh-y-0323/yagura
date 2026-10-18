@@ -12,7 +12,7 @@ use crate::transport::{
     DaemonTransport, RequesterIdentity, TransportError, UNKNOWN_TYPE_CODE, message_kind,
 };
 use yagura_protocol::{
-    ClientMessage, ControlKey, DaemonMessage, WindowStatus, validate_control_keys,
+    ClientMessage, ControlKey, DaemonMessage, OnNameTaken, WindowStatus, validate_control_keys,
 };
 
 /// The fixed MCP error-code vocabulary, exposed via
@@ -93,6 +93,10 @@ pub enum ToolError {
     /// waiting for an approver to approve it.
     #[error("plan not approved: {0}")]
     PlanNotApproved(String),
+    /// The requested window name is taken by a running window or reserved
+    /// for chat mentions. Choose another name, or leave `name` out.
+    #[error("name taken: {0}")]
+    NameTaken(String),
     /// The named launch profile has been disabled in the user's settings.
     /// Not an argument error: repeating the same request reworded will not help.
     #[error("profile disabled: {0}")]
@@ -127,6 +131,7 @@ impl ToolError {
             Self::PlanNotFound(_) => "plan_not_found",
             Self::NotPlanOwner(_) => "not_plan_owner",
             Self::PlanNotApproved(_) => "plan_not_approved",
+            Self::NameTaken(_) => "name_taken",
             Self::ProfileDisabled(_) => "profile_disabled",
             Self::Internal(_) => "internal",
         }
@@ -324,6 +329,7 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "plan_not_found" => ToolError::PlanNotFound(message),
         "not_plan_owner" => ToolError::NotPlanOwner(message),
         "plan_not_approved" => ToolError::PlanNotApproved(message),
+        "name_taken" => ToolError::NameTaken(message),
         "profile_disabled" => ToolError::ProfileDisabled(message),
         _ => ToolError::Internal(message),
     }
@@ -621,6 +627,7 @@ pub async fn open_window<T: DaemonTransport>(
                 name: args.name,
                 model: args.model,
                 effort: args.effort,
+                on_name_taken: OnNameTaken::Refuse,
             })
             .await
             .map_err(map_transport_error)?
@@ -632,6 +639,7 @@ pub async fn open_window<T: DaemonTransport>(
                 name: args.name,
                 vendor: args.vendor,
                 detection: args.detection,
+                on_name_taken: OnNameTaken::Refuse,
             })
             .await
             .map_err(map_transport_error)?
@@ -641,11 +649,16 @@ pub async fn open_window<T: DaemonTransport>(
         DaemonMessage::WindowOpened {
             window_id,
             detection_warning,
+            name,
         } => {
-            // Built key by key rather than with `json!` so that the absent
-            // warning leaves out the key entirely instead of writing `null`.
+            // Built key by key rather than with `json!` so that an absent
+            // warning or name leaves out the key entirely instead of writing
+            // `null`.
             let mut result = serde_json::Map::new();
             result.insert("window_id".to_string(), Value::String(window_id));
+            if let Some(name) = name {
+                result.insert("name".to_string(), Value::String(name));
+            }
             if let Some(warning) = detection_warning {
                 result.insert("detection_warning".to_string(), Value::String(warning));
             }
@@ -975,10 +988,15 @@ pub async fn send_handoff<T: DaemonTransport>(
             window_id,
             opened,
             delivery,
-        } => Ok(with_requester(
-            json!({ "window_id": window_id, "opened": opened, "delivery": delivery }),
-            transport.requester_identity(),
-        )),
+            name,
+        } => {
+            let mut result =
+                json!({ "window_id": window_id, "opened": opened, "delivery": delivery });
+            if let (Some(name), Some(object)) = (name, result.as_object_mut()) {
+                object.insert("name".to_string(), Value::String(name));
+            }
+            Ok(with_requester(result, transport.requester_identity()))
+        }
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
     }

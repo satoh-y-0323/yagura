@@ -303,6 +303,7 @@ async fn a_resize_notice_degrades_a_quiet_window_whose_model_was_rebuilt() {
             name: None,
             vendor: None,
             detection: Some(RULES_ONLY_DETECTION_NAME.to_string()),
+            on_name_taken: Default::default(),
         })
         .await
         .expect("an echo_child window must open")

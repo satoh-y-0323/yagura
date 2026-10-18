@@ -84,6 +84,7 @@ async fn open_window_via_ipc(client: &mut Connection, command: Vec<String>) -> S
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -368,6 +369,7 @@ async fn open_window_with_valid_command_spawns_child_and_returns_window_id() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -395,6 +397,7 @@ async fn open_window_with_empty_command_array_returns_invalid_argument() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -425,6 +428,7 @@ async fn open_window_with_nonexistent_executable_returns_spawn_failed() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -460,6 +464,7 @@ async fn open_window_with_invalid_detection_name_returns_invalid_argument() {
             name: None,
             vendor: None,
             detection: Some("..".to_string()),
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -495,6 +500,7 @@ async fn open_window_with_nonexistent_cwd_returns_invalid_argument() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -1201,6 +1207,7 @@ async fn open_window_returns_detection_warning_when_the_default_detection_defini
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -1212,6 +1219,7 @@ async fn open_window_returns_detection_warning_when_the_default_detection_defini
         DaemonMessage::WindowOpened {
             window_id,
             detection_warning,
+            ..
         } => {
             assert!(!window_id.is_empty(), "window_id must not be empty");
             let warning = detection_warning

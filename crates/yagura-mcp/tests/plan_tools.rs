@@ -518,6 +518,7 @@ async fn open_task_window_sends_the_plan_id_the_task_id_and_the_name() {
             source: AssignmentSource::Role,
             assignment: Some(assignment("claude-code", "opus", "high")),
         },
+        name: None,
     }));
 
     open_task_window(
@@ -552,6 +553,7 @@ async fn open_task_window_without_a_name_sends_none() {
             source: AssignmentSource::Parent,
             assignment: Some(assignment("claude-code", "opus", "high")),
         },
+        name: None,
     }));
 
     open_task_window(
@@ -996,6 +998,7 @@ async fn open_task_window_reports_the_window_and_the_assignment_with_its_source(
             source: AssignmentSource::Role,
             assignment: Some(assignment("claude-code", "opus", "high")),
         },
+        name: None,
     }));
 
     let result = open_task_window(

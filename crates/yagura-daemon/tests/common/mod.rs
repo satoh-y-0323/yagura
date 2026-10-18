@@ -625,6 +625,7 @@ impl Harness {
                 name: None,
                 vendor: None,
                 detection: detection.map(str::to_string),
+                on_name_taken: Default::default(),
             })
             .await
             .expect("registry.open should spawn the child")
@@ -649,6 +650,7 @@ impl Harness {
                 name: None,
                 vendor: None,
                 detection: detection.map(str::to_string),
+                on_name_taken: Default::default(),
             })
             .await
             .expect("registry.open should spawn the child")
@@ -678,6 +680,7 @@ impl Harness {
                     name: None,
                     vendor: None,
                     detection: detection.map(str::to_string),
+                    on_name_taken: Default::default(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -1058,6 +1061,7 @@ pub async fn open_echo_window(
             name: None,
             vendor: None,
             detection: detection.map(str::to_string),
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open should spawn echo_child (a detection warning must not fail it)")
@@ -2143,6 +2147,7 @@ pub async fn call_open_window(client: &mut Connection, command: Vec<String>) -> 
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -2859,6 +2864,7 @@ pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, HandoffDelivery
             window_id,
             opened,
             delivery,
+            ..
         } => (window_id, opened, delivery),
         other => panic!("expected handoff_sent, got {other:?}"),
     }

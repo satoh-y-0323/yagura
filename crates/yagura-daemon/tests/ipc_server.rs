@@ -91,6 +91,7 @@ async fn open_window_via_ipc(client: &mut Connection) -> String {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

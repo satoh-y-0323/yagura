@@ -1027,6 +1027,7 @@ fn echo_request(detection: Option<&str>) -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: detection.map(|s| s.to_string()),
+        on_name_taken: Default::default(),
     }
 }
 

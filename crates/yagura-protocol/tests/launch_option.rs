@@ -355,6 +355,7 @@ fn open_window_from_profile_writes_an_absent_value_as_null_like_its_siblings() {
         name: None,
         model: None,
         effort: None,
+        on_name_taken: Default::default(),
     };
     let encoded = String::from_utf8(encode_client_message(&msg)).expect("valid UTF-8");
     for key in [
@@ -380,6 +381,7 @@ fn open_window_from_profile_round_trips_both_supplied_values() {
         name: None,
         model: Some("tier-a".to_string()),
         effort: Some("tier-b".to_string()),
+        on_name_taken: Default::default(),
     };
     let encoded = encode_client_message(&msg);
     let decoded = decode_client_message(&encoded).expect("must decode");

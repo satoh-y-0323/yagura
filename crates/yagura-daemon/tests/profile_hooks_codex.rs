@@ -804,6 +804,7 @@ async fn open_and_read_launch(
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

@@ -340,6 +340,7 @@ async fn handle_connection(
                 &DaemonMessage::WindowOpened {
                     window_id: "leftover".to_string(),
                     detection_warning: None,
+                    name: None,
                 },
             )));
             if conn.write_all(&batch).await.is_err() {
@@ -356,6 +357,7 @@ async fn handle_connection(
             let reply = frame_encode(&encode_daemon_message(&DaemonMessage::WindowOpened {
                 window_id: "should-not-leak-into-the-error-message".to_string(),
                 detection_warning: None,
+                name: None,
             }));
             if conn.write_all(&reply).await.is_err() {
                 return;

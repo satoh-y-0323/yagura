@@ -350,6 +350,7 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

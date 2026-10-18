@@ -312,6 +312,7 @@ async fn handle_connection(
                 &DaemonMessage::WindowOpened {
                     window_id: "scripted-window".to_string(),
                     detection_warning: None,
+                    name: None,
                 },
             ))),
             Reply::CloseWithoutReply => None,
@@ -359,6 +360,7 @@ fn gated_open_window_from_profile() -> ClientMessage {
         name: None,
         model: Some("opus".to_string()),
         effort: None,
+        on_name_taken: Default::default(),
     }
 }
 
@@ -716,6 +718,7 @@ async fn a_baseline_connection_still_sends_a_non_launch_option_call_unchanged() 
         name: Some("main".to_string()),
         model: None,
         effort: None,
+        on_name_taken: Default::default(),
     };
 
     let result = reply_within(

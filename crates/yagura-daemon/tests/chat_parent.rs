@@ -126,6 +126,7 @@ async fn open_delivering(h: &Harness, name: Option<&str>) -> String {
                 name: name.map(str::to_string),
                 vendor: None,
                 detection: None,
+                on_name_taken: Default::default(),
             },
             Vec::new(),
             Vec::new(),

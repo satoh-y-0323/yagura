@@ -236,6 +236,7 @@ async fn a_window_opened_from_the_profile_with_the_absent_definition_stays_unkno
             name: Some(launch.name),
             vendor: Some(launch.vendor),
             detection: launch.detection,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("a missing detection definition must not stop the window from opening");
@@ -355,6 +356,7 @@ async fn layer_zero_profile_and_window_state_the_missing_layer_instead_of_stayin
             name: Some(launch.name),
             vendor: Some(launch.vendor),
             detection: launch.detection,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("a missing layer must not stop the window from opening");
@@ -482,6 +484,7 @@ async fn an_invalid_detection_name_is_reported_as_invalid_not_as_missing() {
             name: Some(launch.name),
             vendor: Some(launch.vendor),
             detection: launch.detection,
+            on_name_taken: Default::default(),
         })
         .await;
     assert!(
@@ -667,6 +670,7 @@ async fn layer_zero_and_an_invalid_name_together_report_the_invalid_name_not_the
             name: Some(launch.name),
             vendor: Some(launch.vendor),
             detection: launch.detection,
+            on_name_taken: Default::default(),
         })
         .await;
     assert!(

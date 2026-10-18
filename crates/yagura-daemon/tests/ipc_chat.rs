@@ -94,6 +94,7 @@ async fn open_delivering(
                 name: name.map(str::to_string),
                 vendor: None,
                 detection: detection.map(str::to_string),
+                on_name_taken: Default::default(),
             },
             Vec::new(),
             Vec::new(),

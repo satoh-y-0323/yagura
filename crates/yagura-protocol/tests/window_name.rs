@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! Integration tests for the window display-label validation contract: the
-//! `name` and the `vendor` badge, which share one rule.
+//! `name` and the `vendor` badge, which share one rule except that only a name
+//! may not hold `"` (it ends a quoted chat mention).
 //!
 //! `validate_window_name` is the single source of truth for what a window's
 //! display name may contain. The daemon collapses all rejection reasons into
@@ -9,8 +10,12 @@
 //! distinguish the reasons *before* sending, which is why the error type is
 //! an enum rather than a unit type.
 
+use serde_json::{Value, json};
 use yagura_protocol::{
-    WINDOW_NAME_MAX_BYTES, WindowNameError, validate_window_name, validate_window_vendor,
+    HANDOFF_NOTE_MAX_BYTES, WINDOW_NAME_MAX_BYTES, WindowNameError, decode_client_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message, validate_chat_body,
+    validate_handoff_text, validate_send_text_body, validate_task_instruction,
+    validate_window_name, validate_window_vendor,
 };
 
 /// Invisible characters that carry no glyph-shaping role and are therefore
@@ -259,6 +264,143 @@ fn ordinary_vendor_identifier_is_accepted() {
         assert!(
             result.is_ok(),
             "expected Ok(()) for vendor {vendor:?}, got {result:?}"
+        );
+    }
+}
+
+// --- `"` ends a quoted mention, so a name cannot hold one ---------------------------
+
+#[test]
+fn a_double_quote_is_rejected_in_a_window_name() {
+    let result = validate_window_name("Say \"hi\"");
+
+    assert_eq!(
+        result,
+        Err(WindowNameError::ForbiddenChar { at: 4, ch: '"' }),
+        "a name holding `\"` could not be written inside `@\"...\"`"
+    );
+}
+
+#[test]
+fn a_double_quote_stays_accepted_everywhere_a_window_name_is_not_written() {
+    let quoted = "a \"quoted\" word";
+
+    assert_eq!(validate_window_vendor(quoted), Ok(()));
+    assert!(validate_handoff_text(quoted, HANDOFF_NOTE_MAX_BYTES).is_ok());
+    assert!(validate_task_instruction(quoted).is_ok());
+    assert!(validate_send_text_body(quoted).is_ok());
+    assert!(validate_chat_body(quoted).is_ok());
+}
+
+// --- the wire of a name's handling and of the name a window was given ---------------
+
+/// The wire key of an open request saying what to do when its name is taken.
+const ON_NAME_TAKEN: &str = "on_name_taken";
+
+fn client_round_trip(frame: &Value) -> Value {
+    let body = serde_json::to_vec(frame).expect("a frame encodes");
+    let decoded =
+        decode_client_message(&body).unwrap_or_else(|err| panic!("{frame} must decode: {err:?}"));
+    serde_json::from_slice(&encode_client_message(&decoded)).expect("an encoded frame is JSON")
+}
+
+fn daemon_round_trip(frame: &Value) -> Value {
+    let body = serde_json::to_vec(frame).expect("a frame encodes");
+    let decoded =
+        decode_daemon_message(&body).unwrap_or_else(|err| panic!("{frame} must decode: {err:?}"));
+    serde_json::from_slice(&encode_daemon_message(&decoded)).expect("an encoded frame is JSON")
+}
+
+fn open_requests() -> [Value; 2] {
+    [
+        json!({
+            "type": "open_window",
+            "command": ["pwsh"],
+            "cwd": null,
+            "name": "Twin",
+            "vendor": null,
+            "detection": null,
+        }),
+        json!({
+            "type": "open_window_from_profile",
+            "profile": "twin",
+            "cwd": null,
+            "name": "Twin",
+        }),
+    ]
+}
+
+#[test]
+fn an_open_request_asking_to_number_a_taken_name_keeps_asking_across_the_wire() {
+    for mut frame in open_requests() {
+        frame[ON_NAME_TAKEN] = json!("number");
+
+        let echoed = client_round_trip(&frame);
+
+        assert_eq!(
+            echoed[ON_NAME_TAKEN],
+            json!("number"),
+            "{frame} became {echoed}"
+        );
+    }
+}
+
+#[test]
+fn an_open_request_that_omits_the_handling_or_says_refuse_never_asks_for_numbering() {
+    for frame in open_requests() {
+        let omitted = client_round_trip(&frame);
+        let mut refusing = frame.clone();
+        refusing[ON_NAME_TAKEN] = json!("refuse");
+        let refused = client_round_trip(&refusing);
+
+        for echoed in [omitted, refused] {
+            assert!(
+                matches!(echoed.get(ON_NAME_TAKEN), None | Some(Value::Null))
+                    || echoed[ON_NAME_TAKEN] == json!("refuse"),
+                "an omitted handling means refuse: {echoed}"
+            );
+        }
+    }
+}
+
+fn opened_answers() -> [Value; 3] {
+    [
+        json!({ "type": "window_opened", "window_id": "w2-abc" }),
+        json!({
+            "type": "task_window_opened",
+            "plan_id": "p-1",
+            "task_id": "t1",
+            "window_id": "w2-abc",
+            "assignment": { "source": "unassigned", "assignment": null },
+        }),
+        json!({
+            "type": "handoff_sent",
+            "window_id": "w2-abc",
+            "opened": true,
+            "delivery": "taken",
+        }),
+    ]
+}
+
+#[test]
+fn an_answer_that_opened_a_window_carries_its_name_across_the_wire() {
+    for mut frame in opened_answers() {
+        frame["name"] = json!("Twin 2");
+
+        let echoed = daemon_round_trip(&frame);
+
+        assert_eq!(echoed["name"], json!("Twin 2"), "{frame} became {echoed}");
+    }
+}
+
+#[test]
+fn an_answer_from_a_daemon_that_predates_the_name_still_decodes_and_writes_no_name() {
+    for frame in opened_answers() {
+        let echoed = daemon_round_trip(&frame);
+
+        assert!(
+            echoed.get("name").is_none(),
+            "an absent name is left off the wire, not written as null: {echoed}"
         );
     }
 }

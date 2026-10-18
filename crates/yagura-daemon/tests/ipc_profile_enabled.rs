@@ -119,6 +119,7 @@ async fn call_open_window_from_profile(client: &mut Connection, profile: &str) -
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

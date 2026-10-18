@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 use yagura_protocol::{
-    CHAT_READ_LIMIT_MAX, ClientMessage, Frame, MAX_LAYOUT_JSON_BYTES, Palette, TerminalSize,
-    check_input_bounds, validate_chat_body, validate_open_window_exclusivity, validate_window_name,
+    CHAT_READ_LIMIT_MAX, ClientMessage, Frame, MAX_LAYOUT_JSON_BYTES, OnNameTaken, Palette,
+    TerminalSize, check_input_bounds, validate_chat_body, validate_open_window_exclusivity,
+    validate_window_name,
 };
 
 use crate::connection_pool::ConnectionPool;
@@ -103,6 +104,10 @@ pub struct ProfileListReply {
 pub struct OpenWindowReply {
     /// The id the daemon assigned to the new window.
     pub window_id: String,
+    /// The name the daemon gave the window, which differs from the requested
+    /// one when it was numbered. Absent when the daemon predates the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// English reason text when the window runs no detection definition: one
     /// failed to load, or no definition layer is configured at all.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -491,8 +496,10 @@ pub async fn open_window(
     vendor: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    on_name_taken: Option<OnNameTaken>,
     pool: State<'_, Arc<ConnectionPool>>,
 ) -> Result<OpenWindowReply, WindowOpenFailure> {
+    let on_name_taken = on_name_taken.unwrap_or_default();
     check_open_window_arguments(
         &command,
         name.as_deref(),
@@ -504,11 +511,11 @@ pub async fn open_window(
     )?;
     match profile {
         Some(profile) => pool
-            .open_window_from_profile(&app, profile, cwd, name, model, effort)
+            .open_window_from_profile(&app, profile, cwd, name, on_name_taken, model, effort)
             .await
             .map_err(window_open_failure),
         None => pool
-            .open_window(&app, command, cwd, name, detection, vendor)
+            .open_window(&app, command, cwd, name, on_name_taken, detection, vendor)
             .await
             .map_err(window_open_failure),
     }

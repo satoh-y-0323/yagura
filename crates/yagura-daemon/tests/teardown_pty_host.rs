@@ -29,6 +29,7 @@ async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open should spawn the child")

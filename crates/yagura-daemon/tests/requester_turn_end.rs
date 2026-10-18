@@ -524,6 +524,7 @@ async fn a_handoff_is_answered_undelivered_when_its_requester_goes_from_running_
             window_id,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(window_id, stage.receiver);
             assert!(!opened, "the handoff was addressed to an open window");
@@ -646,6 +647,7 @@ async fn an_open_window_waiting_for_an_approver_is_withdrawn_when_its_requester_
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

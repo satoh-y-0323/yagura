@@ -305,6 +305,7 @@ impl Scene {
                 name: None,
                 model: None,
                 effort: None,
+                on_name_taken: Default::default(),
             },
         )
         .await;
@@ -326,6 +327,7 @@ impl Scene {
                 name: None,
                 vendor: None,
                 detection: Some(HOOK_DETECTION.to_string()),
+                on_name_taken: Default::default(),
             })
             .await
             .expect("open the window")
@@ -653,6 +655,7 @@ fn expect_handoff_sent(message: DaemonMessage) -> (String, bool, String) {
             window_id,
             opened,
             delivery,
+            ..
         } => (
             window_id,
             opened,
@@ -995,6 +998,7 @@ async fn plan_owner(scene: &Scene) -> Connection {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open the owner")

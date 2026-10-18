@@ -387,6 +387,7 @@ async fn a_window_opened_from_a_profile_by_an_identified_connection_becomes_its_
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

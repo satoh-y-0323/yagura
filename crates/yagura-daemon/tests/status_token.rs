@@ -58,6 +58,7 @@ async fn open_long_lived_window(registry: &WindowRegistry) -> Arc<WindowEntry> {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open must spawn the child")
@@ -301,6 +302,7 @@ async fn registry_open_injects_the_status_token_that_verify_status_token_accepts
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open must spawn the child")
@@ -359,6 +361,7 @@ async fn registry_open_injects_the_window_id_alongside_the_status_token() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open must spawn the child")

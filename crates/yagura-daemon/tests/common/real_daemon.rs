@@ -292,6 +292,7 @@ impl RunningDaemon {
                 name: None,
                 model: None,
                 effort: None,
+                on_name_taken: Default::default(),
             },
         )
         .await;

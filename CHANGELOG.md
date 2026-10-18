@@ -20,6 +20,9 @@ This release changes how yagura hands text to a CLI, and with it several MCP and
 - **The IPC protocol is now revision 24.** The daemon pushes the new `chat_participants_changed` message to every approver when a chat room appears or who takes part in one changes. A client that does not know it can ignore it.
 - **On Windows, Codex CLI must be the standalone build, not the npm package.** The daemon wakes a waiting Codex CLI by passing text to `codex queue` on the command line, which the npm package's `.cmd` launcher cannot carry, so the `codex-cli` profile is listed as unavailable until the standalone build is first on `PATH`.
 - **After updating, press Update for Codex CLI and Antigravity CLI in Settings > Integrations.** The bundled hooks changed, so the hook trust and the hooks entry recorded earlier no longer match; until they are written again, a Codex CLI window gets no hooks and an Antigravity CLI window is not handed text.
+- **A window's name is now unique among the running windows.** Names are compared the way chat mentions are (case-insensitive, `-` and `_` the same), a window that has exited no longer holds its name, and the names chat reserves (`user`, `parent`, `all`) cannot be used. `open_window`, `open_task_window`, `send_handoff` (with `profile`) and renaming a window refuse a name that is taken with the new error `name_taken`, and a default name (a profile's display name, a command's file stem, a task's title) that is taken gets a number: `Claude Code`, `Claude Code 2`, `Claude Code 3`. The output of `open_window`, `open_task_window` and `send_handoff` carries the new `name` key, the name the window actually has. A client that does not know `name_taken` sees it as an unknown error code. A GUI older than this release restoring a session is refused for a window whose name a running window already carries.
+- **A `"` is no longer accepted in a window name**, a profile's `display_name` or a plan task's `title`, because it ends a quoted `@"..."` mention. A profile or plan that already contains one stops loading until it is edited. The label in a model listing and a registration `group` are not window names and still accept it.
+- **The IPC protocol is now revision 25.** The open requests `open_window` and `open_window_from_profile` take `on_name_taken` (`refuse`, the default, or `number`), the error code `name_taken` is new, and `window_opened`, `task_window_opened` and `handoff_sent` carry `name`. Every addition is optional on the wire.
 
 ### Added
 
@@ -27,6 +30,7 @@ This release changes how yagura hands text to a CLI, and with it several MCP and
 
 ### Fixed
 
+- A chat mention of a window did not reach anyone when two windows had the same name (opening two windows from one profile gave them both the profile's name), and nothing told the sender. Names are now unique, so a mention reaches the window it names.
 - A window opened after the chat panel was already open now appears in the `@` suggestions and the participant count right away, and leaves them when it ends or is renamed; before, it showed up only after someone posted. Choosing a suggestion with the arrow keys no longer snaps back to the first one when the key is released.
 - A handoff or chat message to a window that took it without visibly starting work could be written into that window two or three times: a later attempt read the emptied input line as the text having been lost. Once the submit key has been pressed, yagura no longer writes the text again; it only presses the key again over text it still sees in the input line.
 

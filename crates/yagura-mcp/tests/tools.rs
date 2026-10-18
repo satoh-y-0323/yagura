@@ -1187,6 +1187,7 @@ async fn open_window_returns_the_window_id_from_a_successful_response() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w2".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: vec!["pwsh.exe".to_string(), "-NoLogo".to_string()],
@@ -1211,6 +1212,7 @@ async fn open_window_omits_detection_from_the_daemon_message_when_not_provided()
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w2".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: vec!["pwsh.exe".to_string()],
@@ -1238,6 +1240,7 @@ async fn open_window_forwards_a_provided_detection_argument_verbatim() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w2".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: vec!["pwsh.exe".to_string()],
@@ -1267,6 +1270,7 @@ async fn open_window_includes_the_detection_warning_key_when_the_daemon_reports_
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w9".to_string(),
         detection_warning: Some("failed to load the detection definition (os error)".to_string()),
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: vec!["pwsh.exe".to_string()],
@@ -1295,6 +1299,7 @@ async fn open_window_omits_the_detection_warning_key_when_the_daemon_reports_non
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w10".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: vec!["pwsh.exe".to_string()],
@@ -2694,6 +2699,7 @@ async fn open_window_sends_the_profile_variant_when_a_profile_is_given() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w7".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -2716,6 +2722,7 @@ async fn open_window_sends_the_profile_variant_when_a_profile_is_given() {
             name,
             model,
             effort,
+            ..
         } => {
             assert_eq!(profile, "claude-code");
             assert_eq!(cwd, Some(r"C:\work".to_string()));
@@ -2735,6 +2742,7 @@ async fn open_window_forwards_an_omitted_cwd_and_name_of_a_profile_launch_as_non
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w7".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -2756,6 +2764,7 @@ async fn open_window_forwards_an_omitted_cwd_and_name_of_a_profile_launch_as_non
             name,
             model,
             effort,
+            ..
         } => {
             assert_eq!(profile, "claude-code");
             assert_eq!(cwd, None);
@@ -2932,6 +2941,7 @@ async fn open_window_passes_a_detection_warning_of_a_profile_launch_through() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w7".to_string(),
         detection_warning: Some("detection definition `claude-code` was not found".to_string()),
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -2958,6 +2968,7 @@ async fn open_window_forwards_model_and_effort_of_a_profile_launch() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w8".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -2986,6 +2997,7 @@ async fn open_window_accepts_a_model_only_specification_of_a_profile_launch() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w8".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -3014,6 +3026,7 @@ async fn open_window_accepts_an_effort_only_specification_of_a_profile_launch() 
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w8".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = OpenWindowArgs {
         command: Vec::new(),
@@ -3650,6 +3663,7 @@ async fn send_handoff_accepts_a_reference_exactly_at_the_512_byte_limit() {
         window_id: "w1".to_string(),
         opened: false,
         delivery: delivery("taken"),
+        name: None,
     }));
     let mut args = valid_window_handoff_args();
     args.reference = Some("a".repeat(512));
@@ -3677,6 +3691,7 @@ async fn send_handoff_accepts_a_note_exactly_at_the_1024_byte_limit() {
         window_id: "w1".to_string(),
         opened: false,
         delivery: delivery("taken"),
+        name: None,
     }));
     let mut args = valid_window_handoff_args();
     args.note = Some("a".repeat(1024));
@@ -3692,6 +3707,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_window_target_resp
         window_id: "w1".to_string(),
         opened: false,
         delivery: delivery("taken"),
+        name: None,
     }));
     let args = valid_window_handoff_args();
 
@@ -3722,6 +3738,7 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_profile_target_res
         window_id: "w9".to_string(),
         opened: true,
         delivery: delivery("taken"),
+        name: None,
     }));
     let args = valid_profile_handoff_args();
 
@@ -3752,6 +3769,7 @@ async fn send_handoff_forwards_the_model_launch_option_of_a_profile_target() {
         window_id: "w9".to_string(),
         opened: true,
         delivery: delivery("taken"),
+        name: None,
     }));
     let mut args = valid_profile_handoff_args();
     args.model = Some("strong".to_string());
@@ -3788,6 +3806,7 @@ async fn send_handoff_relays_every_delivery_outcome_the_daemon_can_report() {
             window_id: "w1".to_string(),
             opened: false,
             delivery: delivery(spelling),
+            name: None,
         }));
 
         let result = send_handoff(&transport, valid_window_handoff_args())
@@ -3808,6 +3827,7 @@ async fn send_handoff_reports_a_window_requester_once_the_daemon_accepted_the_id
             window_id: "w1".to_string(),
             opened: false,
             delivery: delivery("taken"),
+            name: None,
         }),
         RequesterIdentity::Window(IDENTIFIED_WINDOW_ID.to_string()),
     );
@@ -3859,6 +3879,7 @@ async fn send_handoff_maps_an_unexpected_daemon_message_variant_to_internal() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::WindowOpened {
         window_id: "w1".to_string(),
         detection_warning: None,
+        name: None,
     }));
     let args = valid_window_handoff_args();
 

@@ -26,8 +26,8 @@ use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, FrameError,
     HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, HandoffDelivery, InstructionNoticeState,
-    MessageError, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind, ProfileInfo,
-    RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
+    MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
+    ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
     decode_client_message, encode_daemon_message, frame_decode, frame_encode, is_valid_source,
     validate_control_keys, validate_handoff_target, validate_handoff_text,
     validate_launch_option_value, validate_send_text_body,
@@ -74,9 +74,10 @@ use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
 use crate::window::{
     CliInjection, ComposerResidue, EnvelopeWait, InputOrigin, LaunchIdentity, McpConnectionClaim,
-    NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, RequestedCwd, SendStage,
-    SubmitJudgment, SubmitPlacement, TaskOrigin, WakeCommand, WindowEntry, WindowLiveness,
-    WindowOpenError, WindowProvenance, WindowRegistry, resolve_existing_dir,
+    NameRefusal, NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, RejectedArgument,
+    RequestedCwd, SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin, WakeCommand, WindowEntry,
+    WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry, WindowRenameError,
+    resolve_existing_dir,
 };
 
 use permit::{
@@ -1416,9 +1417,17 @@ impl IpcServer {
                 name,
                 vendor,
                 detection,
+                on_name_taken,
             }) => {
-                self.handle_open_window(outbound, state, command, cwd, name, vendor, detection)
-                    .await;
+                let request = OpenWindowRequest {
+                    command,
+                    cwd: cwd.map(|cwd| RequestedCwd::from_caller(PathBuf::from(cwd))),
+                    name,
+                    on_name_taken,
+                    vendor,
+                    detection,
+                };
+                self.handle_open_window(outbound, state, request).await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ListWindows) => {
@@ -1475,7 +1484,7 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::RenameWindow { window_id, name }) => {
-                self.handle_rename_window(outbound, &window_id, &name);
+                self.handle_rename_window(outbound, &window_id, &name).await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ReadOutput { window_id, lines }) => {
@@ -1503,6 +1512,7 @@ impl IpcServer {
                 name,
                 model,
                 effort,
+                on_name_taken,
             }) => {
                 self.handle_open_window_from_profile(
                     outbound,
@@ -1510,6 +1520,7 @@ impl IpcServer {
                     profile,
                     cwd,
                     name,
+                    on_name_taken,
                     crate::profile::LaunchOptionValues { model, effort },
                 )
                 .await;
@@ -2192,25 +2203,12 @@ impl IpcServer {
     /// Validation (command, `cwd`, detection name) and the resource limits
     /// live in the registry; this maps its error enum 1:1 onto the IPC error
     /// codes.
-    // One argument per `OpenWindow` field, plus the connection that asked.
-    #[allow(clippy::too_many_arguments)]
     async fn handle_open_window(
         &self,
         outbound: &Arc<Outbound>,
         state: &ConnectionState,
-        command: Vec<String>,
-        cwd: Option<String>,
-        name: Option<String>,
-        vendor: Option<String>,
-        detection: Option<String>,
+        request: OpenWindowRequest,
     ) {
-        let request = OpenWindowRequest {
-            command,
-            cwd: cwd.map(|cwd| RequestedCwd::from_caller(PathBuf::from(cwd))),
-            name,
-            vendor,
-            detection,
-        };
         let provenance = WindowProvenance {
             opener: opener_of(&state.origin),
             ..WindowProvenance::default()
@@ -2331,8 +2329,16 @@ impl IpcServer {
         profile: &str,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         options: crate::profile::LaunchOptionValues,
     ) -> Result<PlannedOpen, DaemonMessage> {
+        // The profile's display name is a default, never a name the caller
+        // chose, so it is numbered rather than refused when taken.
+        let on_name_taken = if name.is_some() {
+            on_name_taken
+        } else {
+            OnNameTaken::Number
+        };
         for axis in crate::profile::LaunchOptionAxis::ALL {
             if let Some(value) = options.get(axis) {
                 validate_launch_option_value(value).map_err(|err| {
@@ -2411,6 +2417,7 @@ impl IpcServer {
                 command: launch.argv,
                 cwd: launch.cwd,
                 name: Some(launch.name),
+                on_name_taken,
                 vendor: Some(launch.vendor),
                 detection: launch.detection,
             },
@@ -2428,6 +2435,8 @@ impl IpcServer {
     /// ([`IpcServer::plan_from_profile`]), then the approval gate, and only
     /// then is the window actually opened ([`open_planned`]), so a refusal
     /// never leaves a child behind.
+    // One argument per `OpenWindowFromProfile` field, plus the connection that asked.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_open_window_from_profile(
         &self,
         outbound: &Arc<Outbound>,
@@ -2435,9 +2444,10 @@ impl IpcServer {
         profile: String,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         options: crate::profile::LaunchOptionValues,
     ) {
-        let planned = match self.plan_from_profile(&profile, cwd, name, options) {
+        let planned = match self.plan_from_profile(&profile, cwd, name, on_name_taken, options) {
             Ok(planned) => planned,
             Err(message) => {
                 outbound.reply(&message);
@@ -2627,13 +2637,18 @@ impl IpcServer {
             effort: assignment.effort.clone(),
         };
         // Task titles pass the same window-name validation when the plan is stored.
-        let name = name.unwrap_or(prelude.title);
+        // A name the caller gave is refused when taken; the title is a default.
+        let (name, on_name_taken) = match name {
+            Some(name) => (name, OnNameTaken::Refuse),
+            None => (prelude.title, OnNameTaken::Number),
+        };
         let has_instruction = prelude.instruction.is_some();
 
         let planned = match self.plan_from_profile(
             &assignment.profile,
             Some(prelude.cwd),
             Some(name),
+            on_name_taken,
             options,
         ) {
             Ok(planned) => planned,
@@ -2702,15 +2717,16 @@ impl IpcServer {
     /// applies does not appear here -- a label change never touches the child,
     /// and gating it would leave an exited window stuck with a name nobody can
     /// correct.
-    fn handle_rename_window(&self, outbound: &Outbound, window_id: &str, name: &str) {
+    async fn handle_rename_window(&self, outbound: &Outbound, window_id: &str, name: &str) {
         let Some(entry) = self.registry.get(window_id) else {
             outbound.reply(&window_not_found_msg());
             return;
         };
-        // Every rejection reason collapses into `invalid_argument` on the
-        // wire; clients that need to tell them apart run the same
-        // `validate_window_name` before sending.
-        let message = match entry.rename(name) {
+        // A malformed name is `invalid_argument` whatever is wrong with it;
+        // clients that need to tell the reasons apart run the same
+        // `validate_window_name` before sending. A taken or reserved name is
+        // `name_taken`.
+        let message = match self.registry.rename_window(&entry, name).await {
             Ok(stored) => {
                 // A successful rename's new name must reach the store before
                 // the reply.
@@ -2720,7 +2736,8 @@ impl IpcServer {
                     name: stored,
                 }
             }
-            Err(err) => error_msg("invalid_argument", &err.to_string()),
+            Err(WindowRenameError::Invalid(err)) => error_msg("invalid_argument", &err.to_string()),
+            Err(WindowRenameError::NameTaken(refusal)) => name_taken_msg(&refusal),
         };
         outbound.reply(&message);
     }
@@ -3087,6 +3104,7 @@ impl IpcServer {
                             window_id: entry.window_id().to_string(),
                             opened: false,
                             delivery: HandoffDelivery::UndeliveredNoDelivery,
+                            name: Some(entry.name()),
                         },
                     );
                     return;
@@ -3135,13 +3153,15 @@ impl IpcServer {
                 // Work handed over starts where it came from, so the
                 // requester's own window is the default working directory.
                 let cwd = cwd.or_else(|| requester.map(|info| info.cwd));
-                let planned = match self.plan_from_profile(&profile, cwd, name, options) {
-                    Ok(planned) => planned,
-                    Err(message) => {
-                        outbound.reply(&message);
-                        return;
-                    }
-                };
+                let planned =
+                    match self.plan_from_profile(&profile, cwd, name, OnNameTaken::Refuse, options)
+                    {
+                        Ok(planned) => planned,
+                        Err(message) => {
+                            outbound.reply(&message);
+                            return;
+                        }
+                    };
                 // The envelope is handed over as the launch prompt, so a
                 // profile that declares none, or whose program would pass it
                 // through the command interpreter, is refused before anything
@@ -5002,6 +5022,7 @@ async fn await_handoff_end(
         window_id: entry.window_id().to_string(),
         opened: false,
         delivery,
+        name: Some(entry.name()),
     };
     let deadline = tokio::time::sleep(Duration::from_secs(config.handoff_delivery_timeout_secs));
     tokio::pin!(deadline);
@@ -5029,7 +5050,7 @@ async fn await_handoff_end(
                 // Withdrawn before the answer: a push under way gives up and
                 // takes its text back if it still can.
                 let _ = entry.inbox().withdraw(key);
-                return handoff_withdrawn_msg(entry.window_id());
+                return handoff_withdrawn_msg(entry);
             }
             () = &mut deadline, if !timed_out => {
                 timed_out = true;
@@ -5195,6 +5216,7 @@ async fn start_profile_handoff(job: ProfileHandoffOpen, permit: Permit<permit::L
                     window_id: opened.window_id,
                     opened: true,
                     delivery: HandoffDelivery::Taken,
+                    name: Some(opened.name),
                 },
             );
         }
@@ -5302,6 +5324,7 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
                 plan_id: plan_id_for_bind,
                 task_id,
                 window_id: opened.window_id,
+                name: Some(opened.name),
                 assignment: plan::wire_resolved(resolved),
             });
         }
@@ -5447,6 +5470,7 @@ fn opened_message(opened: OpenedWindow) -> DaemonMessage {
     DaemonMessage::WindowOpened {
         window_id: opened.window_id,
         detection_warning: opened.detection_warning,
+        name: Some(opened.name),
     }
 }
 
@@ -5527,7 +5551,7 @@ fn spawn_pending(
                 // answer on.
                 if let PendingAction::SendHandoff { .. } = action {
                     drop(action);
-                    outbound.reply(&handoff_withdrawn_msg(entry.window_id()));
+                    outbound.reply(&handoff_withdrawn_msg(&entry));
                 }
                 return;
             }
@@ -5845,11 +5869,12 @@ fn open_withdrawn_msg() -> DaemonMessage {
 
 /// The answer to a handoff whose requester left: its envelope was taken out
 /// of the window's inbox, and nothing hands it over after this answer.
-fn handoff_withdrawn_msg(window_id: &str) -> DaemonMessage {
+fn handoff_withdrawn_msg(entry: &WindowEntry) -> DaemonMessage {
     DaemonMessage::HandoffSent {
-        window_id: window_id.to_string(),
+        window_id: entry.window_id().to_string(),
         opened: false,
         delivery: HandoffDelivery::UndeliveredTimeout,
+        name: Some(entry.name()),
     }
 }
 
@@ -5874,6 +5899,15 @@ fn deny_no_approver(tool: DestructiveTool) -> DaemonMessage {
     deny_msg(tool, DenyReason::ApprovalRequired)
 }
 
+/// The refusal for a window name that is taken or reserved.
+fn name_taken_msg(refusal: &NameRefusal) -> DaemonMessage {
+    DaemonMessage::Error {
+        code: "name_taken".to_string(),
+        message: refusal.to_string(),
+        rejected_argument: Some(RejectedArgument::Name.wire_name().to_string()),
+    }
+}
+
 /// Renders a refused window open, one answer per [`WindowOpenError`] variant.
 fn window_open_error_msg(err: &WindowOpenError) -> DaemonMessage {
     match err {
@@ -5882,6 +5916,7 @@ fn window_open_error_msg(err: &WindowOpenError) -> DaemonMessage {
             message: reason.clone(),
             rejected_argument: argument.map(|argument| argument.wire_name().to_string()),
         },
+        WindowOpenError::NameTaken(refusal) => name_taken_msg(refusal),
         WindowOpenError::SpawnFailed(reason) => error_msg("spawn_failed", reason),
         WindowOpenError::ResourceExhausted => error_msg(
             "resource_exhausted",
@@ -6038,6 +6073,7 @@ mod tests {
                     name: None,
                     vendor: None,
                     detection: None,
+                    on_name_taken: Default::default(),
                 },
                 Vec::new(),
                 Vec::new(),

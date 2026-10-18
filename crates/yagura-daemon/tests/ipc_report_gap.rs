@@ -73,6 +73,7 @@ async fn open_from_profile(client: &mut Connection, profile: &str) -> String {
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

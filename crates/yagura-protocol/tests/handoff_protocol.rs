@@ -102,6 +102,7 @@ fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
             window_id,
             opened,
             delivery,
+            ..
         } => {
             assert_eq!(window_id, "w2");
             assert!(opened);
@@ -132,6 +133,7 @@ fn handoff_sent_round_trips_every_delivery_value_through_the_message() {
             window_id: "w2".to_string(),
             opened: false,
             delivery,
+            name: None,
         };
         let encoded = encode_daemon_message(&message);
         let decoded = decode_daemon_message(&encoded).expect("must decode");
@@ -154,6 +156,7 @@ fn handoff_sent_decodes_with_each_undelivered_delivery() {
                 window_id,
                 opened,
                 delivery,
+                ..
             } => {
                 assert_eq!(window_id, "w2");
                 assert!(!opened);

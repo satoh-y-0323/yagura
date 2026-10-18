@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use yagura_protocol::{
-    TaskInstructionError, is_valid_token, validate_launch_option_value, validate_task_instruction,
-    validate_window_name,
+    TaskInstructionError, is_valid_token, validate_display_label, validate_launch_option_value,
+    validate_task_instruction, validate_window_name,
 };
 
 /// Maximum number of tasks a single plan may declare.
@@ -55,7 +55,7 @@ pub struct TaskSpec {
 /// A plan as submitted for validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanSpec {
-    /// Display title, validated against [`validate_window_name`].
+    /// Display title, validated against [`validate_display_label`].
     pub title: String,
     /// Tasks in registration order.
     pub tasks: Vec<TaskSpec>,
@@ -201,7 +201,8 @@ pub enum PlanError {
         /// The plan's actual task count.
         actual: usize,
     },
-    /// A plan or task title failed [`validate_window_name`].
+    /// A plan title failed [`validate_display_label`] or a task title failed
+    /// [`validate_window_name`].
     #[error("title is invalid")]
     InvalidTitle,
     /// A `task_id` failed [`is_valid_token`].
@@ -455,7 +456,7 @@ pub fn validate_plan(
             actual: spec.tasks.len(),
         });
     }
-    if validate_window_name(&spec.title).is_err() {
+    if validate_display_label(&spec.title).is_err() {
         errors.push(PlanError::InvalidTitle);
     }
 

@@ -83,12 +83,12 @@ use yagura_protocol::{
     InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
     McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry, McpRegistrationRow,
     McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
-    McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, Palette,
-    PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState,
-    PointerButton, PointerInput, PointerKind, ProfileCommandDetail, ProfileDetailEntry,
-    ProfileGuidance, ProfileInfo, ProfileUnavailableKind, ReceivedReport, ReportOutcome,
-    ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry, RoomRef,
-    TaskAssignment, TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState,
+    McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken,
+    Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec,
+    PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCommandDetail,
+    ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, ReceivedReport,
+    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
+    RoomRef, TaskAssignment, TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState,
     WheelInput, WindowInfo, WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
@@ -241,6 +241,7 @@ wire_sample!(enum DeliveryStream => Stdout);
 wire_sample!(enum ProfileUnavailableKind => NotFound);
 wire_sample!(enum NamedKey => ArrowUp);
 wire_sample!(enum PointerKind => Down);
+wire_sample!(enum OnNameTaken => Number);
 wire_sample!(enum PointerButton => Left);
 wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
@@ -571,6 +572,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             name,
             vendor,
             detection,
+            on_name_taken,
         }),
         wire_sample!(ClientMessage::ListWindows),
         wire_sample!(ClientMessage::GetWindowStatus { window_id }),
@@ -601,6 +603,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             name,
             model,
             effort,
+            on_name_taken,
         }),
         wire_sample!(ClientMessage::Identify { window_id, token }),
         wire_sample!(ClientMessage::RegisterApprover),
@@ -716,6 +719,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::WindowOpened {
             window_id,
             detection_warning,
+            name,
         }),
         wire_sample!(DaemonMessage::WindowList { windows }),
         wire_sample!(DaemonMessage::WindowStatus {
@@ -764,6 +768,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             window_id,
             opened,
             delivery,
+            name,
         }),
         wire_sample!(DaemonMessage::ChatPosted {
             room_id,
@@ -807,6 +812,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             plan_id,
             task_id,
             window_id,
+            name,
             assignment,
         }),
         wire_sample!(DaemonMessage::PlanChanged { plan_id }),

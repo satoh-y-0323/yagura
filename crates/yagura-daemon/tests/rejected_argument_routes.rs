@@ -129,6 +129,7 @@ async fn open_window_with_a_nonexistent_caller_cwd_names_cwd_on_the_wire() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -165,6 +166,7 @@ async fn open_window_from_profile_with_a_nonexistent_caller_cwd_names_cwd_on_the
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -205,6 +207,7 @@ async fn open_window_from_profile_with_a_declared_cwd_omits_the_argument_key() {
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -237,6 +240,7 @@ async fn open_window_with_an_empty_command_omits_the_argument_key_on_the_wire() 
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -263,6 +267,7 @@ async fn open_window_with_an_invalid_vendor_omits_the_argument_key_on_the_wire()
             name: None,
             vendor: Some("bad\u{0}vendor".to_string()),
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -289,6 +294,7 @@ async fn open_window_with_an_invalid_detection_name_omits_the_argument_key_on_th
             name: None,
             vendor: None,
             detection: Some("../escape".to_string()),
+            on_name_taken: Default::default(),
         },
     )
     .await;

@@ -24,6 +24,7 @@ async fn rejected_argument_wire_identifies_caller_cwd_when_missing() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -57,6 +58,7 @@ async fn rejected_argument_wire_identifies_caller_cwd_when_not_directory() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -84,6 +86,7 @@ async fn rejected_argument_wire_omits_cwd_for_empty_command() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 
@@ -117,6 +120,7 @@ async fn rejected_argument_wire_includes_path_in_reason() {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await;
 

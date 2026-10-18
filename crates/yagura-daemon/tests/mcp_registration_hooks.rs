@@ -948,6 +948,7 @@ async fn open_window(client: &mut Connection) -> String {
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

@@ -143,6 +143,7 @@ fn echo_request(detection: &str) -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: Some(detection.to_string()),
+        on_name_taken: Default::default(),
     }
 }
 

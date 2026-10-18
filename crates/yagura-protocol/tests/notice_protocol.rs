@@ -29,6 +29,7 @@ fn sample_task_window_opened() -> DaemonMessage {
             source: AssignmentSource::Unassigned,
             assignment: None,
         },
+        name: None,
     }
 }
 

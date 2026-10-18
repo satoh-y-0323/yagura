@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use thiserror::Error;
-use yagura_protocol::{ModelChoice, validate_launch_option_value, validate_window_name};
+use yagura_protocol::{ModelChoice, validate_display_label, validate_launch_option_value};
 
 use crate::profile::{JsonFilter, OutputFormat};
 
@@ -87,7 +87,7 @@ pub(crate) fn parse_json_document(text: &str) -> Option<Value> {
 ///
 /// An identifier must satisfy [`validate_launch_option_value`]; a line or
 /// element whose identifier does not is dropped. A display name must
-/// satisfy [`validate_window_name`]; one that does not is dropped and the
+/// satisfy [`validate_display_label`]; one that does not is dropped and the
 /// identifier kept alone. A repeated identifier keeps its first occurrence.
 ///
 /// # Errors
@@ -207,7 +207,7 @@ impl Collector {
         self.choices.push(ModelChoice {
             id: id.to_string(),
             label: label
-                .filter(|label| validate_window_name(label).is_ok())
+                .filter(|label| validate_display_label(label).is_ok())
                 .map(str::to_string),
         });
         Ok(())

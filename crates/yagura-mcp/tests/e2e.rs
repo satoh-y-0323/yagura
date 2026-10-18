@@ -268,6 +268,7 @@ impl DaemonHarness {
                 name: Some("initial".to_string()),
                 vendor: None,
                 detection: None,
+                on_name_taken: Default::default(),
             })
             .await
             .expect("the initial window must open")
@@ -431,8 +432,19 @@ impl DaemonHarness {
     /// `idle` with the marker and *observes* the transition before returning:
     /// no assertion may run against an unobserved transition.
     async fn open_idle_window<T: DaemonTransport>(&self, transport: &T) -> String {
+        self.open_idle_window_named(transport, "idle-window").await
+    }
+
+    /// [`DaemonHarness::open_idle_window`] under a name of the caller's choice,
+    /// for a test that holds two idle windows at once: running windows cannot
+    /// share a name.
+    async fn open_idle_window_named<T: DaemonTransport>(
+        &self,
+        transport: &T,
+        name: &str,
+    ) -> String {
         let window_id = self
-            .open_via_tool(transport, echo_child_command(), "idle-window", None)
+            .open_via_tool(transport, echo_child_command(), name, None)
             .await;
         self.write_window_input(&window_id, CONTROL_READY_LINE.as_bytes())
             .await;
@@ -456,6 +468,7 @@ impl DaemonHarness {
                     name: Some("idle-delivering-window".to_string()),
                     vendor: None,
                     detection: None,
+                    on_name_taken: Default::default(),
                 },
                 Vec::new(),
                 Vec::new(),
@@ -1608,7 +1621,9 @@ async fn a_denied_close_reaches_the_approver_named_as_the_requesting_window_and_
     // Two windows: the one the transport claims, and the one it acts on. A
     // claim only lifts the gate for the caller's *own* window.
     let caller_window = harness.open_idle_window(&opener).await;
-    let target_window = harness.open_idle_window(&opener).await;
+    let target_window = harness
+        .open_idle_window_named(&opener, "idle-target-window")
+        .await;
 
     let caller = harness.transport_as(&caller_window, VALID_TOKEN);
     let mut approver = connect_with_retry(&harness.endpoint, Duration::from_secs(5)).await;

@@ -702,7 +702,6 @@ async fn resolve_parent_mention(
     roster: &[room::RosterEntry],
     mentions: &mut room::Mentions,
 ) {
-    const PARENT_MENTION: &str = "parent";
     if !mentions.parent {
         return;
     }
@@ -723,8 +722,12 @@ async fn resolve_parent_mention(
             }
         }
         None => {
-            if !mentions.unresolved.iter().any(|raw| raw == PARENT_MENTION) {
-                mentions.unresolved.push(PARENT_MENTION.to_string());
+            if !mentions
+                .unresolved
+                .iter()
+                .any(|raw| raw == room::PARENT_MENTION)
+            {
+                mentions.unresolved.push(room::PARENT_MENTION.to_string());
             }
         }
     }

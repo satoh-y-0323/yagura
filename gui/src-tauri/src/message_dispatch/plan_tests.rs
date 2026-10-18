@@ -177,6 +177,7 @@ fn reply_for_classifies_task_window_opened_as_a_task_window_opened_reply() {
         plan_id: "p-abc123".to_owned(),
         task_id: "investigate".to_owned(),
         window_id: "window-b".to_owned(),
+        name: None,
         assignment: assignment.clone(),
     });
     match result {

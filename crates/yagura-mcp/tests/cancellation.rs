@@ -194,6 +194,7 @@ impl Daemon {
                 name: Some(name.to_string()),
                 vendor: None,
                 detection: Some(DEFINITION.to_string()),
+                on_name_taken: Default::default(),
             })
             .await
             .expect("the window must open")

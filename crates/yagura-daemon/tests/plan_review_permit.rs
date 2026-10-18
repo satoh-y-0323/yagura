@@ -42,6 +42,7 @@ fn echo_request() -> OpenWindowRequest {
         name: None,
         vendor: None,
         detection: None,
+        on_name_taken: Default::default(),
     }
 }
 
@@ -61,6 +62,7 @@ async fn open_short_lived_window(registry: &WindowRegistry) -> String {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         })
         .await
         .expect("open should succeed")

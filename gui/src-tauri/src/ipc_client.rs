@@ -22,7 +22,7 @@ use tokio::io::WriteHalf;
 use tokio::sync::{Mutex, oneshot};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
-    ApprovalRequest, ClientMessage, LaunchOptionAlias, McpRegistrationAction,
+    ApprovalRequest, ClientMessage, LaunchOptionAlias, McpRegistrationAction, OnNameTaken,
     PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize,
     WindowInfo,
 };
@@ -467,6 +467,7 @@ impl IpcClient {
         command: Vec<String>,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         detection: Option<String>,
         vendor: Option<String>,
     ) -> Result<OpenWindowReply, IpcError> {
@@ -476,6 +477,7 @@ impl IpcClient {
             name,
             vendor,
             detection,
+            on_name_taken,
         };
         match self.request(&message, PendingKind::OpenWindow).await? {
             Reply::WindowOpened(reply) => Ok(reply),
@@ -513,6 +515,7 @@ impl IpcClient {
         profile: String,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         model: Option<String>,
         effort: Option<String>,
     ) -> Result<OpenWindowReply, IpcError> {
@@ -522,6 +525,7 @@ impl IpcClient {
             name,
             model,
             effort,
+            on_name_taken,
         };
         // The daemon answers both open paths with `window_opened`, so this
         // waits on the same pending kind as `open_window`.
@@ -2326,6 +2330,7 @@ mod tests {
                 vec!["sh".to_owned()],
                 Some("/work".to_owned()),
                 Some("build".to_owned()),
+                Default::default(),
                 None,
                 Some("vendor-a".to_owned()),
             ),
@@ -2335,6 +2340,7 @@ mod tests {
                 PendingKind::OpenWindow,
                 Ok(Reply::WindowOpened(OpenWindowReply {
                     window_id: "w2".to_owned(),
+                    name: None,
                     detection_warning: None,
                 }))
             )
@@ -2347,6 +2353,7 @@ mod tests {
                 name: Some("build".to_owned()),
                 vendor: Some("vendor-a".to_owned()),
                 detection: None,
+                on_name_taken: Default::default(),
             }
         );
         assert_eq!(opened.expect("open_window").window_id, "w2");
@@ -2356,6 +2363,7 @@ mod tests {
                 "shell".to_owned(),
                 None,
                 None,
+                Default::default(),
                 Some("fast".to_owned()),
                 None,
             ),
@@ -2365,6 +2373,7 @@ mod tests {
                 PendingKind::OpenWindow,
                 Ok(Reply::WindowOpened(OpenWindowReply {
                     window_id: "w3".to_owned(),
+                    name: None,
                     detection_warning: None,
                 }))
             )
@@ -2377,6 +2386,7 @@ mod tests {
                 name: None,
                 model: Some("fast".to_owned()),
                 effort: None,
+                on_name_taken: Default::default(),
             }
         );
         assert_eq!(opened.expect("open_window_from_profile").window_id, "w3");

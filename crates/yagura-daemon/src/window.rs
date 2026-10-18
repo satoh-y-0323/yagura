@@ -22,9 +22,9 @@ use tokio::sync::{
 };
 use yagura_os::program;
 use yagura_protocol::{
-    DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, RoomRef, STATUS_TOKEN_ENV, UnknownReason,
-    WINDOW_ID_ENV, WindowInfo, WindowNameError, WindowStatus, validate_window_name,
-    validate_window_vendor,
+    DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, RoomRef, STATUS_TOKEN_ENV,
+    UnknownReason, WINDOW_ID_ENV, WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus,
+    validate_window_name, validate_window_vendor,
 };
 
 use crate::config::DaemonConfig;
@@ -48,6 +48,7 @@ use crate::pty::{
     GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix, TakeBackRegistration,
     lock_recover,
 };
+use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
@@ -192,7 +193,7 @@ impl RequestedCwd {
 /// `cwd` defaults to [`DaemonConfig::default_window_cwd`] when set and to the
 /// daemon's own resolved current directory otherwise, and
 /// `detection` defaults to [`DaemonConfig::detection_name`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OpenWindowRequest {
     /// Argument vector to spawn (`command[0]` is the executable). Must be
     /// non-empty.
@@ -201,8 +202,12 @@ pub struct OpenWindowRequest {
     /// directory if provided; otherwise defaults to the daemon's current
     /// directory.
     pub cwd: Option<RequestedCwd>,
-    /// Display name. Defaults to `command[0]`'s file stem.
+    /// Display name. Defaults to `command[0]`'s file stem, numbered when
+    /// taken.
     pub name: Option<String>,
+    /// What to do when a supplied `name` is taken. Unused without a `name`:
+    /// a default name is always numbered.
+    pub on_name_taken: OnNameTaken,
     /// Vendor identifier: a data value, never a type variant. Free-form
     /// except that it is displayed, so it must satisfy
     /// [`validate_window_vendor`].
@@ -356,6 +361,9 @@ impl InjectedConfigFile {
 pub struct OpenedWindow {
     /// The assigned window id.
     pub window_id: String,
+    /// The name the window was given, which differs from the requested one
+    /// when it was numbered.
+    pub name: String,
     /// English reason text when this window has no detection definition to
     /// run: one failed to load, or no definition layer is configured at all.
     /// Either way the window is open and stays `Unknown`. See
@@ -420,6 +428,8 @@ struct DetectionSetup {
 pub enum RejectedArgument {
     /// The request's working directory.
     Cwd,
+    /// The request's display name.
+    Name,
 }
 
 impl RejectedArgument {
@@ -427,12 +437,37 @@ impl RejectedArgument {
     pub fn wire_name(self) -> &'static str {
         match self {
             Self::Cwd => "cwd",
+            Self::Name => "name",
         }
     }
 }
 
+/// Why a window name cannot be used: the chat mention rule would not tell the
+/// window apart from another, or would not reach it at all.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NameRefusal {
+    /// A running window already carries a name the mention rule treats as
+    /// the same.
+    #[error("a window named “{0}” is already open")]
+    InUse(String),
+    /// The name is one of the reserved mentions.
+    #[error("“{0}” is reserved for chat mentions")]
+    Reserved(String),
+}
+
+/// Why [`WindowRegistry::rename_window`] changed nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WindowRenameError {
+    /// The name fails [`validate_window_name`].
+    #[error(transparent)]
+    Invalid(#[from] WindowNameError),
+    /// The name is taken or reserved.
+    #[error(transparent)]
+    NameTaken(#[from] NameRefusal),
+}
+
 /// Errors returned by [`WindowRegistry::open`], 1:1 with the IPC error codes
-/// `invalid_argument` / `spawn_failed` / `resource_exhausted`. The mapping
+/// `invalid_argument` / `name_taken` / `spawn_failed` / `resource_exhausted`. The mapping
 /// stays 1:1; which argument was refused rides along on
 /// [`WindowOpenError::InvalidArgument`] instead of splitting the code.
 #[derive(Debug, Clone, Error)]
@@ -447,6 +482,9 @@ pub enum WindowOpenError {
         /// at fault: `None` also covers a value that came from elsewhere.
         argument: Option<RejectedArgument>,
     },
+    /// The requested name is taken by a running window or reserved.
+    #[error(transparent)]
+    NameTaken(#[from] NameRefusal),
     /// Validation passed but the process could not be spawned.
     #[error("failed to spawn the window: {0}")]
     SpawnFailed(String),
@@ -3669,28 +3707,21 @@ impl WindowEntry {
         lock_recover(&self.current_attach).is_some()
     }
 
-    /// Changes this window's display name and returns the value as stored,
-    /// re-read under the same guard rather than echoed back from the request,
-    /// so that concurrent renames converge on one last-writer-wins value.
-    ///
-    /// A label change never touches the child process, so this succeeds on an
-    /// exited window too.
-    ///
-    /// # Errors
-    ///
-    /// [`WindowNameError`] if `name` fails [`validate_window_name`]; the
-    /// stored name is left untouched. The check lives here, not in the
-    /// caller, so that this and [`WindowRegistry::open`] -- the only two ways
-    /// a name reaches storage -- cannot drift apart.
-    pub fn rename(&self, name: &str) -> Result<String, WindowNameError> {
-        validate_window_name(name)?;
+    /// This window's current display name.
+    pub fn name(&self) -> String {
+        lock_recover(&self.name).clone()
+    }
+
+    /// Stores `name` and returns the value as stored. Reached only through
+    /// [`WindowRegistry::rename_window`], which has already judged the name.
+    fn store_name(&self, name: &str) -> String {
         let stored = {
             let mut stored = lock_recover(&self.name);
             name.clone_into(&mut stored);
             stored.clone()
         };
         self.participation.raise();
-        Ok(stored)
+        stored
     }
 
     /// Replaces the presentation layout this window carries. The value is
@@ -4010,9 +4041,11 @@ impl WindowRegistry {
             command,
             cwd,
             name,
+            on_name_taken,
             vendor,
             detection,
         } = req;
+        let name_supplied = name.is_some();
 
         // Validate and normalize all input before entering the critical section.
         // `vendor` comes back out of the validator, so the stored value cannot
@@ -4030,6 +4063,11 @@ impl WindowRegistry {
             vendor,
             detection.clone(),
         )?;
+        let on_name_taken = if name_supplied {
+            on_name_taken
+        } else {
+            OnNameTaken::Number
+        };
 
         // Early rejection, so a request that is over the limit does not pay
         // for the filesystem walk below. The guard is dropped here: the walk
@@ -4065,6 +4103,10 @@ impl WindowRegistry {
         // that is held through registration can count what is really there.
         let _open_guard = self.open_lock.lock().await;
         self.enforce_limits_before_open()?;
+
+        // Decided under the lock every open and rename takes, so two windows
+        // cannot be given one name.
+        let name = claim_name(&lock_recover(&self.entries), &name, on_name_taken)?;
 
         // Generate window ID and status token early so they can be injected
         // into the child environment before spawn.
@@ -4135,6 +4177,7 @@ impl WindowRegistry {
 
         Ok(OpenedWindow {
             window_id,
+            name: entry.name(),
             detection_warning,
             entry,
         })
@@ -4199,9 +4242,11 @@ impl WindowRegistry {
             command,
             cwd,
             name,
+            on_name_taken,
             vendor,
             detection,
         } = req.clone();
+        let name_supplied = name.is_some();
         let validated = validate_open_request(
             command,
             cwd,
@@ -4210,8 +4255,44 @@ impl WindowRegistry {
             vendor,
             detection,
         )?;
-        self.slot_for_new_entry(&lock_recover(&self.entries))?;
+        let entries = lock_recover(&self.entries);
+        self.slot_for_new_entry(&entries)?;
+        // Only an early refusal, so an approver is not asked about a name
+        // that would be refused anyway; the open decides under its lock.
+        if name_supplied
+            && on_name_taken == OnNameTaken::Refuse
+            && let Some(refusal) = name_refusal(&entries, &validated.name, None)
+        {
+            return Err(refusal.into());
+        }
         Ok(validated.cwd_string)
+    }
+
+    /// Renames `entry` to `name` and returns the name as stored, re-read
+    /// under the same guard so that concurrent renames converge on one
+    /// last-writer-wins value.
+    ///
+    /// A label change never touches the child process, so this succeeds on an
+    /// exited window too. It takes the lock every open takes, so a name
+    /// cannot be given to a window that is being opened.
+    ///
+    /// # Errors
+    ///
+    /// [`WindowRenameError::Invalid`] if `name` fails
+    /// [`validate_window_name`], [`WindowRenameError::NameTaken`] if a
+    /// running window other than `entry` carries it or it is a reserved
+    /// mention. The stored name is left untouched.
+    pub async fn rename_window(
+        &self,
+        entry: &WindowEntry,
+        name: &str,
+    ) -> Result<String, WindowRenameError> {
+        validate_window_name(name)?;
+        let _open_guard = self.open_lock.lock().await;
+        if let Some(refusal) = name_refusal(&lock_recover(&self.entries), name, Some(entry)) {
+            return Err(refusal.into());
+        }
+        Ok(entry.store_name(name))
     }
 
     /// Makes a [`CliInjection`] ready to spawn with: writes its settings
@@ -4984,6 +5065,59 @@ fn write_injected_config_file(file: &InjectedConfigFile) -> std::io::Result<()> 
     }
     let base = file.dir.parent().unwrap_or(&file.dir);
     yagura_os::replace_config_file(base, &file.dir, &file.file_name, &file.content)
+}
+
+/// Why `name` cannot go to a window other than `except`, if it cannot: it is
+/// a reserved mention, or a running window (any state but `Exited`) already
+/// carries a name the mention rule treats as the same.
+fn name_refusal(
+    entries: &[Arc<WindowEntry>],
+    name: &str,
+    except: Option<&WindowEntry>,
+) -> Option<NameRefusal> {
+    if reserved_mention(name).is_some() {
+        return Some(NameRefusal::Reserved(name.to_string()));
+    }
+    let key = mention_key(name);
+    entries
+        .iter()
+        .filter(|entry| except.is_none_or(|except| entry.window_id() != except.window_id()))
+        .filter(|entry| entry.current_status() != WindowStatus::Exited)
+        .any(|entry| mention_key(&lock_recover(&entry.name)) == key)
+        .then(|| NameRefusal::InUse(name.to_string()))
+}
+
+/// The name a new window takes: `requested` itself when free, otherwise a
+/// refusal or, when asked to number, `<requested> <n>` with the smallest
+/// free `n` from 2.
+fn claim_name(
+    entries: &[Arc<WindowEntry>],
+    requested: &str,
+    on_name_taken: OnNameTaken,
+) -> Result<String, NameRefusal> {
+    let Some(refusal) = name_refusal(entries, requested, None) else {
+        return Ok(requested.to_string());
+    };
+    if on_name_taken == OnNameTaken::Refuse {
+        return Err(refusal);
+    }
+    (2u64..)
+        .map(|n| numbered_name(requested, n))
+        .find(|candidate| name_refusal(entries, candidate, None).is_none())
+        .ok_or(refusal)
+}
+
+/// `<base> <n>`, with `base` cut at a character boundary so the whole name
+/// stays within [`WINDOW_NAME_MAX_BYTES`].
+fn numbered_name(base: &str, n: u64) -> String {
+    let suffix = format!(" {n}");
+    let mut end = base
+        .len()
+        .min(WINDOW_NAME_MAX_BYTES.saturating_sub(suffix.len()));
+    while !base.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &base[..end])
 }
 
 /// Validates the entire open request: command, display name, vendor label,
@@ -5804,6 +5938,7 @@ mod tests {
                 name: None,
                 vendor: None,
                 detection: None,
+                on_name_taken: Default::default(),
             })
             .await
             .expect("an echo_child window must open");

@@ -58,6 +58,7 @@ async fn open_window_via_ipc(client: &mut Connection) -> String {
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -316,6 +317,7 @@ async fn open_window_rejects_forbidden_char_name_as_invalid_argument() {
             name: Some("bad\nname".to_string()),
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -364,6 +366,7 @@ async fn open_window_without_name_rejects_forbidden_char_in_command_file_stem() 
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

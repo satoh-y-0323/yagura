@@ -103,6 +103,7 @@ async fn send_open_command(client: &mut Connection, command: Vec<String>, cwd: O
             name: None,
             vendor: None,
             detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
@@ -117,6 +118,7 @@ async fn send_open_profile(client: &mut Connection) {
             name: None,
             model: None,
             effort: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;

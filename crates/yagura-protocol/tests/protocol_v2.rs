@@ -901,6 +901,7 @@ fn daemon_message_window_opened_round_trips_without_detection_warning() {
         DaemonMessage::WindowOpened {
             window_id: "w5".to_string(),
             detection_warning: None,
+            name: None,
         }
     );
     let encoded = encode_daemon_message(&decoded);
@@ -924,6 +925,7 @@ fn daemon_message_window_opened_round_trips_with_detection_warning() {
             detection_warning: Some(
                 "failed to load the detection definition (os error)".to_string()
             ),
+            name: None,
         }
     );
     let encoded = encode_daemon_message(&decoded);
@@ -942,6 +944,7 @@ fn daemon_message_window_opened_decodes_the_old_form_missing_the_detection_warni
         DaemonMessage::WindowOpened {
             window_id: "w7".to_string(),
             detection_warning: None,
+            name: None,
         }
     );
 }

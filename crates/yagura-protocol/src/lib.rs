@@ -132,6 +132,13 @@
 //! Revision 24 adds the [`DaemonMessage::ChatParticipantsChanged`] push, sent
 //! to every approver when a chat room appears or who takes part in one
 //! changes.
+//!
+//! Revision 25 makes a window's name unique among the windows that are
+//! running. An open request says what to do when its name is taken
+//! (`on_name_taken`: `refuse`, the default, or `number`), a refusal is the
+//! `name_taken` error, and `window_opened`, `task_window_opened` and
+//! `handoff_sent` carry the `name` the window was given. A `"` is no longer
+//! accepted in a window name.
 
 use std::collections::BTreeSet;
 
@@ -143,7 +150,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 24;
+pub const PROTOCOL_REVISION: u32 = 25;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -576,7 +583,8 @@ fn is_forbidden_label_char(ch: char) -> bool {
 
 /// Validates a window display name: non-empty, at most
 /// [`WINDOW_NAME_MAX_BYTES`] UTF-8 bytes, and free of the characters listed
-/// in [`WindowNameError::ForbiddenChar`]'s documentation.
+/// in [`WindowNameError::ForbiddenChar`]'s documentation and of `"`, which
+/// would end a quoted `@"..."` mention early.
 ///
 /// This is the single source of truth for the rule, shared by the daemon
 /// (which enforces it at every entry point that stores a name) and by
@@ -587,7 +595,18 @@ fn is_forbidden_label_char(ch: char) -> bool {
 /// Returns the first violation found, checked in the order empty ->
 /// too long -> forbidden character.
 pub fn validate_window_name(name: &str) -> Result<(), WindowNameError> {
-    validate_label(name)
+    validate_label(name, |ch| is_forbidden_label_char(ch) || ch == '"')
+}
+
+/// Validates a label that is displayed but never written as a window name:
+/// the same rule as [`validate_window_name`] except that `"` is allowed,
+/// because only a name has to fit inside a quoted `@"..."` mention.
+///
+/// # Errors
+///
+/// Same as [`validate_window_name`].
+pub fn validate_display_label(label: &str) -> Result<(), WindowNameError> {
+    validate_label(label, is_forbidden_label_char)
 }
 
 /// Validates a vendor identifier under the very same rule as
@@ -603,7 +622,7 @@ pub fn validate_window_name(name: &str) -> Result<(), WindowNameError> {
 ///
 /// Same as [`validate_window_name`].
 pub fn validate_window_vendor(vendor: &str) -> Result<(), WindowNameError> {
-    validate_label(vendor)
+    validate_label(vendor, is_forbidden_label_char)
 }
 
 /// Bytes a launch option value may hold; the same bound as a window name.
@@ -704,7 +723,7 @@ pub fn validate_launch_option_value(value: &str) -> Result<(), LaunchOptionValue
     }
 }
 
-fn validate_label(label: &str) -> Result<(), WindowNameError> {
+fn validate_label(label: &str, is_forbidden: fn(char) -> bool) -> Result<(), WindowNameError> {
     if label.is_empty() {
         return Err(WindowNameError::Empty);
     }
@@ -714,10 +733,7 @@ fn validate_label(label: &str) -> Result<(), WindowNameError> {
             actual: label.len(),
         });
     }
-    match label
-        .char_indices()
-        .find(|&(_, ch)| is_forbidden_label_char(ch))
-    {
+    match label.char_indices().find(|&(_, ch)| is_forbidden(ch)) {
         Some((at, ch)) => Err(WindowNameError::ForbiddenChar { at, ch }),
         None => Ok(()),
     }
@@ -2203,6 +2219,28 @@ pub struct TerminalSize {
     pub rows: u16,
 }
 
+/// What the daemon does with an open request whose name a running window
+/// already carries (compared by the chat mention rule) or that is reserved
+/// for chat mentions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnNameTaken {
+    /// Refuse the open with the `name_taken` error. The default, so a name a
+    /// caller chose is never silently changed.
+    #[default]
+    Refuse,
+    /// Open the window under `<name> <n>`, the smallest free `n` from 2.
+    Number,
+}
+
+impl OnNameTaken {
+    /// Whether this is the default, which is left off the wire.
+    #[must_use]
+    pub fn is_refuse(&self) -> bool {
+        matches!(self, Self::Refuse)
+    }
+}
+
 /// A message sent from the client (GUI) to the daemon.
 ///
 /// Serialized with an internal tag (`"type"`, `snake_case`).
@@ -2326,6 +2364,11 @@ pub enum ClientMessage {
         vendor: Option<String>,
         /// Optional detection definition name (defaults to daemon's configured default).
         detection: Option<String>,
+        /// What to do when `name` is taken. Omitted means
+        /// [`OnNameTaken::Refuse`]. A request without `name` always gets a
+        /// numbered default name.
+        #[serde(default, skip_serializing_if = "OnNameTaken::is_refuse")]
+        on_name_taken: OnNameTaken,
     },
     /// List all windows currently managed by the daemon.
     ListWindows,
@@ -2445,6 +2488,11 @@ pub enum ClientMessage {
         /// Optional `effort` launch option, mapped through the profile.
         #[serde(default)]
         effort: Option<String>,
+        /// What to do when `name` is taken. Omitted means
+        /// [`OnNameTaken::Refuse`]. A request without `name` always gets a
+        /// numbered default name.
+        #[serde(default, skip_serializing_if = "OnNameTaken::is_refuse")]
+        on_name_taken: OnNameTaken,
     },
     /// Claims this connection's origin as a specific window, proven by that
     /// window's per-boot status token. Distinct connections identify
@@ -2804,6 +2852,7 @@ pub enum ClientMessage {
 ///     name: None,
 ///     model: None,
 ///     effort: None,
+///     on_name_taken: Default::default(),
 /// };
 /// assert_eq!(required_protocol_revision(&plain), PROTOCOL_REVISION_BASELINE);
 ///
@@ -2813,6 +2862,7 @@ pub enum ClientMessage {
 ///     name: None,
 ///     model: Some("opus".to_string()),
 ///     effort: None,
+///     on_name_taken: Default::default(),
 /// };
 /// assert_eq!(required_protocol_revision(&with_model), LAUNCH_OPTIONS_MIN_REVISION);
 /// ```
@@ -2906,7 +2956,8 @@ pub enum DaemonMessage {
         /// Machine-readable error code (e.g. `"frame_too_large"`,
         /// `"invalid_json"`, `"unknown_type"`, `"invalid_argument"`,
         /// `"child_exited"`, `"superseded"`, `"internal"`, `"window_not_found"`,
-        /// `"spawn_failed"`, `"resource_exhausted"`, `"unsupported"`).
+        /// `"spawn_failed"`, `"resource_exhausted"`, `"unsupported"`,
+        /// `"name_taken"`).
         code: String,
         /// Human-readable, English message. Must never contain frame bodies
         /// or raw PTY data.
@@ -2952,6 +3003,11 @@ pub enum DaemonMessage {
         /// or the daemon predates this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detection_warning: Option<String>,
+        /// The name the window was given, which differs from the requested
+        /// one when it was numbered. `None` when the daemon predates this
+        /// field. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Response to [`ClientMessage::ListWindows`]: list of all managed windows.
     WindowList {
@@ -3142,6 +3198,10 @@ pub enum DaemonMessage {
         opened: bool,
         /// What became of the envelope.
         delivery: HandoffDelivery,
+        /// The name of the window that received the envelope. `None` when
+        /// the daemon predates this field. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Response to [`ClientMessage::SendChat`] / [`ClientMessage::BroadcastChat`]:
     /// the message was recorded (and, unless the room is halted, handed to a
@@ -3265,6 +3325,10 @@ pub enum DaemonMessage {
         task_id: String,
         /// The newly opened window.
         window_id: String,
+        /// The name the window was given. `None` when the daemon predates
+        /// this field. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         /// The assignment the window was launched with, and where it came
         /// from.
         assignment: ResolvedAssignment,

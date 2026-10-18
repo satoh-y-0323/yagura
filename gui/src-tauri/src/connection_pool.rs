@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use yagura_protocol::{
-    ClientMessage, LaunchOptionAlias, McpRegistrationAction, PlanInfo, PlanSummary, RoleEntry,
-    TaskAssignment, TerminalSize, WindowInfo, WindowStatus,
+    ClientMessage, LaunchOptionAlias, McpRegistrationAction, OnNameTaken, PlanInfo, PlanSummary,
+    RoleEntry, TaskAssignment, TerminalSize, WindowInfo, WindowStatus,
 };
 
 use crate::commands::{
@@ -645,18 +645,21 @@ impl ConnectionPool {
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached or refuses to
     /// open the window.
+    // One parameter per `open_window` wire argument, plus the host.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_window(
         &self,
         app: &impl GuiHost,
         command: Vec<String>,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         detection: Option<String>,
         vendor: Option<String>,
     ) -> Result<OpenWindowReply, IpcError> {
         self.control(app)
             .await?
-            .open_window(command, cwd, name, detection, vendor)
+            .open_window(command, cwd, name, on_name_taken, detection, vendor)
             .await
     }
 
@@ -666,18 +669,21 @@ impl ConnectionPool {
     /// # Errors
     /// Returns [`IpcError`] when the daemon cannot be reached, does not know
     /// the profile, or refuses to open the window.
+    // One parameter per `open_window` wire argument, plus the host.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_window_from_profile(
         &self,
         app: &impl GuiHost,
         profile: String,
         cwd: Option<String>,
         name: Option<String>,
+        on_name_taken: OnNameTaken,
         model: Option<String>,
         effort: Option<String>,
     ) -> Result<OpenWindowReply, IpcError> {
         self.control(app)
             .await?
-            .open_window_from_profile(profile, cwd, name, model, effort)
+            .open_window_from_profile(profile, cwd, name, on_name_taken, model, effort)
             .await
     }
 

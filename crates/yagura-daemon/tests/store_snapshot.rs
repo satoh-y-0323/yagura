@@ -122,6 +122,7 @@ async fn open_described_window(
             name: Some(name.to_string()),
             vendor: Some(vendor.to_string()),
             detection: Some("generic-shell".to_string()),
+            on_name_taken: Default::default(),
         })
         .await
         .expect("registry.open must spawn the child")
