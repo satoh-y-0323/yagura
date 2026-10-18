@@ -122,6 +122,16 @@ fn xdg_state_base_dir_from_prefers_primary_over_home() {
 }
 
 #[test]
+fn xdg_state_base_dir_from_ignores_a_relative_primary() {
+    let home = std::ffi::OsStr::new("/Users/example");
+    assert_eq!(
+        yagura_os::xdg_state_base_dir_from(Some(std::ffi::OsStr::new("state")), Some(home)),
+        Some(std::path::PathBuf::from("/Users/example/.local/state")),
+        "a relative XDG_STATE_HOME must fall back to the home, as the XDG spec has it"
+    );
+}
+
+#[test]
 fn xdg_state_base_dir_from_returns_none_when_both_are_absent() {
     assert_eq!(yagura_os::xdg_state_base_dir_from(None, None), None);
 }

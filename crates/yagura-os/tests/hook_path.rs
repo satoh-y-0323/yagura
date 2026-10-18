@@ -91,6 +91,22 @@ fn windows_names_a_spaced_file_by_its_short_name_or_refuses_it() {
 
 #[cfg(windows)]
 #[test]
+fn windows_shortens_only_the_folders_of_a_file_whose_own_name_has_no_space() {
+    let dir = spaced_file("long-file-name").with_file_name("");
+    let file = dir.join("yagura-daemon.exe");
+    std::fs::write(&file, b"the daemon's image").unwrap();
+    match spaceless_path(&file) {
+        Ok(short) => assert!(
+            short.ends_with(r"\yagura-daemon.exe"),
+            "a file replaced at each start must keep its own long name: {short:?}"
+        ),
+        // A volume with 8.3 names turned off.
+        Err(err) => assert_eq!(err, SpacelessPathError::NoShortName),
+    }
+}
+
+#[cfg(windows)]
+#[test]
 fn windows_refuses_a_spaced_path_that_does_not_exist() {
     let file = spaced_file("missing").with_file_name("not here.exe");
     assert_eq!(spaceless_path(&file), Err(SpacelessPathError::NoShortName));

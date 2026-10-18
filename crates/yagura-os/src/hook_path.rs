@@ -22,7 +22,7 @@ pub enum SpacelessPathError {
     /// The path holds whitespace, and it has no 8.3 short name free of it.
     #[error(
         "the daemon's path holds whitespace, which a CLI cannot run in a hook command, and it \
-         has no 8.3 short name without whitespace (short names may be turned off on its volume)"
+         has no 8.3 short name without whitespace (short names may be turned off on its volume, or          the path may not exist)"
     )]
     NoShortName,
 }
@@ -56,12 +56,31 @@ pub fn spaceless_path(path: &Path) -> Result<String, SpacelessPathError> {
     }
     #[cfg(windows)]
     {
-        spaceless_path_from(long, short_path_name(path).as_deref())
+        spaceless_path_from(long, short_form(path).as_deref())
             .ok_or(SpacelessPathError::NoShortName)
     }
     #[cfg(not(windows))]
     {
         Err(SpacelessPathError::Whitespace)
+    }
+}
+
+/// Only the folders are shortened: a file replaced at each start may be given
+/// a different short name each time, which would leave a registered hook stale.
+#[cfg(windows)]
+fn short_form(path: &Path) -> Option<String> {
+    match (
+        path.parent(),
+        path.file_name().and_then(|name| name.to_str()),
+    ) {
+        (Some(dir), Some(name)) if !name.contains(char::is_whitespace) => {
+            let dir = short_path_name(dir)?;
+            std::path::Path::new(&dir)
+                .join(name)
+                .to_str()
+                .map(str::to_string)
+        }
+        _ => short_path_name(path),
     }
 }
 

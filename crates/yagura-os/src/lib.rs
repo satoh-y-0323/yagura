@@ -514,8 +514,10 @@ fn unix_base_dir_from(
     home: Option<&OsStr>,
     home_suffix: &str,
 ) -> Option<PathBuf> {
-    if let Some(primary) = primary {
-        return Some(PathBuf::from(primary));
+    // The XDG spec has a relative value ignored, as it would make the base
+    // depend on the working directory.
+    if let Some(primary) = primary.map(PathBuf::from).filter(|path| path.has_root()) {
+        return Some(primary);
     }
     home.map(|home| PathBuf::from(home).join(home_suffix))
 }
