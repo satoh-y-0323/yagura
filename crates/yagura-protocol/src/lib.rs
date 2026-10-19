@@ -143,8 +143,8 @@
 //! Revision 26 lets an approver remove chat history. `clear_chat_room` empties
 //! a room's messages and deliveries (answered with `chat_room_cleared`) and
 //! `delete_chat_room` removes a workspace room that has no window left in it
-//! (answered with `chat_room_deleted`; `room_in_use` when a window is
-//! registered there). Either one is followed by a `chat_history_cleared` push
+//! (answered with `chat_room_deleted`; `room_in_use` while a window that has
+//! not exited belongs to it). Either one is followed by a `chat_history_cleared` push
 //! to every approver. [`ChatRoomInfo`] gains `has_open_windows`. A message's
 //! `seq` never goes back, so a reader's `after_seq` stays valid.
 

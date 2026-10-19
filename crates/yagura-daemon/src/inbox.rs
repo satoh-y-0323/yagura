@@ -305,6 +305,17 @@ struct State {
 }
 
 impl State {
+    /// Removes the waiting parcel named `key`; `false` when none waits.
+    fn remove_waiting(&mut self, key: &str) -> bool {
+        match self.parcels.iter().position(|held| held.parcel.key == key) {
+            Some(position) => {
+                self.parcels.remove(position);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// How many waiting parcels are not notices: the ones the capacity bounds.
     fn waiting_others(&self) -> usize {
         self.parcels
@@ -805,8 +816,7 @@ impl Inbox {
             }
         }
         let mut state = self.shared.lock();
-        if let Some(position) = state.parcels.iter().position(|held| held.parcel.key == key) {
-            state.parcels.remove(position);
+        if state.remove_waiting(key) {
             return Withdrawal::Removed;
         }
         match state
@@ -829,14 +839,7 @@ impl Inbox {
     /// everything else that push carries: unlike [`Self::withdraw`], this
     /// never marks a push withdrawn.
     pub fn withdraw_waiting(&self, key: &str) -> bool {
-        let mut state = self.shared.lock();
-        match state.parcels.iter().position(|held| held.parcel.key == key) {
-            Some(position) => {
-                state.parcels.remove(position);
-                true
-            }
-            None => false,
-        }
+        self.shared.lock().remove_waiting(key)
     }
 
     /// Replaces the text of the waiting parcel named `key`. `false` when no

@@ -1245,6 +1245,12 @@ async fn complete_post(
     }
 }
 
+/// The inbox key a chat post travels under: the delivery puts it in under
+/// this key, and a clear takes it back out by the same one.
+fn chat_parcel_key(room_id: &str, seq: i64) -> String {
+    format!("chat:{room_id}:{seq}")
+}
+
 /// Puts the post in `target_id`'s inbox and records how it left: taken by the
 /// window's CLI, or never delivered.
 #[allow(clippy::too_many_arguments)]
@@ -1273,7 +1279,7 @@ fn spawn_delivery_task(
             .await;
             return;
         };
-        let parcel = Parcel::new(format!("chat:{room_id}:{seq}"), envelope);
+        let parcel = Parcel::new(chat_parcel_key(&room_id, seq), envelope);
         let budget = chat.delivery_budget();
         let inbox = entry.inbox().clone();
         let room_for_store = room_id.clone();
@@ -1698,7 +1704,7 @@ async fn handle_room_removal(
                 if let Some(entry) = store_registry.get(&window_id) {
                     entry
                         .inbox()
-                        .withdraw_waiting(&format!("chat:{store_room}:{seq}"));
+                        .withdraw_waiting(&chat_parcel_key(&store_room, seq));
                 }
             }
             Ok(RemovalEnd::Done)
@@ -1827,7 +1833,7 @@ mod tests {
     }
 
     fn parcel_key(seq: i64) -> String {
-        format!("chat:{ROOM}:{seq}")
+        chat_parcel_key(ROOM, seq)
     }
 
     /// The history was cleared after the row was written but before the post

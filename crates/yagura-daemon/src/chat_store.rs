@@ -216,6 +216,16 @@ fn row_to_room_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
 /// handed out twice: clearing a room's history or deleting the room leaves
 /// the counter behind, and a reader holding an `after_seq` would otherwise
 /// skip the numbers that get reused.
+/// Lifts `room_id`'s halt and its `needs_user` flag.
+fn lift_halt_and_needs_user(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Result<(), StoreError> {
+    tx.execute_fixed(
+        "UPDATE chat_room SET halted_reason = NULL, halted_at_ms = NULL, needs_user = 0 \
+         WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    Ok(())
+}
+
 fn next_seq(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Result<i64, StoreError> {
     let highest: i64 = tx.query_row_fixed(
         "SELECT MAX(\
@@ -758,11 +768,7 @@ impl ChatStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let pending = remove_history(&tx, room_id)?;
-        tx.execute_fixed(
-            "UPDATE chat_room SET halted_reason = NULL, halted_at_ms = NULL, needs_user = 0 \
-             WHERE room_id = ?1",
-            params![room_id],
-        )?;
+        lift_halt_and_needs_user(&tx, room_id)?;
         tx.commit()?;
         Ok(pending)
     }
@@ -873,11 +879,7 @@ impl ChatStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_fixed(
-            "UPDATE chat_room SET halted_reason = NULL, halted_at_ms = NULL, needs_user = 0 \
-             WHERE room_id = ?1",
-            params![room_id],
-        )?;
+        lift_halt_and_needs_user(&tx, room_id)?;
         tx.commit()?;
         Ok(())
     }
