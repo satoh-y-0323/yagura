@@ -17,7 +17,7 @@ use common::store_fixtures::{capture_warn_events, count_warns};
 use rusqlite::OptionalExtension;
 use yagura_daemon::chat_store::{ChatStore, EnsureRoom, NewChatMessage};
 use yagura_daemon::room::{ChatDeliveryState, ChatLimits, DeliveryOutcome, HaltReason};
-use yagura_daemon::store;
+use yagura_daemon::store::{self, StoreError};
 use yagura_daemon::workspace::WorkspaceKind;
 use yagura_protocol::UnknownReason;
 
@@ -1685,4 +1685,338 @@ fn the_broadcast_flag_reads_back_as_it_was_posted() {
     };
     assert!(flag_of(broadcast.seq));
     assert!(!flag_of(addressed.seq));
+}
+
+// --- Clearing a room's history and deleting a room -------------------------------------
+
+const ALPHA_ROOM: &str = "r-alpha0000000001";
+
+fn open_with_alpha_room(tag: &str) -> (ChatStore, PathBuf) {
+    let path = db_path(tag);
+    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
+    chat.ensure_room(ALPHA_ROOM, WorkspaceKind::Git, "/repo/alpha", 1_000)
+        .expect("ensure_room must succeed");
+    (chat, path)
+}
+
+fn alpha_message(body: &str, at_ms: i64, mentions: &[&str]) -> NewChatMessage {
+    NewChatMessage {
+        room_id: ALPHA_ROOM.to_string(),
+        ..window_message_to("w-a", "Alpha", body, at_ms, mentions)
+    }
+}
+
+fn row_count(path: &Path, table: &'static str, room_id: &str) -> i64 {
+    let conn = open_ro(path);
+    let sql = match table {
+        "chat_message" => "SELECT COUNT(*) FROM chat_message WHERE room_id = ?1",
+        "chat_delivery" => "SELECT COUNT(*) FROM chat_delivery WHERE room_id = ?1",
+        "chat_room" => "SELECT COUNT(*) FROM chat_room WHERE room_id = ?1",
+        other => panic!("unexpected table {other}"),
+    };
+    conn.query_row(sql, rusqlite::params![room_id], |row| row.get(0))
+        .expect("the count must be readable")
+}
+
+#[test]
+fn a_post_after_clearing_the_history_gets_a_seq_past_every_cleared_one() {
+    let (mut chat, _path) = open_with_alpha_room("chat-clear-seq");
+    let limits = generous_limits();
+    for n in 0..3 {
+        chat.append_message(alpha_message("before", 2_000 + n, &[]), &limits)
+            .expect("append_message must succeed");
+    }
+
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+    let after = chat
+        .append_message(alpha_message("after", 3_000, &[]), &limits)
+        .expect("append_message must succeed");
+
+    assert_eq!(
+        after.seq, 4,
+        "a seq is never handed out twice, or a reader holding after_seq would skip the new post"
+    );
+    let read = chat
+        .read_after(ALPHA_ROOM, 3, 10)
+        .expect("read_after must succeed");
+    assert_eq!(read.messages.len(), 1);
+}
+
+#[test]
+fn a_room_deleted_and_made_again_continues_its_seq() {
+    let (mut chat, _path) = open_with_alpha_room("chat-delete-seq");
+    let limits = generous_limits();
+    for n in 0..2 {
+        chat.append_message(alpha_message("before", 2_000 + n, &[]), &limits)
+            .expect("append_message must succeed");
+    }
+
+    chat.delete_room(ALPHA_ROOM)
+        .expect("delete_room must succeed");
+    chat.ensure_room(ALPHA_ROOM, WorkspaceKind::Git, "/repo/alpha", 5_000)
+        .expect("ensure_room must succeed");
+    let after = chat
+        .append_message(alpha_message("after", 6_000, &[]), &limits)
+        .expect("append_message must succeed");
+
+    assert_eq!(after.seq, 3, "the numbering outlives the room");
+}
+
+#[test]
+fn the_seq_continues_past_history_that_eviction_already_dropped() {
+    // history_max evicts old rows; the counter must not fall back to the surviving maximum.
+    let (mut chat, _path) = open_with_alpha_room("chat-seq-after-eviction");
+    let limits = limits_with_history_max(1);
+    for n in 0..3 {
+        chat.append_message(alpha_message("m", 2_000 + n, &[]), &limits)
+            .expect("append_message must succeed");
+    }
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+
+    let next = chat
+        .append_message(alpha_message("next", 9_000, &[]), &limits)
+        .expect("append_message must succeed");
+
+    assert_eq!(next.seq, 4);
+}
+
+#[test]
+fn clearing_the_history_removes_messages_and_deliveries_but_keeps_the_room() {
+    let (mut chat, path) = open_with_alpha_room("chat-clear-removes");
+    let limits = generous_limits();
+    let other = chat
+        .append_message(window_message("w-a", "Alpha", "in main", 1_500), &limits)
+        .expect("append_message must succeed");
+    chat.append_message(alpha_message("hi", 2_000, &["w-b"]), &limits)
+        .expect("append_message must succeed");
+
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+
+    assert_eq!(row_count(&path, "chat_message", ALPHA_ROOM), 0);
+    assert_eq!(row_count(&path, "chat_delivery", ALPHA_ROOM), 0);
+    assert_eq!(
+        row_count(&path, "chat_room", ALPHA_ROOM),
+        1,
+        "clearing the history keeps the room itself"
+    );
+    assert_eq!(
+        chat.read_tail(ROOM_ID, 10)
+            .expect("read_tail must succeed")
+            .iter()
+            .map(|m| m.seq)
+            .collect::<Vec<_>>(),
+        vec![other.seq],
+        "another room's history is not touched"
+    );
+}
+
+#[test]
+fn clearing_the_history_lifts_the_halt_and_needs_user() {
+    let (mut chat, _path) = open_with_alpha_room("chat-clear-halt");
+    let limits = limits_with_monologue_max(2);
+    for n in 0..3 {
+        chat.append_message(alpha_message("again", 2_000 + n, &[]), &limits)
+            .expect("append_message must succeed");
+    }
+    chat.set_needs_user(ALPHA_ROOM, true)
+        .expect("set_needs_user must succeed");
+    let before = chat
+        .room_status(ALPHA_ROOM)
+        .expect("room_status must succeed");
+    assert!(
+        before.halted.is_some() && before.needs_user,
+        "the fixture must halt the room"
+    );
+
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+
+    let after = chat
+        .room_status(ALPHA_ROOM)
+        .expect("room_status must succeed");
+    assert_eq!(after.halted, None);
+    assert!(!after.needs_user);
+}
+
+#[test]
+fn clearing_the_history_returns_only_the_deliveries_still_pending() {
+    let (mut chat, _path) = open_with_alpha_room("chat-clear-pending");
+    let limits = generous_limits();
+    let first = chat
+        .append_message(alpha_message("one", 2_000, &["w-b", "w-c"]), &limits)
+        .expect("append_message must succeed");
+    let second = chat
+        .append_message(alpha_message("two", 3_000, &["w-b"]), &limits)
+        .expect("append_message must succeed");
+    chat.set_delivery(ALPHA_ROOM, first.seq, "w-c", DeliveryOutcome::Taken, 2_500)
+        .expect("set_delivery must succeed");
+
+    let mut pending = chat
+        .clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+    pending.sort();
+
+    assert_eq!(
+        pending,
+        vec![
+            (first.seq, "w-b".to_string()),
+            (second.seq, "w-b".to_string())
+        ],
+        "a delivery already settled has nothing left to pull back"
+    );
+}
+
+#[test]
+fn deleting_a_room_removes_everything_of_it_and_returns_its_pending_deliveries() {
+    let (mut chat, path) = open_with_alpha_room("chat-delete-removes");
+    let limits = generous_limits();
+    let posted = chat
+        .append_message(alpha_message("hi", 2_000, &["w-b"]), &limits)
+        .expect("append_message must succeed");
+
+    let pending = chat
+        .delete_room(ALPHA_ROOM)
+        .expect("delete_room must succeed");
+
+    assert_eq!(pending, vec![(posted.seq, "w-b".to_string())]);
+    assert_eq!(row_count(&path, "chat_message", ALPHA_ROOM), 0);
+    assert_eq!(row_count(&path, "chat_delivery", ALPHA_ROOM), 0);
+    assert_eq!(row_count(&path, "chat_room", ALPHA_ROOM), 0);
+    assert!(
+        chat.find_room(ALPHA_ROOM)
+            .expect("find_room must succeed")
+            .is_none()
+    );
+}
+
+#[test]
+fn deleting_the_main_room_is_refused_and_leaves_it_whole() {
+    let path = db_path("chat-delete-main");
+    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
+    chat.append_message(
+        window_message("w-a", "Alpha", "hi", 1_000),
+        &generous_limits(),
+    )
+    .expect("append_message must succeed");
+
+    let err = chat
+        .delete_room(ROOM_ID)
+        .expect_err("main must not be deletable");
+
+    assert!(matches!(err, StoreError::MainRoom), "got {err:?}");
+    assert_eq!(chat_message_seqs(&path), vec![1]);
+    assert_eq!(row_count(&path, "chat_room", ROOM_ID), 1);
+}
+
+#[test]
+fn clearing_or_deleting_a_room_that_does_not_exist_finds_nothing_to_remove() {
+    let path = db_path("chat-clear-unknown");
+    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
+
+    assert!(
+        chat.clear_history("r-nowhere000000001")
+            .expect("clear_history must succeed")
+            .is_empty()
+    );
+    assert!(
+        chat.delete_room("r-nowhere000000001")
+            .expect("delete_room must succeed")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_post_to_a_room_that_is_gone_is_refused_and_writes_nothing() {
+    let (mut chat, path) = open_with_alpha_room("chat-post-gone");
+    chat.delete_room(ALPHA_ROOM)
+        .expect("delete_room must succeed");
+
+    let err = chat
+        .append_message(alpha_message("late", 2_000, &["w-b"]), &generous_limits())
+        .expect_err("a post to a deleted room must be refused");
+
+    assert!(matches!(err, StoreError::RoomGone { .. }), "got {err:?}");
+    assert_eq!(row_count(&path, "chat_message", ALPHA_ROOM), 0);
+    assert_eq!(row_count(&path, "chat_delivery", ALPHA_ROOM), 0);
+}
+
+#[test]
+fn a_room_that_never_existed_refuses_a_post_too() {
+    let path = db_path("chat-post-never");
+    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
+
+    let err = chat
+        .append_message(
+            NewChatMessage {
+                room_id: "r-never0000000001".to_string(),
+                ..window_message("w-a", "Alpha", "hi", 1_000)
+            },
+            &generous_limits(),
+        )
+        .expect_err("a post to an unknown room must be refused");
+
+    assert!(matches!(err, StoreError::RoomGone { .. }), "got {err:?}");
+}
+
+#[test]
+fn set_delivery_on_a_cleared_message_writes_nothing_and_says_so() {
+    let (mut chat, path) = open_with_alpha_room("chat-set-delivery-cleared");
+    let posted = chat
+        .append_message(alpha_message("hi", 2_000, &["w-b"]), &generous_limits())
+        .expect("append_message must succeed");
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+
+    let wrote = chat
+        .set_delivery(ALPHA_ROOM, posted.seq, "w-b", DeliveryOutcome::Taken, 3_000)
+        .expect("set_delivery must succeed");
+
+    assert!(
+        !wrote,
+        "the message is gone, so there is nothing to record against"
+    );
+    assert_eq!(row_count(&path, "chat_delivery", ALPHA_ROOM), 0);
+}
+
+#[test]
+fn set_delivery_on_a_message_that_is_there_writes_and_says_so() {
+    let (mut chat, _path) = open_with_alpha_room("chat-set-delivery-present");
+    let posted = chat
+        .append_message(alpha_message("hi", 2_000, &["w-b"]), &generous_limits())
+        .expect("append_message must succeed");
+
+    let wrote = chat
+        .set_delivery(ALPHA_ROOM, posted.seq, "w-b", DeliveryOutcome::Taken, 3_000)
+        .expect("set_delivery must succeed");
+
+    assert!(wrote);
+    assert_eq!(
+        chat.deliveries_for_seq(ALPHA_ROOM, posted.seq)
+            .expect("deliveries_for_seq must succeed"),
+        vec![("w-b".to_string(), DeliveryOutcome::Taken)]
+    );
+}
+
+#[test]
+fn message_exists_follows_the_row_through_a_clear() {
+    let (mut chat, _path) = open_with_alpha_room("chat-message-exists");
+    let posted = chat
+        .append_message(alpha_message("hi", 2_000, &[]), &generous_limits())
+        .expect("append_message must succeed");
+    assert!(
+        chat.message_exists(ALPHA_ROOM, posted.seq)
+            .expect("message_exists must succeed")
+    );
+
+    chat.clear_history(ALPHA_ROOM)
+        .expect("clear_history must succeed");
+
+    assert!(
+        !chat
+            .message_exists(ALPHA_ROOM, posted.seq)
+            .expect("message_exists must succeed")
+    );
 }

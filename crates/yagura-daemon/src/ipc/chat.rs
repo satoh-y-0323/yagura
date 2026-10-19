@@ -32,7 +32,7 @@ use crate::approval::{ApprovalBroker, ApprovalDraft, ApprovalRoomRef, SubmitErro
 use crate::chat_store::{self, ChatStore, NewChatMessage};
 use crate::config::DaemonConfig;
 use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
-use crate::inbox::{Parcel, ParcelEnd, PushBudget};
+use crate::inbox::{Deposited, Inbox, Parcel, ParcelEnd, PushBudget};
 use crate::live_policy::{self, PolicyCell};
 use crate::room::{self, ChatLimits, DeliveryOutcome};
 use crate::store::StoreError;
@@ -170,28 +170,31 @@ impl ChatRuntime {
     }
 
     /// Records one destination's delivery outcome in the store, reason
-    /// included when the outcome is the one arm able to carry one.
+    /// included when the outcome is the one arm able to carry one. Returns
+    /// `false` when the store reported the message gone and wrote nothing.
     async fn record_delivery(
         &self,
         room_id: &str,
         seq: i64,
         window_id: &str,
         outcome: DeliveryOutcome,
-    ) {
+    ) -> bool {
         let room_id = room_id.to_string();
         let window_id = window_id.to_string();
         let at_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
-        let _ = self
+        let recorded = self
             .store
             .with_store(move |store| store.set_delivery(&room_id, seq, &window_id, outcome, at_ms))
             .await;
+        // A failed write still announces: the reader re-reads what the store holds.
+        !matches!(recorded, Ok(Ok(false)))
     }
 
     /// [`Self::record_delivery`], then pushes a [`DaemonMessage::ChatChanged`]
     /// carrying `seq` and the room's `needs_user` exactly as the store now
     /// holds it: every place a destination's delivery outcome settles calls
     /// this, so a `pending` row written by `append_message` never goes
-    /// unannounced.
+    /// unannounced. A message cleared in the meantime has nothing to announce.
     async fn record_delivery_and_notify(
         &self,
         broker: &Arc<ApprovalBroker>,
@@ -200,7 +203,9 @@ impl ChatRuntime {
         window_id: &str,
         outcome: DeliveryOutcome,
     ) {
-        self.record_delivery(room_id, seq, window_id, outcome).await;
+        if !self.record_delivery(room_id, seq, window_id, outcome).await {
+            return;
+        }
         let room_id_owned = room_id.to_string();
         let needs_user = match self
             .store
@@ -263,7 +268,8 @@ impl ChatRuntime {
     /// for silence, called once, `silence_timeout_secs` after
     /// the post, by the task [`spawn_silence_watch`] spawns. A no-op if the
     /// room has since halted, nothing was actually placed, an addressed
-    /// window has since replied, or the message was already noted.
+    /// window has since replied, the message was already noted, or the
+    /// message is gone.
     async fn evaluate_silence(
         &self,
         broker: &Arc<ApprovalBroker>,
@@ -336,27 +342,9 @@ impl ChatRuntime {
         let at_ms = i64::try_from(now_ms()).unwrap_or(i64::MAX);
         let result = self
             .store
-            .with_store(move |store| -> Result<(), StoreError> {
-                store.mark_silence_noted(&room_id_for_store, seq)?;
-                store.append_message(
-                    NewChatMessage {
-                        room_id: room_id_for_store.clone(),
-                        at_ms,
-                        from_kind: "system".to_string(),
-                        from_window_id: None,
-                        from_name: "system".to_string(),
-                        body: "no response was observed within the silence timeout".to_string(),
-                        mentions: Vec::new(),
-                        mentions_user: true,
-                        broadcast: false,
-                    },
-                    &limits,
-                )?;
-                store.set_needs_user(&room_id_for_store, true)?;
-                Ok(())
-            })
+            .with_store(move |store| note_silence(store, &room_id_for_store, seq, at_ms, &limits))
             .await;
-        if matches!(result, Ok(Ok(()))) {
+        if matches!(result, Ok(Ok(true))) {
             broker.notify_approvers(&DaemonMessage::ChatChanged {
                 room_id: room_id.to_string(),
                 seq: u64::try_from(seq).unwrap_or(0),
@@ -364,6 +352,59 @@ impl ChatRuntime {
             });
         }
     }
+}
+
+/// Flags the post `(room_id, seq)` as unanswered: marks it noted, appends the
+/// system notice and raises `needs_user`. Writes nothing and returns `false`
+/// when the post is gone (its history was cleared or its room deleted) -- the
+/// check and the writes run under one store access, so a clear cannot slip
+/// between them.
+fn note_silence(
+    store: &mut ChatStore,
+    room_id: &str,
+    seq: i64,
+    at_ms: i64,
+    limits: &ChatLimits,
+) -> Result<bool, StoreError> {
+    if !store.message_exists(room_id, seq)? {
+        return Ok(false);
+    }
+    store.mark_silence_noted(room_id, seq)?;
+    store.append_message(
+        NewChatMessage {
+            room_id: room_id.to_string(),
+            at_ms,
+            from_kind: "system".to_string(),
+            from_window_id: None,
+            from_name: "system".to_string(),
+            body: "no response was observed within the silence timeout".to_string(),
+            mentions: Vec::new(),
+            mentions_user: true,
+            broadcast: false,
+        },
+        limits,
+    )?;
+    store.set_needs_user(room_id, true)?;
+    Ok(true)
+}
+
+/// Puts `parcel` in `inbox` only while the post `(room_id, seq)` it carries is
+/// still stored; `None` when the post is gone. Called inside one store access,
+/// which a clear or delete also takes, so whichever comes first decides: a
+/// clear that runs first leaves nothing to deposit, and one that runs after
+/// finds the parcel in the inbox to pull back.
+fn deposit_while_message_exists(
+    store: &ChatStore,
+    inbox: &Inbox,
+    room_id: &str,
+    seq: i64,
+    parcel: Parcel,
+    budget: PushBudget,
+) -> Result<Option<Deposited>, StoreError> {
+    if !store.message_exists(room_id, seq)? {
+        return Ok(None);
+    }
+    Ok(Some(inbox.deposit_tracked(parcel, Some(budget), None)))
 }
 
 /// The room a request acts on, once [`resolve_room`] has decided it.
@@ -1125,6 +1166,10 @@ async fn complete_post(
 
     let appended = match append_result {
         Ok(Ok(appended)) => appended,
+        Ok(Err(StoreError::RoomGone { .. })) => {
+            outbound.reply(&error_msg("invalid_argument", "unknown room"));
+            return;
+        }
         Ok(Err(store_err)) => {
             tracing::warn!(error = %store_err, "chat store append failed");
             outbound.reply(&error_msg("internal", "failed to record the chat message"));
@@ -1229,13 +1274,28 @@ fn spawn_delivery_task(
             return;
         };
         let parcel = Parcel::new(format!("chat:{room_id}:{seq}"), envelope);
-        let outcome = match notice_queue::deposit(
-            &registry,
-            &entry,
-            parcel,
-            Some(chat.delivery_budget()),
-            None,
-        ) {
+        let budget = chat.delivery_budget();
+        let inbox = entry.inbox().clone();
+        let room_for_store = room_id.clone();
+        let deposited = chat
+            .store
+            .with_store(move |store| {
+                deposit_while_message_exists(store, &inbox, &room_for_store, seq, parcel, budget)
+            })
+            .await;
+        // The post was cleared (or its room deleted) before it could be put
+        // in: there is nothing to deliver, record or announce.
+        let deposited = match deposited {
+            Ok(Ok(Some(deposited))) => deposited,
+            Ok(Ok(None)) => return,
+            Ok(Err(err)) => {
+                // The delivery stays `pending`; the next daemon start settles it.
+                tracing::warn!(error = %err, "could not confirm the chat post before delivering it");
+                return;
+            }
+            Err(_) => return,
+        };
+        let outcome = match notice_queue::after_deposit(&registry, &entry, deposited) {
             Ok(end) => match end.await {
                 Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
                 Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
@@ -1515,4 +1575,201 @@ pub(super) async fn handle_list_chat_rooms(
         .collect();
 
     outbound.reply(&DaemonMessage::ChatRooms { rooms });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use tokio::sync::watch;
+    use tokio::time::Instant;
+    use yagura_protocol::{DetectedStatus, UnknownReason};
+
+    use super::*;
+    use crate::inbox::{DeliverySpec, Inbox};
+    use crate::waiter::StatusAt;
+
+    const ROOM: &str = "r-alpha0000000001";
+
+    fn limits() -> ChatLimits {
+        ChatLimits {
+            repetition_count: 1000,
+            repetition_window: 1000,
+            repetition_distance: 6,
+            monologue_max: 1000,
+            turn_message_max: 1000,
+            silence_timeout_secs: 300,
+            history_max: 5000,
+        }
+    }
+
+    // Rooms are made through `resolve_room` in production; these cases need one without a request.
+    #[allow(clippy::disallowed_methods)]
+    fn store_with_room(tag: &str) -> ChatStore {
+        let dir = yagura_test_support::paths::unique_temp_dir("yagura-daemon-chat-unit", tag);
+        let mut store = ChatStore::open(&dir.join("chat.db")).expect("the store must open");
+        store
+            .ensure_room(ROOM, WorkspaceKind::Git, "/repo/alpha", 1_000)
+            .expect("the room must be created");
+        store
+    }
+
+    fn post(store: &mut ChatStore, mentions: &[&str]) -> i64 {
+        store
+            .append_message(
+                NewChatMessage {
+                    room_id: ROOM.to_string(),
+                    at_ms: 2_000,
+                    from_kind: "window".to_string(),
+                    from_window_id: Some("w-a".to_string()),
+                    from_name: "Alpha".to_string(),
+                    body: "hello".to_string(),
+                    mentions: mentions.iter().map(|id| (*id).to_string()).collect(),
+                    mentions_user: false,
+                    broadcast: false,
+                },
+                &limits(),
+            )
+            .expect("the post must be recorded")
+            .seq
+    }
+
+    fn inbox() -> Inbox {
+        let now = Instant::now();
+        let (_tx, rx) = watch::channel(StatusAt {
+            status: DetectedStatus::Unknown(UnknownReason::NotYetJudged),
+            changed_at: now,
+            evidence_since: now,
+            generation: 0,
+        });
+        Inbox::new(8, DeliverySpec::default(), rx)
+    }
+
+    fn budget() -> PushBudget {
+        PushBudget {
+            counter: Arc::new(AtomicUsize::new(0)),
+            max: 8,
+        }
+    }
+
+    fn parcel_key(seq: i64) -> String {
+        format!("chat:{ROOM}:{seq}")
+    }
+
+    /// The history was cleared after the row was written but before the post
+    /// reached the inbox: nothing may be put in.
+    #[test]
+    fn a_post_cleared_before_it_is_deposited_never_enters_the_inbox() {
+        let mut store = store_with_room("deposit-after-clear");
+        let seq = post(&mut store, &["w-b"]);
+        store.clear_history(ROOM).expect("the clear must succeed");
+        let inbox = inbox();
+
+        let deposited = deposit_while_message_exists(
+            &store,
+            &inbox,
+            ROOM,
+            seq,
+            Parcel::new(parcel_key(seq), "ENVELOPE"),
+            budget(),
+        )
+        .expect("the check must succeed");
+
+        assert!(
+            deposited.is_none(),
+            "the message is gone: nothing is put in"
+        );
+        assert_eq!(inbox.pending_count(), 0);
+    }
+
+    /// The post was deposited and the history cleared after: the clear pulls
+    /// every parcel it reports pending back out of the inbox.
+    #[test]
+    fn a_post_cleared_after_it_is_deposited_is_pulled_back_out_of_the_inbox() {
+        let mut store = store_with_room("clear-after-deposit");
+        let seq = post(&mut store, &["w-b"]);
+        let inbox = inbox();
+        let deposited = deposit_while_message_exists(
+            &store,
+            &inbox,
+            ROOM,
+            seq,
+            Parcel::new(parcel_key(seq), "ENVELOPE"),
+            budget(),
+        )
+        .expect("the check must succeed")
+        .expect("the message is there: the parcel goes in");
+        assert!(deposited.end.is_some());
+        assert!(inbox.holds(&parcel_key(seq)));
+
+        let pending = store.clear_history(ROOM).expect("the clear must succeed");
+        for (seq, _window_id) in &pending {
+            assert!(inbox.withdraw_waiting(&parcel_key(*seq)));
+        }
+
+        assert_eq!(pending, vec![(seq, "w-b".to_string())]);
+        assert_eq!(inbox.pending_count(), 0);
+    }
+
+    #[test]
+    fn silence_is_noted_for_a_message_that_is_still_there() {
+        let mut store = store_with_room("silence-present");
+        let seq = post(&mut store, &["w-b"]);
+
+        let wrote = note_silence(&mut store, ROOM, seq, 9_000, &limits())
+            .expect("noting silence must succeed");
+
+        assert!(wrote);
+        let messages = store.read_tail(ROOM, 10).expect("the tail must read");
+        assert_eq!(messages.len(), 2, "the system notice follows the post");
+        assert!(messages[0].silence_noted);
+        assert!(
+            store
+                .room_status(ROOM)
+                .expect("the status must read")
+                .needs_user
+        );
+    }
+
+    #[test]
+    fn silence_is_not_noted_for_a_message_that_was_cleared() {
+        let mut store = store_with_room("silence-cleared");
+        let seq = post(&mut store, &["w-b"]);
+        store.clear_history(ROOM).expect("the clear must succeed");
+
+        let wrote = note_silence(&mut store, ROOM, seq, 9_000, &limits())
+            .expect("noting silence must succeed");
+
+        assert!(!wrote, "the message is gone: nothing is written");
+        assert!(
+            store
+                .read_tail(ROOM, 10)
+                .expect("the tail must read")
+                .is_empty()
+        );
+        assert!(
+            !store
+                .room_status(ROOM)
+                .expect("the status must read")
+                .needs_user
+        );
+    }
+
+    #[test]
+    fn silence_is_not_noted_for_a_room_that_was_deleted() {
+        let mut store = store_with_room("silence-deleted");
+        let seq = post(&mut store, &["w-b"]);
+        store.delete_room(ROOM).expect("the delete must succeed");
+
+        let wrote = note_silence(&mut store, ROOM, seq, 9_000, &limits())
+            .expect("noting silence must succeed");
+
+        assert!(!wrote);
+        assert!(
+            store
+                .find_room(ROOM)
+                .expect("the lookup must succeed")
+                .is_none()
+        );
+    }
 }

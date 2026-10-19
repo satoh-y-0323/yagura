@@ -450,6 +450,7 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "chat_delivery".to_string(),
             "chat_message".to_string(),
             "chat_room".to_string(),
+            "chat_seq".to_string(),
             "plan".to_string(),
             "plan_task".to_string(),
             "plan_task_dep".to_string(),
@@ -457,9 +458,10 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "snapshot_meta".to_string(),
             "snapshot_windows".to_string(),
         ],
-        "migration 007 (the plan module) adds four new tables on top of the six the chat and \
-         session-store migrations already left in place; nothing after the fourth migration \
-         changes any of those first six object names"
+        "migration 007 (the plan module) adds four new tables and migration 014 the chat \
+         numbering table on top of the six the chat and session-store migrations already left \
+         in place; nothing after the fourth migration changes any of those first six object \
+         names"
     );
 }
 
@@ -1979,5 +1981,41 @@ fn rebuilding_the_delivery_table_for_the_state_check_keeps_its_columns() {
         table_columns(&previous, "chat_delivery"),
         table_columns(&fresh, "chat_delivery"),
         "the rebuilt delivery table must keep every column unchanged"
+    );
+}
+
+/// A database at v13 already holds chat history; migration 014 must seed each room's
+/// numbering from the highest seq it has, so no number is handed out twice afterwards.
+#[test]
+fn migration_014_seeds_chat_seq_with_each_rooms_highest_seq() {
+    let db = temp_store_db("store-chat-seq-v14");
+    {
+        let mut conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..13])
+            .expect("the first thirteen migrations must apply");
+        conn.execute_batch(
+            "INSERT INTO chat_message (room_id, seq, at_ms, from_kind, from_name, body, mentions_json) \
+             VALUES ('main', 1, 10, 'user', 'u', 'a', '{}'), \
+                    ('main', 3, 30, 'user', 'u', 'b', '{}'), \
+                    ('r-a', 7, 70, 'user', 'u', 'c', '{}');",
+        )
+        .expect("seeding v13 history must succeed");
+        store::apply_migrations(&mut conn, store::MIGRATIONS)
+            .expect("the rest of the shipped series must apply on top of v13");
+    }
+
+    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
+    let mut stmt = conn
+        .prepare("SELECT room_id, last_seq FROM chat_seq ORDER BY room_id")
+        .expect("chat_seq must exist after migration 014");
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("the chat_seq query must run")
+        .map(|r| r.expect("chat_seq row must decode"))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("main".to_string(), 3), ("r-a".to_string(), 7)],
+        "each room's counter starts at its highest stored seq"
     );
 }

@@ -126,6 +126,14 @@ pub enum StoreError {
     /// does not match the pair just passed in.
     #[error("room {room_id} is already bound to a different workspace key")]
     RoomKeyMismatch { room_id: String },
+    /// A message was posted to a room that has no `chat_room` row: it was
+    /// deleted, or never existed.
+    #[error("room {room_id} does not exist")]
+    RoomGone { room_id: String },
+    /// [`crate::chat_store::ChatStore::delete_room`] was asked to delete
+    /// `main`, which every window shares and which is never deleted.
+    #[error("the main room cannot be deleted")]
+    MainRoom,
 }
 
 /// The production migration series, `index = schema version - 1`. Every
@@ -145,6 +153,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/011_snapshot_profile.sql"),
     include_str!("../migrations/012_plan_review.sql"),
     include_str!("../migrations/013_chat_delivery_state_check.sql"),
+    include_str!("../migrations/014_chat_seq.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a

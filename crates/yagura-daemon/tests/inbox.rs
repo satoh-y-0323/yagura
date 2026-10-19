@@ -750,3 +750,72 @@ async fn a_notice_does_not_replace_a_parcel_that_merely_shares_its_key() {
     assert!(inbox.deposit(Parcel::notice("same", "NOTICE")).is_empty());
     assert_eq!(pending(&h, &id), 2);
 }
+
+// --- withdraw_waiting -------------------------------------------------------
+
+#[tokio::test]
+async fn withdraw_waiting_removes_a_waiting_parcel_and_nothing_else() {
+    let (h, mut client) = start("inbox-withdraw-waiting", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    deposit(&h, &id, "gone", "PARCEL-GONE");
+    deposit(&h, &id, "stays", "PARCEL-STAYS");
+
+    assert!(inbox.withdraw_waiting("gone"));
+    assert!(
+        !inbox.withdraw_waiting("gone"),
+        "a parcel that is no longer waiting is not withdrawn twice"
+    );
+    assert!(!inbox.withdraw_waiting("never-deposited"));
+
+    let got = take(&mut client, &id).await;
+    assert!(!got.contains("PARCEL-GONE"), "withdrawn: {got:?}");
+    assert!(got.contains("PARCEL-STAYS"));
+}
+
+#[tokio::test]
+async fn withdraw_waiting_leaves_a_parcel_a_push_is_carrying_alone() {
+    use yagura_daemon::inbox::{ParcelEnd, PushEnd};
+
+    let (h, mut client) = start("inbox-withdraw-waiting-carried", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    let carried = inbox.deposit_tracked(Parcel::new("carried", "PARCEL-CARRIED"), None, None);
+    let end = carried.end.expect("the inbox must take the parcel in");
+    let push = inbox
+        .begin_push(false)
+        .expect("a push must pick the waiting parcel up");
+
+    assert!(
+        !inbox.withdraw_waiting("carried"),
+        "a parcel under way is not the inbox's to pull back"
+    );
+    assert!(
+        !inbox.push_withdrawn(push.id),
+        "the push carrying it must not be marked withdrawn"
+    );
+
+    inbox.finish_push(push.id, PushEnd::Taken);
+    assert_eq!(end.await, Ok(ParcelEnd::Taken));
+}
+
+#[tokio::test]
+async fn withdrawing_a_waiting_parcel_does_not_disturb_another_that_a_push_carries() {
+    use yagura_daemon::inbox::PushEnd;
+
+    let (h, mut client) = start("inbox-withdraw-waiting-sibling", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    deposit(&h, &id, "under-way", "PARCEL-UNDER-WAY");
+    let push = inbox
+        .begin_push(false)
+        .expect("a push must pick the waiting parcel up");
+    deposit(&h, &id, "waiting", "PARCEL-WAITING");
+
+    assert!(inbox.withdraw_waiting("waiting"));
+
+    // The push fails: what it carried goes back, because nothing withdrew it.
+    inbox.finish_push(push.id, PushEnd::Failed);
+    assert_eq!(pending(&h, &id), 1);
+    assert!(inbox.holds("under-way"));
+}

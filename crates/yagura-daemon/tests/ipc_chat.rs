@@ -3254,3 +3254,79 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
         "an addressed, non-Unknown target in a second workspace is typed into and taken"
     );
 }
+
+#[tokio::test]
+async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_leaves_no_row() {
+    let dir = unique_temp_dir("chat-cleared-delivery-settles");
+    let h = start_chat(
+        "chat-cleared-delivery-settles",
+        &dir,
+        &ChatPlaybook::default(),
+    )
+    .await;
+    let mut poster_conn = h.connect().await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let unknown_id = open_unknown_participant(&h).await;
+    let poster_id = h.open_idle_window(&mut poster_conn).await;
+    identify(&mut poster_conn, &poster_id).await;
+
+    let posted = expect_chat_posted(
+        send_chat_msg(&mut poster_conn, None, &format!("hi @{unknown_id}")).await,
+    );
+    let entry = h
+        .registry
+        .get(&unknown_id)
+        .expect("the window is registered");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached the inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // The history is cleared while the parcel is still on its way to the CLI.
+    let mut store = yagura_daemon::chat_store::ChatStore::open(&dir.join("chat.db"))
+        .expect("a second connection to the chat store must open");
+    store
+        .clear_history(&posted.room_id)
+        .expect("clear_history must succeed");
+    let mut door = h.connect().await;
+    call_door(&mut door, "take", &unknown_id).await;
+
+    assert!(
+        chat_changed_within(&mut approver, SECOND_PUSH_OBSERVATION)
+            .await
+            .is_empty(),
+        "the post is gone, so its delivery settling has nothing to announce"
+    );
+    let read = expect_chat_messages(
+        read_chat_msg(
+            &mut poster_conn,
+            Some(posted.room_id.as_str()),
+            Some(0),
+            None,
+        )
+        .await,
+    );
+    assert!(read.messages.is_empty(), "got {:?}", read.messages);
+
+    // The same wiring still announces a post that is there, numbered past the cleared one.
+    let second = expect_chat_posted(
+        send_chat_msg(&mut poster_conn, None, &format!("again @{unknown_id}")).await,
+    );
+    assert!(second.seq > posted.seq, "{} vs {}", second.seq, posted.seq);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the second post never reached the inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    call_door(&mut door, "take", &unknown_id).await;
+    let (_, seq, _) = next_chat_changed(&mut approver, Duration::from_secs(10)).await;
+    assert_eq!(seq, second.seq);
+}

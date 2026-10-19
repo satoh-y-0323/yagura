@@ -1,11 +1,12 @@
-//! Persistence port for the daemon's chat rooms: `chat_room`, `chat_message`
-//! and `chat_delivery` (schema v13, `migrations/013_chat_delivery_state_check.sql`
-//! on top of v6's `migrations/006_chat_delivery_reason_check.sql`, v5's
+//! Persistence port for the daemon's chat rooms: `chat_room`, `chat_message`,
+//! `chat_delivery` and `chat_seq` (schema v14, `migrations/014_chat_seq.sql`
+//! on top of v13's `migrations/013_chat_delivery_state_check.sql`, v6's
+//! `migrations/006_chat_delivery_reason_check.sql`, v5's
 //! `migrations/005_chat_delivery_reason.sql`, v4's `migrations/004_chat_rooms.sql`
 //! and v3's `migrations/003_chat.sql`). A
 //! window's own room and the `main` room are both rows in `chat_room`;
 //! nothing in this module treats `main` specially beyond the seed row
-//! `003_chat.sql` inserts.
+//! `003_chat.sql` inserts and [`ChatStore::delete_room`] refusing to delete it.
 //!
 //! Every write method commits its own transaction; [`ChatStore::append_message`]
 //! is the exception that needs one, since it must make the halt decision and its
@@ -211,15 +212,54 @@ fn row_to_room_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
     })
 }
 
-/// The next seq for `room_id`: one past the highest seq stored so far, or `1`
-/// for an empty room.
+/// The next seq for `room_id`, recorded in `chat_seq` so a seq is never
+/// handed out twice: clearing a room's history or deleting the room leaves
+/// the counter behind, and a reader holding an `after_seq` would otherwise
+/// skip the numbers that get reused.
 fn next_seq(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Result<i64, StoreError> {
-    let max: Option<i64> = tx.query_row_fixed(
-        "SELECT MAX(seq) FROM chat_message WHERE room_id = ?1",
+    let highest: i64 = tx.query_row_fixed(
+        "SELECT MAX(\
+         COALESCE((SELECT last_seq FROM chat_seq WHERE room_id = ?1), 0), \
+         COALESCE((SELECT MAX(seq) FROM chat_message WHERE room_id = ?1), 0))",
         params![room_id],
         |row| row.get(0),
     )?;
-    Ok(max.unwrap_or(0) + 1)
+    let next = highest + 1;
+    tx.execute_fixed(
+        "INSERT INTO chat_seq (room_id, last_seq) VALUES (?1, ?2) \
+         ON CONFLICT(room_id) DO UPDATE SET last_seq = excluded.last_seq",
+        params![room_id, next],
+    )?;
+    Ok(next)
+}
+
+/// Removes every delivery and message of `room_id` and returns the
+/// deliveries that were still `pending`: the ones whose parcel may still sit
+/// in a window's inbox. The room's row and its `chat_seq` counter stay.
+fn remove_history(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &str,
+) -> Result<Vec<(i64, String)>, StoreError> {
+    let pending = {
+        let mut stmt = tx.prepare_fixed(
+            "SELECT seq, window_id FROM chat_delivery \
+             WHERE room_id = ?1 AND state = ?2 ORDER BY seq, window_id",
+        )?;
+        stmt.query_map(
+            params![room_id, room::ChatDeliveryState::Pending.as_str()],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    tx.execute_fixed(
+        "DELETE FROM chat_delivery WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    tx.execute_fixed(
+        "DELETE FROM chat_message WHERE room_id = ?1",
+        params![room_id],
+    )?;
+    Ok(pending)
 }
 
 /// Inserts one `chat_message` row.
@@ -557,7 +597,7 @@ impl ChatStore {
 
     /// Every `chat_room` row: `main` sorted first, the rest by `last_at_ms`
     /// descending, falling back to `created_at_ms` for a room with no
-    /// messages yet. No method in this module removes a `chat_room` row.
+    /// messages yet.
     ///
     /// # Errors
     ///
@@ -583,7 +623,9 @@ impl ChatStore {
     ///
     /// # Errors
     ///
-    /// Any [`StoreError`] from the underlying SQLite operations.
+    /// [`StoreError::RoomGone`] if `msg.room_id` has no `chat_room` row (the
+    /// room was deleted while the post was on its way). Any other
+    /// [`StoreError`] from the underlying SQLite operations.
     pub fn append_message(
         &mut self,
         msg: NewChatMessage,
@@ -592,6 +634,17 @@ impl ChatStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let room_exists: bool = tx.query_row_fixed(
+            "SELECT EXISTS(SELECT 1 FROM chat_room WHERE room_id = ?1)",
+            params![msg.room_id],
+            |row| row.get(0),
+        )?;
+        if !room_exists {
+            return Err(StoreError::RoomGone {
+                room_id: msg.room_id,
+            });
+        }
 
         let seq = next_seq(&tx, &msg.room_id)?;
         insert_message(
@@ -640,6 +693,11 @@ impl ChatStore {
     /// re-settling a delivery never leaves a reason next to a state that
     /// cannot carry one.
     ///
+    /// Nothing is written once the message is gone (its history was cleared
+    /// or its room deleted): an outcome settling late must not leave a
+    /// delivery behind for a message that no longer exists. Returns whether
+    /// a row was written.
+    ///
     /// # Errors
     ///
     /// Any [`StoreError`] from the underlying SQLite operation.
@@ -650,22 +708,85 @@ impl ChatStore {
         window_id: &str,
         outcome: DeliveryOutcome,
         at_ms: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let state = outcome.state().as_str();
         let reason = outcome.unknown_reason().map(UnknownReason::as_wire);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_fixed(
+        let written = tx.execute_fixed(
             "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms, unknown_reason) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6 \
+             WHERE EXISTS (SELECT 1 FROM chat_message WHERE room_id = ?1 AND seq = ?2) \
              ON CONFLICT(room_id, seq, window_id) DO UPDATE SET \
              state = excluded.state, at_ms = excluded.at_ms, \
              unknown_reason = excluded.unknown_reason",
             params![room_id, seq, window_id, state, at_ms, reason],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(written > 0)
+    }
+
+    /// Whether the message `(room_id, seq)` is still stored: `false` once its
+    /// history was cleared, its room deleted, or it was evicted.
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying SQLite operation.
+    pub fn message_exists(&self, room_id: &str, seq: i64) -> Result<bool, StoreError> {
+        let exists = self.conn.query_row_fixed(
+            "SELECT EXISTS(SELECT 1 FROM chat_message WHERE room_id = ?1 AND seq = ?2)",
+            params![room_id, seq],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
+    }
+
+    /// Removes every message and delivery of `room_id` and lifts its halt and
+    /// `needs_user`, in one transaction. The room's row and its seq counter
+    /// stay, so the next post continues the numbering.
+    ///
+    /// Returns the `(seq, window_id)` of every delivery that was still
+    /// `pending`: the caller pulls those parcels back out of the windows'
+    /// inboxes. An unknown room has nothing to remove and returns none.
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying SQLite operations.
+    pub fn clear_history(&mut self, room_id: &str) -> Result<Vec<(i64, String)>, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending = remove_history(&tx, room_id)?;
+        tx.execute_fixed(
+            "UPDATE chat_room SET halted_reason = NULL, halted_at_ms = NULL, needs_user = 0 \
+             WHERE room_id = ?1",
+            params![room_id],
+        )?;
+        tx.commit()?;
+        Ok(pending)
+    }
+
+    /// Removes `room_id` altogether: its messages, deliveries and `chat_room`
+    /// row. The seq counter stays, so a room made again under the same id
+    /// continues the numbering. Returns the still-`pending` deliveries as
+    /// [`Self::clear_history`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::MainRoom`] for `main`, which is never deleted. Any other
+    /// [`StoreError`] from the underlying SQLite operations.
+    pub fn delete_room(&mut self, room_id: &str) -> Result<Vec<(i64, String)>, StoreError> {
+        if room_id == "main" {
+            return Err(StoreError::MainRoom);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending = remove_history(&tx, room_id)?;
+        tx.execute_fixed("DELETE FROM chat_room WHERE room_id = ?1", params![room_id])?;
+        tx.commit()?;
+        Ok(pending)
     }
 
     /// Halts `room_id` and raises `needs_user`, independent of any post.

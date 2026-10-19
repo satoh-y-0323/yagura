@@ -824,6 +824,21 @@ impl Inbox {
         }
     }
 
+    /// Removes the parcel named `key` if it is still waiting, and reports
+    /// whether it did. A parcel a push is carrying is left alone, and so is
+    /// everything else that push carries: unlike [`Self::withdraw`], this
+    /// never marks a push withdrawn.
+    pub fn withdraw_waiting(&self, key: &str) -> bool {
+        let mut state = self.shared.lock();
+        match state.parcels.iter().position(|held| held.parcel.key == key) {
+            Some(position) => {
+                state.parcels.remove(position);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Replaces the text of the waiting parcel named `key`. `false` when no
     /// such parcel waits, or the new text is longer than one answer carries.
     pub fn revise(&self, key: &str, text: String) -> bool {
