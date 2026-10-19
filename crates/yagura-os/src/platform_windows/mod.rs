@@ -11,6 +11,7 @@
 mod child;
 mod command_line;
 pub(crate) mod conpty;
+mod endpoint_lock;
 mod job;
 mod spawn;
 
@@ -195,13 +196,17 @@ impl PipeSecurity {
     }
 }
 
-/// A bound pipe name together with the instance waiting for the next client.
+/// A bound pipe name together with the instance waiting for the next client,
+/// and the endpoint lock that marks its daemon as alive.
 pub struct PipeListener {
     endpoint: String,
     security: PipeSecurity,
     /// `None` when refilling the pending instance failed; `accept` retries the
     /// refill at its next call before waiting for a client.
     pending: Option<NamedPipeServer>,
+    // Declared last so the pipe instance closes before the lock is released:
+    // a free lock never leaves a still-listening pipe behind.
+    _lock: endpoint_lock::EndpointLock,
 }
 
 impl std::fmt::Debug for PipeListener {
@@ -296,11 +301,13 @@ impl IpcTransport for WindowsIpc {
         endpoint: &str,
         security: Self::Security,
     ) -> Result<Self::Listener, OsError> {
+        let lock = endpoint_lock::lock_endpoint(endpoint)?;
         let pending = create_pipe_instance(endpoint, true, &security).await?;
         Ok(PipeListener {
             endpoint: endpoint.to_owned(),
             security,
             pending: Some(pending),
+            _lock: lock,
         })
     }
 

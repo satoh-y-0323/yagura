@@ -575,7 +575,7 @@ async fn bind_rejects_a_non_socket_file_at_the_endpoint_path() {
 }
 
 #[tokio::test]
-async fn bind_surfaces_the_original_error_when_a_live_listener_holds_the_path() {
+async fn bind_refuses_a_second_bind_as_held_while_the_first_listener_lives() {
     let ipc = UnixIpc;
     let dir = secure_dir();
     let endpoint = dir.path().join("e.sock");
@@ -594,25 +594,13 @@ async fn bind_surfaces_the_original_error_when_a_live_listener_holds_the_path() 
         .expect("endpoint_security should succeed");
     let second = ipc.bind(endpoint_str, second_security).await;
     match second {
-        Err(OsError::Io(err)) => {
-            assert_eq!(
-                err.kind(),
-                std::io::ErrorKind::AddrInUse,
-                "a second bind against a live listener must surface an AddrInUse-kind error, \
-                 not some other io::ErrorKind: {err:?}"
-            );
-            assert!(
-                err.to_string().contains("live listener"),
-                "the surfaced error must name the rejection reason (a live listener holds the \
-                 path) rather than only the bare AddrInUse errno, so an operator does not have \
-                 to guess between recover_from_addr_in_use's three branches: {err}"
-            );
-        }
+        Err(OsError::EndpointHeld(reason)) => assert!(
+            reason.contains("live listener"),
+            "the refusal must name its reason (a live listener holds the path): {reason}"
+        ),
         other => panic!(
-            "a second bind while the first listener is still alive must fail with \
-             OsError::Io(..) carrying an AddrInUse-kind error naming a live listener as the \
-             reason (connect succeeds against a live listener, so the original error \
-             surfaces instead of an unlink+rebind); got: {other:?}"
+            "a second bind while the first listener is still alive must be refused as held \
+             by a live daemon; got: {other:?}"
         ),
     }
 }
@@ -759,11 +747,7 @@ async fn bind_does_not_take_over_an_endpoint_whose_lock_is_held() {
         .await;
 
     match result {
-        Err(OsError::Io(err)) => assert_eq!(
-            err.kind(),
-            std::io::ErrorKind::AddrInUse,
-            "an endpoint whose lock is held must be refused as in use: {err:?}"
-        ),
+        Err(OsError::EndpointHeld(_)) => {}
         other => panic!(
             "bind must refuse an endpoint whose lock is held by a live daemon, whatever a \
              connect to its socket answers; got: {other:?}"

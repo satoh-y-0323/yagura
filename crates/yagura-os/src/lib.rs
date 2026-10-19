@@ -64,6 +64,10 @@ pub enum OsError {
     /// A security operation (descriptor, token, identifier) failed.
     #[error("security operation failed: {0}")]
     Security(String),
+    /// A live process holds the endpoint's lock, which only a bound listener
+    /// takes: the endpoint is served by a daemon, however long it takes to answer.
+    #[error("{0}")]
+    EndpointHeld(String),
 }
 
 /// Identity of the endpoint owner and of a connected peer.

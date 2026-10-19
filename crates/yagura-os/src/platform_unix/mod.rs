@@ -442,9 +442,8 @@ impl IpcTransport for UnixIpc {
 /// Takes the lock that marks `endpoint` as owned by a live daemon, opening
 /// (or creating, owner-only) `<endpoint>.lock` beside it.
 ///
-/// A lock already held by another process is reported as an `AddrInUse`-kind
-/// [`OsError::Io`] naming a live listener, the same failure a second `bind`
-/// gets from a socket that is still listening.
+/// A lock already held by another process is reported as
+/// [`OsError::EndpointHeld`].
 fn lock_endpoint(endpoint: &Path) -> Result<std::fs::File, OsError> {
     let mut lock_path = endpoint.as_os_str().to_owned();
     lock_path.push(".lock");
@@ -475,13 +474,10 @@ fn lock_endpoint(endpoint: &Path) -> Result<std::fs::File, OsError> {
     }
     let lock_error = io::Error::last_os_error();
     if lock_error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        return Err(OsError::Io(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!(
-                "{} is held by a live listener (its lock {} is taken)",
-                endpoint.display(),
-                lock_path.display()
-            ),
+        return Err(OsError::EndpointHeld(format!(
+            "{} is held by a live listener (its lock {} is taken)",
+            endpoint.display(),
+            lock_path.display()
         )));
     }
     Err(OsError::Io(lock_error))

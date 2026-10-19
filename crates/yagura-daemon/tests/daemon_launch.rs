@@ -234,20 +234,88 @@ async fn a_second_daemon_for_a_served_instance_exits_as_a_success_and_the_first_
     assert!(matches!(reply, DaemonMessage::Pong), "got {reply:?}");
 }
 
+/// The instance's endpoint name, resolved the way the daemon resolves it.
+fn owned_endpoint(sandbox: &Sandbox) -> String {
+    let user = PlatformIpc::default()
+        .current_user_id()
+        .expect("the current user id must resolve");
+    yagura_os::default_endpoint_owning(&user, &sandbox.namespace())
+}
+
+/// Holds `endpoint` the way an unrelated process would: the raw pipe, without
+/// the lock a daemon's bind takes.
+#[cfg(windows)]
+#[allow(clippy::disallowed_types)] // a squatter is by definition not bound through yagura-os
+fn squat(endpoint: &str) -> tokio::net::windows::named_pipe::NamedPipeServer {
+    tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(endpoint)
+        .expect("claim the instance's pipe name")
+}
+
+/// Unix counterpart of the Windows `squat`: the raw socket, removed again on drop.
+#[cfg(not(windows))]
+fn squat(endpoint: &str) -> Squatter {
+    let listener =
+        std::os::unix::net::UnixListener::bind(endpoint).expect("claim the instance's socket path");
+    Squatter {
+        _listener: listener,
+        path: PathBuf::from(endpoint),
+    }
+}
+
+#[cfg(not(windows))]
+struct Squatter {
+    _listener: std::os::unix::net::UnixListener,
+    path: PathBuf,
+}
+
+#[cfg(not(windows))]
+impl Drop for Squatter {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[tokio::test]
+async fn a_second_daemon_exits_as_a_success_while_the_first_holds_its_endpoint_without_answering() {
+    let sandbox = Sandbox::new("launch-silent");
+    let ipc = PlatformIpc::default();
+    // Bound the way a daemon binds, and never accepting: a daemon still setting up.
+    let _first = ipc
+        .bind(
+            &owned_endpoint(&sandbox),
+            ipc.endpoint_security().expect("endpoint security"),
+        )
+        .await
+        .expect("claim the instance's endpoint");
+
+    let mut second = sandbox.spawn_bin(&daemon_bin());
+    let status = exit_status_within(&mut second, Duration::from_secs(30), &sandbox).await;
+
+    assert!(
+        status.success(),
+        "a daemon whose instance is held by a daemon that has not answered yet must leave \
+         it to that daemon, got {status:?}; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_serves_the_instance_once_the_one_before_it_was_killed() {
+    let sandbox = Sandbox::new("launch-after-kill");
+    drop(sandbox.start().await);
+
+    let mut next = sandbox.start().await;
+    common::send(&mut next.client, &ClientMessage::Ping).await;
+    let reply = common::read_response(&mut next.client, Duration::from_secs(5)).await;
+    assert!(matches!(reply, DaemonMessage::Pong), "got {reply:?}");
+}
+
 #[tokio::test]
 async fn a_daemon_whose_endpoint_is_held_by_a_non_daemon_exits_as_a_failure() {
     let sandbox = Sandbox::new("launch-squatted");
-    let ipc = PlatformIpc::default();
-    let user = ipc
-        .current_user_id()
-        .expect("the current user id must resolve");
-    let endpoint = yagura_os::default_endpoint_owning(&user, &sandbox.namespace());
-    let security = ipc.endpoint_security().expect("endpoint security");
-    // Holds the name and never answers a ping, as an unrelated process would.
-    let _squatter = ipc
-        .bind(&endpoint, security)
-        .await
-        .expect("claim the instance's endpoint");
+    let _squatter = squat(&owned_endpoint(&sandbox));
 
     let mut daemon = sandbox.spawn_bin(&daemon_bin());
     let status = exit_status_within(&mut daemon, Duration::from_secs(30), &sandbox).await;

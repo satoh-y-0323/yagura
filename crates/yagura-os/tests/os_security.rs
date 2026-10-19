@@ -128,6 +128,53 @@ async fn bind_rejects_a_second_bind_on_the_same_name() {
     );
 }
 
+#[tokio::test]
+async fn a_second_bind_while_the_first_listener_lives_is_refused_as_held_by_a_live_daemon() {
+    let ipc = WindowsIpc;
+    let name = unique_endpoint_name(PIPE_PREFIX, "held-by-a-listener");
+    let _first = ipc
+        .bind(&name, ipc.endpoint_security().unwrap())
+        .await
+        .expect("first bind must succeed");
+
+    let second = ipc.bind(&name, ipc.endpoint_security().unwrap()).await;
+    assert!(
+        matches!(second, Err(yagura_os::OsError::EndpointHeld(_))),
+        "a name whose listener is alive must be refused as held by a live daemon, got {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_name_held_by_a_pipe_that_took_no_lock_is_refused_but_not_as_held_by_a_daemon() {
+    let ipc = WindowsIpc;
+    let name = unique_endpoint_name(PIPE_PREFIX, "held-without-lock");
+    let _squatter = tokio::net::windows::named_pipe::ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&name)
+        .expect("the raw pipe must be created");
+
+    let bound = ipc.bind(&name, ipc.endpoint_security().unwrap()).await;
+    assert!(
+        matches!(&bound, Err(err) if !matches!(err, yagura_os::OsError::EndpointHeld(_))),
+        "a pipe nobody locked must be refused, and not as a live daemon's, got {bound:?}"
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_listener_frees_the_name_for_the_next_bind() {
+    let ipc = WindowsIpc;
+    let name = unique_endpoint_name(PIPE_PREFIX, "freed-on-drop");
+    let first = ipc
+        .bind(&name, ipc.endpoint_security().unwrap())
+        .await
+        .expect("first bind must succeed");
+    drop(first);
+
+    ipc.bind(&name, ipc.endpoint_security().unwrap())
+        .await
+        .expect("a name whose listener was dropped must bind again at once");
+}
+
 // ---------------------------------------------------------------------
 // PeerAuth::endpoint_allows_only: DACL verification (unique-pipe-per-case approach)
 // ---------------------------------------------------------------------

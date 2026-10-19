@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
+use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_daemon::child_env::{
     ChildBaseEnvInputs, LOGIN_ENV_MAX_OUTPUT_BYTES, resolve_child_base_env,
@@ -47,10 +47,6 @@ use yagura_protocol::{
 /// A client-side connection to the daemon's endpoint, named through the OS
 /// boundary.
 type ClientConnection = <PlatformIpc as IpcTransport>::ClientConnection;
-
-/// How long to wait for a `pong` reply during multi-instance-prevention /
-/// `--shutdown` connectivity checks.
-const PING_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Stands in for a startup-log field the OS would not tell us.
 const UNKNOWN_LOG_FIELD: &str = "unknown";
@@ -186,19 +182,20 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
 
     // Multi-instance prevention, create-first: the endpoint name is claimed
     // by binding it and that very listener is kept for serving, so no
-    // squatter can slip into a probe/drop/recreate window.
+    // squatter can slip into a probe/drop/recreate window. The endpoint's lock
+    // tells a daemon still setting up from a squatter without waiting on it.
     let security = ipc
         .endpoint_security()
         .context("failed to build the ipc endpoint security")?;
     let listener = match ipc.bind(&endpoint, security).await {
         Ok(listener) => listener,
-        Err(_) => {
-            if try_ping(&ipc, &endpoint).await {
-                tracing::info!("an existing yagura-daemon is already running; exiting");
-                return Ok(ExitCode::SUCCESS);
-            }
+        Err(OsError::EndpointHeld(reason)) => {
+            tracing::info!("an existing yagura-daemon is already running ({reason}); exiting");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(err) => {
             tracing::error!(
-                "failed to claim the ipc endpoint and no daemon responded to ping; \
+                "failed to claim the ipc endpoint ({err}) and no daemon holds its lock; \
                  a non-daemon process may be occupying the endpoint name"
             );
             std::process::exit(1);
@@ -617,23 +614,6 @@ fn log_detection_layers(layers: &DetectionLayers) {
         mode,
         bundled
     );
-}
-
-/// Connects to `endpoint`, sends `ping`, and returns whether `pong` was
-/// received within [`PING_TIMEOUT`]. Any connection or protocol failure is
-/// treated as "no daemon there" (`false`).
-async fn try_ping(ipc: &PlatformIpc, endpoint: &str) -> bool {
-    let Ok(mut client) = ipc.connect(endpoint).await else {
-        return false;
-    };
-    let frame = frame_encode(&encode_client_message(&ClientMessage::Ping));
-    if client.write_all(&frame).await.is_err() {
-        return false;
-    }
-    matches!(
-        tokio::time::timeout(PING_TIMEOUT, read_one_daemon_message(&mut client)).await,
-        Ok(Some(DaemonMessage::Pong))
-    )
 }
 
 /// Connects to `endpoint` and sends `shutdown` (the `--shutdown` CLI entry
