@@ -45,7 +45,7 @@
     type ChatHistory,
     type ChatRoomState,
   } from './chat/chat-store';
-  import { describeRoomRemovalFailure } from './chat/room-actions';
+  import { describeRoomRemovalFailure, readRefusedForRemovedRoom } from './chat/room-actions';
   import { serializeRefresh } from './chat/refresh-serializer';
   import { daemonProblemNotices } from './daemon-health-notice';
   import type { DropSignal } from './ipc/folder-drop-model';
@@ -854,8 +854,26 @@
       // Folded into what is held once the page is back, not when it was asked for.
       chatRoomStates = foldChatPage(chatHistory(), roomId, generation, page);
     } catch (error) {
-      onError(error);
+      if (!(await giveWayIfRoomRemoved(roomId, error))) {
+        onError(error);
+      }
     }
+  }
+
+  /**
+   * A read can race the deletion of the room it reads. When the refusal was
+   * for a room the listing no longer has, the panel moves on as the
+   * removal push would, and there is no failure to report.
+   */
+  async function giveWayIfRoomRemoved(roomId: string, error: unknown): Promise<boolean> {
+    await refreshChatRooms();
+    if (!readRefusedForRemovedRoom(error, roomId, chatRooms)) {
+      return false;
+    }
+    if (currentRoomId === roomId) {
+      selectChatRoom(roomAfterRemoval(currentRoomId, chatRooms));
+    }
+    return true;
   }
 
   function chatHistory(): ChatHistory {

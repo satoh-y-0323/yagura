@@ -6,6 +6,8 @@ import { daemonRejectionCode } from '../ipc/daemon-rejection';
 import { MAIN_CHAT_ROOM_ID, ROOM_IN_USE_CODE, type ChatRoomInfo } from '../ipc/session-boundary';
 import { chat, describeOperationFailure } from '../ui-messages';
 
+const INVALID_ARGUMENT_CODE = 'invalid_argument';
+
 /**
  * Why `room` may not be deleted, as the note the menu shows under the item;
  * `null` when it may. A row that does not say whether windows are open is
@@ -21,6 +23,27 @@ export function roomDeleteNote(room: ChatRoomInfo): string | null {
     return chat.deleteRoomWithWindowsNote;
   }
   return null;
+}
+
+/**
+ * Whether a read of `roomId` refused as `invalid_argument` was refused because
+ * the room is gone: the listing read after the refusal no longer has it. A
+ * room the panel shows can be deleted while a read of it is under way.
+ *
+ * @param error the value the read rejected with
+ * @param roomId the room that was read
+ * @param rooms the room listing read after the refusal
+ */
+export function readRefusedForRemovedRoom(
+  error: unknown,
+  roomId: string,
+  rooms: ReadonlyMap<string, ChatRoomInfo>
+): boolean {
+  return (
+    daemonRejectionCode(error) === INVALID_ARGUMENT_CODE &&
+    roomId !== MAIN_CHAT_ROOM_ID &&
+    !rooms.has(roomId)
+  );
 }
 
 /**

@@ -4,7 +4,11 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { describeRoomRemovalFailure, roomDeleteNote } from './room-actions';
+import {
+  describeRoomRemovalFailure,
+  readRefusedForRemovedRoom,
+  roomDeleteNote,
+} from './room-actions';
 import type { ChatRoomInfo } from '../ipc/session-boundary';
 
 const MAIN_NOTE = "The main room can't be deleted.";
@@ -71,5 +75,36 @@ describe('describeRoomRemovalFailure', () => {
     expect(
       describeRoomRemovalFailure('the daemon rejected the request: internal: room_in_use')
     ).not.toContain(WINDOWS_NOTE);
+  });
+});
+
+describe('readRefusedForRemovedRoom', () => {
+  const refused = 'the daemon rejected the request: invalid_argument: unknown room';
+  const rooms = (...ids: string[]): Map<string, ChatRoomInfo> =>
+    new Map(ids.map((id) => [id, room({ room_id: id })]));
+
+  it('reads a refusal of a room the listing no longer has as that room being removed', () => {
+    expect(readRefusedForRemovedRoom(refused, 'r-gone', rooms('main', 'r-other'))).toBe(true);
+  });
+
+  it('keeps a refusal of a room still listed a failure to report', () => {
+    expect(readRefusedForRemovedRoom(refused, 'r-a', rooms('main', 'r-a'))).toBe(false);
+  });
+
+  it('never reads main as removed', () => {
+    expect(readRefusedForRemovedRoom(refused, 'main', rooms('r-a'))).toBe(false);
+  });
+
+  it('keeps any other failure a failure to report', () => {
+    expect(
+      readRefusedForRemovedRoom(
+        'the daemon rejected the request: internal',
+        'r-gone',
+        rooms('main')
+      )
+    ).toBe(false);
+    expect(readRefusedForRemovedRoom(new Error('connection lost'), 'r-gone', rooms('main'))).toBe(
+      false
+    );
   });
 });
