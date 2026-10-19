@@ -330,6 +330,51 @@ pub fn process_table() -> Vec<ProcessRow> {
     rows
 }
 
+/// The creation time of `pid` in 100 ns `FILETIME` units, or `None` when the
+/// process cannot be opened.
+#[cfg(windows)]
+pub fn creation_time(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let (mut created, mut exited, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    // SAFETY: the handle is closed right after the one call that reads it, and the
+    // four out-parameters are stack locals that outlive that call.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let read = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+        let _ = CloseHandle(handle);
+        read.ok()?;
+    }
+    Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// The rows of `table` that are children of `parent`.
+///
+/// A row's parent PID is the value at its birth and is never updated, so once its
+/// real parent exits the PID can name an unrelated, younger process. A row born
+/// before `parent` is therefore not its child.
+#[cfg(windows)]
+pub fn children_of(table: &[ProcessRow], parent: u32) -> Vec<ProcessRow> {
+    let parent_created = creation_time(parent);
+    table
+        .iter()
+        .filter(|row| row.parent_pid == parent && row.pid != parent)
+        .filter(|row| match (parent_created, creation_time(row.pid)) {
+            (Some(parent_created), Some(created)) => created >= parent_created,
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
 /// Image names a pseudoconsole host process can run under: the bundled
 /// `OpenConsole.exe`, or the OS's own `conhost.exe`.
 #[cfg(windows)]
@@ -341,14 +386,12 @@ pub const PTY_HOST_IMAGES: [&str; 2] = ["OpenConsole.exe", "conhost.exe"];
 /// `cfg(windows)`: a pseudoconsole host has no Unix analogue, so this stays Windows-only.
 #[cfg(windows)]
 pub fn pty_host_child_pids() -> Vec<u32> {
-    let current_pid = std::process::id();
-    process_table()
+    children_of(&process_table(), std::process::id())
         .into_iter()
         .filter(|row| {
-            row.parent_pid == current_pid
-                && PTY_HOST_IMAGES
-                    .iter()
-                    .any(|image| row.image.eq_ignore_ascii_case(image))
+            PTY_HOST_IMAGES
+                .iter()
+                .any(|image| row.image.eq_ignore_ascii_case(image))
         })
         .map(|row| row.pid)
         .collect()
@@ -432,7 +475,30 @@ pub async fn wait_processes_gone(pids: &[u32], timeout: Duration) {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("processes still alive after teardown: {still_alive:?}");
+            let table = process_table();
+            let describe = |pid: u32| {
+                let row = table.iter().find(|row| row.pid == pid);
+                format!(
+                    "{pid} {} created {:?}",
+                    row.map_or("?", |row| row.image.as_str()),
+                    creation_time(pid)
+                )
+            };
+            let rows: Vec<String> = still_alive
+                .iter()
+                .map(|&pid| {
+                    let parent = table
+                        .iter()
+                        .find(|row| row.pid == pid)
+                        .map(|row| row.parent_pid);
+                    format!(
+                        "[{}; parent {}]",
+                        describe(pid),
+                        parent.map_or("?".to_string(), describe)
+                    )
+                })
+                .collect();
+            panic!("processes still alive after teardown: {}", rows.join(", "));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

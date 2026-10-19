@@ -101,10 +101,10 @@ fn subtree(root: u32) -> Vec<u32> {
     while index < found.len() {
         let parent = found[index];
         found.extend(
-            table
-                .iter()
-                .filter(|row| row.parent_pid == parent && !found.contains(&row.pid))
+            common::children_of(&table, parent)
+                .into_iter()
                 .map(|row| row.pid)
+                .filter(|pid| !found.contains(pid))
                 .collect::<Vec<_>>(),
         );
         index += 1;

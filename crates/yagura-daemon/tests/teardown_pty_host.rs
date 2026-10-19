@@ -99,9 +99,8 @@ async fn pty_host_is_reaped_when_the_child_exits_on_its_own() {
 /// The grandchild's PID: the `capture_child` heartbeat's `tick` process, a
 /// direct child of the window's command.
 fn grandchild_pids_of(child_pid: u32) -> Vec<u32> {
-    common::process_table()
+    common::children_of(&common::process_table(), child_pid)
         .into_iter()
-        .filter(|row| row.parent_pid == child_pid)
         .map(|row| row.pid)
         .collect()
 }

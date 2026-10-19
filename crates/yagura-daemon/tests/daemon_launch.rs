@@ -443,9 +443,9 @@ mod detached {
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let pid = loop {
-            if let Some(row) = common::process_table()
+            if let Some(row) = common::children_of(&common::process_table(), own_pid)
                 .into_iter()
-                .find(|row| row.parent_pid == own_pid && row.image.eq_ignore_ascii_case(&image))
+                .find(|row| row.image.eq_ignore_ascii_case(&image))
             {
                 break row.pid;
             }
