@@ -33,6 +33,7 @@ import {
   narrowChatMessages,
   narrowChatChanged,
   narrowChatRooms,
+  narrowChatHistoryCleared,
   type ChatPosted,
   type ChatMessages,
   type ChatChanged,
@@ -43,7 +44,10 @@ import {
   invokeBroadcastChat,
   invokeReadChat,
   invokeListChatRooms,
+  invokeClearChatRoom,
+  invokeDeleteChatRoom,
   subscribeChatChanged,
+  subscribeChatHistoryCleared,
   subscribeChatParticipantsChanged,
 } from './session-client';
 
@@ -482,6 +486,7 @@ function chatRoomWire(overrides: Record<string, unknown> = {}): Record<string, u
     needs_user: false,
     halted: null,
     last_at_ms: 1_700_000_000_000,
+    has_open_windows: false,
     ...overrides,
   };
 }
@@ -514,6 +519,7 @@ describe('narrowChatRooms', () => {
         needs_user: false,
         halted: null,
         last_at_ms: 1_700_000_000_000,
+        has_open_windows: false,
       },
       {
         room_id: 'r-2b7c1d',
@@ -522,6 +528,7 @@ describe('narrowChatRooms', () => {
         needs_user: true,
         halted: null,
         last_at_ms: null,
+        has_open_windows: false,
       },
     ]);
   });
@@ -683,5 +690,103 @@ describe('invokeListChatRooms', () => {
     invokeMock.mockResolvedValueOnce(chatRoomsWire([chatRoomWire({ participant_count: -1 })]));
 
     await expect(invokeListChatRooms()).rejects.toThrow(BoundaryError);
+  });
+});
+
+describe('narrowChatRooms: has_open_windows', () => {
+  it('keeps a present value', () => {
+    const [open] = narrowChatRooms(chatRoomsWire([chatRoomWire({ has_open_windows: true })]));
+    const [empty] = narrowChatRooms(chatRoomsWire([chatRoomWire({ has_open_windows: false })]));
+    expect(open?.has_open_windows).toBe(true);
+    expect(empty?.has_open_windows).toBe(false);
+  });
+
+  it('reads an absent field, as an older daemon sends it, as a room with windows open', () => {
+    const wire = chatRoomWire();
+    delete wire['has_open_windows'];
+    const [room] = narrowChatRooms(chatRoomsWire([wire]));
+    expect(room?.has_open_windows).toBe(true);
+  });
+
+  it('rejects a value that is not a boolean', () => {
+    expect(() =>
+      narrowChatRooms(chatRoomsWire([chatRoomWire({ has_open_windows: 'no' })]))
+    ).toThrow(BoundaryError);
+  });
+});
+
+describe('invokeClearChatRoom', () => {
+  it('calls clear_chat_room with the room id and returns the room the core cleared', async () => {
+    invokeMock.mockResolvedValueOnce('r-2b7c1d');
+
+    await expect(invokeClearChatRoom('r-2b7c1d')).resolves.toBe('r-2b7c1d');
+    expect(invokeMock).toHaveBeenCalledWith('clear_chat_room', { room_id: 'r-2b7c1d' });
+  });
+
+  it('rejects with BoundaryError when the reply is not a string', async () => {
+    invokeMock.mockResolvedValueOnce({ room_id: 'r-2b7c1d' });
+
+    await expect(invokeClearChatRoom('r-2b7c1d')).rejects.toThrow(BoundaryError);
+  });
+});
+
+describe('invokeDeleteChatRoom', () => {
+  it('calls delete_chat_room with the room id and returns the room the core deleted', async () => {
+    invokeMock.mockResolvedValueOnce('r-2b7c1d');
+
+    await expect(invokeDeleteChatRoom('r-2b7c1d')).resolves.toBe('r-2b7c1d');
+    expect(invokeMock).toHaveBeenCalledWith('delete_chat_room', { room_id: 'r-2b7c1d' });
+  });
+
+  it('rejects with BoundaryError when the reply is not a string', async () => {
+    invokeMock.mockResolvedValueOnce(null);
+
+    await expect(invokeDeleteChatRoom('r-2b7c1d')).rejects.toThrow(BoundaryError);
+  });
+});
+
+describe('narrowChatHistoryCleared', () => {
+  it('accepts a payload naming the room', () => {
+    expect(narrowChatHistoryCleared({ room_id: 'main' })).toEqual({ room_id: 'main' });
+  });
+
+  it('rejects a payload without a room id', () => {
+    expect(() => narrowChatHistoryCleared({})).toThrow(BoundaryError);
+    expect(() => narrowChatHistoryCleared({ room_id: 7 })).toThrow(BoundaryError);
+    expect(() => narrowChatHistoryCleared(null)).toThrow(BoundaryError);
+  });
+});
+
+describe('subscribeChatHistoryCleared', () => {
+  it('subscribes to session://chat-history-cleared, the name the core emits it under', () => {
+    expect(SESSION_EVENT.chatHistoryCleared).toBe('session://chat-history-cleared');
+  });
+
+  it('delivers a well-formed payload and reports a malformed one', async () => {
+    let registered: ListenCallback | undefined;
+    listenMock.mockImplementation((name: string, callback: ListenCallback) => {
+      expect(name).toBe(SESSION_EVENT.chatHistoryCleared);
+      registered = callback;
+      return Promise.resolve(unlistenMock);
+    });
+    const onCleared = vi.fn<(payload: { room_id: string }) => void>();
+    const onBoundaryError = vi.fn<(error: unknown) => void>();
+
+    await subscribeChatHistoryCleared(onCleared, onBoundaryError);
+    registered?.({ payload: { room_id: 'r-2b7c1d' } });
+    expect(() => registered?.({ payload: {} })).not.toThrow();
+
+    expect(onCleared).toHaveBeenCalledTimes(1);
+    expect(onCleared).toHaveBeenCalledWith({ room_id: 'r-2b7c1d' });
+    expect(onBoundaryError).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a function that cancels the subscription', async () => {
+    listenMock.mockResolvedValueOnce(unlistenMock);
+
+    const cancel = await subscribeChatHistoryCleared(vi.fn(), vi.fn());
+    cancel();
+
+    expect(unlistenMock).toHaveBeenCalledTimes(1);
   });
 });

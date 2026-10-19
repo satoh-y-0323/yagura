@@ -10,6 +10,8 @@
   import { tick } from 'svelte';
 
   import IconButton from './IconButton.svelte';
+  import PopupMenu from './PopupMenu.svelte';
+  import type { Rect } from './menu-position';
   import { observeSize } from './observe-size';
   import { closeOnEscape } from './panel-focus';
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
@@ -27,6 +29,7 @@
     type MentionCandidate,
     type MentionQuery,
   } from '../chat/mention-input';
+  import { roomDeleteNote } from '../chat/room-actions';
   import { clampRoomRailWidth, createRoomRailWidthStorage } from '../chat/room-rail-width';
   import {
     CHAT_PANEL_MIN_SIZE,
@@ -71,6 +74,12 @@
   export let currentRoomId: string;
   /** Called with a room's id when its row in the rail is clicked. */
   export let onSelectRoom: (roomId: string) => void;
+  /** Reads the room list again; the room menu waits for it so it decides from fresh rows. */
+  export let onRefreshRooms: () => Promise<void>;
+  /** Asks to clear the history of the room the menu was opened on. */
+  export let onClearRoom: (room: ChatRoomInfo) => void;
+  /** Asks to delete the room the menu was opened on. */
+  export let onDeleteRoom: (room: ChatRoomInfo) => void;
 
   const PANEL_STORAGE_KEY = 'yagura.chat-panel-rect';
   const MENTION_PATTERN = /@(?:"[^"]*"|[^\s]+)/g;
@@ -97,6 +106,11 @@
   let activeCandidate = 0;
   /** The last post's mentions that reached no one, kept with the room it went to. */
   let unresolvedNotice: { roomId: string; text: string } | null = null;
+  /** The room the room menu is open on, `null` while it is closed. */
+  let menuRoomId: string | null = null;
+  let menuAnchor: Rect | null = null;
+  /** The button that opened the menu, absent when a right-click did. */
+  let menuTrigger: HTMLElement | undefined;
 
   $: halt = room.halted;
   $: shownUnresolved =
@@ -115,6 +129,9 @@
   // The same floor clampChatPanelRect applies, so the drawn size never outgrows the rect it shows.
   $: minPanelWidth = Math.min(CHAT_PANEL_MIN_SIZE.width, viewport.width);
   $: minPanelHeight = Math.min(CHAT_PANEL_MIN_SIZE.height, viewport.height);
+  // A room that left the list while its menu was open takes the menu with it.
+  $: menuRoom = menuRoomId === null ? undefined : rooms.find((row) => row.room_id === menuRoomId);
+  $: deleteNote = menuRoom === undefined ? null : roomDeleteNote(menuRoom);
 
   /** The viewport the panel is kept inside of. */
   function measureViewport(): PanelSize {
@@ -228,6 +245,61 @@
       runs.push({ text: body.slice(cursor), isMention: false });
     }
     return runs;
+  }
+
+  async function openRoomMenu(
+    roomId: string,
+    anchor: Rect,
+    trigger: HTMLElement | undefined
+  ): Promise<void> {
+    if (menuRoomId === roomId && trigger !== undefined && trigger === menuTrigger) {
+      closeRoomMenu();
+      return;
+    }
+    // Opening a window does not always push a chat change, so whether the
+    // room may be deleted is read again before the menu shows it.
+    await onRefreshRooms();
+    menuRoomId = roomId;
+    menuAnchor = anchor;
+    menuTrigger = trigger;
+  }
+
+  function closeRoomMenu(): void {
+    menuRoomId = null;
+    menuAnchor = null;
+    menuTrigger = undefined;
+  }
+
+  function handleRoomMenuClose(reason: 'escape' | 'outside' | 'resize'): void {
+    const trigger = menuTrigger;
+    closeRoomMenu();
+    if (reason === 'escape') {
+      trigger?.focus();
+    }
+  }
+
+  function openRoomMenuFromButton(roomId: string, event: MouseEvent): void {
+    const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;
+    const rect = trigger?.getBoundingClientRect();
+    const anchor: Rect =
+      rect === undefined
+        ? { left: event.clientX, top: event.clientY, width: 0, height: 0 }
+        : { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    void openRoomMenu(roomId, anchor, trigger);
+  }
+
+  function openRoomMenuAtPointer(roomId: string, event: MouseEvent): void {
+    event.preventDefault();
+    const anchor: Rect = { left: event.clientX, top: event.clientY, width: 0, height: 0 };
+    void openRoomMenu(roomId, anchor, undefined);
+  }
+
+  function chooseRoomAction(action: (room: ChatRoomInfo) => void): void {
+    const target = menuRoom;
+    closeRoomMenu();
+    if (target !== undefined) {
+      action(target);
+    }
   }
 
   function closeMention(): void {
@@ -365,6 +437,8 @@
           title={row.name}
           data-selected={row.room_id === currentRoomId}
           data-empty={row.participant_count === 0}
+          data-menu-open={row.room_id === menuRoomId}
+          on:contextmenu={(event) => openRoomMenuAtPointer(row.room_id, event)}
         >
           <div
             class="room-row__hit"
@@ -390,7 +464,12 @@
                 >{name.tail}</span
               ></span
             >
-            <span class="room-row__meta">{chat.roomParticipantCount(row.participant_count)}</span>
+            <span class="room-row__meta room-row__meta--full"
+              >{chat.roomParticipantCount(row.participant_count)}</span
+            >
+            {#if row.participant_count > 0}
+              <span class="room-row__meta room-row__meta--short">{row.participant_count}</span>
+            {/if}
             {#if row.needs_user}
               <span
                 class="room-row__dot"
@@ -399,10 +478,48 @@
               ></span>
             {/if}
           </div>
+          <IconButton
+            class="room-row__more"
+            label={chat.roomActionsLabel}
+            aria-haspopup="menu"
+            aria-expanded={row.room_id === menuRoomId}
+            on:click={(event) => openRoomMenuFromButton(row.room_id, event)}
+          >
+            ⋯
+          </IconButton>
         </li>
       {/each}
     </ul>
   </div>
+
+  <PopupMenu
+    isOpen={menuRoom !== undefined}
+    anchor={menuAnchor}
+    keepOpenWithin={menuTrigger}
+    onClose={handleRoomMenuClose}
+  >
+    <button
+      type="button"
+      class="popup-menu__item"
+      role="menuitem"
+      on:click={() => chooseRoomAction(onClearRoom)}
+    >
+      {chat.clearHistoryItem}
+    </button>
+    <hr class="popup-menu__divider" />
+    <button
+      type="button"
+      class="popup-menu__item"
+      role="menuitem"
+      disabled={deleteNote !== null}
+      on:click={() => chooseRoomAction(onDeleteRoom)}
+    >
+      {chat.deleteRoomItem}
+    </button>
+    {#if deleteNote !== null}
+      <div class="room-menu__note">{deleteNote}</div>
+    {/if}
+  </PopupMenu>
 
   <!-- Pointer-only affordance, like the sidebar's divider: keyboard resize
        belongs to the shortcut layer. -->
@@ -637,6 +754,9 @@
   }
 
   .room-row {
+    display: flex;
+    align-items: center;
+    padding-right: var(--space-xs);
     border-radius: var(--radius-sm);
   }
 
@@ -657,6 +777,8 @@
      interactive role (a11y_no_noninteractive_element_to_interactive_role),
      so the row's layout and the hit area both live here instead. */
   .room-row__hit {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: var(--space-xs);
@@ -699,6 +821,69 @@
   .room-row[data-selected='true'] .room-row__meta {
     color: inherit;
     opacity: 0.85;
+  }
+
+  /* While the row shows its menu button, the count alone fits beside the name. */
+  .room-row__meta--short {
+    display: none;
+  }
+
+  .room-row[data-empty='false']:is(
+      [data-selected='true'],
+      [data-menu-open='true'],
+      :hover,
+      :focus-within
+    )
+    .room-row__meta--full {
+    display: none;
+  }
+
+  .room-row:is([data-selected='true'], [data-menu-open='true'], :hover, :focus-within)
+    .room-row__meta--short {
+    display: inline;
+  }
+
+  .room-row :global(.room-row__more) {
+    position: relative;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: inherit;
+    font-family: inherit;
+    font-size: var(--font-size-sm);
+    line-height: 22px;
+    cursor: pointer;
+    visibility: hidden;
+  }
+
+  .room-row:is([data-selected='true'], [data-menu-open='true'], :hover, :focus-within)
+    :global(.room-row__more) {
+    visibility: visible;
+  }
+
+  /* A tint of the row's own text colour, so it reads on the selected row too. */
+  .room-row :global(.room-row__more)::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background-color: currentColor;
+    opacity: 0;
+  }
+
+  .room-row :global(.room-row__more:hover)::before,
+  .room-row[data-menu-open='true'] :global(.room-row__more)::before {
+    opacity: 0.18;
+  }
+
+  .room-menu__note {
+    padding: 0 var(--space-sm) 2px;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-xs);
   }
 
   .room-row__stop {

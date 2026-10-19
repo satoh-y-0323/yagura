@@ -28,6 +28,7 @@ export const SESSION_EVENT = {
   approvalRegistrationRefused: 'session://approval-registration-refused',
   chatChanged: 'session://chat-changed',
   chatParticipantsChanged: 'session://chat-participants-changed',
+  chatHistoryCleared: 'session://chat-history-cleared',
   planChanged: 'session://plan-changed',
   modelChoices: 'session://model-choices',
   daemonRecovery: 'session://daemon-recovery',
@@ -84,6 +85,12 @@ export const PROFILE_DISABLED_CODE = 'profile_disabled';
 
 /** The `error.code` a daemon answers with when a live window already carries the name. */
 export const NAME_TAKEN_CODE = 'name_taken';
+
+/** The `error.code` a daemon answers with when asked to delete a room a window is open in. */
+export const ROOM_IN_USE_CODE = 'room_in_use';
+
+/** The id of the room every window can reach, which cannot be deleted. */
+export const MAIN_CHAT_ROOM_ID = 'main';
 
 /**
  * Fields every window-scoped payload carries.
@@ -521,9 +528,9 @@ export interface ChatMessages {
 /**
  * One row of the `list_chat_rooms` result (mirrors the Rust `ChatRoomInfo`).
  *
- * `halted` is optional only so `applyChatChangedToRooms` (`chat-store.ts`)
- * can build a minimal placeholder row without it; `narrowChatRooms` always
- * sets the key, folding the wire's absent-or-`null` into `null`
+ * `halted` and `has_open_windows` are optional only so
+ * `applyChatChangedToRooms` (`chat-store.ts`) can build a minimal placeholder
+ * row without them; `narrowChatRooms` always sets both keys
  * (`exactOptionalPropertyTypes`).
  */
 export interface ChatRoomInfo {
@@ -539,6 +546,14 @@ export interface ChatRoomInfo {
   halted?: ChatHalt | null;
   /** When this room was last posted to, `null` when nothing has been posted yet. */
   last_at_ms: number | null;
+  /** Whether a window that has not exited belongs to this room; such a room cannot be deleted. */
+  has_open_windows?: boolean;
+}
+
+/** Payload of `session://chat-history-cleared`: a room was cleared or deleted. */
+export interface ChatHistoryCleared {
+  /** The room whose history is gone. */
+  room_id: string;
 }
 
 /** Payload of `session://chat-changed`. */
@@ -1373,7 +1388,9 @@ export function narrowChatRooms(value: unknown): ChatRoomInfo[] {
  * Validates one row of the `list_chat_rooms` result. `halted` always keeps
  * its key here, folding the wire's absent-or-`null` into `null`: only the
  * minimal placeholder row `applyChatChangedToRooms` builds (`chat-store.ts`)
- * omits the key.
+ * omits the key. An absent `has_open_windows` comes from a daemon that does
+ * not report it, and reads as `true` so such a room is never offered for
+ * deletion.
  *
  * @throws {BoundaryError} when the row does not match the contract.
  */
@@ -1386,7 +1403,22 @@ function narrowChatRoomInfo(value: unknown, context: string): ChatRoomInfo {
     needs_user: requireBoolean(record, 'needs_user', context),
     halted: narrowChatHalt(readOwnField(record, 'halted'), `${context}.halted`),
     last_at_ms: readOptionalInteger(record, 'last_at_ms', context),
+    has_open_windows:
+      readOwnField(record, 'has_open_windows') === undefined
+        ? true
+        : requireBoolean(record, 'has_open_windows', context),
   };
+}
+
+/**
+ * Validates a `session://chat-history-cleared` payload.
+ *
+ * @throws {BoundaryError} when the payload does not match the contract.
+ */
+export function narrowChatHistoryCleared(value: unknown): ChatHistoryCleared {
+  const context = SESSION_EVENT.chatHistoryCleared;
+  const record = requireRecord(value, context);
+  return { room_id: requireString(record, 'room_id', context) };
 }
 
 /**

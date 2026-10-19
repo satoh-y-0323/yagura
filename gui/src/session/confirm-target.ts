@@ -12,8 +12,11 @@ import { buttons, chat, dialogs } from '../ui-messages';
 /** A destructive operation on a window. */
 export type WindowOperation = 'close' | 'interrupt';
 
+/** A destructive operation on a chat room. */
+export type RoomOperation = 'clear_room' | 'delete_room';
+
 /** An operation the confirmation dialog can be raised for. */
-export type ConfirmOperation = WindowOperation | 'broadcast';
+export type ConfirmOperation = WindowOperation | 'broadcast' | RoomOperation;
 
 /** What the confirmation dialog shows for one operation. */
 export interface ConfirmCopy {
@@ -28,12 +31,13 @@ export interface ConfirmCopy {
 /**
  * The wording of the confirmation dialog for `operation`.
  *
- * One source for all three operations, so the dialog itself carries no
+ * One source for every operation, so the dialog itself carries no
  * per-operation branch.
  *
  * @param operation the operation being confirmed
+ * @param roomName the room a room operation acts on; the other operations ignore it
  */
-export function confirmCopy(operation: ConfirmOperation): ConfirmCopy {
+export function confirmCopy(operation: ConfirmOperation, roomName = ''): ConfirmCopy {
   switch (operation) {
     case 'close':
       return { title: buttons.close, message: dialogs.closeConfirm, confirmLabel: buttons.close };
@@ -48,6 +52,18 @@ export function confirmCopy(operation: ConfirmOperation): ConfirmCopy {
         title: chat.broadcastConfirmTitle,
         message: chat.broadcastConfirmMessage,
         confirmLabel: chat.broadcastConfirmLabel,
+      };
+    case 'clear_room':
+      return {
+        title: chat.clearHistoryConfirmTitle(roomName),
+        message: chat.clearHistoryConfirmMessage,
+        confirmLabel: chat.clearHistoryConfirmLabel,
+      };
+    case 'delete_room':
+      return {
+        title: chat.deleteRoomConfirmTitle(roomName),
+        message: chat.deleteRoomConfirmMessage,
+        confirmLabel: chat.deleteRoomConfirmLabel,
       };
     default: {
       const unreachable: never = operation;

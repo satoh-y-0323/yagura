@@ -496,6 +496,17 @@ export const dummyMessages: Messages = {
     roomNeedsYouLabel: 'DUMMY_chat_roomNeedsYouLabel',
     broadcastConfirmRoomMessage: (name: string) =>
       `DUMMY_chat_broadcastConfirmRoomMessage(${name})`,
+    roomActionsLabel: 'DUMMY_chat_roomActionsLabel',
+    clearHistoryItem: 'DUMMY_chat_clearHistoryItem',
+    deleteRoomItem: 'DUMMY_chat_deleteRoomItem',
+    deleteMainRoomNote: 'DUMMY_chat_deleteMainRoomNote',
+    deleteRoomWithWindowsNote: 'DUMMY_chat_deleteRoomWithWindowsNote',
+    clearHistoryConfirmTitle: (name: string) => `DUMMY_chat_clearHistoryConfirmTitle(${name})`,
+    clearHistoryConfirmMessage: 'DUMMY_chat_clearHistoryConfirmMessage',
+    clearHistoryConfirmLabel: 'DUMMY_chat_clearHistoryConfirmLabel',
+    deleteRoomConfirmTitle: (name: string) => `DUMMY_chat_deleteRoomConfirmTitle(${name})`,
+    deleteRoomConfirmMessage: 'DUMMY_chat_deleteRoomConfirmMessage',
+    deleteRoomConfirmLabel: 'DUMMY_chat_deleteRoomConfirmLabel',
     unresolvedMentions: (mentions: readonly string[]) =>
       `DUMMY_chat_unresolvedMentions(${mentions.join(',')})`,
   },

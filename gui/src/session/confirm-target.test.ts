@@ -98,7 +98,13 @@ describe('resolveConfirmTarget: the blocked reason is distinguishable', () => {
   });
 });
 
-const CONFIRM_OPERATIONS: ConfirmOperation[] = ['close', 'interrupt', 'broadcast'];
+const CONFIRM_OPERATIONS: ConfirmOperation[] = [
+  'close',
+  'interrupt',
+  'broadcast',
+  'clear_room',
+  'delete_room',
+];
 
 describe('confirmCopy: one wording source for the confirmation dialog', () => {
   it.each(CONFIRM_OPERATIONS)(
@@ -147,6 +153,26 @@ describe('confirmCopy: one wording source for the confirmation dialog', () => {
       title: chat.broadcastConfirmTitle,
       message: chat.broadcastConfirmMessage,
       confirmLabel: chat.broadcastConfirmLabel,
+    });
+  });
+});
+
+describe('confirmCopy: the room operations name the room', () => {
+  it('asks before clearing a room, in the wording the room menu was agreed with', () => {
+    expect(confirmCopy('clear_room', 'yagura')).toEqual({
+      title: 'Clear the history of “yagura”?',
+      message:
+        "Every message in this room is deleted, and messages a window has not received yet are taken back. This can't be undone.",
+      confirmLabel: 'Clear history',
+    });
+  });
+
+  it('asks before deleting a room, in the wording the room menu was agreed with', () => {
+    expect(confirmCopy('delete_room', 'yagura_test')).toEqual({
+      title: 'Delete the room “yagura_test”?',
+      message:
+        "The room and all its messages are deleted. If a window in this folder uses chat later, the room comes back empty. This can't be undone.",
+      confirmLabel: 'Delete room',
     });
   });
 });

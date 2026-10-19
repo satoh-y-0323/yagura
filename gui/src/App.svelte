@@ -35,12 +35,17 @@
   import {
     anyNeedsUser,
     applyChatChangedToRooms,
+    applyChatHistoryCleared,
     applyRoomsList,
     chatReloadAfterSeq,
+    chatRoomGeneration,
     emptyChatRoom,
-    mergeChatMessages,
+    foldChatPage,
+    roomAfterRemoval,
+    type ChatHistory,
     type ChatRoomState,
   } from './chat/chat-store';
+  import { describeRoomRemovalFailure } from './chat/room-actions';
   import { serializeRefresh } from './chat/refresh-serializer';
   import { daemonProblemNotices } from './daemon-health-notice';
   import type { DropSignal } from './ipc/folder-drop-model';
@@ -52,6 +57,7 @@
     ATTACH_VIEW_MIN_REVISION,
     type ApprovalRequest,
     type ChatChanged,
+    type ChatHistoryCleared,
     type ChatPosted,
     type ChatRoomInfo,
     type RestoreEntry,
@@ -59,10 +65,13 @@
   import {
     invokeNextFrames,
     subscribeChatChanged,
+    subscribeChatHistoryCleared,
     subscribeChatParticipantsChanged,
     subscribeSession,
     subscribeWindowList,
     invokeBroadcastChat,
+    invokeClearChatRoom,
+    invokeDeleteChatRoom,
     invokeGetApprovalSettings,
     invokeListChatRooms,
     invokeListRestoreCandidates,
@@ -431,7 +440,7 @@
   let unsubscribeWindowList: (() => void) | null = null;
 
   // Confirmation dialog state
-  let confirmDialog = { isOpen: false, operation: 'close' as ConfirmOperation };
+  let confirmDialog = { isOpen: false, operation: 'close' as ConfirmOperation, roomName: '' };
   let pendingConfirm: ((approved: boolean) => void) | null = null;
 
   // The chat rooms. `chatRooms` is the room list (`list_chat_rooms`,
@@ -463,9 +472,12 @@
   let currentRoomId = '';
   let chatRooms: Map<string, ChatRoomInfo> = new Map();
   let chatRoomStates: Map<string, ChatRoomState> = new Map();
+  // Each room's generation; a page read under an older one predates a clear.
+  let chatRoomGenerations: Map<string, number> = new Map();
   let chatNeedsUser = false;
   let unsubscribeChatChanged: (() => void) | null = null;
   let unsubscribeChatParticipantsChanged: (() => void) | null = null;
+  let unsubscribeChatHistoryCleared: (() => void) | null = null;
 
   // The plan ledger, open independently of the chat panel. Liveness and the
   // owner candidates are derived by the panel from the window registry, so
@@ -697,7 +709,7 @@
           ...confirmCopy(confirmDialog.operation),
           message: chat.broadcastConfirmRoomMessage(currentRoomName),
         }
-      : confirmCopy(confirmDialog.operation);
+      : confirmCopy(confirmDialog.operation, confirmDialog.roomName);
 
   $: approvalRequest = approvalQueue.head(approvals);
   // An approval never stacks on top of another modal: it waits in the queue
@@ -775,13 +787,13 @@
    */
   const confirmPort: ConfirmPort = (operation) => requestConfirmation(operation);
 
-  function requestConfirmation(operation: ConfirmOperation): Promise<boolean> {
+  function requestConfirmation(operation: ConfirmOperation, roomName = ''): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       // A request can only still be pending if its dialog is the one being
       // replaced here. Deny it instead of leaving its caller waiting forever.
       answerConfirm(false);
       pendingConfirm = resolve;
-      confirmDialog = { isOpen: true, operation };
+      confirmDialog = { isOpen: true, operation, roomName };
     });
   }
 
@@ -836,16 +848,18 @@
     if (roomId === '') {
       return;
     }
+    const generation = chatRoomGeneration(chatRoomGenerations, roomId);
     try {
-      const state = chatRoomStates.get(roomId) ?? emptyChatRoom(roomId);
-      const merged = mergeChatMessages(state, await invokeReadChat(roomId, afterSeq));
-      // eslint-disable-next-line svelte/prefer-svelte-reactivity -- snapshot swap: a fresh Map is reassigned to the reactive `let`, so runes-based SvelteMap reactivity does not apply
-      const nextStates = new Map(chatRoomStates);
-      nextStates.set(roomId, merged);
-      chatRoomStates = nextStates;
+      const page = await invokeReadChat(roomId, afterSeq);
+      // Folded into what is held once the page is back, not when it was asked for.
+      chatRoomStates = foldChatPage(chatHistory(), roomId, generation, page);
     } catch (error) {
       onError(error);
     }
+  }
+
+  function chatHistory(): ChatHistory {
+    return { states: chatRoomStates, generations: chatRoomGenerations };
   }
 
   /**
@@ -915,6 +929,53 @@
     }
     void refreshChatRooms();
     void refreshChat(chatRoomStates.get(currentRoomId)?.nextAfterSeq);
+  }
+
+  /**
+   * A room's history was cleared, or the room deleted: what is held for it is
+   * dropped and the rooms are listed again even while the panel is closed,
+   * since a clear also lifts the room's attention badge. A shown room that
+   * is gone gives way to `main`.
+   */
+  async function applyChatHistoryClearedPush(payload: ChatHistoryCleared): Promise<void> {
+    const cleared = applyChatHistoryCleared(chatHistory(), payload.room_id);
+    chatRoomStates = cleared.states;
+    chatRoomGenerations = cleared.generations;
+    await refreshChatRooms();
+    const nextRoomId = roomAfterRemoval(currentRoomId, chatRooms);
+    if (!isChatOpen) {
+      currentRoomId = nextRoomId;
+      return;
+    }
+    if (nextRoomId !== currentRoomId) {
+      selectChatRoom(nextRoomId);
+    } else if (currentRoomId === payload.room_id) {
+      void refreshChat();
+    }
+  }
+
+  /**
+   * Clears or deletes a room once the user confirms. What the panel holds
+   * changes on the `chat_history_cleared` push that follows, the same way
+   * for a removal made here or by another approver.
+   */
+  async function removeChatRoom(
+    operation: 'clear_room' | 'delete_room',
+    room: ChatRoomInfo
+  ): Promise<void> {
+    if (!(await requestConfirmation(operation, room.name))) {
+      return;
+    }
+    operationError = null;
+    try {
+      await (operation === 'clear_room'
+        ? invokeClearChatRoom(room.room_id)
+        : invokeDeleteChatRoom(room.room_id));
+    } catch (error) {
+      console.error(chat.panelTitle, error);
+      operationError = describeRoomRemovalFailure(error);
+      void refreshChatRooms();
+    }
   }
 
   /** Posts one message; `null` leaves the composer holding what was typed. */
@@ -1977,6 +2038,7 @@
     unsubscribeWindowList?.();
     unsubscribeChatChanged?.();
     unsubscribeChatParticipantsChanged?.();
+    unsubscribeChatHistoryCleared?.();
     unsubscribePlanChanged?.();
     unsubscribeModelChoices?.();
     unsubscribeMcpRegistrationStatus?.();
@@ -2094,6 +2156,13 @@
 
     unsubscribeChatParticipantsChanged = await subscribeChatParticipantsChanged(
       applyChatParticipantsChanged,
+      (error) => {
+        reportBoundaryNotice('chatChanged', error);
+      }
+    );
+
+    unsubscribeChatHistoryCleared = await subscribeChatHistoryCleared(
+      (payload) => void applyChatHistoryClearedPush(payload),
       (error) => {
         reportBoundaryNotice('chatChanged', error);
       }
@@ -3038,6 +3107,9 @@
     rooms={[...chatRooms.values()]}
     {currentRoomId}
     onSelectRoom={selectChatRoom}
+    onRefreshRooms={refreshChatRooms}
+    onClearRoom={(room: ChatRoomInfo) => void removeChatRoom('clear_room', room)}
+    onDeleteRoom={(room: ChatRoomInfo) => void removeChatRoom('delete_room', room)}
     onClose={closeChat}
     onSend={(body: string) => postChat(body, false)}
     onBroadcast={broadcastChat}

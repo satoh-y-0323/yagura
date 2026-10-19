@@ -9,11 +9,16 @@ import { describe, it, expect } from 'vitest';
 import {
   anyNeedsUser,
   applyChatChangedToRooms,
+  applyChatHistoryCleared,
   applyRoomsList,
   chatReloadAfterSeq,
+  chatRoomGeneration,
   emptyChatRoom,
+  foldChatPage,
   mergeChatMessages,
   resolveDisplayName,
+  roomAfterRemoval,
+  type ChatHistory,
 } from './chat-store';
 import type {
   ChatChanged,
@@ -519,5 +524,125 @@ describe('resolveDisplayName: the most recent message wins', () => {
       })
     );
     expect(resolveDisplayName(state, 'w-c')).toBe('renamed');
+  });
+});
+
+/** What the panel holds after reading `pages` into an otherwise empty history. */
+function historyWith(...pages: ChatMessages[]): ChatHistory {
+  let history: ChatHistory = { states: new Map(), generations: new Map() };
+  for (const read of pages) {
+    const generation = chatRoomGeneration(history.generations, read.room_id);
+    history = { ...history, states: foldChatPage(history, read.room_id, generation, read) };
+  }
+  return history;
+}
+
+describe('applyChatHistoryCleared', () => {
+  it('drops what the cleared room held, its cursor included', () => {
+    const before = historyWith(
+      page({ room_id: 'r-a', messages: [message(1), message(2)], next_after_seq: 2 })
+    );
+    const after = applyChatHistoryCleared(before, 'r-a');
+    expect(after.states.has('r-a')).toBe(false);
+  });
+
+  it('leaves the other rooms as they were', () => {
+    const before = historyWith(
+      page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }),
+      page({ room_id: 'r-b', messages: [message(5)], next_after_seq: 5 })
+    );
+    const after = applyChatHistoryCleared(before, 'r-a');
+    expect(after.states.get('r-b')).toEqual(before.states.get('r-b'));
+    expect(chatRoomGeneration(after.generations, 'r-b')).toBe(
+      chatRoomGeneration(before.generations, 'r-b')
+    );
+  });
+
+  it('moves the room to a new generation every time, a room never read included', () => {
+    const empty: ChatHistory = { states: new Map(), generations: new Map() };
+    const once = applyChatHistoryCleared(empty, 'r-a');
+    const twice = applyChatHistoryCleared(once, 'r-a');
+    const start = chatRoomGeneration(empty.generations, 'r-a');
+    expect(chatRoomGeneration(once.generations, 'r-a')).not.toBe(start);
+    expect(chatRoomGeneration(twice.generations, 'r-a')).not.toBe(
+      chatRoomGeneration(once.generations, 'r-a')
+    );
+  });
+
+  it('leaves the history it was given unchanged', () => {
+    const before = historyWith(page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }));
+    const generation = chatRoomGeneration(before.generations, 'r-a');
+    applyChatHistoryCleared(before, 'r-a');
+    expect(before.states.has('r-a')).toBe(true);
+    expect(chatRoomGeneration(before.generations, 'r-a')).toBe(generation);
+  });
+});
+
+describe('foldChatPage', () => {
+  it('merges a page read in the current generation into what the room holds', () => {
+    const before = historyWith(page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }));
+    const states = foldChatPage(
+      before,
+      'r-a',
+      chatRoomGeneration(before.generations, 'r-a'),
+      page({ room_id: 'r-a', messages: [message(2)], next_after_seq: 2 })
+    );
+    expect(states.get('r-a')?.messages.map((entry) => entry.seq)).toEqual([1, 2]);
+    expect(states.get('r-a')?.nextAfterSeq).toBe(2);
+  });
+
+  it('drops a page read before the room was cleared, so cleared messages do not come back', () => {
+    const before = historyWith(page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }));
+    const issued = chatRoomGeneration(before.generations, 'r-a');
+    const cleared = applyChatHistoryCleared(before, 'r-a');
+    const states = foldChatPage(
+      cleared,
+      'r-a',
+      issued,
+      page({ room_id: 'r-a', messages: [message(1), message(2)], next_after_seq: 2 })
+    );
+    expect(states.has('r-a')).toBe(false);
+  });
+
+  it('takes a page read after the clear into the emptied room', () => {
+    const before = historyWith(page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }));
+    const cleared = applyChatHistoryCleared(before, 'r-a');
+    const states = foldChatPage(
+      cleared,
+      'r-a',
+      chatRoomGeneration(cleared.generations, 'r-a'),
+      page({ room_id: 'r-a', messages: [message(7)], next_after_seq: 7 })
+    );
+    expect(states.get('r-a')?.messages.map((entry) => entry.seq)).toEqual([7]);
+  });
+
+  it('keeps a stale page for one room from touching another', () => {
+    const before = historyWith(
+      page({ room_id: 'r-a', messages: [message(1)], next_after_seq: 1 }),
+      page({ room_id: 'r-b', messages: [message(3)], next_after_seq: 3 })
+    );
+    const issued = chatRoomGeneration(before.generations, 'r-a');
+    const cleared = applyChatHistoryCleared(before, 'r-a');
+    const states = foldChatPage(cleared, 'r-a', issued, page({ room_id: 'r-a' }));
+    expect(states.get('r-b')).toEqual(before.states.get('r-b'));
+  });
+});
+
+describe('roomAfterRemoval', () => {
+  const listed = applyRoomsList([
+    roomInfo({ room_id: 'main', name: 'main' }),
+    roomInfo({ room_id: 'r-a', name: 'yagura' }),
+  ]);
+
+  it('keeps a room that is still listed', () => {
+    expect(roomAfterRemoval('r-a', listed)).toBe('r-a');
+  });
+
+  it('moves to main when the shown room is no longer listed', () => {
+    expect(roomAfterRemoval('r-gone', listed)).toBe('main');
+  });
+
+  it('leaves no room selected while none was', () => {
+    expect(roomAfterRemoval('', listed)).toBe('');
   });
 });

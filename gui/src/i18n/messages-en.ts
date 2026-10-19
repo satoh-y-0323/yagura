@@ -531,6 +531,21 @@ export const messagesEn = {
     roomNeedsYouLabel: 'This room needs you',
     broadcastConfirmRoomMessage: (name: string): string =>
       `This message goes to every participant in the chat room “${name}”. Continue?`,
+
+    // The room rail's per-room menu and its confirmations.
+    roomActionsLabel: 'Room actions',
+    clearHistoryItem: 'Clear history…',
+    deleteRoomItem: 'Delete room…',
+    deleteMainRoomNote: "The main room can't be deleted.",
+    deleteRoomWithWindowsNote: "Close this room's windows first.",
+    clearHistoryConfirmTitle: (name: string): string => `Clear the history of “${name}”?`,
+    clearHistoryConfirmMessage:
+      "Every message in this room is deleted, and messages a window has not received yet are taken back. This can't be undone.",
+    clearHistoryConfirmLabel: 'Clear history',
+    deleteRoomConfirmTitle: (name: string): string => `Delete the room “${name}”?`,
+    deleteRoomConfirmMessage:
+      "The room and all its messages are deleted. If a window in this folder uses chat later, the room comes back empty. This can't be undone.",
+    deleteRoomConfirmLabel: 'Delete room',
   },
 
   /**

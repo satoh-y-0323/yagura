@@ -2604,8 +2604,8 @@ pub enum ClientMessage {
     },
     /// Removes a chat room altogether. Approver-only. Answered with
     /// [`DaemonMessage::ChatRoomDeleted`]. `"main"` and an unknown room are
-    /// `invalid_argument`; a room a registered window (exited ones included)
-    /// belongs to is `room_in_use`.
+    /// `invalid_argument`; a room a window that has not exited belongs to is
+    /// `room_in_use`.
     DeleteChatRoom {
         /// The room to remove.
         room_id: String,
@@ -4174,9 +4174,9 @@ pub struct ChatRoomInfo {
     /// `None` -- present on the wire as `null` -- when nothing has been
     /// posted in it yet.
     pub last_at_ms: Option<u64>,
-    /// Whether any window registered with the daemon (an exited one still on
-    /// screen included) belongs to this room's workspace. Such a room cannot
-    /// be deleted. Absent on an older daemon's wire, which reads as `false`.
+    /// Whether a window that has not exited belongs to this room's workspace.
+    /// Such a room cannot be deleted. Absent on an older daemon's wire, which
+    /// reads as `false`; a client should not offer the delete then.
     #[serde(default)]
     pub has_open_windows: bool,
 }

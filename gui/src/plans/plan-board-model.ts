@@ -15,6 +15,7 @@ import type {
   TaskAssignment,
   ReviewMark,
 } from '../ipc/plan-boundary';
+import { daemonRejectionCode } from '../ipc/daemon-rejection';
 import type { DetectedStatusView } from '../ipc/session-boundary';
 import type { WindowEntry } from '../stores/window-registry';
 
@@ -173,19 +174,6 @@ export function planReloadFor(event: PlanBoardEvent, selectedPlanId: string | nu
   }
 }
 
-const REJECTED_PREFIX = 'the daemon rejected the request: ';
-
-/** The code a daemon rejection carries, `null` when `error` is not that shape. */
-function rejectionCode(error: unknown): string | null {
-  const text = typeof error === 'string' ? error : error instanceof Error ? error.message : null;
-  if (text === null || !text.startsWith(REJECTED_PREFIX)) {
-    return null;
-  }
-  const rest = text.slice(REJECTED_PREFIX.length);
-  const separator = rest.indexOf(': ');
-  return separator === -1 ? rest : rest.slice(0, separator);
-}
-
 /**
  * Drops the selection only when the read that failed named the plan still
  * selected and was refused as `plan_not_found`; a selection made after the
@@ -199,7 +187,7 @@ export function selectionAfterPlanReadFailure(
   if (selectedPlanId !== failedPlanId) {
     return selectedPlanId;
   }
-  return rejectionCode(error) === 'plan_not_found' ? null : selectedPlanId;
+  return daemonRejectionCode(error) === 'plan_not_found' ? null : selectedPlanId;
 }
 
 /** Builds the assignment the editor's fields describe; empty text means "not set". */

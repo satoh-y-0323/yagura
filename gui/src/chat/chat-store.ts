@@ -7,13 +7,14 @@
  * rather than inside a component.
  */
 
-import type {
-  ChatChanged,
-  ChatHalt,
-  ChatMessage,
-  ChatMessages,
-  ChatParticipant,
-  ChatRoomInfo,
+import {
+  MAIN_CHAT_ROOM_ID,
+  type ChatChanged,
+  type ChatHalt,
+  type ChatMessage,
+  type ChatMessages,
+  type ChatParticipant,
+  type ChatRoomInfo,
 } from '../ipc/session-boundary';
 
 /** What the panel holds about one room. */
@@ -204,4 +205,88 @@ export function applyChatChangedToRooms(
     });
   }
   return next;
+}
+
+/**
+ * Everything the panel has read, room by room, with each room's generation.
+ * A room moves to a new generation when its history is cleared, so a read
+ * sent before that can be told apart from one sent after.
+ */
+export interface ChatHistory {
+  /** What each room's page reads have merged in. */
+  states: Map<string, ChatRoomState>;
+  /** Each room's generation; a room missing here is at generation 0. */
+  generations: Map<string, number>;
+}
+
+/**
+ * The generation `roomId` is at now; pass it to {@link foldChatPage} with
+ * the page read under it.
+ *
+ * @param generations the generations held now
+ * @param roomId the room about to be read
+ */
+export function chatRoomGeneration(
+  generations: ReadonlyMap<string, number>,
+  roomId: string
+): number {
+  return generations.get(roomId) ?? 0;
+}
+
+/**
+ * Drops what the panel holds for a room whose history was cleared or which
+ * was deleted, and moves the room to a new generation. `history` is left as
+ * it was.
+ *
+ * @param history what the panel holds now
+ * @param roomId the room the daemon cleared
+ */
+export function applyChatHistoryCleared(history: ChatHistory, roomId: string): ChatHistory {
+  const states = new Map(history.states);
+  states.delete(roomId);
+  const generations = new Map(history.generations);
+  generations.set(roomId, chatRoomGeneration(history.generations, roomId) + 1);
+  return { states, generations };
+}
+
+/**
+ * Folds a page read for `roomId` into the held rooms and returns them. A
+ * page read under an older generation predates a clear, so it would bring
+ * cleared messages back; it is dropped and the rooms are returned unchanged.
+ *
+ * @param history what the panel holds now, not when the read was sent
+ * @param roomId the room the read was sent for
+ * @param issuedGeneration the room's generation when the read was sent
+ * @param page the page the daemon answered with
+ */
+export function foldChatPage(
+  history: ChatHistory,
+  roomId: string,
+  issuedGeneration: number,
+  page: ChatMessages
+): Map<string, ChatRoomState> {
+  const states = new Map(history.states);
+  if (issuedGeneration !== chatRoomGeneration(history.generations, roomId)) {
+    return states;
+  }
+  states.set(roomId, mergeChatMessages(states.get(roomId) ?? emptyChatRoom(roomId), page));
+  return states;
+}
+
+/**
+ * The room to show once the room list was read again after a removal: the
+ * shown room while it is still listed, `main` once it is not, and no room
+ * while none was shown.
+ *
+ * @param currentRoomId the room shown now, `''` for none
+ * @param rooms the room list just read
+ */
+export function roomAfterRemoval(
+  currentRoomId: string,
+  rooms: ReadonlyMap<string, ChatRoomInfo>
+): string {
+  if (currentRoomId === '' || rooms.has(currentRoomId)) {
+    return currentRoomId;
+  }
+  return MAIN_CHAT_ROOM_ID;
 }

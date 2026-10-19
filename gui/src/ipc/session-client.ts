@@ -31,6 +31,7 @@ import {
   narrowApprovalWithdrawnPayload,
   narrowAttachResponse,
   narrowChatChanged,
+  narrowChatHistoryCleared,
   narrowChatMessages,
   narrowChatPosted,
   narrowChatRooms,
@@ -69,6 +70,7 @@ import {
   type ApprovalWithdrawnPayload,
   type AttachResponse,
   type ChatChanged,
+  type ChatHistoryCleared,
   type ChatMessages,
   type ChatPosted,
   type ChatRoomInfo,
@@ -1010,6 +1012,32 @@ export async function invokeListChatRooms(): Promise<ChatRoomInfo[]> {
 }
 
 /**
+ * Deletes every message of one chat room; the room itself stays. Resolves to
+ * the room the daemon cleared.
+ *
+ * @throws when the core rejects the request or the reply fails validation.
+ */
+export async function invokeClearChatRoom(roomId: string): Promise<string> {
+  return narrowStringResult(
+    await invoke<unknown>('clear_chat_room', { room_id: roomId }),
+    'clear_chat_room'
+  );
+}
+
+/**
+ * Deletes one chat room and its messages. Resolves to the room the daemon
+ * deleted; the daemon refuses `main` and a room a window is open in.
+ *
+ * @throws when the core rejects the request or the reply fails validation.
+ */
+export async function invokeDeleteChatRoom(roomId: string): Promise<string> {
+  return narrowStringResult(
+    await invoke<unknown>('delete_chat_room', { room_id: roomId }),
+    'delete_chat_room'
+  );
+}
+
+/**
  * Reads the current daemon-recovery status, so a subscriber that has just
  * started listening does not have to wait for the next change to know where
  * recovery stands.
@@ -1382,6 +1410,24 @@ export async function subscribeChatChanged(
     SESSION_EVENT.chatChanged,
     narrowChatChanged,
     onChatChanged,
+    onBoundaryError
+  );
+}
+
+/**
+ * Subscribes to the pushes saying a chat room's history was cleared or the
+ * room deleted. A payload that fails validation is reported and dropped.
+ *
+ * @returns a function that cancels the subscription.
+ */
+export async function subscribeChatHistoryCleared(
+  onCleared: (payload: ChatHistoryCleared) => void,
+  onBoundaryError: (error: unknown) => void
+): Promise<UnlistenFn> {
+  return listenAppEvent(
+    SESSION_EVENT.chatHistoryCleared,
+    narrowChatHistoryCleared,
+    onCleared,
     onBoundaryError
   );
 }
