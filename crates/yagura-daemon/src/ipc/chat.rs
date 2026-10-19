@@ -1570,11 +1570,185 @@ pub(super) async fn handle_list_chat_rooms(
                 last_at_ms: row
                     .last_at_ms
                     .map(|at_ms| u64::try_from(at_ms).unwrap_or(0)),
+                has_open_windows: registry.has_window_in_room(&row.room_id),
             }
         })
         .collect();
 
     outbound.reply(&DaemonMessage::ChatRooms { rooms });
+}
+
+/// Which of the two room removals a request asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoomRemoval {
+    /// Empty the room; the room stays.
+    ClearHistory,
+    /// Remove the room itself.
+    DeleteRoom,
+}
+
+/// How a removal ended inside the store pass.
+enum RemovalEnd {
+    NoSuchRoom,
+    InUse,
+    Done,
+}
+
+/// Empties a room's history on an approver's request. See
+/// [`handle_room_removal`].
+pub(super) async fn handle_clear_chat_room(
+    chat: &Arc<ChatRuntime>,
+    registry: &Arc<WindowRegistry>,
+    broker: &Arc<ApprovalBroker>,
+    outbound: &Arc<Outbound>,
+    state: &super::ConnectionState,
+    room_id: String,
+) {
+    handle_room_removal(
+        chat,
+        registry,
+        broker,
+        outbound,
+        state,
+        room_id,
+        RoomRemoval::ClearHistory,
+    )
+    .await;
+}
+
+/// Deletes a room no window belongs to on an approver's request. See
+/// [`handle_room_removal`].
+pub(super) async fn handle_delete_chat_room(
+    chat: &Arc<ChatRuntime>,
+    registry: &Arc<WindowRegistry>,
+    broker: &Arc<ApprovalBroker>,
+    outbound: &Arc<Outbound>,
+    state: &super::ConnectionState,
+    room_id: String,
+) {
+    handle_room_removal(
+        chat,
+        registry,
+        broker,
+        outbound,
+        state,
+        room_id,
+        RoomRemoval::DeleteRoom,
+    )
+    .await;
+}
+
+/// Clears or deletes a room. Approver-only, like the listing.
+///
+/// The store's removal and the taking back of every post still waiting in a
+/// window's inbox happen in one store pass, the same pass that puts a post in
+/// an inbox only while it is stored (`deposit_while_message_exists`): whichever
+/// runs first, a removed post never reaches a CLI. A post a CLI is already
+/// taking is not stopped. On success every approver is pushed
+/// [`DaemonMessage::ChatHistoryCleared`], and a deletion also raises the
+/// participation signal so the room's disappearance is announced like any
+/// other change of the rooms.
+async fn handle_room_removal(
+    chat: &Arc<ChatRuntime>,
+    registry: &Arc<WindowRegistry>,
+    broker: &Arc<ApprovalBroker>,
+    outbound: &Arc<Outbound>,
+    state: &super::ConnectionState,
+    room_id: String,
+    removal: RoomRemoval,
+) {
+    if !matches!(state.origin, RequestOrigin::Approver) {
+        outbound.reply(&error_msg(
+            "auth_failed",
+            "this connection may not remove chat history or rooms",
+        ));
+        return;
+    }
+    if removal == RoomRemoval::DeleteRoom && room_id == MAIN_ROOM_ID {
+        outbound.reply(&error_msg(
+            "invalid_argument",
+            "the main room cannot be deleted",
+        ));
+        return;
+    }
+    // Refused before the store is touched, the way `resolve_room` refuses
+    // an id that cannot name a room.
+    if room_id != MAIN_ROOM_ID && !is_valid_token(&room_id) {
+        outbound.reply(&error_msg("invalid_argument", "unknown room"));
+        return;
+    }
+
+    let store_registry = Arc::clone(registry);
+    let store_room = room_id.clone();
+    let ended = chat
+        .store
+        .with_store(move |store| -> Result<RemovalEnd, StoreError> {
+            if store.find_room(&store_room)?.is_none() {
+                return Ok(RemovalEnd::NoSuchRoom);
+            }
+            if removal == RoomRemoval::DeleteRoom && store_registry.has_window_in_room(&store_room)
+            {
+                return Ok(RemovalEnd::InUse);
+            }
+            let pending = match removal {
+                RoomRemoval::ClearHistory => store.clear_history(&store_room)?,
+                RoomRemoval::DeleteRoom => store.delete_room(&store_room)?,
+            };
+            for (seq, window_id) in pending {
+                if let Some(entry) = store_registry.get(&window_id) {
+                    entry
+                        .inbox()
+                        .withdraw_waiting(&format!("chat:{store_room}:{seq}"));
+                }
+            }
+            Ok(RemovalEnd::Done)
+        })
+        .await;
+
+    match ended {
+        Ok(Ok(RemovalEnd::Done)) => {}
+        Ok(Ok(RemovalEnd::NoSuchRoom)) => {
+            outbound.reply(&error_msg("invalid_argument", "unknown room"));
+            return;
+        }
+        Ok(Ok(RemovalEnd::InUse)) => {
+            outbound.reply(&error_msg(
+                "room_in_use",
+                "a window is open in that room, so it cannot be deleted",
+            ));
+            return;
+        }
+        Ok(Err(store_err)) => {
+            tracing::warn!(error = %store_err, "chat room removal failed");
+            outbound.reply(&error_msg("internal", "failed to remove the chat history"));
+            return;
+        }
+        Err(StoreAccessError::Disabled) => {
+            outbound.reply(&error_msg(
+                "unsupported",
+                "chat is not available on this daemon",
+            ));
+            return;
+        }
+        Err(StoreAccessError::Failed(join_err)) => {
+            tracing::warn!(error = %join_err, "chat store access task failed");
+            outbound.reply(&error_msg("internal", "failed to remove the chat history"));
+            return;
+        }
+    }
+
+    outbound.reply(&match removal {
+        RoomRemoval::ClearHistory => DaemonMessage::ChatRoomCleared {
+            room_id: room_id.clone(),
+        },
+        RoomRemoval::DeleteRoom => DaemonMessage::ChatRoomDeleted {
+            room_id: room_id.clone(),
+        },
+    });
+    broker.notify_approvers(&DaemonMessage::ChatHistoryCleared { room_id });
+    if removal == RoomRemoval::DeleteRoom {
+        registry.announce_participation_change();
+    }
 }
 
 #[cfg(test)]

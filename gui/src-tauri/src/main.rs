@@ -110,6 +110,8 @@ fn main() -> anyhow::Result<()> {
             commands::broadcast_chat,
             commands::read_chat,
             commands::list_chat_rooms,
+            commands::clear_chat_room,
+            commands::delete_chat_room,
             commands::list_plans,
             commands::get_plan,
             commands::delete_plan,

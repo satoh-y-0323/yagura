@@ -488,6 +488,7 @@ fn sample_chat_room_info(halted: Option<ChatHalt>) -> ChatRoomInfo {
         needs_user: false,
         halted,
         last_at_ms: Some(1_700_000_000_000),
+        has_open_windows: true,
     }
 }
 
@@ -502,6 +503,7 @@ fn daemon_message_chat_rooms_round_trips_with_multiple_rooms() {
                 needs_user: true,
                 halted: None,
                 last_at_ms: None,
+                has_open_windows: false,
             },
             sample_chat_room_info(Some(ChatHalt {
                 reason: "monologue".to_string(),
@@ -577,5 +579,107 @@ fn a_client_only_room_listing_type_is_unknown_to_the_daemon_decoder() {
     assert!(
         matches!(result, Err(MessageError::UnknownType)),
         "list_chat_rooms must be unknown to the daemon decoder, got {result:?}"
+    );
+}
+
+// =============================================================================
+// ClearChatRoom / DeleteChatRoom / ChatRoomCleared / ChatRoomDeleted /
+// ChatHistoryCleared / ChatRoomInfo::has_open_windows
+// =============================================================================
+
+#[test]
+fn clear_and_delete_chat_room_requests_round_trip_under_their_snake_case_tags() {
+    let clear = decode_client_message(br#"{"type":"clear_chat_room","room_id":"main"}"#)
+        .expect("clear_chat_room must decode");
+    assert_eq!(
+        clear,
+        ClientMessage::ClearChatRoom {
+            room_id: "main".to_string()
+        }
+    );
+    let delete = decode_client_message(br#"{"type":"delete_chat_room","room_id":"r-1"}"#)
+        .expect("delete_chat_room must decode");
+    assert_eq!(
+        delete,
+        ClientMessage::DeleteChatRoom {
+            room_id: "r-1".to_string()
+        }
+    );
+    for msg in [clear, delete] {
+        assert_eq!(
+            decode_client_message(&encode_client_message(&msg)).expect("round trip"),
+            msg
+        );
+    }
+}
+
+#[test]
+fn a_clear_or_delete_request_without_a_room_id_is_invalid() {
+    for body in [
+        &br#"{"type":"clear_chat_room"}"#[..],
+        &br#"{"type":"delete_chat_room"}"#[..],
+    ] {
+        assert!(
+            matches!(decode_client_message(body), Err(MessageError::InvalidJson)),
+            "a room id is required"
+        );
+    }
+}
+
+#[test]
+fn the_room_removal_answers_and_push_round_trip_and_are_unknown_to_the_client_decoder() {
+    for (tag, msg) in [
+        (
+            "chat_room_cleared",
+            DaemonMessage::ChatRoomCleared {
+                room_id: "main".to_string(),
+            },
+        ),
+        (
+            "chat_room_deleted",
+            DaemonMessage::ChatRoomDeleted {
+                room_id: "r-1".to_string(),
+            },
+        ),
+        (
+            "chat_history_cleared",
+            DaemonMessage::ChatHistoryCleared {
+                room_id: "r-1".to_string(),
+            },
+        ),
+    ] {
+        let value = as_json(&msg);
+        assert_eq!(
+            value.get("type").and_then(serde_json::Value::as_str),
+            Some(tag)
+        );
+        assert_eq!(
+            decode_daemon_message(&encode_daemon_message(&msg)).expect("round trip"),
+            msg
+        );
+        let body = serde_json::to_vec(&value).unwrap();
+        assert!(matches!(
+            decode_client_message(&body),
+            Err(MessageError::UnknownType)
+        ));
+    }
+}
+
+#[test]
+fn chat_room_info_without_has_open_windows_decodes_as_not_open() {
+    let body = br#"{"type":"chat_rooms","rooms":[{"room_id":"main","name":"main","participant_count":0,"needs_user":false,"halted":null,"last_at_ms":null}]}"#;
+    let decoded = decode_daemon_message(body).expect("an older daemon's listing must decode");
+    let DaemonMessage::ChatRooms { rooms } = decoded else {
+        panic!("expected chat_rooms");
+    };
+    assert!(!rooms[0].has_open_windows);
+}
+
+#[test]
+fn chat_room_info_always_writes_has_open_windows() {
+    let value = as_json(&sample_chat_room_info(None));
+    assert_eq!(
+        value.get("has_open_windows"),
+        Some(&serde_json::Value::Bool(true))
     );
 }

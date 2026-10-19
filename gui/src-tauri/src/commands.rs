@@ -820,6 +820,39 @@ pub async fn list_chat_rooms(
     pool.list_chat_rooms(&app).await.map_err(stringify)
 }
 
+/// Clears one chat room's history and returns the room the daemon cleared.
+/// `room_id` is passed through unvalidated: the daemon is the authority on
+/// which rooms exist.
+///
+/// # Errors
+/// Returns a human-readable message when the daemon cannot be reached or
+/// rejects the request.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn clear_chat_room(
+    app: AppHandle,
+    room_id: String,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<String, String> {
+    pool.clear_chat_room(&app, room_id).await.map_err(stringify)
+}
+
+/// Deletes one chat room and returns the room the daemon deleted. The
+/// daemon refuses `main` and a room a window is open in (`room_in_use`).
+///
+/// # Errors
+/// Returns a human-readable message when the daemon cannot be reached or
+/// rejects the request.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn delete_chat_room(
+    app: AppHandle,
+    room_id: String,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<String, String> {
+    pool.delete_chat_room(&app, room_id)
+        .await
+        .map_err(stringify)
+}
+
 /// Lists the plans the daemon lets this GUI see. Every plan-ledger command
 /// goes through the control connection, which the daemon knows as the
 /// approver; the daemon, not this layer, decides what an approver may do.

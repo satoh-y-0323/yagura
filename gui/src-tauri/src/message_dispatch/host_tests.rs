@@ -7,7 +7,7 @@ use yagura_protocol::{ClientMessage, CursorShape, CursorState, ViewState, Withdr
 use yagura_test_support::ipc::reply_within;
 
 use super::*;
-use crate::events::EVENT_SUPERSEDED;
+use crate::events::{EVENT_CHAT_HISTORY_CLEARED, EVENT_SUPERSEDED};
 use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, WAIT_LIMIT, error_frame};
 
 fn frame(seq: u64) -> Frame {
@@ -126,6 +126,78 @@ async fn pushes_of_the_daemon_become_the_events_the_webview_listens_for() {
     );
     assert_eq!(events[0].payload, json!({ "plan_id": "p1" }));
     assert_eq!(events[1].payload["request_id"], "r1");
+}
+
+#[tokio::test]
+async fn a_cleared_chat_history_becomes_the_event_naming_its_room() {
+    let host = FakeHost::new("dispatch-history-cleared");
+    let client = Arc::new(IpcClient::new());
+
+    let superseded = dispatch(
+        &host,
+        &client,
+        DaemonMessage::ChatHistoryCleared {
+            room_id: "r-1".to_owned(),
+        },
+        None,
+    )
+    .await;
+
+    assert!(!superseded);
+    assert_eq!(
+        host.next_event(EVENT_CHAT_HISTORY_CLEARED).await,
+        json!({ "room_id": "r-1" })
+    );
+}
+
+#[tokio::test]
+async fn clearing_and_deleting_a_chat_room_reach_the_daemon_and_return_the_room_it_answered() {
+    let daemon = ScriptedDaemon::new(|request| match request {
+        ClientMessage::ClearChatRoom { room_id } => {
+            Reaction::reply(DaemonMessage::ChatRoomCleared {
+                room_id: room_id.clone(),
+            })
+        }
+        ClientMessage::DeleteChatRoom { room_id } => {
+            Reaction::reply(DaemonMessage::ChatRoomDeleted {
+                room_id: room_id.clone(),
+            })
+        }
+        _ => None,
+    });
+    let host = FakeHost::served_by("reader-room-removal", &daemon).await;
+    let client = Arc::new(IpcClient::new());
+    client.connect(&host).await.expect("connect");
+
+    assert_eq!(
+        client
+            .clear_chat_room("r-1".to_owned())
+            .await
+            .expect("clear_chat_room"),
+        "r-1"
+    );
+    assert_eq!(
+        client
+            .delete_chat_room("r-2".to_owned())
+            .await
+            .expect("delete_chat_room"),
+        "r-2"
+    );
+}
+
+#[tokio::test]
+async fn a_room_in_use_rejection_reaches_the_caller_of_delete_chat_room() {
+    let daemon = ScriptedDaemon::new(|request| match request {
+        ClientMessage::DeleteChatRoom { .. } => Reaction::reply(error_frame("room_in_use")),
+        _ => None,
+    });
+    let host = FakeHost::served_by("reader-room-in-use", &daemon).await;
+    let client = Arc::new(IpcClient::new());
+    client.connect(&host).await.expect("connect");
+
+    let outcome = client.delete_chat_room("r-1".to_owned()).await;
+
+    assert!(is_rejected_with(&outcome, "room_in_use"), "got {outcome:?}");
 }
 
 #[tokio::test]

@@ -139,6 +139,14 @@
 //! `name_taken` error, and `window_opened`, `task_window_opened` and
 //! `handoff_sent` carry the `name` the window was given. A `"` is no longer
 //! accepted in a window name.
+//!
+//! Revision 26 lets an approver remove chat history. `clear_chat_room` empties
+//! a room's messages and deliveries (answered with `chat_room_cleared`) and
+//! `delete_chat_room` removes a workspace room that has no window left in it
+//! (answered with `chat_room_deleted`; `room_in_use` when a window is
+//! registered there). Either one is followed by a `chat_history_cleared` push
+//! to every approver. [`ChatRoomInfo`] gains `has_open_windows`. A message's
+//! `seq` never goes back, so a reader's `after_seq` stays valid.
 
 use std::collections::BTreeSet;
 
@@ -150,7 +158,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 25;
+pub const PROTOCOL_REVISION: u32 = 26;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -166,6 +174,13 @@ pub const MIN_WINDOW_COLS: u16 = 2;
 
 /// The fewest rows a window takes.
 pub const MIN_WINDOW_ROWS: u16 = 1;
+
+/// The first wire revision that understands [`ClientMessage::ClearChatRoom`]
+/// and [`ClientMessage::DeleteChatRoom`].
+///
+/// An older daemon refuses both by name, so a caller establishes this
+/// revision before sending either.
+pub const CHAT_ROOM_REMOVAL_MIN_REVISION: u32 = 26;
 
 /// The first wire revision that carries [`ClientMessage::SendKeys`].
 pub const SEND_KEYS_MIN_REVISION: u32 = 6;
@@ -2579,6 +2594,22 @@ pub enum ClientMessage {
     /// listing names the workspaces windows are open in, which no other
     /// kind of connection is told about.
     ListChatRooms,
+    /// Removes every message and delivery of a chat room and lifts its halt
+    /// and `needs_user`; the room itself stays. Approver-only. Answered with
+    /// [`DaemonMessage::ChatRoomCleared`]; an unknown room is
+    /// `invalid_argument`.
+    ClearChatRoom {
+        /// The room to empty; `"main"` is allowed.
+        room_id: String,
+    },
+    /// Removes a chat room altogether. Approver-only. Answered with
+    /// [`DaemonMessage::ChatRoomDeleted`]. `"main"` and an unknown room are
+    /// `invalid_argument`; a room a registered window (exited ones included)
+    /// belongs to is `room_in_use`.
+    DeleteChatRoom {
+        /// The room to remove.
+        room_id: String,
+    },
     /// Asks which wire revision the daemon implements; answered with
     /// [`DaemonMessage::ProtocolRevision`]. A daemon built before this type
     /// existed refuses it by name, and that refusal is itself an answer: such
@@ -2914,6 +2945,9 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
             MCP_REGISTRATION_MIN_REVISION
         }
         ClientMessage::GetDaemonHealth => DAEMON_HEALTH_MIN_REVISION,
+        ClientMessage::ClearChatRoom { .. } | ClientMessage::DeleteChatRoom { .. } => {
+            CHAT_ROOM_REMOVAL_MIN_REVISION
+        }
         ClientMessage::DeliverContext { .. }
         | ClientMessage::DeliverTake { .. }
         | ClientMessage::DeliverWait { .. }
@@ -2957,7 +2991,7 @@ pub enum DaemonMessage {
         /// `"invalid_json"`, `"unknown_type"`, `"invalid_argument"`,
         /// `"child_exited"`, `"superseded"`, `"internal"`, `"window_not_found"`,
         /// `"spawn_failed"`, `"resource_exhausted"`, `"unsupported"`,
-        /// `"name_taken"`).
+        /// `"name_taken"`, `"room_in_use"`).
         code: String,
         /// Human-readable, English message. Must never contain frame bodies
         /// or raw PTY data.
@@ -3252,6 +3286,23 @@ pub enum DaemonMessage {
     /// A `list_chat_rooms` or `read_chat` made on receiving it reflects the
     /// change.
     ChatParticipantsChanged,
+    /// Sent to every registered approver connection after a room's history
+    /// was cleared or the room was deleted. A GUI drops what it holds for
+    /// the room and re-reads the listing.
+    ChatHistoryCleared {
+        /// The room that was cleared or deleted.
+        room_id: String,
+    },
+    /// Response to [`ClientMessage::ClearChatRoom`].
+    ChatRoomCleared {
+        /// The room that was emptied.
+        room_id: String,
+    },
+    /// Response to [`ClientMessage::DeleteChatRoom`].
+    ChatRoomDeleted {
+        /// The room that was removed.
+        room_id: String,
+    },
     /// Response to [`ClientMessage::ListChatRooms`].
     ChatRooms {
         /// Every room the daemon knows of: `"main"` first, then the rest by
@@ -4123,6 +4174,11 @@ pub struct ChatRoomInfo {
     /// `None` -- present on the wire as `null` -- when nothing has been
     /// posted in it yet.
     pub last_at_ms: Option<u64>,
+    /// Whether any window registered with the daemon (an exited one still on
+    /// screen included) belongs to this room's workspace. Such a room cannot
+    /// be deleted. Absent on an older daemon's wire, which reads as `false`.
+    #[serde(default)]
+    pub has_open_windows: bool,
 }
 
 /// A room's current halt, as reported by [`DaemonMessage::ChatMessages`].
@@ -4350,6 +4406,8 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "broadcast_chat",
     "read_chat",
     "list_chat_rooms",
+    "clear_chat_room",
+    "delete_chat_room",
     "get_protocol_revision",
     "get_daemon_health",
     "create_plan",
@@ -4416,6 +4474,9 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "chat_messages",
     "chat_changed",
     "chat_participants_changed",
+    "chat_history_cleared",
+    "chat_room_cleared",
+    "chat_room_deleted",
     "chat_rooms",
     "protocol_revision",
     "daemon_health",

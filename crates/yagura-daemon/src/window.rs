@@ -4795,6 +4795,17 @@ impl WindowRegistry {
         }
     }
 
+    /// Whether a window that has not exited belongs to the workspace room
+    /// `room_id`: only a running window can use chat and so re-create the
+    /// room, and the GUI shows no pane for an exited one. The one answer to
+    /// "is this room in use", for the listing and for refusing a delete.
+    pub fn has_window_in_room(&self, room_id: &str) -> bool {
+        lock_recover(&self.entries).iter().any(|entry| {
+            entry.current_status() != WindowStatus::Exited
+                && workspace::room_id_for(&entry.workspace) == room_id
+        })
+    }
+
     /// Every window's participation-relevant facts, for a caller outside
     /// this module to compute its own notion of "participant" without this
     /// module knowing what one is: the chat room is the

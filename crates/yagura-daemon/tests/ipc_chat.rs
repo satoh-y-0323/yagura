@@ -3330,3 +3330,352 @@ async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_le
     let (_, seq, _) = next_chat_changed(&mut approver, Duration::from_secs(10)).await;
     assert_eq!(seq, second.seq);
 }
+
+// =============================================================================
+// clear_chat_room / delete_chat_room
+// =============================================================================
+
+const UNKNOWN_ROOM_ID: &str = "r-0000000000000000";
+
+fn clear_request(room_id: &str) -> ClientMessage {
+    ClientMessage::ClearChatRoom {
+        room_id: room_id.to_string(),
+    }
+}
+
+fn delete_request(room_id: &str) -> ClientMessage {
+    ClientMessage::DeleteChatRoom {
+        room_id: room_id.to_string(),
+    }
+}
+
+/// What an approver saw after asking to clear or delete a room: the answer,
+/// the room a `chat_history_cleared` push named, and whether a
+/// `chat_participants_changed` push came. Reads until every push the success
+/// path owes has arrived, so a missing one fails here rather than passing.
+struct RemovalOutcome {
+    reply: DaemonMessage,
+    cleared_push: Option<String>,
+    participants_changed: bool,
+}
+
+async fn removal_outcome(
+    client: &mut yagura_test_support::ipc::Connection,
+    request: &ClientMessage,
+    expect_participants_push: bool,
+) -> RemovalOutcome {
+    send(client, request).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut outcome = RemovalOutcome {
+        reply: DaemonMessage::Pong,
+        cleared_push: None,
+        participants_changed: false,
+    };
+    let mut replied = false;
+    while !replied
+        || outcome.cleared_push.is_none()
+        || (expect_participants_push && !outcome.participants_changed)
+    {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out: replied={replied} cleared_push={:?} participants_changed={}",
+            outcome.cleared_push,
+            outcome.participants_changed
+        );
+        match common::read_message(client, remaining).await {
+            DaemonMessage::ChatChanged { .. } => {}
+            DaemonMessage::ChatParticipantsChanged => outcome.participants_changed = true,
+            DaemonMessage::ChatHistoryCleared { room_id } => outcome.cleared_push = Some(room_id),
+            other => {
+                outcome.reply = other;
+                replied = true;
+                // A refusal is followed by no push.
+                if matches!(outcome.reply, DaemonMessage::Error { .. }) {
+                    return outcome;
+                }
+            }
+        }
+    }
+    outcome
+}
+
+/// The answer to a request an approver is refused or rejects: no push follows.
+async fn refusal_of(
+    client: &mut yagura_test_support::ipc::Connection,
+    request: &ClientMessage,
+) -> DaemonMessage {
+    send(client, request).await;
+    loop {
+        match common::read_message(client, Duration::from_secs(5)).await {
+            DaemonMessage::ChatChanged { .. } | DaemonMessage::ChatParticipantsChanged => {}
+            other => return other,
+        }
+    }
+}
+
+/// Opens a participant in a second workspace and posts once, so the
+/// workspace's room exists with history. Returns the room, the poster's
+/// window, its connection and the post's seq.
+async fn room_with_a_post(
+    h: &Harness,
+    workspace: &Path,
+) -> (String, String, yagura_test_support::ipc::Connection, u64) {
+    let mut client = h.connect().await;
+    let window_id = open_identified_participant_in_cwd(h, &mut client, workspace).await;
+    let posted = expect_chat_posted(send_chat_msg(&mut client, None, "first").await);
+    (posted.room_id, window_id, client, posted.seq)
+}
+
+#[tokio::test]
+async fn only_an_approver_may_clear_or_delete_a_chat_room() {
+    let dir = unique_temp_dir("chat-remove-auth");
+    let h = start_chat("chat-remove-auth", &dir, &ChatPlaybook::default()).await;
+    let (room_id, _window, mut window_conn, _) =
+        room_with_a_post(&h, &second_workspace_dir("chat-remove-auth-b")).await;
+    let mut external = h.connect().await;
+
+    for request in [clear_request(&room_id), delete_request(&room_id)] {
+        send(&mut window_conn, &request).await;
+        let from_window = read_reply(&mut window_conn, Duration::from_secs(5)).await;
+        expect_error(from_window, "auth_failed");
+        send(&mut external, &request).await;
+        let from_external = read_reply(&mut external, Duration::from_secs(5)).await;
+        expect_error(from_external, "auth_failed");
+    }
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let read = expect_chat_messages(
+        read_chat_msg(&mut approver, Some(room_id.as_str()), Some(0), None).await,
+    );
+    assert_eq!(read.messages.len(), 1, "a refused request removes nothing");
+}
+
+#[tokio::test]
+async fn clearing_or_deleting_a_room_that_does_not_exist_is_invalid_argument() {
+    let dir = unique_temp_dir("chat-remove-unknown");
+    let h = start_chat("chat-remove-unknown", &dir, &ChatPlaybook::default()).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+
+    for request in [
+        clear_request(UNKNOWN_ROOM_ID),
+        delete_request(UNKNOWN_ROOM_ID),
+    ] {
+        let reply = refusal_of(&mut approver, &request).await;
+        let message = expect_error(reply, "invalid_argument");
+        assert_eq!(message, "unknown room");
+    }
+}
+
+#[tokio::test]
+async fn the_main_room_can_be_cleared_but_never_deleted() {
+    let dir = unique_temp_dir("chat-remove-main");
+    let h = start_chat("chat-remove-main", &dir, &ChatPlaybook::default()).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let first = expect_chat_posted(broadcast_chat_msg(&mut approver, None, "to main").await);
+
+    let reply = refusal_of(&mut approver, &delete_request("main")).await;
+    expect_error(reply, "invalid_argument");
+    let still = expect_chat_messages(read_chat_msg(&mut approver, None, Some(0), None).await);
+    assert_eq!(still.messages.len(), 1, "a refused delete removes nothing");
+
+    let outcome = removal_outcome(&mut approver, &clear_request("main"), false).await;
+    assert_eq!(
+        outcome.reply,
+        DaemonMessage::ChatRoomCleared {
+            room_id: "main".to_string()
+        }
+    );
+    assert_eq!(outcome.cleared_push.as_deref(), Some("main"));
+    let after = expect_chat_messages(read_chat_msg(&mut approver, None, Some(0), None).await);
+    assert!(after.messages.is_empty(), "got {:?}", after.messages);
+    let next = expect_chat_posted(broadcast_chat_msg(&mut approver, None, "again").await);
+    assert!(next.seq > first.seq, "{} vs {}", next.seq, first.seq);
+}
+
+#[tokio::test]
+async fn clearing_a_room_empties_its_history_lifts_the_attention_flag_and_keeps_numbering() {
+    let dir = unique_temp_dir("chat-remove-clear");
+    let h = start_chat("chat-remove-clear", &dir, &ChatPlaybook::default()).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let (room_id, _window, mut window_conn, _) =
+        room_with_a_post(&h, &second_workspace_dir("chat-remove-clear-b")).await;
+    let asked =
+        expect_chat_posted(send_chat_msg(&mut window_conn, None, "@user look at this").await);
+    assert!(asked.user);
+    let before = expect_chat_messages(
+        read_chat_msg(&mut approver, Some(room_id.as_str()), Some(0), None).await,
+    );
+    assert!(before.needs_user);
+
+    let outcome = removal_outcome(&mut approver, &clear_request(&room_id), false).await;
+    assert_eq!(
+        outcome.reply,
+        DaemonMessage::ChatRoomCleared {
+            room_id: room_id.clone()
+        }
+    );
+    assert_eq!(outcome.cleared_push.as_deref(), Some(room_id.as_str()));
+
+    let after = expect_chat_messages(
+        read_chat_msg(&mut approver, Some(room_id.as_str()), Some(0), None).await,
+    );
+    assert!(after.messages.is_empty(), "got {:?}", after.messages);
+    assert!(!after.needs_user);
+    assert!(after.halted.is_none());
+    let listed = list_chat_rooms(&mut approver).await;
+    assert!(
+        listed.iter().any(|room| room.room_id == room_id),
+        "a cleared room stays listed: {listed:?}"
+    );
+    let next = expect_chat_posted(send_chat_msg(&mut window_conn, None, "after").await);
+    assert!(next.seq > asked.seq, "{} vs {}", next.seq, asked.seq);
+}
+
+#[tokio::test]
+async fn clearing_takes_a_waiting_post_back_so_the_cli_never_receives_it() {
+    let dir = unique_temp_dir("chat-remove-withdraw");
+    let h = start_chat("chat-remove-withdraw", &dir, &ChatPlaybook::default()).await;
+    let mut poster_conn = h.connect().await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let unknown_id = open_unknown_participant(&h).await;
+    let poster_id = h.open_idle_window(&mut poster_conn).await;
+    identify(&mut poster_conn, &poster_id).await;
+
+    let posted = expect_chat_posted(
+        send_chat_msg(&mut poster_conn, None, &format!("hi @{unknown_id}")).await,
+    );
+    let entry = h
+        .registry
+        .get(&unknown_id)
+        .expect("the window is registered");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached the inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let outcome = removal_outcome(&mut approver, &clear_request(&posted.room_id), false).await;
+    assert!(matches!(
+        outcome.reply,
+        DaemonMessage::ChatRoomCleared { .. }
+    ));
+    assert_eq!(
+        entry.inbox().pending_count(),
+        0,
+        "the answer comes after the waiting post was taken back"
+    );
+    let mut door = h.connect().await;
+    assert_eq!(
+        call_door(&mut door, "take", &unknown_id).await,
+        "",
+        "the cleared post must not reach the CLI"
+    );
+}
+
+#[tokio::test]
+async fn a_room_is_in_use_while_its_window_runs_and_can_be_deleted_once_it_has_exited() {
+    let dir = unique_temp_dir("chat-remove-in-use");
+    let h = start_chat("chat-remove-in-use", &dir, &ChatPlaybook::default()).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let (room_id, window_id, mut window_conn, _) =
+        room_with_a_post(&h, &second_workspace_dir("chat-remove-in-use-b")).await;
+
+    let listed = list_chat_rooms(&mut approver).await;
+    let info = listed.iter().find(|room| room.room_id == room_id).unwrap();
+    assert!(info.has_open_windows);
+    let main = listed.iter().find(|room| room.room_id == "main").unwrap();
+    assert!(!main.has_open_windows, "main belongs to no workspace");
+
+    let reply = refusal_of(&mut approver, &delete_request(&room_id)).await;
+    expect_error(reply, "room_in_use");
+
+    send(
+        &mut window_conn,
+        &ClientMessage::CloseWindow {
+            window_id,
+            force: Some(true),
+        },
+    )
+    .await;
+    match read_response(&mut window_conn, Duration::from_secs(5)).await {
+        DaemonMessage::WindowClosed { .. } => {}
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+    // `window_closed` waits for the confirmed `Exited` only up to a bound,
+    // so the listing is read until the status has settled.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let listed = list_chat_rooms(&mut approver).await;
+        let info = listed.iter().find(|room| room.room_id == room_id).unwrap();
+        if !info.has_open_windows {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a closed window has no pane and cannot use chat, so it holds no room"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let outcome = removal_outcome(&mut approver, &delete_request(&room_id), true).await;
+    assert_eq!(
+        outcome.reply,
+        DaemonMessage::ChatRoomDeleted {
+            room_id: room_id.clone()
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_room_no_window_belongs_to_is_deleted_announced_and_refuses_later_posts() {
+    let dir = unique_temp_dir("chat-remove-delete");
+    let workspace = second_workspace_dir("chat-remove-delete-ws");
+    let room_id;
+    let first_seq;
+    {
+        let h = start_chat("chat-remove-delete-a", &dir, &ChatPlaybook::default()).await;
+        let (room, _window, _conn, seq) = room_with_a_post(&h, &workspace).await;
+        room_id = room;
+        first_seq = seq;
+    }
+
+    // A fresh daemon on the same store: the room has history and no window.
+    let h = start_chat("chat-remove-delete-c", &dir, &ChatPlaybook::default()).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let listed = list_chat_rooms(&mut approver).await;
+    let info = listed.iter().find(|room| room.room_id == room_id).unwrap();
+    assert!(!info.has_open_windows);
+
+    let outcome = removal_outcome(&mut approver, &delete_request(&room_id), true).await;
+    assert_eq!(
+        outcome.reply,
+        DaemonMessage::ChatRoomDeleted {
+            room_id: room_id.clone()
+        }
+    );
+    assert_eq!(outcome.cleared_push.as_deref(), Some(room_id.as_str()));
+    assert!(outcome.participants_changed);
+
+    let listed = list_chat_rooms(&mut approver).await;
+    assert!(
+        listed.iter().all(|room| room.room_id != room_id),
+        "{listed:?}"
+    );
+    let reply = broadcast_chat_msg(&mut approver, Some(room_id.as_str()), "late").await;
+    assert_eq!(expect_error(reply, "invalid_argument"), "unknown room");
+
+    // A window of that workspace opening later re-creates the room, and its
+    // numbering continues past the deleted history.
+    let (again, _window, _conn, seq) = room_with_a_post(&h, &workspace).await;
+    assert_eq!(again, room_id);
+    assert!(seq > first_seq, "{seq} vs {first_seq}");
+}

@@ -1621,6 +1621,30 @@ impl IpcServer {
                 chat::handle_list_chat_rooms(&self.chat, &self.registry, outbound, state).await;
                 FrameOutcome::Continue
             }
+            Ok(ClientMessage::ClearChatRoom { room_id }) => {
+                chat::handle_clear_chat_room(
+                    &self.chat,
+                    &self.registry,
+                    &self.broker,
+                    outbound,
+                    state,
+                    room_id,
+                )
+                .await;
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::DeleteChatRoom { room_id }) => {
+                chat::handle_delete_chat_room(
+                    &self.chat,
+                    &self.registry,
+                    &self.broker,
+                    outbound,
+                    state,
+                    room_id,
+                )
+                .await;
+                FrameOutcome::Continue
+            }
             // Answered on every connection without a permission check: a
             // caller has to learn which wire this daemon speaks before it can
             // know which requests are worth making, so gating the answer

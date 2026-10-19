@@ -25,8 +25,9 @@ use crate::commands::{
 use crate::constants::READ_CHUNK_LEN;
 use crate::events::{
     ApprovalRequestedPayload, ApprovalWithdrawnPayload, AttachResponse, ChatChangedPayload,
-    ChatParticipantsChangedPayload, EVENT_APPROVAL_REQUESTED, EVENT_APPROVAL_WITHDRAWN,
-    EVENT_CHAT_CHANGED, EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_EXIT, EVENT_MCP_REGISTRATION_RESULT,
+    ChatHistoryClearedPayload, ChatParticipantsChangedPayload, EVENT_APPROVAL_REQUESTED,
+    EVENT_APPROVAL_WITHDRAWN, EVENT_CHAT_CHANGED, EVENT_CHAT_HISTORY_CLEARED,
+    EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_EXIT, EVENT_MCP_REGISTRATION_RESULT,
     EVENT_MCP_REGISTRATION_STATUS, EVENT_MODEL_CHOICES, EVENT_PLAN_CHANGED, EVENT_STATUS,
     ExitPayload, McpRegistrationResultPayload, McpRegistrationStatusPayload, ModelChoicesPayload,
     PlanChangedPayload, StatusPayload,
@@ -233,6 +234,12 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
             PendingKind::ListChatRooms,
             Reply::ChatRoomList(ChatRoomListReply { rooms }),
         )),
+        DaemonMessage::ChatRoomCleared { room_id } => {
+            Some((PendingKind::ClearChatRoom, Reply::ChatRoomCleared(room_id)))
+        }
+        DaemonMessage::ChatRoomDeleted { room_id } => {
+            Some((PendingKind::DeleteChatRoom, Reply::ChatRoomDeleted(room_id)))
+        }
         DaemonMessage::ProtocolRevision { revision } => Some((
             PendingKind::GetProtocolRevision,
             Reply::ProtocolRevision(revision),
@@ -367,6 +374,7 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // request follow its acknowledgement rather than answering it.
         | DaemonMessage::ChatChanged { .. }
         | DaemonMessage::ChatParticipantsChanged
+        | DaemonMessage::ChatHistoryCleared { .. }
         | DaemonMessage::PlanChanged { .. }
         | DaemonMessage::ModelChoices { .. }
         | DaemonMessage::McpRegistrationStatus { .. }
@@ -606,6 +614,13 @@ async fn dispatch(
             );
             false
         }
+        DaemonMessage::ChatHistoryCleared { room_id } => {
+            app.emit_event(
+                EVENT_CHAT_HISTORY_CLEARED,
+                ChatHistoryClearedPayload { room_id },
+            );
+            false
+        }
         DaemonMessage::PlanChanged { plan_id } => {
             app.emit_event(EVENT_PLAN_CHANGED, PlanChangedPayload { plan_id });
             false
@@ -740,6 +755,7 @@ mod tests {
             needs_user: false,
             halted: None,
             last_at_ms: None,
+            has_open_windows: false,
         }];
         let result = reply_for(DaemonMessage::ChatRooms {
             rooms: rooms.clone(),

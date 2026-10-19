@@ -316,6 +316,32 @@ impl ConnectionPool {
         self.control(app).await?.list_chat_rooms().await
     }
 
+    /// Clears one chat room's history, through the control connection.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
+    /// request.
+    pub async fn clear_chat_room(
+        &self,
+        app: &impl GuiHost,
+        room_id: String,
+    ) -> Result<String, IpcError> {
+        self.control(app).await?.clear_chat_room(room_id).await
+    }
+
+    /// Deletes one chat room, through the control connection.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
+    /// request.
+    pub async fn delete_chat_room(
+        &self,
+        app: &impl GuiHost,
+        room_id: String,
+    ) -> Result<String, IpcError> {
+        self.control(app).await?.delete_chat_room(room_id).await
+    }
+
     /// Lists the plans the daemon lets this GUI see, through the control
     /// connection: the daemon answers it as the approver it registered, which
     /// is what every plan-ledger request from the GUI relies on.

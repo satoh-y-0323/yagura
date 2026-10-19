@@ -173,6 +173,8 @@ pub(crate) enum PendingKind {
     SendChat,
     ReadChat,
     ListChatRooms,
+    ClearChatRoom,
+    DeleteChatRoom,
     GetProtocolRevision,
     GetDaemonHealth,
     /// Every request answered with a whole plan waits under one tag: the
@@ -239,6 +241,10 @@ pub(crate) enum Reply {
     ChatPosted(ChatPostedReply),
     ChatMessages(ChatMessagesReply),
     ChatRoomList(ChatRoomListReply),
+    /// The id of the room whose history the daemon cleared.
+    ChatRoomCleared(String),
+    /// The id of the room the daemon deleted.
+    ChatRoomDeleted(String),
     /// The wire revision the answering daemon implements, from
     /// [`ClientMessage::GetProtocolRevision`]'s reply.
     ProtocolRevision(u32),
@@ -751,6 +757,45 @@ impl IpcClient {
             .await?
         {
             Reply::ChatRoomList(reply) => Ok(reply),
+            _ => Err(IpcError::UnexpectedReply),
+        }
+    }
+
+    /// Clears one chat room's history and returns the room the daemon
+    /// cleared. Approver-only on the daemon side.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached, predates this
+    /// request, or rejects it (an unknown room included).
+    pub async fn clear_chat_room(&self, room_id: String) -> Result<String, IpcError> {
+        match self
+            .request(
+                &ClientMessage::ClearChatRoom { room_id },
+                PendingKind::ClearChatRoom,
+            )
+            .await?
+        {
+            Reply::ChatRoomCleared(cleared) => Ok(cleared),
+            _ => Err(IpcError::UnexpectedReply),
+        }
+    }
+
+    /// Deletes one chat room and returns the room the daemon deleted.
+    /// Approver-only on the daemon side.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached, predates this
+    /// request, or rejects it (`room_in_use` when a window is open in the
+    /// room).
+    pub async fn delete_chat_room(&self, room_id: String) -> Result<String, IpcError> {
+        match self
+            .request(
+                &ClientMessage::DeleteChatRoom { room_id },
+                PendingKind::DeleteChatRoom,
+            )
+            .await?
+        {
+            Reply::ChatRoomDeleted(deleted) => Ok(deleted),
             _ => Err(IpcError::UnexpectedReply),
         }
     }
@@ -1967,6 +2012,26 @@ mod tests {
             written,
             yagura_protocol::frame_encode(&yagura_protocol::encode_client_message(&message))
         );
+    }
+
+    #[tokio::test]
+    async fn a_daemon_one_revision_behind_is_not_sent_a_room_removal() {
+        let message = ClientMessage::ClearChatRoom {
+            room_id: "main".to_owned(),
+        };
+        let behind = wire::SettledRevision::new();
+        behind.store(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION - 1, 0);
+        let (refused, written) = send_and_collect(&message, &behind).await;
+        assert!(
+            matches!(refused, Err(IpcError::Unsupported { .. })),
+            "got {refused:?}"
+        );
+        assert!(written.is_empty(), "wrote {written:?}");
+
+        let level = wire::SettledRevision::new();
+        level.store(yagura_protocol::CHAT_ROOM_REMOVAL_MIN_REVISION, 0);
+        let (sent, _) = send_and_collect(&message, &level).await;
+        assert!(sent.is_ok(), "got {sent:?}");
     }
 
     #[tokio::test]

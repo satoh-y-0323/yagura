@@ -48,12 +48,13 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use yagura_protocol::{
-    APPROVAL_SETTINGS_MIN_REVISION, CellPosition, ClientMessage, ControlKey,
-    DAEMON_HEALTH_MIN_REVISION, FRAME_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION,
-    MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers,
-    NamedKey, PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
-    PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton, PointerInput, PointerKind,
-    ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
+    APPROVAL_SETTINGS_MIN_REVISION, CHAT_ROOM_REMOVAL_MIN_REVISION, CellPosition, ClientMessage,
+    ControlKey, DAEMON_HEALTH_MIN_REVISION, FRAME_MIN_REVISION, Key, KeyInput,
+    LAUNCH_OPTIONS_MIN_REVISION, MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION,
+    McpRegistrationAction, Modifiers, NamedKey, PLAN_REVIEW_MIN_REVISION,
+    PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION, PROTOCOL_REVISION_BASELINE, Palette,
+    PlanTaskSpec, PointerButton, PointerInput, PointerKind, ReportOutcome,
+    TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
     required_protocol_revision,
 };
 
@@ -207,6 +208,12 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             limit: None,
         },
         ClientMessage::ListChatRooms,
+        ClientMessage::ClearChatRoom {
+            room_id: "main".to_string(),
+        },
+        ClientMessage::DeleteChatRoom {
+            room_id: "r-0123456789abcdef".to_string(),
+        },
         ClientMessage::GetProtocolRevision,
         ClientMessage::GetDaemonHealth,
         ClientMessage::CreatePlan {
@@ -452,6 +459,8 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::ListMcpRegistrations { .. }
                         | ClientMessage::RunMcpRegistration { .. }
                         | ClientMessage::GetDaemonHealth
+                        | ClientMessage::ClearChatRoom { .. }
+                        | ClientMessage::DeleteChatRoom { .. }
                         | ClientMessage::DeliverContext { .. }
                         | ClientMessage::DeliverTake { .. }
                         | ClientMessage::DeliverWait { .. }
@@ -789,6 +798,24 @@ fn get_daemon_health_requires_revision_twenty() {
         DAEMON_HEALTH_MIN_REVISION
     );
     assert_eq!(DAEMON_HEALTH_MIN_REVISION, 20);
+}
+
+#[test]
+fn clearing_or_deleting_a_chat_room_requires_revision_twenty_six() {
+    for msg in [
+        ClientMessage::ClearChatRoom {
+            room_id: "main".to_string(),
+        },
+        ClientMessage::DeleteChatRoom {
+            room_id: "r-0123456789abcdef".to_string(),
+        },
+    ] {
+        assert_eq!(
+            required_protocol_revision(&msg),
+            CHAT_ROOM_REMOVAL_MIN_REVISION
+        );
+    }
+    assert_eq!(CHAT_ROOM_REMOVAL_MIN_REVISION, 26);
 }
 
 #[test]

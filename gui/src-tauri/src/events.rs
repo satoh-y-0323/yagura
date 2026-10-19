@@ -72,6 +72,10 @@ pub const EVENT_CHAT_CHANGED: &str = "session://chat-changed";
 /// should be read again. Payload: [`ChatParticipantsChangedPayload`].
 pub const EVENT_CHAT_PARTICIPANTS_CHANGED: &str = "session://chat-participants-changed";
 
+/// A chat room's history was cleared, or the room was deleted, so what the
+/// WebView holds for it is stale. Payload: [`ChatHistoryClearedPayload`].
+pub const EVENT_CHAT_HISTORY_CLEARED: &str = "session://chat-history-cleared";
+
 /// A plan's stored content changed, so a displayed copy should be read
 /// again. Payload: [`PlanChangedPayload`].
 pub const EVENT_PLAN_CHANGED: &str = "session://plan-changed";
@@ -219,6 +223,13 @@ pub struct ChatChangedPayload {
 /// reason as [`ApprovalRegistrationRefusedPayload`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatParticipantsChangedPayload {}
+
+/// Payload of [`EVENT_CHAT_HISTORY_CLEARED`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatHistoryClearedPayload {
+    /// The room that was cleared or deleted.
+    pub room_id: String,
+}
 
 /// Payload of [`EVENT_PLAN_CHANGED`].
 #[derive(Debug, Clone, Serialize)]

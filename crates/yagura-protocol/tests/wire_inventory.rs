@@ -361,6 +361,7 @@ wire_sample!(struct ChatRoomInfo {
     needs_user,
     halted,
     last_at_ms,
+    has_open_windows,
 });
 wire_sample!(struct DaemonProblem { kind, detail });
 wire_sample!(struct ChatHalt { reason, since_ms });
@@ -629,6 +630,8 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             limit,
         }),
         wire_sample!(ClientMessage::ListChatRooms),
+        wire_sample!(ClientMessage::ClearChatRoom { room_id }),
+        wire_sample!(ClientMessage::DeleteChatRoom { room_id }),
         wire_sample!(ClientMessage::GetProtocolRevision),
         wire_sample!(ClientMessage::GetDaemonHealth),
         wire_sample!(ClientMessage::DeliverContext { window_id, token }),
@@ -793,6 +796,9 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         }),
         wire_sample!(DaemonMessage::ChatParticipantsChanged),
         wire_sample!(DaemonMessage::ChatRooms { rooms }),
+        wire_sample!(DaemonMessage::ChatRoomCleared { room_id }),
+        wire_sample!(DaemonMessage::ChatRoomDeleted { room_id }),
+        wire_sample!(DaemonMessage::ChatHistoryCleared { room_id }),
         wire_sample!(DaemonMessage::ProtocolRevision { revision }),
         wire_sample!(DaemonMessage::DaemonHealth { problems }),
         wire_sample!(DaemonMessage::Delivery {
