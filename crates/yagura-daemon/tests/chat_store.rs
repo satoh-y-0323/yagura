@@ -941,6 +941,9 @@ fn a_state_value_this_build_does_not_recognize_drops_the_row_from_both_reads_and
 
     {
         let conn = rusqlite::Connection::open(&path).expect("a raw write connection must open");
+        // The schema refuses this state, so only a hand-edited database holds one.
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .expect("the check bypass must apply");
         conn.execute(
             "UPDATE chat_delivery SET state = 'a_future_state_this_build_does_not_know' \
              WHERE room_id = ?1 AND seq = ?2 AND window_id = ?3",
@@ -998,6 +1001,9 @@ fn store_with_one_unreadable_delivery_row(tag: &str) -> (ChatStore, i64) {
 
     {
         let conn = rusqlite::Connection::open(&path).expect("a raw write connection must open");
+        // The schema refuses this state, so only a hand-edited database holds one.
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .expect("the check bypass must apply");
         conn.execute(
             "UPDATE chat_delivery SET state = 'a_future_state_this_build_does_not_know' \
              WHERE room_id = ?1 AND seq = ?2 AND window_id = ?3",
@@ -1106,6 +1112,9 @@ fn an_unreadable_reason_keeps_its_row_while_an_unreadable_state_removes_it() {
 
     {
         let conn = rusqlite::Connection::open(&path).expect("a raw write connection must open");
+        // The schema refuses the unknown state set below; only a hand-edited database holds one.
+        conn.pragma_update(None, "ignore_check_constraints", true)
+            .expect("the check bypass must apply");
         conn.execute(
             "UPDATE chat_delivery SET state = 'undelivered_unknown', \
              unknown_reason = 'a_future_reason_this_build_does_not_know' \

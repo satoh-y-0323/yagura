@@ -24,6 +24,7 @@ use common::store_fixtures::{
     count_warns, insert_window_row, insert_window_row_with_blob_command,
     insert_window_row_with_command_json, read_meta, set_meta, slot_rows, temp_store_db,
 };
+use yagura_daemon::room::ChatDeliveryState;
 use yagura_daemon::store;
 
 /// The comparison query, fixed verbatim.
@@ -1205,7 +1206,7 @@ fn rebuilding_the_delivery_table_leaves_the_schema_and_its_columns_as_they_were(
 fn a_reason_next_to_any_other_delivery_state_is_refused_by_the_shipped_schema() {
     const CONTRADICTORY: &str = "INSERT INTO chat_delivery \
          (room_id, seq, window_id, state, at_ms, unknown_reason) \
-         VALUES ('main', 1, 'w-a', 'confirmed', 1000, 'screen_lost')";
+         VALUES ('main', 1, 'w-a', 'taken', 1000, 'screen_lost')";
 
     let control_db = temp_store_db("store-delivery-check-control");
     {
@@ -1239,7 +1240,7 @@ fn a_reason_next_to_any_other_delivery_state_is_refused_by_the_shipped_schema() 
     .expect("a reason next to undelivered_unknown must still be accepted");
     conn.execute(
         "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms, unknown_reason) \
-         VALUES ('main', 1, 'w-c', 'confirmed', 1000, NULL)",
+         VALUES ('main', 1, 'w-c', 'taken', 1000, NULL)",
         [],
     )
     .expect("a row with no reason must be accepted whatever its state");
@@ -1273,7 +1274,7 @@ fn migrating_a_database_whose_reason_contradicts_its_state_keeps_the_row_without
                 .expect("seeding a v5-era row must succeed");
         }
 
-        store::apply_migrations(&mut conn, store::MIGRATIONS)
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..6])
             .expect("a database holding rows the new constraint forbids must still migrate");
     }
 
@@ -1803,5 +1804,180 @@ fn writing_a_snapshot_stamps_the_current_wall_clock_time() {
     assert!(
         (before..=after).contains(&taken_at),
         "taken_at_epoch_s must be the time of the write: {taken_at} not in {before}..={after}"
+    );
+}
+
+/// Every delivery state this build writes. A new variant stops the match from compiling,
+/// which sends whoever adds it here to extend the list the schema contracts below check.
+fn every_delivery_state() -> Vec<ChatDeliveryState> {
+    use ChatDeliveryState::{
+        Pending, Taken, UndeliveredExhausted, UndeliveredHalted, UndeliveredRestart,
+        UndeliveredUnknown,
+    };
+    let all = [
+        Pending,
+        Taken,
+        UndeliveredUnknown,
+        UndeliveredHalted,
+        UndeliveredExhausted,
+        UndeliveredRestart,
+    ];
+    for state in all {
+        match state {
+            Pending | Taken | UndeliveredUnknown | UndeliveredHalted | UndeliveredExhausted
+            | UndeliveredRestart => {}
+        }
+    }
+    all.to_vec()
+}
+
+/// The delivery states 0.1.0 stored, which no build since writes or reads.
+const RETIRED_DELIVERY_STATES: [&str; 5] = [
+    "confirmed",
+    "unconfirmed",
+    "not_observed",
+    "not_written",
+    "write_failed",
+];
+
+/// The schema version just before the delivery table was tied to the current state
+/// vocabulary.
+const BEFORE_DELIVERY_STATE_CHECK: usize = 12;
+
+/// The shipped schema accepts every state this build writes and refuses any other, so a
+/// change to the vocabulary cannot reach the database without a migration. The control
+/// shows the version before accepting the same write, so the refusal is the schema's.
+#[test]
+fn the_shipped_schema_accepts_only_the_delivery_states_this_build_writes() {
+    const RETIRED: &str = "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms) \
+         VALUES ('main', 1, 'w-retired', 'confirmed', 1000)";
+
+    let control_db = temp_store_db("store-delivery-state-check-control");
+    {
+        let mut conn =
+            rusqlite::Connection::open(&control_db.path).expect("a seed connection must open");
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..BEFORE_DELIVERY_STATE_CHECK])
+            .expect("the migrations before the state check must apply");
+        conn.execute(RETIRED, []).expect(
+            "without the state check the same write must be accepted, or this case proves \
+             nothing about the check",
+        );
+    }
+
+    let db = temp_store_db("store-delivery-state-check");
+    let mut conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+    store::apply_migrations(&mut conn, store::MIGRATIONS)
+        .expect("the shipped migrations must apply to a fresh database");
+
+    for state in every_delivery_state() {
+        conn.execute(
+            "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms) \
+             VALUES ('main', 1, ?1, ?1, 1000)",
+            rusqlite::params![state.as_str()],
+        )
+        .unwrap_or_else(|e| panic!("the state {} must be accepted: {e}", state.as_str()));
+    }
+    assert!(
+        conn.execute(RETIRED, []).is_err(),
+        "a state this build does not write must be refused by the database, but the write \
+         was accepted"
+    );
+}
+
+/// A database written by 0.1.0 holds deliveries in the retired vocabulary. Migrating it
+/// removes exactly those rows: their messages stay, and every row in the current
+/// vocabulary is carried across unchanged.
+#[test]
+fn migrating_removes_deliveries_in_the_retired_vocabulary_and_keeps_the_rest() {
+    let db = temp_store_db("store-delivery-retired-states");
+    let current: Vec<&'static str> = every_delivery_state()
+        .into_iter()
+        .map(|state| state.as_str())
+        .collect();
+    {
+        let mut conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..BEFORE_DELIVERY_STATE_CHECK])
+            .expect("the migrations before the state check must apply");
+        conn.execute(
+            "INSERT INTO chat_message \
+             (room_id, seq, at_ms, from_kind, from_window_id, from_name, body, mentions_json, \
+              broadcast, silence_noted) \
+             VALUES ('main', 1, 1000, 'user', NULL, 'user', 'kept', \
+                     '{\"targets\":[],\"user\":false}', 0, 0)",
+            [],
+        )
+        .expect("seeding the message must succeed");
+        for state in RETIRED_DELIVERY_STATES.iter().chain(current.iter()) {
+            conn.execute(
+                "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms) \
+                 VALUES ('main', 1, ?1, ?1, 1000)",
+                rusqlite::params![state],
+            )
+            .expect("seeding a delivery row must succeed");
+        }
+
+        store::apply_migrations(&mut conn, store::MIGRATIONS)
+            .expect("a database holding retired states must still migrate");
+    }
+
+    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
+    let mut stmt = conn
+        .prepare(
+            "SELECT state FROM chat_delivery WHERE room_id = 'main' AND seq = 1 ORDER BY state",
+        )
+        .expect("the delivery query must prepare");
+    let states: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .expect("the delivery query must run")
+        .map(|row| row.expect("a delivery row must decode"))
+        .collect();
+    let mut expected: Vec<String> = current.iter().map(|s| (*s).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        states, expected,
+        "only the rows in the retired vocabulary may go; every current-state row must stay"
+    );
+
+    let bodies: Vec<String> = conn
+        .prepare("SELECT body FROM chat_message WHERE room_id = 'main'")
+        .expect("the message query must prepare")
+        .query_map([], |row| row.get(0))
+        .expect("the message query must run")
+        .map(|row| row.expect("a message row must decode"))
+        .collect();
+    assert_eq!(
+        bodies,
+        vec!["kept".to_string()],
+        "removing a message's delivery records must leave the message itself"
+    );
+}
+
+/// Rebuilding the delivery table for the state check keeps its columns, and a database
+/// upgraded onto it matches one built in one go.
+#[test]
+fn rebuilding_the_delivery_table_for_the_state_check_keeps_its_columns() {
+    let (_fresh_db, fresh) = migrated_readonly("store-state-rebuild-fresh", &[store::MIGRATIONS]);
+    let (_upgraded_db, upgraded) = migrated_readonly(
+        "store-state-rebuild-upgraded",
+        &[
+            &store::MIGRATIONS[..BEFORE_DELIVERY_STATE_CHECK],
+            store::MIGRATIONS,
+        ],
+    );
+    let (_previous_db, previous) = migrated_readonly(
+        "store-state-rebuild-previous",
+        &[&store::MIGRATIONS[..BEFORE_DELIVERY_STATE_CHECK]],
+    );
+
+    assert_eq!(
+        read_schema(&fresh),
+        read_schema(&upgraded),
+        "a database built in one go and one upgraded from the version before must land on \
+         the identical schema"
+    );
+    assert_eq!(
+        table_columns(&previous, "chat_delivery"),
+        table_columns(&fresh, "chat_delivery"),
+        "the rebuilt delivery table must keep every column unchanged"
     );
 }

@@ -1,7 +1,8 @@
 //! Persistence port for the daemon's chat rooms: `chat_room`, `chat_message`
-//! and `chat_delivery` (schema v6, `migrations/006_chat_delivery_reason_check.sql`
-//! on top of v5's `migrations/005_chat_delivery_reason.sql`, v4's
-//! `migrations/004_chat_rooms.sql` and v3's `migrations/003_chat.sql`). A
+//! and `chat_delivery` (schema v13, `migrations/013_chat_delivery_state_check.sql`
+//! on top of v6's `migrations/006_chat_delivery_reason_check.sql`, v5's
+//! `migrations/005_chat_delivery_reason.sql`, v4's `migrations/004_chat_rooms.sql`
+//! and v3's `migrations/003_chat.sql`). A
 //! window's own room and the `main` room are both rows in `chat_room`;
 //! nothing in this module treats `main` specially beyond the seed row
 //! `003_chat.sql` inserts.
