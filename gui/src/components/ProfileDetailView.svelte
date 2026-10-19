@@ -66,6 +66,7 @@
               value={argument}
               aria-label={settings.profileArgumentLabel(index)}
               disabled={isSavingCommand}
+              spellcheck="false"
               on:input={(event) => updateArgument(index, event.currentTarget.value)}
             />
             {#if edited.length > 1}

@@ -60,7 +60,7 @@
          on it and the label can be typed over straight away. -->
     <label class="dialog-field">
       <span class="dialog-label">{label}</span>
-      <input type="text" class="dialog-input" bind:value />
+      <input type="text" class="dialog-input" spellcheck="false" bind:value />
     </label>
     {#if formError}
       <div class="form-error">{formError}</div>

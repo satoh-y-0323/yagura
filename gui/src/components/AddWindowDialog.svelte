@@ -209,6 +209,7 @@
             placeholder={forms.commandPlaceholder}
             bind:value={commandInput}
             disabled={isSubmitting}
+            spellcheck="false"
             rows="3"></textarea>
           <span class="form-help">{forms.commandHelp}</span>
         </label>
@@ -226,6 +227,7 @@
             value={cwdValue}
             on:input={(event) => onCwdChange(enteredText(event))}
             disabled={isSubmitting}
+            spellcheck="false"
           />
           <button
             type="button"
@@ -251,6 +253,7 @@
           placeholder={forms.namePlaceholder}
           bind:value={nameInput}
           disabled={isSubmitting}
+          spellcheck="false"
         />
       </label>
       {#if profileValue === ''}

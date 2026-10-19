@@ -98,6 +98,7 @@
         value={valueOf(axis.key, modelValue, effortValue)}
         on:input={(event) => reportText(axis.key, event)}
         {disabled}
+        spellcheck="false"
       />
       <datalist id={listPrefix + axis.key}>
         {#each axis.aliases as entry (entry.alias)}

@@ -245,6 +245,7 @@
                   value={row.value}
                   aria-label={plans.modelForAliasLabel(row.alias)}
                   disabled={readOnly}
+                  spellcheck="false"
                   on:input={(event) => editValue(row.alias, event.currentTarget.value)}
                 />
               {/if}

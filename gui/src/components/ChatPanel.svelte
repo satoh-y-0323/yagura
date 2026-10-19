@@ -538,6 +538,7 @@
         bind:this={inputElement}
         bind:value={draft}
         placeholder={chat.inputPlaceholder}
+        spellcheck="false"
         on:input={syncMention}
         on:click={syncMention}
         on:keyup={syncMention}

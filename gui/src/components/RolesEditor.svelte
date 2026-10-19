@@ -110,7 +110,9 @@
   <ul class="roles-editor__rows">
     {#each rows as row (row)}
       <li class="roles-editor__row">
-        <label class="roles-editor__field">{forms.nameLabel}<input bind:value={row.name} /></label>
+        <label class="roles-editor__field"
+          >{forms.nameLabel}<input bind:value={row.name} spellcheck="false" /></label
+        >
         <LaunchProfileFields
           {profileOptions}
           profileValue={row.profile}

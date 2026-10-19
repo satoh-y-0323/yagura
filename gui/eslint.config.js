@@ -117,11 +117,30 @@ const NO_BARE_LABELLED_BUTTON = [
   },
 ];
 
+// What is typed here is read by a machine (mentions, commands, paths, names), and macOS WebKit
+// rewrites quotes, dashes and words as they are typed unless spellcheck is off for the field.
+const NO_TEXT_SUBSTITUTION_MESSAGE =
+  'Set spellcheck="false" on a text field: macOS rewrites quotes and words typed into it.';
+const SPELLCHECK_OFF = "SvelteAttribute[key.name='spellcheck'][value.0.value='false']";
+const NON_TEXT_INPUT =
+  "SvelteAttribute[key.name='type'][value.0.value=/^(checkbox|radio|range|color|file|button|submit|reset|hidden)$/]";
+const NO_TEXT_SUBSTITUTION = [
+  {
+    selector: `SvelteStartTag[parent.kind='html'][parent.name.name='textarea']:not(:has(> ${SPELLCHECK_OFF}))`,
+    message: NO_TEXT_SUBSTITUTION_MESSAGE,
+  },
+  {
+    selector: `SvelteStartTag[parent.kind='html'][parent.name.name='input']:not(:has(> ${NON_TEXT_INPUT})):not(:has(> ${SPELLCHECK_OFF}))`,
+    message: NO_TEXT_SUBSTITUTION_MESSAGE,
+  },
+];
+
 const SOURCE_SYNTAX = [
   ...NO_RAW_HTML,
   ...NO_JAPANESE_TEXT,
   ...NO_GLOBAL_KEYDOWN,
   ...NO_BARE_LABELLED_BUTTON,
+  ...NO_TEXT_SUBSTITUTION,
 ];
 
 export default [
@@ -190,6 +209,7 @@ export default [
         ...NO_RAW_HTML,
         ...NO_JAPANESE_TEXT,
         ...NO_BARE_LABELLED_BUTTON,
+        ...NO_TEXT_SUBSTITUTION,
         ...NO_LITERAL_MARKUP_TEXT,
       ],
     },
