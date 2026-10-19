@@ -212,12 +212,11 @@ fn row_to_room_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
     })
 }
 
-/// The next seq for `room_id`, recorded in `chat_seq` so a seq is never
-/// handed out twice: clearing a room's history or deleting the room leaves
-/// the counter behind, and a reader holding an `after_seq` would otherwise
-/// skip the numbers that get reused.
 /// Lifts `room_id`'s halt and its `needs_user` flag.
-fn lift_halt_and_needs_user(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Result<(), StoreError> {
+fn lift_halt_and_needs_user(
+    tx: &rusqlite::Transaction<'_>,
+    room_id: &str,
+) -> Result<(), StoreError> {
     tx.execute_fixed(
         "UPDATE chat_room SET halted_reason = NULL, halted_at_ms = NULL, needs_user = 0 \
          WHERE room_id = ?1",
@@ -226,6 +225,10 @@ fn lift_halt_and_needs_user(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Re
     Ok(())
 }
 
+/// The next seq for `room_id`, recorded in `chat_seq` so a seq is never
+/// handed out twice: clearing a room's history or deleting the room leaves
+/// the counter behind, and a reader holding an `after_seq` would otherwise
+/// skip the numbers that get reused.
 fn next_seq(tx: &rusqlite::Transaction<'_>, room_id: &str) -> Result<i64, StoreError> {
     let highest: i64 = tx.query_row_fixed(
         "SELECT MAX(\
