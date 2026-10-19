@@ -914,6 +914,8 @@ An `"undelivered_unknown"` entry may carry `unknown_reason`, one of the six valu
 
 **Halt and `needs_user`**: `halted` is `null` when the room is running normally, or an object `{ "reason": "...", "since_ms": ... }` naming why it stopped (a runaway loop, a monologue, or the turn budget) once it has. `needs_user` is `true` whenever a human should look at the room -- either it just halted, or `@user` was mentioned in a post -- and is cleared only by a `"user"`-kind post. A halted room still accepts `read_chat` and delivers nothing further to any target until a user post clears it; [`send_chat`](#send_chat) / [`broadcast_chat`](#broadcast_chat) calls made while halted are still recorded but never delivered (see `"undelivered_halted"` above).
 
+**Clearing and deleting**: the user can clear a room's history, or delete a workspace room no running window belongs to, from the app's chat panel; no tool does either. A clear removes every message and delivery record, takes back posts still waiting in a window's inbox, and lifts the halt and `needs_user`. `seq` keeps counting up through a clear, and through a deleted room that a window re-creates later, so an `after_seq` you hold stays valid: the next page simply has no older messages. `"main"` can be cleared but not deleted.
+
 ### create_plan
 
 Creates a new plan: a title and a list of tasks, each naming its own `task_id`, an optional `role` / `profile` / `model` / `effort`, the `task_id`s it `depends_on`, and the paths it `writes`. yagura derives each task's wave from `depends_on` -- the longest dependency chain reaching it -- and returns the plan grouped into waves.

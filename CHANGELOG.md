@@ -25,10 +25,12 @@ This release changes how yagura hands text to a CLI, and with it several MCP and
 - **In the app, restoring a session numbers a window whose name a running window already carries** instead of having it refused, and the Rename window dialog now waits for the daemon: it closes once the window has the new name, and otherwise stays open and shows why, so the name can be corrected in place. The Add a window dialog adds, under a taken name, that leaving the name empty gets a numbered one.
 - **A `"` is no longer accepted in a window name**, a profile's `display_name` or a plan task's `title`, because it ends a quoted `@"..."` mention. A profile that already contains one stops loading until it is edited; a plan still loads, but a task whose title contains one cannot open its window without a `name`, and the plan cannot be updated until that title is changed. The label in a model listing and a registration `group` are not window names and still accept it.
 - **The IPC protocol is now revision 25.** The open requests `open_window` and `open_window_from_profile` take `on_name_taken` (`refuse`, the default, or `number`), the error code `name_taken` is new, and `window_opened`, `task_window_opened` and `handoff_sent` carry `name`. Every addition is optional on the wire.
+- **The IPC protocol is now revision 26.** The approver requests `clear_chat_room` and `delete_chat_room` (answered with `chat_room_cleared` and `chat_room_deleted`), the push `chat_history_cleared`, the error code `room_in_use`, and `ChatRoomInfo.has_open_windows` are new. A message's `seq` now keeps counting up when a room's history is cleared or the room is deleted and re-created.
 
 ### Added
 
 - [`docs/adding-a-cli.md`](docs/adding-a-cli.md): how to check, route by route, how a new CLI can be handed text, and how to turn the result into a profile.
+- **A chat room's history can be cleared, and a room deleted, from the chat panel.** Open a room's ⋯ menu and choose Clear history or Delete room. Clearing removes every message in the room and takes back the messages its windows have not received yet; it also lifts a halt. A workspace room can be deleted once none of its windows is running, and comes back empty if a window in that folder uses chat again; the main room can only be cleared.
 
 ### Fixed
 
