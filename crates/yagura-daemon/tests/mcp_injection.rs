@@ -507,6 +507,54 @@ async fn open_window_from_profile_renders_the_bridge_toml_and_env_names_placehol
 }
 
 #[tokio::test]
+async fn open_window_from_profile_names_the_injected_mcp_server_after_the_named_instances_registration()
+ {
+    let tree = TempDir::new("yagura-cli-test", "mcp-inject-server-name");
+    let profiles_dir = tree.make_dir("profiles");
+    let mcp_dir = tree.make_dir("mcp");
+    let table = "\n[mcp]\nconfig_file = '{\"mcpServers\":{\"{server}\":{\"command\":\"x\"}}}'\n\
+                 args = [\"--mcp-config\", \"{mcp_config_file}\", \"-c\", \
+                 \"mcp_servers.{server}.command={bridge_toml}\"]\n";
+    write_profile(
+        &profiles_dir,
+        "argv-probe",
+        &argv_probe_profile_source("Argv Probe", table),
+    );
+    let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
+    let mut config = mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge));
+    config.instance_id = Some("t-named".to_string());
+    let registered =
+        yagura_daemon::mcp_registration::RegistrationTarget::for_instance(Some("t-named"))
+            .server()
+            .to_string();
+    let h = Harness::start("mcp-inject-server-name", config).await;
+    let mut client = h.connect().await;
+
+    let window_id =
+        expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
+    h.wait_for_scrollback(&window_id, b"<<argv[4]=", Duration::from_secs(10))
+        .await;
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
+
+    let command_arg = extract_sentinel_value(&text, "argv[4]")
+        .expect("argv[4] must report the rendered -c element");
+    assert!(
+        command_arg.starts_with(&format!("mcp_servers.{registered}.command=")),
+        "the -c override must name the registered server {registered:?}; got {command_arg:?}"
+    );
+    let config_file_path = extract_sentinel_value(&text, "argv[2]")
+        .expect("argv[2] must report the rendered settings-file path");
+    let written = std::fs::read_to_string(&config_file_path)
+        .unwrap_or_else(|err| panic!("the rendered settings file must exist: {err}"));
+    let json: serde_json::Value = serde_json::from_str(&written)
+        .unwrap_or_else(|err| panic!("the settings file must be JSON: {err}; got {written:?}"));
+    assert!(
+        json["mcpServers"].get(&registered).is_some(),
+        "the settings file must key mcpServers by {registered:?}; got {written:?}"
+    );
+}
+
+#[tokio::test]
 async fn open_window_from_profile_without_an_mcp_table_injects_nothing_into_argv() {
     let tree = TempDir::new("yagura-cli-test", "mcp-inject-no-table");
     let profiles_dir = tree.make_dir("profiles");

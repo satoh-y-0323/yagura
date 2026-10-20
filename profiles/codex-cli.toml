@@ -34,11 +34,11 @@ args = ["-c", "model_reasoning_effort={value}"]
 
 [mcp]
 args = [
-  "-c", "mcp_servers.yagura.command={bridge_toml}",
-  "-c", "mcp_servers.yagura.args=[]",
-  "-c", "mcp_servers.yagura.env_vars={env_names_toml}",
+  "-c", "mcp_servers.{server}.command={bridge_toml}",
+  "-c", "mcp_servers.{server}.args=[]",
+  "-c", "mcp_servers.{server}.env_vars={env_names_toml}",
   # Codex's own 60-second default would end a call before the daemon's deadlines do.
-  "-c", "mcp_servers.yagura.tool_timeout_sec=86400",
+  "-c", "mcp_servers.{server}.tool_timeout_sec=86400",
 ]
 
 # Each turn boundary runs the daemon's status report. Codex runs a

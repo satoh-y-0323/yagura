@@ -73,7 +73,10 @@ no MCP registration.** The daemon points that CLI at the bridge itself:
   `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN`.
 - A window launched from a profile with an `[mcp]` table gets that table's arguments appended to
   its command line: Claude Code a `--mcp-config` server definition, Codex CLI `-c` overrides for
-  `mcp_servers.yagura` that also forward the channel variables with `env_vars`. The bundled
+  `mcp_servers.<name>` that also forward the channel variables with `env_vars` (and, in
+  `wsl-codex-cli`, name them in the server's `WSLENV` so they reach the Windows bridge). The server
+  is named the way Register names it: `yagura`, or `yagura-<instance>` for a
+  [named instance](instances.md). The bundled
   `claude-code`, `codex-cli`, `wsl-claude-code` and `wsl-codex-cli` profiles carry one; `shell`
   does not, and neither does `antigravity-cli` or `wsl-antigravity-cli` -- Antigravity CLI
   (`agy`) reads MCP servers only from its own global registration, not from anything passed at
@@ -91,10 +94,13 @@ The bundled `[mcp]` table applies even when you have changed the profile: your f
 root carries only what you changed and is laid over the bundled profile (see
 [profiles/README.md](../profiles/README.md#where-profiles-live)).
 
-If the CLI also has a server named `yagura` registered, the injected one is what runs in a window
-yagura opens: Claude Code starts the `--mcp-config` definition instead of a same-named one from a
-project's `.mcp.json`, and Codex CLI merges the `-c` overrides into an existing
-`[mcp_servers.yagura]` table key by key, keeping the keys the injection does not set. The bundled
+If the CLI also has a server of that name registered -- `yagura`, or `yagura-<instance>` for a
+named instance -- the injected one is what runs in a window yagura opens: Claude Code starts the
+`--mcp-config` definition instead of a same-named one from a project's `.mcp.json`, and Codex CLI
+merges the `-c` overrides into an existing `[mcp_servers.<name>]` table key by key, keeping the
+keys the injection does not set. A profile of your own that spells `yagura` instead of `{server}`
+gives a window of a named instance two servers side by side, and only the injected one can say
+which window it is. The bundled
 Codex profiles set `tool_timeout_sec` themselves (see [Configuring Codex CLI](#configuring-codex-cli)
 for why), so a value in `~/.codex/config.toml` does not apply to a window yagura opens.
 
@@ -1431,7 +1437,7 @@ When a GUI-launched daemon logs `no playbook resolved`, the seeding described in
 
 A connection's origin starts as `External` and can be upgraded exactly once, in one of two mutually exclusive directions:
 
-- **`identify { window_id, token }`** claims the connection as that window, proven with the window's own per-boot status token (see [StatusEvent Authentication](#statusevent-authentication) for how the token reaches a process). `yagura-mcp` sends this automatically, once, on every fresh connection it opens, using the `YAGURA_WINDOW_ID` / `YAGURA_STATUS_TOKEN` environment variables it inherits from its own process's environment -- populated only when `yagura-mcp` is itself running inside (or spawned from within) a window the daemon opened. A bridge started outside any such window -- a person's own MCP client, not launched by an agent CLI running in a yagura window -- never sees these variables and stays `External` for its whole lifetime. The same happens inside a window when the MCP client does not pass its own environment on to the server it spawns: Codex CLI assembles an stdio server's environment from an allow-list, so both variables have to be forwarded explicitly -- by the `env_vars` override a bundled profile's `[mcp]` table injects (see [Windows yagura Opens](#windows-yagura-opens)), or by its own configuration (see [Configuring Codex CLI](#configuring-codex-cli)). Claude Code passes its environment through unchanged and needs no such setting. A WSL window's variables cross into the distribution only because the daemon names them in `WSLENV` (see [docs/wsl.md](wsl.md#environment-variables)).
+- **`identify { window_id, token }`** claims the connection as that window, proven with the window's own per-boot status token (see [StatusEvent Authentication](#statusevent-authentication) for how the token reaches a process). `yagura-mcp` sends this automatically, once, on every fresh connection it opens, using the `YAGURA_WINDOW_ID` / `YAGURA_STATUS_TOKEN` environment variables it inherits from its own process's environment -- populated only when `yagura-mcp` is itself running inside (or spawned from within) a window the daemon opened. A bridge started outside any such window -- a person's own MCP client, not launched by an agent CLI running in a yagura window -- never sees these variables and stays `External` for its whole lifetime. The same happens inside a window when the MCP client does not pass its own environment on to the server it spawns: Codex CLI assembles an stdio server's environment from an allow-list, so both variables have to be forwarded explicitly -- by the `env_vars` override a bundled profile's `[mcp]` table injects (see [Windows yagura Opens](#windows-yagura-opens)), or by its own configuration (see [Configuring Codex CLI](#configuring-codex-cli)). Claude Code passes its environment through unchanged and needs no such setting. A WSL window's variables cross into the distribution only because the daemon names them in `WSLENV` (see [docs/wsl.md](wsl.md#environment-variables)), and back out to the Windows bridge a WSL Codex CLI starts only because `wsl-codex-cli` names them in that server's own `WSLENV`.
 - **`register_approver`** claims the connection as an approver (see [Approver Registration](#approver-registration)).
 
 **Who this identifies**: the token lives in the environment of the window's *whole process tree*, not just its immediate child, so the self-window exemption (see [Approval Flow](#approval-flow)) is granted to any process running inside that tree that can read its own environment and open a connection to the daemon. This does not exceed what such a process could already do directly -- write to its own PTY, or terminate anything sharing its Job Object / process group -- so it is accepted as within the daemon's existing trust boundary.
@@ -1569,3 +1575,9 @@ If the MCP server fails to connect:
    `no usable mcp bridge next to the daemon`, or that it dropped the injection for that window (see
    [profiles/README.md](../profiles/README.md#mcp-injection)); and that `yagura-mcp` itself did not
    write `yagura-mcp: could not identify with the daemon at startup: <reason>` to its stderr
+
+8. A WSL profile starts the Windows `yagura-mcp.exe` through WSL interop. If Codex CLI's `/mcp`
+   shows yagura as failed in a WSL window, run `/mnt/c/Windows/System32/cmd.exe /c ver` inside the
+   distribution: `Exec format error` means interop is off, and no window's yagura MCP server can
+   start until it is back. `wsl --shutdown` from Windows restores it. This has been seen on
+   Ubuntu 24.04 with systemd enabled in WSL, and may have other causes.

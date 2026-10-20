@@ -186,7 +186,7 @@ fn render_mcp_args_round_trips_the_bridge_path_through_a_toml_literal_string() {
         .expect("mcp-bridge-toml must ship an [mcp] table");
 
     let bridge_path = Path::new(r"C:\Program Files\yagura\yagura-mcp.exe");
-    let rendered = render_mcp_args(spec, bridge_path, None)
+    let rendered = render_mcp_args(spec, "yagura", bridge_path, None)
         .expect("a bridge path with no quote or newline must render");
 
     assert_eq!(rendered[0], "--bridge");
@@ -220,7 +220,7 @@ fn render_mcp_args_refuses_a_bridge_path_containing_a_single_quote_or_newline() 
         Path::new("C:\\it's\\yagura-mcp.exe"),
         Path::new("C:\\line\nbreak\\yagura-mcp.exe"),
     ] {
-        let rendered = render_mcp_args(spec, unsafe_path, None);
+        let rendered = render_mcp_args(spec, "yagura", unsafe_path, None);
         assert_eq!(
             rendered, None,
             "a bridge path containing a single quote or newline cannot become a TOML \
@@ -244,7 +244,8 @@ fn render_mcp_args_renders_env_names_toml_as_the_four_channel_names_in_order() {
         .expect("mcp-env-names must ship an [mcp] table");
 
     let bridge_path = Path::new("/opt/yagura/yagura-mcp");
-    let rendered = render_mcp_args(spec, bridge_path, None).expect("nothing unsafe here to refuse");
+    let rendered =
+        render_mcp_args(spec, "yagura", bridge_path, None).expect("nothing unsafe here to refuse");
 
     let mut expected: Vec<String> = yagura_protocol::MCP_CHANNEL_ENV_VARS
         .iter()
@@ -275,7 +276,7 @@ fn render_mcp_args_substitutes_the_mcp_config_file_placeholder_with_the_given_pa
 
     let bridge_path = Path::new("/opt/yagura/yagura-mcp");
     let config_path = Path::new("/home/yagura/.config/yagura/mcp-abc123.json");
-    let rendered = render_mcp_args(spec, bridge_path, Some(config_path))
+    let rendered = render_mcp_args(spec, "yagura", bridge_path, Some(config_path))
         .expect("nothing unsafe here to refuse");
 
     assert_eq!(
@@ -301,7 +302,7 @@ fn render_mcp_args_passes_through_an_arg_with_no_placeholder_unchanged() {
         .as_ref()
         .expect("mcp-no-placeholder-render must ship an [mcp] table");
 
-    let rendered = render_mcp_args(spec, Path::new("/opt/yagura/yagura-mcp"), None)
+    let rendered = render_mcp_args(spec, "yagura", Path::new("/opt/yagura/yagura-mcp"), None)
         .expect("nothing unsafe here to refuse");
 
     assert_eq!(

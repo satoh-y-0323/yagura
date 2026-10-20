@@ -37,11 +37,14 @@ args = ["-c", "model_reasoning_effort={value}"]
 
 [mcp]
 args = [
-  "-c", "mcp_servers.yagura.command='bash'",
-  "-c", "mcp_servers.yagura.args=['-c','exec \"$YAGURA_MCP_BRIDGE\"']",
-  "-c", "mcp_servers.yagura.env_vars={env_names_toml}",
+  "-c", "mcp_servers.{server}.command='bash'",
+  "-c", "mcp_servers.{server}.args=['-c','exec \"$YAGURA_MCP_BRIDGE\"']",
+  "-c", "mcp_servers.{server}.env_vars={env_names_toml}",
+  # Codex hands its MCP server only the variables above, without WSLENV, so
+  # the Windows bridge would see none of them unless WSLENV is set here.
+  "-c", "mcp_servers.{server}.env.WSLENV={wslenv_toml}",
   # Codex's own 60-second default would end a call before the daemon's deadlines do.
-  "-c", "mcp_servers.yagura.tool_timeout_sec=86400",
+  "-c", "mcp_servers.{server}.tool_timeout_sec=86400",
 ]
 
 # Each turn boundary runs the daemon's status report. Codex runs a

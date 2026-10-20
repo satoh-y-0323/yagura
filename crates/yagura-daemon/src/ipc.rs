@@ -2388,8 +2388,16 @@ impl IpcServer {
         let mut injections = Vec::new();
         if let (Some(spec), Some(bridge)) = (launch.mcp.as_ref(), self.config.mcp_bridge.as_deref())
         {
+            // The registered name, so the window's server and the instance's
+            // registration are one entry rather than two side by side.
+            let target = crate::mcp_registration::RegistrationTarget::for_instance(
+                self.config.instance_id.as_deref(),
+            );
             injections.extend(crate::profile::prepare_mcp_injection(
-                spec, bridge, config_dir,
+                spec,
+                target.server(),
+                bridge,
+                config_dir,
             ));
         }
         // Independent of the bridge: the hooks reach the daemon through the

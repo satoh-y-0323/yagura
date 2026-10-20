@@ -143,7 +143,7 @@ args = ["-m", "{value}"]       # accepts. `args` is required inside it and must
 [mcp]                          # optional table; how the launched CLI is
                                 # pointed at yagura's MCP bridge. See "MCP
                                 # injection" below
-args = ["-c", "mcp_servers.yagura.command={bridge_toml}"]
+args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
                                 # required inside it; appended to the launch
 # config_file = '...'          # optional; content of a settings file the
                                 # daemon writes for `{mcp_config_file}`
@@ -758,16 +758,16 @@ see [docs/mcp-setup.md's "Configuring Antigravity CLI"](../docs/mcp-setup.md#con
 ```toml
 # Claude Code on Windows: the server definition goes into a settings file
 [mcp]
-config_file = '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+config_file = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
 args = ["--mcp-config", "{mcp_config_file}"]
 
 # Codex CLI on Windows: -c overrides written as TOML literal strings
 [mcp]
 args = [
-  "-c", "mcp_servers.yagura.command={bridge_toml}",
-  "-c", "mcp_servers.yagura.args=[]",
-  "-c", "mcp_servers.yagura.env_vars={env_names_toml}",
-  "-c", "mcp_servers.yagura.tool_timeout_sec=86400",
+  "-c", "mcp_servers.{server}.command={bridge_toml}",
+  "-c", "mcp_servers.{server}.args=[]",
+  "-c", "mcp_servers.{server}.env_vars={env_names_toml}",
+  "-c", "mcp_servers.{server}.tool_timeout_sec=86400",
 ]
 ```
 
@@ -776,16 +776,19 @@ The table takes two keys, and any other key excludes the profile:
 - `args` (required): argv elements appended to the launch, after the
   profile's own argv and its launch options.
 - `config_file` (optional): the content of a settings file for the CLI to
-  read, written by the daemon exactly as given -- no placeholder is
-  substituted inside it.
+  read, written by the daemon as given except that `{server}` is replaced
+  by the server name (see the table below) -- no other placeholder is
+  substituted inside it, so JSON braces and `${NAME}` stay as written.
 
-Three placeholders are substituted inside `args` elements, always within an
+These placeholders are substituted inside `args` elements, always within an
 element, so they can never add, split or reorder argv elements:
 
 | placeholder | replaced by |
 |---|---|
+| `{server}` | the MCP server name the instance registers under: `yagura` for the default instance, `yagura-<instance>` for a named one (see [Instances](../docs/instances.md)); also substituted inside `config_file` |
 | `{bridge_toml}` | the bridge's absolute path as a TOML literal string, for example `'C:\path\to\yagura-mcp.exe'` |
 | `{env_names_toml}` | the TOML literal-string array `['YAGURA_WINDOW_ID', 'YAGURA_STATUS_TOKEN', 'YAGURA_INSTANCE', 'YAGURA_MCP_BRIDGE']` |
+| `{wslenv_toml}` | the TOML literal string `'YAGURA_WINDOW_ID:YAGURA_STATUS_TOKEN:YAGURA_INSTANCE'`, a `WSLENV` value naming the variables the bridge reads (the bundled `wsl-codex-cli` sets it as its server's `env.WSLENV`, because Codex does not pass `WSLENV` on to an MCP server, and without it the Windows bridge started from WSL sees none of them) |
 | `{mcp_config_file}` | the path of the file the daemon wrote from `config_file`; usable only when the table has `config_file` |
 
 An element with none of them passes through unchanged. `${NAME}` is not a
@@ -836,12 +839,15 @@ its values as TOML literal strings, which need none. The WSL profiles start
 `wsl.exe`, which is not a shim, so `wsl-claude-code` passes the same JSON
 straight on the command line.
 
-Where a CLI already has a server named `yagura` configured, the bundled
-tables take over for a window yagura opens. Claude Code starts the
-`--mcp-config` definition instead of a same-named one from a project's
-`.mcp.json`. Codex CLI merges `-c` overrides key by key, so keys of an
-existing `[mcp_servers.yagura]` table that the injection does not set stay
-in effect. The bundled Codex tables set `tool_timeout_sec` to a day: Codex's
+Where a CLI already has a server of the injected name configured -- `yagura`,
+or `yagura-<instance>` for a named instance, the name Register in the GUI
+uses -- the bundled tables take over for a window yagura opens. Claude Code
+starts the `--mcp-config` definition instead of a same-named one from a
+project's `.mcp.json`. Codex CLI merges `-c` overrides key by key, so keys
+of an existing `[mcp_servers.<name>]` table that the injection does not set
+stay in effect. A profile of your own that spells `yagura` instead of
+`{server}` still works, but under a named instance its window then carries
+two servers, the registered one and the injected one. The bundled Codex tables set `tool_timeout_sec` to a day: Codex's
 own 60-second default would otherwise end a `wait_for_status`,
 `wait_for_report` or `send_handoff` call that is still waiting on the daemon.
 
@@ -1115,7 +1121,7 @@ registered or not).
 **Update and Remove can drop a hand-written value.** A CLI's own `add`
 command can rewrite its whole record rather than editing it in place: the
 bundled `codex-cli` and `wsl-codex-cli` tables' `add` drops any key its own
-`-c mcp_servers.yagura.*` overrides did not set, including a
+`-c mcp_servers.{server}.*` overrides did not set, including a
 `tool_timeout_sec` an earlier `toml_set` edit wrote -- which is why their
 `[mcp_registration.toml_set]` writes it back once, right after `add`. Update
 runs `remove` then the same steps as Register. Remove runs `remove`, then

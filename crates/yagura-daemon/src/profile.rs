@@ -52,12 +52,16 @@ const SUPPORTED_SCHEMA: u32 = 1;
 /// goes. Every occurrence inside an element is replaced; nothing else is.
 const VALUE_PLACEHOLDER: &str = "{value}";
 
-/// The three placeholders an `[mcp]` table's `args` may spell, understood by
+/// The placeholders an `[mcp]` table's `args` may spell, understood by
 /// [`render_mcp_args`]. Named here so [`contains_unknown_placeholder`] strips
 /// exactly these before judging what remains.
 const MCP_CONFIG_FILE_PLACEHOLDER: &str = "{mcp_config_file}";
 const MCP_BRIDGE_TOML_PLACEHOLDER: &str = "{bridge_toml}";
 const MCP_ENV_NAMES_TOML_PLACEHOLDER: &str = "{env_names_toml}";
+const MCP_WSLENV_TOML_PLACEHOLDER: &str = "{wslenv_toml}";
+/// The one placeholder an `[mcp]` table's `config_file` content may spell as
+/// well as its `args`.
+const MCP_SERVER_PLACEHOLDER: &str = "{server}";
 /// The one placeholder a `[hooks]` table's `args` may spell.
 const HOOKS_CONFIG_FILE_PLACEHOLDER: &str = "{hooks_config_file}";
 
@@ -417,7 +421,8 @@ pub struct InjectionSpec {
     pub args: Vec<String>,
     /// The settings-file content the daemon writes to disk before spawn,
     /// substituted wherever an `args` element spells the kind's config-file
-    /// placeholder. `None` when no element needs one (the CLI takes the
+    /// placeholder. For `[mcp]`, `{server}` in it is substituted too, and
+    /// nothing else. `None` when no element needs one (the CLI takes the
     /// configuration directly on its command line instead).
     pub config_file: Option<String>,
 }
@@ -1044,6 +1049,8 @@ fn known_placeholders(kind: TableKind) -> &'static [&'static str] {
             MCP_CONFIG_FILE_PLACEHOLDER,
             MCP_BRIDGE_TOML_PLACEHOLDER,
             MCP_ENV_NAMES_TOML_PLACEHOLDER,
+            MCP_WSLENV_TOML_PLACEHOLDER,
+            MCP_SERVER_PLACEHOLDER,
         ],
         TableKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER],
     }
@@ -1144,14 +1151,16 @@ fn toml_literal_string_array(items: &[&str]) -> Option<String> {
 }
 
 /// Turns an `[mcp]` table's [`InjectionSpec::args`] into the argv elements a launch injects,
-/// resolving each of the three known placeholders: `bridge_path` for
-/// `{bridge_toml}` (as a TOML literal string), the fixed channel
-/// environment-variable names for `{env_names_toml}` (as a TOML
-/// literal-string array, [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] followed
-/// by [`yagura_protocol::MCP_BRIDGE_ENV`]), and `config_file_path` for
-/// `{mcp_config_file}` (substituted verbatim -- it is a settings-file path
-/// argument, not TOML content). An element with none of the three passes
-/// through unchanged.
+/// resolving each known placeholder: `server` for `{server}` (the MCP server
+/// name, verbatim), `bridge_path` for `{bridge_toml}` (as a TOML literal
+/// string), the fixed channel environment-variable names for
+/// `{env_names_toml}` (as a TOML literal-string array,
+/// [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] followed by
+/// [`yagura_protocol::MCP_BRIDGE_ENV`]) and for `{wslenv_toml}` (as one TOML
+/// literal string, [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] joined by `:` --
+/// a `WSLENV` value), and `config_file_path` for `{mcp_config_file}`
+/// (substituted verbatim -- it is a settings-file path argument, not TOML
+/// content). An element with none of them passes through unchanged.
 ///
 /// Returns `None` when `bridge_path` cannot be rendered as a TOML literal
 /// string (it contains a single quote or a newline): emitting a broken TOML
@@ -1159,6 +1168,7 @@ fn toml_literal_string_array(items: &[&str]) -> Option<String> {
 #[must_use]
 pub fn render_mcp_args(
     spec: &InjectionSpec,
+    server: &str,
     bridge_path: &Path,
     config_file_path: Option<&Path>,
 ) -> Option<Vec<String>> {
@@ -1171,19 +1181,31 @@ pub fn render_mcp_args(
     env_names.push(yagura_protocol::MCP_BRIDGE_ENV.to_string());
     let env_name_refs: Vec<&str> = env_names.iter().map(String::as_str).collect();
     let env_names_toml = toml_literal_string_array(&env_name_refs)?;
+    // The bridge path stays out: only the WSL-side shell reads it.
+    let wslenv_toml = toml_literal_string(&yagura_protocol::MCP_CHANNEL_ENV_VARS.join(":"))?;
 
     let config_file = config_file_path.map(|path| path.to_string_lossy().into_owned());
 
     let mut rendered = Vec::with_capacity(spec.args.len());
     for arg in &spec.args {
-        let mut value = arg.replace(MCP_BRIDGE_TOML_PLACEHOLDER, &bridge_toml);
+        // First, so a substituted path that happens to spell `{server}` is
+        // never rewritten.
+        let mut value = substitute_server(arg, server);
+        value = value.replace(MCP_BRIDGE_TOML_PLACEHOLDER, &bridge_toml);
         value = value.replace(MCP_ENV_NAMES_TOML_PLACEHOLDER, &env_names_toml);
+        value = value.replace(MCP_WSLENV_TOML_PLACEHOLDER, &wslenv_toml);
         if let Some(config_file) = &config_file {
             value = value.replace(MCP_CONFIG_FILE_PLACEHOLDER, config_file);
         }
         rendered.push(value);
     }
     Some(rendered)
+}
+
+/// Replaces `{server}` in `text` with `server` and nothing else, so JSON
+/// braces and `${NAME}` references in a settings file survive.
+fn substitute_server(text: &str, server: &str) -> String {
+    text.replace(MCP_SERVER_PLACEHOLDER, server)
 }
 
 /// Turns a `[hooks]` table's [`InjectionSpec::args`] into the argv elements a
@@ -1201,10 +1223,16 @@ pub fn render_hooks_args(spec: &InjectionSpec, config_file_path: Option<&Path>) 
         .collect()
 }
 
-/// Renders an `[mcp]` table into the injection one launch carries: its
-/// settings file, when it has one, is named after its content under
-/// `config_dir`, and the rendered `args` name that file
-/// ([`render_mcp_args`]).
+/// Renders an `[mcp]` table into the injection one launch carries, naming
+/// the MCP server `server` (the same name the instance registers under,
+/// [`crate::mcp_registration::RegistrationTarget::server`]): its settings
+/// file, when it has one, has `{server}` substituted and is named after the
+/// substituted content under `config_dir`, and the rendered `args` name that
+/// file ([`render_mcp_args`]).
+///
+/// `server` goes into JSON keys and bare TOML keys unquoted, which holds
+/// because an instance id is limited to `[a-z0-9-]`
+/// (`yagura_os::validate_instance_id`).
 ///
 /// Returns `None` -- no injection for this launch, with a warning -- when
 /// the table needs a settings file but no `config_dir` was configured, or
@@ -1212,11 +1240,16 @@ pub fn render_hooks_args(spec: &InjectionSpec, config_file_path: Option<&Path>) 
 #[must_use]
 pub fn prepare_mcp_injection(
     spec: &InjectionSpec,
+    server: &str,
     bridge_path: &Path,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    prepare_injection(TableKind::Mcp, spec, config_dir, |config_file_path| {
-        let args = render_mcp_args(spec, bridge_path, config_file_path);
+    let content = spec
+        .config_file
+        .as_deref()
+        .map(|content| substitute_server(content, server));
+    prepare_injection(TableKind::Mcp, content, config_dir, |config_file_path| {
+        let args = render_mcp_args(spec, server, bridge_path, config_file_path);
         if args.is_none() {
             tracing::warn!(
                 "the MCP bridge path cannot be rendered as a TOML literal string; the window \
@@ -1239,26 +1272,29 @@ pub fn prepare_hooks_injection(
     spec: &InjectionSpec,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    prepare_injection(TableKind::Hooks, spec, config_dir, |config_file_path| {
-        Some(render_hooks_args(spec, config_file_path))
-    })
+    prepare_injection(
+        TableKind::Hooks,
+        spec.config_file.clone(),
+        config_dir,
+        |config_file_path| Some(render_hooks_args(spec, config_file_path)),
+    )
 }
 
 /// The part of preparing an injection both kinds share: the settings file
-/// (named after its content under `config_dir`) and the rendered `args` that
-/// name it. `render` turns the file's path into the argv elements and logs
-/// its own refusal.
+/// `content` (named after itself under `config_dir`) and the rendered `args`
+/// that name it. `render` turns the file's path into the argv elements and
+/// logs its own refusal.
 fn prepare_injection(
     kind: TableKind,
-    spec: &InjectionSpec,
+    content: Option<String>,
     config_dir: Option<&Path>,
     render: impl FnOnce(Option<&Path>) -> Option<Vec<String>>,
 ) -> Option<CliInjection> {
-    let config_file = match (&spec.config_file, config_dir) {
+    let config_file = match (content, config_dir) {
         (Some(content), Some(dir)) => Some(InjectedConfigFile {
             dir: dir.to_path_buf(),
-            file_name: config_file_name(kind, content),
-            content: content.clone(),
+            file_name: config_file_name(kind, &content),
+            content,
         }),
         (Some(_), None) => {
             tracing::warn!(

@@ -36,7 +36,7 @@ values = ["haiku", "sonnet", "opus", "fable"]
 args = ["--effort", "{value}"]
 
 [mcp]
-args = ["--mcp-config", '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}']
+args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}']
 
 # Each hook event reports the turn's start, a permission prompt, or its end to
 # the daemon through the window's own environment (verified with Claude Code

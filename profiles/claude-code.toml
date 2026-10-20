@@ -27,7 +27,7 @@ values = ["haiku", "sonnet", "opus", "fable"]
 args = ["--effort", "{value}"]
 
 [mcp]
-config_file = '{"mcpServers":{"yagura":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+config_file = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
 args = ["--mcp-config", "{mcp_config_file}"]
 
 # Each hook event reports the turn's start, a permission prompt, or its end to

@@ -37,13 +37,13 @@ fn parse_repo_profile(id: &str) -> Profile {
 
 /// Decodes a JSON document embedded in a profile's own text (a
 /// `config_file` string, or a WSL profile's literal `args` element),
-/// returning the `mcpServers.yagura.command` field it must carry.
+/// returning the `mcpServers.{server}.command` field it must carry.
 fn mcp_server_command(json: &str) -> String {
     let value: serde_json::Value = serde_json::from_str(json)
         .unwrap_or_else(|err| panic!("must be valid JSON: {err}, source: {json:?}"));
-    value["mcpServers"]["yagura"]["command"]
+    value["mcpServers"]["{server}"]["command"]
         .as_str()
-        .unwrap_or_else(|| panic!("mcpServers.yagura.command must be a string, got: {value}"))
+        .unwrap_or_else(|| panic!("mcpServers.{{server}}.command must be a string, got: {value}"))
         .to_string()
 }
 
@@ -85,7 +85,7 @@ fn claude_code_ships_a_config_file_referencing_the_bridge_variable() {
     assert_eq!(
         mcp_server_command(config_file),
         "${YAGURA_MCP_BRIDGE}",
-        "the config file's mcpServers.yagura.command must reference the bridge \
+        "the config file's mcpServers.{{server}}.command must reference the bridge \
          environment variable, not a literal path"
     );
 }
@@ -184,10 +184,10 @@ fn codex_profiles_lift_the_client_tool_timeout_above_the_daemon_deadlines() {
             .args
             .windows(2)
             .filter(|pair| pair[0] == "-c")
-            .find_map(|pair| pair[1].strip_prefix("mcp_servers.yagura.tool_timeout_sec="))
+            .find_map(|pair| pair[1].strip_prefix("mcp_servers.{server}.tool_timeout_sec="))
             .unwrap_or_else(|| {
                 panic!(
-                    "{id}'s [mcp] args must set mcp_servers.yagura.tool_timeout_sec, got {:?}",
+                    "{id}'s [mcp] args must set mcp_servers.{{server}}.tool_timeout_sec, got {:?}",
                     mcp.args
                 )
             });
