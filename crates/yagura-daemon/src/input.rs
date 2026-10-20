@@ -410,6 +410,12 @@ impl ComposerLine {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The composer's text once `probe` is typed behind this line.
+    #[must_use]
+    pub fn with_probe(&self, probe: char) -> String {
+        format!("{}{probe}", self.0)
+    }
 }
 
 /// The write sequence [`plan_submit_line`] builds for one submit attempt.

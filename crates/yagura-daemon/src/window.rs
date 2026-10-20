@@ -2649,7 +2649,7 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
         let after_probe = seq + 1;
-        let envelope_and_probe = self.own_text(&format!("{}{probe}", line.as_str()));
+        let envelope_and_probe = self.own_text(&line.with_probe(probe));
         if self
             .write_judged(probe.to_string().as_bytes(), seq, envelope_and_probe)
             .await?
@@ -3024,7 +3024,7 @@ impl WindowEntry {
             .write_judged(
                 probe.to_string().as_bytes(),
                 after_body,
-                self.own_text(&format!("{}{probe}", line.as_str())),
+                self.own_text(&line.with_probe(probe)),
             )
             .await?
             == GuardedWrite::Moved
@@ -3051,12 +3051,8 @@ impl WindowEntry {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_probe)))
             }
             ComposerWait::RequesterGone => {
-                self.take_back_for_departed_requester(
-                    &format!("{}{probe}", line.as_str()),
-                    probe,
-                    after_probe,
-                )
-                .await
+                self.take_back_for_departed_requester(&line.with_probe(probe), probe, after_probe)
+                    .await
             }
             ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
         }
@@ -3159,7 +3155,7 @@ impl WindowEntry {
     ) -> PtyResult<SubmitJudgment> {
         if requester.has_left() {
             return self
-                .take_back_for_departed_requester(&format!("{}{probe}", line.as_str()), probe, seq)
+                .take_back_for_departed_requester(&line.with_probe(probe), probe, seq)
                 .await;
         }
         let after_erase = seq + 1;
@@ -3173,12 +3169,8 @@ impl WindowEntry {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
             Some(ComposerWait::RequesterGone) => {
-                self.take_back_for_departed_requester(
-                    &format!("{}{probe}", line.as_str()),
-                    probe,
-                    after_erase,
-                )
-                .await
+                self.take_back_for_departed_requester(&line.with_probe(probe), probe, after_erase)
+                    .await
             }
             Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
         }
