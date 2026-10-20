@@ -874,7 +874,7 @@ async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and
     let received = child_input(&h, &window_id, &log).await;
     assert_only_the_take_back_reached_the_child_after_the_body(&received, b'Q');
     assert_eq!(
-        count_subslice(&received, b"\x1b[200~hello\x1b[201~"),
+        count_subslice(&received, b"\x1b[200~hello \x1b[201~"),
         1,
         "the body must have been written exactly once; the child read {received:?}"
     );

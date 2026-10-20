@@ -23,9 +23,9 @@ use std::time::Duration;
 use common::{
     Harness, SubmitDefinitionInput, approver_base_config, count_marker, input_log_read_so_far,
     let_every_clock_bound_run_out, let_every_clock_bound_run_out_while_a_thread_is_awaited, policy,
-    read_composer_now, read_response, report_status, send, settled_marker_count, unique_temp_dir,
-    wait_until_composer_is, wait_until_frame_satisfies, wait_until_input_log_contains,
-    wait_until_status, write_submit_definition,
+    read_composer_now, read_response, report_status, send, settled_marker_count,
+    settled_submitted_count, unique_temp_dir, wait_until_composer_is, wait_until_frame_satisfies,
+    wait_until_input_log_contains, wait_until_status, write_submit_definition,
 };
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{
@@ -622,7 +622,7 @@ async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
             other => panic!("{body:?} must be placed, got {other:?}"),
         }
         assert_eq!(
-            settled_marker_count(&h, &window_id, &format!("SUBMITTED {body}\r"), 1).await,
+            settled_submitted_count(&h, &window_id, body, 1).await,
             1,
             "{body:?} reaches the receiver exactly once"
         );

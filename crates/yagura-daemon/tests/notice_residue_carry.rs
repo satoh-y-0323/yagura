@@ -218,7 +218,8 @@ async fn a_notice_written_behind_a_dialog_is_submitted_by_the_same_attempt_once_
         "the notice must be submitted exactly once"
     );
     assert!(
-        !text.contains(&format!("SUBMITTED {notice}{notice}")),
+        !text.contains(&format!("SUBMITTED {notice} {notice}"))
+            && !text.contains(&format!("SUBMITTED {notice}{notice}")),
         "the notice text must not have been written twice into the composer"
     );
     h.registry.terminate_all().await;

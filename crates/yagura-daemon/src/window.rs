@@ -41,7 +41,8 @@ use crate::detector::screen::ComposerReadout;
 use crate::handoff::{ReadyHoldLatch, StartupEvidence};
 use crate::inbox::{Inbox, is_session_id};
 use crate::input::{
-    InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack, plan_submit_line,
+    ComposerLine, InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack,
+    plan_submit_line,
 };
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
@@ -684,12 +685,21 @@ pub(crate) enum EnvelopeWait {
 /// remembers about who wrote last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComposerResidue<'a> {
-    /// The text this send left in the composer.
+    /// The body this send wants to send; the composer holds it followed by
+    /// one space ([`ComposerLine`]).
     pub body: &'a str,
     /// [`WindowEntry::write_seq`] as it stood once this send's own writes
     /// were done. Still equal to the window's current count means not one
     /// write, from any writer, has landed since.
     pub write_seq: u64,
+}
+
+/// A [`ComposerResidue`] with its body turned into the line that was written,
+/// so nothing past [`WindowEntry::submit_message`]'s entry sees a raw body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineResidue<'a> {
+    line: &'a ComposerLine,
+    write_seq: u64,
 }
 
 /// What one [`WindowEntry::submit_message`] call ended as.
@@ -854,7 +864,8 @@ impl ShownText {
     /// erased, shows the composer as it was again, `own` being the call's
     /// own text in it. Without the probe a body that ran off the screen may
     /// fit it after all.
-    fn restored_in(&self, readout: &ComposerReadout, own: &str) -> bool {
+    fn restored_in(&self, readout: &ComposerReadout, own: &ComposerLine) -> bool {
+        let own = own.as_str();
         match (self, readout) {
             (Self::Body(before), ComposerReadout::Body(_)) => {
                 composer_reads_back_as(readout, before)
@@ -989,12 +1000,17 @@ async fn next_change<T>(cue: &mut watch::Receiver<T>) {
     }
 }
 
-/// Reads what a fresh `body` and the `probe` written behind it left in the
+/// Reads what a fresh `line` and the `probe` written behind it left in the
 /// composer, or `None` while that is not decided yet. A reading on its way to
 /// the body and the probe -- a proper prefix of both together -- is not
 /// decided, so a body made of or starting with the probe's character is never
 /// taken for the probe alone.
-fn reflection_of(readout: &ComposerReadout, body: &str, probe: char) -> Option<BehindProbe> {
+fn reflection_of(
+    readout: &ComposerReadout,
+    line: &ComposerLine,
+    probe: char,
+) -> Option<BehindProbe> {
+    let body = line.as_str();
     if let ComposerReadout::Body(text) = readout
         && is_proper_prefix_ignoring_whitespace(text, body, probe)
     {
@@ -1597,10 +1613,10 @@ impl WindowEntry {
         Ok(written)
     }
 
-    /// Notes that the running call read its own `body` back off the screen,
+    /// Notes that the running call read its own `line` back off the screen,
     /// when `shown` is it.
-    fn note_read_back(&self, shown: &str, body: &str) {
-        if composer_text_matches_ignoring_lost_whitespace(shown, body) {
+    fn note_read_back(&self, shown: &str, line: &ComposerLine) {
+        if composer_text_matches_ignoring_lost_whitespace(shown, line.as_str()) {
             lock_recover(&self.own_part).read_back = true;
         }
     }
@@ -1837,8 +1853,18 @@ impl WindowEntry {
         let ComposerAccess::Judged { probe } = self.composer_access else {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         };
+        // The one place the bodies become what is written: everything below
+        // decides on, writes and takes back the lines alone.
+        let line = ComposerLine::new(body);
+        let residue_line = residue.map(|residue| ComposerLine::new(residue.body));
+        let residue = residue
+            .zip(residue_line.as_ref())
+            .map(|(residue, line)| LineResidue {
+                line,
+                write_seq: residue.write_seq,
+            });
         let judgment = self
-            .judge_submit(body, probe, residue, stage, &mut requester)
+            .judge_submit(&line, probe, residue, stage, &mut requester)
             .await?;
         self.check_after_another_write(judgment, probe, &mut requester)
             .await
@@ -1848,9 +1874,9 @@ impl WindowEntry {
     /// writer's write leaves is checked.
     async fn judge_submit(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
-        residue: Option<ComposerResidue<'_>>,
+        residue: Option<LineResidue<'_>>,
         stage: SendStage,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
@@ -1863,7 +1889,7 @@ impl WindowEntry {
         };
         let vouched_now = || {
             residue
-                .filter(|residue| self.record_vouches_for_residue(Some(*residue), body))
+                .filter(|residue| self.record_vouches_for_residue(Some(*residue), line))
                 .map(|residue| residue.write_seq)
         };
         if matches!(observation.readout, ComposerReadout::NotObserved) {
@@ -1910,7 +1936,7 @@ impl WindowEntry {
                 return Ok(declined(NotPlacedReason::Unobservable, None));
             }
             return self
-                .confirm_unshown_envelope(body, probe, &observation, vouched_seq, stage, requester)
+                .confirm_unshown_envelope(line, probe, &observation, vouched_seq, stage, requester)
                 .await;
         }
         match &observation.readout {
@@ -1920,7 +1946,7 @@ impl WindowEntry {
                 if self.degenerate_and_unchanged() {
                     return Ok(declined(NotPlacedReason::Unobservable, None));
                 }
-                self.confirm_empty_then_write(body, probe, &observation, seen, stage, requester)
+                self.confirm_empty_then_write(line, probe, &observation, seen, stage, requester)
                     .await
             }
             ComposerReadout::Body(_) | ComposerReadout::Tail(_) => {
@@ -1941,7 +1967,7 @@ impl WindowEntry {
                         Some(TakenBack::Emptied(settled, seq)) => {
                             return self
                                 .write_fresh_and_decide(
-                                    body, probe, &settled, seq, stage, requester,
+                                    line, probe, &settled, seq, stage, requester,
                                 )
                                 .await;
                         }
@@ -1960,15 +1986,15 @@ impl WindowEntry {
                 // by anything this call wrote.
                 let restored_own_envelope = marked.is_some_and(|text| {
                     residue.is_some_and(|residue| {
-                        composer_text_matches_ignoring_lost_whitespace(text, residue.body)
-                            && residue.body == body
+                        composer_text_matches_ignoring_lost_whitespace(text, residue.line.as_str())
+                            && residue.line == line
                     })
                 });
                 if let (true, Some(text)) = (restored_own_envelope, marked) {
-                    self.note_read_back(text, body);
+                    self.note_read_back(text, line);
                 }
                 let vouched_seq = residue
-                    .filter(|residue| self.record_vouches_for_residue(Some(*residue), body))
+                    .filter(|residue| self.record_vouches_for_residue(Some(*residue), line))
                     .map(|residue| residue.write_seq);
                 if restored_own_envelope || vouched_seq.is_some() {
                     // A dialog's option row can read exactly like a composer
@@ -1982,13 +2008,13 @@ impl WindowEntry {
                     }
                     match (restored_own_envelope, vouched_seq) {
                         (true, Some(vouched_seq)) => {
-                            self.resend_key_only(body, vouched_seq, requester).await
+                            self.resend_key_only(line, vouched_seq, requester).await
                         }
                         // Someone wrote since the caller's baseline, so the
                         // envelope on screen may have unshown input behind it.
                         (true, None) => {
                             self.confirm_envelope_then_resend(
-                                body,
+                                line,
                                 probe,
                                 &observation.readout,
                                 seen,
@@ -2003,7 +2029,7 @@ impl WindowEntry {
                         // as the composer. The probe has to show behind it.
                         (false, Some(vouched_seq)) => {
                             self.confirm_envelope_then_resend(
-                                body,
+                                line,
                                 probe,
                                 &observation.readout,
                                 vouched_seq,
@@ -2023,7 +2049,7 @@ impl WindowEntry {
                     residue.filter(|residue| residue.write_seq == self.write_seq())
                 {
                     self.take_back_own_residue_then_write(
-                        body,
+                        line,
                         probe,
                         residue,
                         &observation,
@@ -2034,7 +2060,7 @@ impl WindowEntry {
                 } else if !self.degenerate_and_unchanged() {
                     // What reads as someone else's text may only be a screen
                     // that has not caught up with input that emptied it.
-                    self.confirm_empty_then_write(body, probe, &observation, seen, stage, requester)
+                    self.confirm_empty_then_write(line, probe, &observation, seen, stage, requester)
                         .await
                 } else {
                     Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
@@ -2531,13 +2557,13 @@ impl WindowEntry {
     }
 
     /// `observed` may not show input written before it yet. Writes the probe
-    /// behind that input and writes `body` only once the probe shows alone
+    /// behind that input and writes `line` only once the probe shows alone
     /// and is erased; a probe that shows behind anything else means someone's
-    /// text is there, and only the probe is erased. Nothing of `body` is
+    /// text is there, and only the probe is erased. Nothing of `line` is
     /// written on any declining path.
     async fn confirm_empty_then_write(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
@@ -2569,7 +2595,7 @@ impl WindowEntry {
                 .await
             {
                 ComposerWait::Done(BehindProbe::Alone) => {
-                    self.write_once_probe_erased(body, probe, seq, stage, requester)
+                    self.write_once_probe_erased(line, probe, seq, stage, requester)
                         .await
                 }
                 ComposerWait::Done(before @ BehindProbe::Text(_)) => {
@@ -2586,7 +2612,7 @@ impl WindowEntry {
             .await?
         {
             ProbeReading::Shown(BehindProbe::Alone) => {
-                self.write_once_probe_erased(body, probe, seq + 1, stage, requester)
+                self.write_once_probe_erased(line, probe, seq + 1, stage, requester)
                     .await
             }
             ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
@@ -2602,14 +2628,14 @@ impl WindowEntry {
     /// since its baseline, yet the composer reads empty: the envelope is not
     /// drawn yet, or the receiver has already taken or dropped it. The probe
     /// written behind it tells which, in the order the receiver handles its
-    /// input: shown behind something (behind the end of `body`, when only
+    /// input: shown behind something (behind the end of `line`, when only
     /// the end of a taller composer shows), the envelope is there and the
     /// submit key alone is pressed once the probe is erased; shown alone, it
-    /// is gone and `body` is written fresh; nothing shown, or a screen that
+    /// is gone and `line` is written fresh; nothing shown, or a screen that
     /// shows no composer, the call waits.
     async fn confirm_unshown_envelope(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
@@ -2623,7 +2649,7 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
         let after_probe = seq + 1;
-        let envelope_and_probe = self.own_text(&format!("{body}{probe}"));
+        let envelope_and_probe = self.own_text(&format!("{}{probe}", line.as_str()));
         if self
             .write_judged(probe.to_string().as_bytes(), seq, envelope_and_probe)
             .await?
@@ -2634,7 +2660,7 @@ impl WindowEntry {
         }
         let shown = |observation: &ComposerObservation| {
             if screen_accepts_write(observation) {
-                reflection_of(&observation.readout, body, probe)
+                reflection_of(&observation.readout, line, probe)
             } else {
                 None
             }
@@ -2650,20 +2676,20 @@ impl WindowEntry {
         {
             ComposerWait::Done(BehindProbe::Text(shown)) => {
                 if let ShownText::Body(before) = &shown {
-                    self.note_read_back(before, body);
+                    self.note_read_back(before, line);
                 }
-                self.erase_probe_then_resend(body, &shown, after_probe, requester)
+                self.erase_probe_then_resend(line, &shown, after_probe, requester)
                     .await
             }
             ComposerWait::Done(BehindProbe::Alone) => {
-                self.write_once_probe_erased(body, probe, after_probe, stage, requester)
+                self.write_once_probe_erased(line, probe, after_probe, stage, requester)
                     .await
             }
             ComposerWait::OtherWriter => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
             ComposerWait::RequesterGone => {
                 // Whether or not another write got in first, the requester is
                 // gone and nothing more is decided here.
-                self.write_judged(&self.input.erase, after_probe, self.own_text(body))
+                self.write_judged(&self.input.erase, after_probe, self.own_text(line.as_str()))
                     .await?;
                 Ok(declined_unvouched(NotPlacedReason::Unobservable))
             }
@@ -2671,11 +2697,11 @@ impl WindowEntry {
         }
     }
 
-    /// Erases a probe that shows alone (ledger at `seq`) and writes `body`
+    /// Erases a probe that shows alone (ledger at `seq`) and writes `line`
     /// once the composer reads empty.
     async fn write_once_probe_erased(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         seq: u64,
         stage: SendStage,
@@ -2683,7 +2709,7 @@ impl WindowEntry {
     ) -> PtyResult<SubmitJudgment> {
         match self.erase_probe(seq).await? {
             ProbeErased::Emptied(settled, after_erase) => {
-                self.write_fresh_and_decide(body, probe, &settled, after_erase, stage, requester)
+                self.write_fresh_and_decide(line, probe, &settled, after_erase, stage, requester)
                     .await
             }
             ProbeErased::Interrupted(_) => Ok(declined(NotPlacedReason::Interrupted, None)),
@@ -2710,7 +2736,7 @@ impl WindowEntry {
     #[allow(clippy::too_many_arguments)]
     async fn confirm_envelope_then_resend(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         observed: &ComposerReadout,
         seq: u64,
@@ -2720,9 +2746,10 @@ impl WindowEntry {
     ) -> PtyResult<SubmitJudgment> {
         let envelope_shows = |shown: &ShownText| match shown {
             ShownText::Body(before) => {
-                ledger_vouches || composer_text_matches_ignoring_lost_whitespace(before, body)
+                ledger_vouches
+                    || composer_text_matches_ignoring_lost_whitespace(before, line.as_str())
             }
-            ShownText::Tail(before) => tail_is_end_of(before, body),
+            ShownText::Tail(before) => tail_is_end_of(before, line.as_str()),
         };
         match self
             .read_through_probe(probe, seq, observed, requester)
@@ -2737,9 +2764,9 @@ impl WindowEntry {
             },
             ProbeReading::Shown(BehindProbe::Text(shown)) if envelope_shows(&shown) => {
                 if let ShownText::Body(before) = &shown {
-                    self.note_read_back(before, body);
+                    self.note_read_back(before, line);
                 }
-                self.erase_probe_then_resend(body, &shown, seq + 1, requester)
+                self.erase_probe_then_resend(line, &shown, seq + 1, requester)
                     .await
             }
             ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
@@ -2756,16 +2783,16 @@ impl WindowEntry {
     /// reads as `target` again.
     async fn erase_probe_then_resend(
         &self,
-        body: &str,
+        line: &ComposerLine,
         target: &ShownText,
         seq: u64,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         match self
-            .erase_probe_back_to(seq, target, body, requester)
+            .erase_probe_back_to(seq, target, line, requester)
             .await?
         {
-            Some(ComposerWait::Done(())) => self.resend_key_only(body, seq + 1, requester).await,
+            Some(ComposerWait::Done(())) => self.resend_key_only(line, seq + 1, requester).await,
             None | Some(ComposerWait::OtherWriter) => {
                 Ok(declined_unvouched(NotPlacedReason::Interrupted))
             }
@@ -2869,8 +2896,12 @@ impl WindowEntry {
     /// by being identical. It never stands in for the screen: the envelope,
     /// or a probe written behind it, still has to show before the submit key
     /// is pressed.
-    fn record_vouches_for_residue(&self, residue: Option<ComposerResidue<'_>>, body: &str) -> bool {
-        residue.is_some_and(|residue| residue.body == body && residue.write_seq == self.write_seq())
+    fn record_vouches_for_residue(
+        &self,
+        residue: Option<LineResidue<'_>>,
+        line: &ComposerLine,
+    ) -> bool {
+        residue.is_some_and(|residue| residue.line == line && residue.write_seq == self.write_seq())
     }
 
     /// Whether this window's degenerate-empty marker is still active: a write
@@ -2891,14 +2922,14 @@ impl WindowEntry {
     /// written, and the envelope stays where it is.
     async fn resend_key_only(
         &self,
-        body: &str,
+        line: &ComposerLine,
         seq: u64,
         requester: &Requester,
     ) -> PtyResult<SubmitJudgment> {
         if requester.has_left() {
             return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
-        let plan = plan_submit_line(&self.input, body, SubmitAction::ResendOnly);
+        let plan = plan_submit_line(&self.input, line, SubmitAction::ResendOnly);
         let last_index = plan.steps.len().saturating_sub(1);
         let own_writes = plan.steps.len() as u64;
         // The submit key closes the composer's content out of this call's
@@ -2916,7 +2947,7 @@ impl WindowEntry {
         }
     }
 
-    /// Writes `body` fresh into a composer just observed empty, then the
+    /// Writes `line` fresh into a composer just observed empty, then the
     /// probe behind it, and decides from what the composer shows once the
     /// probe does (see [`reflection_of`]): the body landed, so the probe is
     /// erased and the submit key pressed once the composer reads as it did
@@ -2938,7 +2969,7 @@ impl WindowEntry {
     /// [`WindowEntry::take_back_for_departed_requester`]).
     async fn write_fresh_and_decide(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         observed: &ComposerObservation,
         seq: u64,
@@ -2957,7 +2988,7 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         }
 
-        let plan = plan_submit_line(&self.input, body, SubmitAction::Write);
+        let plan = plan_submit_line(&self.input, line, SubmitAction::Write);
         let mut steps = plan.steps.into_iter();
         let (Some(body_step), Some(submit_step)) = (steps.next(), steps.next()) else {
             // Structurally unreachable: `SubmitAction::Write` always builds a
@@ -2970,7 +3001,7 @@ impl WindowEntry {
         // gone out: the baseline a follow-up attempt brings back.
         let after_body = seq + 1;
         if self
-            .write_judged(&body_step.bytes, seq, self.own_text(body))
+            .write_judged(&body_step.bytes, seq, self.own_text(line.as_str()))
             .await?
             == GuardedWrite::Moved
         {
@@ -2984,7 +3015,7 @@ impl WindowEntry {
         }
         if requester.has_left() {
             return self
-                .take_back_for_departed_requester(body, probe, after_body)
+                .take_back_for_departed_requester(line.as_str(), probe, after_body)
                 .await;
         }
 
@@ -2993,7 +3024,7 @@ impl WindowEntry {
             .write_judged(
                 probe.to_string().as_bytes(),
                 after_body,
-                self.own_text(&format!("{body}{probe}")),
+                self.own_text(&format!("{}{probe}", line.as_str())),
             )
             .await?
             == GuardedWrite::Moved
@@ -3001,12 +3032,12 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Interrupted, Some(after_body)));
         }
         match self
-            .wait_for_reflection(body, probe, after_probe, requester)
+            .wait_for_reflection(line, probe, after_probe, requester)
             .await
         {
             ComposerWait::Done(BehindProbe::Text(shown)) => {
                 self.erase_probe_then_submit(
-                    body,
+                    line,
                     probe,
                     &shown,
                     &submit_step,
@@ -3020,19 +3051,23 @@ impl WindowEntry {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_probe)))
             }
             ComposerWait::RequesterGone => {
-                self.take_back_for_departed_requester(&format!("{body}{probe}"), probe, after_probe)
-                    .await
+                self.take_back_for_departed_requester(
+                    &format!("{}{probe}", line.as_str()),
+                    probe,
+                    after_probe,
+                )
+                .await
             }
             ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
         }
     }
 
-    /// [`WindowEntry::wait_for_composer`] for what a fresh `body` and the
+    /// [`WindowEntry::wait_for_composer`] for what a fresh `line` and the
     /// probe behind it (ledger at `seq`) leave in the composer, on a screen
     /// that accepts a write.
     async fn wait_for_reflection(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         seq: u64,
         requester: &mut Requester,
@@ -3041,7 +3076,7 @@ impl WindowEntry {
         let reflection = self
             .wait_for_composer("wait_for_reflection", Some(seq), requester, |observation| {
                 if screen_accepts_write(observation) {
-                    reflection_of(&observation.readout, body, probe)
+                    reflection_of(&observation.readout, line, probe)
                 } else {
                     None
                 }
@@ -3049,10 +3084,10 @@ impl WindowEntry {
             .await;
         let (outcome, reflected) = match &reflection {
             ComposerWait::Done(BehindProbe::Text(ShownText::Body(before))) => {
-                self.note_read_back(before, body);
+                self.note_read_back(before, line);
                 (
                     "behind",
-                    composer_text_matches_ignoring_lost_whitespace(before, body),
+                    composer_text_matches_ignoring_lost_whitespace(before, line.as_str()),
                 )
             }
             ComposerWait::Done(BehindProbe::Alone) => ("dropped", false),
@@ -3066,7 +3101,7 @@ impl WindowEntry {
         // debugging a delivery.
         tracing::debug!(
             window_id = %self.window_id(),
-            body_bytes = body.len(),
+            body_bytes = line.as_str().len(),
             elapsed_ms = started.elapsed().as_millis(),
             outcome,
             reflected,
@@ -3085,11 +3120,11 @@ impl WindowEntry {
         &self,
         seq: u64,
         target: &ShownText,
-        own: &str,
+        own: &ComposerLine,
         requester: &mut Requester,
     ) -> PtyResult<Option<ComposerWait<()>>> {
         if self
-            .write_judged(&self.input.erase, seq, self.own_text(own))
+            .write_judged(&self.input.erase, seq, self.own_text(own.as_str()))
             .await?
             == GuardedWrite::Moved
         {
@@ -3115,7 +3150,7 @@ impl WindowEntry {
     /// `target` again.
     async fn erase_probe_then_submit(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
         target: &ShownText,
         submit_step: &SubmitStep,
@@ -3124,12 +3159,12 @@ impl WindowEntry {
     ) -> PtyResult<SubmitJudgment> {
         if requester.has_left() {
             return self
-                .take_back_for_departed_requester(&format!("{body}{probe}"), probe, seq)
+                .take_back_for_departed_requester(&format!("{}{probe}", line.as_str()), probe, seq)
                 .await;
         }
         let after_erase = seq + 1;
         match self
-            .erase_probe_back_to(seq, target, body, requester)
+            .erase_probe_back_to(seq, target, line, requester)
             .await?
         {
             Some(ComposerWait::Done(())) => self.press_submit_key(submit_step, after_erase).await,
@@ -3138,8 +3173,12 @@ impl WindowEntry {
                 Ok(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
             Some(ComposerWait::RequesterGone) => {
-                self.take_back_for_departed_requester(&format!("{body}{probe}"), probe, after_erase)
-                    .await
+                self.take_back_for_departed_requester(
+                    &format!("{}{probe}", line.as_str()),
+                    probe,
+                    after_erase,
+                )
+                .await
             }
             Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
         }
@@ -3196,13 +3235,13 @@ impl WindowEntry {
     /// The composer holds a leftover this caller's own record vouches for
     /// (`residue`), but the text it wants to send now differs from it. Takes
     /// the leftover back and, once the composer is confirmed empty, writes
-    /// `body` as a fresh message; any other outcome leaves the leftover
+    /// `line` as a fresh message; any other outcome leaves the leftover
     /// reported as remaining.
     async fn take_back_own_residue_then_write(
         &self,
-        body: &str,
+        line: &ComposerLine,
         probe: char,
-        residue: ComposerResidue<'_>,
+        residue: LineResidue<'_>,
         observed: &ComposerObservation,
         stage: SendStage,
         requester: &mut Requester,
@@ -3220,11 +3259,16 @@ impl WindowEntry {
             ));
         }
         match self
-            .take_back_and_settle(residue.body, probe, residue.write_seq, &observed.readout)
+            .take_back_and_settle(
+                residue.line.as_str(),
+                probe,
+                residue.write_seq,
+                &observed.readout,
+            )
             .await?
         {
             TakenBack::Emptied(settled, seq) => {
-                self.write_fresh_and_decide(body, probe, &settled, seq, stage, requester)
+                self.write_fresh_and_decide(line, probe, &settled, seq, stage, requester)
                     .await
             }
             TakenBack::Declined(judgment) => Ok(judgment),

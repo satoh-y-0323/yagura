@@ -2321,6 +2321,29 @@ pub async fn settled_count(
     .await
 }
 
+/// [`settled_marker_count`] for the line `submit_child` echoes once `body` is
+/// submitted, with or without the space the daemon ends its text with: a
+/// repaint may drop a trailing space, and whether it was written is measured
+/// on the child's input instead.
+pub async fn settled_submitted_count(
+    h: &Harness,
+    window_id: &str,
+    body: &str,
+    expected: usize,
+) -> usize {
+    let lines = [
+        format!("SUBMITTED {body}\r"),
+        format!("SUBMITTED {body} \r"),
+    ];
+    settled_count(h, window_id, expected, |scrollback| {
+        lines
+            .iter()
+            .map(|line| count_in_scrollback(scrollback, line))
+            .sum()
+    })
+    .await
+}
+
 /// Opens a `submit_child` window bound to a fresh detection definition built
 /// by [`write_submit_definition`], and observes it reach `waiting_input`
 /// (the fixture's startup marker line) before returning: never assert

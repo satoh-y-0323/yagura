@@ -308,7 +308,7 @@ async fn a_body_with_another_writers_keystroke_behind_it_is_left_alone_and_repor
     wait_until_composer_is(
         &h,
         &window.id,
-        &ComposerReadout::Body(format!("{BODY}h")),
+        &ComposerReadout::Body(format!("{BODY} h")),
         HANG_GUARD,
     )
     .await;

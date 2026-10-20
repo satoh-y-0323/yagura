@@ -20,7 +20,7 @@ use std::time::Duration;
 use common::{
     Harness, approver_base_config, let_every_clock_bound_run_out,
     open_submit_child_window_with_clear_scope, read_composer_now, settled_marker_count,
-    unique_temp_dir, wait_until_composer_is, wait_until_status,
+    settled_submitted_count, unique_temp_dir, wait_until_composer_is, wait_until_status,
     write_submit_definition_with_input_toml,
 };
 use yagura_daemon::DaemonConfig;
@@ -282,7 +282,7 @@ async fn a_second_attempt_after_a_stalled_take_back_writes_the_body_only_once() 
         // Ends at `\r`, the start of the line end on every platform (a Unix
         // PTY turns the child's `\r\n` into `\r\r\n`), so a body written
         // twice in a row still fails to match.
-        settled_marker_count(&h, &window_id, &format!("SUBMITTED {body}\r"), 1).await,
+        settled_submitted_count(&h, &window_id, &body, 1).await,
         1,
         "the receiver must be handed the body exactly once, not twice in a row"
     );

@@ -277,7 +277,14 @@ async fn a_notice_written_before_the_pending_count_moved_is_submitted_as_it_was_
     }
     let text = flattened(&scene.h, &scene.parent);
     assert!(
-        !text.contains(&format!("{old}{new}")) && !text.contains(&format!("{new}{old}")),
+        [
+            format!("{old} {new}"),
+            format!("{new} {old}"),
+            format!("{old}{new}"),
+            format!("{new}{old}"),
+        ]
+        .iter()
+        .all(|merged| !text.contains(merged.as_str())),
         "the old and the new text must not be sent together"
     );
     scene.h.registry.terminate_all().await;

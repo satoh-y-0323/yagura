@@ -1306,12 +1306,14 @@ async fn observation_and_write_share_the_exclusive_region_so_a_full_send_cannot_
         "BBB must reach the receiver on its own, not merged with AAA"
     );
     assert_eq!(
-        count_marker(&h, &window_id, "SUBMITTED AAABBB"),
+        count_marker(&h, &window_id, "SUBMITTED AAA BBB")
+            + count_marker(&h, &window_id, "SUBMITTED AAABBB"),
         0,
         "the two bodies must never be concatenated"
     );
     assert_eq!(
-        count_marker(&h, &window_id, "SUBMITTED BBBAAA"),
+        count_marker(&h, &window_id, "SUBMITTED BBB AAA")
+            + count_marker(&h, &window_id, "SUBMITTED BBBAAA"),
         0,
         "the two bodies must never be concatenated, either order"
     );
@@ -2996,7 +2998,7 @@ async fn a_submit_key_inside_the_receivers_paste_window_leaves_the_body_unsubmit
     wait_until_composer_is(
         &h,
         &window_id,
-        &ComposerReadout::Body("BODYx".to_string()),
+        &ComposerReadout::Body("BODY x".to_string()),
         Duration::from_secs(10),
     )
     .await;

@@ -340,7 +340,10 @@ so text being typed never decides the window's status.
 
 `[input]` is read when the daemon types into a window running this
 definition -- a [`send_message`](../../../docs/mcp-setup.md#send_message), or a
-text it sends of its own accord to a CLI it cannot wake. The body and the
+text it sends of its own accord to a CLI it cannot wake. The body is written
+followed by one space of the daemon's own, whatever the body ends with (inside
+the paste when `bracketed_paste` is set), because a CLI's input completion
+opens on the word right before the cursor. The body and the
 submit bytes are written as two steps, `submit_delay_ms` apart, because a CLI that reads a fast burst of input
 as a paste takes a carriage return arriving inside that burst as a line break
 rather than as "submit". After the submit bytes are written, the daemon
@@ -358,7 +361,8 @@ types the probe behind it, and presses the key once the probe has shown at the
 cursor and been erased again.
 
 Whether a written body has shown is decided by the order the CLI handles its
-input in, never by a clock. The daemon types `probe` right behind the body and
+input in, never by a clock. The daemon types `probe` right behind the body's
+trailing space and
 reads the composer again whenever the window draws output, changes status or
 takes another write:
 

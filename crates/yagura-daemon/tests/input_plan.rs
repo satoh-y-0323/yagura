@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use yagura_daemon::detector::definition::InputSection;
 use yagura_daemon::input::{
-    BRACKETED_PASTE_END, BRACKETED_PASTE_START, InputProfile, SubmitAction, SubmitOutcome,
-    SubmitPlan, TakeBack, plan_raw_write, plan_submit_line,
+    BRACKETED_PASTE_END, BRACKETED_PASTE_START, ComposerLine, InputProfile, SubmitAction,
+    SubmitOutcome, SubmitPlan, TakeBack, plan_raw_write, plan_submit_line,
 };
 use yagura_protocol::WindowStatus;
 
@@ -47,10 +47,10 @@ fn profile(
 #[test]
 fn plan_submit_line_without_paste_returns_two_steps_and_the_body_carries_no_terminator() {
     let p = profile(false, b"\r", b"", 40);
-    let plan = plan_submit_line(&p, "hello", SubmitAction::Write);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hello"), SubmitAction::Write);
 
     assert_eq!(plan.steps.len(), 2, "no clear: body then submit key");
-    assert_eq!(plan.steps[0].bytes, b"hello");
+    assert_eq!(plan.steps[0].bytes, b"hello ");
     assert!(
         !plan.steps[0].bytes.ends_with(b"\r") && !plan.steps[0].bytes.ends_with(b"\n"),
         "the body step must not carry its own terminator"
@@ -61,10 +61,10 @@ fn plan_submit_line_without_paste_returns_two_steps_and_the_body_carries_no_term
 #[test]
 fn plan_submit_line_with_bracketed_paste_wraps_the_body_in_the_paste_markers() {
     let p = profile(true, b"\r", b"", 40);
-    let plan = plan_submit_line(&p, "hello", SubmitAction::Write);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hello"), SubmitAction::Write);
 
     let mut expected = BRACKETED_PASTE_START.to_vec();
-    expected.extend_from_slice(b"hello");
+    expected.extend_from_slice(b"hello ");
     expected.extend_from_slice(BRACKETED_PASTE_END);
     assert_eq!(plan.steps[0].bytes, expected);
     assert!(plan.steps[0].bytes.starts_with(BRACKETED_PASTE_START));
@@ -75,10 +75,10 @@ fn plan_submit_line_with_bracketed_paste_wraps_the_body_in_the_paste_markers() {
 fn plan_submit_line_does_not_wrap_a_body_that_contains_an_escape_byte() {
     let p = profile(true, b"\r", b"", 40);
     for body in ["\u{1b}leading", "trailing\u{1b}", "in\u{1b}the middle"] {
-        let plan = plan_submit_line(&p, body, SubmitAction::Write);
+        let plan = plan_submit_line(&p, &ComposerLine::new(body), SubmitAction::Write);
         assert_eq!(
             plan.steps[0].bytes,
-            body.as_bytes(),
+            format!("{body} ").as_bytes(),
             "a body containing ESC must never be framed, even when bracketed_paste is true: {body:?}"
         );
         assert!(!plan.steps[0].bytes.starts_with(BRACKETED_PASTE_START));
@@ -88,7 +88,7 @@ fn plan_submit_line_does_not_wrap_a_body_that_contains_an_escape_byte() {
 #[test]
 fn plan_submit_line_rewrite_with_a_nonempty_clear_prepends_a_clear_step() {
     let p = profile(false, b"\r", b"\x15", 40);
-    let plan = plan_submit_line(&p, "hi", SubmitAction::Rewrite);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::Rewrite);
 
     assert_eq!(
         plan.steps.len(),
@@ -96,15 +96,15 @@ fn plan_submit_line_rewrite_with_a_nonempty_clear_prepends_a_clear_step() {
         "rewrite with a clear sequence: clear, body, submit key"
     );
     assert_eq!(plan.steps[0].bytes, b"\x15");
-    assert_eq!(plan.steps[1].bytes, b"hi");
+    assert_eq!(plan.steps[1].bytes, b"hi ");
     assert_eq!(plan.steps[2].bytes, b"\r");
 }
 
 #[test]
 fn plan_submit_line_rewrite_with_an_empty_clear_has_the_same_step_count_as_write() {
     let p = profile(false, b"\r", b"", 40);
-    let rewritten = plan_submit_line(&p, "hi", SubmitAction::Rewrite);
-    let fresh = plan_submit_line(&p, "hi", SubmitAction::Write);
+    let rewritten = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::Rewrite);
+    let fresh = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::Write);
 
     assert_eq!(
         rewritten.steps.len(),
@@ -117,7 +117,7 @@ fn plan_submit_line_rewrite_with_an_empty_clear_has_the_same_step_count_as_write
 #[test]
 fn plan_submit_line_submit_step_bytes_always_equal_the_profiles_submit_field() {
     let p = profile(false, b"\n", b"", 40);
-    let plan = plan_submit_line(&p, "x", SubmitAction::Write);
+    let plan = plan_submit_line(&p, &ComposerLine::new("x"), SubmitAction::Write);
     assert_eq!(
         plan.steps
             .last()
@@ -131,7 +131,7 @@ fn plan_submit_line_submit_step_bytes_always_equal_the_profiles_submit_field() {
 #[test]
 fn plan_submit_line_only_the_final_step_has_a_zero_delay_and_the_clear_step_delays_too() {
     let p = profile(false, b"\r", b"\x15", 55);
-    let plan = plan_submit_line(&p, "x", SubmitAction::Rewrite);
+    let plan = plan_submit_line(&p, &ComposerLine::new("x"), SubmitAction::Rewrite);
     assert_eq!(
         plan.steps.len(),
         3,
@@ -165,7 +165,7 @@ fn plan_submit_line_only_the_final_step_has_a_zero_delay_and_the_clear_step_dela
 #[test]
 fn plan_submit_line_resend_only_writes_just_the_submit_key() {
     let p = profile(false, b"\r", b"\x15", 40);
-    let plan = plan_submit_line(&p, "hi", SubmitAction::ResendOnly);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::ResendOnly);
 
     assert_eq!(
         plan.steps.len(),
@@ -179,9 +179,13 @@ fn plan_submit_line_resend_only_writes_just_the_submit_key() {
 #[test]
 fn plan_submit_line_resend_only_ignores_the_body_argument() {
     let p = profile(false, b"\r", b"\x15", 40);
-    let with_one_body = plan_submit_line(&p, "one body", SubmitAction::ResendOnly);
-    let with_another_body =
-        plan_submit_line(&p, "a completely different body", SubmitAction::ResendOnly);
+    let with_one_body =
+        plan_submit_line(&p, &ComposerLine::new("one body"), SubmitAction::ResendOnly);
+    let with_another_body = plan_submit_line(
+        &p,
+        &ComposerLine::new("a completely different body"),
+        SubmitAction::ResendOnly,
+    );
 
     assert_eq!(
         with_one_body, with_another_body,
@@ -192,7 +196,7 @@ fn plan_submit_line_resend_only_ignores_the_body_argument() {
 #[test]
 fn plan_submit_line_clear_only_writes_just_the_clear_sequence() {
     let p = profile(false, b"\r", b"\x15", 40);
-    let plan = plan_submit_line(&p, "hi", SubmitAction::ClearOnly);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::ClearOnly);
 
     assert_eq!(
         plan.steps.len(),
@@ -206,7 +210,7 @@ fn plan_submit_line_clear_only_writes_just_the_clear_sequence() {
 #[test]
 fn plan_submit_line_clear_only_never_writes_the_submit_key() {
     let p = profile(false, b"\r", b"\x15", 40);
-    let plan = plan_submit_line(&p, "hi", SubmitAction::ClearOnly);
+    let plan = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::ClearOnly);
 
     assert!(
         plan.steps.iter().all(|step| step.bytes != b"\r"),
@@ -312,7 +316,7 @@ fn no_take_back_is_available_when_neither_sequence_is_defined() {
 fn clear_only_writes_nothing_when_no_take_back_is_available() {
     let p = profile(false, b"\r", b"", 40);
 
-    let plan: SubmitPlan = plan_submit_line(&p, "abc", SubmitAction::ClearOnly);
+    let plan: SubmitPlan = plan_submit_line(&p, &ComposerLine::new("abc"), SubmitAction::ClearOnly);
 
     assert!(
         plan.steps.is_empty(),
@@ -327,7 +331,11 @@ fn a_fixed_clear_sequence_does_not_depend_on_the_body_length() {
     let long_body = "a".repeat(LONG_BODY_UNITS);
 
     let take_back: TakeBack = p.take_back();
-    let plan: SubmitPlan = plan_submit_line(&p, &long_body, SubmitAction::ClearOnly);
+    let plan: SubmitPlan = plan_submit_line(
+        &p,
+        &ComposerLine::new(long_body.as_str()),
+        SubmitAction::ClearOnly,
+    );
 
     assert_eq!(take_back, TakeBack::Fixed);
     assert_eq!(plan.steps.len(), 1);
@@ -379,4 +387,106 @@ fn from_section_defaults_ready_hold_to_zero_when_ready_hold_ms_is_omitted() {
     };
     let p = InputProfile::from_section(Some(&section));
     assert_eq!(p.ready_hold, Duration::ZERO);
+}
+
+// =====================================================================
+// ComposerLine: the text the daemon writes into a window's input is the
+// body plus exactly one ASCII space, always
+// =====================================================================
+
+#[test]
+fn composer_line_is_the_body_followed_by_one_ascii_space() {
+    assert_eq!(ComposerLine::new("abc").as_str(), "abc ");
+    assert_eq!(
+        ComposerLine::new("please review @src").as_str(),
+        "please review @src "
+    );
+}
+
+#[test]
+fn composer_line_adds_a_space_even_when_the_body_already_ends_in_whitespace() {
+    assert_eq!(ComposerLine::new("abc ").as_str(), "abc  ");
+    assert_eq!(ComposerLine::new("abc\t").as_str(), "abc\t ");
+}
+
+#[test]
+fn composer_line_always_ends_in_a_space_byte_for_any_nonempty_body() {
+    for body in [
+        "a",
+        "@",
+        "x.",
+        "user@",
+        "\u{3000}",
+        "\u{a0}",
+        "日本語",
+        "he\u{1b}llo",
+        " ",
+    ] {
+        let line = ComposerLine::new(body);
+        assert_eq!(line.as_str().as_bytes().last(), Some(&0x20), "{body:?}");
+        assert_eq!(line.as_str().len(), body.len() + 1, "{body:?}");
+        assert!(line.as_str().starts_with(body), "{body:?}");
+    }
+}
+
+#[test]
+fn write_with_paste_puts_the_space_inside_the_frame_just_before_the_end_marker() {
+    let p = profile(true, b"\r", b"", 40);
+    let plan = plan_submit_line(&p, &ComposerLine::new("see @src"), SubmitAction::Write);
+
+    let mut expected = BRACKETED_PASTE_START.to_vec();
+    expected.extend_from_slice(b"see @src ");
+    expected.extend_from_slice(BRACKETED_PASTE_END);
+    assert_eq!(plan.steps[0].bytes, expected);
+}
+
+#[test]
+fn write_without_paste_is_exactly_the_line_bytes() {
+    let p = profile(false, b"\r", b"", 40);
+    let line = ComposerLine::new("see @src");
+    let plan = plan_submit_line(&p, &line, SubmitAction::Write);
+    assert_eq!(plan.steps[0].bytes, line.as_str().as_bytes());
+    assert_eq!(plan.steps[0].bytes.last(), Some(&0x20));
+}
+
+#[test]
+fn rewrite_writes_the_line_with_its_space_between_the_clear_and_the_submit_key() {
+    for paste in [false, true] {
+        let p = profile(paste, b"\r", b"\x15", 40);
+        let plan = plan_submit_line(&p, &ComposerLine::new("hi"), SubmitAction::Rewrite);
+        assert_eq!(plan.steps.len(), 3);
+        assert_eq!(plan.steps[0].bytes, b"\x15");
+        let mut expected = Vec::new();
+        if paste {
+            expected.extend_from_slice(BRACKETED_PASTE_START);
+        }
+        expected.extend_from_slice(b"hi ");
+        if paste {
+            expected.extend_from_slice(BRACKETED_PASTE_END);
+        }
+        assert_eq!(plan.steps[1].bytes, expected, "paste={paste}");
+        assert_eq!(plan.steps[2].bytes, b"\r");
+    }
+}
+
+#[test]
+fn a_body_with_escape_is_unframed_and_still_ends_in_the_daemons_space() {
+    let p = profile(true, b"\r", b"", 40);
+    let plan = plan_submit_line(&p, &ComposerLine::new("he\u{1b}llo"), SubmitAction::Write);
+    assert_eq!(plan.steps[0].bytes, "he\u{1b}llo ".as_bytes());
+}
+
+#[test]
+fn resend_only_and_clear_only_write_no_space() {
+    let p = profile(true, b"\r", b"\x15", 40);
+    let line = ComposerLine::new("hi");
+    let resend = plan_submit_line(&p, &line, SubmitAction::ResendOnly);
+    assert_eq!(resend.steps.len(), 1);
+    assert_eq!(resend.steps[0].bytes, b"\r");
+    let clear = plan_submit_line(&p, &line, SubmitAction::ClearOnly);
+    assert_eq!(clear.steps.len(), 1);
+    assert_eq!(clear.steps[0].bytes, b"\x15");
+    for step in resend.steps.iter().chain(clear.steps.iter()) {
+        assert!(!step.bytes.contains(&b' '));
+    }
 }

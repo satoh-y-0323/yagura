@@ -314,9 +314,10 @@ pub enum TakeBack {
 ///
 /// ```
 /// use std::time::Duration;
-/// use yagura_daemon::input::{InputProfile, SubmitAction, plan_submit_line};
+/// use yagura_daemon::input::{ComposerLine, InputProfile, SubmitAction, plan_submit_line};
 ///
-/// let plan = plan_submit_line(&InputProfile::default(), "hello", SubmitAction::Write);
+/// let line = ComposerLine::new("hello");
+/// let plan = plan_submit_line(&InputProfile::default(), &line, SubmitAction::Write);
 /// let last = plan.steps.last().expect("a plan always ends with its submit key");
 /// assert_eq!(last.delay_after, Duration::ZERO);
 /// ```
@@ -334,11 +335,12 @@ pub struct SubmitStep {
 /// # Examples
 ///
 /// ```
-/// use yagura_daemon::input::{InputProfile, SubmitAction, plan_submit_line};
+/// use yagura_daemon::input::{ComposerLine, InputProfile, SubmitAction, plan_submit_line};
 ///
-/// let plan = plan_submit_line(&InputProfile::default(), "hello", SubmitAction::Write);
+/// let line = ComposerLine::new("hello");
+/// let plan = plan_submit_line(&InputProfile::default(), &line, SubmitAction::Write);
 /// assert_eq!(plan.steps.len(), 2, "body then submit key");
-/// assert_eq!(plan.steps[0].bytes, b"hello");
+/// assert_eq!(plan.steps[0].bytes, b"hello ");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitPlan {
@@ -376,6 +378,40 @@ pub struct SubmitOutcome {
     pub submitted_at: Instant,
 }
 
+/// The text the daemon writes into a window's composer for one message: the
+/// body followed by one ASCII space, added whatever the body ends with.
+///
+/// A receiver's input completion opens on the word right before the cursor,
+/// so the cursor must never rest on the end of the sender's own text.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::input::ComposerLine;
+///
+/// assert_eq!(ComposerLine::new("review @src").as_str(), "review @src ");
+/// assert_eq!(ComposerLine::new("abc ").as_str(), "abc  ");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerLine(String);
+
+impl ComposerLine {
+    /// Builds the line for `body`, the text the caller wants to send.
+    #[must_use]
+    pub fn new(body: &str) -> Self {
+        let mut line = String::with_capacity(body.len() + 1);
+        line.push_str(body);
+        line.push(' ');
+        Self(line)
+    }
+
+    /// The text written into the composer, trailing space included.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The write sequence [`plan_submit_line`] builds for one submit attempt.
 /// Which sequence gets used is a judgment the window layer makes from what it observes of the composer and its own write
 /// record, not something this pure layer decides.
@@ -395,9 +431,10 @@ pub enum SubmitAction {
     ClearOnly,
 }
 
-/// Builds the write sequence for one submit attempt. `body` is ignored by
-/// [`SubmitAction::ResendOnly`], which never writes a body of its own;
-/// [`SubmitAction::ClearOnly`] never writes the body either: it writes the
+/// Builds the write sequence for one submit attempt. `line` is ignored by
+/// [`SubmitAction::ResendOnly`], which never writes a body of its own (the
+/// composer already holds the line, space included);
+/// [`SubmitAction::ClearOnly`] never writes the line either: it writes the
 /// profile's `clear` sequence alone.
 ///
 /// [`SubmitAction::Write`] and [`SubmitAction::Rewrite`] always end with the
@@ -409,33 +446,42 @@ pub enum SubmitAction {
 /// [`SubmitAction::ClearOnly`] is likewise one step with no delay and no
 /// submit key, or no step at all when the profile has no `clear` sequence.
 ///
-/// The body is framed with [`BRACKETED_PASTE_START`] /
-/// [`BRACKETED_PASTE_END`] only when the profile asks for it *and* the body
-/// holds no `ESC` byte: a body that could spell the end marker itself would
+/// The line is framed with [`BRACKETED_PASTE_START`] /
+/// [`BRACKETED_PASTE_END`] only when the profile asks for it *and* the line
+/// holds no `ESC` byte: a line that could spell the end marker itself would
 /// otherwise leave the frame, and the rest of it would be read as keystrokes.
-/// Apart from that framing the body's bytes are the caller's, unnormalized,
-/// so what an approver read is what the receiver is handed.
+/// The frame holds the whole line, its trailing space included. Apart from
+/// that framing the line's bytes are the caller's body, unnormalized, plus
+/// that space, so what an approver read is what the receiver is handed.
 ///
 /// # Examples
 ///
 /// ```
-/// use yagura_daemon::input::{BRACKETED_PASTE_START, InputProfile, SubmitAction, plan_submit_line};
+/// use yagura_daemon::input::{
+///     BRACKETED_PASTE_END, BRACKETED_PASTE_START, ComposerLine, InputProfile, SubmitAction,
+///     plan_submit_line,
+/// };
 ///
 /// let mut profile = InputProfile::default();
 /// profile.bracketed_paste = true;
 ///
-/// let framed = plan_submit_line(&profile, "hello", SubmitAction::Write);
-/// assert!(framed.steps[0].bytes.starts_with(BRACKETED_PASTE_START));
+/// let framed = plan_submit_line(&profile, &ComposerLine::new("hello"), SubmitAction::Write);
+/// let expected = [BRACKETED_PASTE_START, b"hello ", BRACKETED_PASTE_END].concat();
+/// assert_eq!(framed.steps[0].bytes, expected);
 ///
-/// let unframed = plan_submit_line(&profile, "he\u{1b}llo", SubmitAction::Write);
-/// assert_eq!(unframed.steps[0].bytes, "he\u{1b}llo".as_bytes());
+/// let unframed = plan_submit_line(&profile, &ComposerLine::new("he\u{1b}llo"), SubmitAction::Write);
+/// assert_eq!(unframed.steps[0].bytes, "he\u{1b}llo ".as_bytes());
 /// ```
 #[must_use]
-pub fn plan_submit_line(profile: &InputProfile, body: &str, action: SubmitAction) -> SubmitPlan {
+pub fn plan_submit_line(
+    profile: &InputProfile,
+    line: &ComposerLine,
+    action: SubmitAction,
+) -> SubmitPlan {
     let steps = match action {
         SubmitAction::Write => vec![
             SubmitStep {
-                bytes: frame_body(profile, body),
+                bytes: frame_body(profile, line.as_str()),
                 delay_after: profile.submit_delay,
             },
             SubmitStep {
@@ -452,7 +498,7 @@ pub fn plan_submit_line(profile: &InputProfile, body: &str, action: SubmitAction
                 });
             }
             steps.push(SubmitStep {
-                bytes: frame_body(profile, body),
+                bytes: frame_body(profile, line.as_str()),
                 delay_after: profile.submit_delay,
             });
             steps.push(SubmitStep {
