@@ -989,7 +989,8 @@ pub(super) async fn disable_other_bridges(
 fn warn_left_on(reason: &str) {
     tracing::warn!(
         reason,
-        "could not read the CLI's registrations; the window opens without turning the other          instances' bridge registrations off"
+        "could not read the CLI's registrations; the window opens without turning the other \
+         instances' bridge registrations off"
     );
 }
 
