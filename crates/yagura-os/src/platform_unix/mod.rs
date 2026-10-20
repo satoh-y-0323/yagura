@@ -886,8 +886,9 @@ fn mark_cloexec_below(bound: libc::c_int) {
 
 /// Unix branch of [`crate::spawn_daemon_detached`]: `setsid` detaches the
 /// daemon into its own session (so it survives the caller's controlling
-/// terminal going away), it inherits no fd beyond its null stdio, and a reaper thread waits on it so it never lingers
-/// as a zombie. Always uses this one mode -- there is no weaker Unix
+/// terminal going away), it inherits no fd beyond its null stdio, and a
+/// reaper thread waits on it so it never lingers as a zombie. Always uses
+/// this one mode -- there is no weaker Unix
 /// fallback to fall back to -- so `used_fallback` is always `false`.
 // The OS boundary owns the one detached spawn outside the PTY path; the ban in
 // `clippy.toml` keeps every other call site from creating a child of its own.
