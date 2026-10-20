@@ -23,6 +23,9 @@
 //!   `  Command: ...` / `  Args: ...`). An unregistered name writes nothing
 //!   to stdout, `No MCP server named '<name>' found.` to stderr, and exits
 //!   `1` (the shape the real CLIs use).
+//! - `mcp_cli_stub mcp list --json`: writes the registry as a JSON array,
+//!   one `{"name":..,"transport":{"command":..,"args":[..]}}` element per
+//!   registration, in name order.
 //! - `mcp_cli_stub probe <path>`: writes one transformed line for `<path>`
 //!   (see [`transform_probe_path`]), standing in for a `wslpath`-style call.
 //! - `mcp_cli_stub file-read <path>`: writes `<path>`'s bytes to stdout, or
@@ -33,7 +36,7 @@
 //!   absent), standing in for a `cat > <path>` replace tool.
 //!
 //! Environment variables (all optional except where noted):
-//! - `MCP_CLI_STUB_STATE_DIR` (required for `mcp add` / `remove` / `get`): a
+//! - `MCP_CLI_STUB_STATE_DIR` (required for `mcp add` / `remove` / `get` / `list`): a
 //!   directory this process keeps its own registration record in
 //!   (`registry.json`), independent of any settings file below -- modelling
 //!   a CLI's private registry.
@@ -54,7 +57,7 @@
 //!   directly from a file rather than through this binary.
 //! - `MCP_CLI_STUB_FAIL_SUBCOMMAND` / `MCP_CLI_STUB_FAIL_EXIT_CODE` /
 //!   `MCP_CLI_STUB_FAIL_STDOUT` / `MCP_CLI_STUB_FAIL_STDERR`: when the
-//!   dispatched subcommand's name (`add` / `remove` / `get` / `probe` /
+//!   dispatched subcommand's name (`add` / `remove` / `get` / `list` / `probe` /
 //!   `file-read` / `file-replace`) equals `MCP_CLI_STUB_FAIL_SUBCOMMAND`,
 //!   this process writes the given stdout/stderr text -- which may carry
 //!   ANSI escapes or bidi control characters, taken literally -- and exits
@@ -111,7 +114,7 @@ fn main() -> io::Result<()> {
 fn run(args: &[String]) -> io::Result<i32> {
     let Some(name) = subcommand_name(args) else {
         eprintln!(
-            "usage: mcp_cli_stub <mcp add|mcp remove|mcp get|probe|file-read|file-replace> ..."
+            "usage: mcp_cli_stub <mcp add|mcp remove|mcp get|mcp list|probe|file-read|file-replace> ..."
         );
         return Ok(2);
     };
@@ -122,6 +125,7 @@ fn run(args: &[String]) -> io::Result<i32> {
         "add" => run_add(&args[2..]),
         "remove" => run_remove(&args[2..]),
         "get" => run_get(&args[2..]),
+        "list" => run_list(),
         "probe" => run_probe(&args[1..]),
         "file-read" => run_file_read(&args[1..]),
         "file-replace" => run_file_replace(&args[1..]),
@@ -139,6 +143,7 @@ fn subcommand_name(args: &[String]) -> Option<&'static str> {
         (Some("mcp"), Some("add")) => Some("add"),
         (Some("mcp"), Some("remove")) => Some("remove"),
         (Some("mcp"), Some("get")) => Some("get"),
+        (Some("mcp"), Some("list")) => Some("list"),
         (Some("probe"), _) => Some("probe"),
         (Some("file-read"), _) => Some("file-read"),
         (Some("file-replace"), _) => Some("file-replace"),
@@ -365,6 +370,21 @@ fn run_get(args: &[String]) -> io::Result<i32> {
         println!("  Command: {}", registration.command);
         println!("  Args: {}", registration.args.join(" "));
     }
+    Ok(0)
+}
+
+fn run_list() -> io::Result<i32> {
+    let registry = read_registry()?;
+    let entries: Vec<Value> = registry
+        .iter()
+        .map(|(name, registration)| {
+            serde_json::json!({
+                "name": name,
+                "transport": { "command": registration.command, "args": registration.args },
+            })
+        })
+        .collect();
+    println!("{}", Value::Array(entries));
     Ok(0)
 }
 

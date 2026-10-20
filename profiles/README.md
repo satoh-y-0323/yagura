@@ -1011,6 +1011,17 @@ args_pointer = "/transport/args"  # optional; "json" only
 require = { "Scope:" = "User" }   # optional; "lines" only
 absent = "No MCP server named"    # optional; a substring meaning "not registered"
 
+[mcp_registration.list]        # optional; turns the other instances' bridge
+                                # registrations off for each window
+args = ["mcp", "list", "--json"]  # appended to the launch argv; prints JSON
+items = ""                      # JSON Pointer to the array of registered servers
+name = "/name"                  # JSON Pointer, within an element, to its name
+command = "/transport/command"  # JSON Pointer, within an element, to the
+                                # executable it runs
+disable = ["-c", "mcp_servers.{server}.enabled=false"]
+                                # appended to the window's command line once
+                                # per name; `{server}` only
+
 [mcp_registration.toml_set]    # optional; an edit made once, right after add
 file = ".codex/config.toml"    # home-relative
 table = ["mcp_servers", "{server}"]
@@ -1117,6 +1128,24 @@ a `files.read` tool exited with `absent_exit`), **not installed** (the CLI
 itself, or its `bridge_probe`, could not be found or run), or **unknown**
 (the output could not be read as the declared format -- never guessed as
 registered or not).
+
+**Turning the other instances' registrations off.** A CLI that hands an MCP
+server only the variables its own configuration names starts a registered
+`yagura` without the window's identity, so a window of a named instance would
+reach the default instance's daemon as an outside client. When a profile
+declares `list`, the daemon runs `args` after the profile's launch argv (with
+no model or effort added) each time it opens a window from the profile, and
+appends `disable` once per registered server that is yagura's bridge for some
+other instance: its name is `yagura` or `yagura-<instance>` with a valid
+instance identifier, **and** the file name of the command it runs is the
+file name of this daemon's bridge. The server the window's own `[mcp]`
+injection is named for stays on, and a server of your own is never touched.
+`{server}` is the only placeholder, `args` takes none, and `disable` must
+carry it. The wait for a free slot and the listing together are limited to 10
+seconds; when the listing fails, times out or is not the declared shape, the
+daemon logs a warning and opens the window without turning anything off. A
+profile whose `[mcp]` table spells the server name out instead of `{server}`
+is left as it is, since the daemon cannot tell which name it injects.
 
 **Update and Remove can drop a hand-written value.** A CLI's own `add`
 command can rewrite its whole record rather than editing it in place: the

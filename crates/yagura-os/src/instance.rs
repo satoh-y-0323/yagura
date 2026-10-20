@@ -162,7 +162,14 @@ pub fn resolve_instance_from(
     })
 }
 
-fn validate_instance_id(candidate: &OsStr) -> Result<&str, InstanceIdError> {
+/// Checks `candidate` against the identifier rules [`resolve_instance_from`]
+/// documents and returns it as text.
+///
+/// # Errors
+///
+/// Returns [`InstanceIdError`] for an identifier that breaks any of those
+/// rules.
+pub fn validate_instance_id(candidate: &OsStr) -> Result<&str, InstanceIdError> {
     // Nothing outside ASCII is in the allow-list, so a non-UTF-8 identifier
     // fails the same rule the character scan below applies.
     let id = candidate

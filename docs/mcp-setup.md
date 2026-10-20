@@ -104,6 +104,25 @@ which window it is. The bundled
 Codex profiles set `tool_timeout_sec` themselves (see [Configuring Codex CLI](#configuring-codex-cli)
 for why), so a value in `~/.codex/config.toml` does not apply to a window yagura opens.
 
+**A window turns the other instances' registrations off (Codex CLI).** Codex CLI hands an MCP
+server only the variables its own configuration names, so a registered `yagura` that a window of a
+named instance can see would start without that window's identity and connect to the default
+instance's daemon as an outside client, unable to say which window it is. When a Codex CLI window
+opens, the daemon therefore lists the CLI's registrations (`codex mcp list --json`, inside WSL for
+`wsl-codex-cli`) and passes `-c mcp_servers.<name>.enabled=false` for each one named `yagura` or
+`yagura-<instance>` whose command is this daemon's bridge, except the one the window's own server is
+named for. A server of your own is never touched, and the registration itself is not changed: only
+that window stops seeing the others. The daemon logs `turned off the other instances' bridge
+registrations for this window` with the names it turned off; if the listing fails or takes longer
+than 10 seconds it logs a warning and opens the window without turning anything off. In Codex CLI's
+`/mcp`, the other instances' servers show as disabled. The bundled `codex-cli` and `wsl-codex-cli`
+profiles declare this in [`[mcp_registration.list]`](../profiles/README.md#mcp-registration).
+
+**Claude Code is not covered.** It has no documented way to turn a user-scope registration off for
+one launch, so a window of a named instance still sees the other instances' registrations. The
+default instance's registered `yagura` does no harm there: Claude Code starts it with the window's
+environment, so it identifies as the window.
+
 **Registration is still needed** for a session yagura does not start -- for example the Claude Code
 you run in your own terminal to drive yagura's windows -- and for a CLI that cannot be handed an MCP
 server at launch, that is, one opened from a profile without an `[mcp]` table.
@@ -1579,5 +1598,6 @@ If the MCP server fails to connect:
 8. A WSL profile starts the Windows `yagura-mcp.exe` through WSL interop. If Codex CLI's `/mcp`
    shows yagura as failed in a WSL window, run `/mnt/c/Windows/System32/cmd.exe /c ver` inside the
    distribution: `Exec format error` means interop is off, and no window's yagura MCP server can
-   start until it is back. `wsl --shutdown` from Windows restores it. This has been seen on
-   Ubuntu 24.04 with systemd enabled in WSL, and may have other causes.
+   start until it is back. `wsl --shutdown` from Windows restores it only until WSL next restarts,
+   so expect to run it again. This has been seen on Ubuntu 24.04 with systemd enabled in WSL, and
+   may have other causes.

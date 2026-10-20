@@ -26,6 +26,7 @@ use common::{
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::mcp_registration::RegistrationTarget;
 use yagura_daemon::profile::{ProfileOs, parse_profile, render_hooks_args};
 use yagura_os::program::contains_cmd_metacharacter;
 use yagura_protocol::{
@@ -476,6 +477,10 @@ fn is_file(path: &Path) -> bool {
 }
 
 async fn start(tag: &str, profile: &str, layout: &Layout) -> Harness {
+    start_as(tag, profile, layout, None).await
+}
+
+async fn start_as(tag: &str, profile: &str, layout: &Layout, instance: Option<&str>) -> Harness {
     write_profile(
         &layout.profiles_dir,
         "codex",
@@ -484,7 +489,7 @@ async fn start(tag: &str, profile: &str, layout: &Layout) -> Harness {
     let config = DaemonConfig {
         profiles_dir: Some(layout.profiles_dir.clone()),
         home_dir: Some(layout.home_dir.clone()),
-        instance_id: None,
+        instance_id: instance.map(str::to_string),
         mcp_bridge: Some(layout.bridge.clone()),
         mcp_config_dir: Some(layout.mcp_config_dir.clone()),
         mcp_registration_timeout: Duration::from_secs(20),
@@ -952,4 +957,47 @@ async fn a_launch_that_loses_its_hooks_to_stale_trust_says_so_once_with_the_reas
         1 => Ok(()),
         n => Err(format!("restoring the trust must add no line, found {n}")),
     });
+}
+
+// =============================================================================
+// A window disables the other instances' bridge registrations
+// =============================================================================
+
+fn disabled_servers(launch: &[String]) -> Vec<String> {
+    launch
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .filter_map(|pair| {
+            let rest = pair[1].strip_prefix("mcp_servers.")?;
+            rest.strip_suffix(".enabled=false").map(str::to_string)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_named_instance_window_disables_only_the_default_bridge_registration() {
+    let layout = Layout::new("codex-disable-others");
+    let default_name = RegistrationTarget::for_instance(None).server().to_string();
+    let own_name = RegistrationTarget::for_instance(Some("work"))
+        .server()
+        .to_string();
+    let bridge_name = layout.bridge.file_name().unwrap().to_str().unwrap();
+    let bridge_path = |dir: &str| format!("{dir}/{bridge_name}");
+    let registry = serde_json::json!({
+        default_name.as_str(): { "command": bridge_path("/default"), "args": [] },
+        own_name.as_str(): { "command": bridge_path("/work"), "args": [] },
+        "my-own-tool": { "command": "/tools/my-own-tool", "args": [] },
+    });
+    std::fs::write(layout.state_dir.join("registry.json"), registry.to_string())
+        .expect("seed registry");
+    let h = start_as("codex-disable-others", HOST_PROFILE, &layout, Some("work")).await;
+    let mut client = approver_connection(&h).await;
+
+    let launch = open_and_read_launch(&mut client, &layout, 1).await;
+
+    assert_eq!(
+        disabled_servers(&launch),
+        vec![default_name],
+        "only the bridge registration of another instance is disabled: {launch:?}"
+    );
 }

@@ -51,6 +51,10 @@ pub enum RenderError {
     InstanceNotCarried,
 }
 
+/// The name the default instance registers under, and the prefix of every
+/// named instance's.
+const DEFAULT_SERVER: &str = "yagura";
+
 /// The registration name and environment one instance registers under.
 #[derive(Debug, Clone)]
 pub struct RegistrationTarget {
@@ -68,13 +72,26 @@ impl RegistrationTarget {
     pub fn for_instance(instance_id: Option<&str>) -> Self {
         match instance_id {
             None => Self {
-                server: "yagura".to_string(),
+                server: DEFAULT_SERVER.to_string(),
                 env: Vec::new(),
             },
             Some(id) => Self {
-                server: format!("yagura-{id}"),
+                server: format!("{DEFAULT_SERVER}-{id}"),
                 env: vec![("YAGURA_INSTANCE".to_string(), id.to_string())],
             },
+        }
+    }
+
+    /// Whether `name` is one [`RegistrationTarget::for_instance`] can produce:
+    /// `yagura`, or `yagura-` followed by a valid instance identifier.
+    #[must_use]
+    pub fn is_bridge_server(name: &str) -> bool {
+        match name.strip_prefix(DEFAULT_SERVER) {
+            Some("") => true,
+            Some(rest) => rest.strip_prefix('-').is_some_and(|id| {
+                yagura_os::validate_instance_id(std::ffi::OsStr::new(id)).is_ok()
+            }),
+            None => false,
         }
     }
 
@@ -287,6 +304,69 @@ impl JsonEntrySpec {
     }
 }
 
+/// A validated `[mcp_registration.list]` table: how to read every server the
+/// CLI has registered, and how to turn one of them off for a single launch.
+#[derive(Debug, Clone)]
+pub struct ListSpec {
+    args: Vec<String>,
+    items: String,
+    name: String,
+    command: String,
+    disable: Vec<String>,
+}
+
+impl ListSpec {
+    /// The arguments (after the CLI's own launch argv) that list the
+    /// registrations.
+    #[must_use]
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// The names, in listing order, of the registered servers that are
+    /// yagura's bridge for some instance other than the one named `keep`: the
+    /// name is one [`RegistrationTarget::is_bridge_server`] accepts and the
+    /// registered command's file name is `bridge_file_name`. A server of
+    /// the user's own, or a bridge-named one that runs something else, is never
+    /// in the result.
+    ///
+    /// `None` when `stdout` is not the declared shape: not UTF-8, not JSON,
+    /// or `items` does not point at an array.
+    #[must_use]
+    pub fn other_bridges(
+        &self,
+        stdout: &[u8],
+        bridge_file_name: &str,
+        keep: &str,
+    ) -> Option<Vec<String>> {
+        let document = parse_json_document(std::str::from_utf8(stdout).ok()?)?;
+        let items = document.pointer(&self.items)?.as_array()?;
+        Some(
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.pointer(&self.name)?.as_str()?;
+                    let command = item.pointer(&self.command)?.as_str()?;
+                    let file_name = command.rsplit(['/', '\\']).next().unwrap_or(command);
+                    (name != keep
+                        && RegistrationTarget::is_bridge_server(name)
+                        && file_name.eq_ignore_ascii_case(bridge_file_name))
+                    .then(|| name.to_string())
+                })
+                .collect(),
+        )
+    }
+
+    /// The launch arguments that turn `servers` off, in order.
+    #[must_use]
+    pub fn render_disable(&self, servers: &[String]) -> Vec<String> {
+        servers
+            .iter()
+            .flat_map(|server| substitute_all(&self.disable, "{server}", server))
+            .collect()
+    }
+}
+
 /// `value` with `placeholder` replaced by `with` in every string it holds.
 fn substitute_json(value: &JsonValue, placeholder: &str, with: &str) -> JsonValue {
     match value {
@@ -336,6 +416,7 @@ pub struct McpRegistrationSpec {
     status: StatusSpec,
     toml_set: Option<TomlSetSpec>,
     json_entry: Option<JsonEntrySpec>,
+    list: Option<ListSpec>,
 }
 
 impl McpRegistrationSpec {
@@ -358,6 +439,13 @@ impl McpRegistrationSpec {
     #[must_use]
     pub fn json_entry(&self) -> Option<&JsonEntrySpec> {
         self.json_entry.as_ref()
+    }
+
+    /// The `list` table, when this row can name the CLI's registered servers
+    /// and turn one off for a launch.
+    #[must_use]
+    pub fn list(&self) -> Option<&ListSpec> {
+        self.list.as_ref()
     }
 
     /// Whether this row owns settings-file entries of its own (a `toml_set`
@@ -999,6 +1087,18 @@ struct RawMcpRegistrationTable {
     toml_set: Option<RawTomlSet>,
     #[serde(default)]
     json_entry: Option<RawJsonEntry>,
+    #[serde(default)]
+    list: Option<RawList>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawList {
+    args: Vec<String>,
+    items: String,
+    name: String,
+    command: String,
+    disable: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1144,6 +1244,7 @@ fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRe
     };
 
     let json_entry = raw.json_entry.map(build_json_entry).transpose()?;
+    let list = raw.list.map(build_list).transpose()?;
 
     Ok(McpRegistrationSpec {
         group: raw.group,
@@ -1159,6 +1260,32 @@ fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRe
         status,
         toml_set,
         json_entry,
+        list,
+    })
+}
+
+/// Validates `list`: arguments without placeholders, JSON Pointers for the
+/// array and the two fields read from each element, and a `disable` that
+/// names its server by `{server}` alone.
+fn build_list(raw: RawList) -> Result<ListSpec, McpRegistrationError> {
+    let invalid = || McpRegistrationError::InvalidShape;
+    validate_args_placeholders(&raw.args, &[])?;
+    validate_args_placeholders(&raw.disable, &["{server}"])?;
+    let pointers = [&raw.items, &raw.name, &raw.command];
+    if raw.args.is_empty()
+        || !raw.disable.iter().any(|arg| arg.contains("{server}"))
+        || !pointers
+            .iter()
+            .all(|pointer| profile::is_json_pointer(pointer))
+    {
+        return Err(invalid());
+    }
+    Ok(ListSpec {
+        args: raw.args,
+        items: raw.items,
+        name: raw.name,
+        command: raw.command,
+        disable: raw.disable,
     })
 }
 

@@ -398,6 +398,10 @@ pub struct ProfileLaunch {
     /// -- whether the CLI will report. `None` when the profile has neither
     /// `[hooks]` nor a `json_entry`, or has no registration table.
     pub hooks_registration: Option<crate::mcp_registration::McpRegistrationSpec>,
+    /// The profile's `[mcp_registration.list]` table: how this launch asks
+    /// its CLI for the bridge registrations of other instances and turns
+    /// them off. `None` when the profile declares none.
+    pub bridge_listing: Option<crate::mcp_registration::ListSpec>,
     /// The profile's `[delivery]` table, as declared. What it contributes to a
     /// spawn argv (a launch prompt) is rendered by
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
@@ -425,6 +429,19 @@ pub struct InjectionSpec {
     /// nothing else. `None` when no element needs one (the CLI takes the
     /// configuration directly on its command line instead).
     pub config_file: Option<String>,
+}
+
+impl InjectionSpec {
+    /// Whether the table names its MCP server through `{server}`, so the
+    /// name a launch injects is the one the caller renders it with. A table
+    /// that spells the name out injects one this crate cannot read back.
+    #[must_use]
+    pub fn names_server(&self) -> bool {
+        self.args
+            .iter()
+            .chain(self.config_file.as_ref())
+            .any(|text| text.contains(MCP_SERVER_PLACEHOLDER))
+    }
 }
 
 /// Errors rejecting a profile document outright (the *excluded* half of the
@@ -1948,6 +1965,10 @@ pub fn resolve_launch(
         .mcp_registration
         .clone()
         .filter(|registration| profile.hooks.is_some() || registration.json_entry().is_some());
+    let bridge_listing = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|registration| registration.list().cloned());
 
     Ok(ProfileLaunch {
         argv,
@@ -1965,6 +1986,7 @@ pub fn resolve_launch(
         mcp: profile.mcp,
         hooks: profile.hooks,
         hooks_registration,
+        bridge_listing,
         delivery: profile.delivery,
     })
 }

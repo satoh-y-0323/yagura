@@ -382,6 +382,9 @@ struct PlannedOpen {
     delivery: Option<ProfileDelivery>,
     /// What a wake by command runs, when the profile wakes that way.
     wake_command: Option<WakeCommand>,
+    /// How the launch turns the other instances' bridge registrations off,
+    /// read right before spawn; `None` when the profile cannot say.
+    bridge_scan: Option<mcp_registration::BridgeScan>,
 }
 
 /// A registration whose settings-file entries must hold for a launch to keep
@@ -906,6 +909,10 @@ pub struct IpcServer {
     /// Admits a `list_mcp_registrations` listing's own row reads, sized by
     /// [`DaemonConfig::mcp_registration_status_max_concurrent`].
     mcp_registration_row_reads: Arc<Semaphore>,
+    /// Admits the window launches reading their CLI's registrations, sized by
+    /// [`DaemonConfig::mcp_registration_status_max_concurrent`]; apart from
+    /// `mcp_registration_row_reads` so a slow status read never holds a launch.
+    mcp_launch_listings: Arc<Semaphore>,
     /// Admits at most one `run_mcp_registration` operation (register /
     /// update / remove) across the whole daemon at a time, held for as long
     /// as that operation's own steps and status re-read take (see
@@ -967,6 +974,9 @@ impl IpcServer {
         let mcp_registration_row_reads = Arc::new(Semaphore::new(
             config.mcp_registration_status_max_concurrent,
         ));
+        let mcp_launch_listings = Arc::new(Semaphore::new(
+            config.mcp_registration_status_max_concurrent,
+        ));
         let mcp_registration_changes = Arc::new(Semaphore::new(1));
         let reports = Arc::new(report::ReportInboxes::new(Arc::clone(&registry)));
         let ledger = Arc::new(plan::PlanRuntime::disabled());
@@ -990,6 +1000,7 @@ impl IpcServer {
             model_choices_listing,
             mcp_registration_listing,
             mcp_registration_row_reads,
+            mcp_launch_listings,
             mcp_registration_changes,
             reports,
             health_checks: Semaphore::new(1),
@@ -2386,13 +2397,13 @@ impl IpcServer {
         // registry right before spawn, so a refused request never writes one.
         let config_dir = self.config.mcp_config_dir.as_deref();
         let mut injections = Vec::new();
+        // The registered name, so the window's server and the instance's
+        // registration are one entry rather than two side by side.
+        let target = crate::mcp_registration::RegistrationTarget::for_instance(
+            self.config.instance_id.as_deref(),
+        );
         if let (Some(spec), Some(bridge)) = (launch.mcp.as_ref(), self.config.mcp_bridge.as_deref())
         {
-            // The registered name, so the window's server and the instance's
-            // registration are one entry rather than two side by side.
-            let target = crate::mcp_registration::RegistrationTarget::for_instance(
-                self.config.instance_id.as_deref(),
-            );
             injections.extend(crate::profile::prepare_mcp_injection(
                 spec,
                 target.server(),
@@ -2408,23 +2419,68 @@ impl IpcServer {
         let reports_through_entries = launch.hooks.is_none();
         // The program alone, without this launch's options: a wake command
         // runs the profile's own program for a session that already exists.
-        let wake_command = match launch.delivery.as_ref().map(|delivery| &delivery.wake) {
-            Some(WakeMode::Command(_)) => {
-                let base = crate::profile::resolve_launch(
+        let wakes_by_command = matches!(
+            launch.delivery.as_ref().map(|delivery| &delivery.wake),
+            Some(WakeMode::Command(_))
+        );
+        // A table that spells its server name out injects one this launch
+        // cannot tell from the registrations it would turn off.
+        let scanning = match (
+            launch.bridge_listing.as_ref(),
+            self.config
+                .mcp_bridge
+                .as_deref()
+                .and_then(Path::file_name)
+                .and_then(std::ffi::OsStr::to_str),
+        ) {
+            (Some(list), Some(file_name))
+                if launch
+                    .mcp
+                    .as_ref()
+                    .is_none_or(crate::profile::InjectionSpec::names_server) =>
+            {
+                Some((list.clone(), file_name.to_string()))
+            }
+            _ => None,
+        };
+        let base_argv = if wakes_by_command || scanning.is_some() {
+            Some(
+                crate::profile::resolve_launch(
                     &self.config,
                     profile,
                     None,
                     None,
                     &crate::profile::LaunchOptionValues::default(),
                 )
-                .map_err(|err| profile_launch_error_msg(&err))?;
-                Some(WakeCommand {
-                    argv: base.argv,
-                    env: launch.env.clone().into_iter().collect(),
-                })
-            }
-            _ => None,
+                .map_err(|err| profile_launch_error_msg(&err))?
+                .argv,
+            )
+        } else {
+            None
         };
+        let wake_command = base_argv
+            .clone()
+            .filter(|_| wakes_by_command)
+            .map(|argv| WakeCommand {
+                argv,
+                env: launch.env.clone().into_iter().collect(),
+            });
+        let bridge_scan = scanning
+            .zip(base_argv)
+            .map(
+                |((list, bridge_file_name), launch_argv)| mcp_registration::BridgeScan {
+                    list,
+                    launch_argv,
+                    env: launch
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                    bridge_file_name,
+                    keep: target.server().to_string(),
+                    permits: Arc::clone(&self.mcp_launch_listings),
+                },
+            );
         let hooks_gate = launch
             .hooks_registration
             .filter(crate::mcp_registration::McpRegistrationSpec::owns_entries)
@@ -2458,6 +2514,7 @@ impl IpcServer {
             hooks_gate,
             delivery: launch.delivery,
             wake_command,
+            bridge_scan,
         })
     }
 
@@ -5458,6 +5515,17 @@ async fn open_planned(
                 .retain(|injection| injection.kind != crate::window::InjectionKind::Hooks);
             hooks_left_out = Some((gate.profile, reason));
         }
+    }
+    if let Some(scan) = planned.bridge_scan.take()
+        && let Some(disable) = mcp_registration::disable_other_bridges(config, scan).await
+    {
+        // Before the launch prompt, which has to stay the CLI's last argument.
+        let at = planned
+            .injections
+            .iter()
+            .position(|injection| injection.kind == crate::window::InjectionKind::LaunchPrompt)
+            .unwrap_or(planned.injections.len());
+        planned.injections.insert(at, disable);
     }
     let provenance = WindowProvenance {
         launch: Some(planned.launch),

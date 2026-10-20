@@ -424,8 +424,17 @@ pub struct DaemonConfig {
     pub mcp_registration_max_output_bytes: usize,
 
     /// How many `[mcp_registration]` row state reads may run at once, within
-    /// a single listing. Defaults to 2.
+    /// a single listing; also how many window launches may be reading their
+    /// CLI's registrations at once ([`DaemonConfig::mcp_listing_timeout`]).
+    /// Defaults to 2.
     pub mcp_registration_status_max_concurrent: usize,
+
+    /// How long a window launch may spend, waiting for a slot and then running
+    /// its CLI's registration listing, before it opens without turning the other
+    /// instances' registrations off. Shorter than
+    /// `mcp_registration_timeout` because the window waits on it. Defaults to
+    /// 10 seconds, which covers a WSL distribution's cold start.
+    pub mcp_listing_timeout: Duration,
 }
 
 /// A configuration value whose contents must never reach a `Debug` rendering.
@@ -542,6 +551,9 @@ const DEFAULT_MCP_REGISTRATION_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Default value of [`DaemonConfig::mcp_registration_status_max_concurrent`].
 const DEFAULT_MCP_REGISTRATION_STATUS_MAX_CONCURRENT: usize = 2;
+
+/// Default value of [`DaemonConfig::mcp_listing_timeout`], in seconds.
+const DEFAULT_MCP_LISTING_TIMEOUT_SECS: u64 = 10;
 
 /// Every `DaemonConfig` value the daemon binary resolves at startup.
 ///
@@ -701,6 +713,7 @@ impl Default for DaemonConfig {
             mcp_registration_timeout: Duration::from_secs(DEFAULT_MCP_REGISTRATION_TIMEOUT_SECS),
             mcp_registration_max_output_bytes: DEFAULT_MCP_REGISTRATION_MAX_OUTPUT_BYTES,
             mcp_registration_status_max_concurrent: DEFAULT_MCP_REGISTRATION_STATUS_MAX_CONCURRENT,
+            mcp_listing_timeout: Duration::from_secs(DEFAULT_MCP_LISTING_TIMEOUT_SECS),
         }
     }
 }

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use yagura_protocol::{
     DaemonMessage, McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry,
     McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
@@ -25,6 +26,7 @@ use crate::mcp_registration;
 use crate::profile;
 use crate::pty;
 use crate::toml_set;
+use crate::window::{CliInjection, InjectionKind};
 
 use super::plan::{auth_failed_msg, load_role_and_profile_state_blocking, unsupported_msg};
 use super::{ConnectionState, Outbound, error_msg};
@@ -836,6 +838,18 @@ async fn run_captured(
     env: &[(OsString, OsString)],
     stdin: Option<Vec<u8>>,
 ) -> SpawnOutcome {
+    run_captured_within(config, argv, env, stdin, config.mcp_registration_timeout).await
+}
+
+/// [`run_captured`] with its own time limit in place of
+/// `config.mcp_registration_timeout`.
+async fn run_captured_within(
+    config: &DaemonConfig,
+    argv: Vec<String>,
+    env: &[(OsString, OsString)],
+    stdin: Option<Vec<u8>>,
+    timeout: std::time::Duration,
+) -> SpawnOutcome {
     // Resolution probes the filesystem, so it runs off the async runtime.
     let resolve_config = config.clone();
     let resolved =
@@ -862,7 +876,7 @@ async fn run_captured(
         Err(_) => return SpawnOutcome::SpawnFailed,
     };
     let limits = yagura_os::CaptureLimits {
-        timeout: config.mcp_registration_timeout,
+        timeout,
         max_output_bytes: config.mcp_registration_max_output_bytes,
     };
     let outcome = tokio::task::spawn_blocking(move || captured.collect(limits))
@@ -884,6 +898,99 @@ async fn run_captured(
         yagura_os::CaptureOutcome::TimedOut => SpawnOutcome::TimedOut,
         yagura_os::CaptureOutcome::OutputTooLarge => SpawnOutcome::OutputTooLarge,
     }
+}
+
+/// What a window launch needs to turn the other instances' bridge
+/// registrations off in its CLI ([`disable_other_bridges`]).
+pub(super) struct BridgeScan {
+    pub(super) list: mcp_registration::ListSpec,
+    /// The profile's launch argv without the launch's options: the listing
+    /// needs no model or effort.
+    pub(super) launch_argv: Vec<String>,
+    pub(super) env: Vec<(OsString, OsString)>,
+    /// The file name of this daemon's bridge, which a registration's command
+    /// must end in to count as a bridge.
+    pub(super) bridge_file_name: String,
+    /// The registration the window's own injection is named for; it stays on.
+    pub(super) keep: String,
+    /// Bounds how many launches read their CLI's registrations at once.
+    pub(super) permits: Arc<Semaphore>,
+}
+
+/// Reads the CLI's registrations and returns the launch arguments that turn
+/// off, for this window only, every yagura bridge registration except
+/// `scan.keep`: a CLI that passes the window only the variables its own
+/// configuration names would otherwise connect it to another instance's
+/// daemon as an outside client.
+///
+/// The wait for a slot and the listing together stay within
+/// `config.mcp_listing_timeout`. `None` when there is nothing to turn off, or
+/// when the listing cannot be had in time or cannot be read: the window then
+/// opens as it would have, with a warning saying so.
+pub(super) async fn disable_other_bridges(
+    config: &DaemonConfig,
+    scan: BridgeScan,
+) -> Option<CliInjection> {
+    let deadline = Instant::now() + config.mcp_listing_timeout;
+    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, scan.permits.acquire()).await else {
+        warn_left_on("no slot to read them in");
+        return None;
+    };
+    let argv = full_argv(&scan.launch_argv, scan.list.args().to_vec());
+    let within = deadline.saturating_duration_since(Instant::now());
+    let stdout = match run_captured_within(config, argv, &scan.env, None, within).await {
+        SpawnOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } => stdout,
+        SpawnOutcome::Exited { .. } => {
+            warn_left_on("the listing command failed");
+            return None;
+        }
+        SpawnOutcome::Refused(reason) => {
+            warn_left_on(reason);
+            return None;
+        }
+        SpawnOutcome::SpawnFailed => {
+            warn_left_on("the listing command could not be started");
+            return None;
+        }
+        SpawnOutcome::TimedOut => {
+            warn_left_on("the listing command timed out");
+            return None;
+        }
+        SpawnOutcome::OutputTooLarge => {
+            warn_left_on("the listing was larger than accepted");
+            return None;
+        }
+    };
+    let Some(names) = scan
+        .list
+        .other_bridges(&stdout, &scan.bridge_file_name, &scan.keep)
+    else {
+        warn_left_on("the listing was not in the declared shape");
+        return None;
+    };
+    if names.is_empty() {
+        return None;
+    }
+    tracing::info!(
+        disabled = %names.join(","),
+        "turned off the other instances' bridge registrations for this window"
+    );
+    Some(CliInjection {
+        kind: InjectionKind::Mcp,
+        args: scan.list.render_disable(&names),
+        config_file: None,
+    })
+}
+
+fn warn_left_on(reason: &str) {
+    tracing::warn!(
+        reason,
+        "could not read the CLI's registrations; the window opens without turning the other          instances' bridge registrations off"
+    );
 }
 
 // ---------------------------------------------------------------------

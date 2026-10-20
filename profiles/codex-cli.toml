@@ -90,6 +90,19 @@ command = "/transport/command"
 args_pointer = "/transport/args"
 absent = "No MCP server named"
 
+# Read for every window this profile opens: the bridge registrations of the
+# other instances are turned off for that window, because the CLI passes the
+# window only the variables its own configuration names, so a registration
+# of another instance would connect it to that instance's daemon as an
+# outside client. `items` points at the array, `name` and `command` at the
+# fields read from each element.
+[mcp_registration.list]
+args = ["mcp", "list", "--json"]
+items = ""
+name = "/name"
+command = "/transport/command"
+disable = ["-c", "mcp_servers.{server}.enabled=false"]
+
 [mcp_registration.toml_set]
 file = ".codex/config.toml"
 table = ["mcp_servers", "{server}"]
