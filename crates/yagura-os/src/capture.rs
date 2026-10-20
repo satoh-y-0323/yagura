@@ -614,11 +614,12 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// child is in a [`ProcessGroup`] of its own before it runs any code, so
 /// everything it starts belongs to that group too, and
 /// [`CapturedChild::collect`] (or [`CapturedChild::collect_until`], or
-/// dropping the result early) can tear down the whole tree at once.
+/// dropping the result early) can tear down the whole tree at once. On every
+/// OS the child receives its three standard handles and no other fd or
+/// handle the caller holds.
 ///
 /// On Windows, a bare `argv[0]` is searched for only in the child's own
-/// `PATH` (by [`crate::program::resolve_program`]'s rules), and the child
-/// receives its three standard handles and no other handle.
+/// `PATH` (by [`crate::program::resolve_program`]'s rules).
 ///
 /// # Errors
 ///

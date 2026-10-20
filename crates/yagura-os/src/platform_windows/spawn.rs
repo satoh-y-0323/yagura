@@ -1,5 +1,6 @@
-//! The one way this crate starts a process on Windows: inside a job object
-//! from before its first instruction, with only the handles it is given.
+//! The one way this crate starts a process on Windows: with only the handles
+//! it is given, and, except for the detached daemon, inside a job object from
+//! before its first instruction.
 
 use std::ffi::{OsStr, c_void};
 use std::fs::File;
@@ -72,27 +73,106 @@ pub(crate) struct Spawned {
 /// the process cannot be created, or it cannot be assigned to the job or
 /// resumed. In the last two cases the suspended child is terminated before
 /// this returns, so none of its code has run.
-// The OS boundary owns this `CreateProcessW`; `clippy.toml` bans it everywhere else.
-#[allow(clippy::disallowed_methods)]
 pub(crate) fn spawn_in_job(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
     let (program, args) = spec
         .argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "argv must not be empty"))?;
-    let application = command_line::resolve_application(program, spec.env.get(OsStr::new("PATH")))?;
-    let application_wide = command_line::to_wide_nul(application.as_os_str())?;
-    let mut line = command_line::command_line(&application, args)?;
     let block = spec.env.to_block()?;
-    let cwd_wide = spec
+
+    let job = JobObject::new().map_err(crate::capture::os_error_to_io)?;
+
+    let info = create_process(Creation {
+        program: OsStr::new(program),
+        args,
+        child_path: spec.env.get(OsStr::new("PATH")),
+        env_block: Some(&block),
+        cwd: spec.cwd,
+        io: &spec.io,
+        flags: CREATE_SUSPENDED,
+    })?;
+    // SAFETY: CreateProcessW succeeded, so both handles are fresh and owned
+    // here alone.
+    let suspended = unsafe { SuspendedChild::from_information(&info) };
+    drop(spec.io);
+
+    job.assign_process(suspended.process())
+        .map_err(|error| win32_error_to_io(&error))?;
+    let child = suspended.resume()?;
+    Ok(Spawned { child, job })
+}
+
+/// Starts `program` with `args` outside any job, with the `NUL` device as its
+/// three standard handles and no other handle inherited, in the caller's own
+/// environment and working directory. Nothing waits on it.
+///
+/// # Errors
+///
+/// As for resolving the program and building the command line, plus the
+/// operating system's error when `NUL` cannot be opened or the process
+/// cannot be created with `flags`.
+pub(super) fn spawn_detached(
+    program: &OsStr,
+    args: &[&OsStr],
+    flags: PROCESS_CREATION_FLAGS,
+) -> io::Result<()> {
+    // One handle per slot: the handle-list attribute is not documented to
+    // accept the same handle twice.
+    let io = Io::Pipes(StdHandles {
+        stdin: inheritable_null(false)?,
+        stdout: inheritable_null(true)?,
+        stderr: inheritable_null(true)?,
+    });
+    let path = std::env::var_os("PATH");
+    let info = create_process(Creation {
+        program,
+        args,
+        child_path: path.as_deref(),
+        env_block: None,
+        cwd: None,
+        io: &io,
+        flags,
+    })?;
+    // SAFETY: CreateProcessW succeeded, so both handles are fresh and owned
+    // here alone; each is closed once as its owner drops.
+    unsafe {
+        drop(OwnedHandle::from_raw_handle(info.hProcess.0 as *mut c_void));
+        drop(OwnedHandle::from_raw_handle(info.hThread.0 as *mut c_void));
+    }
+    Ok(())
+}
+
+/// What [`create_process`] starts.
+struct Creation<'a, A> {
+    /// Resolved by [`command_line::resolve_application`] against `child_path`.
+    program: &'a OsStr,
+    args: &'a [A],
+    child_path: Option<&'a OsStr>,
+    /// A `CREATE_UNICODE_ENVIRONMENT` block, or `None` to inherit the caller's.
+    env_block: Option<&'a [u16]>,
+    /// `None` inherits the calling process's working directory.
+    cwd: Option<&'a Path>,
+    io: &'a Io,
+    /// Added to the flags `io` itself needs.
+    flags: PROCESS_CREATION_FLAGS,
+}
+
+/// The one `CreateProcessW` of this crate: the child inherits exactly the
+/// handles `io` names, through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+// The OS boundary owns this `CreateProcessW`; `clippy.toml` bans it everywhere else.
+#[allow(clippy::disallowed_methods)]
+fn create_process<A: AsRef<OsStr>>(creation: Creation<'_, A>) -> io::Result<PROCESS_INFORMATION> {
+    let application = command_line::resolve_application(creation.program, creation.child_path)?;
+    let application_wide = command_line::to_wide_nul(application.as_os_str())?;
+    let mut line = command_line::command_line(&application, creation.args)?;
+    let cwd_wide = creation
         .cwd
         .map(|cwd| command_line::to_wide_nul(cwd.as_os_str()))
         .transpose()?;
 
-    let job = JobObject::new().map_err(crate::capture::os_error_to_io)?;
-
     // A pseudoconsole child gets its standard handles from the console, so all
     // three are explicitly invalid and no handle is inherited.
-    let (attributes, std_handles, inherit_handles, window_flag) = match &spec.io {
+    let (attributes, std_handles, inherit_handles, window_flag) = match creation.io {
         Io::Pipes(handles) => {
             let std_handles = [
                 raw(&handles.stdin),
@@ -122,16 +202,21 @@ pub(crate) fn spawn_in_job(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
     startup.StartupInfo.hStdError = std_handles[2];
     startup.lpAttributeList = attributes.as_list();
 
-    let flags =
-        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | window_flag;
+    let env_flag = if creation.env_block.is_some() {
+        CREATE_UNICODE_ENVIRONMENT
+    } else {
+        PROCESS_CREATION_FLAGS(0)
+    };
+    let flags = creation.flags | EXTENDED_STARTUPINFO_PRESENT | env_flag | window_flag;
     let mut info = PROCESS_INFORMATION::default();
-    // SAFETY: every pointer refers to a buffer owned by this frame that
-    // outlives the call: the NUL-terminated application name, command line
-    // (writable, as CreateProcessW requires), environment block and working
-    // directory, and `startup`, whose attribute list `attributes` keeps alive
-    // together with the handle array it may point at. Listed handles are
-    // inheritable and stay open until after the call (`spec.io`); the
-    // pseudoconsole stays open because the caller guarantees it.
+    // SAFETY: every pointer refers to a buffer that outlives the call: the
+    // NUL-terminated application name, command line (writable, as
+    // CreateProcessW requires) and working directory owned by this frame, the
+    // caller's environment block, and `startup`, whose attribute list
+    // `attributes` keeps alive together with the handle array it may point
+    // at. Listed handles are inheritable and stay open until after the call
+    // (`creation.io`); the pseudoconsole stays open because the caller
+    // guarantees it.
     unsafe {
         CreateProcessW(
             PCWSTR(application_wide.as_ptr()),
@@ -140,7 +225,9 @@ pub(crate) fn spawn_in_job(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
             None,
             inherit_handles,
             flags,
-            Some(block.as_ptr().cast::<c_void>()),
+            creation
+                .env_block
+                .map(|block| block.as_ptr().cast::<c_void>()),
             cwd_wide
                 .as_ref()
                 .map_or(PCWSTR::null(), |cwd| PCWSTR(cwd.as_ptr())),
@@ -149,16 +236,8 @@ pub(crate) fn spawn_in_job(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
         )
     }
     .map_err(|error| win32_error_to_io(&error))?;
-    // SAFETY: CreateProcessW succeeded, so both handles are fresh and owned
-    // here alone.
-    let suspended = unsafe { SuspendedChild::from_information(&info) };
     drop(attributes);
-    drop(spec.io);
-
-    job.assign_process(suspended.process())
-        .map_err(|error| win32_error_to_io(&error))?;
-    let child = suspended.resume()?;
-    Ok(Spawned { child, job })
+    Ok(info)
 }
 
 fn raw(handle: &OwnedHandle) -> HANDLE {
@@ -356,9 +435,13 @@ fn make_inheritable(handle: &OwnedHandle) -> io::Result<()> {
         .map_err(|error| win32_error_to_io(&error))
 }
 
-/// The `NUL` device opened for reading, inheritable.
-fn inheritable_null_input() -> io::Result<OwnedHandle> {
-    let handle = OwnedHandle::from(File::open("NUL")?);
+/// The `NUL` device, opened for writing or for reading, inheritable.
+fn inheritable_null(write: bool) -> io::Result<OwnedHandle> {
+    let file = std::fs::OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .open("NUL")?;
+    let handle = OwnedHandle::from(file);
     make_inheritable(&handle)?;
     Ok(handle)
 }
@@ -392,7 +475,7 @@ pub(crate) fn spawn_captured(
         let (parent, child) = pipe_for_child(false)?;
         (Some(parent), child)
     } else {
-        (None, inheritable_null_input()?)
+        (None, inheritable_null(false)?)
     };
 
     let spawned = spawn_in_job(SpawnSpec {

@@ -59,12 +59,15 @@ pub(crate) fn to_wide_nul(value: &OsStr) -> io::Result<Vec<u16>> {
 /// # Errors
 ///
 /// [`io::ErrorKind::InvalidInput`] when any word contains a NUL.
-pub(crate) fn command_line(application: &Path, args: &[String]) -> io::Result<Vec<u16>> {
+pub(crate) fn command_line<A: AsRef<OsStr>>(
+    application: &Path,
+    args: &[A],
+) -> io::Result<Vec<u16>> {
     let mut line = Vec::new();
     append_quoted(application.as_os_str(), &mut line)?;
     for arg in args {
         line.push(u16::from(b' '));
-        append_quoted(OsStr::new(arg), &mut line)?;
+        append_quoted(arg.as_ref(), &mut line)?;
     }
     line.push(0);
     Ok(line)
@@ -403,11 +406,16 @@ fn fold_case(name: &OsStr) -> Vec<u16> {
 ///   when a bare name carries a drive prefix.
 /// - [`io::ErrorKind::NotFound`] when a bare name resolves to no executable
 ///   image in `child_path`.
+/// - [`io::ErrorKind::InvalidInput`] when a bare name is not valid Unicode.
 pub(crate) fn resolve_application(
-    program: &str,
+    program: impl AsRef<OsStr>,
     child_path: Option<&OsStr>,
 ) -> io::Result<PathBuf> {
-    if program.contains(['/', '\\']) {
+    let program = program.as_ref();
+    if program
+        .encode_wide()
+        .any(|unit| unit == u16::from(b'/') || unit == u16::from(b'\\'))
+    {
         let path = PathBuf::from(program);
         if names_batch_file(&path) {
             return Err(invalid_input(
@@ -417,6 +425,10 @@ pub(crate) fn resolve_application(
         }
         return Ok(path);
     }
+    // The PATH search below works on Unicode names only.
+    let program = program
+        .to_str()
+        .ok_or_else(|| invalid_input("a bare program name must be valid Unicode"))?;
     if program.contains(':') {
         // `C:name` is relative to a drive's current directory, not a bare name.
         return Err(invalid_input(

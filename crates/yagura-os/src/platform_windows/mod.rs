@@ -25,11 +25,8 @@ use std::ffi::c_void;
 use std::mem;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::AsRawHandle;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -89,6 +86,7 @@ use windows::Win32::System::Threading::DETACHED_PROCESS;
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::System::Threading::OpenProcess;
 use windows::Win32::System::Threading::OpenProcessToken;
+use windows::Win32::System::Threading::PROCESS_CREATION_FLAGS;
 use windows::Win32::System::Threading::PROCESS_NAME_WIN32;
 use windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
 use windows::Win32::System::Threading::QueryFullProcessImageNameW;
@@ -676,11 +674,12 @@ fn process_user_sid(process_id: u32) -> Result<String, OsError> {
 /// Creation flags for the preferred detached daemon start:
 /// no inherited console and no membership in the caller's job object, so that
 /// the daemon survives the caller being closed.
-const DETACHED_SPAWN_FLAGS: u32 = DETACHED_PROCESS.0 | CREATE_BREAKAWAY_FROM_JOB.0;
+const DETACHED_SPAWN_FLAGS: PROCESS_CREATION_FLAGS =
+    PROCESS_CREATION_FLAGS(DETACHED_PROCESS.0 | CREATE_BREAKAWAY_FROM_JOB.0);
 
 /// Fallback creation flags used when the environment refuses
 /// `CREATE_BREAKAWAY_FROM_JOB`.
-const DETACHED_SPAWN_FLAGS_NO_BREAKAWAY: u32 = DETACHED_PROCESS.0;
+const DETACHED_SPAWN_FLAGS_NO_BREAKAWAY: PROCESS_CREATION_FLAGS = DETACHED_PROCESS;
 
 /// Windows branch of [`crate::schedule_force_kill`]: a no-op.
 ///
@@ -731,7 +730,8 @@ pub fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Windows branch of [`crate::spawn_daemon_detached`].
+/// Windows branch of [`crate::spawn_daemon_detached`]: the daemon gets the
+/// `NUL` device as its standard handles and inherits no other handle.
 pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpawn, OsError> {
     if spawn_detached(path, args, DETACHED_SPAWN_FLAGS).is_ok() {
         return Ok(DetachedSpawn {
@@ -744,19 +744,13 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
     })
 }
 
-// The OS boundary owns the one detached spawn outside the PTY path; the ban in
-// `clippy.toml` keeps every other call site from creating a child of its own.
-#[allow(clippy::disallowed_methods)]
-fn spawn_detached(path: &Path, args: &[&OsStr], creation_flags: u32) -> std::io::Result<()> {
+fn spawn_detached(
+    path: &Path,
+    args: &[&OsStr],
+    creation_flags: PROCESS_CREATION_FLAGS,
+) -> std::io::Result<()> {
     // Argument vector, never a shell command line (CWE-78).
-    Command::new(path)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(creation_flags)
-        .spawn()
-        .map(|_detached| ())
+    spawn::spawn_detached(path.as_os_str(), args, creation_flags)
 }
 
 #[cfg(test)]

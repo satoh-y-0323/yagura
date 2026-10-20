@@ -752,9 +752,141 @@ pub fn is_executable(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
+// =========================================================================
+// What a spawned child inherits
+// =========================================================================
+
+/// The lowest fd a child never names: 0-2 are its stdio.
+const FIRST_UNNAMED_FD: libc::c_int = 3;
+
+/// Makes `command`'s child lead a new session and inherit no fd beyond its
+/// stdio. Without `FD_CLOEXEC` at fork time, an fd another thread is still
+/// setting up (a pipe or a PTY pair) would otherwise survive the exec.
+///
+/// # Errors
+///
+/// Off Linux, returns an I/O error when no finite bound on the fd numbers can
+/// be read (see [`unnamed_fd_bound`]), since the child could not cover them.
+fn start_in_new_session_with_only_stdio(command: &mut Command) -> io::Result<()> {
+    let bound = unnamed_fd_bound();
+    // Linux needs the bound only if close_range fails, which only the child sees.
+    #[cfg(not(target_os = "linux"))]
+    let bound = bound.ok_or_else(|| {
+        io::Error::other("no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to")
+    })?;
+    // SAFETY: the closure runs in the forked child between fork and exec. It
+    // calls only setsid(2), syscall(2) for close_range(2) and fcntl(2) --
+    // async-signal-safe there -- allocates nothing, takes no lock, and reads
+    // only `bound`, a plain integer moved in from the parent.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            mark_unnamed_fds_cloexec(bound)
+        });
+    }
+    Ok(())
+}
+
+/// One past the highest fd number this process can hold: the `RLIMIT_NOFILE`
+/// soft value, read in the parent because the child must not allocate.
+fn unnamed_fd_bound() -> Option<libc::c_int> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live out-parameter of the type getrlimit(2) writes.
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0;
+    if read && limit.rlim_cur != libc::RLIM_INFINITY {
+        // Every fd number is a c_int, so a larger soft value covers them all.
+        return Some(libc::c_int::try_from(limit.rlim_cur).unwrap_or(libc::c_int::MAX));
+    }
+    max_files_per_proc()
+}
+
+/// macOS caps the fds of a process at `kern.maxfilesperproc` whatever the
+/// soft limit says, so it bounds the scan when the soft value does not.
+#[cfg(target_os = "macos")]
+fn max_files_per_proc() -> Option<libc::c_int> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_MAXFILESPERPROC];
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    // SAFETY: `mib` names a c_int-valued sysctl, `value` and `len` are live
+    // out-parameters sized for it, and nothing is written to the kernel.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut value).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    (read && value > 0).then_some(value)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn max_files_per_proc() -> Option<libc::c_int> {
+    None
+}
+
+/// Child side: marks every fd from [`FIRST_UNNAMED_FD`] up close-on-exec in
+/// one close_range(2). std's own fds there are close-on-exec already, so only
+/// the ones that would have leaked change.
+#[cfg(target_os = "linux")]
+fn mark_unnamed_fds_cloexec(bound: Option<libc::c_int>) -> io::Result<()> {
+    // The raw syscall, not libc's close_range: that wrapper needs glibc 2.34.
+    // SAFETY: close_range(2) with CLOSE_RANGE_CLOEXEC only sets fd flags of
+    // this process; its arguments are plain integers.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            FIRST_UNNAMED_FD as libc::c_uint,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } == 0;
+    if marked {
+        return Ok(());
+    }
+    // ENOSYS before 5.9, EINVAL before 5.11 (no CLOSE_RANGE_CLOEXEC), EPERM
+    // under seccomp: the loop reaches the same state, and marking is idempotent.
+    let error = io::Error::last_os_error();
+    match bound {
+        Some(bound) => {
+            mark_cloexec_below(bound);
+            Ok(())
+        }
+        None => Err(error),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mark_unnamed_fds_cloexec(bound: libc::c_int) -> io::Result<()> {
+    mark_cloexec_below(bound);
+    Ok(())
+}
+
+/// Child side: marks each open fd in `FIRST_UNNAMED_FD..bound` that lacks
+/// `FD_CLOEXEC`, so exec closes it.
+fn mark_cloexec_below(bound: libc::c_int) {
+    for fd in FIRST_UNNAMED_FD..bound {
+        // SAFETY: F_GETFD and F_SETFD only read and set this process's fd
+        // flag; a number that is not open makes F_GETFD return -1.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
 /// Unix branch of [`crate::spawn_daemon_detached`]: `setsid` detaches the
 /// daemon into its own session (so it survives the caller's controlling
-/// terminal going away) and a reaper thread waits on it so it never lingers
+/// terminal going away), it inherits no fd beyond its null stdio, and a reaper thread waits on it so it never lingers
 /// as a zombie. Always uses this one mode -- there is no weaker Unix
 /// fallback to fall back to -- so `used_fallback` is always `false`.
 // The OS boundary owns the one detached spawn outside the PTY path; the ban in
@@ -767,19 +899,7 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-
-    // SAFETY: the closure passed to pre_exec runs in the forked child,
-    // between fork and exec, and calls only setsid(2) -- one of the
-    // operations POSIX guarantees is async-signal-safe in that window. It
-    // takes no arguments and its failure is reported to the child alone.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    start_in_new_session_with_only_stdio(&mut command).map_err(OsError::Io)?;
 
     let mut child = command.spawn().map_err(OsError::Io)?;
 
@@ -803,11 +923,13 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
 /// the child, which also makes it the leader of a fresh process group that a
 /// descendant it forks before this function even returns still inherits),
 /// and takes that group as [`UnixProcessGroup::led_by`] the child's own pid --
-/// so tearing the tree down is just dropping [`UnixProcessGroup`].
+/// so tearing the tree down is just dropping [`UnixProcessGroup`]. The child
+/// inherits no fd beyond its three standard ones.
 ///
 /// # Errors
 ///
-/// Returns whatever [`std::process::Command::spawn`] returns, and an I/O
+/// Returns whatever [`std::process::Command::spawn`] returns, an I/O error
+/// when no bound on the fds to keep from the child can be read, and an I/O
 /// error when [`UnixProcessGroup::led_by`] rejects the child's pid; the child
 /// is then killed and reaped before returning.
 // The OS boundary owns the one one-shot, non-PTY capture spawn outside the
@@ -846,16 +968,7 @@ pub(crate) fn spawn_captured(
     // A new session, not just a group: a group keeps the daemon's controlling
     // terminal, where an interactive shell's job control stops it (SIGTTIN).
     // No `process_group` either: std applies it first, so `setsid` would EPERM.
-    // SAFETY: the closure runs in the forked child between fork and exec and
-    // calls only setsid(2), which POSIX lists as async-signal-safe there.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    start_in_new_session_with_only_stdio(&mut command)?;
 
     let mut child = command.spawn()?;
 
