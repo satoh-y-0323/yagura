@@ -26,9 +26,13 @@ const FIXTURE_100X30_APPROVAL_COMMAND: &str =
     include_str!("fixtures/copilot-cli/100x30-approval-command.txt");
 const FIXTURE_100X30_TRUST: &str = include_str!("fixtures/copilot-cli/100x30-trust.txt");
 const FIXTURE_100X30_TRUST_WSL: &str = include_str!("fixtures/copilot-cli/100x30-trust-wsl.txt");
+const FIXTURE_100X30_RUNNING_JUST_SUBMITTED: &str =
+    include_str!("fixtures/copilot-cli/100x30-running-just-submitted.txt");
+const FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT: &str =
+    include_str!("fixtures/copilot-cli/100x30-waiting-input-wrapped-draft.txt");
 
-/// The ten real fixtures with their recorded geometry and expected verdict, per
-/// `tests/fixtures/copilot-cli/README.md`.
+/// The real fixtures read from the screen text alone, with their recorded geometry and
+/// expected verdict, per `tests/fixtures/copilot-cli/README.md`.
 const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
     (
         "100x30-idle-startup",
@@ -100,7 +104,41 @@ const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
         30,
         WindowStatus::WaitingApproval,
     ),
+    (
+        "100x30-running-just-submitted",
+        FIXTURE_100X30_RUNNING_JUST_SUBMITTED,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
 ];
+
+/// A draft that wraps pushes the composer's marker row out of the bottom window, so the
+/// verdict depends on the daemon reading the draft's continuation rows as the composer's
+/// body. That needs the cursor where the CLI leaves it, at the end of the draft; the
+/// capture keeps text only, so the cursor is put there after the repaint.
+#[tokio::test]
+async fn copilot_cli_definition_reads_a_wrapped_draft_through_the_composer() {
+    tokio::time::pause();
+    let source = repo_definition_text("copilot-cli.toml");
+    let lines: Vec<&str> = FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT.lines().collect();
+    let closing_rule = lines
+        .iter()
+        .rposition(|line| line.starts_with('─'))
+        .expect("the composer is closed by a rule row");
+    let last_body_row = closing_rule - 1;
+    let last_body_col = lines[last_body_row].trim_end().chars().count();
+
+    let mut engine =
+        common::new_engine_sized(&source, &yagura_daemon::DaemonConfig::default(), 100, 30);
+    let mut bytes = common::repaint_lines(&lines);
+    bytes
+        .extend_from_slice(format!("\x1b[{};{}H", last_body_row + 1, last_body_col + 1).as_bytes());
+    common::ScreenFeed::feed(&mut engine, &bytes);
+    common::tick_after_ms(&mut engine, 350).await;
+
+    assert_eq!(engine.status(), WindowStatus::WaitingInput);
+}
 
 #[tokio::test]
 async fn copilot_cli_definition_classifies_captured_screens() {

@@ -26,9 +26,10 @@ args = ["--reasoning-effort", "{value}"]
 
 # The JSON is inline so the launch hands the WSL CLI no path for it; Copilot
 # expands the variable from its own environment, where WSLENV has already
-# converted the bridge's path.
+# converted the bridge's path. `timeout` is in milliseconds (one day): Copilot
+# cuts a tool call off after 180 seconds by default.
 [mcp]
-args = ["--additional-mcp-config", '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"]}}}']
+args = ["--additional-mcp-config", '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"],"timeout":86400000}}}']
 
 # Copilot takes launch-time hooks only from a plugin directory (see
 # copilot-cli.toml). Inside WSL the hooks run under the `bash` key, and the
@@ -61,7 +62,7 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 # the CLI's own output, so no file tool is needed.
 [mcp_registration]
 group = "WSL"
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 env_forward = { name = "WSLENV", separator = ":" }

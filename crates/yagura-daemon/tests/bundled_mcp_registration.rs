@@ -53,6 +53,8 @@ const INSTANCE: &str = "dev";
 struct CliForm {
     /// Arguments between `mcp add` / `mcp remove` and the server name.
     scope: &'static [&'static str],
+    /// Options only `mcp add` takes, after `scope`.
+    add_options: &'static [&'static str],
     /// The flag that carries one `NAME=value` environment pair.
     env_flag: &'static str,
     /// How the CLI reports a registration's state.
@@ -73,24 +75,29 @@ enum StatusForm {
 
 const CLAUDE_FORM: CliForm = CliForm {
     scope: &["--scope", "user"],
+    add_options: &[],
     env_flag: "--env",
     status: StatusForm::Lines,
 };
 
 const CODEX_FORM: CliForm = CliForm {
     scope: &[],
+    add_options: &[],
     env_flag: "--env",
     status: StatusForm::JsonCommandWithTomlSet,
 };
 
 const AGY_FORM: CliForm = CliForm {
     scope: &[],
+    add_options: &[],
     env_flag: "--env",
     status: StatusForm::JsonFile,
 };
 
 const COPILOT_FORM: CliForm = CliForm {
     scope: &[],
+    // Copilot's own 180-second default would end a call before the daemon's deadlines do.
+    add_options: &["--timeout", "86400000"],
     env_flag: "--env",
     status: StatusForm::JsonCommand,
 };
@@ -381,6 +388,7 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
 fn expected_add(form: CliForm, server: &str, env_pairs: &[&str], bridge: &str) -> Vec<String> {
     let mut argv = strings(&["mcp", "add"]);
     argv.extend(strings(form.scope));
+    argv.extend(strings(form.add_options));
     for pair in env_pairs {
         argv.push(format!("{}={pair}", form.env_flag));
     }

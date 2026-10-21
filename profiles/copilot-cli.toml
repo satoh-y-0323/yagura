@@ -21,8 +21,10 @@ default = "auto"
 [effort]
 args = ["--reasoning-effort", "{value}"]
 
+# `timeout` is in milliseconds (one day): Copilot cuts a tool call off after
+# 180 seconds by default, which is shorter than the waits the tools allow.
 [mcp]
-config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"]}}}'
+config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"],"timeout":86400000}}}'
 args = ["--additional-mcp-config", "@{mcp_config_file}"]
 
 # Copilot takes launch-time hooks only from a plugin directory: a
@@ -47,7 +49,7 @@ launch_prompt = ["-i", "{prompt}"]
 
 # `copilot mcp get --json` prints one table keyed by the server's name.
 [mcp_registration]
-add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+add = ["mcp", "add", "--timeout", "86400000", "{env_args}", "{server}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
 

@@ -562,8 +562,8 @@ written to.
 
 The bundled `codex-cli` definition sets it to `true`; `claude-code` and
 `antigravity-cli` set it to `false`. `copilot-cli` leaves it out (so
-`false`): how Copilot CLI treats a call still out when a turn is interrupted
-has not been measured.
+`false`): Copilot CLI sends the server a cancellation for a call it drops,
+whether the turn is interrupted or the call times out (checked with 1.0.101).
 
 ### What patterns are matched against
 
@@ -999,9 +999,9 @@ single event (only `Stop`, say) is not.
   The hook Copilot runs for a permission request fires before its own rules
   decide whether to ask, so it would report prompts that never appear; the
   approval box is read from the screen alone. An interrupted turn runs no
-  hook and leaves the input line under the cancellation message, so it
-  closes on 5 seconds of quiet and reads as `waiting_input`, not
-  `interrupted`.
+  hook and leaves the input line under the cancellation message, so the
+  window stays `running` until 5 seconds of quiet close the turn, then
+  reads as `waiting_input`, not `interrupted`.
 
 ### Writing hooks by hand
 

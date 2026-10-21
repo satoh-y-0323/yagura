@@ -901,7 +901,9 @@ two servers, the registered one and the injected one. The bundled Codex tables s
 own 60-second default would otherwise end a `wait_for_status`,
 `wait_for_report` or `send_handoff` call that is still waiting on the daemon.
 Copilot CLI lays `--additional-mcp-config` over its own configuration, the
-last definition of a name winning.
+last definition of a name winning. The bundled Copilot tables set `timeout`
+to a day, in milliseconds: Copilot's own 180-second default would end the
+same calls.
 
 ## Hooks injection
 

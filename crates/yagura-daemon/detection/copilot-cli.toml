@@ -25,12 +25,13 @@ pattern = '(?i)^[│\s]{0,4}↑/↓ to navigate\b'
 priority = 30
 region = "bottom"
 
-# The footer while a turn runs: `esc esc interrupt`, and after a single Esc
-# `esc again to interrupt`. The glyph before `Working` changes from frame to
-# frame, so the rule does not depend on it.
+# The footer while a turn runs: `esc esc interrupt`, right after a prompt is
+# sent `esc esc edit prompt`, and after a single Esc `esc again to interrupt`.
+# The glyph before `Working` changes from frame to frame, so the rule does not
+# depend on it.
 [[rules]]
 status = "running"
-pattern = '\besc (esc|again to) interrupt\b'
+pattern = '\besc (esc (interrupt|edit prompt)|again to interrupt)\b'
 priority = 20
 region = "bottom"
 
@@ -48,19 +49,21 @@ region = "bottom"
 
 # Identifies the composer so the daemon can read what has been typed before
 # submitting. The marker omits the trailing space so an empty composer
-# (glyph alone) still matches. A wrapped draft's continuation rows have not
-# been measured, so none is read as one.
+# (glyph alone) still matches. A draft that wraps continues on rows indented
+# by two spaces; reading them as the body keeps the marker row inside the
+# bottom window however tall the draft is.
 [composer]
 marker = '^❯'
 separator = " "
-continuation_prefix = ""
+continuation_prefix = "  "
 
-# Initial values, to be confirmed by the probe procedure in README.md
-# ("Choosing probe for a CLI"). A body and its submit key written back to
-# back left the body unsent, so the submit waits for the default delay.
+# A body and its submit key written back to back left the body unsent, so the
+# submit waits for the default delay. Ctrl+U empties the whole composer,
+# wrapped rows included, and does nothing in an empty one.
 [input]
 bracketed_paste = true
 submit = "\r"
+clear = "\u0015"
 ready_hold_ms = 1500
 submit_delay_ms = 800
 delivery_confirm_ms = 8000

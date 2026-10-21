@@ -1,6 +1,6 @@
 # GitHub Copilot CLI screen fixtures
 
-Ten real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
+Twelve real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
 `crates/yagura-daemon/detection/copilot-cli.toml` against real screen content
 instead of hand-written approximations.
 
@@ -18,6 +18,8 @@ instead of hand-written approximations.
 | 100x30-approval-command | 100 | 30 | WaitingApproval | 1.0.101 |
 | 100x30-trust | 100 | 30 | WaitingApproval | 1.0.101 |
 | 100x30-trust-wsl | 100 | 30 | WaitingApproval | 1.0.101 |
+| 100x30-running-just-submitted | 100 | 30 | Running | 1.0.101 |
+| 100x30-waiting-input-wrapped-draft | 100 | 30 | WaitingInput | 1.0.101 |
 
 ## Capture conditions
 
@@ -41,6 +43,11 @@ point in the session named below, checked against the live screen each time.
 | 100x30-approval-command | the shell command approval box |
 | 100x30-trust | the folder trust prompt |
 | 100x30-trust-wsl | the folder trust prompt, WSL binary |
+| 100x30-running-just-submitted | a prompt sent a moment ago, the footer still reading `esc esc edit prompt` |
+| 100x30-waiting-input-wrapped-draft | the composer holds a draft that wraps onto four rows, each continuation row indented by two spaces |
+
+The wrapped-draft capture keeps text only, so the test puts the cursor at the end of
+the draft, where the CLI leaves it, before judging it.
 
 ## Extraction rule
 

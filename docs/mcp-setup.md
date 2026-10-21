@@ -367,10 +367,14 @@ other Copilot session -- from [Registering from the GUI](#registering-from-the-g
 (GitHub Copilot CLI 1.0.101):
 
 ```bash
-copilot mcp add yagura -- <absolute path to yagura-mcp>
+copilot mcp add --timeout 86400000 yagura -- <absolute path to yagura-mcp>
 ```
 
 `copilot mcp get yagura` shows the registration, and `copilot mcp remove yagura` undoes it.
+`--timeout` (milliseconds) matters: Copilot ends an MCP tool call after 180 seconds unless the
+server's entry sets a longer limit, and yagura's `wait_for_status` and `send_message` can wait
+longer than that. The windows yagura opens and a registration from the GUI both set one day; a
+registration by hand needs the flag above.
 
 1. **`copilot` must be on `PATH`.** `winget install GitHub.Copilot` adds its package folder to your
    user `PATH`; a process that was already running, the daemon among them, does not see the change,
@@ -385,7 +389,10 @@ copilot mcp add yagura -- <absolute path to yagura-mcp>
    again.
 4. **The start-up context arrives with the first prompt.** Copilot runs its session-start hook when
    the first prompt is sent, not when the window opens.
-5. **Copilot reads a project's Claude Code settings too.** It takes the working folder's `.mcp.json`
+5. **After an interrupt the window stays `running` for about 5 seconds.** Copilot runs no hook when
+   a turn is interrupted, so the window reads as `waiting_input` once its output has been quiet that
+   long.
+6. **Copilot reads a project's Claude Code settings too.** It takes the working folder's `.mcp.json`
    and `.claude/settings.json` as its own configuration, so the MCP servers and hooks set up there
    for Claude Code also apply to a Copilot window opened in that folder.
 
