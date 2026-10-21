@@ -207,6 +207,8 @@ continuation_prefix = ""       # string prefixing a wrapped continuation
                                # line; may be empty
 blank_lines_in_body = false    # optional; a blank line above the cursor
                                # belongs to the body (default false)
+left_panel = '^[^│]*│'         # optional, no default; regex matching a
+                               # panel drawn left of the composer
 
 [input]                        # optional; every key optional
 bracketed_paste = false        # wrap the body in ESC[200~ / ESC[201~ before
@@ -333,6 +335,15 @@ When every line from the cursor up to the top row of the screen is a
 continuation line, the marker line has scrolled off the top (a body taller
 than the screen). The daemon then reads the end of the body, from the top row
 to the cursor, and only that: it is never taken for the whole body.
+
+When the CLI draws another panel to the left of the composer, `left_panel` is
+a regex matching that panel from the start of a line. Only when it matches
+every line holding a visible character, and all its matches end at the same
+column, does the daemon read the composer from that column rightwards: the
+other keys are matched with that column as the start of the line, and a
+cursor left of it is not in the composer. On any other screen the composer is
+read from the first column, as without the key. The column is counted in
+cells, a wide character taking two.
 
 While the cursor is visible and the composer can be located this way, the
 composer's body is taken out of the screen before `[[rules]]` are matched
@@ -1004,13 +1015,10 @@ single event (only `Stop`, say) is not.
   hook and leaves the input line under the cancellation message, so the
   window stays `running` until 5 seconds of quiet close the turn, then
   reads as `waiting_input`, not `interrupted`.
-- **GitHub Copilot CLI's session sidebar hides its input line from the
-  daemon.** With the sidebar open (`←`) the window still reads as
-  `waiting_input`, but every row starts with the sidebar, so the composer
-  cannot be read and nothing is written into it until the sidebar closes
-  (`→`). While the sidebar holds the focus, and on the tabs other than
-  Current, keys act on a list rather than reaching the input line, so the
-  window reads as `unknown` (`declared_unknown`).
+- **GitHub Copilot CLI's session sidebar can take the keys.** While the
+  sidebar holds the focus, and on the tabs other than Current, keys act on a
+  list rather than reaching the input line, so the window reads as `unknown`
+  (`declared_unknown`).
 
 ### Writing hooks by hand
 

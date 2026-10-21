@@ -71,13 +71,14 @@ region = "bottom"
 # rule drawing is a marker as well, so a one-row draft reads in either. A
 # draft that wraps in the rule drawing continues on rows indented by two
 # spaces, which this prefix does not name: that composer reads as not
-# observed, and the daemon does not write into it. So does any composer while
-# the session sidebar is open: every row then starts with the sidebar, and the
-# prefix is matched only at the start of a row.
+# observed, and the daemon does not write into it. With the session sidebar
+# open every row starts with the sidebar up to its first `│`, and the composer
+# is read from the right of it.
 [composer]
 marker = '^(?:╻▄+$|❯ ?)'
 separator = ""
 continuation_prefix = "┃ "
+left_panel = '^[^│]*│'
 
 # A body and its submit key written back to back left the body unsent, so the
 # submit waits for the default delay. Ctrl+U empties the whole composer,

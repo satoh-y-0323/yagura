@@ -383,6 +383,10 @@ impl VtScreen {
     /// of it. Nothing is taken out when the cursor is hidden or the composer
     /// cannot be located: the screen then cannot be told apart from a dialog
     /// drawn over the composer's shape.
+    ///
+    /// The composer is located from the same column as in
+    /// [`VtScreen::read_composer`], and a left panel's part of the marker row
+    /// is kept for the rules.
     #[must_use]
     pub fn bottom_lines_without_composer(
         &self,
@@ -390,14 +394,24 @@ impl VtScreen {
         section: &crate::detector::definition::ComposerSection,
     ) -> Vec<String> {
         let mut lines = self.screen_rows();
+        let origin = self.composer_origin(section);
         if !self.cursor_hidden()
-            && let Some((marker_row, cursor_row)) = self.locate_composer(section)
+            && let ComposerWalk::Marker(marker_row) = self.walk_to_marker(section, origin)
         {
+            let cursor_row = self.cursor_position().0;
+            let marker_start = if origin == 0 {
+                Some(0)
+            } else {
+                self.row_text_columns(marker_row)
+                    .and_then(|(_, columns)| byte_at_column(&columns, origin))
+            };
             let (marker_row, cursor_row) = (usize::from(marker_row), usize::from(cursor_row));
             if let Some(line) = lines.get_mut(marker_row)
-                && let Some(marker_match) = section.marker.find(line)
+                && let Some(start) = marker_start
+                && let Some(marker_match) =
+                    line.get(start..).and_then(|from| section.marker.find(from))
             {
-                let after_marker = marker_match.end();
+                let after_marker = start + marker_match.end();
                 let keep = match line[after_marker..].find(&section.separator) {
                     Some(rel) => after_marker + rel + section.separator.len(),
                     None => after_marker,
@@ -541,16 +555,22 @@ impl VtScreen {
     /// - Remove continuation prefix from continuation lines (if not empty string)
     /// - Trim trailing whitespace from all lines
     /// - Join all lines into a single string
+    ///
+    /// Every row is read from the composer's origin: the right edge of the
+    /// section's `left_panel` when it matches every row holding a visible
+    /// character and all its matches end at one column, else column 0. A
+    /// cursor left of the origin is outside the composer: `NotObserved`.
     pub fn read_composer(
         &self,
         section: &crate::detector::definition::ComposerSection,
     ) -> ComposerReadout {
         let (cols, _rows) = self.size();
+        let origin = self.composer_origin(section);
         let (cursor, cursor_col) = self.cursor_position();
         let cursor_col = cursor_col.min(cols);
-        let cursor_line = self.text_left_of_cursor(cursor, cursor_col);
+        let cursor_line = self.text_left_of_cursor(cursor, origin, cursor_col);
 
-        let marker_row = match self.walk_to_marker(section) {
+        let marker_row = match self.walk_to_marker(section, origin) {
             ComposerWalk::Marker(row) => Some(row),
             ComposerWalk::ReachedTop => None,
             ComposerWalk::Absent => return ComposerReadout::NotObserved,
@@ -571,7 +591,7 @@ impl VtScreen {
             if row == cursor {
                 cursor_line.clone()
             } else {
-                self.visible_text(row, 0, cols)
+                self.visible_text(row, origin, cols)
             }
         };
         let continuation_text = |row: u16| {
@@ -647,35 +667,77 @@ impl VtScreen {
     /// non-continuation row that is not the marker, or runs off the top of the
     /// screen (the marker row has scrolled out of view). A marker row must
     /// therefore not itself start with the continuation prefix.
+    ///
+    /// Rows are read from the same origin as in [`VtScreen::read_composer`],
+    /// and a cursor left of it locates nothing.
     #[must_use]
     pub fn locate_composer(
         &self,
         section: &crate::detector::definition::ComposerSection,
     ) -> Option<(u16, u16)> {
-        match self.walk_to_marker(section) {
+        match self.walk_to_marker(section, self.composer_origin(section)) {
             ComposerWalk::Marker(row) => Some((row, self.cursor_position().0)),
             ComposerWalk::ReachedTop | ComposerWalk::Absent => None,
         }
     }
 
+    /// The column the composer is read from (see [`VtScreen::read_composer`]).
+    /// The panel is matched against each row from column 0, dimmed cells
+    /// included, and its end is counted in cells: a wide character takes two
+    /// columns, and a match ending inside a cell (before its combining marks)
+    /// has no column, so the origin falls back to 0.
+    fn composer_origin(&self, section: &crate::detector::definition::ComposerSection) -> u16 {
+        let Some(panel) = &section.left_panel else {
+            return 0;
+        };
+        let (_cols, rows) = self.size();
+        let mut origin = None;
+        for row in 0..rows {
+            let Some((text, columns)) = self.row_text_columns(row) else {
+                return 0;
+            };
+            if text.chars().all(char::is_whitespace) {
+                continue;
+            }
+            let Some(edge) = panel
+                .find(&text)
+                .filter(|found| found.start() == 0)
+                .and_then(|found| column_at_byte(&columns, found.end()))
+            else {
+                return 0;
+            };
+            match origin {
+                None => origin = Some(edge),
+                Some(seen) if seen == edge => {}
+                Some(_) => return 0,
+            }
+        }
+        origin.unwrap_or(0)
+    }
+
     /// The upward walk behind [`VtScreen::locate_composer`], telling a walk
     /// that ran off the top through continuation rows from one that stopped
-    /// on a row that is neither a continuation nor the marker.
+    /// on a row that is neither a continuation nor the marker. Rows are read
+    /// from column `origin`.
     fn walk_to_marker(
         &self,
         section: &crate::detector::definition::ComposerSection,
+        origin: u16,
     ) -> ComposerWalk {
         let (cols, _rows) = self.size();
         let (cursor, cursor_col) = self.cursor_position();
         let cursor_col = cursor_col.min(cols);
-        let cursor_line = self.text_left_of_cursor(cursor, cursor_col);
+        if cursor_col < origin {
+            return ComposerWalk::Absent;
+        }
+        let cursor_line = self.text_left_of_cursor(cursor, origin, cursor_col);
         let crosses_blank_rows = section.blank_lines_in_body && !self.cursor_hidden();
         let mut row = cursor;
         loop {
             let line = if row == cursor {
                 cursor_line.clone()
             } else {
-                match self.row_text(row, 0, cols, false) {
+                match self.row_text(row, origin, cols, false) {
                     Some((text, _)) => text,
                     None => return ComposerWalk::Absent,
                 }
@@ -711,13 +773,14 @@ impl VtScreen {
             .unwrap_or_default()
     }
 
-    /// The cursor row up to the cursor's column, with every column the
-    /// cursor has moved past read as blank even if nothing was written
-    /// there: a terminal may draw a space by moving the cursor alone
-    /// (ConPTY does after a PowerShell prompt), and a reader sees it as one.
-    fn text_left_of_cursor(&self, cursor_row: u16, cursor_col: u16) -> String {
+    /// The cursor row from column `start` up to the cursor's column, with
+    /// every column the cursor has moved past read as blank even if nothing
+    /// was written there: a terminal may draw a space by moving the cursor
+    /// alone (ConPTY does after a PowerShell prompt), and a reader sees it as
+    /// one.
+    fn text_left_of_cursor(&self, cursor_row: u16, start: u16, cursor_col: u16) -> String {
         let (mut text, next_col) = self
-            .row_text(cursor_row, 0, cursor_col, true)
+            .row_text(cursor_row, start, cursor_col, true)
             .unwrap_or_default();
         for _ in next_col..cursor_col {
             text.push(' ');
@@ -737,6 +800,27 @@ impl VtScreen {
             usize::from(end),
             skip_dim,
         ))
+    }
+
+    /// A whole screen row as [`cells_text`] reads it with dimmed cells
+    /// included, with the `(byte, column)` where each column's text starts,
+    /// ending with the text's length and the column past it; `None` below the
+    /// last row.
+    fn row_text_columns(&self, row: u16) -> Option<(String, Vec<(usize, usize)>)> {
+        let grid = self.model.term().grid();
+        if usize::from(row) >= grid.screen_lines() {
+            return None;
+        }
+        let mut columns = Vec::new();
+        let (text, next_col) = cells_text_mapped(
+            &grid[Line(i32::from(row))],
+            0,
+            grid.columns(),
+            false,
+            |byte, col| columns.push((byte, col)),
+        );
+        columns.push((text.len(), usize::from(next_col)));
+        Some((text, columns))
     }
 
     /// Runs `op` -- a call that mutates the model -- and contains any panic it
@@ -840,6 +924,19 @@ fn has_content_row(row: &Row<Cell>) -> bool {
 /// them, so a line has no trailing padding; a space a program wrote stays.
 /// With `skip_dim`, dimmed cells are skipped like unwritten ones.
 fn cells_text(row: &Row<Cell>, start: usize, end: usize, skip_dim: bool) -> (String, u16) {
+    cells_text_mapped(row, start, end, skip_dim, |_, _| {})
+}
+
+/// [`cells_text`], calling `column_starts(byte, col)` where the text of each
+/// column begins. A combining mark adds bytes but no column, and a wide
+/// character's second column has no start of its own.
+fn cells_text_mapped(
+    row: &Row<Cell>,
+    start: usize,
+    end: usize,
+    skip_dim: bool,
+    mut column_starts: impl FnMut(usize, usize),
+) -> (String, u16) {
     let mut text = String::new();
     let mut next_col = start;
     for col in start..end.min(row.len()) {
@@ -847,9 +944,11 @@ fn cells_text(row: &Row<Cell>, start: usize, end: usize, skip_dim: bool) -> (Str
         if !has_content(cell) || (skip_dim && cell.flags.contains(Flags::DIM)) {
             continue;
         }
-        for _ in next_col..col {
+        for blank in next_col..col {
+            column_starts(text.len(), blank);
             text.push(' ');
         }
+        column_starts(text.len(), col);
         text.push(if cell.c == '\t' { ' ' } else { cell.c });
         if let Some(marks) = cell.zerowidth() {
             text.extend(marks);
@@ -862,6 +961,23 @@ fn cells_text(row: &Row<Cell>, start: usize, end: usize, skip_dim: bool) -> (Str
             };
     }
     (text, u16::try_from(next_col).unwrap_or(u16::MAX))
+}
+
+/// The column whose text starts at `byte` in a [`VtScreen::row_text_columns`]
+/// map, or `None` when `byte` falls inside a cell.
+fn column_at_byte(columns: &[(usize, usize)], byte: usize) -> Option<u16> {
+    columns
+        .iter()
+        .find(|&&(at, _)| at == byte)
+        .and_then(|&(_, col)| u16::try_from(col).ok())
+}
+
+/// The byte where column `col` starts in a [`VtScreen::row_text_columns`] map.
+fn byte_at_column(columns: &[(usize, usize)], col: u16) -> Option<usize> {
+    columns
+        .iter()
+        .find(|&&(_, at)| at == usize::from(col))
+        .map(|&(byte, _)| byte)
 }
 
 #[cfg(test)]

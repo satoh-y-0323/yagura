@@ -103,7 +103,8 @@ pub struct Activity {
 ///
 /// `marker`, `separator` and `continuation_prefix` are required: if the
 /// `[composer]` table is present, all three keys must be provided.
-/// `blank_lines_in_body` is optional and defaults to `false`.
+/// `blank_lines_in_body` is optional and defaults to `false`; `left_panel`
+/// is optional and has no default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerRawSection {
@@ -124,6 +125,9 @@ pub struct ComposerRawSection {
     /// See [`ComposerSection::blank_lines_in_body`].
     #[serde(default)]
     pub blank_lines_in_body: bool,
+    /// A regex pattern string; see [`ComposerSection::left_panel`].
+    #[serde(default)]
+    pub left_panel: Option<String>,
 }
 
 /// The compiled section of a definition that identifies the composer (input area)
@@ -148,6 +152,11 @@ pub struct ComposerSection {
     /// it; only a CLI whose dialogs hide the cursor can, because the walk up
     /// from the cursor then crosses rows that a dialog's layout has as well.
     pub blank_lines_in_body: bool,
+    /// A compiled regex matching, from the start of a row, a panel the CLI
+    /// draws to the left of the composer. Only when it matches every row
+    /// holding a visible character and all its matches end at the same
+    /// column is the composer read from that column; otherwise from column 0.
+    pub left_panel: Option<Regex>,
 }
 
 /// Raw values from a definition's optional `[input]` table: how the CLI this
@@ -619,21 +628,24 @@ fn validate_input_section(
 }
 
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {
-    let marker = RegexBuilder::new(&raw.marker)
-        .size_limit(REGEX_SIZE_LIMIT_BYTES)
-        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
-        .build()
-        .map_err(|source| DefinitionError::InvalidPattern {
-            pattern: raw.marker,
-            source,
-        })?;
+    let marker = compile_composer_pattern(raw.marker)?;
+    let left_panel = raw.left_panel.map(compile_composer_pattern).transpose()?;
 
     Ok(ComposerSection {
         marker,
         separator: raw.separator,
         continuation_prefix: raw.continuation_prefix,
         blank_lines_in_body: raw.blank_lines_in_body,
+        left_panel,
     })
+}
+
+fn compile_composer_pattern(pattern: String) -> Result<Regex, DefinitionError> {
+    RegexBuilder::new(&pattern)
+        .size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
+        .build()
+        .map_err(|source| DefinitionError::InvalidPattern { pattern, source })
 }
 
 fn compile_rule(raw: RawRule) -> Result<Rule, DefinitionError> {

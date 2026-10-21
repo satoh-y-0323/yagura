@@ -29,6 +29,7 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
         separator: separator.to_string(),
         continuation_prefix: continuation_prefix.to_string(),
         blank_lines_in_body: false,
+        left_panel: None,
     }
 }
 
@@ -715,5 +716,41 @@ fn a_body_that_fills_the_row_exactly_is_still_read() {
     match screen.read_composer(&section) {
         ComposerReadout::Body(text) => assert_eq!(text, "12345678"),
         other => panic!("expected Body, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// A composer drawn to the right of a left-hand panel (Copilot's session
+// sidebar) is read from the panel's right edge.
+// =====================================================================
+
+fn sidebar_screen(fixture: &str, cursor_col: u16) -> VtScreen {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/copilot-cli")
+        .join(format!("{fixture}.txt"));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let lines: Vec<&str> = text.lines().collect();
+    let mut screen = feed_rows(100, &lines);
+    // The capture keeps text only; the cursor sits where the CLI leaves it
+    // (replayed from the raw recordings: just after `┃ ` / after `else.`).
+    move_cursor(&mut screen, 13, cursor_col);
+    screen
+}
+
+#[test]
+fn copilot_composer_beside_the_open_session_sidebar_reads_empty_and_as_the_wrapped_draft() {
+    let section = shipped_composer("copilot-cli");
+
+    match sidebar_screen("100x30-sidebar-idle", 33).read_composer(&section) {
+        ComposerReadout::Empty => {}
+        other => panic!("expected Empty, got {other:?}"),
+    }
+    match sidebar_screen("100x30-sidebar-draft", 38).read_composer(&section) {
+        ComposerReadout::Body(text) => assert_eq!(
+            text,
+            "Run the shell command Start-Sleep -Seconds 40 now. Do nothingelse."
+        ),
+        other => panic!("expected the wrapped draft as Body, got {other:?}"),
     }
 }

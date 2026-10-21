@@ -3329,6 +3329,7 @@ pub fn submit_child_composer_section() -> ComposerSection {
         separator: yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
         continuation_prefix: yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
         blank_lines_in_body: false,
+        left_panel: None,
     }
 }
 
