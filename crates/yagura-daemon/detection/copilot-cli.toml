@@ -19,10 +19,12 @@ confirm_ms = 300
 # Command approval and folder trust are both a selection box whose hint row
 # reads the same regardless of the question, so match that row (drawn inside
 # the box's left border) rather than the box's wording. Highest priority:
-# a numbered option row starts with the same glyph as the composer.
+# a numbered option row starts with the same glyph as the composer. With the
+# session sidebar open (`←`) each row starts with the sidebar up to its first
+# `│`, and the box's own border follows it.
 [[rules]]
 status = "waiting_approval"
-pattern = '(?i)^[│\s]{0,4}↑/↓ to navigate\b'
+pattern = '(?i)^(?:[^│]*││\s{0,3}|[│\s]{0,4})↑/↓ to navigate\b'
 priority = 30
 region = "bottom"
 
@@ -36,6 +38,17 @@ pattern = '\besc (esc (interrupt|edit prompt)|again to interrupt)\b'
 priority = 20
 region = "bottom"
 
+# Screens with no composer to type into, where a key is an action instead:
+# the tabs other than Current (`tab` cycles them; their footer starts with
+# `/ search · ` or reads `tab switch tabs`), and the session sidebar holding
+# the focus (`←` twice; its footer offers `→ focus timeline`), where `n`
+# starts a new session. The composer border is still drawn in the latter.
+[[rules]]
+status = "unknown"
+pattern = '^\s{0,2}(?:/ search · |tab switch tabs\b)|→ focus timeline\b'
+priority = 15
+region = "bottom"
+
 # The border that closes the composer, right above the footer, waiting for
 # the next instruction. Copilot draws the composer as a band of half blocks
 # when the terminal answered its color queries (the daemon answers them from
@@ -44,10 +57,11 @@ region = "bottom"
 # is the bottom border in either. The composer stays drawn while a turn runs,
 # which the higher-priority rule covers, and an interrupted turn returns
 # here. Past prompts in the history are indented, so they never start a line
-# with either border.
+# with either border. With the session sidebar open the border follows the
+# sidebar's first `│`; the sidebar's width follows the terminal's.
 [[rules]]
 status = "waiting_input"
-pattern = '^(?:─+|╹▀+)\s*$'
+pattern = '^(?:[^│]*│)?(?:─+|╹▀+)\s*$'
 priority = 10
 region = "bottom"
 
@@ -57,7 +71,9 @@ region = "bottom"
 # rule drawing is a marker as well, so a one-row draft reads in either. A
 # draft that wraps in the rule drawing continues on rows indented by two
 # spaces, which this prefix does not name: that composer reads as not
-# observed, and the daemon does not write into it.
+# observed, and the daemon does not write into it. So does any composer while
+# the session sidebar is open: every row then starts with the sidebar, and the
+# prefix is matched only at the start of a row.
 [composer]
 marker = '^(?:╻▄+$|❯ ?)'
 separator = ""

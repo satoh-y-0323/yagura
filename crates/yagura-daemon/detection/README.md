@@ -1004,6 +1004,13 @@ single event (only `Stop`, say) is not.
   hook and leaves the input line under the cancellation message, so the
   window stays `running` until 5 seconds of quiet close the turn, then
   reads as `waiting_input`, not `interrupted`.
+- **GitHub Copilot CLI's session sidebar hides its input line from the
+  daemon.** With the sidebar open (`←`) the window still reads as
+  `waiting_input`, but every row starts with the sidebar, so the composer
+  cannot be read and nothing is written into it until the sidebar closes
+  (`→`). While the sidebar holds the focus, and on the tabs other than
+  Current, keys act on a list rather than reaching the input line, so the
+  window reads as `unknown` (`declared_unknown`).
 
 ### Writing hooks by hand
 

@@ -1,0 +1,16 @@
+                              │  ❯ Run the shell command Start-Sleep -Seconds 40 now. Do   01:55    
+                              │    nothing else.                                                    
+                              │ ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀  
+                              │ $ Shell Wait for 40 seconds                                  4m 7s  
+                              │   Start-Sleep -Seconds 40
+                              │
+                              │
+                              │
+                              │
+                              │
+                              │
+                              │ ~\work\project                 [⎇ main]      Session: 0.23 AIC used 
+                              │╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+                              │┃  
+                              │╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                              │ ◎ Working · 115 B esc again to interrupt

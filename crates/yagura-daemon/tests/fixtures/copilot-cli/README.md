@@ -1,6 +1,6 @@
 # GitHub Copilot CLI screen fixtures
 
-Twenty-one real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
+Thirty-five real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
 `crates/yagura-daemon/detection/copilot-cli.toml` against real screen content
 instead of hand-written approximations.
 
@@ -40,6 +40,20 @@ way, so they are captured once.
 | 100x30-running-esc-once-no-palette | 100 | 30 | Running | 1.0.101 |
 | 100x30-running-just-submitted-no-palette | 100 | 30 | Running | 1.0.101 |
 | 100x30-waiting-input-wrapped-draft-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-tab-sessions | 100 | 30 | Unknown | 1.0.101 |
+| 100x30-tab-issues | 100 | 30 | Unknown | 1.0.101 |
+| 100x30-tab-pull-requests | 100 | 30 | Unknown | 1.0.101 |
+| 100x30-tab-gists | 100 | 30 | Unknown | 1.0.101 |
+| 100x30-tab-back-to-current | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-sidebar-idle | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-sidebar-draft | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-sidebar-running-just-submitted | 100 | 30 | Running | 1.0.101 |
+| 100x30-sidebar-running | 100 | 30 | Running | 1.0.101 |
+| 100x30-sidebar-running-esc-once | 100 | 30 | Running | 1.0.101 |
+| 100x30-sidebar-approval-command | 100 | 30 | WaitingApproval | 1.0.101 |
+| 100x30-sidebar-interrupted | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-sidebar-focused | 100 | 30 | Unknown | 1.0.101 |
+| 100x30-sidebar-closed | 100 | 30 | WaitingInput | 1.0.101 |
 
 ## Capture conditions
 
@@ -83,6 +97,29 @@ Each `-no-palette` fixture is taken at the same point as its counterpart; in
 `100x30-waiting-input-wrapped-draft-no-palette` each continuation row is indented
 by two spaces instead.
 
+The `tab-` and `sidebar-` fixtures were captured on 2026-10-22 the same way, with
+the GUI's palette, in a fresh shallow clone of a GitHub repository, as the Issues
+and Pull requests tabs are left out of the cycle in a folder that is not one. In
+each `sidebar-` fixture the session sidebar is open, so every row starts with the
+sidebar up to its first `│`.
+
+| fixture | point in the session |
+|---|---|
+| 100x30-tab-sessions | one `tab` press from Current: the Sessions tab |
+| 100x30-tab-issues | the next `tab`: the Issues tab, with no open issues |
+| 100x30-tab-pull-requests | the next `tab`: the Pull requests tab, with none open |
+| 100x30-tab-gists | the next `tab`: the Gists tab, with no gists |
+| 100x30-tab-back-to-current | the next `tab`, back on Current |
+| 100x30-sidebar-idle | the sidebar opened with `←` over an empty composer |
+| 100x30-sidebar-draft | the composer holds a draft that wraps onto two rows |
+| 100x30-sidebar-running-just-submitted | that draft sent a moment ago |
+| 100x30-sidebar-approval-command | the shell command approval box it led to |
+| 100x30-sidebar-running | right after approving the command |
+| 100x30-sidebar-running-esc-once | while running, after a single Esc press |
+| 100x30-sidebar-interrupted | after the second Esc press |
+| 100x30-sidebar-focused | a second `←`, moving the focus into the sidebar (the cursor hidden) |
+| 100x30-sidebar-closed | the sidebar closed with `→`, back on the composer |
+
 The wrapped-draft capture keeps text only, so the test puts the cursor at the end of
 the draft, where the CLI leaves it, before judging it.
 
@@ -110,5 +147,10 @@ columns.
   second (`/mnt/c/Users/demo/work/project` in `100x30-trust-wsl`).
 - The directory in the "don't ask again" option of `100x30-approval-command` is
   replaced with `~\work\project`.
+- In the `tab-` and `sidebar-` fixtures the clone's directory in the footer and
+  in the "don't ask again" option (`~\AppData\Local\Temp\...\workG`) is replaced
+  with `~\work\project`.
+- In `100x30-tab-sessions` the title of every earlier session in the list is
+  replaced with `Earlier session`.
 
 Nothing else in the captured text was altered.
