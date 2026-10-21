@@ -34,6 +34,7 @@ use common::{
     tick_after_ms, unique_temp_dir, wait_until_composer_is, wait_until_composer_satisfies,
     wait_until_input_log_contains,
 };
+use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -1326,6 +1327,11 @@ async fn finish_the_dialog_then_write_another_byte(
     rest: &Path,
     call: SubmitCall,
 ) -> SubmitJudgment {
+    draw_the_rest_of_the_dialog(h, window_id, rest).await;
+    write_another_byte_and_collect(h, window_id, call).await
+}
+
+async fn draw_the_rest_of_the_dialog(h: &Harness, window_id: &str, rest: &Path) {
     std::fs::write(rest, b"").expect("draw the rest of the dialog");
     wait_for_screen(
         h,
@@ -1334,6 +1340,37 @@ async fn finish_the_dialog_then_write_another_byte(
         |screen| shows(screen, APPROVAL_HEADING),
     )
     .await;
+}
+
+/// Waits until the judged send has read the finished dialog and is waiting on
+/// it with its ledger baseline taken: the daemon logs that wait under the
+/// `judge_submit` route, after the baseline. Needs `#[traced_test]`.
+async fn wait_until_the_judged_send_waits_on_the_dialog(window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while !tracing_test::internal::global_buf()
+        .lock()
+        .expect("the captured log buffer is not poisoned")
+        .split(|byte| *byte == b'\n')
+        .map(String::from_utf8_lossy)
+        .any(|line| {
+            line.contains(window_id)
+                && line.contains("judge_submit")
+                && line.contains("waiting for the composer to become readable")
+        })
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the judged send to wait on the dialog"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn write_another_byte_and_collect(
+    h: &Harness,
+    window_id: &str,
+    call: SubmitCall,
+) -> SubmitJudgment {
     press(h, window_id, FOREIGN).await;
     tokio::time::timeout(HANG_GUARD, call)
         .await
@@ -2552,7 +2589,9 @@ async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, sh
     );
     assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
 
-    let judgment = finish_the_dialog_then_write_another_byte(&h, &window_id, &rest, call).await;
+    draw_the_rest_of_the_dialog(&h, &window_id, &rest).await;
+    wait_until_the_judged_send_waits_on_the_dialog(&window_id).await;
+    let judgment = write_another_byte_and_collect(&h, &window_id, call).await;
 
     assert!(
         matches!(judgment.placement, SubmitPlacement::NotPlaced(_)),
@@ -2613,6 +2652,7 @@ async fn an_unterminated_body_is_not_written_while_a_half_painted_dialog_reads_a
 }
 
 #[tokio::test]
+#[traced_test]
 async fn a_judged_body_is_not_written_while_a_half_painted_dialog_reads_as_an_empty_composer() {
     a_judged_send_waits_out_an_unfinished_dialog(
         "screen-gate-unfinished-judged-marker",
@@ -2636,6 +2676,7 @@ async fn a_bare_terminator_is_not_written_while_a_synchronized_update_is_left_op
 }
 
 #[tokio::test]
+#[traced_test]
 async fn a_judged_body_is_not_written_while_a_synchronized_update_is_left_open() {
     a_judged_send_waits_out_an_unfinished_dialog(
         "screen-gate-unfinished-judged-sync",
