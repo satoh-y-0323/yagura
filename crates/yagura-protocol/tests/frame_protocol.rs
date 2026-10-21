@@ -363,37 +363,32 @@ fn the_view_messages_need_the_frame_revision_and_this_build_speaks_it() {
 // --- the built-in palette ---------------------------------------------
 
 /// The daemon's built-in palette is the GUI's built-in dark theme, read from
-/// the one file both take it from, color by color.
+/// the files both take it from (the colors, and which token each terminal
+/// color is), color by color.
 #[test]
 fn the_built_in_dark_palette_is_the_dark_theme_of_the_shared_file() {
-    let file: Value = serde_json::from_str(include_str!("../built-in-palettes.json")).unwrap();
-    let dark = &file["dark"];
-    let rgb = |token: &str| -> [u8; 3] {
+    let palettes: Value = serde_json::from_str(include_str!("../built-in-palettes.json")).unwrap();
+    let terminal: Value = serde_json::from_str(include_str!("../terminal-tokens.json")).unwrap();
+    let dark = &palettes["dark"];
+    let rgb = |key: &str| -> [u8; 3] {
+        let token = terminal["tokens"][key].as_str().unwrap();
         let hex = dark[token].as_str().unwrap().trim_start_matches('#');
         let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap();
         [channel(0), channel(2), channel(4)]
     };
-    let ansi: Vec<[u8; 3]> = [
-        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-    ]
-    .iter()
-    .map(|name| format!("term-ansi-{name}"))
-    .chain(
-        [
-            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-        ]
+    let ansi_keys = terminal["ansi"].as_array().unwrap();
+    assert_eq!(ansi_keys.len(), 16);
+    let ansi: Vec<[u8; 3]> = ansi_keys
         .iter()
-        .map(|name| format!("term-ansi-bright-{name}")),
-    )
-    .map(|token| rgb(&token))
-    .collect();
+        .map(|key| rgb(key.as_str().unwrap()))
+        .collect();
 
     assert_eq!(
         yagura_protocol::built_in_dark_palette(),
         Palette {
-            foreground: rgb("color-foreground"),
-            background: rgb("color-background"),
-            cursor: rgb("color-primary"),
+            foreground: rgb("foreground"),
+            background: rgb("background"),
+            cursor: rgb("cursor"),
             ansi,
         }
     );

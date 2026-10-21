@@ -2228,51 +2228,41 @@ pub struct DefaultPalettes {
     pub vendors: BTreeMap<String, Palette>,
 }
 
-/// The token names of the built-in palettes (`built-in-palettes.json`, which
-/// the GUI reads too) that a [`Palette`] is made of, in ANSI order 0-15.
-const BUILT_IN_ANSI_TOKENS: [&str; 16] = [
-    "term-ansi-black",
-    "term-ansi-red",
-    "term-ansi-green",
-    "term-ansi-yellow",
-    "term-ansi-blue",
-    "term-ansi-magenta",
-    "term-ansi-cyan",
-    "term-ansi-white",
-    "term-ansi-bright-black",
-    "term-ansi-bright-red",
-    "term-ansi-bright-green",
-    "term-ansi-bright-yellow",
-    "term-ansi-bright-blue",
-    "term-ansi-bright-magenta",
-    "term-ansi-bright-cyan",
-    "term-ansi-bright-white",
-];
-
 const BUILT_IN_PALETTES_JSON: &str = include_str!("../built-in-palettes.json");
+
+/// Which palette token each terminal color is read from, shared with the GUI.
+const TERMINAL_TOKENS_JSON: &str = include_str!("../terminal-tokens.json");
+
+/// `terminal-tokens.json`: the token of each terminal color, and the ANSI
+/// colors 0-15 in order.
+#[derive(Debug, Default, Deserialize)]
+struct TerminalTokens {
+    tokens: BTreeMap<String, String>,
+    ansi: Vec<String>,
+}
 
 /// The built-in dark palette, the GUI's default theme, as the daemon answers
 /// color queries with it before the GUI has sent any [`DefaultPalettes`].
 ///
-/// Read from the same file the GUI draws its built-in themes from. Should
-/// that file lack a color, the color is black.
+/// Read from the same files the GUI draws its built-in themes with. Should
+/// they lack a color, the color is black.
 #[must_use]
 pub fn built_in_dark_palette() -> Palette {
-    let tokens = built_in_palette_tokens("dark").unwrap_or_default();
-    let color = |token: &str| {
-        tokens
-            .get(token)
+    let palette = built_in_palette_tokens("dark").unwrap_or_default();
+    let terminal: TerminalTokens = serde_json::from_str(TERMINAL_TOKENS_JSON).unwrap_or_default();
+    let color = |key: &str| {
+        terminal
+            .tokens
+            .get(key)
+            .and_then(|token| palette.get(token))
             .and_then(|value| parse_hex_rgb(value))
             .unwrap_or([0, 0, 0])
     };
     Palette {
-        foreground: color("color-foreground"),
-        background: color("color-background"),
-        cursor: color("color-primary"),
-        ansi: BUILT_IN_ANSI_TOKENS
-            .iter()
-            .map(|token| color(token))
-            .collect(),
+        foreground: color("foreground"),
+        background: color("background"),
+        cursor: color("cursor"),
+        ansi: terminal.ansi.iter().map(|key| color(key)).collect(),
     }
 }
 

@@ -1,6 +1,5 @@
 //! Persistence port for the default palettes the GUI last sent
-//! (`default_palettes`, schema v15: `migrations/015_default_palettes.sql`),
-//! and the one rule a [`DefaultPalettes`] is accepted by, whether it arrives
+//! (the `default_palettes` table), and the one rule a [`DefaultPalettes`] is accepted by, whether it arrives
 //! from the wire or is read back from the database.
 //!
 //! The table holds a single row: the palettes as JSON, with the vendor names

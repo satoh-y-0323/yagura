@@ -38,8 +38,9 @@ region = "bottom"
 
 # The border that closes the composer, right above the footer, waiting for
 # the next instruction. Copilot draws the composer as a band of half blocks
-# when the terminal answered its color queries (the daemon answers them once
-# a GUI view has sent its palette) and between two rules otherwise; this row
+# when the terminal answered its color queries (the daemon answers them from
+# the moment the window opens, with the default palettes the GUI last sent or
+# else the built-in dark palette) and between two rules otherwise; this row
 # is the bottom border in either. The composer stays drawn while a turn runs,
 # which the higher-priority rule covers, and an interrupted turn returns
 # here. Past prompts in the history are indented, so they never start a line
