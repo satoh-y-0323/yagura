@@ -63,6 +63,8 @@ struct CliForm {
 enum StatusForm {
     /// `mcp get <server> --json`, plus a settings-file edit.
     JsonCommandWithTomlSet,
+    /// `mcp get <server> --json`, nothing else.
+    JsonCommand,
     /// `mcp get <server>`, printed as `Prefix: value` lines.
     Lines,
     /// A JSON settings file read directly.
@@ -87,15 +89,23 @@ const AGY_FORM: CliForm = CliForm {
     status: StatusForm::JsonFile,
 };
 
+const COPILOT_FORM: CliForm = CliForm {
+    scope: &[],
+    env_flag: "--env",
+    status: StatusForm::JsonCommand,
+};
+
 /// Every shipped profile expected to carry a registration table: its id,
 /// its CLI's form, and whether it runs inside WSL.
 const SHIPPED_ROWS: &[(&str, CliForm, bool)] = &[
     ("claude-code", CLAUDE_FORM, false),
     ("codex-cli", CODEX_FORM, false),
     ("antigravity-cli", AGY_FORM, false),
+    ("copilot-cli", COPILOT_FORM, false),
     ("wsl-claude-code", CLAUDE_FORM, true),
     ("wsl-codex-cli", CODEX_FORM, true),
     ("wsl-antigravity-cli", AGY_FORM, true),
+    ("wsl-copilot-cli", COPILOT_FORM, true),
 ];
 
 /// The settings file the JSON-file status form reads.
@@ -161,6 +171,12 @@ fn named_target() -> RegistrationTarget {
 
 fn bridge_for(is_wsl: bool) -> &'static str {
     if is_wsl { WSL_BRIDGE } else { HOST_BRIDGE }
+}
+
+/// Whether a row reads or writes a settings file of its CLI's own, as
+/// opposed to reading every state from the CLI's own output.
+fn reads_files(spec: &McpRegistrationSpec, form: CliForm) -> bool {
+    form.status == StatusForm::JsonFile || spec.toml_set().is_some() || spec.json_entry().is_some()
 }
 
 // =============================================================================
@@ -272,9 +288,15 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
             "{id}: WSLENV separates names with a colon"
         );
 
+        // A row that reads no file of its own has no use for the file tools.
+        if !reads_files(&spec, *form) && !raw.contains_key("files") {
+            continue;
+        }
         let files = match raw.get("files") {
             Some(toml::Value::Table(files)) => files.clone(),
-            other => panic!("{id} must carry a files table, got {other:?}"),
+            other => {
+                panic!("{id} reads settings files, so it must carry a files table, got {other:?}")
+            }
         };
         assert_eq!(
             files.get("absent_exit").and_then(toml::Value::as_integer),
@@ -302,16 +324,19 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
     // A name no script text would contain, with shell metacharacters: it must
     // arrive as its own argv element, never spliced into a script string.
     let file = ".probe dir/it's $(not run);`x`.json";
-    for (id, _form, is_wsl) in SHIPPED_ROWS {
+    for (id, form, is_wsl) in SHIPPED_ROWS {
         if !*is_wsl {
             continue;
         }
         let spec = shipped_spec(id);
-        let mut rendered = vec![(
-            "read",
-            spec.render_file_read(file)
-                .unwrap_or_else(|| panic!("{id} must carry a read tool")),
-        )];
+        let Some(read) = spec.render_file_read(file) else {
+            assert!(
+                !reads_files(&spec, *form),
+                "{id} reads settings files, so it must carry a read tool"
+            );
+            continue;
+        };
+        let mut rendered = vec![("read", read)];
         if let Some(replace) = spec.render_file_replace(file) {
             rendered.push(("replace", replace));
         }
@@ -425,7 +450,7 @@ fn each_row_reads_its_status_the_way_its_cli_reports_it() {
     for (id, form, _is_wsl) in SHIPPED_ROWS {
         let spec = shipped_spec(id);
         let expected = match form.status {
-            StatusForm::JsonCommandWithTomlSet => {
+            StatusForm::JsonCommandWithTomlSet | StatusForm::JsonCommand => {
                 StatusPlan::Run(strings(&["mcp", "get", "yagura", "--json"]))
             }
             StatusForm::Lines => StatusPlan::Run(strings(&["mcp", "get", "yagura"])),
@@ -908,10 +933,17 @@ mod wsl_file_tools {
         i32::try_from(exit).expect("an exit code fits in i32")
     }
 
+    /// The WSL rows that carry file tools; a row that reads every state from
+    /// its CLI's own output has none.
     fn wsl_ids() -> Vec<&'static str> {
         super::SHIPPED_ROWS
             .iter()
-            .filter(|(_, _, is_wsl)| *is_wsl)
+            .filter(|(id, _, is_wsl)| {
+                *is_wsl
+                    && shipped_spec(id)
+                        .render_file_read(AGY_SETTINGS_FILE)
+                        .is_some()
+            })
             .map(|(id, _, _)| *id)
             .collect()
     }

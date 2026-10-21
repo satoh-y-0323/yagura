@@ -1,0 +1,68 @@
+# Launches the GitHub Copilot CLI directly. Requires `copilot` to be
+# resolvable on the daemon's PATH (or its extra bin directories on Windows).
+# The launch options below follow `copilot --help` (1.0.101).
+schema = 1
+display_name = "GitHub Copilot CLI"
+detection = "copilot-cli"
+
+[command]
+default = ["copilot"]
+
+# Only `auto`: Copilot documents no model identifiers and no command that
+# lists them, so any other name is passed through as given (or picked with
+# the CLI's own /model).
+[model]
+args = ["--model", "{value}"]
+
+[model.aliases]
+default = "auto"
+
+# No aliases: the levels `--help` lists pass through as given.
+[effort]
+args = ["--reasoning-effort", "{value}"]
+
+[mcp]
+config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"]}}}'
+args = ["--additional-mcp-config", "@{mcp_config_file}"]
+
+# Copilot takes launch-time hooks only from a plugin directory: a
+# `plugin.json` naming the plugin and a `hooks.json` beside it. It loads them
+# once the folder is trusted and runs `sessionStart` on the first prompt.
+# The interrupted turn runs no hook, and the approval box is read from the
+# screen. Checked with Copilot CLI 1.0.101 on Windows.
+[hooks]
+args = ["--plugin-dir", "{hooks_config_dir}"]
+
+[hooks.config_dir]
+"plugin.json" = '{"name":"yagura"}'
+"hooks.json" = '{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon --deliver-context","powershell":"yagura-daemon --deliver-context"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"preToolUse":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"postToolUse":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"agentStop":[{"type":"command","bash":"yagura-daemon --emit-status waiting_input --source copilot-cli","powershell":"yagura-daemon --emit-status waiting_input --source copilot-cli"}]}}'
+
+# How the daemon hands text to this CLI without typing it into the composer.
+# Copilot has no hook that fires on an idle session, so `wake` stays `none`.
+[delivery]
+output = '{"additionalContext":{text}}'
+max_chars = 10000
+wake = "none"
+launch_prompt = ["-i", "{prompt}"]
+
+# `copilot mcp get --json` prints one table keyed by the server's name.
+[mcp_registration]
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}", "--json"]
+format = "json"
+command = "/{server}/command"
+absent = "not found"
+
+# Read for every window this profile opens: the bridge registrations of the
+# other instances are turned off for that window, so it shows no yagura but
+# the one that opened it. `items` points at a table keyed by the server's
+# name, so no `name` pointer is given.
+[mcp_registration.list]
+args = ["mcp", "list", "--json"]
+items = "/mcpServers"
+command = "/command"
+disable = ["--disable-mcp-server", "{server}"]

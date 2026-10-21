@@ -311,9 +311,19 @@ impl JsonEntrySpec {
 pub struct ListSpec {
     args: Vec<String>,
     items: String,
-    name: String,
+    name: ItemName,
     command: String,
     disable: Vec<String>,
+}
+
+/// Where a listed server's name is read from.
+#[derive(Debug, Clone)]
+enum ItemName {
+    /// `items` is an array; the name is at this JSON Pointer inside each
+    /// element.
+    Pointer(String),
+    /// `items` is a table; each member is one server, named by its key.
+    Key,
 }
 
 impl ListSpec {
@@ -324,15 +334,16 @@ impl ListSpec {
         &self.args
     }
 
-    /// The names, in listing order, of the registered servers that are
-    /// yagura's bridge for some instance other than the one named `keep`: the
-    /// name is one [`RegistrationTarget::is_bridge_server`] accepts and the
-    /// registered command's file name is `bridge_file_name`. A server of
-    /// the user's own, or a bridge-named one that runs something else, is never
-    /// in the result.
+    /// The names, in the order the listing holds them, of the registered
+    /// servers that are yagura's bridge for some instance other than the one
+    /// named `keep`: the name is one [`RegistrationTarget::is_bridge_server`]
+    /// accepts and the registered command's file name is `bridge_file_name`.
+    /// A server of the user's own, or a bridge-named one that runs something
+    /// else, is never in the result.
     ///
     /// `None` when `stdout` is not the declared shape: not UTF-8, not JSON,
-    /// or `items` does not point at an array.
+    /// or `items` does not point at an array (at a table, when the names are
+    /// its keys).
     #[must_use]
     pub fn other_bridges(
         &self,
@@ -341,12 +352,23 @@ impl ListSpec {
         keep: &str,
     ) -> Option<Vec<String>> {
         let document = parse_json_document(std::str::from_utf8(stdout).ok()?)?;
-        let items = document.pointer(&self.items)?.as_array()?;
-        Some(
-            items
+        let items = document.pointer(&self.items)?;
+        let named: Vec<(&str, &JsonValue)> = match &self.name {
+            ItemName::Pointer(pointer) => items
+                .as_array()?
                 .iter()
-                .filter_map(|item| {
-                    let name = item.pointer(&self.name)?.as_str()?;
+                .filter_map(|item| Some((item.pointer(pointer)?.as_str()?, item)))
+                .collect(),
+            ItemName::Key => items
+                .as_object()?
+                .iter()
+                .map(|(name, item)| (name.as_str(), item))
+                .collect(),
+        };
+        Some(
+            named
+                .into_iter()
+                .filter_map(|(name, item)| {
                     let command = item.pointer(&self.command)?.as_str()?;
                     let file_name = command.rsplit(['/', '\\']).next().unwrap_or(command);
                     (name != keep
@@ -1095,7 +1117,8 @@ struct RawMcpRegistrationTable {
 struct RawList {
     args: Vec<String>,
     items: String,
-    name: String,
+    #[serde(default)]
+    name: Option<String>,
     command: String,
     disable: Vec<String>,
 }
@@ -1267,17 +1290,19 @@ fn build_spec(
 }
 
 /// Validates `list`: arguments without placeholders, JSON Pointers for the
-/// array and the two fields read from each element, and a `disable` that
-/// names its server by `{server}` alone.
+/// items and the fields read from each of them (no `name` when the items are
+/// a table keyed by name), and a `disable` that names its server by
+/// `{server}` alone.
 fn build_list(raw: RawList) -> Result<ListSpec, McpRegistrationError> {
     let invalid = || McpRegistrationError::InvalidShape;
     validate_args_placeholders(&raw.args, &[])?;
     validate_args_placeholders(&raw.disable, &["{server}"])?;
-    let pointers = [&raw.items, &raw.name, &raw.command];
+    let pointers = [Some(&raw.items), raw.name.as_ref(), Some(&raw.command)];
     if raw.args.is_empty()
         || !raw.disable.iter().any(|arg| arg.contains("{server}"))
         || !pointers
             .iter()
+            .flatten()
             .all(|pointer| profile::is_json_pointer(pointer))
     {
         return Err(invalid());
@@ -1285,7 +1310,7 @@ fn build_list(raw: RawList) -> Result<ListSpec, McpRegistrationError> {
     Ok(ListSpec {
         args: raw.args,
         items: raw.items,
-        name: raw.name,
+        name: raw.name.map_or(ItemName::Key, ItemName::Pointer),
         command: raw.command,
         disable: raw.disable,
     })

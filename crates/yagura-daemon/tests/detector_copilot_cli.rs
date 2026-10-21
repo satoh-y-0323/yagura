@@ -1,0 +1,123 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+//! Judges `detection/copilot-cli.toml` against real GitHub Copilot CLI screen captures
+//! (1.0.101). See `tests/fixtures/copilot-cli/README.md` for fixture provenance, the
+//! `VtScreen::bottom_lines(16)` extraction rule, and the redactions applied.
+
+mod common;
+
+use common::detection_rules::judge;
+use common::repo_definition_text;
+use yagura_protocol::WindowStatus;
+
+const FIXTURE_100X30_IDLE_STARTUP: &str =
+    include_str!("fixtures/copilot-cli/100x30-idle-startup.txt");
+const FIXTURE_100X30_IDLE_STARTUP_WSL: &str =
+    include_str!("fixtures/copilot-cli/100x30-idle-startup-wsl.txt");
+const FIXTURE_100X30_DONE: &str = include_str!("fixtures/copilot-cli/100x30-done.txt");
+const FIXTURE_100X30_WAITING_INPUT_DRAFT: &str =
+    include_str!("fixtures/copilot-cli/100x30-waiting-input-draft.txt");
+const FIXTURE_100X30_INTERRUPTED: &str =
+    include_str!("fixtures/copilot-cli/100x30-interrupted.txt");
+const FIXTURE_100X30_RUNNING: &str = include_str!("fixtures/copilot-cli/100x30-running.txt");
+const FIXTURE_100X30_RUNNING_ESC_ONCE: &str =
+    include_str!("fixtures/copilot-cli/100x30-running-esc-once.txt");
+const FIXTURE_100X30_APPROVAL_COMMAND: &str =
+    include_str!("fixtures/copilot-cli/100x30-approval-command.txt");
+const FIXTURE_100X30_TRUST: &str = include_str!("fixtures/copilot-cli/100x30-trust.txt");
+const FIXTURE_100X30_TRUST_WSL: &str = include_str!("fixtures/copilot-cli/100x30-trust-wsl.txt");
+
+/// The ten real fixtures with their recorded geometry and expected verdict, per
+/// `tests/fixtures/copilot-cli/README.md`.
+const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
+    (
+        "100x30-idle-startup",
+        FIXTURE_100X30_IDLE_STARTUP,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-idle-startup-wsl",
+        FIXTURE_100X30_IDLE_STARTUP_WSL,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-done",
+        FIXTURE_100X30_DONE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-waiting-input-draft",
+        FIXTURE_100X30_WAITING_INPUT_DRAFT,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-interrupted",
+        FIXTURE_100X30_INTERRUPTED,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-running",
+        FIXTURE_100X30_RUNNING,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "100x30-running-esc-once",
+        FIXTURE_100X30_RUNNING_ESC_ONCE,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "100x30-approval-command",
+        FIXTURE_100X30_APPROVAL_COMMAND,
+        100,
+        30,
+        WindowStatus::WaitingApproval,
+    ),
+    (
+        "100x30-trust",
+        FIXTURE_100X30_TRUST,
+        100,
+        30,
+        WindowStatus::WaitingApproval,
+    ),
+    (
+        "100x30-trust-wsl",
+        FIXTURE_100X30_TRUST_WSL,
+        100,
+        30,
+        WindowStatus::WaitingApproval,
+    ),
+];
+
+#[tokio::test]
+async fn copilot_cli_definition_classifies_captured_screens() {
+    tokio::time::pause();
+    let source = repo_definition_text("copilot-cli.toml");
+
+    let mut mismatches = Vec::new();
+    for (name, fixture, cols, rows, expected) in CASES {
+        let lines: Vec<&str> = fixture.lines().collect();
+        let status = judge(&source, *cols, *rows, &lines).await;
+        if status != *expected {
+            mismatches.push(format!("{name}: expected {expected:?}, got {status:?}"));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "every captured screen must classify as its recorded verdict: {mismatches:#?}"
+    );
+}

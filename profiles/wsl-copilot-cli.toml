@@ -1,0 +1,80 @@
+# Runs the GitHub Copilot CLI inside a WSL distribution. Windows only (see
+# wsl-claude-code.toml for why this profile carries no other operating
+# system's argv). The shell is both a login and an interactive shell so
+# `~/.bashrc` runs too, which is where a tool such as nvm adds its own
+# install to `PATH`.
+# The launch options below follow `copilot --help` (1.0.101).
+schema = 1
+display_name = "WSL: GitHub Copilot CLI"
+detection = "copilot-cli"
+
+[command]
+windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "copilot"]
+
+# Only `auto`: Copilot documents no model identifiers and no command that
+# lists them, so any other name is passed through as given (or picked with
+# the CLI's own /model).
+[model]
+args = ["--model", "{value}"]
+
+[model.aliases]
+default = "auto"
+
+# No aliases: the levels `--help` lists pass through as given.
+[effort]
+args = ["--reasoning-effort", "{value}"]
+
+# The JSON is inline so the launch hands the WSL CLI no path for it; Copilot
+# expands the variable from its own environment, where WSLENV has already
+# converted the bridge's path.
+[mcp]
+args = ["--additional-mcp-config", '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"]}}}']
+
+# Copilot takes launch-time hooks only from a plugin directory (see
+# copilot-cli.toml). Inside WSL the hooks run under the `bash` key, and the
+# Windows executable is called by name because a Linux shell does not
+# resolve the bare name. Checked with Copilot CLI 1.0.101 inside WSL.
+[hooks]
+args = ["--plugin-dir", "{hooks_config_dir}"]
+
+[hooks.config_dir]
+"plugin.json" = '{"name":"yagura"}'
+"hooks.json" = '{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon.exe --deliver-context"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon.exe --emit-status running --source copilot-cli"}],"preToolUse":[{"type":"command","bash":"yagura-daemon.exe --emit-status running --source copilot-cli"}],"postToolUse":[{"type":"command","bash":"yagura-daemon.exe --emit-status running --source copilot-cli"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon.exe --emit-status running --source copilot-cli"}],"agentStop":[{"type":"command","bash":"yagura-daemon.exe --emit-status waiting_input --source copilot-cli"}]}}'
+
+# How the daemon hands text to this CLI without typing it into the composer.
+# Copilot has no hook that fires on an idle session, so `wake` stays `none`.
+[delivery]
+output = '{"additionalContext":{text}}'
+max_chars = 10000
+wake = "none"
+launch_prompt = ["-i", "{prompt}"]
+
+# A Windows path is unreadable from the WSL CLI as it is, so every path the
+# daemon hands it -- a launch's plugin directory and the bridge a
+# registration writes -- is converted with WSL's own tool first.
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+# The registration commands below run the same way any other window from
+# this profile does: through the launch argv above, so they reach the same
+# `copilot` the login shell's `PATH` would find. Every state is read from
+# the CLI's own output, so no file tool is needed.
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+env_forward = { name = "WSLENV", separator = ":" }
+
+[mcp_registration.status]
+args = ["mcp", "get", "{server}", "--json"]
+format = "json"
+command = "/{server}/command"
+absent = "not found"
+
+# Read for every window this profile opens (see copilot-cli.toml).
+[mcp_registration.list]
+args = ["mcp", "list", "--json"]
+items = "/mcpServers"
+command = "/command"
+disable = ["--disable-mcp-server", "{server}"]

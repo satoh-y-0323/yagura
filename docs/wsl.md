@@ -39,13 +39,14 @@ input typed into the pane (for example `pwd`) is answered by that shell.
 
 A command typed this way is a raw argv: it gets no MCP injection (see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)). To run a CLI with yagura's MCP tools available,
-open it from the `WSL: Claude Code` or `WSL: Codex CLI` profile instead (`WSL: Antigravity CLI`
+open it from the `WSL: Claude Code`, `WSL: Codex CLI` or `WSL: GitHub Copilot CLI` profile
+instead (`WSL: Antigravity CLI`
 opens a window the same way but needs its own manual MCP registration -- see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)).
 
 ## The Launch Form of the Bundled WSL Profiles
 
-The three WSL profiles start their CLI with
+The four WSL profiles start their CLI with
 
 ```
 wsl -e bash -lic 'exec "$0" "$@"' <cli> <appended arguments...>
@@ -61,11 +62,12 @@ unexpanded. This needs `bash` in the distribution, and the **Linux** build of th
 inside it: the Windows build on the host is not what runs. See
 [profiles/README.md](../profiles/README.md#wsl-profiles).
 
-A Windows path is not readable from the Linux CLI as it is, so each of the three profiles also has
+A Windows path is not readable from the Linux CLI as it is, so each of the four profiles also has
 a top-level `[host_paths]` table that converts every path the daemon hands the CLI with
 `wsl -e wslpath -u` -- the bridge and the daemon a registration writes, and a settings file or
 directory a launch injection names. Their own launch injections name no path, so opening one of
-their windows runs no conversion. See [Host paths](../profiles/README.md#host-paths).
+their windows runs no conversion -- except `wsl-copilot-cli`, whose hooks are a plugin directory
+GitHub Copilot CLI takes only by its path, converted at each launch. See [Host paths](../profiles/README.md#host-paths).
 
 Because the shell is both a login and an interactive one, `~/.profile` and `~/.bashrc` run inside
 the window's process tree before the CLI replaces bash, and that tree's environment already carries
@@ -74,7 +76,7 @@ itself as the window. See "Who this identifies" under
 [Requester Identification](mcp-setup.md#requester-identification) for why the token is on the whole
 tree.
 
-None of the three WSL profiles names a `[command]` key for macOS or Linux, so on either of those
+None of the four WSL profiles names a `[command]` key for macOS or Linux, so on either of those
 the daemon leaves them out of every profile listing --
 see profiles/README.md's schema section for the OS-specific `[command]` selection rule.
 
@@ -87,7 +89,7 @@ from the Linux build inside the distribution, found through the same `PATH` afte
 `~/.profile` and `~/.bashrc` have run. The listing is not a window, so it gets none of the variables
 a window's child is given. A CLI missing from the distribution makes bash exit with status 127, which
 reads as `codex was not found` (the CLI's name, not `wsl`). `wsl-claude-code` carries a fixed list
-and starts nothing. See [profiles/README.md](../profiles/README.md#model-choices).
+and starts nothing, and `wsl-copilot-cli` carries none. See [profiles/README.md](../profiles/README.md#model-choices).
 
 A distribution that is not running yet -- or a WSL that has not started since the host booted --
 can make the first listing noticeably slower than later ones, because it waits for the distribution
@@ -118,6 +120,9 @@ names:
   `${YAGURA_MCP_BRIDGE}`, which Claude Code expands from its own environment.
 - `wsl-codex-cli` has Codex CLI start `bash -c 'exec "$YAGURA_MCP_BRIDGE"'`, because Codex CLI does
   not expand variables in a `-c` value, and forwards the channel variables to it with `env_vars`.
+- `wsl-copilot-cli` passes GitHub Copilot CLI an `--additional-mcp-config` JSON whose `command` is
+  `${YAGURA_MCP_BRIDGE}`, which Copilot expands from its own environment and whose server gets that
+  whole environment, `WSLENV` included.
 
 The bridge then reaches the daemon over the same Windows named pipe as any other window's bridge.
 

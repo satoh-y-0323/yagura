@@ -28,6 +28,7 @@ Definitions in this directory:
 - `claude-code` -- Claude Code.
 - `codex-cli` -- Codex CLI.
 - `antigravity-cli` -- Antigravity CLI (`agy`).
+- `copilot-cli` -- GitHub Copilot CLI (`copilot`).
 - `generic-shell` -- a plain interactive shell, and the daemon's built-in
   default when nothing selects a definition. It declares no `[composer]`: a
   plain shell's screen alone cannot tell its prompt apart from a program's
@@ -560,7 +561,9 @@ written to.
 | `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered at once (a `send_message` as `not_written`, with its text taken back as for a cancelled call; a `send_handoff` as `undelivered_timeout`, with its envelope withdrawn from the inbox). `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
 
 The bundled `codex-cli` definition sets it to `true`; `claude-code` and
-`antigravity-cli` set it to `false`.
+`antigravity-cli` set it to `false`. `copilot-cli` leaves it out (so
+`false`): how Copilot CLI treats a call still out when a turn is interrupted
+has not been measured.
 
 ### What patterns are matched against
 
@@ -883,8 +886,8 @@ debounced by `confirm_ms` like any other.
 
 ### Bundled profiles
 
-The bundled profiles for Claude Code, Codex CLI and Antigravity CLI, and their
-WSL versions, give the CLI its hooks themselves, so nothing has to be written
+The bundled profiles for Claude Code, Codex CLI, Antigravity CLI and GitHub
+Copilot CLI, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
 by hand. Each event maps to a report as follows, checked with the CLI version
 named:
 
@@ -893,6 +896,7 @@ named:
 | Claude Code 2.1.285 (`claude-code`, `wsl-claude-code`) | `--settings` at every launch | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `StopFailure` |
 | Codex CLI 0.159.2 on Windows, 0.158.0 in WSL (`codex-cli`, `wsl-codex-cli`) | `-c hooks.<Event>=...` at every launch, while their trust is registered | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | Antigravity CLI 1.2.14 (`antigravity-cli`, `wsl-antigravity-cli`) | a `yagura` entry in `~/.gemini/config/hooks.json`, written by registration | `PreInvocation`, `PostToolUse` | -- | -- |
+| GitHub Copilot CLI 1.0.101 (`copilot-cli`, `wsl-copilot-cli`) | a plugin directory, `--plugin-dir` at every launch | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 
 How the hooks are placed, and what the profile tables look like, is in
 [profiles/README.md](../../../profiles/README.md#hooks-injection). The same hooks
@@ -944,12 +948,18 @@ Every other entry in the file is left as it was. The entry applies to every
 nothing (see above). An `agy` you start by hand inside a yagura shell window
 does report, for that window -- what it reports is true of that window.
 
+**GitHub Copilot CLI** takes launch-time hooks only from a plugin directory,
+so its profiles write one under the instance's state directory at every
+launch and name it with `--plugin-dir`; the WSL profile hands it over as a
+WSL path. Copilot loads the plugin's hooks only once you have answered its
+folder trust prompt, so a window reports nothing before that.
+
 ### When reports are missing
 
 A window expects reports when its hooks were actually given to the CLI: a
-Claude Code window from a bundled profile, a Codex CLI window whose trust
-entries were in place when it opened, and an Antigravity CLI window whose
-hooks entry was in place when it opened. If such a window's screen shows a
+Claude Code or GitHub Copilot CLI window from a bundled profile, a Codex CLI
+window whose trust entries were in place when it opened, and an Antigravity
+CLI window whose hooks entry was in place when it opened. If such a window's screen shows a
 running turn and 10 seconds later no report has arrived at all, the window is
 marked:
 
@@ -985,6 +995,13 @@ single event (only `Stop`, say) is not.
   a `PreToolUse` or `Stop` hook to carry a decision, which a status report does
   not give. Its approval prompts come from the screen alone, and its turns
   close on 5 seconds of quiet.
+- **GitHub Copilot CLI reports neither an approval prompt nor an interrupt.**
+  The hook Copilot runs for a permission request fires before its own rules
+  decide whether to ask, so it would report prompts that never appear; the
+  approval box is read from the screen alone. An interrupted turn runs no
+  hook and leaves the input line under the cancellation message, so it
+  closes on 5 seconds of quiet and reads as `waiting_input`, not
+  `interrupted`.
 
 ### Writing hooks by hand
 

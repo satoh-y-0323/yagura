@@ -574,7 +574,8 @@ value cannot be launched" are both true at once.
 
 ### Recommended aliases
 
-Every profile this repository ships declares `fast`, `default` and `strong`.
+Every profile this repository ships declares `fast`, `default` and `strong`,
+except the GitHub Copilot ones (see below).
 Putting the same three names in a profile you write yourself lets whoever
 asks for a window pick a tier without knowing which CLI, or which model
 names, are behind it:
@@ -584,16 +585,23 @@ names, are behind it:
 | `claude-code`, `wsl-claude-code` | `fast` = `haiku`, `default` = `sonnet`, `strong` = `opus`, `fable` = `fable` | accepted, no aliases (levels pass through) |
 | `codex-cli`, `wsl-codex-cli` | `fast` = `gpt-5.6-luna`, `default` = `gpt-5.6-terra`, `strong` = `gpt-6-astra` | accepted, no aliases (levels pass through) |
 | `antigravity-cli`, `wsl-antigravity-cli` | `fast` = `gemini-3.8-flash-low`, `default` = `gemini-3.8-flash-medium`, `strong` = `gemini-3.1-pro-high` | not accepted (see below) |
+| `copilot-cli`, `wsl-copilot-cli` | `default` = `auto` only (see below) | accepted, no aliases (levels pass through) |
 | `shell` | accepts neither option | -- |
 
 Those mappings come from each CLI's own `--help` (Claude Code 2.1.263, Codex
-CLI 0.153.4, Antigravity CLI 1.2.11) and, for the reasoning levels and the
+CLI 0.153.4, Antigravity CLI 1.2.11, GitHub Copilot CLI 1.0.101) and, for the reasoning levels and the
 model names, the Codex configuration and models reference. **Model names
 change over time**: read the table as the state when these profiles were
 written, and edit your own copies to whatever your CLI and your account
 actually accept -- yagura never validates a model name, it only passes it
 on. The `antigravity-cli` aliases were confirmed only against Antigravity's
 free-tier "Starter Quota"; a model a paid tier can select was not checked.
+
+GitHub Copilot CLI documents no model identifiers -- its supported models
+page gives display names only -- and has no command that lists them, so the
+Copilot profiles map `default` to `auto`, the value `--model` takes to let
+Copilot pick, and nothing else. Pass any other model name as it is, or pick
+one with the CLI's own `/model`. This was checked on a Copilot Free account.
 
 Antigravity CLI (`agy`) has an `--effort` flag, but it cannot be combined
 with the *effort-qualified* model ids `agy models` lists: `--model
@@ -663,8 +671,11 @@ Of the profiles this repository ships, `claude-code` and `wsl-claude-code`
 carry a fixed `values` list, `codex-cli` and `wsl-codex-cli` ask Codex CLI
 (`codex debug models`, JSON), and `antigravity-cli` and
 `wsl-antigravity-cli` ask Antigravity CLI (`agy models`, one model per line,
-id and display name separated by a tab). Codex CLI's `debug` command may
-change its output; if it does, edit the pointers to follow it.
+id and display name separated by a tab). `copilot-cli` and
+`wsl-copilot-cli` carry none, since Copilot lists its models nowhere a
+profile can read (see [Recommended aliases](#recommended-aliases)). Codex
+CLI's `debug` command may change its output; if it does, edit the pointers
+to follow it.
 
 **How the list is taken.** The daemon runs the listing command only when
 the GUI asks for it -- when a profile is shown in the Models tab, or its
@@ -874,7 +885,9 @@ Claude Code and Codex CLI as shims, so the Windows `claude-code` profile
 puts its JSON, which needs `"`, in a settings file, and `codex-cli` spells
 its values as TOML literal strings, which need none. The WSL profiles start
 `wsl.exe`, which is not a shim, so `wsl-claude-code` passes the same JSON
-straight on the command line.
+straight on the command line. The Copilot profiles follow the same split:
+`copilot-cli` names its settings file with Copilot's `@` prefix, and
+`wsl-copilot-cli` passes the JSON inline.
 
 Where a CLI already has a server of the injected name configured -- `yagura`,
 or `yagura-<instance>` for a named instance, the name Register in the GUI
@@ -887,6 +900,8 @@ stay in effect. A profile of your own that spells `yagura` instead of
 two servers, the registered one and the injected one. The bundled Codex tables set `tool_timeout_sec` to a day: Codex's
 own 60-second default would otherwise end a `wait_for_status`,
 `wait_for_report` or `send_handoff` call that is still waiting on the daemon.
+Copilot CLI lays `--additional-mcp-config` over its own configuration, the
+last definition of a name winning.
 
 ## Hooks injection
 
@@ -976,10 +991,19 @@ were checked with):
 | `claude-code`, `wsl-claude-code` (Claude Code 2.1.285) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `StopFailure` |
 | `codex-cli` (Codex CLI 0.159.2), `wsl-codex-cli` (0.158.0) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
+| `copilot-cli`, `wsl-copilot-cli` (GitHub Copilot CLI 1.0.101) | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 
 The bundled profiles also call the delivery doors from the hooks above: at
 session start, at the start of a turn and, for Claude Code, in a background
 wait. Antigravity CLI's `json_entry` carries its doors the same way.
+
+Copilot CLI takes launch-time hooks only from a plugin directory
+(`--plugin-dir`), so the Copilot profiles write one with `config_dir`: a
+`plugin.json` that names the plugin and a `hooks.json` beside it. Copilot
+loads it once the folder is trusted and runs `sessionStart` -- the
+start-up context door -- when the first prompt is sent, not when the window
+opens. An interrupted turn runs no hook, and an approval prompt is read
+from the screen only.
 
 `wsl-claude-code` passes the JSON on the command line, since the Windows path
 of a settings file is unreadable from inside WSL. Changing a Codex hook's
@@ -1020,7 +1044,7 @@ url = "https://example.com/docs"
 
 `wake_timeout_secs` and `session_pointer` are not keys: writing either is an error. An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
 
-**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI has no way to be woken (`wake = "none"`), so while an Antigravity CLI window waits for input the daemon types the text. Their start-up requests are given on each CLI's command line.
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI and GitHub Copilot CLI have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Their start-up requests are given on each CLI's command line.
 
 **Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's `shim_guidance` gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [`.cmd` / `.bat` shims](#cmd--bat-shims)).
 
@@ -1101,8 +1125,11 @@ absent = "No MCP server named"    # optional; a substring meaning "not registere
 [mcp_registration.list]        # optional; turns the other instances' bridge
                                 # registrations off for each window
 args = ["mcp", "list", "--json"]  # appended to the launch argv; prints JSON
-items = ""                      # JSON Pointer to the array of registered servers
-name = "/name"                  # JSON Pointer, within an element, to its name
+items = ""                      # JSON Pointer to the array of registered
+                                # servers, or to a table keyed by their names
+name = "/name"                  # JSON Pointer, within an element, to its
+                                # name; omitted when `items` is a table, whose
+                                # keys are the names
 command = "/transport/command"  # JSON Pointer, within an element, to the
                                 # executable it runs
 disable = ["-c", "mcp_servers.{server}.enabled=false"]
@@ -1221,7 +1248,10 @@ registered or not).
 **Turning the other instances' registrations off.** A CLI that hands an MCP
 server only the variables its own configuration names starts a registered
 `yagura` without the window's identity, so a window of a named instance would
-reach the default instance's daemon as an outside client. When a profile
+reach the default instance's daemon as an outside client. A CLI that hands
+it the window's whole environment still starts every `yagura` registered
+with it, so the window would carry another instance's bridge beside its own;
+the bundled Copilot tables turn those off too. When a profile
 declares `list`, the daemon runs `args` after the profile's launch argv (with
 no model or effort added) each time it opens a window from the profile, and
 appends `disable` once per registered server that is yagura's bridge for some
@@ -1248,8 +1278,8 @@ takes out the owned entries (`toml_set.entries`, `json_entry`); it leaves
 
 ## WSL profiles
 
-The three WSL profiles this repository ships (`wsl-claude-code`,
-`wsl-codex-cli`, `wsl-antigravity-cli`) start the CLI with
+The four WSL profiles this repository ships (`wsl-claude-code`,
+`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`) start the CLI with
 
 ```toml
 [command]
@@ -1276,8 +1306,10 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 ```
 
 Their `[mcp]` and `[hooks]` tables, where they have them, are written inline
-and name no path, so
-opening one of their windows runs no conversion; their registration rows do.
+and name no path, so opening one of their windows runs no conversion -- except
+`wsl-copilot-cli`'s `[hooks]`, a plugin directory Copilot takes only by its
+path, which is converted at each launch. Their registration rows convert
+too.
 
 ## Approval-skip flags
 

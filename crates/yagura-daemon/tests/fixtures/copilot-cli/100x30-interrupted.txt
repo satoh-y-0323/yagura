@@ -1,0 +1,16 @@
+   Start-Sleep -Seconds 40
+
+ ● Operation cancelled by user
+
+
+
+
+
+
+
+
+ ~\work\project                                                              Session: 0.19 AIC used 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ← open sidebar · Interactive · Manual Approval · / commands · tab next tab       Auto → gpt-6-luna 

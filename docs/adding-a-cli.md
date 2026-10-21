@@ -89,6 +89,13 @@ going to change, and when you are done restore it and compare it byte for byte w
 - If the daemon is started from inside another agent CLI's shell, the CLI's environment variables are
   inherited by every window. Start the measurement daemon with them removed.
 - The shared room `main` keeps its history between runs. Move the database aside before each run.
+- Some CLIs take launch-time settings only as a directory of files: GitHub Copilot CLI reads
+  per-launch hooks only from a plugin directory (`--plugin-dir`), not from one settings file. A
+  profile writes such a directory with `config_dir` (see
+  [MCP injection](../profiles/README.md#mcp-injection)).
+- A setting a CLI takes only by its path cannot reach a CLI that runs in another environment, such
+  as WSL, as the daemon's own path. Give the profile a [`[host_paths]`](../profiles/README.md#host-paths)
+  table so the daemon converts the path first, rather than inlining the content to avoid one.
 
 ## 4. Turn the findings into a profile
 

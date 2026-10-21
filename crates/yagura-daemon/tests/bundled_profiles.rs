@@ -303,10 +303,15 @@ fn model_choices(profile: &Profile) -> &ModelChoicesSpec {
         .unwrap_or_else(|| panic!("{} must ship a [model.choices] table", profile.id))
 }
 
+/// Bundled profiles with no source to offer model choices from: the shell
+/// maps no model, and Copilot neither documents its model identifiers nor
+/// lists them through a command.
+const WITHOUT_MODEL_CHOICES: &[&str] = &["copilot-cli", "shell", "wsl-copilot-cli"];
+
 #[test]
-fn every_bundled_profile_but_the_shell_ships_model_choices() {
+fn every_bundled_profile_with_a_model_list_source_ships_model_choices() {
     let ids = bundled_profile_ids();
-    assert_eq!(ids.len(), 7, "the bundled set this test covers: {ids:?}");
+    assert_eq!(ids.len(), 9, "the bundled set this test covers: {ids:?}");
     let mut with_choices = Vec::new();
     for id in &ids {
         let profile = parse_repo_profile(id);
@@ -314,11 +319,15 @@ fn every_bundled_profile_but_the_shell_ships_model_choices() {
             with_choices.push(id.clone());
         }
     }
-    let expected: Vec<String> = ids.iter().filter(|id| *id != "shell").cloned().collect();
+    let expected: Vec<String> = ids
+        .iter()
+        .filter(|id| !WITHOUT_MODEL_CHOICES.contains(&id.as_str()))
+        .cloned()
+        .collect();
     assert_eq!(
         with_choices, expected,
-        "every bundled profile that maps a model ships where its choices come from, and the \
-         shell, which maps none, ships none"
+        "every bundled profile whose models a CLI command or document lists ships where its \
+         choices come from, and the others ship none"
     );
 }
 

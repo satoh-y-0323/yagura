@@ -55,15 +55,15 @@ must follow.
 [Registering from the GUI](#registering-from-the-gui) does this for you. The GUI of a named instance
 registers the bridge as `yagura-<instance>` rather than `yagura`, and carries
 `YAGURA_INSTANCE=<instance>` in the registration's own environment (`-e` for Claude Code, `--env`
-for Codex CLI and Antigravity CLI), so a development instance's registration never overwrites, and
+for Codex CLI, Antigravity CLI and GitHub Copilot CLI), so a development instance's registration never overwrites, and
 is never overwritten by, the default instance's `yagura`. The default instance registers as
 `yagura` with no environment. Register by hand the same way: pick a name of your own and pass
 `YAGURA_INSTANCE` through the CLI's environment flag.
 
 ## Windows yagura Opens
 
-**A Claude Code or Codex CLI window that yagura opens from one of its bundled launch profiles needs
-no MCP registration.** The daemon points that CLI at the bridge itself:
+**A Claude Code, Codex CLI or GitHub Copilot CLI window that yagura opens from one of its bundled
+launch profiles needs no MCP registration.** The daemon points that CLI at the bridge itself:
 
 - At start-up, the daemon looks for `yagura-mcp` next to its own executable. The installer ships
   `yagura-mcp.exe` there, beside `yagura-daemon.exe`. When none is usable, the daemon logs
@@ -74,10 +74,12 @@ no MCP registration.** The daemon points that CLI at the bridge itself:
 - A window launched from a profile with an `[mcp]` table gets that table's arguments appended to
   its command line: Claude Code a `--mcp-config` server definition, Codex CLI `-c` overrides for
   `mcp_servers.<name>` that also forward the channel variables with `env_vars` (and, in
-  `wsl-codex-cli`, name them in the server's `WSLENV` so they reach the Windows bridge). The server
+  `wsl-codex-cli`, name them in the server's `WSLENV` so they reach the Windows bridge), GitHub
+  Copilot CLI an `--additional-mcp-config` server definition. The server
   is named the way Register names it: `yagura`, or `yagura-<instance>` for a
   [named instance](instances.md). The bundled
-  `claude-code`, `codex-cli`, `wsl-claude-code` and `wsl-codex-cli` profiles carry one; `shell`
+  `claude-code`, `codex-cli`, `copilot-cli`, `wsl-claude-code`, `wsl-codex-cli` and
+  `wsl-copilot-cli` profiles carry one; `shell`
   does not, and neither does `antigravity-cli` or `wsl-antigravity-cli` -- Antigravity CLI
   (`agy`) reads MCP servers only from its own global registration, not from anything passed at
   launch, so a window opened from either of those two profiles needs the manual registration
@@ -98,7 +100,8 @@ If the CLI also has a server of that name registered -- `yagura`, or `yagura-<in
 named instance -- the injected one is what runs in a window yagura opens: Claude Code starts the
 `--mcp-config` definition instead of a same-named one from a project's `.mcp.json`, and Codex CLI
 merges the `-c` overrides into an existing `[mcp_servers.<name>]` table key by key, keeping the
-keys the injection does not set. A profile of your own that spells `yagura` instead of `{server}`
+keys the injection does not set, and GitHub Copilot CLI lets the `--additional-mcp-config`
+definition win over its own configuration. A profile of your own that spells `yagura` instead of `{server}`
 gives a window of a named instance two servers side by side, and only the injected one can say
 which window it is. The bundled
 Codex profiles set `tool_timeout_sec` themselves (see [Configuring Codex CLI](#configuring-codex-cli)
@@ -118,6 +121,13 @@ than 10 seconds it logs a warning and opens the window without turning anything 
 `/mcp`, the other instances' servers show as disabled. The bundled `codex-cli` and `wsl-codex-cli`
 profiles declare this in [`[mcp_registration.list]`](../profiles/README.md#mcp-registration).
 
+**GitHub Copilot CLI is covered the same way.** It starts an MCP server with the window's whole
+environment, but a window would still carry another instance's registered bridge beside its own.
+When a GitHub Copilot CLI window opens, the daemon lists its registrations (`copilot mcp list
+--json`, inside WSL for `wsl-copilot-cli`) and passes `--disable-mcp-server <name>` for the same
+servers, logging and falling back exactly as above. The bundled `copilot-cli` and
+`wsl-copilot-cli` profiles declare it too.
+
 **Claude Code is not covered.** It has no documented way to turn a user-scope registration off for
 one launch, so a window of a named instance still sees the other instances' registrations. The
 default instance's registered `yagura` does no harm there: Claude Code starts it with the window's
@@ -133,7 +143,8 @@ per-CLI sections after it are the manual alternative.
 hooks that report each turn's start and end to the daemon, so the window's status no longer depends
 on the screen alone. The Codex CLI profiles do the same only once yagura is registered with Codex
 CLI, and Antigravity CLI reports only once yagura is registered with it -- both from
-[Registering from the GUI](#registering-from-the-gui). What the hooks report, and the mark a window
+[Registering from the GUI](#registering-from-the-gui). The GitHub Copilot CLI profiles give the CLI
+its hooks at every launch, which it loads once you have answered its folder trust prompt. What the hooks report, and the mark a window
 shows when its reports stop arriving, are in
 [Detection definitions](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status).
 
@@ -157,8 +168,8 @@ The GUI's Settings panel (the gear button in the navigation rail) has an **Integ
 registers the bridge beside the running daemon with each CLI, so a session you start yourself can
 reach yagura. It lists one row for every launch profile with a `[mcp_registration]` table (see
 [profiles/README.md](../profiles/README.md#mcp-registration)): the bundled `claude-code`,
-`codex-cli` and `antigravity-cli` under "This computer", and `wsl-claude-code`, `wsl-codex-cli` and
-`wsl-antigravity-cli` under "WSL". `shell` has no row.
+`codex-cli`, `antigravity-cli` and `copilot-cli` under "This computer", and `wsl-claude-code`,
+`wsl-codex-cli`, `wsl-antigravity-cli` and `wsl-copilot-cli` under "WSL". `shell` has no row.
 
 Each row shows the command it is about to run and the CLI's current state:
 
@@ -213,7 +224,8 @@ added to it yourself -- such as `env_vars` -- is gone afterwards; yagura writes 
 
 **Reading the state.** The rows are read when the tab opens and after each operation, never in the
 background: `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
-and `~/.gemini/config/mcp_config.json` (read, never written) for Antigravity CLI, plus the hook
+`copilot mcp get <name> --json` for GitHub Copilot CLI, and `~/.gemini/config/mcp_config.json`
+(read, never written) for Antigravity CLI, plus the hook
 settings above, read back from `~/.codex/config.toml` and `~/.gemini/config/hooks.json`. `claude mcp get`
 starts the bridge briefly to check that it connects; that connection is `External` and changes no
 window's `mcp_connected`.
@@ -347,6 +359,36 @@ agy mcp add yagura -- bash -c 'exec "$YAGURA_MCP_BRIDGE"'
    from an `agy` window is not delivered until the tool call it needs is approved on that
    window's own screen.
 
+## Configuring GitHub Copilot CLI
+
+A GitHub Copilot CLI window yagura opens from the bundled `copilot-cli` or `wsl-copilot-cli` profile
+already reaches yagura (see [Windows yagura Opens](#windows-yagura-opens)). Register yagura for any
+other Copilot session -- from [Registering from the GUI](#registering-from-the-gui), or by hand
+(GitHub Copilot CLI 1.0.101):
+
+```bash
+copilot mcp add yagura -- <absolute path to yagura-mcp>
+```
+
+`copilot mcp get yagura` shows the registration, and `copilot mcp remove yagura` undoes it.
+
+1. **`copilot` must be on `PATH`.** `winget install GitHub.Copilot` adds its package folder to your
+   user `PATH`; a process that was already running, the daemon among them, does not see the change,
+   so restart yagura after installing. For `wsl-copilot-cli`, install the Linux build inside the
+   distribution (see [docs/wsl.md](wsl.md)).
+2. **On Windows, the hooks need PowerShell 7 (`pwsh`) on `PATH`.** Copilot CLI runs a hook's
+   Windows command with it.
+3. **yagura does not answer Copilot's folder trust prompt.** In a folder Copilot has not been told
+   to trust, it asks first, and the window shows `waiting_approval` until you choose on its screen.
+   Copilot loads the profile's hooks and sends a request the window was started with only after
+   that; choose `2. Yes, and remember this folder for future sessions` so it does not ask there
+   again.
+4. **The start-up context arrives with the first prompt.** Copilot runs its session-start hook when
+   the first prompt is sent, not when the window opens.
+5. **Copilot reads a project's Claude Code settings too.** It takes the working folder's `.mcp.json`
+   and `.claude/settings.json` as its own configuration, so the MCP servers and hooks set up there
+   for Claude Code also apply to a Copilot window opened in that folder.
+
 ## How the daemon delivers text
 
 Two kinds of text reach a window's CLI, and they travel differently.
@@ -382,8 +424,9 @@ A text counts as taken when a door printed it, the wake command succeeded, or --
 | `claude-code`, `wsl-claude-code` | `SessionStart` and `UserPromptSubmit` hooks, injected with `--settings` | a background `Stop`/`SessionStart` hook that ends with exit code 2 when something arrives |
 | `codex-cli`, `wsl-codex-cli` | `SessionStart` and `UserPromptSubmit` hooks, injected with `-c` | `codex queue --thread <session> --message <text>`, run by the daemon |
 | `antigravity-cli`, `wsl-antigravity-cli` | `SessionStart` and `PreInvocation` hooks in `~/.gemini/config/hooks.json` | none: the daemon types the text into the composer while the window waits for input |
+| `copilot-cli`, `wsl-copilot-cli` | a `sessionStart` hook in a plugin directory, injected with `--plugin-dir`; it runs when the first prompt is sent, and Copilot has no turn-start door (it discards a command hook's output at the start of a turn) | none: the daemon types the text into the composer while the window waits for input |
 
-Antigravity CLI is the one place left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
+Antigravity CLI and GitHub Copilot CLI are the places left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
 
 **Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a handoff addressed to it is `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded.
 
