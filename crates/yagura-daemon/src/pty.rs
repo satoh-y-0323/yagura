@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -14,8 +14,14 @@ use tokio::sync::{Semaphore, watch};
 use crate::child_env::ChildBaseEnv;
 use crate::config::DaemonConfig;
 use crate::detector::{SharedScreen, VtScreen};
-use crate::input_encode::{self, InputModes};
+use crate::input_encode::InputModes;
 use crate::terminal_identity;
+
+mod focus;
+mod reply_queue;
+
+pub use focus::FocusInterval;
+use reply_queue::ReplyQueue;
 
 /// Error type for PTY operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -69,10 +75,6 @@ const MODEL_LOCK_HOLD: Duration = Duration::from_millis(2);
 /// How many blocking threads may wait on one window's model at once. Every
 /// one of them waits on the same lock, so more would only queue there.
 const MODEL_ACCESS_PER_WINDOW: usize = 1;
-
-/// Reply bytes waiting for a window's reply writer; a batch that would go
-/// past this is dropped.
-const MAX_QUEUED_REPLY_BYTES: usize = 64 * 1024;
 
 /// Whether `cols` x `rows` is a size a window takes (see
 /// [`yagura_protocol::MAX_WINDOW_DIMENSION`]).
@@ -415,274 +417,6 @@ impl WriterSlot {
             Err(std::sync::TryLockError::Poisoned(poisoned)) => *poisoned.into_inner() = None,
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
-    }
-}
-
-/// What a [`ReplyQueue`] hands its writer thread: replies to write, and
-/// whether the focus the child was told is to be brought up to date.
-#[derive(Debug, PartialEq, Eq)]
-struct Wake {
-    bytes: Vec<u8>,
-    check_focus: bool,
-}
-
-/// The focus a window's child is told, derived from the view's focus and from
-/// the daemon's own input.
-///
-/// A real terminal delivers keys to the focused window only, so the child is
-/// told it has focus whenever the daemon types into it, however the view
-/// stands. It is told the view's focus again once the input is over, and
-/// only after the child has produced output, so the report never lands in
-/// the same read as the last input byte.
-///
-/// Every field is read and written under the queue's lock. The reports that
-/// follow from it are written under the writer's lock, which is what orders
-/// them against input bytes.
-#[derive(Default)]
-struct FocusState {
-    /// The last focus the view reported; `None` before any.
-    view: Option<bool>,
-    /// Open stretches of deciding on or making writes; see [`FocusInterval`].
-    open_intervals: usize,
-    /// The focus the child was last told; `None` before any report, when a
-    /// child assumes it has the focus.
-    told: Option<bool>,
-    /// A focus-out is held back until the output count passes this value.
-    out_after: Option<u64>,
-    /// A focus-out is held back now, so the next output is to wake the writer.
-    out_deferred: bool,
-}
-
-impl FocusState {
-    /// The focus the child should hold; `None` when nothing claims one.
-    fn target(&self) -> Option<bool> {
-        if self.open_intervals > 0 {
-            Some(true)
-        } else {
-            self.view
-        }
-    }
-
-    /// Notes that an input write, or an interval of waiting to write, ended
-    /// with `outputs` outputs seen. Returns whether the child holds more focus
-    /// than the target allows, so a focus-out is due.
-    fn input_ended(&mut self, outputs: u64) -> bool {
-        self.out_after = Some(outputs);
-        self.target() == Some(false) && self.told != Some(false)
-    }
-
-    /// The report that brings the child to the target; empty when the child
-    /// already holds it, when it asked for no focus reports, or when a
-    /// focus-out must wait for output.
-    fn reconcile(&mut self, modes: InputModes, outputs: u64) -> Vec<u8> {
-        self.out_deferred = false;
-        if !modes.focus_reports {
-            return Vec::new();
-        }
-        let Some(target) = self.target() else {
-            return Vec::new();
-        };
-        if self.told == Some(target) {
-            return Vec::new();
-        }
-        if !target && self.out_after.is_some_and(|after| outputs <= after) {
-            self.out_deferred = true;
-            return Vec::new();
-        }
-        self.told = Some(target);
-        self.out_after = None;
-        input_encode::encode_focus(target, modes)
-    }
-
-    /// The report that goes in front of an input write.
-    fn before_input(&mut self, modes: InputModes) -> Vec<u8> {
-        self.out_deferred = false;
-        if !modes.focus_reports || self.told == Some(true) {
-            return Vec::new();
-        }
-        self.told = Some(true);
-        input_encode::encode_focus(true, modes)
-    }
-}
-
-/// Replies to the child's terminal queries on their way to the PTY. The
-/// reader only queues them, and one writer thread per window writes them, so
-/// a child that stops reading its input never stops the reader.
-///
-/// The window's [`FocusState`] lives here too, because its reports are
-/// written by the same thread and a change to it is a mark on this queue, not
-/// bytes: marks are never dropped for want of room.
-#[derive(Default)]
-struct ReplyQueue {
-    state: Mutex<ReplyQueueState>,
-    ready: Condvar,
-}
-
-#[derive(Default)]
-struct ReplyQueueState {
-    bytes: Vec<u8>,
-    closed: bool,
-    /// Set while replies are being dropped, so a flood logs once.
-    dropping: bool,
-    /// The writer is to bring the child's focus up to date.
-    check_focus: bool,
-    focus: FocusState,
-}
-
-impl ReplyQueue {
-    /// Queues `replies` whole, or drops them when the queue has no room;
-    /// `dropped` replies were already dropped before reaching it.
-    fn push(&self, replies: Vec<u8>, dropped: usize) {
-        if replies.is_empty() && dropped == 0 {
-            return;
-        }
-        let mut state = lock_recover(&self.state);
-        if state.closed {
-            return;
-        }
-        let fits = state.bytes.len() + replies.len() <= MAX_QUEUED_REPLY_BYTES;
-        if fits && dropped == 0 {
-            state.dropping = false;
-        } else if !state.dropping {
-            state.dropping = true;
-            tracing::warn!(
-                "dropping replies to a child's terminal queries: the child is not reading its input"
-            );
-        }
-        if fits && !replies.is_empty() {
-            state.bytes.extend_from_slice(&replies);
-            self.ready.notify_one();
-        }
-    }
-
-    /// Asks the writer thread to bring the child's focus up to date.
-    fn wake_for_focus(&self, state: &mut ReplyQueueState) {
-        state.check_focus = true;
-        self.ready.notify_one();
-    }
-
-    /// Ends the writer thread once it has nothing in hand.
-    fn close(&self) {
-        let mut state = lock_recover(&self.state);
-        state.closed = true;
-        state.bytes.clear();
-        self.ready.notify_one();
-    }
-
-    /// Waits for queued replies or a focus check; `None` once the queue is
-    /// closed.
-    fn next(&self) -> Option<Wake> {
-        let mut state = lock_recover(&self.state);
-        loop {
-            if state.closed {
-                return None;
-            }
-            if !state.bytes.is_empty() || state.check_focus {
-                return Some(Wake {
-                    bytes: std::mem::take(&mut state.bytes),
-                    check_focus: std::mem::take(&mut state.check_focus),
-                });
-            }
-            state = self
-                .ready
-                .wait(state)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-
-    fn set_view_focus(&self, focused: bool) {
-        let mut state = lock_recover(&self.state);
-        state.focus.view = Some(focused);
-        self.wake_for_focus(&mut state);
-    }
-
-    fn open_focus_interval(&self) {
-        let mut state = lock_recover(&self.state);
-        state.focus.open_intervals += 1;
-        self.wake_for_focus(&mut state);
-    }
-
-    fn close_focus_interval(&self, outputs: &watch::Receiver<u64>) {
-        let mut state = lock_recover(&self.state);
-        state.focus.open_intervals = state.focus.open_intervals.saturating_sub(1);
-        if state.focus.input_ended(*outputs.borrow()) {
-            self.wake_for_focus(&mut state);
-        }
-    }
-
-    /// Wakes the writer when output arrived while a focus-out waits for it.
-    /// The writer reads the output count under this lock, so an arrival is
-    /// either seen by that read or finds the wait marked.
-    fn note_output(&self) {
-        let mut state = lock_recover(&self.state);
-        if state.focus.out_deferred {
-            self.wake_for_focus(&mut state);
-        }
-    }
-
-    /// Under the writer's lock, before an input write: the report that tells
-    /// the child it has the focus.
-    fn focus_before_input(&self, modes: InputModes) -> Vec<u8> {
-        lock_recover(&self.state).focus.before_input(modes)
-    }
-
-    /// After an input write ended and the writer's lock was let go.
-    fn focus_after_input(&self, outputs: &watch::Receiver<u64>) {
-        let mut state = lock_recover(&self.state);
-        if state.focus.input_ended(*outputs.borrow()) {
-            self.wake_for_focus(&mut state);
-        }
-    }
-
-    fn reconcile_focus(&self, modes: InputModes, outputs: &watch::Receiver<u64>) -> Vec<u8> {
-        lock_recover(&self.state)
-            .focus
-            .reconcile(modes, *outputs.borrow())
-    }
-
-    /// The writer thread's body. Replies take the writer's lock like any other
-    /// write, so they never land inside another write's bytes, but they are
-    /// not counted in the write ledger: the child asked for them. So are the
-    /// focus reports, which are worked out under that lock. A failed write
-    /// leaves the PTY unusable, so the writer is dropped with it.
-    fn write_all_to(
-        &self,
-        writer: &WriterSlot,
-        input: &PublishedInput,
-        outputs: &watch::Receiver<u64>,
-    ) {
-        while let Some(wake) = self.next() {
-            let mut guard = writer.lock();
-            let Some(w) = guard.as_mut() else {
-                break;
-            };
-            let mut bytes = wake.bytes;
-            if wake.check_focus {
-                bytes.extend(self.reconcile_focus(input.load().modes, outputs));
-            }
-            if !bytes.is_empty() && w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
-                *guard = None;
-                break;
-            }
-            drop(guard);
-            writer.release_if_requested();
-        }
-        self.close();
-        writer.release_if_requested();
-    }
-}
-
-/// An open stretch in which the daemon is deciding on, or making, writes to a
-/// window; see [`PtySession::open_focus_interval`]. Ends when dropped.
-#[must_use = "the interval ends when this is dropped"]
-pub struct FocusInterval {
-    replies: Arc<ReplyQueue>,
-    outputs: watch::Receiver<u64>,
-}
-
-impl Drop for FocusInterval {
-    fn drop(&mut self) {
-        self.replies.close_focus_interval(&self.outputs);
     }
 }
 
@@ -1673,35 +1407,6 @@ impl std::fmt::Debug for PtySession {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_closed_reply_queue_hands_out_nothing_more() {
-        let queue = ReplyQueue::default();
-        queue.push(b"\x1b[?1;2c".to_vec(), 0);
-        queue.close();
-        assert_eq!(queue.next(), None);
-    }
-
-    #[test]
-    fn a_reply_batch_that_would_go_past_the_bound_is_dropped_whole() {
-        let queue = ReplyQueue::default();
-        queue.push(vec![b'a'; MAX_QUEUED_REPLY_BYTES], 0);
-        queue.push(vec![b'b'], 0);
-        assert_eq!(
-            queue.next().map(|wake| wake.bytes),
-            Some(vec![b'a'; MAX_QUEUED_REPLY_BYTES])
-        );
-    }
-
-    #[test]
-    fn reply_batches_that_fit_together_are_all_kept_in_order() {
-        let queue = ReplyQueue::default();
-        queue.push(vec![b'a'; 100], 0);
-        queue.push(vec![b'b'; 1000], 0);
-        let mut expected = vec![b'a'; 100];
-        expected.resize(1100, b'b');
-        assert_eq!(queue.next().map(|wake| wake.bytes), Some(expected));
-    }
 
     #[test]
     fn a_cell_is_on_the_screen_only_below_both_the_column_and_the_row_count() {
