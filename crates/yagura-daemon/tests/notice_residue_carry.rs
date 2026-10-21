@@ -111,28 +111,6 @@ probe = "{SUBMIT_CHILD_PROBE}"
     .expect("write detection definition file");
 }
 
-fn flattened(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => {
-                if chars.next() == Some('[') {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-            }
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 #[tokio::test]
 async fn a_notice_written_behind_a_dialog_is_submitted_by_the_same_attempt_once_the_dialog_is_gone()
 {
@@ -181,11 +159,14 @@ async fn a_notice_written_behind_a_dialog_is_submitted_by_the_same_attempt_once_
 
     let entry = h.registry.get(&parent).expect("the receiver must exist");
     let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while !flattened(&h, &parent).contains(APPROVAL_HEADING) {
+    while !h
+        .flattened_scrollback_keeping_osc_payload(&parent)
+        .contains(APPROVAL_HEADING)
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the notice never landed behind the dialog; screen text: {}",
-            flattened(&h, &parent)
+            h.flattened_scrollback_keeping_osc_payload(&parent)
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -195,23 +176,27 @@ async fn a_notice_written_behind_a_dialog_is_submitted_by_the_same_attempt_once_
         "the attempt is still waiting behind the dialog, it has not finished"
     );
     assert!(
-        !flattened(&h, &parent).contains("SUBMITTED "),
+        !h.flattened_scrollback_keeping_osc_payload(&parent)
+            .contains("SUBMITTED "),
         "nothing may be submitted while the dialog is up"
     );
     std::fs::write(&dialog_gone, b"").expect("remove the dialog");
 
     let notice = "[yagura report] 1 pending report(s). Call wait_for_report to read them.";
     let submitted = format!("SUBMITTED {notice}");
-    while !flattened(&h, &parent).contains(&submitted) {
+    while !h
+        .flattened_scrollback_keeping_osc_payload(&parent)
+        .contains(&submitted)
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the notice never reached the receiver: an attempt that waited out a dialog \
              must finish its own notice; screen text: {}",
-            flattened(&h, &parent)
+            h.flattened_scrollback_keeping_osc_payload(&parent)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let text = flattened(&h, &parent);
+    let text = h.flattened_scrollback_keeping_osc_payload(&parent);
     assert_eq!(
         text.matches("SUBMITTED ").count(),
         1,

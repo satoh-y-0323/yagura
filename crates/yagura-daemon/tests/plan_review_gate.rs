@@ -20,7 +20,8 @@ use std::time::Duration;
 use common::{
     Harness, SubmitDefinitionInput, approver_base_config, call_list_windows, call_open_window,
     detection_config, expect_error, identify, open_submit_child_window_with_composer,
-    read_response, register_approver, send, unique_temp_dir, wait_until_status, write_profile,
+    read_response, register_approver, send, text_tail, unique_temp_dir, wait_until_status,
+    write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -361,66 +362,17 @@ fn marks(plan: &PlanInfo) -> Vec<(String, Option<ReviewMark>)> {
 
 // --- reading what reached the owner's input ------------------------------------
 
-/// The window's scrollback with escape sequences and line breaks removed, so
-/// a line the terminal wrapped or redrew still reads as one run of text.
-fn flattened_scrollback(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' {
-                            break;
-                        }
-                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-fn tail(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let start = chars.len().saturating_sub(600);
-    chars[start..].iter().collect()
-}
-
-/// Times the window accepted a line starting with `text`.
-fn submitted(h: &Harness, window_id: &str, text: &str) -> usize {
-    flattened_scrollback(h, window_id)
-        .matches(&format!("SUBMITTED {text}"))
-        .count()
-}
-
 async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
     let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
     loop {
-        if submitted(h, window_id, text) >= 1 {
+        if h.submitted_count(window_id, text) >= 1 {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
                 "timed out waiting for {window_id} to accept {text:?}; flattened scrollback \
                  tail: {:?}",
-                tail(&flattened_scrollback(h, window_id)),
+                text_tail(&h.flattened_scrollback(window_id)),
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -432,12 +384,12 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
 async fn assert_submitted_stays_at(h: &Harness, window_id: &str, text: &str, allowed: usize) {
     let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
     loop {
-        let seen = submitted(h, window_id, text);
+        let seen = h.submitted_count(window_id, text);
         assert!(
             seen <= allowed,
             "the window accepted {text:?} {seen} time(s), expected {allowed}; flattened \
              scrollback tail: {:?}",
-            tail(&flattened_scrollback(h, window_id)),
+            text_tail(&h.flattened_scrollback(window_id)),
         );
         if tokio::time::Instant::now() >= deadline {
             return;
@@ -623,7 +575,7 @@ async fn approving_an_approved_plan_again_succeeds_unchanged_and_does_not_notify
     approve_ok(&mut approver, &sentinel.plan_id, sentinel.version).await;
     wait_for_submitted(&h, &owner.window_id, &expected_notice(&sentinel.plan_id)).await;
     assert_eq!(
-        submitted(&h, &owner.window_id, &notice),
+        h.submitted_count(&owner.window_id, &notice),
         1,
         "approving an approved plan again must not type its notice again"
     );
@@ -666,11 +618,11 @@ async fn approving_types_the_fixed_notice_into_the_owner_without_the_title() {
     approve_ok(&mut approver, &plan.plan_id, plan.version).await;
     wait_for_submitted(&h, &owner.window_id, &expected_notice(&plan.plan_id)).await;
 
-    let flattened = flattened_scrollback(&h, &owner.window_id);
+    let flattened = h.flattened_scrollback(&owner.window_id);
     assert!(
         !flattened.contains(title),
         "the notice must carry the plan id only, never its title: {:?}",
-        tail(&flattened),
+        text_tail(&flattened),
     );
     h.registry.terminate_all().await;
 }
@@ -723,14 +675,14 @@ async fn approving_a_plan_whose_owner_died_types_nothing_into_another_live_windo
     approve_ok(&mut approver, &sentinel.plan_id, sentinel.version).await;
     wait_for_submitted(&h, &opener.window_id, &expected_notice(&sentinel.plan_id)).await;
 
-    let flattened = flattened_scrollback(&h, &opener.window_id);
+    let flattened = h.flattened_scrollback(&opener.window_id);
     assert!(
         !flattened.contains(&format!("Plan {}", orphaned.plan_id)),
         "a plan whose owner is dead must not be announced to another window: {:?}",
-        tail(&flattened),
+        text_tail(&flattened),
     );
     assert_eq!(
-        submitted(&h, &opener.window_id, PLAN_NOTICE_MARKER),
+        h.submitted_count(&opener.window_id, PLAN_NOTICE_MARKER),
         1,
         "only the opener's own plan may be announced to it"
     );

@@ -798,6 +798,27 @@ impl Harness {
         captured[captured.len().saturating_sub(256 * 1024)..].to_vec()
     }
 
+    /// `window_id`'s scrollback with CSI and OSC sequences and line breaks
+    /// removed, so a line the terminal wrapped or redrew still reads as one
+    /// run of text.
+    pub fn flattened_scrollback(&self, window_id: &str) -> String {
+        flatten_terminal_text(&self.scrollback(window_id), OscPayload::Remove)
+    }
+
+    /// Like [`Harness::flattened_scrollback`], but an OSC sequence's payload
+    /// (a window title, for one) stays in the text; only its introducer goes.
+    pub fn flattened_scrollback_keeping_osc_payload(&self, window_id: &str) -> String {
+        flatten_terminal_text(&self.scrollback(window_id), OscPayload::Keep)
+    }
+
+    /// Times `window_id`'s `submit_child` echoed a submitted line starting
+    /// with `text`; an empty `text` counts every submitted line.
+    pub fn submitted_count(&self, window_id: &str, text: &str) -> usize {
+        self.flattened_scrollback(window_id)
+            .matches(&format!("SUBMITTED {text}"))
+            .count()
+    }
+
     /// Re-reads `window_id`'s scrollback every 50ms, handing each read and
     /// the instant it was taken to `judge`, until `judge` returns a value.
     async fn poll_scrollback<T>(
@@ -1181,6 +1202,56 @@ pub async fn wait_for_scrollback_containing(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// What [`flatten_terminal_text`] does with an OSC sequence's payload.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OscPayload {
+    Remove,
+    Keep,
+}
+
+/// `raw` decoded lossily, with CSI sequences, line breaks and (per `osc`)
+/// OSC payloads removed. Any other escape drops itself and the char after it.
+pub fn flatten_terminal_text(raw: &[u8], osc: OscPayload) -> String {
+    let raw = String::from_utf8_lossy(raw);
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') if osc == OscPayload::Remove => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' | '\n' => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The last 600 characters of `text`, for a failure message.
+pub fn text_tail(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.len().saturating_sub(600);
+    chars[start..].iter().collect()
 }
 
 pub fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {

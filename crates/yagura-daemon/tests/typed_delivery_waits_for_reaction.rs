@@ -106,29 +106,6 @@ async fn open_receiver(h: &Harness, detection: &str) -> String {
         .window_id
 }
 
-/// The receiver's screen text with escape sequences and line breaks removed.
-fn flattened(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => {
-                if chars.next() == Some('[') {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-            }
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 async fn post_chat(client: &mut Connection, body: &str) {
     send(
         client,
@@ -156,14 +133,14 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, token: &str) {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the text carrying {token:?} never reached the receiver; screen text: {}",
-            flattened(h, window_id)
+            h.flattened_scrollback_keeping_osc_payload(window_id)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
 fn submitted(h: &Harness, window_id: &str, token: &str) -> bool {
-    let text = flattened(h, window_id);
+    let text = h.flattened_scrollback_keeping_osc_payload(window_id);
     text.match_indices("SUBMITTED ").any(|(at, _)| {
         text[at..]
             .split("SUBMITTED ")
@@ -202,10 +179,11 @@ async fn the_next_typed_text_waits_for_the_window_to_react_to_the_previous_one()
     let watched_until = first_submitted_at + NOT_WRITTEN_WINDOW;
     while tokio::time::Instant::now() < watched_until {
         assert!(
-            !flattened(&h, &receiver).contains(SECOND),
+            !h.flattened_scrollback_keeping_osc_payload(&receiver)
+                .contains(SECOND),
             "the second text was written before the receiver reacted to the first; \
              screen text: {}",
-            flattened(&h, &receiver)
+            h.flattened_scrollback_keeping_osc_payload(&receiver)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

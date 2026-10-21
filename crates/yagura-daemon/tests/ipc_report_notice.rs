@@ -15,7 +15,7 @@ use std::time::Duration;
 use common::{
     Harness, SubmitDefinitionInput, VALID_TOKEN, approver_base_config, call_open_window, identify,
     open_submit_child_window_with_composer, policy, read_response, register_approver, send,
-    unique_temp_dir, wait_until_status,
+    text_tail, unique_temp_dir, wait_until_status,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -179,71 +179,18 @@ async fn drain_inbox(parent_conn: &mut Connection) -> Vec<ReceivedReport> {
 
 // --- reading what reached the parent's input ------------------------------------
 
-/// The parent's scrollback with escape sequences and line breaks removed, so
-/// a line the terminal wrapped or redrew still reads as one run of text.
-fn flattened_scrollback(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' {
-                            break;
-                        }
-                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-fn count_in(haystack: &str, needle: &str) -> usize {
-    haystack.matches(needle).count()
-}
-
-/// Lines the parent accepted as submitted, whatever they said.
-fn submitted_lines(h: &Harness, window_id: &str) -> usize {
-    count_in(&flattened_scrollback(h, window_id), "SUBMITTED ")
-}
-
-/// Times the parent accepted exactly `text` as a submitted line.
-fn submitted(h: &Harness, window_id: &str, text: &str) -> usize {
-    count_in(
-        &flattened_scrollback(h, window_id),
-        &format!("SUBMITTED {text}"),
-    )
-}
-
 async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str, times: usize) {
     let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
     loop {
-        if submitted(h, window_id, text) >= times {
+        if h.submitted_count(window_id, text) >= times {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
                 "timed out waiting for the parent to accept {text:?} {times} time(s); \
                  accepted lines so far: {}, flattened scrollback tail: {:?}",
-                submitted_lines(h, window_id),
-                tail(&flattened_scrollback(h, window_id)),
+                h.submitted_count(window_id, ""),
+                text_tail(&h.flattened_scrollback(window_id)),
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -255,24 +202,18 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str, times: usi
 async fn assert_no_more_submissions(h: &Harness, window_id: &str, allowed: usize, what: &str) {
     let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
     loop {
-        let seen = submitted_lines(h, window_id);
+        let seen = h.submitted_count(window_id, "");
         assert!(
             seen <= allowed,
             "{what}: the parent accepted {seen} line(s), expected at most {allowed}; \
              flattened scrollback tail: {:?}",
-            tail(&flattened_scrollback(h, window_id)),
+            text_tail(&h.flattened_scrollback(window_id)),
         );
         if tokio::time::Instant::now() >= deadline {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn tail(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let start = chars.len().saturating_sub(600);
-    chars[start..].iter().collect()
 }
 
 // --- One report to a ready parent ----------------------------------------------
@@ -286,7 +227,7 @@ async fn a_report_to_a_parent_that_accepts_input_types_the_notice_exactly_once()
 
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
     assert_no_more_submissions(&s.h, &s.parent, 1, "after the first notice").await;
-    assert_eq!(submitted(&s.h, &s.parent, &expected_notice(1)), 1);
+    assert_eq!(s.h.submitted_count(&s.parent, &expected_notice(1)), 1);
     // Once the notice is typed nothing is due, so the agent must not keep
     // attempting through the absence window above.
     let parent =
@@ -311,7 +252,7 @@ async fn reports_to_a_running_parent_are_announced_once_it_accepts_input_with_th
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(2), 1).await;
     assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
-    assert_eq!(submitted(&s.h, &s.parent, &expected_notice(2)), 1);
+    assert_eq!(s.h.submitted_count(&s.parent, &expected_notice(2)), 1);
     s.h.registry.terminate_all().await;
 }
 
@@ -446,12 +387,12 @@ async fn the_notice_carries_only_the_count_never_the_childs_summary_or_path() {
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
     assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
 
-    let flattened = flattened_scrollback(&s.h, &s.parent);
+    let flattened = s.h.flattened_scrollback(&s.parent);
     for needle in ["99 pending", summary_token, path_token, "xxxxxxxxxx"] {
         assert!(
             !flattened.contains(needle),
             "{needle:?} from the child's report reached the parent's input: {:?}",
-            tail(&flattened),
+            text_tail(&flattened),
         );
     }
     s.h.registry.terminate_all().await;
@@ -482,7 +423,7 @@ async fn the_notice_is_typed_without_an_approval_request_under_a_playbook_that_g
     }
 
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
-    assert_eq!(submitted_lines(&s.h, &s.parent), 1);
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
     s.h.registry.terminate_all().await;
 }
 
@@ -549,7 +490,7 @@ async fn a_notice_declined_by_foreign_text_in_the_input_is_typed_once_the_input_
 
     s.h.write_input(&s.parent, FOREIGN_DRAFT.as_bytes()).await;
     let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while !flattened_scrollback(&s.h, &s.parent).contains(FOREIGN_DRAFT) {
+    while !s.h.flattened_scrollback(&s.parent).contains(FOREIGN_DRAFT) {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the foreign draft never painted in the parent's input"

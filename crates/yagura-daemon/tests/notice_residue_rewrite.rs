@@ -122,28 +122,6 @@ probe = "{SUBMIT_CHILD_PROBE}"
     .expect("write detection definition file");
 }
 
-fn flattened(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => {
-                if chars.next() == Some('[') {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-            }
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
 struct Scene {
     h: Harness,
     parent: String,
@@ -172,7 +150,8 @@ impl Scene {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the notice agent never finished attempt {count}; screen text: {}",
-                flattened(&self.h, &self.parent)
+                self.h
+                    .flattened_scrollback_keeping_osc_payload(&self.parent)
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -236,11 +215,17 @@ async fn scene_with_first_notice_waiting(tag: &str, clear_scope: &str, style: &s
         dialog_gone,
     };
     let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while !flattened(&scene.h, &scene.parent).contains(APPROVAL_HEADING) {
+    while !scene
+        .h
+        .flattened_scrollback_keeping_osc_payload(&scene.parent)
+        .contains(APPROVAL_HEADING)
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the first attempt never met the dialog; screen text: {}",
-            flattened(&scene.h, &scene.parent)
+            scene
+                .h
+                .flattened_scrollback_keeping_osc_payload(&scene.parent)
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -266,16 +251,24 @@ async fn a_notice_written_before_the_pending_count_moved_is_submitted_as_it_was_
     let new = notice_for(2);
     let submitted = format!("SUBMITTED {old}");
     let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
-    while !flattened(&scene.h, &scene.parent).contains(&submitted) {
+    while !scene
+        .h
+        .flattened_scrollback_keeping_osc_payload(&scene.parent)
+        .contains(&submitted)
+    {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the notice the attempt had written never reached the receiver; \
              screen text: {}",
-            flattened(&scene.h, &scene.parent)
+            scene
+                .h
+                .flattened_scrollback_keeping_osc_payload(&scene.parent)
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let text = flattened(&scene.h, &scene.parent);
+    let text = scene
+        .h
+        .flattened_scrollback_keeping_osc_payload(&scene.parent);
     assert!(
         [
             format!("{old} {new}"),
@@ -317,7 +310,7 @@ async fn text_typed_behind_a_waiting_notice_is_neither_cleared_overwritten_nor_s
     scene.wait_for_attempts(1).await;
 
     scene.wait_for_attempts(2).await;
-    let text = flattened(&scene.h, &parent);
+    let text = scene.h.flattened_scrollback_keeping_osc_payload(&parent);
     // This receiver types the clear key out as `^U`, so the notice's take-back
     // shows where it reached the composer: in front of the other writer's text.
     let composer = match read_composer_now(&scene.h, &parent).await {

@@ -858,6 +858,50 @@ fn enumeration_excludes_each_unusable_file_and_warns_about_it_by_name() {
     );
 }
 
+#[test]
+fn enumeration_excludes_a_profile_whose_config_dir_names_a_file_outside_the_directory() {
+    let tree = TempDir::new("yagura-cli-test", "profile-list-config-dir");
+    let dir = tree.make_dir("profiles");
+    let with_config_dir = |file_name: &str| {
+        format!(
+            "schema = 1\ndisplay_name = \"Config Dir\"\n\n[command]\ndefault = \
+             [\"config-dir-program\"]\n\n[hooks]\nargs = [\"--plugin-dir\", \
+             \"{{hooks_config_dir}}\"]\n\n[hooks.config_dir]\n\"{file_name}\" = '{{}}'\n"
+        )
+    };
+    write_profile(&dir, "plain-name", &with_config_dir("plugin.json"));
+    let refused = [
+        ("parent-dir", ".."),
+        ("separator", "a/b"),
+        ("device", "con"),
+    ];
+    for (id, file_name) in refused {
+        write_profile(&dir, id, &with_config_dir(file_name));
+    }
+
+    let config = config_with(Some(dir), empty_lookup(), ProfileOs::host(), None);
+    let listing: ProfileListing = list_profiles(&config);
+
+    assert_eq!(
+        listed_ids(&listing),
+        strings(&["plain-name"]),
+        "a config_dir key that is not one plain file name would have the daemon write \
+         outside the settings directory; warnings were {:?}",
+        listing.warnings
+    );
+    for (id, _) in refused {
+        assert!(
+            listing
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(&format!("{id}.toml"))
+                    && warning.contains("invalid hooks table")),
+            "{id}.toml must be reported as an invalid hooks table; warnings were {:?}",
+            listing.warnings
+        );
+    }
+}
+
 /// The fixed clause `list_profiles` prints for each `ProfileParseError`
 /// variant. Matched exhaustively, with no `_` arm, so a new variant fails
 /// to compile here instead of silently falling out of this test's coverage

@@ -41,49 +41,9 @@ fn expected_report_notice(pending: usize) -> String {
 
 // --- reading what reached a window's input ------------------------------------
 
-fn flattened_scrollback(h: &Harness, window_id: &str) -> String {
-    let raw = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\u{1b}' => match chars.next() {
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' {
-                            break;
-                        }
-                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\r' | '\n' => {}
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-fn submitted_lines(h: &Harness, window_id: &str) -> usize {
-    flattened_scrollback(h, window_id)
-        .matches("SUBMITTED ")
-        .count()
-}
-
 async fn wait_for_flattened(h: &Harness, window_id: &str, needle: &str, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
-    while !flattened_scrollback(h, window_id).contains(needle) {
+    while !h.flattened_scrollback(window_id).contains(needle) {
         assert!(
             tokio::time::Instant::now() < deadline,
             "timed out waiting for {needle:?} in {window_id}"
@@ -190,7 +150,7 @@ async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_cha
     assert_eq!(entry.session().writes_recorded(), settled);
     assert_eq!(entry.notice_attempts(), before);
     assert_eq!(
-        submitted_lines(&h, &parent),
+        h.submitted_count(&parent, ""),
         0,
         "no notice may be typed over the foreign draft"
     );
@@ -299,7 +259,7 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
         "no probe may be written behind a draft the user is still typing into; the child read          {after_typing:?} after the keys"
     );
     assert_eq!(entry.notice_attempts(), before);
-    assert_eq!(submitted_lines(&h, &parent), 0);
+    assert_eq!(h.submitted_count(&parent, ""), 0);
 
     h.write_input(&parent, b"\x15").await;
     wait_for_flattened(
