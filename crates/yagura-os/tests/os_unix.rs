@@ -657,6 +657,26 @@ async fn bind_unlinks_and_rebinds_a_stale_dead_socket() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    // bind takes `<endpoint>.lock` before it binds the socket, so a sibling
+    // forked in between inherits the lock's fd without the listener's: the
+    // socket is already refusing while that fork still holds the lock.
+    let lock_path = dir.path().join("e.sock.lock");
+    loop {
+        let lock = std::fs::File::open(&lock_path).expect("the endpoint lock file must exist");
+        // SAFETY: `lock` owns this fd for the call; flock only reads it.
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&lock);
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "the dropped listener's endpoint lock was still taken after {:?}",
+                start.elapsed()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     let second_security = ipc
         .endpoint_security()
         .expect("endpoint_security should succeed");
