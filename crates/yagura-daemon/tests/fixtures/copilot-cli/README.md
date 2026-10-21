@@ -1,8 +1,18 @@
 # GitHub Copilot CLI screen fixtures
 
-Twelve real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
+Twenty-one real-session captures, used by `tests/detector_copilot_cli.rs` to exercise
 `crates/yagura-daemon/detection/copilot-cli.toml` against real screen content
 instead of hand-written approximations.
+
+Copilot draws its composer one of two ways. When the terminal answers its color
+queries (OSC 10, 11 and 4), the composer is a band of half blocks (`╻▄▄▄`, rows
+starting with `┃`, `╹▀▀▀`); when nothing answers, it sits between two rules
+(`────`, `❯`, `────`). The daemon answers those queries only after a GUI view has
+sent the window its palette, so a window the GUI shows from the start gets the
+first drawing and a window started with no view attached gets the second. The
+fixtures without a suffix are the first; the `-no-palette` ones are the second.
+The two dialogs (`trust`, `trust-wsl`, `approval-command`) read the same either
+way, so they are captured once.
 
 ## Source
 
@@ -20,16 +30,38 @@ instead of hand-written approximations.
 | 100x30-trust-wsl | 100 | 30 | WaitingApproval | 1.0.101 |
 | 100x30-running-just-submitted | 100 | 30 | Running | 1.0.101 |
 | 100x30-waiting-input-wrapped-draft | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-idle-startup-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-idle-startup-wsl-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-done-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-waiting-input-draft-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-interrupted-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
+| 100x30-running-no-palette | 100 | 30 | Running | 1.0.101 |
+| 100x30-running-esc-once-no-palette | 100 | 30 | Running | 1.0.101 |
+| 100x30-running-just-submitted-no-palette | 100 | 30 | Running | 1.0.101 |
+| 100x30-waiting-input-wrapped-draft-no-palette | 100 | 30 | WaitingInput | 1.0.101 |
 
 ## Capture conditions
 
 Captured 2026-10-21 against real GitHub Copilot CLI 1.0.101 sessions: the native
-Windows binary for every fixture except the two `-wsl` ones, which come from the
-WSL binary. A scratch tool (not part of this repository) spawned the CLI through
-the same `PtySession` / `VtScreen` primitives this crate exercises in production
-and recorded the raw PTY byte stream. Each fixture is that recording replayed
-into a fresh `VtScreen` and read through `VtScreen::bottom_lines(16)` at the
-point in the session named below, checked against the live screen each time.
+Windows binary for every fixture except the `-wsl` ones, which come from the WSL
+binary started as the bundled `wsl-copilot-cli` profile starts it
+(`wsl -e bash -lic 'exec "$0" "$@"' copilot`). A scratch tool (not part of this
+repository) spawned the CLI through `PtySession::spawn_with_command_in_env`, the
+function that starts every window's child, and recorded the raw PTY byte stream.
+Each fixture is that recording replayed into a fresh `VtScreen` and read through
+`VtScreen::bottom_lines(16)` at the point in the session named below, checked
+against the live screen each time.
+
+The child's environment is therefore the one a window's child gets: the
+launching terminal's own variables removed and `TERM=xterm-256color`,
+`COLORTERM=truecolor` set (`terminal_identity`). Inside WSL the CLI saw
+`TERM=xterm-256color` and no `COLORTERM`, as `WSLENV` names neither. The CLI was
+started with `--plugin-dir` pointing at the hooks the bundled profiles write, with
+`PATH` led by a stand-in `yagura-daemon` that exits at once; the MCP options were
+left out. For the fixtures without a suffix, the window's screen held the GUI's
+fallback dark palette (`FALLBACK_THEME` in `gui/src/terminal/terminal-colors.ts`)
+from right after the spawn, as a view attached at once leaves it; the
+`-no-palette` ones had none.
 
 | fixture | point in the session |
 |---|---|
@@ -44,7 +76,11 @@ point in the session named below, checked against the live screen each time.
 | 100x30-trust | the folder trust prompt |
 | 100x30-trust-wsl | the folder trust prompt, WSL binary |
 | 100x30-running-just-submitted | a prompt sent a moment ago, the footer still reading `esc esc edit prompt` |
-| 100x30-waiting-input-wrapped-draft | the composer holds a draft that wraps onto four rows, each continuation row indented by two spaces |
+| 100x30-waiting-input-wrapped-draft | the composer holds a draft that wraps onto four rows, each starting with `┃ ` |
+
+Each `-no-palette` fixture is taken at the same point as its counterpart; in
+`100x30-waiting-input-wrapped-draft-no-palette` each continuation row is indented
+by two spaces instead.
 
 The wrapped-draft capture keeps text only, so the test puts the cursor at the end of
 the draft, where the CLI leaves it, before judging it.
@@ -66,7 +102,7 @@ columns.
 - The working directory shown in the footer line above the composer
   (`~\AppData\Local\Temp\claude\...\workA` and the longer startup variants) is
   replaced with `~\work\project`.
-- The same footer on the WSL binary (`/mnt/c/Users/<user>/.../workW`) is
+- The same footer on the WSL binary (`/mnt/c/Users/<user>/.../workWA`) is
   replaced with `/mnt/c/Users/demo/work/project`.
 - The directory path inside the trust prompt box (two wrapped lines) is replaced
   with `C:\Users\demo\work\project` on the first line and a blank box row on the

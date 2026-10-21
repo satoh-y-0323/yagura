@@ -7,9 +7,10 @@ schema_version = 1
 name = "copilot-cli"
 # Captured against GitHub Copilot CLI 1.0.101 on 2026-10-21 at 100x30; see
 # tests/fixtures/copilot-cli/README.md for the extraction rule and fixture
-# provenance. Three lines reach the composer row, the rule under it and the
-# footer line; the approval boxes put their navigation hint second from the
-# bottom. Anything taller would bring the conversation history into reach.
+# provenance. Three lines reach the composer's last row, the border under it
+# and the footer line; the approval boxes put their navigation hint second
+# from the bottom. Anything taller would bring the conversation history into
+# reach.
 bottom_line_count = 3
 
 [debounce]
@@ -35,27 +36,31 @@ pattern = '\besc (esc (interrupt|edit prompt)|again to interrupt)\b'
 priority = 20
 region = "bottom"
 
-# The composer row, waiting for the next instruction. Its footer changes
-# with a draft (the sidebar hint disappears), so the row itself is read.
-# Past prompts in the history start with a space, and the composer stays
-# drawn while a turn runs, which the higher-priority rule covers. An
-# interrupted turn returns here: the cancellation line stays in the history
-# and is not a state of its own.
+# The border that closes the composer, right above the footer, waiting for
+# the next instruction. Copilot draws the composer as a band of half blocks
+# when the terminal answered its color queries (the daemon answers them once
+# a GUI view has sent its palette) and between two rules otherwise; this row
+# is the bottom border in either. The composer stays drawn while a turn runs,
+# which the higher-priority rule covers, and an interrupted turn returns
+# here. Past prompts in the history are indented, so they never start a line
+# with either border.
 [[rules]]
 status = "waiting_input"
-pattern = '^❯( |$)'
+pattern = '^(?:─+|╹▀+)\s*$'
 priority = 10
 region = "bottom"
 
 # Identifies the composer so the daemon can read what has been typed before
-# submitting. The marker omits the trailing space so an empty composer
-# (glyph alone) still matches. A draft that wraps continues on rows indented
-# by two spaces; reading them as the body keeps the marker row inside the
-# bottom window however tall the draft is.
+# submitting. In the half-block drawing the band's top row is the marker and
+# every body row, wrapped ones included, starts with `┃ `; the `❯` row of the
+# rule drawing is a marker as well, so a one-row draft reads in either. A
+# draft that wraps in the rule drawing continues on rows indented by two
+# spaces, which this prefix does not name: that composer reads as not
+# observed, and the daemon does not write into it.
 [composer]
-marker = '^❯'
-separator = " "
-continuation_prefix = "  "
+marker = '^(?:╻▄+$|❯ ?)'
+separator = ""
+continuation_prefix = "┃ "
 
 # A body and its submit key written back to back left the body unsent, so the
 # submit waits for the default delay. Ctrl+U empties the whole composer,

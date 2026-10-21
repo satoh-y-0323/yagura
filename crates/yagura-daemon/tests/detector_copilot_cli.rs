@@ -30,6 +30,24 @@ const FIXTURE_100X30_RUNNING_JUST_SUBMITTED: &str =
     include_str!("fixtures/copilot-cli/100x30-running-just-submitted.txt");
 const FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT: &str =
     include_str!("fixtures/copilot-cli/100x30-waiting-input-wrapped-draft.txt");
+const FIXTURE_100X30_IDLE_STARTUP_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-idle-startup-no-palette.txt");
+const FIXTURE_100X30_IDLE_STARTUP_WSL_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-idle-startup-wsl-no-palette.txt");
+const FIXTURE_100X30_DONE_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-done-no-palette.txt");
+const FIXTURE_100X30_WAITING_INPUT_DRAFT_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-waiting-input-draft-no-palette.txt");
+const FIXTURE_100X30_INTERRUPTED_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-interrupted-no-palette.txt");
+const FIXTURE_100X30_RUNNING_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-running-no-palette.txt");
+const FIXTURE_100X30_RUNNING_ESC_ONCE_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-running-esc-once-no-palette.txt");
+const FIXTURE_100X30_RUNNING_JUST_SUBMITTED_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-running-just-submitted-no-palette.txt");
+const FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT_NO_PALETTE: &str =
+    include_str!("fixtures/copilot-cli/100x30-waiting-input-wrapped-draft-no-palette.txt");
 
 /// The real fixtures read from the screen text alone, with their recorded geometry and
 /// expected verdict, per `tests/fixtures/copilot-cli/README.md`.
@@ -111,6 +129,69 @@ const CASES: &[(&str, &str, u16, u16, WindowStatus)] = &[
         30,
         WindowStatus::Running,
     ),
+    (
+        "100x30-idle-startup-no-palette",
+        FIXTURE_100X30_IDLE_STARTUP_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-idle-startup-wsl-no-palette",
+        FIXTURE_100X30_IDLE_STARTUP_WSL_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-done-no-palette",
+        FIXTURE_100X30_DONE_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-waiting-input-draft-no-palette",
+        FIXTURE_100X30_WAITING_INPUT_DRAFT_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-interrupted-no-palette",
+        FIXTURE_100X30_INTERRUPTED_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "100x30-running-no-palette",
+        FIXTURE_100X30_RUNNING_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "100x30-running-esc-once-no-palette",
+        FIXTURE_100X30_RUNNING_ESC_ONCE_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "100x30-running-just-submitted-no-palette",
+        FIXTURE_100X30_RUNNING_JUST_SUBMITTED_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::Running,
+    ),
+    (
+        "100x30-waiting-input-wrapped-draft-no-palette",
+        FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT_NO_PALETTE,
+        100,
+        30,
+        WindowStatus::WaitingInput,
+    ),
 ];
 
 /// A draft that wraps pushes the composer's marker row out of the bottom window, so the
@@ -124,7 +205,7 @@ async fn copilot_cli_definition_reads_a_wrapped_draft_through_the_composer() {
     let lines: Vec<&str> = FIXTURE_100X30_WAITING_INPUT_WRAPPED_DRAFT.lines().collect();
     let closing_rule = lines
         .iter()
-        .rposition(|line| line.starts_with('─'))
+        .rposition(|line| line.starts_with('╹'))
         .expect("the composer is closed by a rule row");
     let last_body_row = closing_rule - 1;
     let last_body_col = lines[last_body_row].trim_end().chars().count();
