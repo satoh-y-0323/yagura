@@ -177,7 +177,9 @@ Each row shows the command it is about to run and the CLI's current state:
 
 **What yagura runs and writes.** yagura runs each CLI's own `mcp add` and `mcp remove` -- through
 the profile's own launch command, so a WSL row reaches the CLI inside the distribution, with the
-bridge's path converted by `wslpath` -- in your home directory, so no project's `.mcp.json` is
+bridge's path converted by `wslpath` (the profile's
+[`[host_paths]`](../profiles/README.md#host-paths)) -- in your home directory, so no project's
+`.mcp.json` is
 picked up. Claude Code is registered with `--scope user`. yagura writes three things itself,
 changing nothing else in the file and keeping a symlinked file a symlink and its permissions as
 they were:

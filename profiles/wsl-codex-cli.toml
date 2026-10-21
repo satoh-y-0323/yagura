@@ -75,11 +75,17 @@ wake = "command"
 wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
 launch_prompt = ["{prompt}"]
 
+# A Windows path is unreadable from the WSL CLI as it is, so every path the
+# daemon hands it -- a launch's settings file, the bridge and the daemon a
+# registration writes -- is converted with WSL's own tool first.
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same
-# `codex` the login shell's `PATH` would find. `bridge_probe` and the file
-# tools run as their own standalone `wsl` invocations instead, because they
-# have nothing to do with launching the CLI itself. `codex mcp add` rewrites
+# `codex` the login shell's `PATH` would find. The path conversion above
+# and the file tools run as their own standalone `wsl` invocations instead,
+# because they have nothing to do with launching the CLI itself. `codex mcp add` rewrites
 # the whole `[mcp_servers.<name>]` table, dropping any hand-written key --
 # including `tool_timeout_sec` -- so it is written back once as a
 # settings-file edit right after add.
@@ -88,7 +94,6 @@ group = "WSL"
 add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
 env_forward = { name = "WSLENV", separator = ":" }
 
 [mcp_registration.status]

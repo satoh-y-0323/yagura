@@ -425,13 +425,15 @@ pub struct DaemonConfig {
 
     /// How many `[mcp_registration]` row state reads may run at once, within
     /// a single listing; also how many window launches may be reading their
-    /// CLI's registrations at once ([`DaemonConfig::mcp_listing_timeout`]).
-    /// Defaults to 2.
+    /// CLI's registrations, or converting the paths they inject, at once
+    /// ([`DaemonConfig::mcp_listing_timeout`]). Defaults to 2.
     pub mcp_registration_status_max_concurrent: usize,
 
     /// How long a window launch may spend, waiting for a slot and then running
     /// its CLI's registration listing, before it opens without turning the other
-    /// instances' registrations off. Shorter than
+    /// instances' registrations off; and, likewise, waiting for a slot and then
+    /// converting the paths it injects (a profile's `[host_paths]`), before it
+    /// opens without the injections those paths belong to. Shorter than
     /// `mcp_registration_timeout` because the window waits on it. Defaults to
     /// 10 seconds, which covers a WSL distribution's cold start.
     pub mcp_listing_timeout: Duration,

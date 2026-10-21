@@ -232,18 +232,20 @@ fn plain_profile_source(display_name: &str) -> String {
     )
 }
 
-/// A foreign-environment (WSL) row: `bridge_probe` converts the bridge path,
+/// A foreign-environment (WSL) row: `[host_paths]` converts the bridge path,
 /// and a `toml_set` edit is carried out through `files.read` /
 /// `files.replace` rather than a direct host read/write.
 fn wsl_files_toml_set_table(home: &str, toml_set_file: &str) -> String {
     let stub = mcp_cli_stub_toml_literal();
     format!(
-        "[mcp_registration]\n\
+        "[host_paths]\n\
+         convert = [{stub}, \"probe\", \"{{path}}\"]\n\
+         \n\
+         [mcp_registration]\n\
          group = \"WSL\"\n\
          add = [\"mcp\", \"add\", \"{{server}}\", \"{{env_args}}\", \"--\", \"{{bridge}}\"]\n\
          remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\
          env_arg = [\"--env\", \"{{env}}\"]\n\
-         bridge_probe = [{stub}, \"probe\", \"{{bridge}}\"]\n\
          files = {{ read = [{stub}, \"file-read\", '{home}/{{file}}'], replace = [{stub}, \
          \"file-replace\", '{home}/{{file}}'], absent_exit = 3 }}\n\
          \n\

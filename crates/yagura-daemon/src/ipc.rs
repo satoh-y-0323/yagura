@@ -368,9 +368,16 @@ struct HandoffRequest {
 struct PlannedOpen {
     request: OpenWindowRequest,
     extra_env: Vec<(String, String)>,
-    /// The profile's `[mcp]` and `[hooks]` tables rendered for this launch,
-    /// in the order they are appended to the argv. A table that is absent,
-    /// or cannot be rendered, contributes nothing.
+    /// The profile's `[mcp]` and `[hooks]` tables prepared for this launch,
+    /// in the order they are appended to the argv, rendered right before
+    /// spawn once the paths they name are as the CLI sees them. A table that
+    /// is absent, or cannot be prepared, contributes nothing.
+    profile_injections: Vec<crate::profile::UnrenderedInjection>,
+    /// How the paths `profile_injections` name are converted for the CLI;
+    /// `None` when the profile hands them over unchanged.
+    host_paths: Option<mcp_registration::PathConversion>,
+    /// The injections that follow the profile's own (a launch prompt), in
+    /// argv order.
     injections: Vec<CliInjection>,
     /// What the `[hooks]` injection depends on, checked right before spawn:
     /// `None` when it depends on nothing.
@@ -2404,7 +2411,7 @@ impl IpcServer {
         );
         if let (Some(spec), Some(bridge)) = (launch.mcp.as_ref(), self.config.mcp_bridge.as_deref())
         {
-            injections.extend(crate::profile::prepare_mcp_injection(
+            injections.extend(crate::profile::plan_mcp_injection(
                 spec,
                 target.server(),
                 bridge,
@@ -2414,8 +2421,21 @@ impl IpcServer {
         // Independent of the bridge: the hooks reach the daemon through the
         // window's own environment.
         if let Some(spec) = launch.hooks.as_ref() {
-            injections.extend(crate::profile::prepare_hooks_injection(spec, config_dir));
+            injections.extend(crate::profile::plan_hooks_injection(spec, config_dir));
         }
+        let host_paths =
+            launch
+                .host_paths
+                .clone()
+                .map(|host_paths| mcp_registration::PathConversion {
+                    host_paths,
+                    env: launch
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                    permits: Arc::clone(&self.mcp_launch_listings),
+                });
         let hooks = if launch.hooks.is_some() {
             HooksRoute::Injection
         } else {
@@ -2513,7 +2533,9 @@ impl IpcServer {
                 detection: launch.detection,
             },
             extra_env: launch.env.into_iter().collect(),
-            injections,
+            profile_injections: injections,
+            host_paths,
+            injections: Vec::new(),
             hooks_gate,
             hooks,
             delivery: launch.delivery,
@@ -5518,12 +5540,22 @@ async fn open_planned(
         };
         if let Some(reason) = reason {
             planned
-                .injections
-                .retain(|injection| injection.kind != crate::window::InjectionKind::Hooks);
+                .profile_injections
+                .retain(|injection| injection.kind() != crate::window::InjectionKind::Hooks);
             planned.hooks = HooksRoute::LeftOut;
             hooks_left_out = Some((gate.profile, reason));
         }
     }
+    // A table whose path cannot be converted is left out here; a `[hooks]`
+    // table left out this way settles as left out at spawn.
+    let mut injections = mcp_registration::render_profile_injections(
+        config,
+        std::mem::take(&mut planned.profile_injections),
+        planned.host_paths.take(),
+    )
+    .await;
+    injections.append(&mut planned.injections);
+    planned.injections = injections;
     if let Some(scan) = planned.bridge_scan.take()
         && let Some(disable) = mcp_registration::disable_other_bridges(config, scan).await
     {

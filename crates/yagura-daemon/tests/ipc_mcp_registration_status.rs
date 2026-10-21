@@ -212,12 +212,14 @@ fn host_file_table() -> String {
 fn probed_lines_table() -> String {
     let stub = mcp_cli_stub_toml_literal();
     format!(
-        "[mcp_registration]\n\
+        "[host_paths]\n\
+         convert = [{stub}, \"probe\", \"{{path}}\"]\n\
+         \n\
+         [mcp_registration]\n\
          group = \"WSL\"\n\
          add = [\"mcp\", \"add\", \"{{server}}\", \"{{env_args}}\", \"--\", \"{{bridge}}\"]\n\
          remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\
          env_arg = [\"--env\", \"{{env}}\"]\n\
-         bridge_probe = [{stub}, \"probe\", \"{{bridge}}\"]\n\
          env_forward = {{ name = \"WSLENV\", separator = \":\" }}\n\
          \n\
          [mcp_registration.status]\n\
@@ -235,12 +237,14 @@ fn probed_lines_table() -> String {
 fn probed_file_table(home: &str) -> String {
     let stub = mcp_cli_stub_toml_literal();
     format!(
-        "[mcp_registration]\n\
+        "[host_paths]\n\
+         convert = [{stub}, \"probe\", \"{{path}}\"]\n\
+         \n\
+         [mcp_registration]\n\
          group = \"WSL\"\n\
          add = [\"mcp\", \"add\", \"{{server}}\", \"{{env_args}}\", \"--\", \"{{bridge}}\"]\n\
          remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\
          env_arg = [\"--env\", \"{{env}}\"]\n\
-         bridge_probe = [{stub}, \"probe\", \"{{bridge}}\"]\n\
          files = {{ read = [{stub}, \"file-read\", '{home}/{{file}}'], absent_exit = 3 }}\n\
          \n\
          [mcp_registration.status]\n\

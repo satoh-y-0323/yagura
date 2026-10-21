@@ -41,6 +41,12 @@ max_chars = 10000
 wake = "none"
 launch_prompt = ["-i", "{prompt}"]
 
+# A Windows path is unreadable from the WSL CLI as it is, so every path the
+# daemon hands it -- a launch's settings file, the bridge and the daemon a
+# registration writes -- is converted with WSL's own tool first.
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
 # agy keeps its registrations in a settings file, not behind a status
 # command, so the daemon reads that file through the read tool below rather
 # than running a status command.
@@ -49,7 +55,6 @@ group = "WSL"
 add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
 env_forward = { name = "WSLENV", separator = ":" }
 
 [mcp_registration.status]

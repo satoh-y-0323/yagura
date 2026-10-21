@@ -484,6 +484,97 @@ async fn a_window_launched_with_only_an_mcp_injection_does_not_expect_status_rep
 }
 
 // =============================================================================
+// A profile's [host_paths] converts the paths a hooks injection hands the CLI
+// =============================================================================
+
+const CONVERTED_HOOKS_PATH: &str = "/converted/hooks-settings.json";
+
+/// Top-level `[host_paths]` whose converter is the `mcp_cli_stub` `probe`
+/// subcommand, plus the `[env]` that makes it print `CONVERTED_HOOKS_PATH`
+/// and exit with `exit_code`.
+fn converting_tables(exit_code: i32) -> String {
+    let stub = common::mcp_cli_stub_path();
+    format!(
+        "\n[host_paths]\nconvert = ['{}', \"probe\", \"{{path}}\"]\n\n\
+         [env]\nMCP_CLI_STUB_PROBE_OUTPUT = \"{CONVERTED_HOOKS_PATH}\"\n\
+         MCP_CLI_STUB_PROBE_EXIT_CODE = \"{exit_code}\"\n\n\
+         [delivery]\n",
+        stub.display()
+    )
+}
+
+#[tokio::test]
+async fn a_host_paths_converter_replaces_the_daemon_side_hooks_path_in_the_argv() {
+    let tree = TempDir::new("yagura-cli-test", "hooks-host-paths-convert");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let tables = format!("{}{}", hooks_file_table(HOOKS_JSON), converting_tables(0));
+    write_profile(
+        &profiles_dir,
+        "converted",
+        &argv_probe_profile_source("Converted", &tables),
+    );
+    let h = Harness::start(
+        "hooks-host-paths-convert",
+        daemon_config(profiles_dir, Some(&config_dir), None),
+    )
+    .await;
+    let mut client = h.connect().await;
+
+    let window_id = open_from_profile(&mut client, "converted", None).await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
+        .await;
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
+
+    assert_eq!(
+        sentinel(&text, "argv[1]").as_deref(),
+        Some("--settings"),
+        "{text:?}"
+    );
+    assert_eq!(
+        sentinel(&text, "argv[2]").as_deref(),
+        Some(CONVERTED_HOOKS_PATH),
+        "the argv must carry the converter's path, not the daemon-side path; scrollback: {text:?}"
+    );
+    assert!(
+        h.registry.get(&window_id).unwrap().delivers(),
+        "a window whose hooks reached the CLI takes part in delivery"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_host_paths_converter_leaves_hooks_out_and_the_window_neither_reports_nor_delivers()
+ {
+    let tree = TempDir::new("yagura-cli-test", "hooks-host-paths-fail");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let tables = format!("{}{}", hooks_file_table(HOOKS_JSON), converting_tables(1));
+    write_profile(&profiles_dir, "unconverted", &long_lived_profile(&tables));
+    let h = Harness::start(
+        "hooks-host-paths-fail",
+        daemon_config(profiles_dir, Some(&config_dir), None),
+    )
+    .await;
+    let mut client = h.connect().await;
+
+    let window_id = open_from_profile(&mut client, "unconverted", None).await;
+
+    let entry = h.registry.get(&window_id).unwrap();
+    assert!(
+        entry.has_detector(),
+        "the window must still be running, or it expects nothing whatever was injected"
+    );
+    assert!(
+        !entry.reports_expected(),
+        "the hooks were left out, so no status reports are expected"
+    );
+    assert!(
+        !entry.delivers(),
+        "a window whose hooks never reached the CLI must not take part in delivery"
+    );
+}
+
+// =============================================================================
 // A command-interpreter shim drops only what it would reinterpret
 // =============================================================================
 

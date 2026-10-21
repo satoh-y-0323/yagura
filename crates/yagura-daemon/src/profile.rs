@@ -40,6 +40,7 @@ use crate::child_env::is_reserved_env_name;
 use crate::config::DaemonConfig;
 use crate::detector::definition::is_valid_detection_name;
 use crate::detector::layers::{DetectionLayers, LayerError};
+use crate::host_paths::{HostPaths, HostPathsError, RawHostPaths, parse_host_paths};
 use crate::profile_delivery::{DeliveryError, ProfileDelivery, WakeMode, parse_delivery};
 use crate::window::{
     CliInjection, InjectedConfigDir, InjectedConfigFile, InjectionKind, RequestedCwd,
@@ -303,6 +304,10 @@ pub struct Profile {
     /// has no such table: the daemon hands this profile's windows nothing
     /// without typing it into the composer.
     pub delivery: Option<ProfileDelivery>,
+    /// The top-level `[host_paths]` table, already validated: how a
+    /// daemon-side path becomes the path this profile's CLI sees. `None`
+    /// means paths are handed over unchanged.
+    pub host_paths: Option<HostPaths>,
     /// Values that were dropped or ignored while staying valid overall
     /// (a relative/`~` `cwd`, a reserved environment key). Empty when
     /// nothing needed to be reported.
@@ -406,6 +411,10 @@ pub struct ProfileLaunch {
     /// its CLI for the bridge registrations of other instances and turns
     /// them off. `None` when the profile declares none.
     pub bridge_listing: Option<crate::mcp_registration::ListSpec>,
+    /// The profile's `[host_paths]` table: how the daemon-side paths an
+    /// injection names are converted before they reach the argv. `None` when
+    /// the profile declares none.
+    pub host_paths: Option<HostPaths>,
     /// The profile's `[delivery]` table, as declared. What it contributes to a
     /// spawn argv (a launch prompt) is rendered by
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
@@ -514,6 +523,9 @@ pub enum ProfileParseError {
     /// the whole profile, the same rule every other table follows.
     #[error("invalid mcp registration table")]
     InvalidMcpRegistration(#[source] crate::mcp_registration::McpRegistrationError),
+    /// A `[host_paths]` table breaks its rule ([`HostPathsError`]).
+    #[error("invalid host paths table")]
+    InvalidHostPaths(#[source] HostPathsError),
 }
 
 /// Why a `[model]` / `[effort]` table was rejected. Carried only as the
@@ -707,6 +719,8 @@ struct RawProfile {
     /// `Display`.
     #[serde(default)]
     delivery: Option<toml::Value>,
+    #[serde(default)]
+    host_paths: Option<RawHostPaths>,
 }
 
 /// A `[mcp]` or `[hooks]` table before validation. `args` is `Option` for the
@@ -900,8 +914,11 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     };
     let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp)?;
     let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks)?;
-    let mcp_registration = crate::mcp_registration::parse_mcp_registration(raw.mcp_registration)
-        .map_err(ProfileParseError::InvalidMcpRegistration)?;
+    let host_paths =
+        parse_host_paths(raw.host_paths).map_err(ProfileParseError::InvalidHostPaths)?;
+    let mcp_registration =
+        crate::mcp_registration::parse_mcp_registration(raw.mcp_registration, host_paths.as_ref())
+            .map_err(ProfileParseError::InvalidMcpRegistration)?;
     let delivery = parse_delivery(raw.delivery).map_err(ProfileParseError::InvalidDelivery)?;
 
     let mut warnings = Vec::new();
@@ -948,6 +965,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         hooks,
         mcp_registration,
         delivery,
+        host_paths,
         warnings,
     })
 }
@@ -1340,7 +1358,7 @@ pub fn render_hooks_args(spec: &InjectionSpec, paths: InjectedPaths<'_>) -> Vec<
 /// [`crate::mcp_registration::RegistrationTarget::server`]): its settings
 /// file and directory, when it has them, have `{server}` substituted and are
 /// named after the substituted content under `config_dir`, and the rendered
-/// `args` name them ([`render_mcp_args`]).
+/// `args` name them ([`render_mcp_args`]) as the daemon sees them.
 ///
 /// `server` goes into JSON keys and bare TOML keys unquoted, which holds
 /// because an instance id is limited to `[a-z0-9-]`
@@ -1356,28 +1374,7 @@ pub fn prepare_mcp_injection(
     bridge_path: &Path,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    let settings = InjectionSettings {
-        file: spec
-            .config_file
-            .as_deref()
-            .map(|content| substitute_server(content, server)),
-        dir: spec.config_dir.as_ref().map(|files| {
-            files
-                .iter()
-                .map(|(name, content)| (name.clone(), substitute_server(content, server)))
-                .collect()
-        }),
-    };
-    prepare_injection(TableKind::Mcp, settings, config_dir, |paths| {
-        let args = render_mcp_args(spec, server, bridge_path, paths);
-        if args.is_none() {
-            tracing::warn!(
-                "the MCP bridge path cannot be rendered as a TOML literal string; the window \
-                 opens without MCP injection"
-            );
-        }
-        args
-    })
+    plan_mcp_injection(spec, server, bridge_path, config_dir)?.render(Path::to_path_buf)
 }
 
 /// Renders a `[hooks]` table into the injection one launch carries, the same
@@ -1392,13 +1389,50 @@ pub fn prepare_hooks_injection(
     spec: &InjectionSpec,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
+    plan_hooks_injection(spec, config_dir)?.render(Path::to_path_buf)
+}
+
+/// [`prepare_mcp_injection`] with its `args` left unrendered, so the
+/// daemon-side paths they name can be converted first
+/// ([`UnrenderedInjection::host_paths`]).
+#[must_use]
+pub fn plan_mcp_injection(
+    spec: &InjectionSpec,
+    server: &str,
+    bridge_path: &Path,
+    config_dir: Option<&Path>,
+) -> Option<UnrenderedInjection> {
+    let settings = InjectionSettings {
+        file: spec
+            .config_file
+            .as_deref()
+            .map(|content| substitute_server(content, server)),
+        dir: spec.config_dir.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|(name, content)| (name.clone(), substitute_server(content, server)))
+                .collect()
+        }),
+    };
+    let mcp = McpRendering {
+        server: server.to_string(),
+        bridge: bridge_path.to_path_buf(),
+    };
+    plan_injection(TableKind::Mcp, spec, Some(mcp), settings, config_dir)
+}
+
+/// [`prepare_hooks_injection`] with its `args` left unrendered, as
+/// [`plan_mcp_injection`] leaves an `[mcp]` table's.
+#[must_use]
+pub fn plan_hooks_injection(
+    spec: &InjectionSpec,
+    config_dir: Option<&Path>,
+) -> Option<UnrenderedInjection> {
     let settings = InjectionSettings {
         file: spec.config_file.clone(),
         dir: spec.config_dir.clone(),
     };
-    prepare_injection(TableKind::Hooks, settings, config_dir, |paths| {
-        Some(render_hooks_args(spec, paths))
-    })
+    plan_injection(TableKind::Hooks, spec, None, settings, config_dir)
 }
 
 /// The settings one launch writes for a table, after any substitution.
@@ -1407,52 +1441,128 @@ struct InjectionSettings {
     dir: Option<BTreeMap<String, String>>,
 }
 
-/// The part of preparing an injection both kinds share: the settings file
-/// and directory in `settings` (each named after its content under
-/// `config_dir`) and the rendered `args` that name them. `render` turns
-/// their paths into the argv elements and logs its own refusal.
-fn prepare_injection(
+/// What an `[mcp]` table's `args` are rendered with besides paths.
+#[derive(Debug, Clone)]
+struct McpRendering {
+    server: String,
+    bridge: PathBuf,
+}
+
+/// An `[mcp]` or `[hooks]` table prepared for one launch: its settings file
+/// and directory are named, but its `args` are not rendered yet, because the
+/// paths they name may first have to be turned into the paths the CLI sees
+/// (the profile's `[host_paths]`).
+#[derive(Debug, Clone)]
+pub struct UnrenderedInjection {
     kind: TableKind,
+    spec: InjectionSpec,
+    mcp: Option<McpRendering>,
+    config_file: Option<InjectedConfigFile>,
+    config_dir: Option<InjectedConfigDir>,
+}
+
+impl UnrenderedInjection {
+    /// The table this injection comes from.
+    #[must_use]
+    pub fn kind(&self) -> InjectionKind {
+        self.kind.injection_kind()
+    }
+
+    /// The daemon-side paths the rendered `args` would name: the settings
+    /// file, the settings directory and the bridge, each only when an
+    /// element spells its placeholder. Empty when the `args` name no path.
+    #[must_use]
+    pub fn host_paths(&self) -> Vec<PathBuf> {
+        let named = |placeholder: &str| self.spec.args.iter().any(|arg| arg.contains(placeholder));
+        let mut paths = Vec::new();
+        if let Some(file) = &self.config_file
+            && named(config_file_placeholder(self.kind))
+        {
+            paths.push(file.path());
+        }
+        if let Some(dir) = &self.config_dir
+            && named(config_dir_placeholder(self.kind))
+        {
+            paths.push(dir.path());
+        }
+        if let Some(mcp) = &self.mcp
+            && named(MCP_BRIDGE_TOML_PLACEHOLDER)
+        {
+            paths.push(mcp.bridge.clone());
+        }
+        paths
+    }
+
+    /// Renders the `args`, naming each daemon-side path as `seen_as` turns
+    /// it. `None` -- with a warning -- when an `[mcp]` table's bridge path
+    /// cannot be rendered.
+    #[must_use]
+    pub fn render(self, seen_as: impl Fn(&Path) -> PathBuf) -> Option<CliInjection> {
+        let file_path = self.config_file.as_ref().map(|file| seen_as(&file.path()));
+        let dir_path = self.config_dir.as_ref().map(|dir| seen_as(&dir.path()));
+        let paths = InjectedPaths {
+            config_file: file_path.as_deref(),
+            config_dir: dir_path.as_deref(),
+        };
+        let args = match &self.mcp {
+            Some(mcp) => {
+                let bridge = seen_as(&mcp.bridge);
+                let args = render_mcp_args(&self.spec, &mcp.server, &bridge, paths);
+                if args.is_none() {
+                    tracing::warn!(
+                        "the MCP bridge path cannot be rendered as a TOML literal string; the \
+                         window opens without MCP injection"
+                    );
+                }
+                args?
+            }
+            None => render_hooks_args(&self.spec, paths),
+        };
+        Some(CliInjection {
+            kind: self.kind.injection_kind(),
+            args,
+            config_file: self.config_file,
+            config_dir: self.config_dir,
+        })
+    }
+}
+
+/// The part of planning an injection both kinds share: the settings file
+/// and directory in `settings`, each named after its content under
+/// `config_dir`.
+fn plan_injection(
+    kind: TableKind,
+    spec: &InjectionSpec,
+    mcp: Option<McpRendering>,
     settings: InjectionSettings,
     config_dir: Option<&Path>,
-    render: impl FnOnce(InjectedPaths<'_>) -> Option<Vec<String>>,
-) -> Option<CliInjection> {
+) -> Option<UnrenderedInjection> {
     let InjectionSettings { file, dir } = settings;
-    if file.is_none() && dir.is_none() {
-        let args = render(InjectedPaths::default())?;
-        return Some(CliInjection {
-            kind: kind.injection_kind(),
-            args,
-            config_file: None,
-            config_dir: None,
-        });
-    }
-    let Some(parent) = config_dir else {
+    if (file.is_some() || dir.is_some()) && config_dir.is_none() {
         tracing::warn!(
             "no settings directory is configured; the window opens without {} injection",
             kind.injection_kind().label()
         );
         return None;
-    };
-    let config_file = file.map(|content| InjectedConfigFile {
-        dir: parent.to_path_buf(),
-        file_name: config_file_name(kind, &content),
-        content,
-    });
-    let config_dir = dir.map(|files| InjectedConfigDir {
-        parent: parent.to_path_buf(),
-        dir_name: config_dir_name(kind, &files),
-        files,
-    });
-    let file_path = config_file.as_ref().map(InjectedConfigFile::path);
-    let dir_path = config_dir.as_ref().map(InjectedConfigDir::path);
-    let args = render(InjectedPaths {
-        config_file: file_path.as_deref(),
-        config_dir: dir_path.as_deref(),
-    })?;
-    Some(CliInjection {
-        kind: kind.injection_kind(),
-        args,
+    }
+    let config_file = file
+        .zip(config_dir)
+        .map(|(content, parent)| InjectedConfigFile {
+            dir: parent.to_path_buf(),
+            file_name: config_file_name(kind, &content),
+            content,
+        });
+    let config_dir = dir
+        .zip(config_dir)
+        .map(|(files, parent)| InjectedConfigDir {
+            parent: parent.to_path_buf(),
+            dir_name: config_dir_name(kind, &files),
+            files,
+        });
+    Some(UnrenderedInjection {
+        kind,
+        spec: spec.clone(),
+        mcp,
         config_file,
         config_dir,
     })
@@ -2141,6 +2251,7 @@ pub fn resolve_launch(
         hooks: profile.hooks,
         hooks_registration,
         bridge_listing,
+        host_paths: profile.host_paths,
         delivery: profile.delivery,
     })
 }

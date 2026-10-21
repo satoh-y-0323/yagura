@@ -3196,8 +3196,8 @@ pub fn mcp_cli_stub_profile_source(display_name: &str, fixture: &McpCliStubFixtu
 }
 
 /// The `mcp_cli_stub` fixture's path as a TOML literal string, for a
-/// registration table whose `bridge_probe` or `files` argv runs the fixture
-/// directly (those argv are standalone, not appended to the launch argv).
+/// profile whose `[host_paths]` or `files` argv runs the fixture directly
+/// (those argv are standalone, not appended to the launch argv).
 ///
 /// # Panics
 ///

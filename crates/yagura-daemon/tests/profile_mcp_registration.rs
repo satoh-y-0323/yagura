@@ -63,12 +63,14 @@ command = "/mcpServers/{server}/command"
 /// A row inside another environment: the bridge path comes from a probe,
 /// files are read and written through that environment's own tools, and the
 /// instance variable's name is forwarded.
-const FOREIGN_TABLE: &str = r#"[mcp_registration]
+const FOREIGN_TABLE: &str = r#"[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+[mcp_registration]
 group = "WSL"
 add = ["mcp", "add", "{server}", "{env_args}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env", "{env}"]
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
 env_forward = { name = "WSLENV", separator = ":" }
 files = { read = ["wsl", "-e", "sh", "-c", "[ -e \"$HOME/$1\" ] || exit 3; cat \"$HOME/$1\"", "sh", "{file}"], replace = ["wsl", "-e", "sh", "-c", "cat > \"$HOME/$1\"", "sh", "{file}"], absent_exit = 3 }
 
@@ -222,10 +224,12 @@ fn a_foreign_environment_table_keeps_its_group_probe_and_file_tools() {
 fn a_foreign_file_table_may_have_a_read_tool_without_a_replace_tool() {
     let table = FILE_TABLE.replace(
         "env_arg = [\"--env\", \"{env}\"]\n",
-        "env_arg = [\"--env\", \"{env}\"]\ngroup = \"WSL\"\nbridge_probe = [\"wsl\", \"-e\", \
-         \"wslpath\", \"-u\", \"{bridge}\"]\nenv_forward = { name = \"WSLENV\", separator = \
-         \":\" }\nfiles = { read = [\"wsl\", \"-e\", \"sh\", \"-c\", \"cat \\\"$HOME/$1\\\"\", \
-         \"sh\", \"{file}\"], absent_exit = 3 }\n",
+        "env_arg = [\"--env\", \"{env}\"]\ngroup = \"WSL\"\nenv_forward = { name = \
+         \"WSLENV\", separator = \":\" }\nfiles = { read = [\"wsl\", \"-e\", \"sh\", \"-c\", \
+         \"cat \\\"$HOME/$1\\\"\", \"sh\", \"{file}\"], absent_exit = 3 }\n",
+    );
+    let table = format!(
+        "[host_paths]\nconvert = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{path}}\"]\n\n{table}"
     );
     let spec = spec_of("foreign-file-row", &table);
     assert!(spec.render_file_read(".neutral/mcp_config.json").is_some());

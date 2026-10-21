@@ -16,6 +16,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use yagura_os::program::{self, HostOs, Platform};
 
+use crate::host_paths::HostPaths;
 use crate::model_choices::{COMMAND_NOT_FOUND_STATUS, output_lines, parse_json_document};
 use crate::profile;
 use crate::toml_set::TableEdit;
@@ -411,7 +412,7 @@ pub struct McpRegistrationSpec {
     remove: Vec<String>,
     env_arg: Option<Vec<String>>,
     env_forward: Option<EnvForward>,
-    bridge_probe: Option<Vec<String>>,
+    host_paths: Option<HostPaths>,
     files: Option<FilesSpec>,
     status: StatusSpec,
     toml_set: Option<TomlSetSpec>,
@@ -456,12 +457,12 @@ impl McpRegistrationSpec {
         self.toml_set.as_ref().is_some_and(TomlSetSpec::has_entries) || self.json_entry.is_some()
     }
 
-    /// Whether this row converts `{bridge}` through an environment-specific
-    /// tool ([`McpRegistrationSpec::render_probe`]) rather than using the
-    /// bridge path directly.
+    /// Whether this row's profile converts daemon-side paths through its
+    /// `[host_paths]` tool ([`McpRegistrationSpec::render_probe`]) rather
+    /// than using them directly.
     #[must_use]
-    pub fn has_bridge_probe(&self) -> bool {
-        self.bridge_probe.is_some()
+    pub fn converts_paths(&self) -> bool {
+        self.host_paths.is_some()
     }
 
     /// Renders the command that registers `target` with `bridge`.
@@ -509,14 +510,14 @@ impl McpRegistrationSpec {
         }
     }
 
-    /// Renders the command that turns `bridge` into this environment's own
-    /// path to it, `None` when the row has no such tool (it uses `bridge`
-    /// directly).
+    /// Renders the command that turns the daemon-side `path` into this
+    /// environment's own path to it (the profile's `[host_paths]`), `None`
+    /// when the profile has no such tool (it uses `path` directly).
     #[must_use]
-    pub fn render_probe(&self, bridge: &str) -> Option<Vec<String>> {
-        self.bridge_probe
+    pub fn render_probe(&self, path: &str) -> Option<Vec<String>> {
+        self.host_paths
             .as_ref()
-            .map(|args| substitute_all(args, "{bridge}", bridge))
+            .map(|host_paths| host_paths.render(path))
     }
 
     /// Renders the command that reads `file`'s content, `None` when the row
@@ -718,11 +719,11 @@ pub fn probe_output_unusable() -> DerivedStatus {
 /// would register) for `target`.
 ///
 /// `platform` decides how the registered command path is compared to
-/// `expected_bridge` when the row has no `bridge_probe` (Windows compares
-/// case-insensitively and normalizes `/` to `\`; every other host compares
-/// exactly). A row with `bridge_probe` always compares exactly, on every
-/// host: its probe already rendered the path the way that environment
-/// itself sees it.
+/// `expected_bridge` when the row's profile has no `[host_paths]` (Windows
+/// compares case-insensitively and normalizes `/` to `\`; every other host
+/// compares exactly). A row whose profile converts paths always compares
+/// exactly, on every host: the conversion already rendered the path the way
+/// that environment itself sees it.
 #[must_use]
 pub fn derive_status(
     spec: &McpRegistrationSpec,
@@ -838,7 +839,7 @@ fn derive_from_output(
     is_file_source: bool,
 ) -> DerivedStatus {
     let status = &spec.status;
-    let has_probe = spec.bridge_probe.is_some();
+    let has_probe = spec.converts_paths();
     let Ok(text) = std::str::from_utf8(stdout) else {
         return unknown(REASON_UNREADABLE_OUTPUT);
     };
@@ -986,7 +987,7 @@ pub fn json_value_matches(expected: &toml::Value, actual: &JsonValue) -> bool {
 /// The most bytes [`validate_probe_output`] accepts.
 const PROBE_OUTPUT_MAX_BYTES: usize = 4 * 1024;
 
-/// Validates a `bridge_probe` command's standard output as a usable path:
+/// Validates a `[host_paths]` conversion's standard output as a usable path:
 /// exactly one line (its trailing newline, and a preceding `\r`, are
 /// dropped), starting with `/`, holding no control character and no more
 /// than [`PROBE_OUTPUT_MAX_BYTES`]. `None` when any of that does not hold,
@@ -1077,8 +1078,6 @@ struct RawMcpRegistrationTable {
     #[serde(default)]
     env_arg: Option<Vec<String>>,
     #[serde(default)]
-    bridge_probe: Option<Vec<String>>,
-    #[serde(default)]
     env_forward: Option<RawEnvForward>,
     #[serde(default)]
     files: Option<RawFiles>,
@@ -1168,7 +1167,9 @@ struct RawEntries {
 }
 
 /// Parses `raw` (the profile's own `[mcp_registration]` table, still
-/// untyped) into a [`McpRegistrationSpec`]. `None` in, `None` out.
+/// untyped) into a [`McpRegistrationSpec`] that converts daemon-side paths
+/// through `host_paths` (the profile's own `[host_paths]`). `None` in, `None`
+/// out.
 ///
 /// # Errors
 ///
@@ -1177,15 +1178,19 @@ struct RawEntries {
 /// module enforces itself (see [`McpRegistrationError::InvalidShape`]).
 pub(crate) fn parse_mcp_registration(
     raw: Option<toml::Value>,
+    host_paths: Option<&HostPaths>,
 ) -> Result<Option<McpRegistrationSpec>, McpRegistrationError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
     let table: RawMcpRegistrationTable = raw.try_into()?;
-    build_spec(table).map(Some)
+    build_spec(table, host_paths.cloned()).map(Some)
 }
 
-fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRegistrationError> {
+fn build_spec(
+    raw: RawMcpRegistrationTable,
+    host_paths: Option<HostPaths>,
+) -> Result<McpRegistrationSpec, McpRegistrationError> {
     let invalid = || McpRegistrationError::InvalidShape;
 
     if let Some(group) = &raw.group {
@@ -1196,9 +1201,6 @@ fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRe
     validate_args_placeholders(&raw.remove, &["{server}"])?;
     if let Some(env_arg) = &raw.env_arg {
         validate_args_placeholders(env_arg, &["{env}"])?;
-    }
-    if let Some(bridge_probe) = &raw.bridge_probe {
-        validate_args_placeholders(bridge_probe, &["{bridge}"])?;
     }
 
     let files = match raw.files {
@@ -1255,7 +1257,7 @@ fn build_spec(raw: RawMcpRegistrationTable) -> Result<McpRegistrationSpec, McpRe
             name: forward.name,
             separator: forward.separator,
         }),
-        bridge_probe: raw.bridge_probe,
+        host_paths,
         files,
         status,
         toml_set,

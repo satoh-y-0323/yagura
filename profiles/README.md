@@ -167,6 +167,11 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 # output = "plain"
 # wake = "none"
 # launch_prompt = ["{prompt}"]
+
+[host_paths]                   # optional table; how a path the daemon hands
+                                # the CLI becomes the path the CLI's own
+                                # environment sees. See "Host paths" below
+# convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 ```
 
 The identifier is the file name without its `.toml` extension, and must
@@ -181,8 +186,9 @@ argv element under `[command]` is empty or contains a NUL byte; a
 `[model]` / `[effort]` table breaks one of the rules under
 [Launch options](#launch-options); an `[mcp]` or `[hooks]` table breaks
 one of the rules under [MCP injection](#mcp-injection) and
-[Hooks injection](#hooks-injection); or a `[delivery]` table breaks a rule
-under [Delivery](#delivery). A profile stays valid, with the offending
+[Hooks injection](#hooks-injection); a `[delivery]` table breaks a rule
+under [Delivery](#delivery); or a `[host_paths]` table breaks a rule under
+[Host paths](#host-paths). A profile stays valid, with the offending
 value dropped and a warning attached, when: `cwd` is relative or starts with
 `~`; or an `[env]` key starts with `YAGURA_` (case-insensitively; see
 below).
@@ -1020,6 +1026,47 @@ url = "https://example.com/docs"
 
 To add a profile for a new CLI, work out which doors and wake it supports first; the procedure is in [Adding a CLI](../docs/adding-a-cli.md).
 
+## Host paths
+
+A CLI that runs in another environment than the daemon -- a WSL
+distribution started from Windows -- cannot read the daemon's own paths as
+they are. A profile's optional top-level `[host_paths]` table names the
+command that turns one of them into the path that environment sees, and
+every path the daemon hands the CLI goes through it: the settings file and
+directory an injection names (`{mcp_config_file}`, `{mcp_config_dir}`,
+`{hooks_config_file}`, `{hooks_config_dir}`), the bridge `{bridge_toml}`
+names, and, for [MCP registration](#mcp-registration), the bridge `add`
+registers (`{bridge}`) and the daemon a `json_entry` names (`{daemon}`).
+Without the table, paths are handed over unchanged.
+
+```toml
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+```
+
+- `convert` is required: a non-empty argv, at least one element of which
+  contains `{path}`, the daemon-side path. No other placeholder is accepted,
+  and neither is any other key; either fails the table, and the profile is
+  left out of the listing with a warning.
+- It runs as its own standalone command -- not after the profile's launch
+  argv -- with the profile's `[env]`, in the home directory. Its standard
+  output must be exactly one line that starts with `/`, holds no control
+  character and is at most 4 KiB; anything else counts as a failure.
+- At a window's launch it runs only when an injection names one of the paths
+  above, once per path, before the argv is put together. The wait for a free
+  slot and the conversions together are limited to 10 seconds, the same
+  slots and limit [the registration listing](#mcp-registration) uses. When a
+  conversion fails or times out, the daemon logs a warning and opens the
+  window without the table that names the path: a window left without its
+  `[hooks]` this way is not expected to report its status and takes no part
+  in [Delivery](#delivery). Nothing is cached; the next launch converts
+  again.
+- For a registration row it runs before `add` and before a state read, under
+  the registration's own time limit. The converted bridge is compared with
+  the CLI's record exactly, on every host, because the conversion already
+  spelled it the way that environment does; a conversion that fails leaves
+  the row **not installed** or **unknown**.
+
 ## MCP registration
 
 A profile's optional `[mcp_registration]` table tells the daemon how to
@@ -1038,9 +1085,6 @@ add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]      # optional; required whenever a named
                                 # instance's environment has to reach `add`
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
-                                # optional; converts the bridge's path into
-                                # this environment's own before `add` uses it
 env_forward = { name = "WSLENV", separator = ":" }
                                 # optional; names the variable a named
                                 # instance's environment must also be listed
@@ -1104,7 +1148,8 @@ Five placeholders are substituted inside `[mcp_registration]`'s argv, always
 *within* an element so none of them can add, split or reorder one:
 `{server}` (the registration name -- `yagura`, or `yagura-<instance>` for a
 named instance), `{bridge}` (the bridge's path, or this environment's own
-path to it once `bridge_probe` converts it), `{env_args}` (only as a whole
+path to it once the profile's [`[host_paths]`](#host-paths) converts it),
+`{env_args}` (only as a whole
 `add` element; expands to zero or more environment pairs, `env_arg` applied
 to each), `{env}` (only inside `env_arg`; one `NAME=value` pair), and
 `{file}` (only inside `files.read` / `files.replace`; a `status.file`,
@@ -1131,8 +1176,8 @@ hooks only once something is written into its own files (see
   home-relative and `entries` names each one. An entry's name may carry
   `{server}`; its value is any TOML value, written as JSON, whose strings may
   carry `{daemon}`. `{daemon}` is replaced by the absolute path of the
-  daemon's copy in its report folder -- converted by `bridge_probe` when the
-  row has one -- and a path containing whitespace, `'`, `` ` ``, `$`, or a
+  daemon's copy in its report folder -- converted by the profile's
+  `[host_paths]` when it has one -- and a path containing whitespace, `'`, `` ` ``, `$`, or a
   character the command interpreter would act on is not written at all, since
   a hook command carries it unquoted. The rest of the file is kept byte for
   byte, a missing file is created holding only these entries, and a file that
@@ -1153,9 +1198,9 @@ command -- so a WSL profile's registration reaches the same CLI its own
 always the executable itself**, the same assumption
 [Launch options](#launch-options) already makes to append `model` /
 `effort`; a `[mcp_registration]` table adds nothing that would move it.
-`bridge_probe`, `files.read` and `files.replace` are different: they run as
-their own standalone commands, because they have nothing to do with
-launching the CLI.
+The [`[host_paths]`](#host-paths) conversion, `files.read` and
+`files.replace` are different: they run as their own standalone commands,
+because they have nothing to do with launching the CLI.
 
 **Reading a row's state.** `status` names either a command to run (`args`,
 read the same way a window's launch is) or a settings file to read (`file`,
@@ -1168,7 +1213,8 @@ holds another value in it -- `differs_in` names which, giving owned entries
 as `under` joined by `.` or as the `json_entry` names), **not registered**
 (`absent` matched the command's output, the settings file does not exist, or
 a `files.read` tool exited with `absent_exit`), **not installed** (the CLI
-itself, or its `bridge_probe`, could not be found or run), or **unknown**
+itself, or its `[host_paths]` conversion, could not be found or run), or
+**unknown**
 (the output could not be read as the declared format -- never guessed as
 registered or not).
 
@@ -1220,6 +1266,18 @@ becomes `$0` (the CLI's name) and every later element -- launch options and
 the MCP injection -- reaches the CLI as one argv element each, never split
 or expanded. The distribution needs `bash`, and the Linux build of the CLI
 installed inside it; see [docs/wsl.md](../docs/wsl.md).
+
+Each of them also converts the paths the daemon hands its CLI with WSL's own
+tool ([Host paths](#host-paths)):
+
+```toml
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+```
+
+Their `[mcp]` and `[hooks]` tables, where they have them, are written inline
+and name no path, so
+opening one of their windows runs no conversion; their registration rows do.
 
 ## Approval-skip flags
 

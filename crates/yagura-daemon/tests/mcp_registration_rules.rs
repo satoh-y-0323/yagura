@@ -64,12 +64,14 @@ format = "json"
 command = "/mcpServers/{server}/command"
 "#;
 
-const FOREIGN_TABLE: &str = r#"[mcp_registration]
+const FOREIGN_TABLE: &str = r#"[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+[mcp_registration]
 group = "WSL"
 add = ["mcp", "add", "{server}", "{env_args}", "--", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env", "{env}"]
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
 env_forward = { name = "WSLENV", separator = ":" }
 files = { read = ["wsl", "-e", "sh", "-c", "[ -e \"$HOME/$1\" ] || exit 3; cat \"$HOME/$1\"", "sh", "{file}"], replace = ["wsl", "-e", "sh", "-c", "cat > \"$HOME/$1\"", "sh", "{file}"], absent_exit = 3 }
 
@@ -80,12 +82,14 @@ command = "/transport/command"
 absent = "No MCP server named"
 "#;
 
-const FOREIGN_FILE_TABLE: &str = r#"[mcp_registration]
+const FOREIGN_FILE_TABLE: &str = r#"[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+[mcp_registration]
 group = "WSL"
 add = ["mcp", "add", "{server}", "{env_args}", "{bridge}"]
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env", "{env}"]
-bridge_probe = ["wsl", "-e", "wslpath", "-u", "{bridge}"]
 env_forward = { name = "WSLENV", separator = ":" }
 files = { read = ["wsl", "-e", "sh", "-c", "[ -e \"$HOME/$1\" ] || exit 3; cat \"$HOME/$1\"", "sh", "{file}"], absent_exit = 3 }
 

@@ -216,7 +216,7 @@ fn host_rows_have_no_group_no_probe_and_no_file_tools() {
             "{id} runs on the host, so it belongs to the host's own group"
         );
         assert!(
-            !spec.has_bridge_probe(),
+            !spec.converts_paths(),
             "{id} runs on the host, which reaches the bridge by its own path"
         );
         assert_eq!(

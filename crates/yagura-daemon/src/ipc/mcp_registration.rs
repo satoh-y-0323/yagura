@@ -7,8 +7,9 @@
 //! registration child is started through [`pty::spawn_one_shot`],
 //! the same one-shot capture a window's model-choices listing uses.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -21,6 +22,7 @@ use yagura_protocol::{
 
 use crate::config::{DaemonConfig, REPORT_EXE_NAME};
 use crate::control::RequestOrigin;
+use crate::host_paths::HostPaths;
 use crate::json_entry;
 use crate::mcp_registration;
 use crate::profile;
@@ -183,11 +185,7 @@ fn build_rows(
         // A probed row's bridge is not known before its probe runs, so the
         // listing keeps the `{bridge}` placeholder even when this daemon's
         // own bridge is known.
-        let bridge_for_listing = if spec.has_bridge_probe() {
-            None
-        } else {
-            bridge
-        };
+        let bridge_for_listing = if spec.converts_paths() { None } else { bridge };
         let (add, remove) = row_commands(&spec, &target, &entry.command, bridge_for_listing);
         let toml_set = spec
             .toml_set()
@@ -349,7 +347,7 @@ fn hook_entries_preview(
     spec: &mcp_registration::McpRegistrationSpec,
     target: &mcp_registration::RegistrationTarget,
 ) -> Vec<McpRegistrationHookEntry> {
-    let daemon = if spec.has_bridge_probe() {
+    let daemon = if spec.converts_paths() {
         None
     } else {
         hook_daemon_path(config).ok().flatten()
@@ -661,7 +659,7 @@ fn build_status_info(
     }
 }
 
-/// What running a row's `bridge_probe` (when it has one) came back with.
+/// What converting a path through a profile's `[host_paths]` came back with.
 enum ProbeOutcome {
     /// The row has no probe; `bridge` is used as given.
     NoProbe,
@@ -677,14 +675,15 @@ enum ProbeOutcome {
     OutputTooLarge,
 }
 
-/// Runs `source`'s `bridge_probe` against `bridge`, when it has one.
+/// Converts `bridge` through `source`'s `[host_paths]`, when its profile has
+/// one.
 async fn resolve_probe(config: &DaemonConfig, source: &RowSource, bridge: &str) -> ProbeOutcome {
     probe_path(config, &source.spec, &source.env, bridge).await
 }
 
-/// Runs `spec`'s `bridge_probe` against `path`, when it has one: the same
-/// conversion serves every daemon-side path a row writes into its CLI's
-/// environment.
+/// Converts `path` through `spec`'s `[host_paths]`, when its profile has one:
+/// the same conversion serves every daemon-side path a row writes into its
+/// CLI's environment.
 async fn probe_path(
     config: &DaemonConfig,
     spec: &mcp_registration::McpRegistrationSpec,
@@ -694,7 +693,19 @@ async fn probe_path(
     let Some(argv) = spec.render_probe(path) else {
         return ProbeOutcome::NoProbe;
     };
-    match run_captured(config, argv, env, None).await {
+    run_conversion(config, argv, env, config.mcp_registration_timeout).await
+}
+
+/// Runs one `[host_paths]` conversion command and validates what it printed
+/// ([`mcp_registration::validate_probe_output`]): the one way both a
+/// registration and a launch turn a daemon-side path into the CLI's own.
+async fn run_conversion(
+    config: &DaemonConfig,
+    argv: Vec<String>,
+    env: &[(OsString, OsString)],
+    timeout: std::time::Duration,
+) -> ProbeOutcome {
+    match run_captured_within(config, argv, env, None, timeout).await {
         SpawnOutcome::Refused(reason) => ProbeOutcome::Refused(reason),
         SpawnOutcome::SpawnFailed => ProbeOutcome::NotInstalled,
         SpawnOutcome::Exited { code, stdout, .. } => {
@@ -993,6 +1004,109 @@ fn warn_left_on(reason: &str) {
         "could not read the CLI's registrations; the window opens without turning the other \
          instances' bridge registrations off"
     );
+}
+
+/// How a window launch converts the daemon-side paths its injections name
+/// ([`render_profile_injections`]).
+pub(super) struct PathConversion {
+    /// The profile's `[host_paths]` table.
+    pub(super) host_paths: HostPaths,
+    pub(super) env: Vec<(OsString, OsString)>,
+    /// Bounds how many launches run a conversion or a listing at once.
+    pub(super) permits: Arc<Semaphore>,
+}
+
+/// Renders a launch's `[mcp]` and `[hooks]` injections, in order, with every
+/// daemon-side path they name converted through `conversion` first. Without
+/// a conversion, or when no injection names a path, nothing is run.
+///
+/// The wait for a slot and the conversions together stay within
+/// `config.mcp_listing_timeout`. A table whose path cannot be converted is
+/// left out of the launch with a warning; the window still opens.
+pub(super) async fn render_profile_injections(
+    config: &DaemonConfig,
+    injections: Vec<profile::UnrenderedInjection>,
+    conversion: Option<PathConversion>,
+) -> Vec<CliInjection> {
+    let wanted: BTreeSet<PathBuf> = injections
+        .iter()
+        .flat_map(profile::UnrenderedInjection::host_paths)
+        .collect();
+    let Some(conversion) = conversion.filter(|_| !wanted.is_empty()) else {
+        return injections
+            .into_iter()
+            .filter_map(|injection| injection.render(Path::to_path_buf))
+            .collect();
+    };
+    let converted = convert_paths(config, &conversion, wanted).await;
+    injections
+        .into_iter()
+        .filter_map(|injection| {
+            let failure = injection
+                .host_paths()
+                .iter()
+                .find_map(|path| converted.get(path).and_then(|seen| seen.as_ref().err()))
+                .copied();
+            if let Some(reason) = failure {
+                tracing::warn!(
+                    table = injection.kind().label(),
+                    reason,
+                    "a path could not be converted for the CLI; the window opens without this \
+                     injection"
+                );
+                return None;
+            }
+            injection.render(|path| match converted.get(path) {
+                Some(Ok(seen)) => PathBuf::from(seen),
+                _ => path.to_path_buf(),
+            })
+        })
+        .collect()
+}
+
+/// Converts each of `paths` through `conversion`, one child at a time under
+/// one launch slot, keeping each one's converted path or the fixed reason it
+/// could not be had.
+async fn convert_paths(
+    config: &DaemonConfig,
+    conversion: &PathConversion,
+    paths: BTreeSet<PathBuf>,
+) -> BTreeMap<PathBuf, Result<String, &'static str>> {
+    let deadline = Instant::now() + config.mcp_listing_timeout;
+    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, conversion.permits.acquire()).await
+    else {
+        return paths
+            .into_iter()
+            .map(|path| (path, Err("no slot to convert it in")))
+            .collect();
+    };
+    let mut converted = BTreeMap::new();
+    for path in paths {
+        let seen = match path.to_str() {
+            Some(text) => {
+                let argv = conversion.host_paths.render(text);
+                let within = deadline.saturating_duration_since(Instant::now());
+                conversion_result(run_conversion(config, argv, &conversion.env, within).await)
+            }
+            None => Err("the path is not valid UTF-8"),
+        };
+        converted.insert(path, seen);
+    }
+    converted
+}
+
+/// A conversion's converted path, or the fixed reason it has none.
+fn conversion_result(outcome: ProbeOutcome) -> Result<String, &'static str> {
+    match outcome {
+        ProbeOutcome::Bridge(path) => Ok(path),
+        ProbeOutcome::Refused(reason) => Err(reason),
+        ProbeOutcome::NoProbe | ProbeOutcome::NotInstalled => {
+            Err("the conversion could not be run, or failed")
+        }
+        ProbeOutcome::Unusable => Err("the conversion returned an unusable path"),
+        ProbeOutcome::TimedOut => Err("the conversion timed out"),
+        ProbeOutcome::OutputTooLarge => Err("the conversion's output was larger than accepted"),
+    }
 }
 
 // ---------------------------------------------------------------------

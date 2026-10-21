@@ -61,6 +61,12 @@ unexpanded. This needs `bash` in the distribution, and the **Linux** build of th
 inside it: the Windows build on the host is not what runs. See
 [profiles/README.md](../profiles/README.md#wsl-profiles).
 
+A Windows path is not readable from the Linux CLI as it is, so each of the three profiles also has
+a top-level `[host_paths]` table that converts every path the daemon hands the CLI with
+`wsl -e wslpath -u` -- the bridge and the daemon a registration writes, and a settings file or
+directory a launch injection names. Their own launch injections name no path, so opening one of
+their windows runs no conversion. See [Host paths](../profiles/README.md#host-paths).
+
 Because the shell is both a login and an interactive one, `~/.profile` and `~/.bashrc` run inside
 the window's process tree before the CLI replaces bash, and that tree's environment already carries
 the window's identity token (`YAGURA_STATUS_TOKEN`), so anything those files start can identify

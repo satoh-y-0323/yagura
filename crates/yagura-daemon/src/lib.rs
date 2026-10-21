@@ -8,6 +8,7 @@ pub mod control;
 pub mod detector;
 pub mod handoff;
 pub mod health;
+pub mod host_paths;
 pub mod inbox;
 pub mod input;
 pub mod input_encode;

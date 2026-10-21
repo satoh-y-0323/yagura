@@ -156,7 +156,7 @@ fn str_array(items: &[&str]) -> toml::Value {
 }
 
 /// The shipped `profile` with only the parts that would reach the real CLI
-/// replaced: the launch command, and for the WSL row the probe and file
+/// replaced: the launch command, and for the WSL row the path conversion and file
 /// tools. `alive_ms` keeps every stub call (and so a launched window) alive
 /// that long before it does anything.
 fn fixture_profile(profile: &str, layout: &Layout, alive_ms: Option<&str>) -> String {
@@ -171,14 +171,13 @@ fn fixture_profile(profile: &str, layout: &Layout, alive_ms: Option<&str>) -> St
     root.insert("command".into(), toml::Value::Table(command));
 
     if profile == WSL_PROFILE {
+        let mut host_paths = toml::Table::new();
+        host_paths.insert("convert".into(), str_array(&[stub, "probe", "{path}"]));
+        root.insert("host_paths".into(), toml::Value::Table(host_paths));
         let registration = root
             .get_mut("mcp_registration")
             .and_then(toml::Value::as_table_mut)
             .expect("the shipped profile carries a registration table");
-        registration.insert(
-            "bridge_probe".into(),
-            str_array(&[stub, "probe", "{bridge}"]),
-        );
         let files = registration
             .get_mut("files")
             .and_then(toml::Value::as_table_mut)

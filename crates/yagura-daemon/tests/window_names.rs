@@ -635,15 +635,15 @@ async fn a_plan_task_title_with_a_double_quote_is_refused() {
     h.registry.terminate_all().await;
 }
 
-/// The `[mcp_registration]` table of a row inside another environment, whose `group`
-/// heading is `{group}`.
+/// The `[host_paths]` and `[mcp_registration]` tables of a row inside another
+/// environment, whose `group` heading is `{group}`.
 fn foreign_registration_table(group: &str) -> String {
     format!(
-        "[mcp_registration]\ngroup = \"{}\"\n\
+        "[host_paths]\nconvert = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{path}}\"]\n\n\
+         [mcp_registration]\ngroup = \"{}\"\n\
          add = [\"mcp\", \"add\", \"{{server}}\", \"{{env_args}}\", \"--\", \"{{bridge}}\"]\n\
          remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\
-         env_arg = [\"--env\", \"{{env}}\"]\n\
-         bridge_probe = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{bridge}}\"]\n\n\
+         env_arg = [\"--env\", \"{{env}}\"]\n\n\
          [mcp_registration.status]\n\
          args = [\"mcp\", \"get\", \"{{server}}\", \"--json\"]\n\
          format = \"json\"\ncommand = \"/transport/command\"\n",
