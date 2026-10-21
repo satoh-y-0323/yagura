@@ -451,6 +451,7 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "chat_message".to_string(),
             "chat_room".to_string(),
             "chat_seq".to_string(),
+            "default_palettes".to_string(),
             "plan".to_string(),
             "plan_task".to_string(),
             "plan_task_dep".to_string(),
@@ -458,8 +459,9 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "snapshot_meta".to_string(),
             "snapshot_windows".to_string(),
         ],
-        "migration 007 (the plan module) adds four new tables and migration 014 the chat \
-         numbering table on top of the six the chat and session-store migrations already left \
+        "migration 007 (the plan module) adds four new tables, migration 014 the chat numbering \
+         table and migration 015 the default palettes table on top of the six the chat and \
+         session-store migrations already left \
          in place; nothing after the fourth migration changes any of those first six object \
          names"
     );

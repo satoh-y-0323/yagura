@@ -7,10 +7,11 @@ instead of hand-written approximations.
 Copilot draws its composer one of two ways. When the terminal answers its color
 queries (OSC 10, 11 and 4), the composer is a band of half blocks (`╻▄▄▄`, rows
 starting with `┃`, `╹▀▀▀`); when nothing answers, it sits between two rules
-(`────`, `❯`, `────`). The daemon answers those queries only after a GUI view has
-sent the window its palette, so a window the GUI shows from the start gets the
-first drawing and a window started with no view attached gets the second. The
-fixtures without a suffix are the first; the `-no-palette` ones are the second.
+(`────`, `❯`, `────`). The daemon answers those queries from the moment a window
+opens, with the colors the GUI last sent or the built-in dark ones, so a yagura
+window gets the first drawing; the second was captured while the daemon answered
+them only after a GUI view had sent the window its palette. The fixtures without
+a suffix are the first; the `-no-palette` ones are the second.
 The two dialogs (`trust`, `trust-wsl`, `approval-command`) read the same either
 way, so they are captured once.
 

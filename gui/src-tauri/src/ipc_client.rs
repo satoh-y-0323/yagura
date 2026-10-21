@@ -22,9 +22,9 @@ use tokio::io::WriteHalf;
 use tokio::sync::{Mutex, oneshot};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
-    ApprovalRequest, ClientMessage, LaunchOptionAlias, McpRegistrationAction, OnNameTaken,
-    PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize,
-    WindowInfo,
+    ApprovalRequest, ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction,
+    OnNameTaken, PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, TaskAssignment,
+    TerminalSize, WindowInfo,
 };
 
 use crate::commands::{
@@ -350,7 +350,19 @@ pub struct IpcClient {
     /// daemon forgets it with the connection, and a window that was hidden
     /// would otherwise be built frames for again.
     last_visible: Mutex<Option<bool>>,
+    /// The default palettes last asked for, sent again on every new
+    /// connection: a daemon that started again without a store would
+    /// otherwise answer with its built-in ones.
+    default_palettes: Mutex<SentDefaultPalettes>,
     role: Role,
+}
+
+/// [`IpcClient::set_default_palettes`]'s memory: the palettes, and the
+/// connection `generation` they were last sent on.
+#[derive(Debug, Default)]
+struct SentDefaultPalettes {
+    latest: Option<DefaultPalettes>,
+    sent_on: Option<u64>,
 }
 
 impl Default for IpcClient {
@@ -367,6 +379,7 @@ impl Default for IpcClient {
             window_id: Mutex::new(None),
             last_size: Mutex::new(None),
             last_visible: Mutex::new(None),
+            default_palettes: Mutex::new(SentDefaultPalettes::default()),
             role: Role::Control,
         }
     }
@@ -1207,6 +1220,57 @@ impl IpcClient {
         self.send(message).await
     }
 
+    /// Gives the daemon the palettes a window it opens from now on answers
+    /// color queries with, unless this connection already sent the same ones.
+    /// They are remembered and sent again whenever a new connection is made,
+    /// so a daemon that is not reachable now, or not yet, still gets them.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when a connected daemon could not be written to.
+    /// A daemon too old to take them is not sent them, which is not an error.
+    pub async fn set_default_palettes(&self, palettes: DefaultPalettes) -> Result<(), IpcError> {
+        self.ensure_protocol_revision().await;
+        let mut sent = self.default_palettes.lock().await;
+        let generation = self.generation.load(Ordering::SeqCst);
+        if sent.latest.as_ref() == Some(&palettes) && sent.sent_on == Some(generation) {
+            return Ok(());
+        }
+        sent.latest = Some(palettes.clone());
+        sent.sent_on = None;
+        match self
+            .send(&ClientMessage::SetDefaultPalettes(palettes))
+            .await
+        {
+            Ok(()) => {
+                sent.sent_on = Some(generation);
+                Ok(())
+            }
+            Err(IpcError::NotConnected | IpcError::Unsupported { .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Sends the remembered default palettes on a connection that has not
+    /// had them yet.
+    async fn resend_default_palettes(&self) {
+        let mut sent = self.default_palettes.lock().await;
+        let generation = self.generation.load(Ordering::SeqCst);
+        let Some(latest) = sent.latest.clone() else {
+            return;
+        };
+        if sent.sent_on == Some(generation) {
+            return;
+        }
+        // A failed write is the next disconnect's business.
+        if self
+            .send(&ClientMessage::SetDefaultPalettes(latest))
+            .await
+            .is_ok()
+        {
+            sent.sent_on = Some(generation);
+        }
+    }
+
     /// Reads the text selected in the window this connection is attached to.
     ///
     /// # Errors
@@ -1529,6 +1593,7 @@ impl IpcClient {
         drop(slot);
         self.ensure_approver_registered(app).await;
         self.ensure_protocol_revision().await;
+        self.resend_default_palettes().await;
         Ok(())
     }
 
@@ -1728,6 +1793,7 @@ impl IpcClient {
         }
         self.ensure_approver_registered(app).await;
         self.ensure_protocol_revision().await;
+        self.resend_default_palettes().await;
 
         // A control connection has no attachment to restore.
         let Some(window_id) = window_id else {

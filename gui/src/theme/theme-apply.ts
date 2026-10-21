@@ -1,4 +1,4 @@
-import { buildTheme, type TerminalTheme } from '../components/terminal-theme';
+import { themeOfPalette, type TerminalTheme } from '../components/terminal-theme';
 import type { Palette } from './palette';
 import { resolveWindowPaletteFromState } from './theme-resolve';
 import type { ThemeState, ThemeStore } from './theme-store';
@@ -29,7 +29,7 @@ export function applyPalette(target: PaletteTarget, palette: Palette): void {
  * there rather than being decided again here.
  */
 export function applyTerminalTheme(target: TerminalThemeTarget, palette: Palette): void {
-  target.setTheme(buildTheme((token) => palette[token.replace(/^--/, '')] ?? ''));
+  target.setTheme(themeOfPalette(palette));
 }
 
 /**

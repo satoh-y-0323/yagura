@@ -22,9 +22,9 @@ use tokio::sync::{
 };
 use yagura_os::program;
 use yagura_protocol::{
-    DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, RoomRef, STATUS_TOKEN_ENV,
-    UnknownReason, WINDOW_ID_ENV, WINDOW_NAME_MAX_BYTES, WindowInfo, WindowNameError, WindowStatus,
-    validate_window_name, validate_window_vendor,
+    DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, Palette, RoomRef,
+    STATUS_TOKEN_ENV, UnknownReason, WINDOW_ID_ENV, WINDOW_NAME_MAX_BYTES, WindowInfo,
+    WindowNameError, WindowStatus, validate_window_name, validate_window_vendor,
 };
 
 use crate::config::DaemonConfig;
@@ -4026,6 +4026,9 @@ pub struct WindowRegistry {
     shutting_down: AtomicBool,
     /// Raised on registration, on a window reaching `Exited` and on a rename.
     participation: Arc<ParticipationSignal>,
+    /// The palettes a window takes when it opens: see
+    /// [`WindowRegistry::set_default_palettes`].
+    default_palettes: Mutex<DefaultPalettes>,
 }
 
 impl WindowRegistry {
@@ -4075,7 +4078,39 @@ impl WindowRegistry {
             opening: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             participation: Arc::default(),
+            default_palettes: Mutex::new(DefaultPalettes {
+                app: yagura_protocol::built_in_dark_palette(),
+                vendors: BTreeMap::new(),
+            }),
         }
+    }
+
+    /// Replaces, as a whole, the palettes a window opened from now on answers
+    /// its color queries with until a view sends it its own: the one of its
+    /// vendor, else `app`. Windows already open keep theirs. Returns whether
+    /// the palettes changed.
+    pub fn set_default_palettes(&self, palettes: DefaultPalettes) -> bool {
+        let mut current = lock_recover(&self.default_palettes);
+        if *current == palettes {
+            return false;
+        }
+        *current = palettes;
+        true
+    }
+
+    /// The palettes [`WindowRegistry::set_default_palettes`] last set; the
+    /// built-in dark palette for every window before that.
+    #[must_use]
+    pub fn default_palettes(&self) -> DefaultPalettes {
+        lock_recover(&self.default_palettes).clone()
+    }
+
+    fn default_palette_for(&self, vendor: Option<&str>) -> Palette {
+        let palettes = lock_recover(&self.default_palettes);
+        vendor
+            .and_then(|vendor| palettes.vendors.get(vendor))
+            .unwrap_or(&palettes.app)
+            .clone()
     }
 
     /// Opens a new window: validates the request, enforces the dual
@@ -4213,6 +4248,7 @@ impl WindowRegistry {
         // path, and only once registration (if any) has already happened.
         let _opening = self.begin_opening(&window_id);
 
+        let palette = self.default_palette_for(vendor.as_deref());
         let (session, hooks_injected) = self
             .spawn_pty_for_window(
                 &command,
@@ -4221,6 +4257,7 @@ impl WindowRegistry {
                 &window_id,
                 extra_profile_env,
                 &prepared,
+                palette,
             )
             .await?;
         let session = Arc::new(session);
@@ -4446,7 +4483,8 @@ impl WindowRegistry {
     /// the child environment if the token is verifiable, the MCP bridge path
     /// when one was resolved, plus `extra_profile_env` (a launch profile's
     /// own `[env]` table; empty for an `OpenWindow` request). `injections`
-    /// are appended to `argv` in order for this spawn only.
+    /// are appended to `argv` in order for this spawn only. The window's
+    /// terminal answers color queries with `palette` from the start.
     ///
     /// This is the registry's one spawn call site, and the only place
     /// `argv[0]` is resolved to a concrete executable through `yagura-os`
@@ -4455,6 +4493,8 @@ impl WindowRegistry {
     /// nothing (`Resolution::NotFound`) is passed through unchanged and left
     /// to fail on its own (`SpawnFailed`), preserving the existing
     /// `OpenWindow` contract for a program that simply is not there.
+    // Each argument is a distinct part of one spawn; grouping them would only rename them.
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_pty_for_window(
         &self,
         argv: &[String],
@@ -4463,6 +4503,7 @@ impl WindowRegistry {
         window_id: &str,
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
+        palette: Palette,
     ) -> Result<(PtySession, bool), WindowOpenError> {
         let platform = self.config.host_os.platform();
         let predicate = crate::profile::is_executable_predicate(&self.config);
@@ -4503,10 +4544,11 @@ impl WindowRegistry {
         let spawn_argv = program::into_spawn_argv(&resolution, &full_argv, platform);
         let spawn_argv: Vec<&str> = spawn_argv.iter().map(String::as_str).collect();
 
-        let session = PtySession::spawn_with_command_in_env(
+        let session = PtySession::spawn_with_palette(
             &spawn_argv,
             Some(resolved_cwd),
             &extra_env,
+            Some(palette),
             &self.config,
         )
         .await

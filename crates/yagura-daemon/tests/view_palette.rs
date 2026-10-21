@@ -3,7 +3,7 @@
 //! A program asking for the terminal's colors (OSC 10, 11, 4) is answered by
 //! the daemon from the palette the attached GUI sent (`set_palette`) and from
 //! what the program itself set over it; before any palette was sent the
-//! daemon does not answer.
+//! daemon answers from the palette the window took when it opened.
 //!
 //! The child is `hex_echo --emit-on-input`: on its first input byte it writes
 //! the queries, then a device status report as a sentinel (answered by the
@@ -14,10 +14,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{
-    Harness, assert_hex_echo_receives, contains_subsequence, hex_echo_path, hex_of,
-    output_after_marker,
-};
+use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, Palette, TerminalSize};
 use yagura_test_support::view::ViewClient;
@@ -79,7 +76,8 @@ async fn window_that_asks(
 }
 
 #[tokio::test]
-async fn a_color_query_is_not_answered_before_the_gui_sent_a_palette() {
+async fn before_the_gui_sent_a_palette_a_color_query_is_answered_from_the_built_in_one() {
+    let built_in = yagura_protocol::built_in_dark_palette();
     let (h, window_id, _view) = window_that_asks(
         "palette-none",
         &[QUERY_BACKGROUND, QUERY_FOREGROUND, DEVICE_STATUS],
@@ -87,20 +85,13 @@ async fn a_color_query_is_not_answered_before_the_gui_sent_a_palette() {
     )
     .await;
 
-    assert_hex_echo_receives(
-        &h,
-        &window_id,
-        EMITTED_MARKER,
-        DEVICE_STATUS_REPLY,
-        REPLY_TIMEOUT,
-    )
-    .await;
-    let received = output_after_marker(&h, &window_id, EMITTED_MARKER);
-    assert!(
-        !contains_subsequence(&received, hex_of(b"\x1b]1").as_bytes()),
-        "a color reply came before the status report's: {:?}",
-        String::from_utf8_lossy(&received)
-    );
+    let expected = [
+        reply("11", built_in.background),
+        reply("10", built_in.foreground),
+        DEVICE_STATUS_REPLY.to_vec(),
+    ]
+    .concat();
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected, REPLY_TIMEOUT).await;
 }
 
 #[tokio::test]

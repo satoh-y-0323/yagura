@@ -753,6 +753,19 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         config: &DaemonConfig,
     ) -> PtyResult<Self> {
+        Self::spawn_with_palette(argv, cwd, extra_env, None, config).await
+    }
+
+    /// [`PtySession::spawn_with_command_in_env`], with the window's terminal
+    /// answering color queries with `palette` from the child's first output
+    /// on. With `None` it leaves them unanswered until a palette is set.
+    pub async fn spawn_with_palette(
+        argv: &[&str],
+        cwd: Option<&Path>,
+        extra_env: &[(&str, &str)],
+        palette: Option<yagura_protocol::Palette>,
+        config: &DaemonConfig,
+    ) -> PtyResult<Self> {
         if argv.is_empty() {
             return Err(PtyError::SpawnFailed);
         }
@@ -845,6 +858,11 @@ impl PtySession {
             config.read_output_max_lines,
         );
         screen.follow_writes(writes_seen);
+        // Before the reader thread starts, so no query the child already
+        // wrote is read without it.
+        if let Some(palette) = palette {
+            screen.set_palette(palette);
+        }
         let screen = screen.into_shared();
         let input = Arc::new(PublishedInput::of(&screen.lock()));
         let (arrivals_tx, output_arrivals) = watch::channel(0u64);

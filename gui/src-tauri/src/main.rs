@@ -135,6 +135,7 @@ fn main() -> anyhow::Result<()> {
             commands::send_window_input,
             commands::next_frames,
             commands::set_window_palette,
+            commands::set_default_palettes,
             commands::set_window_visible,
             commands::copy_window_selection,
             commands::clear_window_selection,

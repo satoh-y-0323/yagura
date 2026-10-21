@@ -79,13 +79,13 @@ use yagura_protocol::{
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
-    DaemonProblemKind, DeliveryStream, Frame, FrameLine, FrameRun, HandoffDelivery,
-    InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
-    McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry, McpRegistrationRow,
-    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
-    McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken,
-    Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec,
-    PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCommandDetail,
+    DaemonProblemKind, DefaultPalettes, DeliveryStream, Frame, FrameLine, FrameRun,
+    HandoffDelivery, InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias,
+    LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry,
+    McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
+    McpRegistrationTomlSet, McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers,
+    NamedKey, OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
+    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCommandDetail,
     ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, ReceivedReport,
     ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
     RoomRef, TaskAssignment, TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState,
@@ -97,9 +97,9 @@ use yagura_protocol::{
 // ---------------------------------------------------------------------
 
 /// A type that can build one representative value of itself for the corpus.
-/// `Option<T>` and `Vec<T>` below are the only impls that touch a container;
-/// both always populate it, so a corpus built from `Sample` alone can never
-/// contain `None` or an empty array.
+/// `Option<T>`, `Vec<T>` and `BTreeMap<String, V>` below are the only impls
+/// that touch a container; all of them always populate it, so a corpus built
+/// from `Sample` alone can never contain `None` or an empty array.
 trait Sample: Sized {
     fn sample() -> Self;
 }
@@ -181,6 +181,12 @@ impl<T: Sample + Ord> Sample for BTreeSet<T> {
 impl<T: Sample> Sample for Vec<T> {
     fn sample() -> Self {
         vec![T::sample()]
+    }
+}
+
+impl<V: Sample> Sample for BTreeMap<String, V> {
+    fn sample() -> Self {
+        BTreeMap::from([(String::sample(), V::sample())])
     }
 }
 
@@ -502,6 +508,7 @@ wire_sample!(struct Palette {
     cursor,
     ansi,
 });
+wire_sample!(struct DefaultPalettes { app, vendors });
 wire_sample!(struct CellAttr { fg, bg, flags });
 wire_sample!(struct FrameRun { attr, cells, wide });
 wire_sample!(struct FrameLine { row, wrapped, runs });
@@ -548,6 +555,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
         wire_sample!(ClientMessage::AttachView { window_id, size }),
         wire_sample!(ClientMessage::FrameAck { seq }),
         ClientMessage::SetPalette(Palette::sample()),
+        ClientMessage::SetDefaultPalettes(DefaultPalettes::sample()),
         wire_sample!(ClientMessage::SetVisible { visible }),
         wire_sample!(ClientMessage::CopySelection),
         wire_sample!(ClientMessage::ClearSelection),

@@ -66,6 +66,7 @@ use crate::inbox::{Parcel, ParcelEnd, PushBudget, Withdrawal};
 use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
 use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
+use crate::palette_store::{self, PaletteStore};
 use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
 use crate::pty::{InputState, PtyError};
@@ -931,6 +932,10 @@ pub struct IpcServer {
     /// Admits one `get_daemon_health` pseudoconsole check at a time: the check
     /// reads and hashes files on a blocking thread, and any connection may ask.
     health_checks: Semaphore,
+    /// Where `set_default_palettes` is saved, so a daemon started again
+    /// answers with it. Disabled until [`IpcServer::with_palette_store`]:
+    /// the palettes then live in the registry's memory only.
+    palette_store: store_gate::StoreGate<PaletteStore>,
     /// Held only so the registry's notice launcher, which refers to it
     /// weakly, stays live for as long as this server does.
     _notice_agents: Arc<notice_queue::NoticeAgents>,
@@ -1011,6 +1016,7 @@ impl IpcServer {
             mcp_registration_changes,
             reports,
             health_checks: Semaphore::new(1),
+            palette_store: store_gate::StoreGate::disabled(),
             _notice_agents: notice_agents,
         }
     }
@@ -1038,6 +1044,15 @@ impl IpcServer {
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<plan::PlanRuntime>) -> Self {
         self.ledger = ledger;
+        self
+    }
+
+    /// Saves every `set_default_palettes` to `store` from now on. `store` is
+    /// opened by the caller (`main.rs`) on a blocking thread, which also
+    /// hands what it held to [`WindowRegistry::set_default_palettes`].
+    #[must_use]
+    pub fn with_palette_store(mut self, store: PaletteStore) -> Self {
+        self.palette_store = store_gate::StoreGate::opened(store);
         self
     }
 
@@ -1362,6 +1377,10 @@ impl IpcServer {
                         .with_model(move |screen| screen.set_palette(palette))
                         .await;
                 }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::SetDefaultPalettes(palettes)) => {
+                self.handle_set_default_palettes(outbound, palettes).await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::SetVisible { visible }) => {
@@ -2143,6 +2162,39 @@ impl IpcServer {
         outbound.reply(&DaemonMessage::WindowLayoutUpdated {
             window_id: entry.window_id().to_string(),
         });
+    }
+
+    /// Takes the palettes windows opened from now on answer color queries
+    /// with, then saves whatever the registry holds by the time the store is
+    /// free: the save that runs last writes the latest palettes, whichever
+    /// connection sent them.
+    async fn handle_set_default_palettes(
+        &self,
+        outbound: &Arc<Outbound>,
+        palettes: yagura_protocol::DefaultPalettes,
+    ) {
+        let palettes = match palette_store::accept_default_palettes(palettes) {
+            Ok(palettes) => palettes,
+            Err(err) => {
+                outbound.reply(&error_msg("invalid_argument", &err.to_string()));
+                return;
+            }
+        };
+        if !self.registry.set_default_palettes(palettes) || !self.palette_store.is_enabled() {
+            return;
+        }
+        let registry = Arc::clone(&self.registry);
+        let saved = self
+            .palette_store
+            .with_store(move |store| store.save(&registry.default_palettes()))
+            .await;
+        match saved {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::warn!("failed to save the default palettes: {err}"),
+            Err(_) => {
+                tracing::warn!("failed to save the default palettes: the store task did not finish")
+            }
+        }
     }
 
     /// Registers this connection as the (new) attach holder of `window_id`,

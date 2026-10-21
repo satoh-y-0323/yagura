@@ -147,8 +147,13 @@
 //! not exited belongs to it). Either one is followed by a `chat_history_cleared` push
 //! to every approver. [`ChatRoomInfo`] gains `has_open_windows`. A message's
 //! `seq` never goes back, so a reader's `after_seq` stays valid.
+//!
+//! Revision 27 adds `set_default_palettes` ([`DefaultPalettes`]): the colors
+//! the GUI would draw a new window with, which the daemon keeps and answers a
+//! window's color queries with until a view sends that window its own. A
+//! caller establishes [`DEFAULT_PALETTES_MIN_REVISION`] before sending it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -158,7 +163,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 26;
+pub const PROTOCOL_REVISION: u32 = 27;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -281,6 +286,16 @@ pub const DAEMON_HEALTH_MIN_REVISION: u32 = 20;
 /// An older daemon refuses them by name, so a hook command built for this
 /// revision does nothing useful against it.
 pub const INBOX_MIN_REVISION: u32 = 22;
+
+/// The first wire revision that understands [`ClientMessage::SetDefaultPalettes`].
+///
+/// An older daemon refuses it by name, so a caller establishes this revision
+/// before sending it.
+pub const DEFAULT_PALETTES_MIN_REVISION: u32 = 27;
+
+/// The most vendors one [`DefaultPalettes`] may assign a palette to; the
+/// daemon refuses a larger one as `invalid_argument`.
+pub const DEFAULT_PALETTES_MAX_VENDORS: usize = 256;
 
 /// The most JSON bytes (as [`encode_daemon_message`] produces them) one
 /// [`Frame`] part may take; a larger frame is split into several parts by
@@ -2198,6 +2213,85 @@ pub struct Palette {
     pub ansi: Vec<Rgb>,
 }
 
+/// The colors the GUI would draw a new window with, before any view of that
+/// window sends its own: [`ClientMessage::SetDefaultPalettes`].
+///
+/// A window takes the palette its vendor is a key of, else `app`. A key that
+/// [`validate_window_vendor`] refuses can name no window, so the daemon drops
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultPalettes {
+    /// The palette of a window whose vendor has none of its own.
+    pub app: Palette,
+    /// Palettes by window vendor.
+    #[serde(default)]
+    pub vendors: BTreeMap<String, Palette>,
+}
+
+/// The token names of the built-in palettes (`built-in-palettes.json`, which
+/// the GUI reads too) that a [`Palette`] is made of, in ANSI order 0-15.
+const BUILT_IN_ANSI_TOKENS: [&str; 16] = [
+    "term-ansi-black",
+    "term-ansi-red",
+    "term-ansi-green",
+    "term-ansi-yellow",
+    "term-ansi-blue",
+    "term-ansi-magenta",
+    "term-ansi-cyan",
+    "term-ansi-white",
+    "term-ansi-bright-black",
+    "term-ansi-bright-red",
+    "term-ansi-bright-green",
+    "term-ansi-bright-yellow",
+    "term-ansi-bright-blue",
+    "term-ansi-bright-magenta",
+    "term-ansi-bright-cyan",
+    "term-ansi-bright-white",
+];
+
+const BUILT_IN_PALETTES_JSON: &str = include_str!("../built-in-palettes.json");
+
+/// The built-in dark palette, the GUI's default theme, as the daemon answers
+/// color queries with it before the GUI has sent any [`DefaultPalettes`].
+///
+/// Read from the same file the GUI draws its built-in themes from. Should
+/// that file lack a color, the color is black.
+#[must_use]
+pub fn built_in_dark_palette() -> Palette {
+    let tokens = built_in_palette_tokens("dark").unwrap_or_default();
+    let color = |token: &str| {
+        tokens
+            .get(token)
+            .and_then(|value| parse_hex_rgb(value))
+            .unwrap_or([0, 0, 0])
+    };
+    Palette {
+        foreground: color("color-foreground"),
+        background: color("color-background"),
+        cursor: color("color-primary"),
+        ansi: BUILT_IN_ANSI_TOKENS
+            .iter()
+            .map(|token| color(token))
+            .collect(),
+    }
+}
+
+fn built_in_palette_tokens(name: &str) -> Option<BTreeMap<String, String>> {
+    let mut palettes: BTreeMap<String, BTreeMap<String, String>> =
+        serde_json::from_str(BUILT_IN_PALETTES_JSON).ok()?;
+    palettes.remove(name)
+}
+
+/// `#rrggbb` as an [`Rgb`].
+fn parse_hex_rgb(value: &str) -> Option<Rgb> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
 /// One part of a frame: [`DaemonMessage::Frame`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frame {
@@ -2286,8 +2380,17 @@ pub enum ClientMessage {
     },
     /// The theme colors the client draws with. The daemon answers the
     /// attached window's color queries (OSC 4/10/11/12) with them; before it
-    /// receives one it leaves those queries unanswered.
+    /// receives one it answers them with the palette the window took from the
+    /// [`DefaultPalettes`] when it opened.
     SetPalette(Palette),
+    /// The colors a window opened from now on answers its color queries with
+    /// until a view sends it its own ([`ClientMessage::SetPalette`]). Each one
+    /// replaces the last as a whole, and the daemon keeps it across restarts.
+    /// Needs no attached view and is not answered; one with a palette that
+    /// does not hold 16 ANSI colors, or with more than
+    /// [`DEFAULT_PALETTES_MAX_VENDORS`] vendors, is refused as
+    /// `invalid_argument` and changes nothing.
+    SetDefaultPalettes(DefaultPalettes),
     /// Whether the client shows the attached window. While it does not, the
     /// daemon builds no frames for it; once it does, the next frame carries
     /// every row. A view starts shown.
@@ -2952,6 +3055,7 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         | ClientMessage::DeliverTake { .. }
         | ClientMessage::DeliverWait { .. }
         | ClientMessage::ReportSession { .. } => INBOX_MIN_REVISION,
+        ClientMessage::SetDefaultPalettes(_) => DEFAULT_PALETTES_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -4369,6 +4473,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "attach_view",
     "frame_ack",
     "set_palette",
+    "set_default_palettes",
     "set_visible",
     "copy_selection",
     "clear_selection",

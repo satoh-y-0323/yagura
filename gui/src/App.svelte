@@ -89,6 +89,7 @@
     invokeLoadKeymap,
     invokeSaveKeymap,
     invokeLoadThemes,
+    invokeSetDefaultPalettes,
     invokeReadChat,
     invokeReconnectDaemon,
     invokeRenameWindow,
@@ -261,6 +262,7 @@
   import { createWindowSessionStore } from './stores/session-store';
   import { createWindowRegistry, type WindowEntry } from './stores/window-registry';
   import { bindPalette } from './theme/theme-apply';
+  import { startDefaultPaletteSync } from './theme/default-palettes';
   import { isBuiltInSelection, type AppThemeSelection } from './theme/theme-resolve';
   import { createBrowserThemeDeps, createThemeStore } from './theme/theme-store';
   import {
@@ -2050,6 +2052,7 @@
 
   onDestroy(() => {
     unbindAppPalette();
+    stopDefaultPaletteSync?.();
     stopLayoutSync();
     unsubscribeSession?.();
     void framePull?.stop();
@@ -2975,7 +2978,14 @@
   void initialize().then(() => Promise.all([loadDetections(), loadProfiles()]));
   void loadKeymap();
   void loadKeymapFilePath();
-  void loadThemes();
+  // After the themes file settles, so the daemon is never sent the state from
+  // before it was read.
+  let stopDefaultPaletteSync: (() => void) | null = null;
+  void loadThemes().then(() => {
+    stopDefaultPaletteSync = startDefaultPaletteSync(themeStore, ({ app, vendors }) =>
+      invokeSetDefaultPalettes(app, vendors)
+    );
+  });
   void loadRestoreCandidates();
 </script>
 

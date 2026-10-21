@@ -49,12 +49,12 @@ use serde_json::Value;
 
 use yagura_protocol::{
     APPROVAL_SETTINGS_MIN_REVISION, CHAT_ROOM_REMOVAL_MIN_REVISION, CellPosition, ClientMessage,
-    ControlKey, DAEMON_HEALTH_MIN_REVISION, FRAME_MIN_REVISION, Key, KeyInput,
-    LAUNCH_OPTIONS_MIN_REVISION, MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION,
-    McpRegistrationAction, Modifiers, NamedKey, PLAN_REVIEW_MIN_REVISION,
-    PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION, PROTOCOL_REVISION_BASELINE, Palette,
-    PlanTaskSpec, PointerButton, PointerInput, PointerKind, ReportOutcome,
-    TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
+    ControlKey, DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes,
+    FRAME_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION, MCP_REGISTRATION_MIN_REVISION,
+    MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers, NamedKey,
+    PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
+    PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton, PointerInput, PointerKind,
+    ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
     required_protocol_revision,
 };
 
@@ -84,6 +84,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             cursor: [7, 8, 9],
             ansi: vec![[0, 0, 0]; 16],
         }),
+        ClientMessage::SetDefaultPalettes(default_palettes()),
         ClientMessage::SetVisible { visible: false },
         ClientMessage::CopySelection,
         ClientMessage::ClearSelection,
@@ -437,6 +438,7 @@ fn every_other_variant_requires_no_more_than_baseline() {
                     ClientMessage::AttachView { .. }
                         | ClientMessage::FrameAck { .. }
                         | ClientMessage::SetPalette(_)
+                        | ClientMessage::SetDefaultPalettes(_)
                         | ClientMessage::SetVisible { .. }
                         | ClientMessage::CopySelection
                         | ClientMessage::ClearSelection
@@ -816,6 +818,27 @@ fn clearing_or_deleting_a_chat_room_requires_revision_twenty_six() {
         );
     }
     assert_eq!(CHAT_ROOM_REMOVAL_MIN_REVISION, 26);
+}
+
+fn default_palettes() -> DefaultPalettes {
+    DefaultPalettes {
+        app: Palette {
+            foreground: [1, 2, 3],
+            background: [4, 5, 6],
+            cursor: [7, 8, 9],
+            ansi: vec![[0, 0, 0]; 16],
+        },
+        vendors: Default::default(),
+    }
+}
+
+#[test]
+fn set_default_palettes_requires_revision_twenty_seven() {
+    assert_eq!(
+        required_protocol_revision(&ClientMessage::SetDefaultPalettes(default_palettes())),
+        DEFAULT_PALETTES_MIN_REVISION
+    );
+    assert_eq!(DEFAULT_PALETTES_MIN_REVISION, 27);
 }
 
 #[test]

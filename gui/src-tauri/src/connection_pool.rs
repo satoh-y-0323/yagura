@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use yagura_protocol::{
-    ClientMessage, LaunchOptionAlias, McpRegistrationAction, OnNameTaken, PlanInfo, PlanSummary,
-    RoleEntry, TaskAssignment, TerminalSize, WindowInfo, WindowStatus,
+    ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction, OnNameTaken,
+    PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize, WindowInfo, WindowStatus,
 };
 
 use crate::commands::{
@@ -578,6 +578,17 @@ impl ConnectionPool {
             .await?
             .set_profile_command(profile, argv)
             .await
+    }
+
+    /// Gives the daemon the palettes a window it opens from now on answers
+    /// color queries with, through the control connection. Neither connects
+    /// nor starts a daemon: the control connection sends them when it is
+    /// next made.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when a connected daemon could not be written to.
+    pub async fn set_default_palettes(&self, palettes: DefaultPalettes) -> Result<(), IpcError> {
+        self.control.set_default_palettes(palettes).await
     }
 
     /// Reads the daemon's current approval settings, through the control

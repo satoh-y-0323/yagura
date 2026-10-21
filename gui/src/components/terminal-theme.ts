@@ -97,3 +97,11 @@ export function buildTheme(readToken: (token: string) => string): Partial<Termin
 
   return theme;
 }
+
+/**
+ * The colours a palette gives, read by token name without the leading `--`,
+ * dropping those it lacks.
+ */
+export function themeOfPalette(palette: Readonly<Record<string, string>>): Partial<TerminalTheme> {
+  return buildTheme((token) => palette[token.replace(/^--/, '')] ?? '');
+}

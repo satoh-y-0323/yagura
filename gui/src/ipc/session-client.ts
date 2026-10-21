@@ -250,6 +250,23 @@ export async function invokeSetWindowPalette(
 }
 
 /**
+ * Gives the daemon the colors a window it opens from now on answers color
+ * queries with until the window is shown: the palette of each vendor that has
+ * one of its own, and the application's for the rest.
+ *
+ * @throws when the core rejects the request.
+ */
+export async function invokeSetDefaultPalettes(
+  appPalette: WirePalette,
+  vendorPalettes: Record<string, WirePalette>
+): Promise<void> {
+  await invoke<unknown>('set_default_palettes', {
+    app_palette: appPalette,
+    vendor_palettes: vendorPalettes,
+  });
+}
+
+/**
  * Tells the daemon whether a window is on screen; it builds no frames for one
  * that is not.
  *

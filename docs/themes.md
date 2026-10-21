@@ -163,6 +163,11 @@ The value must be one of:
 
 When omitted or empty, vendor windows use the app-wide selection.
 
+The daemon keeps the colors the GUI last resolved for each vendor and for the app, and answers a
+window's color queries with them from the moment the window opens, even before the GUI shows it
+(on an instance whose GUI has never run, with the built-in `dark` theme). A window's own theme override
+takes effect once the window is shown.
+
 A vendor key is not a detection definition name. `codex` above picks the theme
 for Codex windows, while `codex-cli` is the name of the file in
 [detection/](../crates/yagura-daemon/detection/README.md) whose patterns that window's output is

@@ -36,6 +36,7 @@ use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
 use yagura_daemon::inbox::{is_session_id, session_at_pointer};
 use yagura_daemon::ipc::{chat, plan};
+use yagura_daemon::palette_store::PaletteStore;
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
@@ -489,13 +490,48 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         .context("plan ledger initialization panicked")?,
     );
 
-    let server =
-        Arc::new(IpcServer::new_with_chat(registry, endpoint, config, chat).with_ledger(ledger));
+    // Read before any window can be opened, so the first one already answers
+    // with what the GUI last sent.
+    let palette_store = tokio::task::spawn_blocking({
+        let registry = Arc::clone(&registry);
+        let db_path = config.store_db_path_resolved.clone();
+        move || open_palette_store(&registry, db_path.as_deref())
+    })
+    .await
+    .context("default palette store initialization panicked")?;
+
+    let mut server = IpcServer::new_with_chat(registry, endpoint, config, chat).with_ledger(ledger);
+    if let Some(palette_store) = palette_store {
+        server = server.with_palette_store(palette_store);
+    }
+    let server = Arc::new(server);
     server
         .run_with_listener(listener, daemon_sid)
         .await
         .context("IPC server loop failed")?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Opens the store of the default palettes and hands what it holds to
+/// `registry`. `None` when there is no database or it cannot be opened: the
+/// palettes then live in memory for this run only.
+fn open_palette_store(registry: &WindowRegistry, db_path: Option<&Path>) -> Option<PaletteStore> {
+    let db_path = db_path?;
+    let store = match PaletteStore::open(db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!("default palettes will not be saved: {err}");
+            return None;
+        }
+    };
+    match store.load() {
+        Ok(Some(palettes)) => {
+            registry.set_default_palettes(palettes);
+        }
+        Ok(None) => {}
+        Err(err) => tracing::warn!("failed to read the saved default palettes: {err}"),
+    }
+    Some(store)
 }
 
 fn succeeded((): ()) -> ExitCode {

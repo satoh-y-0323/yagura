@@ -3,38 +3,28 @@
  * theme's 16 colors, the xterm 256-color cube and grays, and whatever the
  * program in the window set over them (OSC 4/10/11/12).
  */
-import { ANSI_THEME_KEYS, THEME_TOKENS, type TerminalTheme } from '../components/terminal-theme';
+import {
+  ANSI_THEME_KEYS,
+  THEME_TOKENS,
+  themeOfPalette,
+  type TerminalTheme,
+} from '../components/terminal-theme';
 import type { CellAttr, CellColor, ColorOverride, Rgb } from '../ipc/session-boundary';
 import type { WirePalette } from '../ipc/session-client';
+import { BUILT_IN_PALETTES } from '../theme/palette';
 
 /**
- * Colors a theme falls back to for a token that resolved to nothing; the
- * dark theme's values (`tokens.css`).
+ * Colors a theme falls back to for a token that resolved to nothing: the
+ * built-in dark palette's, which holds every token.
  */
-const FALLBACK_THEME: TerminalTheme = {
-  background: '#1e1e1e',
-  foreground: '#ffffff',
-  cursor: '#4a9eff',
-  selectionBackground: '#264f78',
-  selectionForeground: '#ffffff',
-  selectionInactiveBackground: '#3d3d3d',
-  black: '#000000',
-  red: '#cd3131',
-  green: '#0dbc79',
-  yellow: '#e5e510',
-  blue: '#007acc',
-  magenta: '#bc3fbc',
-  cyan: '#11a8cd',
-  white: '#e5e5e5',
-  brightBlack: '#666666',
-  brightRed: '#f14c4c',
-  brightGreen: '#23d18b',
-  brightYellow: '#f5f543',
-  brightBlue: '#3b8eea',
-  brightMagenta: '#d670d6',
-  brightCyan: '#29b8db',
-  brightWhite: '#ffffff',
-};
+const FALLBACK_THEME: TerminalTheme = (() => {
+  const dark = themeOfPalette(BUILT_IN_PALETTES.dark);
+  const theme = {} as TerminalTheme;
+  for (const key of Object.keys(THEME_TOKENS) as (keyof TerminalTheme)[]) {
+    theme[key] = dark[key] ?? '#000000';
+  }
+  return theme;
+})();
 
 /** A theme with every color present. */
 export function completeTheme(theme: Partial<TerminalTheme>): TerminalTheme {

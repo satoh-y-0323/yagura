@@ -359,3 +359,42 @@ fn the_view_messages_need_the_frame_revision_and_this_build_speaks_it() {
     }
     assert_eq!(FRAME_MIN_REVISION, 19);
 }
+
+// --- the built-in palette ---------------------------------------------
+
+/// The daemon's built-in palette is the GUI's built-in dark theme, read from
+/// the one file both take it from, color by color.
+#[test]
+fn the_built_in_dark_palette_is_the_dark_theme_of_the_shared_file() {
+    let file: Value = serde_json::from_str(include_str!("../built-in-palettes.json")).unwrap();
+    let dark = &file["dark"];
+    let rgb = |token: &str| -> [u8; 3] {
+        let hex = dark[token].as_str().unwrap().trim_start_matches('#');
+        let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap();
+        [channel(0), channel(2), channel(4)]
+    };
+    let ansi: Vec<[u8; 3]> = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ]
+    .iter()
+    .map(|name| format!("term-ansi-{name}"))
+    .chain(
+        [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ]
+        .iter()
+        .map(|name| format!("term-ansi-bright-{name}")),
+    )
+    .map(|token| rgb(&token))
+    .collect();
+
+    assert_eq!(
+        yagura_protocol::built_in_dark_palette(),
+        Palette {
+            foreground: rgb("color-foreground"),
+            background: rgb("color-background"),
+            cursor: rgb("color-primary"),
+            ansi,
+        }
+    );
+}

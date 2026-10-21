@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 use yagura_protocol::{
-    CHAT_READ_LIMIT_MAX, ClientMessage, Frame, MAX_LAYOUT_JSON_BYTES, OnNameTaken, Palette,
-    TerminalSize, check_input_bounds, validate_chat_body, validate_open_window_exclusivity,
-    validate_window_name,
+    CHAT_READ_LIMIT_MAX, ClientMessage, DEFAULT_PALETTES_MAX_VENDORS, DefaultPalettes, Frame,
+    MAX_LAYOUT_JSON_BYTES, OnNameTaken, Palette, TerminalSize, check_input_bounds,
+    validate_chat_body, validate_open_window_exclusivity, validate_window_name,
+    validate_window_vendor,
 };
 
 use crate::connection_pool::ConnectionPool;
@@ -1509,6 +1510,45 @@ pub fn validate_window_input(input: &ClientMessage) -> Result<(), IpcError> {
             "input must be a key, text, paste, pointer, wheel or focus message",
         )),
     }
+}
+
+/// Gives the daemon the palettes the GUI would draw a new window with: the
+/// one of each vendor that has its own, and the application's for the rest.
+/// The daemon answers the color queries of a window it opens with them until
+/// the window is shown.
+///
+/// A vendor no window can have (one the window vendor rule refuses) is
+/// dropped rather than sent: it could never be looked up.
+///
+/// # Errors
+/// Returns a human-readable message when a palette does not hold 16 ANSI
+/// colors, there are more vendors than the daemon takes, or a connected
+/// daemon could not be written to.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn set_default_palettes(
+    app_palette: Palette,
+    vendor_palettes: std::collections::BTreeMap<String, Palette>,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<(), String> {
+    let palettes = default_palettes_to_send(app_palette, vendor_palettes).map_err(stringify)?;
+    pool.set_default_palettes(palettes).await.map_err(stringify)
+}
+
+fn default_palettes_to_send(
+    app: Palette,
+    mut vendors: std::collections::BTreeMap<String, Palette>,
+) -> Result<DefaultPalettes, IpcError> {
+    vendors.retain(|vendor, _| validate_window_vendor(vendor).is_ok());
+    if vendors.len() > DEFAULT_PALETTES_MAX_VENDORS {
+        return Err(IpcError::InvalidArgument(
+            "too many vendors are assigned a palette",
+        ));
+    }
+    validate_palette(&app)?;
+    for palette in vendors.values() {
+        validate_palette(palette)?;
+    }
+    Ok(DefaultPalettes { app, vendors })
 }
 
 /// The daemon reads the 16 ANSI colors by index.

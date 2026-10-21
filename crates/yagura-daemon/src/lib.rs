@@ -17,6 +17,7 @@ pub mod json_entry;
 pub mod live_policy;
 pub mod mcp_registration;
 pub mod model_choices;
+pub mod palette_store;
 pub mod plan;
 pub mod plan_permit;
 pub mod plan_store;
