@@ -237,8 +237,10 @@ erase = "\u007f"               # the key that erases one character, used to
                                # Default: DEL
 delivery_confirm_ms = 8000     # how long to wait, after the submit bytes,
                                # for the composer to empty or the status to
-                               # react. 0..=30000; 0 means "do not look for
-                               # either". Default: 8000
+                               # react. Also the longest a typed delivery
+                               # waits for that reaction before typing the
+                               # next text. 0..=30000; 0 means "do not look
+                               # for either". Default: 8000
 resend_max = 0                 # how many times an unconfirmed submit may be
                                # written again. 0..=4. Default: 0
 

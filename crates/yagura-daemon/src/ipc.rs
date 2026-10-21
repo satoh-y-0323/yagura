@@ -4880,8 +4880,12 @@ async fn run_delivery<'a>(
                     break DeliveryVerdict {
                         delivery,
                         attempts: placements,
-                        submitted_at: Instant::now(),
-                        status_before_submit: entry.current_status(),
+                        submitted_at: last_submit
+                            .map_or_else(Instant::now, |last| last.submitted_at),
+                        status_before_submit: last_submit.map_or_else(
+                            || entry.current_status(),
+                            |last| last.status_before_submit,
+                        ),
                         ready_hold_wait_ms,
                     };
                 }

@@ -424,6 +424,8 @@ Each answer is cut to the profile's `max_chars` between texts; a text is never c
 | waiting for input | the profile's `wake` decides: `wait` ends the wait the CLI left registered, `command` runs the CLI's own program to queue the text on its session (needs the session identifier a hook reported, so after the first turn), `none` types it into the composer |
 | `unknown` | nothing is pushed; texts wait |
 
+With `none`, texts are typed one at a time: the next one is typed only after the window has reacted to the previous submit key (its status moved to `running`, `waiting_approval` or `interrupted`) and is waiting for input again, or, when no reaction shows within the detection definition's `delivery_confirm_ms` after that key, once it is waiting for input.
+
 A text counts as taken when a door printed it, the wake command succeeded, or -- for `none` -- the typed write was judged taken by the same check `send_message` uses. A typed write that was not written (see the `not_written` error under [Error Handling](#error-handling)) puts the text back in the inbox. The bundled profiles:
 
 | Profile | Start-up and turn-start doors | Waking a waiting CLI |
