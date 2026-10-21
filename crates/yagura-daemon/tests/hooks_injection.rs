@@ -212,6 +212,66 @@ async fn a_hooks_table_is_injected_without_an_mcp_bridge_and_equal_content_maps_
 }
 
 #[tokio::test]
+async fn a_hooks_config_dir_is_written_as_a_directory_of_exactly_the_declared_files_and_argv_names_it()
+ {
+    const PLUGIN_JSON: &str = "{\"name\":\"yagura-status\",\"version\":\"0.0.0\"}";
+    let tree = TempDir::new("yagura-cli-test", "hooks-inject-config-dir");
+    let profiles_dir = tree.make_dir("profiles");
+    let config_dir = tree.make_dir("mcp");
+    let tables = format!(
+        "\n[hooks]\nargs = [\"--plugin-dir\", \"{{hooks_config_dir}}\"]\n\n\
+         [hooks.config_dir]\n\"plugin.json\" = '{PLUGIN_JSON}'\n\"hooks.json\" = '{HOOKS_JSON}'\n"
+    );
+    write_profile(
+        &profiles_dir,
+        "argv-probe",
+        &argv_probe_profile_source("Argv Probe", &tables),
+    );
+    let h = Harness::start(
+        "hooks-inject-config-dir",
+        daemon_config(profiles_dir, Some(&config_dir), None),
+    )
+    .await;
+    let mut client = h.connect().await;
+
+    let window_id = open_from_profile(&mut client, "argv-probe", None).await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
+        .await;
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
+
+    assert_eq!(
+        sentinel(&text, "argv[1]").as_deref(),
+        Some("--plugin-dir"),
+        "{text:?}"
+    );
+    let dir = PathBuf::from(sentinel(&text, "argv[2]").expect("hooks directory path"));
+    assert!(
+        dir.is_dir(),
+        "the argv must name an existing directory; scrollback: {text:?}"
+    );
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["hooks.json", "plugin.json"],
+        "the directory must hold exactly the declared files"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("plugin.json")).unwrap(),
+        PLUGIN_JSON,
+        "each declared file must be written verbatim"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("hooks.json")).unwrap(),
+        HOOKS_JSON,
+        "each declared file must be written verbatim"
+    );
+}
+
+#[tokio::test]
 async fn hooks_args_without_a_config_file_are_passed_through_as_written() {
     let tree = TempDir::new("yagura-cli-test", "hooks-inject-args-only");
     let profiles_dir = tree.make_dir("profiles");

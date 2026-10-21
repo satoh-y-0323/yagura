@@ -918,6 +918,7 @@ async fn the_prompt_arrives_in_the_childs_argv_after_every_other_injection_and_v
             kind: InjectionKind::Hooks,
             args: strings(&["--hooks-arg"]),
             config_file: None,
+            config_dir: None,
         },
         launch_prompt_injection(&delivery, AWKWARD_PROMPT).expect("an injection"),
     ];

@@ -840,6 +840,101 @@ pub fn replace_config_file(
     }
 }
 
+/// Publishes the directory `dir_name` inside `parent_dir`, holding exactly
+/// `files` (file name, content): the directory counterpart to
+/// [`replace_config_file`], for a caller that names the directory after its
+/// content, so a directory already present under that name already holds
+/// these files.
+///
+/// [`secure_owned_dir`]`(base_dir, parent_dir)` comes first, as in
+/// [`replace_config_file`]. If `parent_dir.join(dir_name)` already exists as
+/// a directory, nothing is written. Otherwise every file is written into a
+/// temporary directory beside it, each narrowed by [`secure_owned_file`]
+/// and the directory itself by [`secure_owned_dir`], and the temporary
+/// directory is renamed onto the final name, so a reader never observes a
+/// partially written directory. A rename that fails because another writer
+/// published the same name first counts as success.
+///
+/// # Errors
+///
+/// Returns [`std::io::ErrorKind::InvalidInput`] when `dir_name` or a file
+/// name is not a single plain path component, or a file name repeats, before
+/// anything is touched. Returns the [`secure_owned_dir`] failure, converted to
+/// a generic [`std::io::Error`], when `parent_dir` or the temporary directory
+/// cannot be secured. Otherwise returns any [`std::io::Error`] from creating
+/// the temporary directory, writing a file into it, or renaming it when the
+/// final name still does not exist afterwards. The temporary directory is
+/// removed on any failure that occurs after it was created.
+pub fn publish_config_dir(
+    base_dir: &Path,
+    parent_dir: &Path,
+    dir_name: &str,
+    files: &[(&str, &str)],
+) -> std::io::Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    let names_ok = is_single_component(dir_name)
+        && files
+            .iter()
+            .all(|(name, _)| is_single_component(name) && seen.insert(*name));
+    if !names_ok {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a settings directory or file name is not a single plain path component",
+        ));
+    }
+    secure_owned_dir(base_dir, parent_dir).map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(parent_dir)?;
+    let target = parent_dir.join(dir_name);
+    if target.is_dir() {
+        return Ok(());
+    }
+
+    static NEXT_TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = parent_dir.join(format!(
+        ".{dir_name}.tmp-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    // Only a crashed earlier process with the same id can have left it.
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir(&temp)?;
+    let filled = fill_temp_config_dir(base_dir, &temp, files);
+    let published = filled.and_then(|()| std::fs::rename(&temp, &target));
+    match published {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&temp);
+            if target.is_dir() { Ok(()) } else { Err(err) }
+        }
+    }
+}
+
+/// Narrows the freshly created `temp` to its owner and writes `files` into
+/// it, each narrowed the same way.
+fn fill_temp_config_dir(
+    base_dir: &Path,
+    temp: &Path,
+    files: &[(&str, &str)],
+) -> std::io::Result<()> {
+    secure_owned_dir(base_dir, temp).map_err(std::io::Error::other)?;
+    for (name, content) in files {
+        let path = temp.join(name);
+        std::fs::write(&path, content.as_bytes())?;
+        let _ = secure_owned_file(&path);
+    }
+    Ok(())
+}
+
+/// Whether `name` is exactly one normal path component (not empty, `.`,
+/// `..`, a root or a prefix, and no separator).
+fn is_single_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(only)), None) if only == OsStr::new(name)
+    )
+}
+
 /// The [`IpcTransport`] implementation of the platform being compiled for.
 #[cfg(windows)]
 pub type PlatformIpc = platform_windows::WindowsIpc;

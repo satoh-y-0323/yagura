@@ -73,11 +73,11 @@ use crate::store::{self, SnapshotWindow, StoreError};
 use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
 use crate::window::{
-    CliInjection, ComposerResidue, EnvelopeWait, InputOrigin, LaunchIdentity, McpConnectionClaim,
-    NameRefusal, NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow, RejectedArgument,
-    RequestedCwd, SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin, WakeCommand, WindowEntry,
-    WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry, WindowRenameError,
-    resolve_existing_dir,
+    CliInjection, ComposerResidue, EnvelopeWait, HooksRoute, InputOrigin, LaunchIdentity,
+    McpConnectionClaim, NameRefusal, NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow,
+    RejectedArgument, RequestedCwd, SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin,
+    WakeCommand, WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
+    WindowRenameError, resolve_existing_dir,
 };
 
 use permit::{
@@ -375,6 +375,9 @@ struct PlannedOpen {
     /// What the `[hooks]` injection depends on, checked right before spawn:
     /// `None` when it depends on nothing.
     hooks_gate: Option<HooksGate>,
+    /// How the profile arranges hooks for its CLI, before the gate is read
+    /// and the argv is spawned.
+    hooks: HooksRoute,
     /// Recorded on the window, so a restore can launch it through the same
     /// profile again.
     launch: LaunchIdentity,
@@ -394,9 +397,6 @@ struct HooksGate {
     /// The profile id, named when the gate takes the hooks away.
     profile: String,
     registration: crate::mcp_registration::McpRegistrationSpec,
-    /// The profile injects no hooks of its own: the entries are the hooks
-    /// the CLI runs, so the window expects reports exactly while they hold.
-    reports_through_entries: bool,
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
@@ -2416,7 +2416,11 @@ impl IpcServer {
         if let Some(spec) = launch.hooks.as_ref() {
             injections.extend(crate::profile::prepare_hooks_injection(spec, config_dir));
         }
-        let reports_through_entries = launch.hooks.is_none();
+        let hooks = if launch.hooks.is_some() {
+            HooksRoute::Injection
+        } else {
+            HooksRoute::Unarranged
+        };
         // The program alone, without this launch's options: a wake command
         // runs the profile's own program for a session that already exists.
         let wakes_by_command = matches!(
@@ -2487,7 +2491,6 @@ impl IpcServer {
             .map(|registration| HooksGate {
                 profile: profile.to_string(),
                 registration,
-                reports_through_entries,
                 env: launch
                     .env
                     .iter()
@@ -2512,6 +2515,7 @@ impl IpcServer {
             extra_env: launch.env.into_iter().collect(),
             injections,
             hooks_gate,
+            hooks,
             delivery: launch.delivery,
             wake_command,
             bridge_scan,
@@ -5486,7 +5490,6 @@ async fn open_planned(
     _permit: Permit<OpenWindow>,
 ) -> Result<OpenedWindow, WindowOpenError> {
     let mut planned = planned;
-    let mut reports_through_entries = false;
     let mut hooks_left_out = None;
     // Read at each launch so a registration changed outside the daemon
     // is seen by the next window.
@@ -5496,7 +5499,11 @@ async fn open_planned(
                 .await;
         let reason = match reading {
             mcp_registration::EntriesRead::Hold => {
-                reports_through_entries = gate.reports_through_entries;
+                // Without hooks of its own, the profile's CLI runs the
+                // registered entries as its hooks.
+                if planned.hooks == HooksRoute::Unarranged {
+                    planned.hooks = HooksRoute::RegisteredEntries;
+                }
                 None
             }
             // Missing entries are the normal state of a CLI the user chose
@@ -5513,6 +5520,7 @@ async fn open_planned(
             planned
                 .injections
                 .retain(|injection| injection.kind != crate::window::InjectionKind::Hooks);
+            planned.hooks = HooksRoute::LeftOut;
             hooks_left_out = Some((gate.profile, reason));
         }
     }
@@ -5530,7 +5538,7 @@ async fn open_planned(
     let provenance = WindowProvenance {
         launch: Some(planned.launch),
         delivery: planned.delivery,
-        hooks_left_out: hooks_left_out.is_some(),
+        hooks: planned.hooks,
         wake_command: planned.wake_command,
         ..provenance
     };
@@ -5542,9 +5550,6 @@ async fn open_planned(
             provenance,
         )
         .await?;
-    if reports_through_entries {
-        opened.entry.expect_status_reports();
-    }
     if let Some((profile, (reason, abnormal))) = hooks_left_out {
         if abnormal {
             tracing::warn!(

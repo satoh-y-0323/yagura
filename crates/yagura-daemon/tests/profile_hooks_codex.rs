@@ -27,7 +27,7 @@ use common::{
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::mcp_registration::RegistrationTarget;
-use yagura_daemon::profile::{ProfileOs, parse_profile, render_hooks_args};
+use yagura_daemon::profile::{InjectedPaths, ProfileOs, parse_profile, render_hooks_args};
 use yagura_os::program::contains_cmd_metacharacter;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, McpRegistrationAction, McpRegistrationState,
@@ -280,7 +280,7 @@ fn the_shipped_codex_profiles_inject_their_hooks_as_plain_overrides_one_event_ea
             spec.config_file.is_none(),
             "{profile}: the hooks are command-line overrides, not a settings file"
         );
-        let args = render_hooks_args(&spec, None);
+        let args = render_hooks_args(&spec, InjectedPaths::default());
         assert_eq!(args.len(), (EVENTS.len() + 1) * 2, "{profile}: {args:?}");
         assert_eq!(
             hook_commands(&args),
@@ -302,7 +302,7 @@ fn the_doors_are_added_to_the_user_prompt_group_without_dropping_the_status_repo
             .unwrap_or_else(|err| panic!("{profile} must parse: {err}"))
             .hooks
             .unwrap_or_else(|| panic!("{profile} must ship a [hooks] table"));
-        let assignments = hook_assignments(&render_hooks_args(&spec, None));
+        let assignments = hook_assignments(&render_hooks_args(&spec, InjectedPaths::default()));
 
         let submit = &assignments["UserPromptSubmit"];
         let running = format!(
@@ -343,7 +343,7 @@ fn the_injected_codex_arguments_pass_the_command_interpreters_metacharacter_gate
             .unwrap_or_else(|err| panic!("{profile} must parse: {err}"))
             .hooks
             .unwrap_or_else(|| panic!("{profile} must ship a [hooks] table"));
-        let args = render_hooks_args(&spec, None);
+        let args = render_hooks_args(&spec, InjectedPaths::default());
         assert!(!args.is_empty(), "{profile}: no hooks were injected");
         for arg in &args {
             assert!(

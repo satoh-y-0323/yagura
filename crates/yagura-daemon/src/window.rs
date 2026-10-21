@@ -10,7 +10,7 @@
 //! resolving which detection definition a window uses
 //! (`load_definition_for`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -251,13 +251,55 @@ pub struct WindowProvenance {
     /// `None` for a window the profile did not open or one whose profile
     /// declares none: its doors answer by the daemon's own defaults.
     pub delivery: Option<ProfileDelivery>,
-    /// Whether the launch went without the profile's hooks because their
-    /// registration did not hold: the CLI never runs the doors, so nothing
-    /// the daemon sends of its own accord can reach it.
-    pub hooks_left_out: bool,
+    /// How the window's CLI comes to run the daemon's hooks. Given by the
+    /// caller as planned and settled by [`WindowRegistry`] at spawn, from
+    /// what the spawned argv really carries ([`HooksRoute::settle`]).
+    pub hooks: HooksRoute,
     /// The profile's own program, run to wake the window's CLI when its
     /// `[delivery]` table wakes by command.
     pub wake_command: Option<WakeCommand>,
+}
+
+/// How a window's CLI comes to run the daemon's hooks: the one fact both
+/// whether the window expects status reports and whether it takes part in
+/// delivery are read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HooksRoute {
+    /// The daemon arranged no hooks: no reports are expected, and a declared
+    /// `[delivery]` relies on the CLI's own configuration.
+    #[default]
+    Unarranged,
+    /// The launch's `[hooks]` injection. Settled at spawn: it stays only
+    /// when the spawned argv still carries the injection.
+    Injection,
+    /// Hooks the CLI reads from its own settings, whose registered entries
+    /// were read and held at launch.
+    RegisteredEntries,
+    /// The daemon arranged hooks, but they do not reach the CLI: their
+    /// registration did not hold, their settings could not be written, the
+    /// command interpreter would have reinterpreted them, or there was
+    /// nowhere to write them.
+    LeftOut,
+}
+
+impl HooksRoute {
+    /// The route as it really is once the argv is spawned:
+    /// `hooks_in_argv` is whether a `[hooks]` injection is in it.
+    #[must_use]
+    pub fn settle(self, hooks_in_argv: bool) -> Self {
+        match self {
+            _ if hooks_in_argv => Self::Injection,
+            Self::Injection => Self::LeftOut,
+            other => other,
+        }
+    }
+
+    /// Whether the CLI runs hooks the daemon arranged, so it is expected to
+    /// report its turns.
+    #[must_use]
+    pub fn reaches(self) -> bool {
+        matches!(self, Self::Injection | Self::RegisteredEntries)
+    }
 }
 
 /// The program a profile's wake command runs, and the environment it runs
@@ -334,6 +376,33 @@ pub struct CliInjection {
     pub args: Vec<String>,
     /// The settings file `args` refer to, written before spawn when absent.
     pub config_file: Option<InjectedConfigFile>,
+    /// The settings directory `args` refer to, written before spawn when
+    /// absent. If either it or `config_file` cannot be written, the whole
+    /// injection is dropped.
+    pub config_dir: Option<InjectedConfigDir>,
+}
+
+/// A settings directory a [`CliInjection`] needs on disk before spawn, for a
+/// CLI that takes its configuration only as a directory. The name is derived
+/// from every file's name and content, so a directory already present under
+/// that name already holds exactly these files and is never rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectedConfigDir {
+    /// The directory the settings directory is created in.
+    pub parent: PathBuf,
+    /// The settings directory's name inside `parent`.
+    pub dir_name: String,
+    /// Its files, file name to content. Each name is a single plain file
+    /// name ([`crate::profile::is_config_dir_file_name`]).
+    pub files: BTreeMap<String, String>,
+}
+
+impl InjectedConfigDir {
+    /// The settings directory's full path.
+    #[must_use]
+    pub fn path(&self) -> PathBuf {
+        self.parent.join(&self.dir_name)
+    }
 }
 
 /// A settings file a [`CliInjection`] needs on disk before spawn. The name
@@ -3553,11 +3622,11 @@ impl WindowEntry {
     }
 
     /// Whether what the daemon sends of its own accord can reach this
-    /// window's CLI: its profile declares delivery, and its hooks were not
-    /// left out at launch.
+    /// window's CLI: its profile declares delivery, and the hooks the daemon
+    /// arranged were not left out at launch.
     #[must_use]
     pub fn delivers(&self) -> bool {
-        self.provenance.delivery.is_some() && !self.provenance.hooks_left_out
+        self.provenance.delivery.is_some() && self.provenance.hooks != HooksRoute::LeftOut
     }
 
     /// The program a wake by command runs, when the profile declares one.
@@ -3810,14 +3879,6 @@ impl WindowEntry {
         lock_recover(&self.detector)
             .as_ref()
             .is_some_and(|detector| detector.reports_expected())
-    }
-
-    /// Declares that this window's CLI reports its turns through hooks the
-    /// CLI reads from its own settings rather than from its argv.
-    pub(crate) fn expect_status_reports(&self) {
-        if let Some(detector) = lock_recover(&self.detector).as_ref() {
-            detector.expect_status_reports(true);
-        }
     }
 
     /// Whether at least one live connection has identified as this window.
@@ -4173,9 +4234,14 @@ impl WindowRegistry {
             composer_access,
             abandons_calls_at_turn_end,
         } = self.initialize_detection_for_window(&window_id, &session, detection.as_deref());
-        // Decided where the injection is finally carried out, so a hooks table
-        // that was dropped on the way (gate, file, shim) expects nothing.
-        if hooks_injected {
+        // Settled where the injection is finally carried out, so hooks that
+        // were dropped on the way (gate, file, shim) neither expect reports
+        // nor take part in delivery.
+        let provenance = WindowProvenance {
+            hooks: provenance.hooks.settle(hooks_injected),
+            ..provenance
+        };
+        if provenance.hooks.reaches() {
             detector_handle.expect_status_reports(true);
         }
         // Started before the remaining awaited steps of this open so the
@@ -4332,32 +4398,39 @@ impl WindowRegistry {
     }
 
     /// Makes a [`CliInjection`] ready to spawn with: writes its settings
-    /// file when one is needed and not already present, and returns the argv
-    /// elements to append. A file that cannot be written drops the whole
-    /// injection (with a warning), since its elements would name a file the
-    /// CLI cannot read.
+    /// file and directory when they are needed and not already present, and
+    /// returns the argv elements to append. Settings that cannot be written
+    /// drop the whole injection (with a warning), since its elements would
+    /// name settings the CLI cannot read.
     async fn prepare_injection(&self, injection: CliInjection) -> PreparedInjection {
         let CliInjection {
             kind,
             args,
             config_file,
+            config_dir,
         } = injection;
-        let Some(config_file) = config_file else {
+        if config_file.is_none() && config_dir.is_none() {
             return PreparedInjection { kind, args };
-        };
+        }
         let _write_guard = self.mcp_config_write.lock().await;
-        let target = config_file.path();
-        let written = tokio::task::spawn_blocking(move || write_injected_config_file(&config_file))
-            .await
-            .map_err(|err| std::io::Error::other(err.to_string()))
-            .and_then(|outcome| outcome);
+        let written = tokio::task::spawn_blocking(move || {
+            if let Some(file) = &config_file {
+                write_injected_config_file(file).map_err(|err| (file.path(), err))?;
+            }
+            if let Some(dir) = &config_dir {
+                write_injected_config_dir(dir).map_err(|err| (dir.path(), err))?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|err| Err((PathBuf::new(), std::io::Error::other(err.to_string()))));
         match written {
             Ok(()) => PreparedInjection { kind, args },
-            Err(err) => {
+            Err((target, err)) => {
                 tracing::warn!(
                     path = %target.display(),
                     error = %err,
-                    "could not write the {} settings file; the window opens without that injection",
+                    "could not write the {} settings; the window opens without that injection",
                     kind.label()
                 );
                 PreparedInjection {
@@ -5112,6 +5185,18 @@ fn write_injected_config_file(file: &InjectedConfigFile) -> std::io::Result<()> 
     }
     let base = file.dir.parent().unwrap_or(&file.dir);
     yagura_os::replace_config_file(base, &file.dir, &file.file_name, &file.content)
+}
+
+/// Blocking: publishes `dir` unless a directory of that name is already
+/// there. The name is derived from the files, so an existing one holds them.
+fn write_injected_config_dir(dir: &InjectedConfigDir) -> std::io::Result<()> {
+    let base = dir.parent.parent().unwrap_or(&dir.parent);
+    let files: Vec<(&str, &str)> = dir
+        .files
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_str()))
+        .collect();
+    yagura_os::publish_config_dir(base, &dir.parent, &dir.dir_name, &files)
 }
 
 /// Why `name` cannot go to a window other than `except`, if it cannot: it is

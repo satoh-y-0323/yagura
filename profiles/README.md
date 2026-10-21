@@ -147,6 +147,9 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
                                 # required inside it; appended to the launch
 # config_file = '...'          # optional; content of a settings file the
                                 # daemon writes for `{mcp_config_file}`
+# config_dir = { "a.json" = '...' }
+                                # optional; files of a settings directory the
+                                # daemon writes for `{mcp_config_dir}`
 
 [hooks]                        # optional table; how the launched CLI is made
                                 # to report its turns. See "Hooks injection"
@@ -154,6 +157,9 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 # args = ["--settings", "{hooks_config_file}"]
 # config_file = '...'          # optional; content of a settings file the
                                 # daemon writes for `{hooks_config_file}`
+# config_dir = { "hooks.json" = '...' }
+                                # optional; files of a settings directory the
+                                # daemon writes for `{hooks_config_dir}`
 
 [delivery]                     # optional table; how the daemon hands the
                                 # CLI the text it sends of its own accord.
@@ -771,7 +777,7 @@ args = [
 ]
 ```
 
-The table takes two keys, and any other key excludes the profile:
+The table takes three keys, and any other key excludes the profile:
 
 - `args` (required): argv elements appended to the launch, after the
   profile's own argv and its launch options.
@@ -779,17 +785,34 @@ The table takes two keys, and any other key excludes the profile:
   read, written by the daemon as given except that `{server}` is replaced
   by the server name (see the table below) -- no other placeholder is
   substituted inside it, so JSON braces and `${NAME}` stay as written.
+- `config_dir` (optional): a table of file name to content, for a CLI that
+  takes its settings only as a directory of files. The daemon writes a
+  directory holding exactly these files, each content treated as
+  `config_file`'s is. A file name is one plain name: ASCII letters, digits,
+  `.`, `_` and `-` only, not starting or ending with `.`, without `..`, and
+  not a Windows device name (`con`, `nul`, `com1` and so on). `config_file`
+  and `config_dir` can be used together.
+
+```toml
+# A CLI that reads its MCP servers from a directory
+[mcp]
+args = ["--config-dir", "{mcp_config_dir}"]
+
+[mcp.config_dir]
+"mcp.json" = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+```
 
 These placeholders are substituted inside `args` elements, always within an
 element, so they can never add, split or reorder argv elements:
 
 | placeholder | replaced by |
 |---|---|
-| `{server}` | the MCP server name the instance registers under: `yagura` for the default instance, `yagura-<instance>` for a named one (see [Instances](../docs/instances.md)); also substituted inside `config_file` |
+| `{server}` | the MCP server name the instance registers under: `yagura` for the default instance, `yagura-<instance>` for a named one (see [Instances](../docs/instances.md)); also substituted inside `config_file` and each `config_dir` file |
 | `{bridge_toml}` | the bridge's absolute path as a TOML literal string, for example `'C:\path\to\yagura-mcp.exe'` |
 | `{env_names_toml}` | the TOML literal-string array `['YAGURA_WINDOW_ID', 'YAGURA_STATUS_TOKEN', 'YAGURA_INSTANCE', 'YAGURA_MCP_BRIDGE']` |
 | `{wslenv_toml}` | the TOML literal string `'YAGURA_WINDOW_ID:YAGURA_STATUS_TOKEN:YAGURA_INSTANCE'`, a `WSLENV` value naming the variables the bridge reads (the bundled `wsl-codex-cli` sets it as its server's `env.WSLENV`, because Codex does not pass `WSLENV` on to an MCP server, and without it the Windows bridge started from WSL sees none of them) |
 | `{mcp_config_file}` | the path of the file the daemon wrote from `config_file`; usable only when the table has `config_file` |
+| `{mcp_config_dir}` | the path of the directory the daemon wrote from `config_dir`; usable only when the table has `config_dir` |
 
 An element with none of them passes through unchanged. `${NAME}` is not a
 placeholder: it is left for the CLI to expand from its own environment,
@@ -797,7 +820,9 @@ which is how the bundled Claude Code tables name the bridge
 (`${YAGURA_MCP_BRIDGE}`). The whole profile is excluded, with one warning
 line naming the file, when `args` is missing, when an element carries any
 other `{name}`-shaped token (ASCII letters, digits and `_` between braces),
-or when `{mcp_config_file}` is used without `config_file`.
+when `{mcp_config_file}` is used without `config_file` or `{mcp_config_dir}`
+without `config_dir`, or when `config_dir` is empty or has a key that is not
+a plain file name.
 
 What the daemon provides around the table:
 
@@ -811,6 +836,12 @@ What the daemon provides around the table:
 - **The settings file.** `config_file` is written under the instance's
   state directory, in `mcp/`, as `mcp-<SHA-256 of the content>.json`. A file
   already there under that name is not written again.
+- **The directory of settings files.** `config_dir` is written in the same `mcp/`
+  folder as `mcp-<SHA-256>`, hashed over every file name and content in name
+  order (no extension, so it never meets a settings file's name). The files
+  are written into a temporary directory first and it is then renamed into
+  place, so a CLI never sees a half-written directory. A directory already
+  there under that name is not written again.
 
 The injection applies to every launch from a profile -- `open_window` with
 `profile`, a `send_handoff` that opens a new window from a `profile`,
@@ -823,8 +854,8 @@ daemon log, when the injection cannot be carried out:
 
 - the bridge's path contains a `'` or a newline, which a TOML literal string
   cannot hold;
-- the table has `config_file` but no settings directory was resolved, or
-  the file cannot be written;
+- the table has `config_file` or `config_dir` but no settings directory was
+  resolved, or either of them cannot be written (the whole table is dropped);
 - `argv[0]` resolves to a `.cmd` / `.bat` shim (see
   [`.cmd` / `.bat` shims](#cmd--bat-shims)) and a rendered element contains
   one of the characters the command interpreter would act on (`%` `&` `|`
@@ -860,13 +891,16 @@ make it report its turn boundaries to the daemon with
 The same hooks carry the doors a CLI reads its inbox through,
 `yagura-daemon --deliver-context`, `--deliver-take`, `--deliver-wait` and
 `--report-session` (see [Delivery](#delivery)).
-It follows the `[mcp]` rules above -- the same `args` and `config_file` keys,
-the same settings directory, argv order and drop rules -- with three
-differences:
+It follows the `[mcp]` rules above -- the same `args`, `config_file` and
+`config_dir` keys, the same settings directory, argv order and drop rules --
+with three differences:
 
-- The one placeholder is `{hooks_config_file}`, the path of the file written
-  from `config_file` (usable only when the table has `config_file`). The
-  file is named `hooks-<SHA-256 of the content>.json`.
+- The placeholders are `{hooks_config_file}`, the path of the file written
+  from `config_file` (usable only when the table has `config_file`), and
+  `{hooks_config_dir}`, the path of the directory written from `config_dir`
+  (usable only when the table has `config_dir`). The file is named
+  `hooks-<SHA-256 of the content>.json` and the directory `hooks-<SHA-256>`.
+  Nothing is substituted inside either: `{server}` belongs to `[mcp]`.
 - It needs no bridge: a profile's hooks are injected whether or not
   `yagura-mcp` was found.
 - Its elements are appended after the `[mcp]` ones. When `argv[0]` resolves
@@ -885,6 +919,14 @@ args = ["--settings", "{hooks_config_file}"]
 args = [
   "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
 ]
+
+# A CLI that takes its hooks only as a directory of files
+[hooks]
+args = ["--plugin-dir", "{hooks_config_dir}"]
+
+[hooks.config_dir]
+"plugin.json" = '{"name":"yagura-status"}'
+"hooks.json" = '{"hooks":{"Stop":[{"type":"command","command":"yagura-daemon --emit-status waiting_input --source my-cli"}]}}'
 ```
 
 **The daemon's report folder.** A hook names the daemon as `yagura-daemon`
@@ -916,8 +958,9 @@ actually appended to its launch, and a window whose profile's `json_entry` was
 in place when it opened, expect their CLI to report. Such a window is marked
 in the GUI when no report arrives (see
 [When reports are missing](../crates/yagura-daemon/detection/README.md#when-reports-are-missing)).
-A table that was dropped on the way -- no settings directory, a file that
-could not be written, a shim, entries not in place -- expects nothing.
+A table that was dropped on the way -- no settings directory, settings that
+could not be written, a shim, entries not in place -- expects nothing, and
+its window takes no part in [delivery](#delivery) either.
 
 The bundled profiles map these events (the versions are those the profiles
 were checked with):

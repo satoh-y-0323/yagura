@@ -271,5 +271,6 @@ pub fn launch_prompt_injection(delivery: &ProfileDelivery, prompt: &str) -> Opti
             .map(|arg| arg.replace(PROMPT_PLACEHOLDER, prompt))
             .collect(),
         config_file: None,
+        config_dir: None,
     })
 }

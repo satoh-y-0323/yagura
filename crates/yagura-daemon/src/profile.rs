@@ -41,7 +41,9 @@ use crate::config::DaemonConfig;
 use crate::detector::definition::is_valid_detection_name;
 use crate::detector::layers::{DetectionLayers, LayerError};
 use crate::profile_delivery::{DeliveryError, ProfileDelivery, WakeMode, parse_delivery};
-use crate::window::{CliInjection, InjectedConfigFile, InjectionKind, RequestedCwd};
+use crate::window::{
+    CliInjection, InjectedConfigDir, InjectedConfigFile, InjectionKind, RequestedCwd,
+};
 
 /// Schema version this loader accepts. Any other declared value is
 /// rejected, so a future incompatible schema change fails loudly rather
@@ -56,14 +58,16 @@ const VALUE_PLACEHOLDER: &str = "{value}";
 /// [`render_mcp_args`]. Named here so [`contains_unknown_placeholder`] strips
 /// exactly these before judging what remains.
 const MCP_CONFIG_FILE_PLACEHOLDER: &str = "{mcp_config_file}";
+const MCP_CONFIG_DIR_PLACEHOLDER: &str = "{mcp_config_dir}";
 const MCP_BRIDGE_TOML_PLACEHOLDER: &str = "{bridge_toml}";
 const MCP_ENV_NAMES_TOML_PLACEHOLDER: &str = "{env_names_toml}";
 const MCP_WSLENV_TOML_PLACEHOLDER: &str = "{wslenv_toml}";
 /// The one placeholder an `[mcp]` table's `config_file` content may spell as
 /// well as its `args`.
 const MCP_SERVER_PLACEHOLDER: &str = "{server}";
-/// The one placeholder a `[hooks]` table's `args` may spell.
+/// The placeholders a `[hooks]` table's `args` may spell.
 const HOOKS_CONFIG_FILE_PLACEHOLDER: &str = "{hooks_config_file}";
+const HOOKS_CONFIG_DIR_PLACEHOLDER: &str = "{hooks_config_dir}";
 
 /// Reason text for [`ProfileUnavailableKind::NotFound`]: the selected argv's
 /// executable could not be found by the injected resolution environment.
@@ -429,6 +433,14 @@ pub struct InjectionSpec {
     /// nothing else. `None` when no element needs one (the CLI takes the
     /// configuration directly on its command line instead).
     pub config_file: Option<String>,
+    /// The files of a settings directory the daemon writes before spawn,
+    /// file name to content, substituted wherever an `args` element spells
+    /// the kind's config-directory placeholder: for a CLI that takes its
+    /// configuration only as a directory. Each name is one path component
+    /// ([`is_config_dir_file_name`]); `{server}` in an `[mcp]` table's
+    /// contents is substituted, and nothing else. `None` when the table has
+    /// none.
+    pub config_dir: Option<BTreeMap<String, String>>,
 }
 
 impl InjectionSpec {
@@ -440,8 +452,19 @@ impl InjectionSpec {
         self.args
             .iter()
             .chain(self.config_file.as_ref())
+            .chain(self.config_dir.iter().flat_map(BTreeMap::values))
             .any(|text| text.contains(MCP_SERVER_PLACEHOLDER))
     }
+}
+
+/// Where the settings an injection names were placed for one launch: what
+/// replaces the kind's config-file and config-directory placeholders.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InjectedPaths<'a> {
+    /// The settings file's path, when the table has a `config_file`.
+    pub config_file: Option<&'a Path>,
+    /// The settings directory's path, when the table has a `config_dir`.
+    pub config_dir: Option<&'a Path>,
 }
 
 /// Errors rejecting a profile document outright (the *excluded* half of the
@@ -536,6 +559,17 @@ pub enum InjectionSpecError {
     /// table has no `config_file` key to substitute there.
     #[error("args uses the config file placeholder but the table has no config_file")]
     ConfigFileRequiredForPlaceholder,
+    /// An `args` element uses the kind's config-directory placeholder, but
+    /// the table has no `config_dir` table to write there.
+    #[error("args uses the config directory placeholder but the table has no config_dir")]
+    ConfigDirRequiredForPlaceholder,
+    /// The `config_dir` table names no file.
+    #[error("the config_dir table is empty")]
+    EmptyConfigDir,
+    /// A `config_dir` key is not a single plain file name
+    /// ([`is_config_dir_file_name`]).
+    #[error("a config_dir key is not a plain file name")]
+    InvalidConfigDirFileName,
 }
 
 /// The schema version [`ProfileParseError::UnsupportedSchema`] rejected.
@@ -687,6 +721,8 @@ struct RawInjection {
     args: Option<Vec<String>>,
     #[serde(default)]
     config_file: Option<String>,
+    #[serde(default)]
+    config_dir: Option<BTreeMap<String, String>>,
 }
 
 /// A `[model]` / `[effort]` table before validation. `args` is `Option` so
@@ -1059,24 +1095,62 @@ fn config_file_placeholder(kind: TableKind) -> &'static str {
     }
 }
 
+/// The placeholder `kind`'s `args` spell where the settings directory's path
+/// goes.
+fn config_dir_placeholder(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::Mcp => MCP_CONFIG_DIR_PLACEHOLDER,
+        TableKind::Hooks => HOOKS_CONFIG_DIR_PLACEHOLDER,
+    }
+}
+
 /// Every placeholder `kind`'s `args` may spell.
 fn known_placeholders(kind: TableKind) -> &'static [&'static str] {
     match kind {
         TableKind::Mcp => &[
             MCP_CONFIG_FILE_PLACEHOLDER,
+            MCP_CONFIG_DIR_PLACEHOLDER,
             MCP_BRIDGE_TOML_PLACEHOLDER,
             MCP_ENV_NAMES_TOML_PLACEHOLDER,
             MCP_WSLENV_TOML_PLACEHOLDER,
             MCP_SERVER_PLACEHOLDER,
         ],
-        TableKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER],
+        TableKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER, HOOKS_CONFIG_DIR_PLACEHOLDER],
     }
+}
+
+/// Whether `name` can be a `config_dir` key: one plain file name that stays
+/// inside the directory on every platform. Only ASCII letters, digits, `.`,
+/// `_` and `-`, so no path separator can appear; no leading `.` (no hidden
+/// file, no `.` / `..`), no trailing `.` (Windows strips it), no `..`
+/// anywhere, and no Windows reserved device name as its stem.
+#[must_use]
+pub fn is_config_dir_file_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &["con", "prn", "aux", "nul"];
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('.')
+        || name.ends_with('.')
+        || name.contains("..")
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
+    let numbered_device = (stem.starts_with("com") || stem.starts_with("lpt"))
+        && stem.len() == 4
+        && stem.as_bytes()[3].is_ascii_digit();
+    !(RESERVED.contains(&stem.as_str()) || numbered_device)
 }
 
 /// Validates one `[mcp]` / `[hooks]` table into its spec (`None` in, `None`
 /// out), in the order: `args` present, no `args` element carries a
 /// placeholder `kind` does not know, the config-file placeholder used only
-/// alongside a `config_file`.
+/// alongside a `config_file`, the config-directory placeholder used only
+/// alongside a `config_dir`, and a `config_dir` naming at least one file,
+/// each by a plain file name.
 fn parse_injection_spec(
     raw: Option<RawInjection>,
     kind: TableKind,
@@ -1104,9 +1178,25 @@ fn parse_injection_spec(
             InjectionSpecError::ConfigFileRequiredForPlaceholder,
         ));
     }
+    match &raw.config_dir {
+        None if args
+            .iter()
+            .any(|arg| arg.contains(config_dir_placeholder(kind))) =>
+        {
+            return Err(invalid(InjectionSpecError::ConfigDirRequiredForPlaceholder));
+        }
+        Some(files) if files.is_empty() => {
+            return Err(invalid(InjectionSpecError::EmptyConfigDir));
+        }
+        Some(files) if !files.keys().all(|name| is_config_dir_file_name(name)) => {
+            return Err(invalid(InjectionSpecError::InvalidConfigDirFileName));
+        }
+        _ => {}
+    }
     Ok(Some(InjectionSpec {
         args,
         config_file: raw.config_file,
+        config_dir: raw.config_dir,
     }))
 }
 
@@ -1175,9 +1265,9 @@ fn toml_literal_string_array(items: &[&str]) -> Option<String> {
 /// [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] followed by
 /// [`yagura_protocol::MCP_BRIDGE_ENV`]) and for `{wslenv_toml}` (as one TOML
 /// literal string, [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] joined by `:` --
-/// a `WSLENV` value), and `config_file_path` for `{mcp_config_file}`
-/// (substituted verbatim -- it is a settings-file path argument, not TOML
-/// content). An element with none of them passes through unchanged.
+/// a `WSLENV` value), and `paths` for `{mcp_config_file}` /
+/// `{mcp_config_dir}` (substituted verbatim -- they are path arguments, not
+/// TOML content). An element with none of them passes through unchanged.
 ///
 /// Returns `None` when `bridge_path` cannot be rendered as a TOML literal
 /// string (it contains a single quote or a newline): emitting a broken TOML
@@ -1187,7 +1277,7 @@ pub fn render_mcp_args(
     spec: &InjectionSpec,
     server: &str,
     bridge_path: &Path,
-    config_file_path: Option<&Path>,
+    paths: InjectedPaths<'_>,
 ) -> Option<Vec<String>> {
     let bridge_toml = toml_literal_string(&bridge_path.to_string_lossy())?;
 
@@ -1201,8 +1291,6 @@ pub fn render_mcp_args(
     // The bridge path stays out: only the WSL-side shell reads it.
     let wslenv_toml = toml_literal_string(&yagura_protocol::MCP_CHANNEL_ENV_VARS.join(":"))?;
 
-    let config_file = config_file_path.map(|path| path.to_string_lossy().into_owned());
-
     let mut rendered = Vec::with_capacity(spec.args.len());
     for arg in &spec.args {
         // First, so a substituted path that happens to spell `{server}` is
@@ -1211,12 +1299,22 @@ pub fn render_mcp_args(
         value = value.replace(MCP_BRIDGE_TOML_PLACEHOLDER, &bridge_toml);
         value = value.replace(MCP_ENV_NAMES_TOML_PLACEHOLDER, &env_names_toml);
         value = value.replace(MCP_WSLENV_TOML_PLACEHOLDER, &wslenv_toml);
-        if let Some(config_file) = &config_file {
-            value = value.replace(MCP_CONFIG_FILE_PLACEHOLDER, config_file);
-        }
-        rendered.push(value);
+        rendered.push(substitute_paths(value, TableKind::Mcp, paths));
     }
     Some(rendered)
+}
+
+/// Replaces `kind`'s config-file and config-directory placeholders in `arg`
+/// with the paths `paths` carries; a placeholder without a path stays.
+fn substitute_paths(arg: String, kind: TableKind, paths: InjectedPaths<'_>) -> String {
+    let mut value = arg;
+    if let Some(path) = paths.config_file {
+        value = value.replace(config_file_placeholder(kind), &path.to_string_lossy());
+    }
+    if let Some(path) = paths.config_dir {
+        value = value.replace(config_dir_placeholder(kind), &path.to_string_lossy());
+    }
+    value
 }
 
 /// Replaces `{server}` in `text` with `server` and nothing else, so JSON
@@ -1226,26 +1324,23 @@ fn substitute_server(text: &str, server: &str) -> String {
 }
 
 /// Turns a `[hooks]` table's [`InjectionSpec::args`] into the argv elements a
-/// launch injects: `config_file_path` replaces `{hooks_config_file}` (verbatim,
-/// as a path argument); an element without it passes through unchanged.
+/// launch injects: `paths` replace `{hooks_config_file}` and
+/// `{hooks_config_dir}` (verbatim, as path arguments); an element without
+/// them passes through unchanged.
 #[must_use]
-pub fn render_hooks_args(spec: &InjectionSpec, config_file_path: Option<&Path>) -> Vec<String> {
-    let config_file = config_file_path.map(|path| path.to_string_lossy().into_owned());
+pub fn render_hooks_args(spec: &InjectionSpec, paths: InjectedPaths<'_>) -> Vec<String> {
     spec.args
         .iter()
-        .map(|arg| match &config_file {
-            Some(path) => arg.replace(HOOKS_CONFIG_FILE_PLACEHOLDER, path),
-            None => arg.clone(),
-        })
+        .map(|arg| substitute_paths(arg.clone(), TableKind::Hooks, paths))
         .collect()
 }
 
 /// Renders an `[mcp]` table into the injection one launch carries, naming
 /// the MCP server `server` (the same name the instance registers under,
 /// [`crate::mcp_registration::RegistrationTarget::server`]): its settings
-/// file, when it has one, has `{server}` substituted and is named after the
-/// substituted content under `config_dir`, and the rendered `args` name that
-/// file ([`render_mcp_args`]).
+/// file and directory, when it has them, have `{server}` substituted and are
+/// named after the substituted content under `config_dir`, and the rendered
+/// `args` name them ([`render_mcp_args`]).
 ///
 /// `server` goes into JSON keys and bare TOML keys unquoted, which holds
 /// because an instance id is limited to `[a-z0-9-]`
@@ -1261,12 +1356,20 @@ pub fn prepare_mcp_injection(
     bridge_path: &Path,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    let content = spec
-        .config_file
-        .as_deref()
-        .map(|content| substitute_server(content, server));
-    prepare_injection(TableKind::Mcp, content, config_dir, |config_file_path| {
-        let args = render_mcp_args(spec, server, bridge_path, config_file_path);
+    let settings = InjectionSettings {
+        file: spec
+            .config_file
+            .as_deref()
+            .map(|content| substitute_server(content, server)),
+        dir: spec.config_dir.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|(name, content)| (name.clone(), substitute_server(content, server)))
+                .collect()
+        }),
+    };
+    prepare_injection(TableKind::Mcp, settings, config_dir, |paths| {
+        let args = render_mcp_args(spec, server, bridge_path, paths);
         if args.is_none() {
             tracing::warn!(
                 "the MCP bridge path cannot be rendered as a TOML literal string; the window \
@@ -1289,59 +1392,110 @@ pub fn prepare_hooks_injection(
     spec: &InjectionSpec,
     config_dir: Option<&Path>,
 ) -> Option<CliInjection> {
-    prepare_injection(
-        TableKind::Hooks,
-        spec.config_file.clone(),
-        config_dir,
-        |config_file_path| Some(render_hooks_args(spec, config_file_path)),
-    )
+    let settings = InjectionSettings {
+        file: spec.config_file.clone(),
+        dir: spec.config_dir.clone(),
+    };
+    prepare_injection(TableKind::Hooks, settings, config_dir, |paths| {
+        Some(render_hooks_args(spec, paths))
+    })
+}
+
+/// The settings one launch writes for a table, after any substitution.
+struct InjectionSettings {
+    file: Option<String>,
+    dir: Option<BTreeMap<String, String>>,
 }
 
 /// The part of preparing an injection both kinds share: the settings file
-/// `content` (named after itself under `config_dir`) and the rendered `args`
-/// that name it. `render` turns the file's path into the argv elements and
-/// logs its own refusal.
+/// and directory in `settings` (each named after its content under
+/// `config_dir`) and the rendered `args` that name them. `render` turns
+/// their paths into the argv elements and logs its own refusal.
 fn prepare_injection(
     kind: TableKind,
-    content: Option<String>,
+    settings: InjectionSettings,
     config_dir: Option<&Path>,
-    render: impl FnOnce(Option<&Path>) -> Option<Vec<String>>,
+    render: impl FnOnce(InjectedPaths<'_>) -> Option<Vec<String>>,
 ) -> Option<CliInjection> {
-    let config_file = match (content, config_dir) {
-        (Some(content), Some(dir)) => Some(InjectedConfigFile {
-            dir: dir.to_path_buf(),
-            file_name: config_file_name(kind, &content),
-            content,
-        }),
-        (Some(_), None) => {
-            tracing::warn!(
-                "no settings directory is configured; the window opens without {} injection",
-                kind.injection_kind().label()
-            );
-            return None;
-        }
-        (None, _) => None,
+    let InjectionSettings { file, dir } = settings;
+    if file.is_none() && dir.is_none() {
+        let args = render(InjectedPaths::default())?;
+        return Some(CliInjection {
+            kind: kind.injection_kind(),
+            args,
+            config_file: None,
+            config_dir: None,
+        });
+    }
+    let Some(parent) = config_dir else {
+        tracing::warn!(
+            "no settings directory is configured; the window opens without {} injection",
+            kind.injection_kind().label()
+        );
+        return None;
     };
-    let config_file_path = config_file.as_ref().map(InjectedConfigFile::path);
-    let args = render(config_file_path.as_deref())?;
+    let config_file = file.map(|content| InjectedConfigFile {
+        dir: parent.to_path_buf(),
+        file_name: config_file_name(kind, &content),
+        content,
+    });
+    let config_dir = dir.map(|files| InjectedConfigDir {
+        parent: parent.to_path_buf(),
+        dir_name: config_dir_name(kind, &files),
+        files,
+    });
+    let file_path = config_file.as_ref().map(InjectedConfigFile::path);
+    let dir_path = config_dir.as_ref().map(InjectedConfigDir::path);
+    let args = render(InjectedPaths {
+        config_file: file_path.as_deref(),
+        config_dir: dir_path.as_deref(),
+    })?;
     Some(CliInjection {
         kind: kind.injection_kind(),
         args,
         config_file,
+        config_dir,
     })
+}
+
+fn kind_prefix(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::Mcp => "mcp",
+        TableKind::Hooks => "hooks",
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// `<mcp|hooks>-<sha-256 of content, hex>.json`: equal content always maps to
 /// the same name, so a file already present under it never needs rewriting.
 fn config_file_name(kind: TableKind, content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(content.as_bytes());
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    let prefix = match kind {
-        TableKind::Mcp => "mcp",
-        TableKind::Hooks => "hooks",
-    };
-    format!("{prefix}-{hex}.json")
+    format!(
+        "{}-{}.json",
+        kind_prefix(kind),
+        sha256_hex(content.as_bytes())
+    )
+}
+
+/// `<mcp|hooks>-<sha-256, hex>`, hashed over every (name, content) pair in
+/// name order, each part prefixed with its length so no two different sets
+/// of files hash the same bytes. No extension, so it never collides with a
+/// [`config_file_name`].
+fn config_dir_name(kind: TableKind, files: &BTreeMap<String, String>) -> String {
+    let mut bytes = Vec::new();
+    for (name, content) in files {
+        for part in [name.as_bytes(), content.as_bytes()] {
+            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(part);
+        }
+    }
+    format!("{}-{}", kind_prefix(kind), sha256_hex(&bytes))
 }
 
 /// The wire form of one mapped axis: `None` for an axis the profile does not

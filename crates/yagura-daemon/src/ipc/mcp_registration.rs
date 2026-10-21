@@ -983,6 +983,7 @@ pub(super) async fn disable_other_bridges(
         kind: InjectionKind::Mcp,
         args: scan.list.render_disable(&names),
         config_file: None,
+        config_dir: None,
     })
 }
 
