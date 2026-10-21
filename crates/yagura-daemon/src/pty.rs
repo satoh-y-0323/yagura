@@ -14,7 +14,7 @@ use tokio::sync::{Semaphore, watch};
 use crate::child_env::ChildBaseEnv;
 use crate::config::DaemonConfig;
 use crate::detector::{SharedScreen, VtScreen};
-use crate::input_encode::InputModes;
+use crate::input_encode::{self, InputModes};
 use crate::terminal_identity;
 
 /// Error type for PTY operations.
@@ -418,9 +418,100 @@ impl WriterSlot {
     }
 }
 
+/// What a [`ReplyQueue`] hands its writer thread: replies to write, and
+/// whether the focus the child was told is to be brought up to date.
+#[derive(Debug, PartialEq, Eq)]
+struct Wake {
+    bytes: Vec<u8>,
+    check_focus: bool,
+}
+
+/// The focus a window's child is told, derived from the view's focus and from
+/// the daemon's own input.
+///
+/// A real terminal delivers keys to the focused window only, so the child is
+/// told it has focus whenever the daemon types into it, however the view
+/// stands. It is told the view's focus again once the input is over, and
+/// only after the child has produced output, so the report never lands in
+/// the same read as the last input byte.
+///
+/// Every field is read and written under the queue's lock. The reports that
+/// follow from it are written under the writer's lock, which is what orders
+/// them against input bytes.
+#[derive(Default)]
+struct FocusState {
+    /// The last focus the view reported; `None` before any.
+    view: Option<bool>,
+    /// Open stretches of deciding on or making writes; see [`FocusInterval`].
+    open_intervals: usize,
+    /// The focus the child was last told; `None` before any report, when a
+    /// child assumes it has the focus.
+    told: Option<bool>,
+    /// A focus-out is held back until the output count passes this value.
+    out_after: Option<u64>,
+    /// A focus-out is held back now, so the next output is to wake the writer.
+    out_deferred: bool,
+}
+
+impl FocusState {
+    /// The focus the child should hold; `None` when nothing claims one.
+    fn target(&self) -> Option<bool> {
+        if self.open_intervals > 0 {
+            Some(true)
+        } else {
+            self.view
+        }
+    }
+
+    /// Notes that an input write, or an interval of waiting to write, ended
+    /// with `outputs` outputs seen. Returns whether the child holds more focus
+    /// than the target allows, so a focus-out is due.
+    fn input_ended(&mut self, outputs: u64) -> bool {
+        self.out_after = Some(outputs);
+        self.target() == Some(false) && self.told != Some(false)
+    }
+
+    /// The report that brings the child to the target; empty when the child
+    /// already holds it, when it asked for no focus reports, or when a
+    /// focus-out must wait for output.
+    fn reconcile(&mut self, modes: InputModes, outputs: u64) -> Vec<u8> {
+        self.out_deferred = false;
+        if !modes.focus_reports {
+            return Vec::new();
+        }
+        let Some(target) = self.target() else {
+            return Vec::new();
+        };
+        if self.told == Some(target) {
+            return Vec::new();
+        }
+        if !target && self.out_after.is_some_and(|after| outputs <= after) {
+            self.out_deferred = true;
+            return Vec::new();
+        }
+        self.told = Some(target);
+        self.out_after = None;
+        input_encode::encode_focus(target, modes)
+    }
+
+    /// The report that goes in front of an input write.
+    fn before_input(&mut self, modes: InputModes) -> Vec<u8> {
+        self.out_deferred = false;
+        if !modes.focus_reports || self.told == Some(true) {
+            return Vec::new();
+        }
+        self.told = Some(true);
+        input_encode::encode_focus(true, modes)
+    }
+}
+
 /// Replies to the child's terminal queries on their way to the PTY. The
 /// reader only queues them, and one writer thread per window writes them, so
 /// a child that stops reading its input never stops the reader.
+///
+/// The window's [`FocusState`] lives here too, because its reports are
+/// written by the same thread and a change to it is a mark on this queue, not
+/// bytes: marks are never dropped for want of room.
 #[derive(Default)]
 struct ReplyQueue {
     state: Mutex<ReplyQueueState>,
@@ -433,6 +524,9 @@ struct ReplyQueueState {
     closed: bool,
     /// Set while replies are being dropped, so a flood logs once.
     dropping: bool,
+    /// The writer is to bring the child's focus up to date.
+    check_focus: bool,
+    focus: FocusState,
 }
 
 impl ReplyQueue {
@@ -461,6 +555,12 @@ impl ReplyQueue {
         }
     }
 
+    /// Asks the writer thread to bring the child's focus up to date.
+    fn wake_for_focus(&self, state: &mut ReplyQueueState) {
+        state.check_focus = true;
+        self.ready.notify_one();
+    }
+
     /// Ends the writer thread once it has nothing in hand.
     fn close(&self) {
         let mut state = lock_recover(&self.state);
@@ -469,15 +569,19 @@ impl ReplyQueue {
         self.ready.notify_one();
     }
 
-    /// Waits for queued replies; `None` once the queue is closed.
-    fn next(&self) -> Option<Vec<u8>> {
+    /// Waits for queued replies or a focus check; `None` once the queue is
+    /// closed.
+    fn next(&self) -> Option<Wake> {
         let mut state = lock_recover(&self.state);
         loop {
             if state.closed {
                 return None;
             }
-            if !state.bytes.is_empty() {
-                return Some(std::mem::take(&mut state.bytes));
+            if !state.bytes.is_empty() || state.check_focus {
+                return Some(Wake {
+                    bytes: std::mem::take(&mut state.bytes),
+                    check_focus: std::mem::take(&mut state.check_focus),
+                });
             }
             state = self
                 .ready
@@ -486,17 +590,77 @@ impl ReplyQueue {
         }
     }
 
+    fn set_view_focus(&self, focused: bool) {
+        let mut state = lock_recover(&self.state);
+        state.focus.view = Some(focused);
+        self.wake_for_focus(&mut state);
+    }
+
+    fn open_focus_interval(&self) {
+        let mut state = lock_recover(&self.state);
+        state.focus.open_intervals += 1;
+        self.wake_for_focus(&mut state);
+    }
+
+    fn close_focus_interval(&self, outputs: &watch::Receiver<u64>) {
+        let mut state = lock_recover(&self.state);
+        state.focus.open_intervals = state.focus.open_intervals.saturating_sub(1);
+        if state.focus.input_ended(*outputs.borrow()) {
+            self.wake_for_focus(&mut state);
+        }
+    }
+
+    /// Wakes the writer when output arrived while a focus-out waits for it.
+    /// The writer reads the output count under this lock, so an arrival is
+    /// either seen by that read or finds the wait marked.
+    fn note_output(&self) {
+        let mut state = lock_recover(&self.state);
+        if state.focus.out_deferred {
+            self.wake_for_focus(&mut state);
+        }
+    }
+
+    /// Under the writer's lock, before an input write: the report that tells
+    /// the child it has the focus.
+    fn focus_before_input(&self, modes: InputModes) -> Vec<u8> {
+        lock_recover(&self.state).focus.before_input(modes)
+    }
+
+    /// After an input write ended and the writer's lock was let go.
+    fn focus_after_input(&self, outputs: &watch::Receiver<u64>) {
+        let mut state = lock_recover(&self.state);
+        if state.focus.input_ended(*outputs.borrow()) {
+            self.wake_for_focus(&mut state);
+        }
+    }
+
+    fn reconcile_focus(&self, modes: InputModes, outputs: &watch::Receiver<u64>) -> Vec<u8> {
+        lock_recover(&self.state)
+            .focus
+            .reconcile(modes, *outputs.borrow())
+    }
+
     /// The writer thread's body. Replies take the writer's lock like any other
     /// write, so they never land inside another write's bytes, but they are
-    /// not counted in the write ledger: the child asked for them. A failed
-    /// write leaves the PTY unusable, so the writer is dropped with it.
-    fn write_all_to(&self, writer: &WriterSlot) {
-        while let Some(bytes) = self.next() {
+    /// not counted in the write ledger: the child asked for them. So are the
+    /// focus reports, which are worked out under that lock. A failed write
+    /// leaves the PTY unusable, so the writer is dropped with it.
+    fn write_all_to(
+        &self,
+        writer: &WriterSlot,
+        input: &PublishedInput,
+        outputs: &watch::Receiver<u64>,
+    ) {
+        while let Some(wake) = self.next() {
             let mut guard = writer.lock();
             let Some(w) = guard.as_mut() else {
                 break;
             };
-            if w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
+            let mut bytes = wake.bytes;
+            if wake.check_focus {
+                bytes.extend(self.reconcile_focus(input.load().modes, outputs));
+            }
+            if !bytes.is_empty() && w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
                 *guard = None;
                 break;
             }
@@ -505,6 +669,20 @@ impl ReplyQueue {
         }
         self.close();
         writer.release_if_requested();
+    }
+}
+
+/// An open stretch in which the daemon is deciding on, or making, writes to a
+/// window; see [`PtySession::open_focus_interval`]. Ends when dropped.
+#[must_use = "the interval ends when this is dropped"]
+pub struct FocusInterval {
+    replies: Arc<ReplyQueue>,
+    outputs: watch::Receiver<u64>,
+}
+
+impl Drop for FocusInterval {
+    fn drop(&mut self) {
+        self.replies.close_focus_interval(&self.outputs);
     }
 }
 
@@ -611,6 +789,7 @@ impl ModelFeed {
         replies.push(queued, dropped);
         raw_capture.record(output);
         arrivals.send_replace(arrival);
+        replies.note_output();
     }
 }
 
@@ -876,7 +1055,9 @@ impl PtySession {
         {
             let replies = Arc::clone(&replies);
             let writer = Arc::clone(&writer);
-            thread::spawn(move || replies.write_all_to(&writer));
+            let input = Arc::clone(&input);
+            let outputs = output_arrivals.clone();
+            thread::spawn(move || replies.write_all_to(&writer, &input, &outputs));
         }
 
         let reader_thread = {
@@ -1116,12 +1297,37 @@ impl PtySession {
         self.exit_notify_rx.clone()
     }
 
-    /// Sends the child a report it turned on, such as a focus change, the way
-    /// replies to its terminal queries go: ordered with every other write but
-    /// not counted in the write ledger, since a report never reaches the
-    /// composer. Dropped once the child is gone.
+    /// Sends the child a report it turned on that carries no key or button,
+    /// such as a pointer move, the way replies to its terminal queries go:
+    /// ordered with every other write but not counted in the write ledger,
+    /// since a report never reaches the composer. Dropped once the child is
+    /// gone. Focus is not sent this way; see [`PtySession::set_view_focus`].
     pub fn send_report(&self, report: Vec<u8>) {
         self.replies.push(report, 0);
+    }
+
+    /// Records the focus the window's view reported. The child is told it
+    /// when it asked for focus reports and the daemon is not typing into the
+    /// window (see [`PtySession::open_focus_interval`]); only a change is
+    /// ever sent, and never counted in the write ledger.
+    pub fn set_view_focus(&self, focused: bool) {
+        self.replies.set_view_focus(focused);
+    }
+
+    /// Opens a stretch in which the daemon decides on, or makes, writes to the
+    /// child, such as one delivery from its start to its end. While any is
+    /// open, and while a write is being made, the child is told it has the
+    /// focus, whatever the view reported: a daemon that types into a window
+    /// the user is not looking at would otherwise type into a child that
+    /// believes it has no focus, and some of those draw nothing until they
+    /// have it. Once the last one ends, the view's focus is told again, after
+    /// the child's next output. The stretch ends when the guard is dropped.
+    pub fn open_focus_interval(&self) -> FocusInterval {
+        self.replies.open_focus_interval();
+        FocusInterval {
+            replies: Arc::clone(&self.replies),
+            outputs: self.output_arrivals.clone(),
+        }
     }
 
     /// [`PtySession::write_input_with`] with [`TakeBackPrefix::Apply`].
@@ -1159,25 +1365,26 @@ impl PtySession {
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
         let input = Arc::clone(&self.input);
+        let replies = Arc::clone(&self.replies);
+        let outputs = self.output_arrivals.clone();
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
             let registered = writer.take_registration();
-            let take_back = match prefix {
-                TakeBackPrefix::Apply => registered.map(|r| r.keys(input.load().cols)),
-                TakeBackPrefix::Withhold => None,
-            };
+            let mut lead = replies.focus_before_input(input.load().modes);
+            if let (TakeBackPrefix::Apply, Some(registered)) = (prefix, registered) {
+                lead.extend(registered.keys(input.load().cols));
+            }
             match prefix {
                 TakeBackPrefix::Apply => ledger.count(),
                 TakeBackPrefix::Withhold => ledger.count_withheld(),
             }
             let written = match writer_guard.as_mut() {
-                Some(w) => take_back
-                    .map_or(Ok(()), |keys| w.write_all(&keys))
-                    .and_then(|()| w.write_all(&data)),
+                Some(w) => w.write_all(&lead).and_then(|()| w.write_all(&data)),
                 None => Ok(()),
             };
             drop(writer_guard);
             writer.release_if_requested();
+            replies.focus_after_input(&outputs);
             written
         })
         .await
@@ -1212,14 +1419,20 @@ impl PtySession {
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
         let input_writes = Arc::clone(&self.input_writes);
+        let input = Arc::clone(&self.input);
+        let replies = Arc::clone(&self.replies);
+        let outputs = self.output_arrivals.clone();
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
+            let mut entered = false;
             let outcome = if *ledger.count.borrow() == expected_seq {
                 before_write();
                 Self::count_input_write(&input_writes);
                 ledger.count();
+                entered = true;
+                let lead = replies.focus_before_input(input.load().modes);
                 let written = match writer_guard.as_mut() {
-                    Some(w) => w.write_all(&data),
+                    Some(w) => w.write_all(&lead).and_then(|()| w.write_all(&data)),
                     None => Ok(()),
                 };
                 // Applied even when the write failed: part of `data` may have
@@ -1231,6 +1444,9 @@ impl PtySession {
             };
             drop(writer_guard);
             writer.release_if_requested();
+            if entered {
+                replies.focus_after_input(&outputs);
+            }
             outcome
         })
         .await
@@ -1471,7 +1687,10 @@ mod tests {
         let queue = ReplyQueue::default();
         queue.push(vec![b'a'; MAX_QUEUED_REPLY_BYTES], 0);
         queue.push(vec![b'b'], 0);
-        assert_eq!(queue.next(), Some(vec![b'a'; MAX_QUEUED_REPLY_BYTES]));
+        assert_eq!(
+            queue.next().map(|wake| wake.bytes),
+            Some(vec![b'a'; MAX_QUEUED_REPLY_BYTES])
+        );
     }
 
     #[test]
@@ -1481,7 +1700,7 @@ mod tests {
         queue.push(vec![b'b'; 1000], 0);
         let mut expected = vec![b'a'; 100];
         expected.resize(1100, b'b');
-        assert_eq!(queue.next(), Some(expected));
+        assert_eq!(queue.next().map(|wake| wake.bytes), Some(expected));
     }
 
     #[test]

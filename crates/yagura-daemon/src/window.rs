@@ -1795,6 +1795,7 @@ impl WindowEntry {
         plan: &SubmitPlan,
         requester: Option<watch::Receiver<bool>>,
     ) -> PtyResult<SubmitJudgment> {
+        let _focus = self.session.open_focus_interval();
         let mut requester = Requester(requester);
         let Some(_guard) = self.lock_input(&mut requester).await else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
@@ -1914,6 +1915,7 @@ impl WindowEntry {
         stage: SendStage,
         requester: Option<watch::Receiver<bool>>,
     ) -> PtyResult<SubmitJudgment> {
+        let _focus = self.session.open_focus_interval();
         let mut requester = Requester(requester);
         let Some(_guard) = self.lock_input(&mut requester).await else {
             return Ok(declined(NotPlacedReason::Unobservable, None));

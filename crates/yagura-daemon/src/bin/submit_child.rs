@@ -146,6 +146,12 @@
 //! composer) and, at the first typed byte after it, takes the whole buffer
 //! and paints that byte alone: a receiver that processes the envelope behind
 //! a submit key it did not take just before the next keystroke.
+//! `focus-reports` asks for focus reports (`ESC[?1004h`) at startup and
+//! answers a focus-out report (`ESC[O`) with `ESC[?25l` alone and a focus-in
+//! report (`ESC[I`) with `ESC[?25h` alone, the way GitHub Copilot CLI hides
+//! its cursor while it has no focus; a focus report is read inside a paste
+//! too. `output-on|<path>` prints `OUTPUT-ON` once the file `<path>` exists:
+//! output the test causes without writing any input.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -254,6 +260,21 @@ enum MarkerStep {
     Matched,
     /// The bytes are not the marker this state expects. Carries them.
     Unmodeled(Vec<u8>),
+    /// A focus report (`focus-reports` only): `true` for focus-in.
+    Focus(bool),
+}
+
+const FOCUS_IN: &[u8] = b"\x1b[I";
+const FOCUS_OUT: &[u8] = b"\x1b[O";
+
+/// Whether `read` holds focus reports and nothing else: such a read changes
+/// no composer, so it is not repainted, and the cursor its report hid stays hidden.
+fn only_focus_reports(read: &[u8]) -> bool {
+    !read.is_empty()
+        && read.len().is_multiple_of(FOCUS_IN.len())
+        && read
+            .chunks(FOCUS_IN.len())
+            .all(|report| report == FOCUS_IN || report == FOCUS_OUT)
 }
 
 /// Mutable state carried across reads.
@@ -335,9 +356,15 @@ impl State {
     }
 
     /// Every `0x1b` written to this fixture opens or closes a bracketed
-    /// paste, so a marker-length sequence is read whole.
-    fn feed_marker(&mut self, byte: u8) -> MarkerStep {
+    /// paste, or is a focus report when `focus_reports` is set, so a
+    /// marker-length sequence is read whole.
+    fn feed_marker(&mut self, byte: u8, focus_reports: bool) -> MarkerStep {
         self.pending.push(byte);
+        if focus_reports && (self.pending == FOCUS_IN || self.pending == FOCUS_OUT) {
+            let focused = self.pending == FOCUS_IN;
+            self.pending.clear();
+            return MarkerStep::Focus(focused);
+        }
         let target = self.active_marker();
         if self.pending.len() < target.len() {
             return MarkerStep::Matching;
@@ -378,6 +405,8 @@ struct Settings<'a> {
     /// The first typed byte after a submit key taken as a line break takes the
     /// buffer (`take-on-typing-after-key`).
     takes_on_typing_after_key: bool,
+    /// `focus-reports`: see the module doc comment.
+    focus_reports: bool,
 }
 
 /// The `take-on` receive mode: a submit key that arrives before the file
@@ -422,6 +451,8 @@ struct ReceiveMode {
     take_on: Option<Arc<TakeOn>>,
     hold_probe: Option<std::path::PathBuf>,
     takes_on_typing_after_key: bool,
+    focus_reports: bool,
+    output_on: Option<std::path::PathBuf>,
 }
 
 impl ReceiveMode {
@@ -437,6 +468,8 @@ impl ReceiveMode {
             take_on: None,
             hold_probe: None,
             takes_on_typing_after_key: false,
+            focus_reports: false,
+            output_on: None,
         };
         for part in spec.split(';').filter(|part| !part.is_empty()) {
             if part == "silent" {
@@ -452,6 +485,10 @@ impl ReceiveMode {
                 mode.takes_on_typing_after_key = true;
             } else if let Some(path) = part.strip_prefix("hold-probe|") {
                 mode.hold_probe = Some(std::path::PathBuf::from(path));
+            } else if part == "focus-reports" {
+                mode.focus_reports = true;
+            } else if let Some(path) = part.strip_prefix("output-on|") {
+                mode.output_on = Some(std::path::PathBuf::from(path));
             } else {
                 eprintln!("submit_child: cannot parse receive_mode {part:?}");
                 std::process::exit(2);
@@ -728,6 +765,13 @@ fn fire_overlay(
     Ok(())
 }
 
+/// Writes `bytes` with one write to stderr, the stream every frame goes to.
+fn emit_raw(bytes: &[u8]) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(bytes)?;
+    stderr.flush()
+}
+
 /// Writes and flushes one output line.
 fn emit(out: &Output, line: &str) -> io::Result<()> {
     out.line(line)
@@ -750,8 +794,10 @@ fn process_byte(
     chunk_had_append: &mut bool,
 ) -> io::Result<()> {
     if !state.pending.is_empty() || byte == 0x1b {
-        return match state.feed_marker(byte) {
+        return match state.feed_marker(byte, settings.focus_reports) {
             MarkerStep::Matching => Ok(()),
+            MarkerStep::Focus(true) => emit_raw(b"\x1b[?25h"),
+            MarkerStep::Focus(false) => emit_raw(b"\x1b[?25l"),
             MarkerStep::Matched => {
                 if state.in_paste {
                     state.in_paste = false;
@@ -958,6 +1004,7 @@ fn main() -> io::Result<()> {
         take_on: receive_mode.take_on,
         hold_probe: receive_mode.hold_probe,
         takes_on_typing_after_key: receive_mode.takes_on_typing_after_key,
+        focus_reports: receive_mode.focus_reports,
     };
     let out = Arc::new(Output::new(style));
     let reflector = reflect.map(|reflect| spawn_reflector(Arc::clone(&out), reflect));
@@ -981,7 +1028,19 @@ fn main() -> io::Result<()> {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    if settings.focus_reports {
+        emit_raw(b"\x1b[?1004h")?;
+    }
     emit(&out, &marker)?;
+    if let Some(path) = receive_mode.output_on {
+        let out = Arc::clone(&out);
+        std::thread::spawn(move || {
+            while !path.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = out.line("OUTPUT-ON");
+        });
+    }
 
     let mut stall_until = stall_until;
     let mut frozen_from_paste = frozen_from_paste;
@@ -1102,7 +1161,9 @@ fn main() -> io::Result<()> {
             overlay_fired = true;
             fire_overlay(&out, &overlay_drawn, overlay)?;
         }
-        let reflects = reflector.is_some() && !state.held;
+        let reflects = reflector.is_some()
+            && !state.held
+            && !(settings.focus_reports && only_focus_reports(&chunk[..n]));
         if reflects {
             out.set_body_pasted_through(
                 &String::from_utf8_lossy(&state.buffer),

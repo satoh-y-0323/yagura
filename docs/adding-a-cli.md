@@ -93,6 +93,7 @@ going to change, and when you are done restore it and compare it byte for byte w
   per-launch hooks only from a plugin directory (`--plugin-dir`), not from one settings file. A
   profile writes such a directory with `config_dir` (see
   [MCP injection](../profiles/README.md#mcp-injection)).
+- While the daemon types into a window, it tells the child that the window has the focus, but only when the CLI turned on focus reports (`?1004`). A CLI that changes its cursor or its drawing with the focus, such as GitHub Copilot CLI hiding the cursor without it, therefore draws as if focused for the length of a delivery, even in a window at the back; the view's focus is told again after the CLI's next output.
 - A setting a CLI takes only by its path cannot reach a CLI that runs in another environment, such
   as WSL, as the daemon's own path. Give the profile a [`[host_paths]`](../profiles/README.md#host-paths)
   table so the daemon converts the path first, rather than inlining the content to avoid one.

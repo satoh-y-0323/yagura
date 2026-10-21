@@ -2421,8 +2421,9 @@ pub enum ClientMessage {
     Pointer(PointerInput),
     /// A wheel event in the attached window.
     Wheel(WheelInput),
-    /// The attached window gained or lost the focus. Reported to the child
-    /// when it asked for focus reports.
+    /// The attached window's view gained or lost the focus. The child, when
+    /// it asked for focus reports, is told this and, while the daemon types
+    /// into the window, that it has the focus; it is told only a change.
     Focus {
         /// `true` when the window gained the focus.
         focused: bool,

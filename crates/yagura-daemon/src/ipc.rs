@@ -3802,13 +3802,20 @@ impl IpcServer {
             outbound.reply(&error_msg("invalid_argument", message));
             return;
         }
+        // The view's focus is not the child's to see as it stands: the daemon
+        // tells the child the focus it should hold (see
+        // `PtySession::set_view_focus`).
+        if let ClientMessage::Focus { focused } = msg {
+            entry.session().set_view_focus(*focused);
+            return;
+        }
         let bytes = encode_structured_input(msg, input);
         if bytes.is_empty() {
             return;
         }
-        // A focus report or a move with no button held carries no key or
-        // button, so it cannot change the composer and does not count as
-        // another writer to a delivery waiting on the window.
+        // A move with no button held carries no key or button, so it cannot
+        // change the composer and does not count as another writer to a
+        // delivery waiting on the window.
         if is_report_without_input(msg) {
             entry.session().send_report(bytes);
             return;
@@ -4041,14 +4048,12 @@ fn encode_structured_input(msg: &ClientMessage, input: InputState) -> Vec<u8> {
                 WheelOutcome::ScrollView { .. } => Vec::new(),
             }
         }
-        ClientMessage::Focus { focused } => input_encode::encode_focus(*focused, modes),
         _ => Vec::new(),
     }
 }
 
 fn is_report_without_input(msg: &ClientMessage) -> bool {
     match msg {
-        ClientMessage::Focus { .. } => true,
         ClientMessage::Pointer(pointer) => {
             pointer.kind == PointerKind::Move && pointer.button == PointerButton::None
         }
@@ -4727,6 +4732,9 @@ async fn run_delivery<'a>(
     budget: SharedBudget,
     submitted: Option<&watch::Sender<bool>>,
 ) -> DeliveryEnd<'a> {
+    // Open for the whole delivery, its waits included, so the child holds the
+    // focus from the first wait on a screen it may draw only when focused.
+    let _focus = entry.session().open_focus_interval();
     let profile = entry.input_profile();
     let mut resent = 0u8;
     // Times the submit key was actually pressed (`attempts`
