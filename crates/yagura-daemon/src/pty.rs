@@ -1104,7 +1104,7 @@ impl PtySession {
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
             let registered = writer.take_registration();
-            let mut lead = replies.focus_before_input(input.load().modes);
+            let mut lead = replies.focus_before_input(input.load().modes, &outputs);
             if let (TakeBackPrefix::Apply, Some(registered)) = (prefix, registered) {
                 lead.extend(registered.keys(input.load().cols));
             }
@@ -1164,7 +1164,7 @@ impl PtySession {
                 Self::count_input_write(&input_writes);
                 ledger.count();
                 entered = true;
-                let lead = replies.focus_before_input(input.load().modes);
+                let lead = replies.focus_before_input(input.load().modes, &outputs);
                 let written = match writer_guard.as_mut() {
                     Some(w) => w.write_all(&lead).and_then(|()| w.write_all(&data)),
                     None => Ok(()),

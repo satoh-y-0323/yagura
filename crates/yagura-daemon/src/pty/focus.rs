@@ -75,8 +75,11 @@ impl FocusState {
     }
 
     /// The report that goes in front of an input write.
-    pub(super) fn before_input(&mut self, modes: InputModes) -> Vec<u8> {
+    /// `outputs` is the output count as the input is written; a focus-out
+    /// waits for output past it, so it never follows the input's bytes.
+    pub(super) fn before_input(&mut self, modes: InputModes, outputs: u64) -> Vec<u8> {
         self.out_deferred = false;
+        self.out_after = Some(outputs);
         if !modes.focus_reports || self.told == Some(true) {
             return Vec::new();
         }
@@ -96,5 +99,42 @@ pub struct FocusInterval {
 impl Drop for FocusInterval {
     fn drop(&mut self) {
         self.replies.close_focus_interval(&self.outputs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reporting() -> InputModes {
+        InputModes {
+            focus_reports: true,
+            ..InputModes::default()
+        }
+    }
+
+    fn unfocused_view() -> FocusState {
+        FocusState {
+            view: Some(false),
+            ..FocusState::default()
+        }
+    }
+
+    #[test]
+    fn focus_out_waits_for_output_after_the_input_written_under_the_lock() {
+        let modes = reporting();
+
+        let mut told_out = unfocused_view();
+        assert_eq!(told_out.reconcile(modes, 0), b"\x1b[O");
+        assert_eq!(told_out.before_input(modes, 5), b"\x1b[I");
+        assert_eq!(told_out.reconcile(modes, 5), b"");
+        assert_eq!(told_out.reconcile(modes, 6), b"\x1b[O");
+
+        let mut stale = unfocused_view();
+        assert_eq!(stale.before_input(modes, 3), b"\x1b[I");
+        let _ = stale.input_ended(3);
+        assert_eq!(stale.reconcile(modes, 3), b"");
+        assert_eq!(stale.before_input(modes, 8), b"");
+        assert_eq!(stale.reconcile(modes, 8), b"");
     }
 }

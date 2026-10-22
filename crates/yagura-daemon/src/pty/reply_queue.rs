@@ -136,8 +136,14 @@ impl ReplyQueue {
 
     /// Under the writer's lock, before an input write: the report that tells
     /// the child it has the focus.
-    pub(super) fn focus_before_input(&self, modes: InputModes) -> Vec<u8> {
-        lock_recover(&self.state).focus.before_input(modes)
+    pub(super) fn focus_before_input(
+        &self,
+        modes: InputModes,
+        outputs: &watch::Receiver<u64>,
+    ) -> Vec<u8> {
+        lock_recover(&self.state)
+            .focus
+            .before_input(modes, *outputs.borrow())
     }
 
     /// After an input write ended and the writer's lock was let go.
