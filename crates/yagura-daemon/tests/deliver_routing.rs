@@ -670,12 +670,12 @@ fn expect_handoff_sent(message: DaemonMessage) -> (String, bool, String) {
 }
 
 // =========================================================================================
-// R1: a chat post reaches the CLI through its doors, once, and is never typed
+// a chat post reaches the CLI through its doors, once, and is never typed
 // =========================================================================================
 
 #[tokio::test]
 async fn a_post_to_a_waiting_window_that_waits_for_the_daemon_arrives_through_the_wait() {
-    let scene = Scene::start("r1-wait-idle", Opts::default()).await;
+    let scene = Scene::start("wait-idle", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -707,7 +707,7 @@ async fn a_post_to_a_waiting_window_that_waits_for_the_daemon_arrives_through_th
 
 #[tokio::test]
 async fn a_post_to_a_working_window_that_waits_for_the_daemon_arrives_through_the_wait() {
-    let scene = Scene::start("r1-wait-working", Opts::default()).await;
+    let scene = Scene::start("wait-working", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -725,7 +725,7 @@ async fn a_post_to_a_working_window_that_waits_for_the_daemon_arrives_through_th
 
 #[tokio::test]
 async fn a_post_to_a_waiting_window_woken_by_command_runs_the_command_with_its_session() {
-    let scene = Scene::start("r1-command-idle", Opts::default()).await;
+    let scene = Scene::start("command-idle", Opts::default()).await;
     let logs = scene.profile("hc-command", COMMAND_FLAGS, Some(COMMAND_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-command").await;
@@ -750,7 +750,7 @@ async fn a_post_to_a_waiting_window_woken_by_command_runs_the_command_with_its_s
 
 #[tokio::test]
 async fn a_post_to_a_working_window_woken_by_command_runs_the_command_at_once() {
-    let scene = Scene::start("r1-command-working", Opts::default()).await;
+    let scene = Scene::start("command-working", Opts::default()).await;
     let logs = scene.profile("hc-command", COMMAND_FLAGS, Some(COMMAND_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-command").await;
@@ -767,7 +767,7 @@ async fn a_post_to_a_working_window_woken_by_command_runs_the_command_at_once() 
 
 #[tokio::test]
 async fn a_post_to_a_working_window_with_no_wake_door_arrives_with_the_next_turn_start() {
-    let scene = Scene::start("r1-none-working", Opts::default()).await;
+    let scene = Scene::start("none-working", Opts::default()).await;
     let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -786,7 +786,7 @@ async fn a_post_to_a_working_window_with_no_wake_door_arrives_with_the_next_turn
 
 #[tokio::test]
 async fn a_post_waiting_for_a_session_is_pushed_by_command_once_the_session_is_first_known() {
-    let scene = Scene::start("r1-command-session", Opts::default()).await;
+    let scene = Scene::start("command-session", Opts::default()).await;
     // Reports its session at a turn's start but reads nothing there itself: what arrives
     // can only have come through the command.
     let logs = scene.profile(
@@ -809,12 +809,12 @@ async fn a_post_waiting_for_a_session_is_pushed_by_command_once_the_session_is_f
 }
 
 // =========================================================================================
-// R2: opening a window types nothing; the start-up door carries the intro
+// opening a window types nothing; the start-up door carries the intro
 // =========================================================================================
 
 #[tokio::test]
 async fn opening_a_window_types_nothing_and_its_start_up_door_carries_the_intro() {
-    let scene = Scene::start("r2-intro", Opts::default()).await;
+    let scene = Scene::start("intro", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -839,12 +839,12 @@ async fn opening_a_window_types_nothing_and_its_start_up_door_carries_the_intro(
 }
 
 // =========================================================================================
-// R3: a handoff, a plan approval and a report reach the CLI through its doors
+// a handoff, a plan approval and a report reach the CLI through its doors
 // =========================================================================================
 
 #[tokio::test]
 async fn a_handoff_to_an_existing_window_arrives_through_its_wait_and_answers_taken() {
-    let scene = Scene::start("r3-handoff", Opts::default()).await;
+    let scene = Scene::start("handoff", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -865,7 +865,7 @@ async fn a_handoff_to_an_existing_window_arrives_through_its_wait_and_answers_ta
 #[tokio::test]
 async fn a_plan_approval_reaches_its_owner_through_the_owners_wait() {
     let scene = Scene::start(
-        "r3-plan",
+        "plan",
         Opts {
             plan_review: true,
             ..Opts::default()
@@ -902,7 +902,7 @@ async fn a_plan_approval_reaches_its_owner_through_the_owners_wait() {
 
 #[tokio::test]
 async fn a_report_reaches_its_parent_through_the_parents_wait() {
-    let scene = Scene::start("r3-report", Opts::default()).await;
+    let scene = Scene::start("report", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let parent_id = scene.open_profile(&mut user, "hc-wait").await;
@@ -939,7 +939,7 @@ async fn a_report_reaches_its_parent_through_the_parents_wait() {
 }
 
 // =========================================================================================
-// R4 / R12: a task window's notice is its launch prompt, kept out of what is stored
+// a task window's notice is its launch prompt, kept out of what is stored
 // =========================================================================================
 
 fn task(task_id: &str, profile: &str, instruction: Option<&str>) -> PlanTaskSpec {
@@ -1029,7 +1029,7 @@ async fn stored_command(scene: &Scene, name: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn a_task_windows_notice_is_its_launch_prompt_and_nothing_is_typed() {
-    let scene = Scene::start("r4-task", Opts::default()).await;
+    let scene = Scene::start("task", Opts::default()).await;
     let logs = scene.profile("hc-task", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut owner = plan_owner(&scene).await;
     let plan = create_plan(
@@ -1038,7 +1038,7 @@ async fn a_task_windows_notice_is_its_launch_prompt_and_nothing_is_typed() {
     )
     .await;
 
-    let window_id = match open_task(&mut owner, &plan.plan_id, "t1", "r4-task-window").await {
+    let window_id = match open_task(&mut owner, &plan.plan_id, "t1", "task-window").await {
         DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
         other => panic!("expected task_window_opened, got {other:?}"),
     };
@@ -1094,11 +1094,11 @@ async fn a_task_windows_notice_is_its_launch_prompt_and_nothing_is_typed() {
 
 #[tokio::test]
 async fn a_task_windows_launch_prompt_is_never_part_of_the_command_kept_for_a_restore() {
-    let scene = Scene::start("r12-task-restore", Opts::default()).await;
+    let scene = Scene::start("task-restore", Opts::default()).await;
     let logs = scene.profile("hc-task", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut owner = plan_owner(&scene).await;
     let plan = create_plan(&mut owner, vec![task("t1", "hc-task", Some("do it"))]).await;
-    match open_task(&mut owner, &plan.plan_id, "t1", "r12-task-window").await {
+    match open_task(&mut owner, &plan.plan_id, "t1", "task-window").await {
         DaemonMessage::TaskWindowOpened { .. } => {}
         other => panic!("expected task_window_opened, got {other:?}"),
     }
@@ -1111,7 +1111,7 @@ async fn a_task_windows_launch_prompt_is_never_part_of_the_command_kept_for_a_re
         "the child was started with the notice"
     );
 
-    let stored = stored_command(&scene, "r12-task-window").await;
+    let stored = stored_command(&scene, "task-window").await;
     assert!(
         !stored.iter().any(|arg| arg.contains("[yagura task]")),
         "a window started again from what was stored must not be handed the task again: \
@@ -1121,7 +1121,7 @@ async fn a_task_windows_launch_prompt_is_never_part_of_the_command_kept_for_a_re
 }
 
 // =========================================================================================
-// R4b: a launch prompt is never handed over through a Windows `.cmd` / `.bat`
+// a launch prompt is never handed over through a Windows `.cmd` / `.bat`
 // =========================================================================================
 
 #[cfg(windows)]
@@ -1142,7 +1142,7 @@ fn write_cmd_profile(scene: &Scene, id: &str) {
 #[cfg(windows)]
 #[tokio::test]
 async fn an_instructed_task_window_whose_program_is_a_cmd_shim_is_refused_and_nothing_opens() {
-    let scene = Scene::start("r4b-task", Opts::default()).await;
+    let scene = Scene::start("task", Opts::default()).await;
     write_cmd_profile(&scene, "hc-shim");
     let mut owner = plan_owner(&scene).await;
     let before = call_list_windows(&mut owner).await.len();
@@ -1152,7 +1152,7 @@ async fn an_instructed_task_window_whose_program_is_a_cmd_shim_is_refused_and_no
     )
     .await;
 
-    let reply = open_task(&mut owner, &plan.plan_id, "t1", "r4b-window").await;
+    let reply = open_task(&mut owner, &plan.plan_id, "t1", "window").await;
 
     assert!(
         matches!(reply, DaemonMessage::Error { .. }),
@@ -1169,7 +1169,7 @@ async fn an_instructed_task_window_whose_program_is_a_cmd_shim_is_refused_and_no
 #[cfg(windows)]
 #[tokio::test]
 async fn a_handoff_that_opens_a_window_through_a_cmd_shim_is_refused_and_nothing_opens() {
-    let scene = Scene::start("r4b-handoff", Opts::default()).await;
+    let scene = Scene::start("handoff", Opts::default()).await;
     write_cmd_profile(&scene, "hc-shim");
     let mut user = scene.user().await;
     let before = call_list_windows(&mut user).await.len();
@@ -1201,12 +1201,12 @@ async fn a_handoff_that_opens_a_window_through_a_cmd_shim_is_refused_and_nothing
 }
 
 // =========================================================================================
-// R5: before the first turn, what is waiting stays in the inbox for the first turn's door
+// before the first turn, what is waiting stays in the inbox for the first turn's door
 // =========================================================================================
 
 #[tokio::test]
 async fn a_post_before_the_first_turn_waits_for_it_and_never_runs_the_wake_command() {
-    let scene = Scene::start("r5-first-turn", Opts::default()).await;
+    let scene = Scene::start("first-turn", Opts::default()).await;
     let logs = scene.profile("hc-command", COMMAND_FLAGS, Some(COMMAND_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-command").await;
@@ -1233,12 +1233,12 @@ async fn a_post_before_the_first_turn_waits_for_it_and_never_runs_the_wake_comma
 }
 
 // =========================================================================================
-// R6: a profile with no wake door is typed into while it waits, and only then
+// a profile with no wake door is typed into while it waits, and only then
 // =========================================================================================
 
 #[tokio::test]
 async fn a_post_to_a_waiting_window_with_no_wake_door_is_typed_once_and_taken() {
-    let scene = Scene::start("r6-none-idle", Opts::default()).await;
+    let scene = Scene::start("none-idle", Opts::default()).await;
     let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -1252,7 +1252,7 @@ async fn a_post_to_a_waiting_window_with_no_wake_door_is_typed_once_and_taken() 
 
 #[tokio::test]
 async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again() {
-    let scene = Scene::start("r6-none-after-turn", Opts::default()).await;
+    let scene = Scene::start("none-after-turn", Opts::default()).await;
     let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -1269,12 +1269,12 @@ async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again()
 }
 
 // =========================================================================================
-// R7: pending while in the inbox, taken once the CLI has it
+// pending while in the inbox, taken once the CLI has it
 // =========================================================================================
 
 #[tokio::test]
 async fn read_chat_reports_pending_until_the_cli_takes_the_post_and_taken_after() {
-    let scene = Scene::start("r7-states", Opts::default()).await;
+    let scene = Scene::start("states", Opts::default()).await;
     let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -1294,14 +1294,14 @@ async fn read_chat_reports_pending_until_the_cli_takes_the_post_and_taken_after(
 }
 
 // =========================================================================================
-// R8: send_message is still typed
+// send_message is still typed
 // =========================================================================================
 
-// Green before and after: `send_message` is the caller's own request to type, and keeps
-// doing so into a window that declares `[delivery]`.
+// `send_message` is the caller's own request to type, so it is still typed into a window
+// that declares `[delivery]`.
 #[tokio::test]
 async fn send_message_is_still_typed_into_a_window_that_declares_delivery() {
-    let scene = Scene::start("r8-send-message", Opts::default()).await;
+    let scene = Scene::start("send-message", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -1326,7 +1326,7 @@ async fn send_message_is_still_typed_into_a_window_that_declares_delivery() {
 }
 
 // =========================================================================================
-// R9: the daemon pushes nothing to a window in Unknown; the CLI's own doors still answer
+// the daemon pushes nothing to a window in Unknown; the CLI's own doors still answer
 // =========================================================================================
 
 /// A profile without status hooks, so that a status line no rule matches leaves the window
@@ -1340,7 +1340,7 @@ async fn lose(scene: &Scene, client: &mut Connection, window_id: &str) {
 
 #[tokio::test]
 async fn a_wait_in_an_unknown_window_is_not_answered_but_the_take_door_returns_the_post() {
-    let scene = Scene::start("r9-wait", Opts::default()).await;
+    let scene = Scene::start("wait", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS_QUIET, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -1366,7 +1366,7 @@ async fn a_wait_in_an_unknown_window_is_not_answered_but_the_take_door_returns_t
 
 #[tokio::test]
 async fn a_post_held_while_unknown_is_pushed_once_the_status_is_known_again() {
-    let scene = Scene::start("r9-wait-recovers", Opts::default()).await;
+    let scene = Scene::start("wait-recovers", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS_QUIET, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-wait").await;
@@ -1385,7 +1385,7 @@ async fn a_post_held_while_unknown_is_pushed_once_the_status_is_known_again() {
 
 #[tokio::test]
 async fn the_wake_command_never_runs_for_a_window_in_unknown() {
-    let scene = Scene::start("r9-command", Opts::default()).await;
+    let scene = Scene::start("command", Opts::default()).await;
     let logs = scene.profile(
         "hc-command",
         &["--take", "--session", SESSION],
@@ -1417,7 +1417,7 @@ async fn the_wake_command_never_runs_for_a_window_in_unknown() {
 
 #[tokio::test]
 async fn a_window_with_no_wake_door_is_never_typed_into_while_unknown() {
-    let scene = Scene::start("r9-none", Opts::default()).await;
+    let scene = Scene::start("none", Opts::default()).await;
     let logs = scene.profile("hc-none", &["--take"], Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -1433,7 +1433,7 @@ async fn a_window_with_no_wake_door_is_never_typed_into_while_unknown() {
 }
 
 // =========================================================================================
-// R10: a window that declares no delivery, or whose hooks were left out, takes no part
+// a window that declares no delivery, or whose hooks were left out, takes no part
 // =========================================================================================
 
 /// Checks that `window_id` is no participant: a post naming it and a broadcast both leave
@@ -1492,7 +1492,7 @@ async fn assert_takes_no_part(scene: &Scene, user: &mut Connection, logs: &Logs,
 
 #[tokio::test]
 async fn a_window_opened_from_a_raw_argv_takes_no_part_in_chat_or_notices() {
-    let scene = Scene::start("r10-argv", Opts::default()).await;
+    let scene = Scene::start("argv", Opts::default()).await;
     let mut user = scene.user().await;
     let logs = Logs {
         dir: scene.root.join("logs").join("argv"),
@@ -1504,7 +1504,7 @@ async fn a_window_opened_from_a_raw_argv_takes_no_part_in_chat_or_notices() {
 
 #[tokio::test]
 async fn a_window_whose_profile_declares_no_delivery_takes_no_part_in_chat_or_notices() {
-    let scene = Scene::start("r10-no-table", Opts::default()).await;
+    let scene = Scene::start("no-table", Opts::default()).await;
     let logs = scene.profile("hc-plain", WAIT_FLAGS, None);
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-plain").await;
@@ -1514,7 +1514,7 @@ async fn a_window_whose_profile_declares_no_delivery_takes_no_part_in_chat_or_no
 
 #[tokio::test]
 async fn a_window_whose_hooks_were_left_out_takes_no_part_in_chat_or_notices() {
-    let scene = Scene::start("r10-hooks-left-out", Opts::default()).await;
+    let scene = Scene::start("hooks-left-out", Opts::default()).await;
     // The hooks this profile's CLI runs live in a settings file the daemon checks at
     // launch; that file was never written, so the launch goes without them.
     let logs = scene.profile_with(
@@ -1538,13 +1538,13 @@ async fn a_window_whose_hooks_were_left_out_takes_no_part_in_chat_or_notices() {
 }
 
 // =========================================================================================
-// R11: a handoff answers once the CLI took it, or once it is known it never will
+// a handoff answers once the CLI took it, or once it is known it never will
 // =========================================================================================
 
 #[tokio::test]
 async fn a_handoff_not_taken_within_the_limit_is_undelivered_and_leaves_the_inbox() {
     let scene = Scene::start(
-        "r11-timeout",
+        "timeout",
         Opts {
             limits: "handoff_delivery_timeout_secs = 1",
             handoffs_per_conn: Some(1),
@@ -1592,7 +1592,7 @@ async fn a_handoff_not_taken_within_the_limit_is_undelivered_and_leaves_the_inbo
 
 #[tokio::test]
 async fn a_handoff_to_a_working_window_answers_taken_once_its_next_turn_starts() {
-    let scene = Scene::start("r11-taken-later", Opts::default()).await;
+    let scene = Scene::start("taken-later", Opts::default()).await;
     let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
@@ -1617,7 +1617,7 @@ async fn a_handoff_to_a_working_window_answers_taken_once_its_next_turn_starts()
 
 #[tokio::test]
 async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_prompt() {
-    let scene = Scene::start("r11-open", Opts::default()).await;
+    let scene = Scene::start("open", Opts::default()).await;
     let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
     let mut user = scene.user().await;
 
@@ -1628,7 +1628,7 @@ async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_pro
                 window_id: None,
                 profile: Some("hc-wait".to_string()),
                 cwd: None,
-                name: Some("r11-opened".to_string()),
+                name: Some("opened".to_string()),
                 model: None,
                 effort: None,
                 reference: "docs/handoff.md".to_string(),
@@ -1657,7 +1657,7 @@ async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_pro
     logs.assert_never_typed("R11OPENED");
     assert_eq!(logs.received("R11OPENED"), 0, "handed over once, at launch");
 
-    let stored = stored_command(&scene, "r11-opened").await;
+    let stored = stored_command(&scene, "opened").await;
     assert!(
         !stored.iter().any(|arg| arg.contains("R11OPENED")),
         "the envelope is not kept for a restore: {stored:?}"
@@ -1665,12 +1665,12 @@ async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_pro
 }
 
 // =========================================================================================
-// R13: a push under way is not handed out again; a failed push goes back to the inbox
+// a push under way is not handed out again; a failed push goes back to the inbox
 // =========================================================================================
 
 #[tokio::test]
 async fn a_post_being_pushed_by_command_is_not_returned_by_a_turn_start_door() {
-    let scene = Scene::start("r13-command-held", Opts::default()).await;
+    let scene = Scene::start("command-held", Opts::default()).await;
     let hold = scene.root.join("command-hold");
     std::fs::write(&hold, b"").expect("create the hold file");
     let hold_arg = hold.display().to_string();
@@ -1710,7 +1710,7 @@ async fn a_post_being_pushed_by_command_is_not_returned_by_a_turn_start_door() {
 
 #[tokio::test]
 async fn a_failed_command_push_puts_the_post_back_for_the_next_turn() {
-    let scene = Scene::start("r13-command-failed", Opts::default()).await;
+    let scene = Scene::start("command-failed", Opts::default()).await;
     let logs = scene.profile(
         "hc-command",
         &["--session", SESSION, "--woken-fail"],
@@ -1746,7 +1746,7 @@ async fn a_failed_command_push_puts_the_post_back_for_the_next_turn() {
 
 #[tokio::test]
 async fn a_post_being_typed_is_not_returned_by_a_turn_start_door() {
-    let scene = Scene::start("r13-typing-held", Opts::default()).await;
+    let scene = Scene::start("typing-held", Opts::default()).await;
     let pause = scene.root.join("paint-pause");
     std::fs::write(&pause, b"").expect("create the pause file");
     let logs = scene.profile_with(

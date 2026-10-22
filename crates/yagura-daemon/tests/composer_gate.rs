@@ -1255,7 +1255,7 @@ async fn a_takeback_is_skipped_once_a_foreign_write_lands_between_verification_a
 // same exclusive region.
 // =====================================================================
 
-/// Field (f) of the shared harness contract: two connections, a short gap.
+/// Two connections, a short gap.
 /// If the judgment observed outside its lock, the second `send_text` could
 /// land between the first's observation and its write; both bodies are
 /// short single lines, so a merged or corrupted result is easy to tell from
@@ -1263,14 +1263,23 @@ async fn a_takeback_is_skipped_once_a_foreign_write_lands_between_verification_a
 #[tokio::test]
 async fn observation_and_write_share_the_exclusive_region_so_a_full_send_cannot_land_between_them()
 {
-    let dir = unique_temp_dir("gate-p5");
+    let dir = unique_temp_dir("gate-shared-region");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["send_message"])),
         ..detection_config(&dir)
     };
-    let h = Harness::start("gate-p5", config).await;
+    let h = Harness::start("gate-shared-region", config).await;
     let mut opener = h.connect().await;
-    let window_id = open_gate_window(&h, &mut opener, &dir, "p5", "p5-marker", "\\u0015", 0).await;
+    let window_id = open_gate_window(
+        &h,
+        &mut opener,
+        &dir,
+        "shared-region",
+        "shared-region-marker",
+        "\\u0015",
+        0,
+    )
+    .await;
 
     let mut client_a = h.connect().await;
     let mut client_b = h.connect().await;
@@ -1319,8 +1328,8 @@ async fn observation_and_write_share_the_exclusive_region_so_a_full_send_cannot_
     );
 }
 
-/// The (h) shape of the shared harness contract: not concurrent, but back
-/// to back. A send whose body the receiver drops cleans up after itself;
+/// Not concurrent, but back to back. A send whose body the receiver drops
+/// cleans up after itself;
 /// whatever the next send writes must land on an empty composer, never stacked
 /// on the bytes the first one left behind.
 #[tokio::test]

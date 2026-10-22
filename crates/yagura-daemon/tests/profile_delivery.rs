@@ -76,7 +76,7 @@ fn shipped_delivery(id: &str) -> ProfileDelivery {
 }
 
 // =============================================================================
-// P1: reading the table
+// reading the table
 // =============================================================================
 
 #[test]
@@ -388,7 +388,7 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
 }
 
 // =============================================================================
-// P2: the profiles this repository ships
+// the profiles this repository ships
 // =============================================================================
 
 const AGY_OUTPUT: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
@@ -492,7 +492,7 @@ fn the_limits_the_hooks_carry_are_the_profiles_own_values() {
 }
 
 // =============================================================================
-// P4: availability
+// availability
 // =============================================================================
 
 fn file_exists(path: &Path) -> bool {
@@ -812,7 +812,7 @@ fn a_program_that_is_not_found_keeps_the_not_found_reason_whatever_the_delivery_
 }
 
 // =============================================================================
-// P5: the launch prompt is an argument of the spawn only
+// the launch prompt is an argument of the spawn only
 // =============================================================================
 
 #[test]

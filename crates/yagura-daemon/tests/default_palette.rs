@@ -3,7 +3,7 @@
 //! A window no view is attached to answers its program's color queries from
 //! the default palettes the GUI last sent (`set_default_palettes`): the one
 //! assigned to the window's vendor, else the app's; before any were sent, from
-//! the built-in dark palette. The answer no longer depends on whether a view
+//! the built-in dark palette. The answer does not depend on whether a view
 //! sent `set_palette` before the program asked.
 //!
 //! The child is `hex_echo --emit`: right after starting it writes the queries,

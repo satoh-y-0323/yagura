@@ -134,7 +134,7 @@ fn not_placed_of(judgment: &SubmitJudgment, what: &str) -> NotPlaced {
 }
 
 // =====================================================================
-// R1: a body that shows late is still placed
+// a body that shows late is still placed
 // =====================================================================
 
 /// A definition that states no reflection bound, and a screen that repaints
@@ -178,7 +178,7 @@ async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() 
 }
 
 // =====================================================================
-// R2: a detector that holds the model is waited for
+// a detector that holds the model is waited for
 // =====================================================================
 
 /// While the window's terminal model is held elsewhere nothing can be read
@@ -232,7 +232,7 @@ async fn a_delivery_waits_for_a_held_model_and_places_the_body_once_it_is_let_go
 }
 
 // =====================================================================
-// R3: a body the receiver drops
+// a body the receiver drops
 // =====================================================================
 
 /// A receiver that throws a pasted body away but keeps the keystrokes behind
@@ -285,7 +285,7 @@ async fn a_body_the_receiver_drops_is_not_reflected_leaves_nothing_and_never_get
 }
 
 // =====================================================================
-// R4: a receiver that shows nothing is waited on until something ends it
+// a receiver that shows nothing is waited on until something ends it
 // =====================================================================
 
 /// A receiver that shows nothing once the body arrives. A status change and a
@@ -370,7 +370,7 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
 }
 
 // =====================================================================
-// R5: the child exits while the call waits
+// the child exits while the call waits
 // =====================================================================
 
 #[tokio::test]
@@ -407,7 +407,7 @@ async fn a_child_that_exits_while_the_delivery_waits_ends_it_with_child_exited()
 }
 
 // =====================================================================
-// R6: the requester leaves
+// the requester leaves
 // =====================================================================
 
 /// A requester that has already left: nothing is written at all.
@@ -588,7 +588,7 @@ async fn a_requester_that_leaves_when_nothing_can_take_the_body_back_leaves_a_ma
 }
 
 // =====================================================================
-// R7: a body made of, or starting with, the probe's character
+// a body made of, or starting with, the probe's character
 // =====================================================================
 
 #[tokio::test]
@@ -630,7 +630,7 @@ async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
 }
 
 // =====================================================================
-// R8: a long body whose reading is unobservable
+// a long body whose reading is unobservable
 // =====================================================================
 
 /// A body long enough to run the composer past the bottom of the viewport: the
@@ -759,7 +759,7 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
 }
 
 // =====================================================================
-// R9: a detector that does not answer
+// a detector that does not answer
 // =====================================================================
 
 /// While the model is held the detector cannot answer. The requester leaving
@@ -870,7 +870,7 @@ async fn a_child_that_exits_ends_the_wait_on_a_detector_that_does_not_answer() {
 }
 
 // =====================================================================
-// R10: an unconfirmed write declines at once
+// an unconfirmed write declines at once
 // =====================================================================
 
 /// A window that carries a write nothing confirmed declines the next judged
@@ -1126,7 +1126,7 @@ fn note_taller_than_the_screen() -> String {
     "lorem ipsum dolor sit amet ".repeat(36)
 }
 
-/// R1: the draft is taller than the screen, so the window's marker line is out
+/// The draft is taller than the screen, so the window's marker line is out
 /// of view and the status before the submit key is `unknown`. The composer
 /// emptying after the key is the evidence the delivery has.
 #[tokio::test]
@@ -1162,7 +1162,7 @@ async fn a_body_taller_than_the_screen_is_taken_once_its_composer_empties_after_
     assert_eq!(count_of(&read, b"\r"), 1, "the submit key is pressed once");
 }
 
-/// R3: the receiver takes the submit key as a line break, so the envelope
+/// The receiver takes the submit key as a line break, so the envelope
 /// stays in its composer. Nothing is confirmed, and only the submit key goes
 /// out again, as many times as `resend_max` allows.
 #[tokio::test]
@@ -1202,7 +1202,7 @@ async fn a_receiver_that_keeps_the_envelope_gets_only_the_submit_key_again() {
     }
 }
 
-/// R4: the receiver takes the line and empties its composer without any status
+/// The receiver takes the line and empties its composer without any status
 /// reacting. The envelope has been received; writing it again is a second
 /// message.
 #[tokio::test]
@@ -1234,7 +1234,7 @@ async fn a_receiver_that_empties_its_composer_without_reacting_is_not_written_to
     );
 }
 
-/// R5: another writer wrote after the submit key and before the composer
+/// Another writer wrote after the submit key and before the composer
 /// emptied, so the composer reading empty says nothing about the envelope. The
 /// delivery stays unconfirmed, and nothing is written over it: `resend_max` is
 /// 1, which a rewrite of the body would spend.
@@ -1283,7 +1283,7 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
     );
 }
 
-/// R4b: the composer is drawn unfinished after the submit key and empties only
+/// The composer is drawn unfinished after the submit key and empties only
 /// once the confirmation window has run out, so the delivery's own wait for the
 /// composer sees nothing and its resend attempt is the one that finds it empty.
 /// That the key was pressed and the composer is empty is enough: the body is
@@ -1355,7 +1355,7 @@ async fn a_handoff_whose_key_was_pressed_is_answered_taken_when_its_bound_runs_o
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }
 
-/// R7: another writer wrote between the submit key and the composer emptying.
+/// Another writer wrote between the submit key and the composer emptying.
 /// What the composer reads then is not evidence about the envelope either way,
 /// and the body is not written a second time.
 #[tokio::test]
@@ -1397,7 +1397,7 @@ async fn another_writer_between_the_submit_key_and_the_empty_composer_does_not_g
     );
 }
 
-/// R8: a resend attempt after the submit key is declined with nothing to carry
+/// A resend attempt after the submit key is declined with nothing to carry
 /// forward (another writer ended its wait behind its probe), and a later
 /// attempt reads the composer empty. The submit key having been pressed is a
 /// fact of the delivery, not of the last attempt's record: the body is still
@@ -1472,7 +1472,7 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
     );
 }
 
-/// R9a: another writer wrote after the submit key, into a composer still
+/// Another writer wrote after the submit key, into a composer still
 /// holding the envelope. Whatever the composer reads then, nothing of the
 /// delivery's own follows the other writer's input: no probe, no submit key
 /// pressed over it.
@@ -1524,7 +1524,7 @@ async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }
 
-/// R9b: after the submit key, a resend attempt reads the composer empty on a
+/// After the submit key, a resend attempt reads the composer empty on a
 /// finished screen, nobody else having written. The envelope was taken, which
 /// that reading already says: nothing is written to check it.
 #[tokio::test]
@@ -1564,10 +1564,10 @@ async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_wri
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }
 
-/// What the folding receiver of R10 paints in place of the pasted envelope.
+/// What the folding receiver paints in place of the pasted envelope.
 const FOLD_PLACEHOLDER: &str = "[Pasted text #1]";
 
-/// R10: after the submit key (taken as a line break, the envelope stays in the
+/// After the submit key (taken as a line break, the envelope stays in the
 /// composer, drawn folded), the receiver takes the envelope just before the
 /// next typed byte and paints that byte alone. The probe a resend attempt
 /// writes then shows alone, which says the envelope left the composer: it was
@@ -1586,7 +1586,7 @@ async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_a
     assert_eq!(delivery, "taken");
 }
 
-/// R10 again, with the handoff's own delivery bound running out while the
+/// The same folded envelope, with the handoff's own delivery bound running out while the
 /// resend probe is on its way to the receiver: the probe a delivery has begun
 /// is carried to its end and erased, not left in the receiver's composer.
 #[tokio::test]
@@ -1605,7 +1605,7 @@ async fn a_handoff_that_times_out_while_its_resend_probe_is_on_its_way_leaves_no
     );
 }
 
-/// How the clock bounds of R10's delivery end.
+/// How the clock bounds of a folded envelope's delivery end.
 #[derive(Clone, Copy)]
 enum ClockBounds {
     /// The test's clock is left alone.
@@ -1615,7 +1615,7 @@ enum ClockBounds {
     RunOutBeforeTheProbe,
 }
 
-/// Plays R10 and checks what the receiver was left with; returns the handoff's
+/// Plays the folded envelope's delivery and checks what the receiver was left with; returns the handoff's
 /// delivery.
 async fn folded_envelope_taken_by_the_resend_probe(
     name: &str,

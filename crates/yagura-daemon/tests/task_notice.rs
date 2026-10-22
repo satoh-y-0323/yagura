@@ -294,7 +294,7 @@ async fn instruction_notice(
 
 // --- No instruction -> no launch prompt, nothing written --------------------
 
-// Green before and after: a task with nothing to say is started with nothing.
+// A task with nothing to say is started with nothing.
 #[tokio::test]
 async fn a_task_with_no_instruction_is_started_with_no_launch_prompt_and_nothing_typed() {
     let Scene { h, mut owner, logs } = scene("tn1-no-instruction", READY_DETECTION).await;
@@ -402,7 +402,7 @@ async fn a_task_whose_window_never_becomes_ready_still_starts_with_its_notice_an
 
 // --- The open is decoupled from the connection's frame loop -----------------
 
-// Green before and after: the reply never waited for the notice.
+// The reply does not wait for the notice.
 #[tokio::test]
 async fn opening_a_task_window_with_an_instruction_does_not_block_other_requests_on_the_same_connection()
  {
@@ -435,7 +435,7 @@ async fn opening_a_task_window_with_an_instruction_does_not_block_other_requests
 
 // --- The reply never waits for the window to accept input -------------------
 
-// Green before and after: the reply never waited for readiness.
+// The reply does not wait for the window to accept input.
 #[tokio::test]
 async fn opening_a_task_window_with_an_instruction_replies_without_waiting_for_the_window() {
     let Scene { h, mut owner, .. } = scene("nq1-immediate-reply", NEVER_READY_DETECTION).await;

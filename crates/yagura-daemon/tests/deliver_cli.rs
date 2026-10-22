@@ -145,7 +145,7 @@ fn err(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-// --- I5: outside a window -----------------------------------------------------
+// --- outside a window ---------------------------------------------------------
 
 #[tokio::test]
 async fn every_inbox_command_is_silent_and_succeeds_outside_a_window() {
@@ -178,7 +178,7 @@ async fn every_inbox_command_is_silent_and_succeeds_outside_a_window() {
     }
 }
 
-// --- I1 / I3 / I4 through the process ------------------------------------------
+// --- take and context through the process --------------------------------------
 
 #[tokio::test]
 async fn take_prints_the_parcels_on_stdout_and_exits_zero() {
@@ -224,7 +224,7 @@ async fn a_wrong_token_prints_no_parcel_and_is_never_the_wake_exit_code() {
     assert_eq!(setup.entry(&id).inbox().pending_count(), 1);
 }
 
-// --- I6 / I7 through the process ------------------------------------------------
+// --- registered waits through the process ---------------------------------------
 
 #[tokio::test]
 async fn wait_ends_with_the_declared_stream_and_exit_code_when_a_parcel_arrives() {
@@ -317,7 +317,7 @@ async fn a_wait_in_an_unknown_window_prints_nothing_while_the_window_cannot_be_p
     assert!(!err(&output).contains("PARCEL-ALPHA"));
 }
 
-// --- I8 through the process ------------------------------------------------------
+// --- report_session through the process ------------------------------------------
 
 /// Runs `--report-session pointer` with `stdin` written from a thread of its own, so a
 /// child that stopped reading shows up as a failed write.

@@ -118,7 +118,7 @@ fn pos(haystack: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("{needle:?} missing from {haystack:?}"))
 }
 
-// --- I1 ---------------------------------------------------------------------
+// --- take -------------------------------------------------------------------
 
 #[tokio::test]
 async fn a_take_returns_the_windows_parcels_in_order_and_takes_them_out() {
@@ -142,7 +142,7 @@ async fn a_take_returns_the_windows_parcels_in_order_and_takes_them_out() {
     assert!(!other.contains("PARCEL-ALPHA"));
 }
 
-// --- I2 ---------------------------------------------------------------------
+// --- the take limit ---------------------------------------------------------
 
 #[tokio::test]
 async fn a_take_stays_within_the_limit_and_never_cuts_a_parcel() {
@@ -219,7 +219,7 @@ async fn the_limit_includes_the_intro_in_the_context() {
     );
 }
 
-// --- I3 ---------------------------------------------------------------------
+// --- context ----------------------------------------------------------------
 
 #[tokio::test]
 async fn the_context_is_the_intro_and_the_pending_parcels_and_takes_them() {
@@ -257,7 +257,7 @@ async fn an_empty_intro_leaves_the_context_with_the_parcels_only() {
     assert!(context.contains("PARCEL-ALPHA"));
 }
 
-// --- I4 ---------------------------------------------------------------------
+// --- an unknown window ------------------------------------------------------
 
 #[tokio::test]
 async fn the_doors_a_cli_reads_answer_in_an_unknown_window() {
@@ -353,7 +353,7 @@ async fn a_token_that_is_not_this_windows_cannot_read_its_inbox() {
     assert_eq!(pending(&h, &id), 1);
 }
 
-// --- I6 / I7 ----------------------------------------------------------------
+// --- registered waits -------------------------------------------------------
 
 #[tokio::test]
 async fn a_registered_wait_returns_when_a_parcel_arrives_in_the_declared_form() {
@@ -443,7 +443,7 @@ async fn a_wait_whose_connection_closes_is_dropped() {
     assert_eq!(pending(&h, &id), 1);
 }
 
-// --- I8 ---------------------------------------------------------------------
+// --- report_session ---------------------------------------------------------
 
 fn report(window_id: &str, token: &str, session: &str) -> ClientMessage {
     ClientMessage::ReportSession {
@@ -553,7 +553,7 @@ async fn the_daemon_does_not_log_a_session_value() {
     assert!(!logs_contain("SESSION-SECRET-OTHER"));
 }
 
-// --- I9 ---------------------------------------------------------------------
+// --- the json form ----------------------------------------------------------
 
 const AGY_SHAPE: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
 
@@ -603,7 +603,7 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
     assert!(context.is_empty());
 }
 
-// --- I10 --------------------------------------------------------------------
+// --- the inbox limit --------------------------------------------------------
 
 #[tokio::test]
 async fn an_inbox_over_its_limit_turns_the_new_parcel_away_and_says_which() {

@@ -141,7 +141,7 @@ const RESIZE_SUPPRESS_MS: u64 = 5_000;
 const RESIZE_DISARM_MS: u64 = 0;
 
 /// A trailing shell prompt, identical in shape to `detection/generic-shell.toml`'s
-/// prompt rule, so the reported defect scenario is reproduced rather than approximated.
+/// prompt rule, so the scenario under test is reproduced rather than approximated.
 const PROMPT_TEXT: &[u8] = b"$ ";
 
 fn time_both_with_prompt_rule_def() -> String {

@@ -4906,7 +4906,7 @@ async fn send_handoff_to_a_working_window_waits_in_its_inbox_and_is_typed_once_i
 }
 
 // =====================================================================
-// send_message: the single-line submit path (case B) applies to `SendText`
+// send_message: the single-line submit path applies to `SendText`
 // too. Every case below targets a `submit_child` window built by
 // `open_submit_child_window` unless noted otherwise; the observation points
 // are the same three the send_handoff suite above uses (`PASTE <n>`,
