@@ -3,7 +3,7 @@
 **Run agent CLIs from different vendors side by side, and let them work together.**
 
 yagura is a desktop app that runs any command -- Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, or a plain shell -- in its own window, tells you at a glance which window is working and which one is
+Copilot CLI, Muse Code, or a plain shell -- in its own window, tells you at a glance which window is working and which one is
 waiting for you, and gives the agents in those windows an MCP server to see and talk to each other.
 You stay in control: anything one agent does to another window waits for your approval unless you
 allow it.
@@ -76,7 +76,7 @@ allow it.
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI), installed
+Copilot CLI, Muse Code), installed
 and signed in as usual. yagura does not install or sign in to them for you. On Windows, install
 Codex CLI's standalone build rather than the npm package: yagura wakes a waiting Codex CLI with a
 command that the npm package's `.cmd` launcher cannot pass text through, and lists the Codex CLI

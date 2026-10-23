@@ -170,8 +170,15 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 
 [host_paths]                   # optional table; how a path the daemon hands
                                 # the CLI becomes the path the CLI's own
-                                # environment sees. See "Host paths" below
+                                # environment sees, and how the CLI's own
+                                # files are read there. See "Host paths" below
 # convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+[shim_guidance]                # optional table; what to tell a user when
+                                # the program is a Windows .cmd / .bat file
+                                # that something cannot pass. See "Shim
+                                # guidance" below
+# text = "Use the WSL profile for that."
 ```
 
 The identifier is the file name without its `.toml` extension, and must
@@ -187,8 +194,9 @@ argv element under `[command]` is empty or contains a NUL byte; a
 [Launch options](#launch-options); an `[mcp]` or `[hooks]` table breaks
 one of the rules under [MCP injection](#mcp-injection) and
 [Hooks injection](#hooks-injection); a `[delivery]` table breaks a rule
-under [Delivery](#delivery); or a `[host_paths]` table breaks a rule under
-[Host paths](#host-paths). A profile stays valid, with the offending
+under [Delivery](#delivery); a `[host_paths]` table breaks a rule under
+[Host paths](#host-paths); or a `[shim_guidance]` table breaks a rule under
+[Shim guidance](#shim-guidance). A profile stays valid, with the offending
 value dropped and a warning attached, when: `cwd` is relative or starts with
 `~`; or an `[env]` key starts with `YAGURA_` (case-insensitively; see
 below).
@@ -392,9 +400,14 @@ name:
 5. the profile wakes its CLI by running its own program with the text as an
    argument (`wake = "command"` in [`[delivery]`](#delivery)), and that
    program is a Windows `.cmd` / `.bat` file, through which the text cannot
-   pass unchanged. The profile's own `shim_guidance` follows the fixed
-   sentence as `text command (see url)`, and is also carried on its own
-   beside the reason, in three parts, so a client can show them apart
+   pass unchanged. The profile's own [`[shim_guidance]`](#shim-guidance)
+   follows the fixed sentence as `text command (see url)`, and is also
+   carried on its own beside the reason, in three parts, so a client can
+   show them apart
+
+An available profile can still be unable to carry one launch option or a
+start-up request on this host; that is a separate fact, listed as the
+profile's `limits` (see [Shim guidance](#shim-guidance)).
 
 ## Disabling a profile
 
@@ -496,7 +509,52 @@ time. A request that must be passed that way -- a `launch_prompt`, or a wake
 command's arguments (see [Delivery](#delivery)) -- is therefore never passed
 through a shim: a window that needs a `launch_prompt` is refused, and a profile
 that wakes its CLI by command is listed as unavailable (kind 5 under
-[Availability](#availability)).
+[Availability](#availability)). A `[model]` or `[effort]` template that itself
+holds one of those characters outside `{value}` cannot pass either, and is
+refused the same way; both are listed beforehand (see
+[Shim guidance](#shim-guidance)).
+
+## Shim guidance
+
+A profile's optional top-level `[shim_guidance]` table says what to do when
+the profile's program is a Windows `.cmd` / `.bat` file and something cannot
+pass through it. It is one table for every such case.
+
+```toml
+[shim_guidance]
+text = "On Windows, this CLI's launcher cannot pass an effort level; use the WSL profile for that."
+command = "irm https://example.com/install.ps1 | iex"   # optional
+url = "https://example.com/docs"                        # optional
+```
+
+`text` is required and is one line of visible text; `command` (something to
+copy and run) and `url` (an `https` address only) are optional and one line
+each. Any other key, or a value outside these rules, fails the table.
+
+When the program resolves to a `.cmd` / `.bat` file, the daemon lists what the
+profile cannot do on this host, judged from the profile itself:
+
+- `model` or `effort`, when an element of that option's `args` holds a
+  character the command interpreter would act on outside `{value}`;
+- `launch_prompt`, whenever the profile declares one, since the request is
+  arbitrary text.
+
+Each is listed as one entry of the profile's `limits` -- a capability, the
+reason, and the guidance above -- in
+[`list_profiles`](../docs/mcp-setup.md#list_profiles) and in the GUI, before
+any window is opened. A request that needs one of them is refused as
+`unsupported` before its approval, and nothing is started; the message is
+the reason, which ends with the guidance as `text command (see url)`. Those
+requests are `open_window` with that `model` or `effort`, a `send_handoff`
+that opens a window from the profile, and an `open_task_window` for a task
+with an instruction. `limits` is not `available`: the profile stays
+available, and a request that needs none of its limited capabilities opens a
+window as usual. A profile whose wake command cannot pass is unavailable instead
+(kind 5 under [Availability](#availability)), and its reason carries the same
+guidance.
+
+The bundled `muse-code` profile uses it to point at `wsl-muse-code`, and
+`codex-cli` to give the command that installs Codex CLI's standalone build.
 
 ## Unix
 
@@ -562,7 +620,9 @@ repository ships hand every appended element to the CLI as its own argv
 element (see [WSL profiles](#wsl-profiles)). On top of that, the launch
 option value rule admits none of the characters `cmd.exe` would reinterpret
 when it starts a `.cmd` / `.bat` shim, so a value reaches the child exactly
-as written on that path too.
+as written on that path too. The profile's own `args` around `{value}` are
+not covered by that rule; a template that needs such a character is listed as
+a limit on that path (see [Shim guidance](#shim-guidance)).
 
 On Windows, a value outside the launch option value rule is refused as
 `invalid_argument` before any process starts, so it never reaches the
@@ -586,11 +646,14 @@ names, are behind it:
 | `codex-cli`, `wsl-codex-cli` | `fast` = `gpt-5.6-luna`, `default` = `gpt-5.6-terra`, `strong` = `gpt-6-astra` | accepted, no aliases (levels pass through) |
 | `antigravity-cli`, `wsl-antigravity-cli` | `fast` = `gemini-3.8-flash-low`, `default` = `gemini-3.8-flash-medium`, `strong` = `gemini-3.1-pro-high` | not accepted (see below) |
 | `copilot-cli`, `wsl-copilot-cli` | `default` = `auto` only (see below) | accepted, no aliases (levels pass through) |
+| `muse-code`, `wsl-muse-code` | `fast` = `muse-spark-1.3`, `default` = `muse-spark-1.3`, `strong` = `muse-wonder-1.0` | accepted, no aliases (levels pass through) on macOS, Linux and in WSL; refused on Windows (see below) |
 | `shell` | accepts neither option | -- |
 
 Those mappings come from each CLI's own `--help` (Claude Code 2.1.263, Codex
-CLI 0.153.4, Antigravity CLI 1.2.11, GitHub Copilot CLI 1.0.101) and, for the reasoning levels and the
-model names, the Codex configuration and models reference. **Model names
+CLI 0.153.4, Antigravity CLI 1.2.11, GitHub Copilot CLI 1.0.101, Muse Code
+1.4.12) and, for the reasoning levels and the
+model names, the Codex configuration and models reference and Muse's models
+page. **Model names
 change over time**: read the table as the state when these profiles were
 written, and edit your own copies to whatever your CLI and your account
 actually accept -- yagura never validates a model name, it only passes it
@@ -615,6 +678,15 @@ ship no `[effort]` table at all -- asking either for `effort` is refused the
 same way `shell` refuses `model`. An interactive `agy` does not fail on a
 refused selection: it warns and falls back to its own default model, which
 is the outcome this profile's `[model]` aliases exist to avoid.
+
+Muse Code saves a level given with `--reasoning-effort` into the user's own
+settings, so the Muse profiles pass `effort` as the one-run override `-c
+reasoning_effort="<level>"` instead. On Windows `muse-code` starts Muse
+through its `.cmd` launcher, which cannot carry that `"`, so asking it for
+`effort` is refused before approval and points at `wsl-muse-code` (see
+[Configuring Muse Code CLI](../docs/mcp-setup.md#configuring-muse-code-cli)).
+Muse has no command that lists its models, so `[model.choices]` is a fixed
+list.
 
 ### Model choices
 
@@ -777,6 +849,10 @@ in. Reaching yagura's MCP bridge from an `agy` window means registering it
 once -- from Settings > Integrations in the GUI (see
 [MCP registration](#mcp-registration) below), or by hand with `agy mcp add`,
 see [docs/mcp-setup.md's "Configuring Antigravity CLI"](../docs/mcp-setup.md#configuring-antigravity-cli).
+`muse-code` has none either: Muse Code's Windows launcher cannot carry the
+JSON a launch would pass, so on every operating system that profile reaches
+yagura through its registration instead (see
+[MCP registration](#mcp-registration)).
 
 ```toml
 # Claude Code on Windows: the server definition goes into a settings file
@@ -794,7 +870,7 @@ args = [
 ]
 ```
 
-The table takes three keys, and any other key excludes the profile:
+The table takes four keys, and any other key excludes the profile:
 
 - `args` (required): argv elements appended to the launch, after the
   profile's own argv and its launch options.
@@ -809,6 +885,17 @@ The table takes three keys, and any other key excludes the profile:
   `.`, `_` and `-` only, not starting or ending with `.`, without `..`, and
   not a Windows device name (`con`, `nul`, `com1` and so on). `config_file`
   and `config_dir` can be used together.
+- `absent` (optional): `{ file = "<home-relative path>", pointer = "<JSON
+  Pointer>" }`, an entry of the CLI's own JSON settings that, when it is
+  there, takes the injection out of the launch. For a CLI that refuses to
+  start when the user's own settings already define a server of the injected
+  name (`pointer` may carry `{server}`). The file is read before each launch
+  -- through [`[host_paths]`](#host-paths)'s `read` when the profile has one,
+  directly otherwise -- within the same slots and 10-second limit as a path
+  conversion. When the entry is there, or the file cannot be read in time,
+  the window opens without the `[mcp]` injection and the daemon logs one
+  warning; a missing file or entry keeps the injection. `wsl-muse-code`
+  uses it.
 
 ```toml
 # A CLI that reads its MCP servers from a directory
@@ -828,6 +915,8 @@ element, so they can never add, split or reorder argv elements:
 | `{bridge_toml}` | the bridge's absolute path as a TOML literal string, for example `'C:\path\to\yagura-mcp.exe'` |
 | `{env_names_toml}` | the TOML literal-string array `['YAGURA_WINDOW_ID', 'YAGURA_STATUS_TOKEN', 'YAGURA_INSTANCE', 'YAGURA_MCP_BRIDGE']` |
 | `{wslenv_toml}` | the TOML literal string `'YAGURA_WINDOW_ID:YAGURA_STATUS_TOKEN:YAGURA_INSTANCE'`, a `WSLENV` value naming the variables the bridge reads (the bundled `wsl-codex-cli` sets it as its server's `env.WSLENV`, because Codex does not pass `WSLENV` on to an MCP server, and without it the Windows bridge started from WSL sees none of them) |
+| `{bridge_json}` | the bridge's absolute path as a JSON string, for a CLI that takes its server definition as JSON on the command line |
+| `{env_refs}` | a JSON object naming, each as a reference to itself (`{"YAGURA_WINDOW_ID":"${YAGURA_WINDOW_ID}",...}`), the variables among `YAGURA_WINDOW_ID`, `YAGURA_STATUS_TOKEN`, `YAGURA_INSTANCE` and `WSLENV` that this window's child actually has; built when the window opens, so a variable the child lacks is never named. For a CLI that passes an MCP server only the variables its definition names and refuses a reference to one that is unset. Values never appear, only names |
 | `{mcp_config_file}` | the path of the file the daemon wrote from `config_file`; usable only when the table has `config_file` |
 | `{mcp_config_dir}` | the path of the directory the daemon wrote from `config_dir`; usable only when the table has `config_dir` |
 
@@ -887,7 +976,8 @@ its values as TOML literal strings, which need none. The WSL profiles start
 `wsl.exe`, which is not a shim, so `wsl-claude-code` passes the same JSON
 straight on the command line. The Copilot profiles follow the same split:
 `copilot-cli` names its settings file with Copilot's `@` prefix, and
-`wsl-copilot-cli` passes the JSON inline.
+`wsl-copilot-cli` passes the JSON inline. `wsl-muse-code` passes its JSON
+inline too, with `{bridge_json}` and `{env_refs}` in it.
 
 Where a CLI already has a server of the injected name configured -- `yagura`,
 or `yagura-<instance>` for a named instance, the name Register in the GUI
@@ -903,7 +993,10 @@ own 60-second default would otherwise end a `wait_for_status`,
 Copilot CLI lays `--additional-mcp-config` over its own configuration, the
 last definition of a name winning. The bundled Copilot tables set `timeout`
 to a day, in milliseconds: Copilot's own 180-second default would end the
-same calls.
+same calls. Muse Code refuses to start when a `-c` definition names a server
+its settings already define, which is why `wsl-muse-code` has `absent`; and
+its `-c` takes no `tool_timeout_sec`, which is why that table sets none (see
+[Configuring Muse Code CLI](../docs/mcp-setup.md#configuring-muse-code-cli)).
 
 ## Hooks injection
 
@@ -974,7 +1067,8 @@ hook given with `-c` only once its trust is recorded in `~/.codex/config.toml`,
 and the key that records it carries characters a shim refuses, so
 registration writes the trust and the launch injects the hooks. A profile with
 no `[hooks]` table but a `json_entry` -- Antigravity CLI, which reads hooks
-only from its own file -- injects nothing; the entry is the hook.
+only from its own file, and `muse-code`, whose hooks live in the managed
+hooks file its registration writes -- injects nothing; the entry is the hook.
 
 **Which windows expect reports.** A window whose `[hooks]` elements were
 actually appended to its launch, and a window whose profile's `json_entry` was
@@ -994,10 +1088,12 @@ were checked with):
 | `codex-cli` (Codex CLI 0.159.2), `wsl-codex-cli` (0.158.0) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
 | `copilot-cli`, `wsl-copilot-cli` (GitHub Copilot CLI 1.0.101) | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
+| `muse-code` (through `json_entry`), `wsl-muse-code` (Muse Code 1.4.12) | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 
 The bundled profiles also call the delivery doors from the hooks above: at
 session start, at the start of a turn and, for Claude Code, in a background
-wait. Antigravity CLI's `json_entry` carries its doors the same way.
+wait. The `json_entry` of Antigravity CLI and of `muse-code` carries their
+doors the same way.
 
 Copilot CLI takes launch-time hooks only from a plugin directory
 (`--plugin-dir`), so the Copilot profiles write one with `config_dir`: a
@@ -1013,7 +1109,30 @@ command changes the hash Codex trusts it by, so the matching
 `toml_set.entries` value has to be taken again (see
 [MCP registration](#mcp-registration)).
 
-## Delivery
+### Hooks that run outside a window
+
+A hook a registration writes into the user's own settings runs in every
+session of that CLI, inside a window or not. Outside a window the `bin`
+folder is not on `PATH`, so a bare `yagura-daemon` is not found and the CLI
+reports a failed hook on every turn. The bundled `muse-code` hooks therefore
+check for the window in the shell before they start the daemon, and do
+nothing outside one:
+
+| Host | Command form (`%COMSPEC% /C` on Windows, `$SHELL -c` elsewhere) |
+| --- | --- |
+| Windows (`by_os.windows`) | `if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --emit-status running --source muse-code)` |
+| macOS, Linux (`by_os.default`) | `[ -z "$YAGURA_WINDOW_ID" ] \|\| exec yagura-daemon --emit-status running --source muse-code` |
+
+The check only tests whether the variable is set; its value is not expanded
+into the command. On Windows the same command also sets
+`NoDefaultCurrentDirectoryInExePath` before `yagura-daemon` is looked up, so
+`cmd` does not run a `yagura-daemon.bat` or `.exe` from the session's working
+folder ahead of the one on `PATH`; it applies whether yagura or the user
+started that Muse. `--emit-status` itself still does nothing outside a
+window, which covers a hook written by hand without the check. The
+`wsl-muse-code` hooks file is passed with each launch and read only by that
+window's CLI, so its commands carry no check.
+
 
 A profile's optional `[delivery]` table says how the daemon hands the profile's CLI the text it sends of its own accord -- chat, handoffs and notices -- without typing it into the composer. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
 
@@ -1028,27 +1147,25 @@ wake_stream = "stderr"          # "stderr" (default) or "stdout"
 wake_exit = 2                   # exit code of an answered wait (default 2)
 launch_prompt = ["--", "{prompt}"]
 
-[delivery.shim_guidance]        # optional; for wake = "command" only
-text = "Install the standalone build, then restart yagura:"
-command = "irm https://example.com/install.ps1 | iex"
-url = "https://example.com/docs"
+[delivery.output]               # or this table instead of the one string
+context = '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":{text}}}'
+take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":{text}}}'
 ```
 
 | Key | Meaning |
 | --- | --- |
-| `output` | How a door prints the text. `"plain"` (the default) prints it as it is. Anything else is a JSON template that contains `{text}`: the text is inserted as a JSON string (quoted and escaped), and the template must still be valid JSON with it in. A CLI that wants its hook output wrapped in a structure takes this form |
+| `output` | How a door prints the text. `"plain"` (the default) prints it as it is. Anything else is a JSON template that contains `{text}`: the text is inserted as a JSON string (quoted and escaped), and the template must still be valid JSON with it in. A CLI that wants its hook output wrapped in a structure takes this form. One string applies to every door. A table `[delivery.output]` gives each door its own, keyed `context` (`--deliver-context`), `take` (`--deliver-take`) and `wait` (`--deliver-wait`), each value following the same rule; a door the table leaves out prints plain, and any other key fails the table. A CLI that checks a hook's output against the event the hook ran for takes this form |
 | `max_chars` | The most characters one answer carries, the chat announcement included (default 10000). Texts are never cut; the ones that do not fit wait for the next answer. Where the CLI limits a hook's output itself, set this to that limit |
 | `wake` | How a CLI that is waiting for input is woken. `"none"` (the default): the daemon cannot, so it types the oldest waiting text into the composer while the window waits for input (this needs a composer and an `[input].probe` in the window's detection definition, see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)). `"wait"`: the CLI leaves a wait registered through the `--deliver-wait` door and the daemon answers it. `"command"`: the daemon runs the profile's own program with `wake_args` |
 | `wake_args` | Required with `wake = "command"` and rejected otherwise. The arguments the program is run with; each is a non-empty argv element, at least one contains `{text}`, and `{session}` stands for the session identifier a hook reported with `--report-session`. The command runs once the CLI has reported its session, so not before its first turn |
 | `wake_stream`, `wake_exit` | For `wake = "wait"`: the stream an answered wait prints on and the exit code it ends with. The CLI's own hook documentation says which code wakes it |
 | `launch_prompt` | Arguments that hand the CLI a first request when it starts; `{prompt}` (required in at least one element) is replaced with the text. The elements are appended after the launch's other elements, after `[mcp]` and `[hooks]`. A task window with an instruction, and a window a `send_handoff` opens from this profile, are started this way. A profile without it cannot be used for either (`no_composer`) |
-| `shim_guidance` | A sub-table `[delivery.shim_guidance]` saying what to do when `wake = "command"` cannot work because the program is a Windows `.cmd` / `.bat` file. `text` is required (a single line); `command` (something to copy and run) and `url` (an `https` address only) are optional. The reason text of an unavailable profile reads `text command (see url)` after its fixed sentence (see [Availability](#availability)), and the three parts are also carried separately as `unavailable_guidance` |
 
-`wake_timeout_secs` and `session_pointer` are not keys: writing either is an error. An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
+`wake_timeout_secs`, `session_pointer` and `shim_guidance` are not keys: writing any of them is an error (what to tell a user when the program is a `.cmd` / `.bat` file is the top-level [`[shim_guidance]`](#shim-guidance) table). An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
 
-**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI and GitHub Copilot CLI have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Their start-up requests are given on each CLI's command line.
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI and Muse Code have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context` and `take` their own templates. Their start-up requests are given on each CLI's command line.
 
-**Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's `shim_guidance` gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [`.cmd` / `.bat` shims](#cmd--bat-shims)).
+**Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's [`[shim_guidance]`](#shim-guidance) gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [Shim guidance](#shim-guidance)).
 
 To add a profile for a new CLI, work out which doors and wake it supports first; the procedure is in [Adding a CLI](../docs/adding-a-cli.md).
 
@@ -1063,17 +1180,21 @@ directory an injection names (`{mcp_config_file}`, `{mcp_config_dir}`,
 `{hooks_config_file}`, `{hooks_config_dir}`), the bridge `{bridge_toml}`
 names, and, for [MCP registration](#mcp-registration), the bridge `add`
 registers (`{bridge}`) and the daemon a `json_entry` names (`{daemon}`).
+The bridge `{bridge_json}` names is converted the same way.
 Without the table, paths are handed over unchanged.
 
 ```toml
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+absent_exit = 3
 ```
 
 - `convert` is required: a non-empty argv, at least one element of which
-  contains `{path}`, the daemon-side path. No other placeholder is accepted,
-  and neither is any other key; either fails the table, and the profile is
-  left out of the listing with a warning.
+  contains `{path}`, the daemon-side path. No other placeholder is accepted
+  in it, and no key other than `convert`, `read`, `replace` and
+  `absent_exit` (below) is accepted in the table; either fails the table, and
+  the profile is left out of the listing with a warning.
 - It runs as its own standalone command -- not after the profile's launch
   argv -- with the profile's `[env]`, in the home directory. Its standard
   output must be exactly one line that starts with `/`, holds no control
@@ -1093,6 +1214,27 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
   spelled it the way that environment does; a conversion that fails leaves
   the row **not installed** or **unknown**.
 
+The table can also say how the CLI's own settings files are read and written
+in that environment, for the profile's registration and its `[mcp]` `absent`
+guard:
+
+- `read` (optional): an argv that prints one file. `{file}` stands for the
+  file's path relative to that environment's home directory and is the only
+  placeholder; it is handed to the tool as its own argument (a positional
+  argument to `sh` above), never spliced into a script string.
+- `replace` (optional, needs `read`): an argv that replaces the file with
+  what it is given on standard input, with the same `{file}`.
+- `absent_exit` (optional, needs `read`): the exit code `read` uses for "the
+  file is not there", told apart from every other failure.
+
+They run as standalone commands, like `convert`. Without `read`, files are
+read and written on the host directly. A registration's own
+[`[mcp_registration.files]`](#mcp-registration) table holds the same three
+keys and is still accepted; a profile may have one or the other, and having
+both `[mcp_registration.files]` and `[host_paths]`'s `read` fails the
+registration table, so the CLI's files are reached one way only. The bundled
+WSL profiles that read the CLI's files use `[host_paths]`.
+
 ## MCP registration
 
 A profile's optional `[mcp_registration]` table tells the daemon how to
@@ -1108,6 +1250,8 @@ group = "WSL"                  # optional; the GUI's heading for this row.
                                 # Omitted, a row is listed under the host
                                 # environment's own group
 add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+                                # add and remove: both, or neither (see
+                                # "Registering without a command" below)
 remove = ["mcp", "remove", "{server}"]
 env_arg = ["--env={env}"]      # optional; required whenever a named
                                 # instance's environment has to reach `add`
@@ -1156,16 +1300,26 @@ under = ["hooks", "state"]     # where they live; no placeholders
 [mcp_registration.toml_set.entries.default]
 '/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:..." }
 
-[mcp_registration.json_entry]  # optional; top-level entries of a JSON
-                                # settings file the registration owns outright
+[mcp_registration.json_entry]  # optional; entries of a JSON settings file
+                                # the registration owns. One table, or an
+                                # array [[mcp_registration.json_entry]] of
+                                # one per file
 file = ".gemini/config/hooks.json"  # home-relative
+# claim = "/managed_hooks_path"  # optional; see "Shared entries and the claim"
 [mcp_registration.json_entry.entries."{server}"]
+                                # a top-level name, or a JSON Pointer such as
+                                # "/mcpServers/{server}"
 PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }]
+# [mcp_registration.json_entry.by_os.windows]
+                                # optional; more entries for one OS: windows /
+                                # macos / linux override default
 
 [mcp_registration.files]       # optional; how a home-relative status.file,
                                 # toml_set.file or json_entry.file is read and
                                 # written inside another environment (WSL)
-                                # rather than directly
+                                # rather than directly. The same keys as
+                                # [host_paths]'s read / replace / absent_exit,
+                                # which a profile has instead
 read = ["wsl", "-e", "sh", "-c", "...", "sh", "{file}"]
 replace = ["wsl", "-e", "sh", "-c", "...", "sh", "{file}"]  # optional
 absent_exit = 3                 # optional; the read tool's exit code for a
@@ -1201,19 +1355,67 @@ hooks only once something is written into its own files (see
   it. Each entry must be a non-empty table, and at least one set must be
   present. Missing tables on the path are created; a key on the path that
   holds something other than a table fails the step and nothing is written.
-- `json_entry` writes top-level entries of a JSON object: `file` is
-  home-relative and `entries` names each one. An entry's name may carry
-  `{server}`; its value is any TOML value, written as JSON, whose strings may
-  carry `{daemon}`. `{daemon}` is replaced by the absolute path of the
-  daemon's copy in its report folder -- converted by the profile's
-  `[host_paths]` when it has one -- and a path containing whitespace, `'`, `` ` ``, `$`, or a
-  character the command interpreter would act on is not written at all, since
-  a hook command carries it unquoted. The rest of the file is kept byte for
-  byte, a missing file is created holding only these entries, and a file that
-  is not a JSON object is left untouched with the step failed.
+- `json_entry` writes entries of a JSON object, one element per file: `file`
+  is home-relative and `entries` names each entry. A key that starts with
+  `/` is a JSON Pointer (RFC 6901) into nested objects, whose missing parents
+  are created as objects; any other key names a top-level entry. A key may
+  carry `{server}`. An optional `by_os` table adds the entries of one set,
+  picked like `toml_set.entries`' sets (`windows`, `macos` or `linux` when
+  present, `default` otherwise); a set may not repeat a key of `entries`.
+  A value is any TOML value, written as JSON, whose strings may carry
+  `{daemon}`, `{bridge}` and `{server}`; a string that is exactly
+  `{env_refs}` becomes an object naming each variable the bridge needs as a
+  reference the CLI fills in (`{"YAGURA_WINDOW_ID":"${YAGURA_WINDOW_ID}",...}`,
+  with `YAGURA_INSTANCE` for a named instance), never a value. `{daemon}` is
+  replaced by the absolute path of the daemon's copy in its report folder,
+  and `{bridge}` by the bridge's path -- both converted by the profile's
+  `[host_paths]` when it has one -- and a `{daemon}` path containing
+  whitespace, `'`, `` ` ``, `$`, or a character the command interpreter would
+  act on is not written at all, since a hook command carries it unquoted. The
+  rest of the file is kept byte for byte, a missing file is created holding
+  only these entries, and a file that is not a JSON object, or a pointer
+  whose parent holds something other than an object, is left untouched with
+  the step failed.
 
-Both edits read and write through `files.read` / `files.replace` when the row
-has them, and are written atomically otherwise, the same way `toml_set` is.
+Both edits read and write through the row's file tools -- `files.read` /
+`files.replace`, or `[host_paths]`'s `read` / `replace` -- when it has them,
+and are written atomically otherwise, the same way `toml_set` is.
+
+**Registering without a command.** A CLI with no `mcp add` of its own
+(Muse Code) leaves out both `add` and `remove` -- one without the other is an
+error -- and then `env_arg` and `env_forward` too. The registration is then
+made by the `json_entry` alone, which must hold the bridge's entry: a key
+ending in `{server}` whose value holds a string that is exactly `{bridge}`.
+For a named instance that entry must carry `{env_refs}`, or Register is
+refused as unable to carry the instance. The GUI shows such a row with the
+files it writes and their entries in place of a command.
+
+**Shared entries and the claim.** An entry whose key has no `{server}` is the
+same for every instance, so a CLI that has room for only one such value --
+Muse Code's `managed_hooks_path` -- can serve all of them. A registration with
+shared entries must name one of them as its `claim`: a shared entry holding a
+plain value, at most one per registration.
+
+- Register and Update read the claimed entry first. When the file holds
+  another value there -- one of the user's own -- nothing is written, the
+  step fails naming the file and the entry, and the row's state says so
+  ahead of time, so the GUI turns Register and Update off (see
+  [Registering from the GUI](../docs/mcp-setup.md#registering-from-the-gui)).
+  When it holds no value or this registration's own, the shared entries are
+  written over.
+- Remove takes out this instance's entries, and the shared ones only when the
+  claim holds this registration's value and no other instance's bridge entry
+  is left -- judged the same way as under "Turning the other instances'
+  registrations off" below. A file that cannot be read keeps them. The files, and
+  any object the removal empties, stay.
+
+**Which file is written first.** When a registration writes more than one
+file, the file holding the claim refers to the others (Muse Code's
+`settings.json` names the hooks file), so it is written last and emptied
+first; the other files keep the profile's order. A step that fails stops the
+operation there and nothing is undone, as for every row: whichever step
+fails, no file refers to one that was never written, the row reads
+**differs**, and Update puts it right.
 
 Put `{env_args}` before `{server}` and keep each flag and its value in one
 element (`--env={env}`): some CLIs reject a flag after the server name, and
@@ -1239,7 +1441,9 @@ record names exactly this bridge, with every `require` / `toml_set.confirm`
 value and every owned entry in place), **differs** (the record exists but
 names another bridge, is missing a required value, or lacks an owned entry or
 holds another value in it -- `differs_in` names which, giving owned entries
-as `under` joined by `.` or as the `json_entry` names), **not registered**
+as `under` joined by `.` or as the `json_entry` keys with `{server}` filled
+in; a claimed entry held by another value is reported here too, with the
+claim's pointer as `refused_by_claim`), **not registered**
 (`absent` matched the command's output, the settings file does not exist, or
 a `files.read` tool exited with `absent_exit`), **not installed** (the CLI
 itself, or its `[host_paths]` conversion, could not be found or run), or
@@ -1274,14 +1478,16 @@ bundled `codex-cli` and `wsl-codex-cli` tables' `add` drops any key its own
 `-c mcp_servers.{server}.*` overrides did not set, including a
 `tool_timeout_sec` an earlier `toml_set` edit wrote -- which is why their
 `[mcp_registration.toml_set]` writes it back once, right after `add`. Update
-runs `remove` then the same steps as Register. Remove runs `remove`, then
-takes out the owned entries (`toml_set.entries`, `json_entry`); it leaves
-`toml_set.values` alone.
+checks the claim, then runs the steps of Remove and then those of Register.
+Remove runs `remove` (when the CLI has commands), then takes out the owned
+entries (`toml_set.entries`, `json_entry`); it leaves `toml_set.values`
+alone.
 
 ## WSL profiles
 
-The four WSL profiles this repository ships (`wsl-claude-code`,
-`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`) start the CLI with
+The five WSL profiles this repository ships (`wsl-claude-code`,
+`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`, `wsl-muse-code`)
+start the CLI with
 
 ```toml
 [command]
@@ -1310,8 +1516,11 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 Their `[mcp]` and `[hooks]` tables, where they have them, are written inline
 and name no path, so opening one of their windows runs no conversion -- except
 `wsl-copilot-cli`'s `[hooks]`, a plugin directory Copilot takes only by its
-path, which is converted at each launch. Their registration rows convert
-too.
+path, and `wsl-muse-code`'s `[mcp]` (`{bridge_json}`) and `[hooks]` (a
+managed hooks file Muse takes only by its path), which are converted at each
+launch. Their registration rows convert too. Those that read the CLI's own
+files -- a registration's, or `wsl-muse-code`'s `absent` guard -- read them
+with `[host_paths]`'s `read`.
 
 ## Approval-skip flags
 

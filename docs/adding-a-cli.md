@@ -97,6 +97,45 @@ going to change, and when you are done restore it and compare it byte for byte w
 - A setting a CLI takes only by its path cannot reach a CLI that runs in another environment, such
   as WSL, as the daemon's own path. Give the profile a [`[host_paths]`](../profiles/README.md#host-paths)
   table so the daemon converts the path first, rather than inlining the content to avoid one.
+- A CLI may read a hook's standard output as JSON as soon as it starts with `[` and fail the hook
+  when it does not parse, and yagura's texts can start with `[yagura ...]`. It may also require a
+  JSON answer to name the event it runs for. Give each door its own `output` template then (see
+  [Delivery](../profiles/README.md#delivery)).
+- A CLI may clear a hook's environment, and an MCP server's, down to a fixed list, so
+  `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN` never reach them. Look for a setting that names the
+  variables to keep (Muse Code's `managed_hooks_env_vars`, or a server's `env`), and print the
+  hook's environment once to confirm it.
+- A CLI's own launcher can lose arguments: Muse Code's Windows `muse.cmd` runs PowerShell 5.1,
+  which drops `"` and `--`. Check what reaches the CLI itself, not what you passed, and record the
+  result as a limit with guidance rather than leave the option to fail at launch (see the last
+  item).
+- A flag can be saved as the user's default: Muse Code writes `--reasoning-effort` into its
+  settings file. Prefer a one-run override, and compare the settings file before and after a
+  launch.
+- A hook that ends with exit code 2 can block the user's prompt or keep the turn going. Make sure
+  no door yagura's hooks call can exit 2 at that event.
+- An Enter sent right after the text can add a line instead of sending (Muse Code needs about
+  100 ms after the text shows). Measure the shortest gap that sends, and set `submit_delay_ms`
+  well above it.
+- A CLI can run hooks for its own sub-sessions after the turn's `Stop`: Muse Code's tool hooks
+  fire for its internal reviewer too. A status hook on such an event leaves the window `running`;
+  map only the events the main session alone runs.
+- A settings file can accept an unknown key without complaint while the command line refuses it
+  (Muse Code takes `tool_timeout_sec` in `settings.json` but not with `-c`). That a key was
+  accepted is not proof that it works; measure its effect.
+- A CLI can refuse to start when a launch argument touches a server its settings already define.
+  Then a per-launch injection under the same name needs an `absent` guard (see
+  [MCP injection](../profiles/README.md#mcp-injection)), and a registered one cannot be switched
+  off for a single window.
+- A hook a registration writes into the user's settings runs in every session of that CLI, inside
+  a window or not. Put the check for the window in the hook's command itself, before the daemon is
+  started, and on Windows have the same command stop `cmd` from searching the working folder for
+  the daemon (see
+  [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
+- When a CLI's launcher cannot carry a launch option or a start-up request on one host, the
+  profile's `[shim_guidance]` says what to use instead; the daemon then refuses the request before
+  approval and shows the limit ahead of time (see
+  [Shim guidance](../profiles/README.md#shim-guidance)).
 
 ## 4. Turn the findings into a profile
 

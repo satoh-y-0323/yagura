@@ -63,7 +63,7 @@ is never overwritten by, the default instance's `yagura`. The default instance r
 ## Windows yagura Opens
 
 **A Claude Code, Codex CLI or GitHub Copilot CLI window that yagura opens from one of its bundled
-launch profiles needs no MCP registration.** The daemon points that CLI at the bridge itself:
+launch profiles, and a `wsl-muse-code` window, needs no MCP registration.** The daemon points that CLI at the bridge itself:
 
 - At start-up, the daemon looks for `yagura-mcp` next to its own executable. The installer ships
   `yagura-mcp.exe` there, beside `yagura-daemon.exe`. When none is usable, the daemon logs
@@ -75,12 +75,15 @@ launch profiles needs no MCP registration.** The daemon points that CLI at the b
   its command line: Claude Code a `--mcp-config` server definition, Codex CLI `-c` overrides for
   `mcp_servers.<name>` that also forward the channel variables with `env_vars` (and, in
   `wsl-codex-cli`, name them in the server's `WSLENV` so they reach the Windows bridge), GitHub
-  Copilot CLI an `--additional-mcp-config` server definition. The server
+  Copilot CLI an `--additional-mcp-config` server definition, Muse Code in WSL a `-c
+  mcpServers.<name>=...` server definition. The server
   is named the way Register names it: `yagura`, or `yagura-<instance>` for a
   [named instance](instances.md). The bundled
-  `claude-code`, `codex-cli`, `copilot-cli`, `wsl-claude-code`, `wsl-codex-cli` and
-  `wsl-copilot-cli` profiles carry one; `shell`
-  does not, and neither does `antigravity-cli` or `wsl-antigravity-cli` -- Antigravity CLI
+  `claude-code`, `codex-cli`, `copilot-cli`, `wsl-claude-code`, `wsl-codex-cli`,
+  `wsl-copilot-cli` and `wsl-muse-code` profiles carry one; `shell`
+  does not, `muse-code` does not (a Muse Code window on the host reaches yagura through the
+  registration described in [Configuring Muse Code CLI](#configuring-muse-code-cli)), and neither
+  does `antigravity-cli` or `wsl-antigravity-cli` -- Antigravity CLI
   (`agy`) reads MCP servers only from its own global registration, not from anything passed at
   launch, so a window opened from either of those two profiles needs the manual registration
   described in [Configuring Antigravity CLI](#configuring-antigravity-cli) below, the same as a
@@ -144,7 +147,9 @@ hooks that report each turn's start and end to the daemon, so the window's statu
 on the screen alone. The Codex CLI profiles do the same only once yagura is registered with Codex
 CLI, and Antigravity CLI reports only once yagura is registered with it -- both from
 [Registering from the GUI](#registering-from-the-gui). The GitHub Copilot CLI profiles give the CLI
-its hooks at every launch, which it loads once you have answered its folder trust prompt. What the hooks report, and the mark a window
+its hooks at every launch, which it loads once you have answered its folder trust prompt. The
+`wsl-muse-code` profile gives Muse Code its hooks at every launch; `muse-code` reports once yagura
+is registered with Muse Code. What the hooks report, and the mark a window
 shows when its reports stop arriving, are in
 [Detection definitions](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status).
 
@@ -168,19 +173,30 @@ The GUI's Settings panel (the gear button in the navigation rail) has an **Integ
 registers the bridge beside the running daemon with each CLI, so a session you start yourself can
 reach yagura. It lists one row for every launch profile with a `[mcp_registration]` table (see
 [profiles/README.md](../profiles/README.md#mcp-registration)): the bundled `claude-code`,
-`codex-cli`, `antigravity-cli` and `copilot-cli` under "This computer", and `wsl-claude-code`,
-`wsl-codex-cli`, `wsl-antigravity-cli` and `wsl-copilot-cli` under "WSL". `shell` has no row.
+`codex-cli`, `antigravity-cli`, `copilot-cli` and `muse-code` under "This computer", and
+`wsl-claude-code`, `wsl-codex-cli`, `wsl-antigravity-cli` and `wsl-copilot-cli` under "WSL".
+`shell` and `wsl-muse-code` have no row.
 
-Each row shows the command it is about to run and the CLI's current state:
+Run the GUI and the daemon from the same release. A daemon of this release lists a row that has
+no command of its own (Muse Code), which a GUI from before it cannot read, so its Integrations tab
+then reads no row at all.
+
+Each row shows the command it is about to run -- or, for a CLI registered by editing its files
+alone (Muse Code), each file it writes and the entries it writes there -- and the CLI's current
+state:
 
 - **Registered**: the CLI's own record names this bridge (and, for Codex CLI, carries
   `tool_timeout_sec = 86400`), and the hook settings described below are in place. **Remove** is
   offered.
-- **Not registered**: **Register** runs the CLI's own `mcp add`.
+- **Not registered**: **Register** runs the CLI's own `mcp add`, or writes the files of a CLI
+  that has none.
 - **Registered to a different bridge**, or **Registered with a different** followed by what
-  differs (`tool_timeout_sec`, `hooks.state` for Codex CLI's hook trust, or `yagura` for
-  Antigravity CLI's hooks entry): **Update** runs `mcp remove`, then the same steps as Register.
-  **Remove** is offered too.
+  differs (`tool_timeout_sec`, `hooks.state` for Codex CLI's hook trust, `yagura` for
+  Antigravity CLI's hooks entry, or the entries of Muse Code's files): **Update** runs `mcp
+  remove`, then the same steps as Register. **Remove** is offered too. When Muse Code's settings
+  already hold a `managed_hooks_path` of your own, the row says so and Register and Update cannot
+  be pressed: yagura does not overwrite it (see
+  [Configuring Muse Code CLI](#configuring-muse-code-cli)).
 - **Not installed**: the CLI (or, for a WSL row, WSL itself) could not be found or run. Register
   cannot be pressed.
 - **Unknown**: the CLI's answer could not be read. It is never guessed as registered or not;
@@ -191,7 +207,7 @@ the profile's own launch command, so a WSL row reaches the CLI inside the distri
 bridge's path converted by `wslpath` (the profile's
 [`[host_paths]`](../profiles/README.md#host-paths)) -- in your home directory, so no project's
 `.mcp.json` is
-picked up. Claude Code is registered with `--scope user`. yagura writes three things itself,
+picked up. Claude Code is registered with `--scope user`. yagura writes these itself,
 changing nothing else in the file and keeping a symlinked file a symlink and its permissions as
 they were:
 
@@ -212,9 +228,22 @@ they were:
   Antigravity CLI cannot run one that has any: on Windows a path that holds a space is written by its
   8.3 short name, and the step fails when it has none (see
   [How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)).
+- **Muse Code's two files**, since Muse Code has no `mcp add`: in `~/.config/muse/settings.json`
+  (`%USERPROFILE%\.config\muse\settings.json` on Windows), the server entry
+  `/mcpServers/<name>` and the two entries that point Muse at a managed hooks file,
+  `managed_hooks_path` (`yagura-managed-hooks.json`, beside it) and `managed_hooks_env_vars`; and
+  that file, `~/.config/muse/yagura-managed-hooks.json`, holding the hooks under `/hooks`. The hook
+  commands differ by host: on Windows `if defined YAGURA_WINDOW_ID (set
+  NoDefaultCurrentDirectoryInExePath=1& yagura-daemon ...)`, on macOS and Linux `[ -z
+  "$YAGURA_WINDOW_ID" ] || exec yagura-daemon ...`, so that a Muse session outside a window runs
+  nothing (see
+  [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
+  Every other entry of either file is kept byte for byte, and a missing file is created.
 
 **Remove** takes the hook trust tables and the hooks entry out again, along with the CLI's own `mcp
-remove`; it leaves `tool_timeout_sec` alone. Any failed step stops the operation there. The output
+remove`; it leaves `tool_timeout_sec` alone. For Muse Code it takes out the instance's server
+entry, and the shared hooks entries only with the last instance's registration (see
+[Shared entries and the claim](../profiles/README.md#mcp-registration)); the files stay. Any failed step stops the operation there. The output
 of `add` and `remove` is shown in the row; what a state read returns is neither shown nor logged.
 
 **Update and Remove discard what you wrote by hand in Codex CLI's table.** `codex mcp remove`
@@ -224,8 +253,8 @@ added to it yourself -- such as `env_vars` -- is gone afterwards; yagura writes 
 
 **Reading the state.** The rows are read when the tab opens and after each operation, never in the
 background: `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
-`copilot mcp get <name> --json` for GitHub Copilot CLI, and `~/.gemini/config/mcp_config.json`
-(read, never written) for Antigravity CLI, plus the hook
+`copilot mcp get <name> --json` for GitHub Copilot CLI, `~/.gemini/config/mcp_config.json`
+(read, never written) for Antigravity CLI, and Muse Code's two files above, plus the hook
 settings above, read back from `~/.codex/config.toml` and `~/.gemini/config/hooks.json`. `claude mcp get`
 starts the bridge briefly to check that it connects; that connection is `External` and changes no
 window's `mcp_connected`.
@@ -274,7 +303,7 @@ not read MCP servers from `settings.json` or `settings.local.json`.
 
 yagura writes to a CLI's own configuration only when you press a button in
 [Registering from the GUI](#registering-from-the-gui), and then only through the CLI's own
-`mcp add` / `mcp remove` -- plus `tool_timeout_sec` in Codex CLI's `[mcp_servers.<name>]` table.
+`mcp add` / `mcp remove` and the entries that section lists.
 The commands in this section are ones you run yourself.
 
 ### 3. Confirm it
@@ -396,6 +425,81 @@ registration by hand needs the flag above.
    and `.claude/settings.json` as its own configuration, so the MCP servers and hooks set up there
    for Claude Code also apply to a Copilot window opened in that folder.
 
+## Configuring Muse Code CLI
+
+Muse Code (`muse`, checked with 1.4.12) has no `mcp add` command, and two bundled profiles reach it
+in different ways:
+
+- **`muse-code`** (Windows, macOS and Linux) passes nothing at launch. Register yagura with Muse
+  Code once, from the Muse Code row in [Registering from the GUI](#registering-from-the-gui):
+  that writes yagura's server and hooks into Muse's own settings, which every Muse session reads.
+  Until then a `muse-code` window opens, but has no yagura MCP tools, reports nothing and takes no
+  part in chat or handoffs.
+- **`wsl-muse-code`** (Windows, running Muse inside WSL) passes the server and a managed hooks file
+  with `-c` at every launch, and registers nothing: the settings inside the distribution are not
+  changed.
+
+To register by hand instead, write the entries the `muse-code` profile's `[mcp_registration]`
+lists, with the bridge's absolute path for `{bridge}`.
+
+`muse` must be on the daemon's `PATH`. On Windows its installer adds its folder to your user `PATH`;
+a daemon that was already running does not see the change, so restart yagura after installing. For
+`wsl-muse-code`, install the Linux build inside the distribution (see [docs/wsl.md](wsl.md)).
+
+**Why the hooks go in a managed hooks file.** Muse clears a hook's environment down to a fixed list
+of variables, so a hook it runs from your own or a project's settings never sees
+`YAGURA_WINDOW_ID` or `YAGURA_STATUS_TOKEN` and cannot report for its window. Only the one file
+named by `managed_hooks_path` also receives the variables `managed_hooks_env_vars` lists, so
+yagura's hooks are put there. Muse passes an MCP server only the variables its definition names,
+which is why the server's `env` names them too.
+
+### Muse Code limits
+
+1. **On Windows, `muse-code` cannot take an effort level or a start-up request.** Muse's Windows
+   launcher (`muse.cmd`, which runs PowerShell 5.1) drops `"` and `--` from its arguments. So
+   `open_window` with `effort`, a `send_handoff` that opens a new window, and an `open_task_window`
+   for a task with an instruction are refused as `unsupported` before approval, and the GUI shows
+   the same limits before a window is opened (see
+   [Shim guidance](../profiles/README.md#shim-guidance)). `wsl-muse-code` takes all three. This is
+   to be measured again once Muse's Windows entry point passes `"`, `--` and any other argument
+   through unchanged.
+2. **A Muse session outside a yagura window cannot reach yagura's MCP server.** The registered
+   server names the window's variables, which such a session does not have, so Muse leaves the
+   server out of it (the session still runs). Unlike the other CLIs, a Muse you start yourself in a
+   plain terminal cannot drive yagura's windows. Started inside a yagura window, such as a shell
+   window, it does reach it, as that window.
+3. **With two instances registered, a window of the named instance also starts the default
+   instance's `yagura` server** (`muse-code` only). That server takes the window's variables to the
+   default instance's daemon, where they name no window. Muse refuses to start when a launch
+   argument touches a server its settings define, so there is no way to switch it off for one
+   window; the server is optional, so the session runs either way. A window of the default
+   instance does not start the named instance's server, whose `YAGURA_INSTANCE` it lacks.
+4. **In WSL, a server of your own named `yagura`** (or `yagura-<instance>`) in the distribution's
+   `~/.config/muse/settings.json` would make Muse refuse the launch, so the window opens without
+   yagura's server and the daemon logs one warning saying so.
+5. **In WSL, your own `managed_hooks_path` is replaced in yagura's windows.** The window's `-c`
+   points Muse at yagura's hooks file for that window only, so your managed hooks do not run there.
+   Your settings file is not changed, and Muse sessions outside yagura are unaffected. On the host,
+   Register is refused while your settings hold a `managed_hooks_path` of your own (see
+   [Registering from the GUI](#registering-from-the-gui)).
+6. **`XDG_CONFIG_HOME` is not supported.** yagura always reads and writes `~/.config/muse`
+   (`%USERPROFILE%\.config\muse` on Windows), and the `wsl-muse-code` checks read the same place
+   inside the distribution.
+7. **In WSL the MCP call time limit cannot be raised.** Muse's `-c` refuses `tool_timeout_sec`, so a
+   `wsl-muse-code` window runs a long `wait_for_status`, `wait_for_report` or `send_message` under
+   Muse's own default limit, which has not been measured. A call Muse gives up on is released when
+   its turn ends. A registration sets `tool_timeout_sec = 86400` for `muse-code`.
+8. **Interrupting before the first output puts the text back in the input line**, text yagura typed
+   included (see [Limits](../crates/yagura-daemon/detection/README.md#limits)).
+9. **Muse may ask before each call to a yagura tool**, depending on its own automatic approval
+   (`--approval-judge`). A call waits on that dialog on the window's screen until it is answered.
+10. **yagura does not answer Muse's folder trust prompt.** In a folder Muse has not been told to
+    trust, a window starts with it and shows `waiting_approval`; choose `Trust and continue` on its
+    screen.
+
+Run the GUI and the daemon from the same release (see
+[Registering from the GUI](#registering-from-the-gui)).
+
 ## How the daemon delivers text
 
 Two kinds of text reach a window's CLI, and they travel differently.
@@ -434,10 +538,11 @@ A text counts as taken when a door printed it, the wake command succeeded, or --
 | `codex-cli`, `wsl-codex-cli` | `SessionStart` and `UserPromptSubmit` hooks, injected with `-c` | `codex queue --thread <session> --message <text>`, run by the daemon |
 | `antigravity-cli`, `wsl-antigravity-cli` | `SessionStart` and `PreInvocation` hooks in `~/.gemini/config/hooks.json` | none: the daemon types the text into the composer while the window waits for input |
 | `copilot-cli`, `wsl-copilot-cli` | a `sessionStart` hook in a plugin directory, injected with `--plugin-dir`; it runs when the first prompt is sent, and Copilot has no turn-start door (it discards a command hook's output at the start of a turn) | none: the daemon types the text into the composer while the window waits for input |
+| `muse-code`, `wsl-muse-code` | `SessionStart` and `UserPromptSubmit` hooks in a managed hooks file, written by registration (`muse-code`) or injected with `-c` (`wsl-muse-code`); `SessionStart` runs when the first prompt is sent | none: the daemon types the text into the composer while the window waits for input |
 
-Antigravity CLI and GitHub Copilot CLI are the places left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
+Antigravity CLI, GitHub Copilot CLI and Muse Code are the places left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
 
-**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a handoff addressed to it is `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded.
+**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a handoff addressed to it is `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded; a `muse-code` window, and an Antigravity CLI window, takes part only while the hooks its registration writes are in place.
 
 **Bounds.** A window's inbox is bounded; past it a chat post is `undelivered_exhausted` and a handoff is `resource_exhausted`. The inbox lives in the daemon's memory: it is discarded when its window ends, and a chat post still waiting when the daemon stops reads back as `undelivered_restart`.
 
@@ -882,6 +987,7 @@ Each entry's keys, beyond `id`, `display_name` and `available`, are present only
 - `command` (the argv this profile would launch, with the operating-system selection already applied but *before* executable resolution — never the `cmd.exe /d /c ...` wrapping a `.cmd` / `.bat` shim resolves to; empty is omitted, so its absence means `[command]` was itself omitted with no default shell resolved -- a profile with no argv at all for this operating system is left out of the listing rather than reported with an empty `command`, see [Availability](../profiles/README.md#availability))
 - `unavailable_reason` (present only when `available` is `false`; one of the five reason kinds documented in [Launch profiles](../profiles/README.md#availability), never containing a path)
 - `model` and `effort` (present only when this profile accepts that launch option at all, so their absence is the answer to "may I send it?"). Each carries one key, `aliases`: the alias-to-value pairs this profile declares, in its file's own order, each an object with an `alias` and a `value` key. An **empty** array is not the same as a missing key -- it means the option is accepted but has no aliases, so only values the CLI itself understands are meaningful. A value outside the list is passed through unchanged, so this is a menu, not a whitelist. What the values are, and whether they still exist on the other side, is the profile author's business: see [Launch options](../profiles/README.md#launch-options)
+- `limits` (present only when non-empty): what this profile cannot do on this host although it is available, one object per capability -- `capability` (`model`, `effort` or `launch_prompt`), `reason` (English text that ends with the guidance) and, when the profile declares one, `guidance` (`text`, and `command` / `url` when present). It lists what a Windows `.cmd` / `.bat` program cannot pass (see [Shim guidance](../profiles/README.md#shim-guidance)); a request that needs a listed capability is refused as `unsupported` before approval.
 
 An entry's `available` flag is judged with no launch option applied, so it says nothing about whether a *particular* `model` or `effort` value can be launched (a value outside the launch option value rule is refused as `invalid_argument` before any process starts).
 
@@ -1311,7 +1417,7 @@ All tools return errors in the standard MCP format:
 - **spawn_failed**: Failed to start the child process
 - **resource_exhausted**: Maximum window limit reached (`open_window`, `open_task_window`), too many concurrent `wait_for_status`, `wait_for_report` and `send_message` calls already outstanding on this connection (`this connection already holds the maximum number of pending waits`), a target window whose inbox is full (`send_handoff`: `too many deliveries are already waiting on this window`; see [send_handoff](#send_handoff)), too many approval requests are already pending (daemon-wide or on this connection; see [Approval Flow](#approval-flow)), or too many `send_handoff` calls are still unanswered on this connection or across the daemon, whether each opened a window from a `profile` or addressed an existing `window_id` (see [send_handoff](#send_handoff)'s two-stage limit); the `message` names which of the two ran out: `too many handoffs are in flight (per-connection limit)` or `(daemon-wide limit)`
 - **child_exited**: The target window has exited (`send_message`, `send_keys`, `interrupt_window`, a `send_handoff` addressed to an existing `window_id`, or a `wait_for_status` whose target status can no longer be reached), reported the same way to every caller regardless of origin. For a `send_handoff` this also covers a child that goes away before its CLI takes the envelope; a child that exits after the envelope was taken is not an error at all but a successful reply carrying `delivery: "taken"` (see [send_handoff](#send_handoff))
-- **unsupported**: The requested feature is not supported. `send_chat` / `broadcast_chat` / `read_chat` return this when the daemon has no chat store to read or write -- either the configured playbook failed to load (chat is disabled along with everything else it would have relaxed), or the daemon could not open its chat database at start-up. Any tool also returns this when the running daemon's wire revision is too old to carry the request -- typically a daemon left running from before an upgrade; see [Starting the Daemon](#starting-the-daemon). A request that must be handed to the CLI at launch (a `send_handoff` addressed to a `profile`, an `open_task_window` for a task with an instruction) is refused this way when the profile's program is a Windows `.cmd` / `.bat` file, through which the text cannot pass unchanged; nothing was started
+- **unsupported**: The requested feature is not supported. `send_chat` / `broadcast_chat` / `read_chat` return this when the daemon has no chat store to read or write -- either the configured playbook failed to load (chat is disabled along with everything else it would have relaxed), or the daemon could not open its chat database at start-up. Any tool also returns this when the running daemon's wire revision is too old to carry the request -- typically a daemon left running from before an upgrade; see [Starting the Daemon](#starting-the-daemon). A request that must be handed to the CLI at launch (a `send_handoff` addressed to a `profile`, an `open_task_window` for a task with an instruction) is refused this way when the profile's program is a Windows `.cmd` / `.bat` file, through which the text cannot pass unchanged; so is an `open_window` with a `model` or `effort` whose template cannot pass through such a file. These are the profile's `limits` in [`list_profiles`](#list_profiles), refused before approval with the profile's own guidance in the `message` (see [Shim guidance](../profiles/README.md#shim-guidance)); nothing was started
 - **approval_required**: `interrupt_window` / `close_window` / `send_message` / `send_keys` / `send_handoff` / `send_chat` / `broadcast_chat` was refused before reaching a human decision at all -- either no approver is currently connected, or the configured playbook failed to load; for a `send_handoff` addressed to a `profile`, this can also happen before the window is even opened (see [send_handoff](#send_handoff)); a `send_chat` reaches this path whenever `send_chat` is not listed in `[approval].auto_approve` (see [send_chat](#send_chat)); see [Troubleshooting `approval_required`](#troubleshooting-approval_required)
 - **status_unknown**: `interrupt_window` / `send_message` / `send_keys` / a `send_handoff` addressed to an existing `window_id` was refused because the target window's status is `unknown` (fail-safe; cannot be relaxed by a playbook or by being the target window's own connection, and is reported the same way to every caller — see [Troubleshooting `status_unknown` and `child_exited`](#troubleshooting-status_unknown-and-child_exited)). The `message` names why that status could not be detected, as a phrase in parentheses: `the window's status could not be detected (<reason>), so this operation is refused`, where `<reason>` is the English phrase for the same reason `unknown_reason` carries (see [Why a window is `unknown`](#why-a-window-is-unknown)); the error code itself is unchanged. A `send_handoff` also reports this when the target window's status has slipped back to `unknown` between an approval decision and delivery. Does not apply to `close_window`. `send_chat` / `broadcast_chat` never return this: a post to an `unknown` window waits in its inbox (`"pending"` in [read_chat](#read_chat)'s `deliveries`), since a chat post may still reach other targets
 - **approval_denied**: An approver decided against a queued `interrupt_window` / `close_window` / `send_message` / `send_keys` / `send_handoff` / `send_chat` / `broadcast_chat` request

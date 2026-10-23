@@ -29,6 +29,7 @@ Definitions in this directory:
 - `codex-cli` -- Codex CLI.
 - `antigravity-cli` -- Antigravity CLI (`agy`).
 - `copilot-cli` -- GitHub Copilot CLI (`copilot`).
+- `muse-code` -- Muse Code (`muse`).
 - `generic-shell` -- a plain interactive shell, and the daemon's built-in
   default when nothing selects a definition. It declares no `[composer]`: a
   plain shell's screen alone cannot tell its prompt apart from a program's
@@ -209,6 +210,8 @@ blank_lines_in_body = false    # optional; a blank line above the cursor
                                # belongs to the body (default false)
 left_panel = '^[^│]*│'         # optional, no default; regex matching a
                                # panel drawn left of the composer
+placeholder = '^Ask anything$' # optional, no default; regex matching the
+                               # whole hint an empty composer shows
 
 [input]                        # optional; every key optional
 bracketed_paste = false        # wrap the body in ESC[200~ / ESC[201~ before
@@ -344,6 +347,17 @@ other keys are matched with that column as the start of the line, and a
 cursor left of it is not in the composer. On any other screen the composer is
 read from the first column, as without the key. The column is counted in
 cells, a wide character taking two.
+
+When the CLI writes a hint into its empty composer and tells it apart from a
+draft by color alone, `placeholder` is a regex matching that hint. The
+composer reads as empty when nothing is typed between the marker and the
+cursor and one match of `placeholder` spans the whole visible text to the
+right of the cursor; a hint followed by anything else is read as a draft. The
+bundled `muse-code` definition lists the hints Muse Code was seen to show. A
+hint the regex does not know reads as a draft, so the daemon does not type
+into it; add the new hint to the regex. Declare it only for a CLI whose hint
+is replaced by the first key typed, since the daemon's `probe` is typed right
+after it.
 
 While the cursor is visible and the composer can be located this way, the
 composer's body is taken out of the screen before `[[rules]]` are matched
@@ -899,8 +913,8 @@ debounced by `confirm_ms` like any other.
 
 ### Bundled profiles
 
-The bundled profiles for Claude Code, Codex CLI, Antigravity CLI and GitHub
-Copilot CLI, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
+The bundled profiles for Claude Code, Codex CLI, Antigravity CLI, GitHub
+Copilot CLI and Muse Code, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
 by hand. Each event maps to a report as follows, checked with the CLI version
 named:
 
@@ -910,6 +924,8 @@ named:
 | Codex CLI 0.159.2 on Windows, 0.158.0 in WSL (`codex-cli`, `wsl-codex-cli`) | `-c hooks.<Event>=...` at every launch, while their trust is registered | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | Antigravity CLI 1.2.14 (`antigravity-cli`, `wsl-antigravity-cli`) | a `yagura` entry in `~/.gemini/config/hooks.json`, written by registration | `PreInvocation`, `PostToolUse` | -- | -- |
 | GitHub Copilot CLI 1.0.101 (`copilot-cli`, `wsl-copilot-cli`) | a plugin directory, `--plugin-dir` at every launch | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
+| Muse Code 1.4.12 (`muse-code`) | a managed hooks file named in `~/.config/muse/settings.json`, written by registration | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
+| Muse Code 1.4.12 (`wsl-muse-code`) | a managed hooks file, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 
 How the hooks are placed, and what the profile tables look like, is in
 [profiles/README.md](../../../profiles/README.md#hooks-injection). The same hooks
@@ -967,12 +983,25 @@ launch and name it with `--plugin-dir`; the WSL profile hands it over as a
 WSL path. Copilot loads the plugin's hooks only once you have answered its
 folder trust prompt, so a window reports nothing before that.
 
+**Muse Code** hands a hook only a fixed list of variables, plus those its
+settings name in `managed_hooks_env_vars` for the one file `managed_hooks_path`
+names, so yagura's hooks go in that managed file. On the host, registering
+yagura with Muse from Settings > Integrations writes the file and points
+`~/.config/muse/settings.json` at it; it applies to every Muse session, and
+each hook command first checks that it runs inside a window (see
+[Hooks that run outside a window](../../../profiles/README.md#hooks-that-run-outside-a-window)).
+The WSL profile passes its own file at every launch instead and registers
+nothing. `PreToolUse` and `PostToolUse` are not used: Muse runs them for its
+own reviewing sub-sessions too, after the turn's `Stop`, so they would leave
+the window `running`.
+
 ### When reports are missing
 
 A window expects reports when its hooks were actually given to the CLI: a
 Claude Code or GitHub Copilot CLI window from a bundled profile, a Codex CLI
-window whose trust entries were in place when it opened, and an Antigravity
-CLI window whose hooks entry was in place when it opened. If such a window's screen shows a
+window whose trust entries were in place when it opened, an Antigravity
+CLI or Muse Code (`muse-code`) window whose registration's entries were in
+place when it opened, and a `wsl-muse-code` window. If such a window's screen shows a
 running turn and 10 seconds later no report has arrived at all, the window is
 marked:
 
@@ -1019,6 +1048,10 @@ single event (only `Stop`, say) is not.
   sidebar holds the focus, and on the tabs other than Current, keys act on a
   list rather than reaching the input line, so the window reads as `unknown`
   (`declared_unknown`).
+- **Muse Code puts a submitted text back in its input line when the turn is
+  interrupted before any output.** Pressing Esc between a submit and the
+  first output cancels the turn and refills the composer with what was sent,
+  text the daemon typed included; send it again or clear it by hand.
 
 ### Writing hooks by hand
 
