@@ -68,6 +68,10 @@ This release changes how yagura hands text to a CLI, and with it several MCP and
 - Registering Antigravity CLI in Settings > Integrations no longer fails with "no path to the daemon can be written" when the daemon's folder has a space in its path: on macOS the daemon copy that CLI hooks run now lives in `~/.local/state/yagura/bin` (or under `$XDG_STATE_HOME`) instead of `~/Library/Application Support`, and on Windows a path with a space is written by its 8.3 short name; where there is none, the registration fails with a message that says so.
 - Commands run once and the detached daemon no longer inherit stray file descriptors or handles from the process that starts them, so a one-shot command no longer waits for an unrelated child started at the same moment to exit. On Windows the daemon is now started through the same explicit handle list as other commands, rather than through the standard library's process launcher.
 
+### Security
+
+- `rmcp` is updated to 3.7.0 for [GHSA-5p52-q7pq-9fq2](https://github.com/advisories/GHSA-5p52-q7pq-9fq2). The advisory is in the SDK's OAuth client, which `yagura-mcp` does not build (it enables only the `server`, `macros` and `transport-io` features), so yagura was not exposed.
+
 ## [0.1.0] - 2026-10-13
 
 The first public release of yagura: a desktop app that runs any command -- an agent CLI such as
