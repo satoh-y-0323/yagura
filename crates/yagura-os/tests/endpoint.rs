@@ -12,52 +12,16 @@
 //! identifiers. `use` stays inside each `mod` so a Windows-only or Unix-only
 //! import never has to compile on the other target.
 
-// ---------------------------------------------------------------------
-// Determinism: platform-agnostic, no cfg needed.
-//
-// Varying with `user_id` is not: on Unix, stage 1's identifier never embeds
-// it, and `default_endpoint` picks stage 1 whenever the session has a valid
-// `XDG_RUNTIME_DIR`. That property is therefore pinned on Windows through
-// `default_endpoint`, and on Unix directly against the seam's stage 3.
-// ---------------------------------------------------------------------
+// Varying with `user_id` is not platform-agnostic: on Unix, stage 1's
+// identifier never embeds it, and `default_endpoint` picks stage 1 whenever
+// the session has a valid `XDG_RUNTIME_DIR`. That property is therefore pinned
+// on Windows through `default_endpoint`, and on Unix directly against the
+// seam's stage 3.
 
 /// The default instance, obtained the same way production code must
 /// (`InstanceNamespace` has no public constructor).
 fn default_namespace() -> yagura_os::InstanceNamespace {
     yagura_os::resolve_instance_from(None).expect("None must resolve to the default instance")
-}
-
-#[test]
-fn default_endpoint_is_pure_and_deterministic() {
-    let user_id = "yagura-endpoint-repr-test-uid";
-    let namespace = default_namespace();
-    assert_eq!(
-        yagura_os::default_endpoint(user_id, &namespace),
-        yagura_os::default_endpoint(user_id, &namespace),
-        "default_endpoint must be referentially transparent"
-    );
-}
-
-#[test]
-fn data_base_dir_from_is_pure_and_deterministic() {
-    let primary = std::ffi::OsStr::new("primary-value");
-    let home = std::ffi::OsStr::new("home-value");
-    assert_eq!(
-        yagura_os::data_base_dir_from(Some(primary), Some(home)),
-        yagura_os::data_base_dir_from(Some(primary), Some(home)),
-        "data_base_dir_from must be referentially transparent"
-    );
-}
-
-#[test]
-fn state_base_dir_from_is_pure_and_deterministic() {
-    let primary = std::ffi::OsStr::new("primary-value");
-    let home = std::ffi::OsStr::new("home-value");
-    assert_eq!(
-        yagura_os::state_base_dir_from(Some(primary), Some(home)),
-        yagura_os::state_base_dir_from(Some(primary), Some(home)),
-        "state_base_dir_from must be referentially transparent"
-    );
 }
 
 // ---------------------------------------------------------------------

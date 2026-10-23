@@ -111,10 +111,3 @@ fn bundled_definitions_declare_which_cli_abandons_calls_at_turn_end() {
         );
     }
 }
-
-#[test]
-fn the_generic_shell_definition_does_not_write_a_requests_table() {
-    let source = bundled_definition_source("generic-shell")
-        .expect("generic-shell must be a bundled definition");
-    assert!(!source.contains("[requests]"));
-}

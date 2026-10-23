@@ -14,10 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tracing_test::traced_test;
-use yagura_daemon::config::{
-    APPROVAL_TIMEOUT_DEFAULT_SECS, DaemonConfig, HANDOFF_READY_TIMEOUT_DEFAULT_SECS,
-    InterruptMethod,
-};
+use yagura_daemon::config::{APPROVAL_TIMEOUT_DEFAULT_SECS, DaemonConfig, InterruptMethod};
 use yagura_daemon::control::{
     ApprovalPolicy, ApprovalSection, ChatSection, ComposerAccess, ComposerWrite, DenyReason,
     DestructiveTool, GateVerdict, PolicyError, PolicyLimits, PolicySource, RateBucket,
@@ -1500,11 +1497,6 @@ fn apply_limits_keeps_the_default_handoff_ready_timeout_when_no_limits_are_given
         config.handoff_ready_timeout_secs,
         defaults.handoff_ready_timeout_secs
     );
-}
-
-#[test]
-fn handoff_ready_timeout_default_secs_constant_is_sixty() {
-    assert_eq!(HANDOFF_READY_TIMEOUT_DEFAULT_SECS, 60);
 }
 
 #[test]

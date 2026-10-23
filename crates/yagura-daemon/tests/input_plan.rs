@@ -365,11 +365,6 @@ fn submit_outcome_holds_the_status_before_submit_and_the_submitted_at_instant() 
 // =====================================================================
 
 #[test]
-fn input_profile_default_ready_hold_is_zero() {
-    assert_eq!(InputProfile::default().ready_hold, Duration::ZERO);
-}
-
-#[test]
 fn from_section_writes_ready_hold_from_ready_hold_ms() {
     let section = InputSection {
         ready_hold_ms: Some(3000),

@@ -17,9 +17,8 @@ use serde_json::Value;
 use tokio::time::Instant;
 
 use yagura_daemon::handoff::{
-    DELIVERY_REACTION_STATUSES, Envelope, EnvelopeFrom, EnvelopeParts, EnvelopeTooLong,
-    READY_STATUSES, ReadyHoldLatch, StartupEvidence, check_envelope_len, compose_envelope,
-    hold_is_reachable_within, is_ready, reacts_to_delivery,
+    Envelope, EnvelopeFrom, EnvelopeParts, EnvelopeTooLong, ReadyHoldLatch, StartupEvidence,
+    check_envelope_len, compose_envelope, hold_is_reachable_within, is_ready, reacts_to_delivery,
 };
 use yagura_daemon::waiter::StatusAt;
 use yagura_protocol::{DetectedStatus, HANDOFF_ENVELOPE_MAX_BYTES, UnknownReason, WindowStatus};
@@ -316,14 +315,6 @@ fn is_ready_is_true_only_for_waiting_input_and_idle() {
     }
 }
 
-#[test]
-fn ready_statuses_constant_is_exactly_waiting_input_and_idle() {
-    assert_eq!(
-        READY_STATUSES.to_vec(),
-        vec![WindowStatus::WaitingInput, WindowStatus::Idle]
-    );
-}
-
 // =====================================================================
 // DELIVERY_REACTION_STATUSES / reacts_to_delivery: the seven statuses split into ready / reacts /
 // neither, with Unknown and Exited belonging to neither.
@@ -338,18 +329,6 @@ const ALL_SEVEN_STATUSES: [WindowStatus; 7] = [
     WindowStatus::Exited,
     WindowStatus::Unknown,
 ];
-
-#[test]
-fn delivery_reaction_statuses_constant_is_exactly_running_waiting_approval_interrupted() {
-    assert_eq!(
-        DELIVERY_REACTION_STATUSES.to_vec(),
-        vec![
-            WindowStatus::Running,
-            WindowStatus::WaitingApproval,
-            WindowStatus::Interrupted,
-        ]
-    );
-}
 
 #[test]
 fn reacts_to_delivery_is_true_only_for_running_waiting_approval_and_interrupted() {

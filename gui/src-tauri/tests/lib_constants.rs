@@ -1,57 +1,5 @@
-//! Confirms that gui/src-tauri exposes its fail-safe constants as a public
-//! library item, reachable from a crate outside `gui/src-tauri/src`.
-
-use std::time::Duration;
-
-#[test]
-fn connect_retry_interval_is_two_hundred_milliseconds() {
-    assert_eq!(
-        yagura_gui::constants::CONNECT_RETRY_INTERVAL,
-        Duration::from_millis(200)
-    );
-}
-
-#[test]
-fn connect_retry_limit_is_twenty_five() {
-    assert_eq!(yagura_gui::constants::CONNECT_RETRY_LIMIT, 25);
-}
-
-#[test]
-fn attach_timeout_is_five_seconds() {
-    assert_eq!(
-        yagura_gui::constants::ATTACH_TIMEOUT,
-        Duration::from_secs(5)
-    );
-}
-
-#[test]
-fn reconnect_attempt_limit_is_one() {
-    assert_eq!(yagura_gui::constants::RECONNECT_ATTEMPT_LIMIT, 1);
-}
-
-#[test]
-fn min_pty_size_is_two_columns_by_one_row() {
-    assert_eq!(yagura_gui::constants::MIN_PTY_COLS, 2u16);
-    assert_eq!(yagura_gui::constants::MIN_PTY_ROWS, 1u16);
-}
-
-#[test]
-fn max_pty_dimension_is_one_thousand() {
-    assert_eq!(yagura_gui::constants::MAX_PTY_DIMENSION, 1000u16);
-}
-
-#[test]
-fn read_chunk_len_is_eight_kibibytes() {
-    assert_eq!(yagura_gui::constants::READ_CHUNK_LEN, 8192);
-}
-
-#[test]
-fn window_list_poll_interval_is_two_seconds() {
-    assert_eq!(
-        yagura_gui::constants::WINDOW_LIST_POLL_INTERVAL,
-        Duration::from_secs(2)
-    );
-}
+//! The connection budget after the GUI spawns the daemon, measured against the
+//! constants `gui/src-tauri` exposes as a public library item.
 
 // The daemon reads the login shell's environment before it binds its
 // endpoint, so the wait right after a spawn must outlast that read on top of

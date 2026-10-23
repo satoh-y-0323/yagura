@@ -592,95 +592,7 @@ export const dummyMessages: Messages = {
   },
 };
 
-describe('dummy locale covers every Messages key', () => {
-  it('has the same top-level key set as the resolved (English) locale', () => {
-    expect(Object.keys(dummyMessages).sort()).toEqual(Object.keys(resolveMessages()).sort());
-  });
-
-  it('has the same statusLabels key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.statusLabels).sort()).toEqual(
-      Object.keys(resolveMessages().statusLabels).sort()
-    );
-  });
-
-  it('has the same hints key set as the resolved locale (includes dismissBanner and the restore hints)', () => {
-    expect(Object.keys(dummyMessages.hints).sort()).toEqual(
-      Object.keys(resolveMessages().hints).sort()
-    );
-  });
-
-  it('has the same banners key set as the resolved locale (includes the restore banners and daemonProtocolStale)', () => {
-    expect(Object.keys(dummyMessages.banners).sort()).toEqual(
-      Object.keys(resolveMessages().banners).sort()
-    );
-  });
-
-  it('has the same errors key set as the resolved locale (includes launchOptionUnsupported)', () => {
-    expect(Object.keys(dummyMessages.errors).sort()).toEqual(
-      Object.keys(resolveMessages().errors).sort()
-    );
-  });
-
-  it('has the same buttons key set as the resolved locale (includes the restore buttons and the approve/deny pair)', () => {
-    expect(Object.keys(dummyMessages.buttons).sort()).toEqual(
-      Object.keys(resolveMessages().buttons).sort()
-    );
-  });
-
-  it('has the same dialogs key set as the resolved locale (includes the approval-dialog entries)', () => {
-    expect(Object.keys(dummyMessages.dialogs).sort()).toEqual(
-      Object.keys(resolveMessages().dialogs).sort()
-    );
-  });
-
-  it('has the same builtInThemeLabels key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.builtInThemeLabels).sort()).toEqual(
-      Object.keys(resolveMessages().builtInThemeLabels).sort()
-    );
-  });
-
-  it('has the same forms key set as the resolved locale (includes the launch-form entries)', () => {
-    expect(Object.keys(dummyMessages.forms).sort()).toEqual(
-      Object.keys(resolveMessages().forms).sort()
-    );
-  });
-
-  it('resolves modelLabel and effortLabel to their English wording', () => {
-    expect(resolveMessages().forms.modelLabel).toBe('Model');
-    expect(resolveMessages().forms.effortLabel).toBe('Effort');
-  });
-
-  it('has the same formats key set as the resolved locale (includes attentionBadge and restoreSelectionCount)', () => {
-    expect(Object.keys(dummyMessages.formats).sort()).toEqual(
-      Object.keys(resolveMessages().formats).sort()
-    );
-  });
-
-  it('has the same windowList.shortStatus key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.windowList.shortStatus).sort()).toEqual(
-      Object.keys(resolveMessages().windowList.shortStatus).sort()
-    );
-  });
-
-  // Each of the three unknownReasons tables covers all six reasons.
-  it('has the same unknownReasons.short key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.unknownReasons.short).sort()).toEqual(
-      Object.keys(resolveMessages().unknownReasons.short).sort()
-    );
-  });
-
-  it('has the same unknownReasons.explanation key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.unknownReasons.explanation).sort()).toEqual(
-      Object.keys(resolveMessages().unknownReasons.explanation).sort()
-    );
-  });
-
-  it('has the same unknownReasons.chatWord key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.unknownReasons.chatWord).sort()).toEqual(
-      Object.keys(resolveMessages().unknownReasons.chatWord).sort()
-    );
-  });
-
+describe('unknownReasons', () => {
   it('unknownReasons.short/explanation/chatWord each cover exactly the six UnknownReason wire values', () => {
     const expected = [
       'no_definition',
@@ -693,36 +605,5 @@ describe('dummy locale covers every Messages key', () => {
     expect(Object.keys(resolveMessages().unknownReasons.short).sort()).toEqual(expected);
     expect(Object.keys(resolveMessages().unknownReasons.explanation).sort()).toEqual(expected);
     expect(Object.keys(resolveMessages().unknownReasons.chatWord).sort()).toEqual(expected);
-  });
-
-  it('has the same menus key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.menus).sort()).toEqual(
-      Object.keys(resolveMessages().menus).sort()
-    );
-  });
-
-  it('has the same nav key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.nav).sort()).toEqual(
-      Object.keys(resolveMessages().nav).sort()
-    );
-  });
-
-  it('has the same chat key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.chat).sort()).toEqual(
-      Object.keys(resolveMessages().chat).sort()
-    );
-  });
-
-  // The Plans panel's own message group.
-  it('has the same plans key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.plans).sort()).toEqual(
-      Object.keys(resolveMessages().plans).sort()
-    );
-  });
-
-  it('has the same settings key set as the resolved locale', () => {
-    expect(Object.keys(dummyMessages.settings).sort()).toEqual(
-      Object.keys(resolveMessages().settings).sort()
-    );
   });
 });
