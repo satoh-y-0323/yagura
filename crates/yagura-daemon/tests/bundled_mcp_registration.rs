@@ -30,8 +30,8 @@ use yagura_daemon::mcp_registration::{
 use yagura_daemon::profile::parse_profile;
 use yagura_os::program::Platform;
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, McpRegistrationCommand, McpRegistrationRow,
-    McpRegistrationTomlSet, McpRegistrationTomlValue,
+    ClientMessage, DaemonMessage, McpRegistrationAction, McpRegistrationCommand,
+    McpRegistrationRow, McpRegistrationState, McpRegistrationTomlSet, McpRegistrationTomlValue,
 };
 
 // --- the shipped rows -----------------------------------------------------------
@@ -114,6 +114,14 @@ const SHIPPED_ROWS: &[(&str, CliForm, bool)] = &[
     ("wsl-antigravity-cli", AGY_FORM, true),
     ("wsl-copilot-cli", COPILOT_FORM, true),
 ];
+
+/// Shipped profiles whose CLI has no registration command, so registering
+/// only writes its settings files.
+const SETTINGS_ONLY_ROWS: &[&str] = &["muse-code"];
+
+/// Shipped profiles that carry no registration and inject the bridge and the
+/// hooks on every launch instead.
+const INJECTED_PER_LAUNCH: &[&str] = &["wsl-muse-code"];
 
 /// The settings file the JSON-file status form reads.
 const AGY_SETTINGS_FILE: &str = ".gemini/config/mcp_config.json";
@@ -202,12 +210,19 @@ fn reads_files(spec: &McpRegistrationSpec, form: CliForm) -> bool {
 // =============================================================================
 
 #[test]
-fn every_shipped_profile_but_the_shell_carries_a_registration_table() {
+fn every_shipped_profile_but_the_shell_and_those_injecting_per_launch_carries_a_registration_table()
+{
     let ids = every_shipped_profile_id();
     assert!(
         ids.iter().any(|id| id == "shell"),
         "the shell profile must still be shipped, found {ids:?}"
     );
+    for id in INJECTED_PER_LAUNCH {
+        assert!(
+            ids.iter().any(|shipped| shipped == id),
+            "{id} must be shipped, found {ids:?}"
+        );
+    }
     for id in &ids {
         let profile = parse_profile(id, &shipped_source(id))
             .unwrap_or_else(|_| panic!("shipped profile {id} must parse as a valid profile"));
@@ -215,6 +230,16 @@ fn every_shipped_profile_but_the_shell_carries_a_registration_table() {
             assert!(
                 profile.mcp_registration.is_none(),
                 "the shell profile launches no CLI with an MCP registry of its own"
+            );
+        } else if INJECTED_PER_LAUNCH.contains(&id.as_str()) {
+            assert!(
+                profile.mcp_registration.is_none(),
+                "{id} must not register: its CLI would refuse to start over a same-named server"
+            );
+            assert!(
+                profile.mcp.is_some() && profile.hooks.is_some(),
+                "{id} carries no registration, so every launch must inject the bridge and the \
+                 hooks itself"
             );
         } else {
             assert!(
@@ -225,11 +250,15 @@ fn every_shipped_profile_but_the_shell_carries_a_registration_table() {
         }
     }
 
-    let expected: BTreeSet<&str> = SHIPPED_ROWS.iter().map(|(id, _, _)| *id).collect();
+    let expected: BTreeSet<&str> = SHIPPED_ROWS
+        .iter()
+        .map(|(id, _, _)| *id)
+        .chain(SETTINGS_ONLY_ROWS.iter().copied())
+        .collect();
     let actual: BTreeSet<&str> = ids
         .iter()
         .map(String::as_str)
-        .filter(|id| *id != "shell")
+        .filter(|id| *id != "shell" && !INJECTED_PER_LAUNCH.contains(id))
         .collect();
     assert_eq!(
         actual, expected,
@@ -872,6 +901,201 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     assert_eq!(wsl.toml_set, None);
 
     h.registry.terminate_all().await;
+}
+
+// =============================================================================
+// Muse Code: no registration command; registering writes the bridge and the
+// hooks into a test home's settings files, the hooks acting only inside a
+// window.
+// =============================================================================
+
+const MUSE_SETTINGS_FILE: &str = ".config/muse/settings.json";
+const MUSE_HOOKS_FILE: &str = ".config/muse/yagura-managed-hooks.json";
+
+/// Every string held under a `command` key anywhere in `value`.
+fn hook_commands(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                match item {
+                    serde_json::Value::String(command) if key == "command" => {
+                        found.push(command.clone());
+                    }
+                    other => hook_commands(other, found),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                hook_commands(item, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|err| panic!("{} is JSON ({err}): {text}", path.display()))
+}
+
+#[test]
+fn muse_code_reads_its_status_from_its_settings_file_directly() {
+    let spec = shipped_spec("muse-code");
+    assert_eq!(
+        spec.render_status(&default_target()),
+        StatusPlan::ReadFile {
+            file: MUSE_SETTINGS_FILE.to_string()
+        }
+    );
+    assert_eq!(
+        spec.render_file_read(MUSE_SETTINGS_FILE),
+        None,
+        "muse-code runs on the host and reads the file itself"
+    );
+}
+
+#[tokio::test]
+async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_home() {
+    for (os, tag, prefix, suffix) in [
+        (
+            yagura_daemon::profile::ProfileOs::Windows,
+            "bundled-mcpreg-muse-win",
+            "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& ",
+            ")",
+        ),
+        (
+            yagura_daemon::profile::ProfileOs::Linux,
+            "bundled-mcpreg-muse-linux",
+            "[ -z \"$YAGURA_WINDOW_ID\" ] || exec ",
+            "",
+        ),
+    ] {
+        let root = unique_temp_dir(tag);
+        let profiles_dir = root.join("profiles");
+        let home_dir = root.join("home");
+        std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+        std::fs::create_dir_all(&home_dir).expect("create home dir");
+        let bridge = root.join("bridge").join("yagura-mcp.exe");
+        let bridge_str = bridge.to_str().expect("bridge path is UTF-8").to_string();
+        let config = DaemonConfig {
+            profiles_dir: Some(profiles_dir),
+            bundled_profiles: true,
+            home_dir: Some(home_dir.clone()),
+            instance_id: None,
+            mcp_bridge: Some(bridge),
+            report_dir: Some(root.join("report")),
+            host_os: os,
+            ..approver_base_config()
+        };
+        let h = Harness::start(tag, config).await;
+        let mut client = h.connect().await;
+        register_approver(&mut client).await;
+
+        send(
+            &mut client,
+            &ClientMessage::ListMcpRegistrations { request_id: 1 },
+        )
+        .await;
+        let rows = match read_response(&mut client, REPLY_TIMEOUT).await {
+            DaemonMessage::McpRegistrationsListed { rows, .. } => rows,
+            other => panic!("expected mcp_registrations_listed, got {other:?}"),
+        };
+        // The listing is followed by one status push per row; drain them so
+        // the next read is the registration's own answer.
+        for _ in 0..rows.len() {
+            match read_response(&mut client, REPLY_TIMEOUT).await {
+                DaemonMessage::McpRegistrationStatus { request_id: 1, .. } => {}
+                other => panic!("expected mcp_registration_status, got {other:?}"),
+            }
+        }
+        let row = row_of(&rows, "muse-code");
+        assert_eq!(row.group, None, "{os:?}: muse-code runs on the host");
+        assert_eq!(row.add, None, "{os:?}: Muse has no registration command");
+        assert_eq!(row.remove, None, "{os:?}");
+        assert!(
+            rows.iter().all(|row| row.profile != "wsl-muse-code"),
+            "{os:?}: wsl-muse-code injects per launch and has nothing to register: {rows:?}"
+        );
+
+        send(
+            &mut client,
+            &ClientMessage::RunMcpRegistration {
+                profile: "muse-code".to_string(),
+                action: McpRegistrationAction::Register,
+                request_id: 2,
+            },
+        )
+        .await;
+        match read_response(&mut client, REPLY_TIMEOUT).await {
+            DaemonMessage::McpRegistrationRequested { request_id: 2, .. } => {}
+            other => panic!("expected mcp_registration_requested, got {other:?}"),
+        }
+        let (steps, error, status) = match read_response(&mut client, REPLY_TIMEOUT).await {
+            DaemonMessage::McpRegistrationResult {
+                request_id: 2,
+                steps,
+                error,
+                status,
+                ..
+            } => (steps, error, status),
+            other => panic!("expected mcp_registration_result, got {other:?}"),
+        };
+        assert_eq!(error, None, "{os:?}: {steps:?}");
+        assert!(
+            steps.iter().all(|step| step.argv.is_empty()),
+            "{os:?}: registering runs no command, only file edits: {steps:?}"
+        );
+        assert_eq!(
+            status.state,
+            McpRegistrationState::Registered,
+            "{os:?}: {status:?}"
+        );
+
+        let settings = read_json(&home_dir.join(MUSE_SETTINGS_FILE));
+        assert_eq!(
+            settings
+                .pointer("/mcpServers/yagura/command")
+                .and_then(serde_json::Value::as_str),
+            Some(bridge_str.as_str()),
+            "{os:?}: {settings}"
+        );
+        assert_eq!(
+            settings.pointer("/managed_hooks_path"),
+            Some(&json!("yagura-managed-hooks.json")),
+            "{os:?}: {settings}"
+        );
+        assert_eq!(
+            settings.pointer("/managed_hooks_env_vars"),
+            Some(&json!([
+                "YAGURA_WINDOW_ID",
+                "YAGURA_STATUS_TOKEN",
+                "YAGURA_INSTANCE"
+            ])),
+            "{os:?}: the hooks receive the window's variables and nothing else: {settings}"
+        );
+
+        let hooks = read_json(&home_dir.join(MUSE_HOOKS_FILE));
+        let mut commands = Vec::new();
+        hook_commands(
+            hooks
+                .pointer("/hooks")
+                .unwrap_or_else(|| panic!("{os:?}: no /hooks in {hooks}")),
+            &mut commands,
+        );
+        assert!(!commands.is_empty(), "{os:?}: {hooks}");
+        for command in &commands {
+            assert!(
+                command.starts_with(prefix) && command.ends_with(suffix),
+                "{os:?}: outside a window the hook must do nothing, before any program is \
+                 looked up: {command}"
+            );
+        }
+
+        h.registry.terminate_all().await;
+    }
 }
 
 // =============================================================================
