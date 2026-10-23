@@ -7,7 +7,7 @@
 use thiserror::Error;
 use yagura_protocol::{DeliveryStream, ProfileGuidance};
 
-use crate::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DeliverySpec, OutputForm};
+use crate::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DeliverySpec, DoorOutputs, OutputForm};
 use crate::profile::contains_placeholder_outside;
 use crate::window::{CliInjection, InjectionKind};
 
@@ -35,7 +35,7 @@ pub enum WakeMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileDelivery {
     /// How the doors print the text they carry.
-    pub output: OutputForm,
+    pub output: DoorOutputs,
     /// The most characters one answer carries, the intro included.
     pub max_chars: usize,
     /// How a waiting CLI is woken.
@@ -92,10 +92,7 @@ pub(crate) fn parse_delivery(
         return Err(DeliveryError::NotATable);
     };
 
-    let output = match take_string(&mut table, "output")? {
-        None => OutputForm::Plain,
-        Some(text) => parse_output(text).ok_or(DeliveryError::Invalid("output"))?,
-    };
+    let output = parse_door_outputs(table.remove("output"))?;
     let max_chars = match take_integer(&mut table, "max_chars")? {
         None => DEFAULT_MAX_CHARS,
         Some(value) => usize::try_from(value)
@@ -178,6 +175,35 @@ fn is_https_url(url: &str) -> bool {
     url.strip_prefix("https://")
         .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
         && !url.chars().any(char::is_whitespace)
+}
+
+/// `output` is one string (every door prints the same way) or a table keyed
+/// `context` / `take` / `wait`; a door the table leaves out prints plain.
+fn parse_door_outputs(raw: Option<toml::Value>) -> Result<DoorOutputs, DeliveryError> {
+    let invalid = || DeliveryError::Invalid("output");
+    match raw {
+        None => Ok(DoorOutputs::all(&OutputForm::Plain)),
+        Some(toml::Value::String(text)) => {
+            Ok(DoorOutputs::all(&parse_output(text).ok_or_else(invalid)?))
+        }
+        Some(toml::Value::Table(mut table)) => {
+            let mut door =
+                |key: &'static str| match take_string(&mut table, key).map_err(|_| invalid())? {
+                    None => Ok(OutputForm::Plain),
+                    Some(text) => parse_output(text).ok_or_else(invalid),
+                };
+            let outputs = DoorOutputs {
+                context: door("context")?,
+                take: door("take")?,
+                wait: door("wait")?,
+            };
+            if !table.is_empty() {
+                return Err(invalid());
+            }
+            Ok(outputs)
+        }
+        Some(_) => Err(invalid()),
+    }
 }
 
 /// `plain`, or a JSON template that is still JSON once the text is in it.

@@ -159,7 +159,9 @@ async fn open_ready_delivering(h: &Harness, detection: &str, command: Vec<String
             Vec::new(),
             yagura_daemon::window::WindowProvenance {
                 delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
-                    output: yagura_daemon::inbox::OutputForm::Plain,
+                    output: yagura_daemon::inbox::DoorOutputs::all(
+                        &yagura_daemon::inbox::OutputForm::Plain,
+                    ),
                     max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
                     wake: yagura_daemon::profile_delivery::WakeMode::None,
                     wake_stream: yagura_protocol::DeliveryStream::Stderr,

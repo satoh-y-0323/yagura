@@ -104,7 +104,7 @@ fn expect_chat_posted(msg: DaemonMessage) -> ChatPostedResult {
 /// window here declares it, since only such a window takes part in chat.
 fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
     yagura_daemon::profile_delivery::ProfileDelivery {
-        output: yagura_daemon::inbox::OutputForm::Plain,
+        output: yagura_daemon::inbox::DoorOutputs::all(&yagura_daemon::inbox::OutputForm::Plain),
         max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
         wake: yagura_daemon::profile_delivery::WakeMode::None,
         wake_stream: yagura_protocol::DeliveryStream::Stderr,

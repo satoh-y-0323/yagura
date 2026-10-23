@@ -857,7 +857,7 @@ mod tests {
     async fn delivering_window() -> (Arc<ReportInboxes>, Arc<WindowEntry>) {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let delivery = crate::profile_delivery::ProfileDelivery {
-            output: crate::inbox::OutputForm::Plain,
+            output: crate::inbox::DoorOutputs::all(&crate::inbox::OutputForm::Plain),
             max_chars: crate::inbox::DEFAULT_MAX_CHARS,
             wake: crate::profile_delivery::WakeMode::Wait,
             wake_stream: yagura_protocol::DeliveryStream::Stderr,

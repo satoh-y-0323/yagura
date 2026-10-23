@@ -211,6 +211,30 @@ impl OutputForm {
     }
 }
 
+/// How each door prints the text it carries: the form follows the event the
+/// door runs on, not the profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoorOutputs {
+    /// The answer for a CLI's start-up.
+    pub context: OutputForm,
+    /// The answer for the start of a turn.
+    pub take: OutputForm,
+    /// The answer to a wait.
+    pub wait: OutputForm,
+}
+
+impl DoorOutputs {
+    /// Every door prints in `form`.
+    #[must_use]
+    pub fn all(form: &OutputForm) -> Self {
+        Self {
+            context: form.clone(),
+            take: form.clone(),
+            wait: form.clone(),
+        }
+    }
+}
+
 /// How a window's doors answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverySpec {
@@ -218,7 +242,7 @@ pub struct DeliverySpec {
     /// carries.
     pub max_chars: usize,
     /// How the text is printed.
-    pub output: OutputForm,
+    pub output: DoorOutputs,
     /// The stream a wait that was answered by a parcel prints on.
     pub wake_stream: DeliveryStream,
     /// The exit code that wait ends with.
@@ -229,7 +253,7 @@ impl Default for DeliverySpec {
     fn default() -> Self {
         Self {
             max_chars: DEFAULT_MAX_CHARS,
-            output: OutputForm::Plain,
+            output: DoorOutputs::all(&OutputForm::Plain),
             wake_stream: DeliveryStream::Stderr,
             wake_exit: DEFAULT_WAKE_EXIT,
         }
@@ -374,9 +398,9 @@ impl Shared {
         (taken, text)
     }
 
-    fn read_message(&self, text: &str) -> DaemonMessage {
+    fn read_message(&self, form: &OutputForm, text: &str) -> DaemonMessage {
         DaemonMessage::Delivery {
-            output: self.spec.output.render(text),
+            output: form.render(text),
             stream: DeliveryStream::Stdout,
             exit_code: 0,
         }
@@ -384,7 +408,7 @@ impl Shared {
 
     fn wake_message(&self, text: &str) -> DaemonMessage {
         DaemonMessage::Delivery {
-            output: self.spec.output.render(text),
+            output: self.spec.output.wait.render(text),
             stream: self.spec.wake_stream,
             exit_code: self.spec.wake_exit,
         }
@@ -647,18 +671,22 @@ impl Inbox {
     /// The answer for a CLI's start-up: `intro`, then the parcels that fit
     /// behind it. The parcels it carries are taken.
     pub fn context(&self, intro: &str) -> DaemonMessage {
+        self.read(intro, &self.shared.spec.output.context)
+    }
+
+    fn read(&self, intro: &str, form: &OutputForm) -> DaemonMessage {
         let mut state = self.shared.lock();
         let (taken, text) = self.shared.take_within(&mut state, intro);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
-        self.shared.read_message(&text)
+        self.shared.read_message(form, &text)
     }
 
     /// The answer for the start of a turn: the parcels that fit in one
     /// answer, which are taken.
     pub fn take(&self) -> DaemonMessage {
-        self.context("")
+        self.read("", &self.shared.spec.output.take)
     }
 
     /// Registers a wait for the window, replacing the one registered before:

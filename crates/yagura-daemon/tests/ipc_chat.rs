@@ -67,7 +67,7 @@ async fn start_chat(tag: &str, dir: &Path, spec: &ChatPlaybook<'_>) -> Harness {
 /// with the daemon's own defaults otherwise.
 fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
     yagura_daemon::profile_delivery::ProfileDelivery {
-        output: yagura_daemon::inbox::OutputForm::Plain,
+        output: yagura_daemon::inbox::DoorOutputs::all(&yagura_daemon::inbox::OutputForm::Plain),
         max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
         wake: yagura_daemon::profile_delivery::WakeMode::None,
         wake_stream: yagura_protocol::DeliveryStream::Stderr,

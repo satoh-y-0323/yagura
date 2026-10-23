@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::inbox::{DeliverySpec, OutputForm, Parcel};
+use yagura_daemon::inbox::{DeliverySpec, DoorOutputs, OutputForm, Parcel};
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryStream, WindowStatus};
 use yagura_test_support::ipc::Connection;
 
@@ -555,13 +555,22 @@ async fn the_daemon_does_not_log_a_session_value() {
 
 // --- the json form ----------------------------------------------------------
 
+/// A form given by one string: every door prints the same way.
+fn every_door(form: OutputForm) -> DoorOutputs {
+    DoorOutputs {
+        context: form.clone(),
+        take: form.clone(),
+        wait: form,
+    }
+}
+
 const AGY_SHAPE: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
 
 #[tokio::test]
 async fn a_json_form_embeds_the_text_as_one_escaped_json_string_substituted_once() {
     let (h, mut client) = start("inbox-i9", |config| {
         config.delivery = DeliverySpec {
-            output: OutputForm::Template(AGY_SHAPE.into()),
+            output: every_door(OutputForm::Template(AGY_SHAPE.into())),
             ..DeliverySpec::default()
         };
     })
@@ -592,7 +601,7 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
     let (h, mut client) = start("inbox-i9-empty", |config| {
         config.chat_intro = String::new();
         config.delivery = DeliverySpec {
-            output: OutputForm::Template(AGY_SHAPE.into()),
+            output: every_door(OutputForm::Template(AGY_SHAPE.into())),
             ..DeliverySpec::default()
         };
     })
@@ -601,6 +610,61 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
     assert!(take(&mut client, &id).await.is_empty());
     let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
     assert!(context.is_empty());
+}
+
+// --- a form for each door ---------------------------------------------------
+
+/// The door a JSON answer names and the text it carries.
+fn door_and_text(output: &str) -> (String, String) {
+    let value: serde_json::Value =
+        serde_json::from_str(output).unwrap_or_else(|err| panic!("not JSON ({err}): {output:?}"));
+    let door = value["door"]
+        .as_str()
+        .expect("the door is named")
+        .to_string();
+    let text = value["t"]
+        .as_str()
+        .expect("the text is a JSON string")
+        .to_string();
+    (door, text)
+}
+
+#[tokio::test]
+async fn each_door_prints_in_its_own_form_and_prints_nothing_when_nothing_waits() {
+    let (h, mut client) = start("inbox-door-forms", |config| {
+        config.chat_intro = String::new();
+        config.delivery = DeliverySpec {
+            output: DoorOutputs {
+                context: OutputForm::Template(r#"{"door":"context","t":{text}}"#.into()),
+                take: OutputForm::Template(r#"{"door":"take","t":{text}}"#.into()),
+                wait: OutputForm::Template(r#"{"door":"wait","t":{text}}"#.into()),
+            },
+            ..DeliverySpec::default()
+        };
+    })
+    .await;
+    let id = h.open_idle_window(&mut client).await;
+
+    let (empty_context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    assert!(empty_context.is_empty(), "{empty_context:?}");
+    assert!(take(&mut client, &id).await.is_empty());
+
+    deposit(&h, &id, "a", "PARCEL-CONTEXT");
+    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (door, text) = door_and_text(&context);
+    assert_eq!(door, "context");
+    assert!(text.contains("PARCEL-CONTEXT"), "{text:?}");
+
+    deposit(&h, &id, "b", "PARCEL-TAKE");
+    let (door, text) = door_and_text(&take(&mut client, &id).await);
+    assert_eq!(door, "take");
+    assert!(text.contains("PARCEL-TAKE"), "{text:?}");
+
+    deposit(&h, &id, "c", "PARCEL-WAIT");
+    let (woken, _, _) = expect_delivery(call_door(&mut client, &wait_msg(&id)).await);
+    let (door, text) = door_and_text(&woken);
+    assert_eq!(door, "wait");
+    assert!(text.contains("PARCEL-WAIT"), "{text:?}");
 }
 
 // --- the inbox limit --------------------------------------------------------

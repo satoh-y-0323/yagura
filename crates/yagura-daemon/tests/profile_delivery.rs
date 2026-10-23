@@ -25,7 +25,7 @@ use common::docs::read_doc_verbatim;
 use common::{Harness, approver_base_config, write_profile};
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::OpenWindowRequest;
-use yagura_daemon::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, OutputForm};
+use yagura_daemon::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DoorOutputs, OutputForm};
 use yagura_daemon::profile::{
     LaunchOptionValues, Profile, ProfileOs, list_profiles, parse_profile, resolve_launch,
     unavailability, unavailable_reason,
@@ -59,6 +59,15 @@ fn delivery_of(before_command: &str) -> ProfileDelivery {
         .unwrap_or_else(|| panic!("{before_command:?} declares a [delivery] table"))
 }
 
+/// The output of a profile whose `output` is one string: every door prints the same way.
+fn every_door(form: OutputForm) -> DoorOutputs {
+    DoorOutputs {
+        context: form.clone(),
+        take: form.clone(),
+        wait: form,
+    }
+}
+
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_string()).collect()
 }
@@ -88,7 +97,7 @@ fn a_profile_without_a_delivery_table_declares_no_delivery() {
 fn an_empty_delivery_table_takes_the_documented_defaults() {
     let delivery = delivery_of("[delivery]\n");
 
-    assert_eq!(delivery.output, OutputForm::Plain);
+    assert_eq!(delivery.output, every_door(OutputForm::Plain));
     assert_eq!(delivery.max_chars, DEFAULT_MAX_CHARS);
     assert_eq!(delivery.wake, WakeMode::None);
     assert_eq!(delivery.wake_stream, DeliveryStream::Stderr);
@@ -114,7 +123,7 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
 
     assert_eq!(
         delivery.output,
-        OutputForm::Template("{\"v\":{text}}".into())
+        every_door(OutputForm::Template("{\"v\":{text}}".into()))
     );
     assert_eq!(delivery.max_chars, 777);
     assert_eq!(
@@ -328,6 +337,70 @@ fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
     }
 }
 
+const CONTEXT_FORM: &str = r#"{"door":"context","t":{text}}"#;
+const TAKE_FORM: &str = r#"{"door":"take","t":{text}}"#;
+const WAIT_FORM: &str = r#"{"door":"wait","t":{text}}"#;
+
+#[test]
+fn an_output_table_gives_each_door_its_own_form_and_a_door_it_leaves_out_prints_plain() {
+    let delivery = delivery_of(&format!(
+        "[delivery.output]\ncontext = '{CONTEXT_FORM}'\ntake = '{TAKE_FORM}'\n"
+    ));
+    assert_eq!(
+        delivery.output,
+        DoorOutputs {
+            context: OutputForm::Template(CONTEXT_FORM.into()),
+            take: OutputForm::Template(TAKE_FORM.into()),
+            wait: OutputForm::Plain,
+        }
+    );
+
+    let every = delivery_of(&format!(
+        "[delivery.output]\ncontext = \"plain\"\ntake = '{TAKE_FORM}'\nwait = '{WAIT_FORM}'\n"
+    ));
+    assert_eq!(
+        every.output,
+        DoorOutputs {
+            context: OutputForm::Plain,
+            take: OutputForm::Template(TAKE_FORM.into()),
+            wait: OutputForm::Template(WAIT_FORM.into()),
+        }
+    );
+    assert_eq!(
+        every.spec().output,
+        every.output,
+        "a window answers at each door with the form its profile gave that door"
+    );
+
+    for (what, fragment) in [
+        (
+            "a door that does not exist",
+            "[delivery.output]\nreport = \"plain\"\n".to_string(),
+        ),
+        (
+            "a door form that is neither plain nor a template",
+            "[delivery.output]\ncontext = \"xml\"\n".to_string(),
+        ),
+        (
+            "a door template with a slot nothing fills",
+            "[delivery.output]\ntake = '{\"a\":{text},\"b\":{session}}'\n".to_string(),
+        ),
+        (
+            "a door template that is not JSON once the text is in",
+            "[delivery.output]\nwait = '{\"a\":{text}'\n".to_string(),
+        ),
+        (
+            "a door form that is not a string",
+            "[delivery.output]\ntake = 1\n".to_string(),
+        ),
+    ] {
+        assert!(
+            parse_with(&fragment).is_err(),
+            "{what}: the profile must not be accepted"
+        );
+    }
+}
+
 #[test]
 fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warning() {
     let tree = TempDir::new("yagura-cli-test", "delivery-invalid-listing");
@@ -397,7 +470,7 @@ const AGY_OUTPUT: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{t
 fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_wait() {
     for id in ["claude-code", "wsl-claude-code"] {
         let delivery = shipped_delivery(id);
-        assert_eq!(delivery.output, OutputForm::Plain, "{id}");
+        assert_eq!(delivery.output, every_door(OutputForm::Plain), "{id}");
         assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(delivery.wake, WakeMode::Wait, "{id}");
         assert_eq!(delivery.wake_stream, DeliveryStream::Stderr, "{id}");
@@ -415,7 +488,7 @@ fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_
 fn the_codex_profiles_wake_a_waiting_cli_by_queueing_a_message_on_its_session() {
     for id in ["codex-cli", "wsl-codex-cli"] {
         let delivery = shipped_delivery(id);
-        assert_eq!(delivery.output, OutputForm::Plain, "{id}");
+        assert_eq!(delivery.output, every_door(OutputForm::Plain), "{id}");
         assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(
             delivery.wake,
@@ -458,7 +531,7 @@ fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way
         let delivery = shipped_delivery(id);
         assert_eq!(
             delivery.output,
-            OutputForm::Template(AGY_OUTPUT.into()),
+            every_door(OutputForm::Template(AGY_OUTPUT.into())),
             "{id}"
         );
         assert_eq!(delivery.max_chars, 10_000, "{id}");
