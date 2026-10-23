@@ -400,6 +400,21 @@ struct PlannedOpen {
     /// How the launch turns the other instances' bridge registrations off,
     /// read right before spawn; `None` when the profile cannot say.
     bridge_scan: Option<mcp_registration::BridgeScan>,
+    /// What the profile cannot do on this host
+    /// ([`crate::profile::shim_limits`]).
+    limits: Vec<yagura_protocol::ProfileLimit>,
+}
+
+impl PlannedOpen {
+    /// The limit on `capability`, when the profile has one on this host.
+    fn limit(
+        &self,
+        capability: yagura_protocol::ProfileCapability,
+    ) -> Option<&yagura_protocol::ProfileLimit> {
+        self.limits
+            .iter()
+            .find(|limit| limit.capability == capability)
+    }
 }
 
 /// A registration whose settings-file entries must hold for a launch to keep
@@ -2414,8 +2429,10 @@ impl IpcServer {
     /// # Errors
     ///
     /// Returns the answer the caller must send: `profile_disabled` when the
-    /// named profile's `enabled` key switches it off, `invalid_argument` for
-    /// every other rejection here, none of which depends on who is asking. A
+    /// named profile's `enabled` key switches it off, `unsupported` when a
+    /// supplied launch option cannot pass this host's program
+    /// ([`crate::profile::shim_limits`]), `invalid_argument` for every other
+    /// rejection here, none of which depends on who is asking. A
     /// refused launch option value is reported as `"{axis}: {reason}"` so a
     /// caller supplying two values knows which one.
     // The error is the wire message itself, which every other refusal in this
@@ -2452,6 +2469,15 @@ impl IpcServer {
             &options,
         )
         .map_err(|err| profile_launch_error_msg(&err))?;
+        for axis in crate::profile::LaunchOptionAxis::ALL {
+            let limited = launch
+                .limits
+                .iter()
+                .find(|limit| limit.capability == axis.capability());
+            if let (Some(_), Some(limit)) = (options.get(axis), limited) {
+                return Err(limit_refusal_msg(limit));
+            }
+        }
         if let Some(cwd) = launch.cwd.as_ref() {
             resolve_existing_dir(cwd.path(), cwd.origin())
                 .map_err(|err| window_open_error_msg(&err))?;
@@ -2617,6 +2643,7 @@ impl IpcServer {
             delivery: launch.delivery,
             wake_command,
             bridge_scan,
+            limits: launch.limits,
         })
     }
 
@@ -2860,8 +2887,8 @@ impl IpcServer {
                 outbound.reply(&no_launch_prompt_msg());
                 return;
             }
-            if launches_through_shim(&self.config, &planned.request.command) {
-                outbound.reply(&launch_prompt_through_shim_msg());
+            if let Some(limit) = planned.limit(yagura_protocol::ProfileCapability::LaunchPrompt) {
+                outbound.reply(&limit_refusal_msg(limit));
                 return;
             }
         }
@@ -3365,8 +3392,9 @@ impl IpcServer {
                     outbound.reply(&no_launch_prompt_msg());
                     return;
                 }
-                if launches_through_shim(&self.config, &planned.request.command) {
-                    outbound.reply(&launch_prompt_through_shim_msg());
+                if let Some(limit) = planned.limit(yagura_protocol::ProfileCapability::LaunchPrompt)
+                {
+                    outbound.reply(&limit_refusal_msg(limit));
                     return;
                 }
                 let cwd = match self.registry.check_open_request(&planned.request) {
@@ -4005,7 +4033,7 @@ fn to_profile_info(entry: crate::profile::ProfileEntry) -> ProfileInfo {
         enabled: entry.enabled,
         unavailable_kind: entry.unavailable_kind,
         unavailable_guidance: entry.unavailable_guidance,
-        limits: Vec::new(),
+        limits: entry.limits,
     }
 }
 
@@ -5298,35 +5326,19 @@ fn abandon_handoff(outbound: &Outbound, slot: HandoffSlot, message: &DaemonMessa
     outbound.reply(message);
 }
 
-/// Whether `argv`'s program is a Windows `.cmd` / `.bat` file, which the
-/// command interpreter starts and whose arguments it reads as its own syntax:
-/// a launch prompt cannot be passed through it unchanged.
-fn launches_through_shim(config: &DaemonConfig, argv: &[String]) -> bool {
-    let predicate = crate::profile::is_executable_predicate(config);
-    matches!(
-        yagura_os::program::resolve_program(
-            argv,
-            config.host_os.platform(),
-            &config.program_lookup,
-            &predicate,
-        ),
-        Ok(yagura_os::program::Resolution::CmdShim { .. })
-    )
-}
-
 /// The refusal for a window that would be handed a request at launch whose
 /// profile declares no way to.
 fn no_launch_prompt_msg() -> DaemonMessage {
     error_msg("no_composer", NO_LAUNCH_PROMPT_MESSAGE)
 }
 
-/// The refusal for a window that would be handed a request at launch through
-/// a Windows `.cmd` / `.bat` file.
-fn launch_prompt_through_shim_msg() -> DaemonMessage {
+/// The refusal for a launch that needs a capability its profile cannot offer
+/// on this host, before anyone is asked to approve it. The limit's reason
+/// comes last, so its guidance ends the message.
+fn limit_refusal_msg(limit: &yagura_protocol::ProfileLimit) -> DaemonMessage {
     error_msg(
         "unsupported",
-        "this profile's program is a Windows .cmd / .bat file, through which a request \
-         handed over at launch cannot pass unchanged, so nothing was started",
+        &format!("nothing was started: {}", limit.reason),
     )
 }
 

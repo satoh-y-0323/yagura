@@ -103,7 +103,6 @@ fn an_empty_delivery_table_takes_the_documented_defaults() {
     assert_eq!(delivery.wake_stream, DeliveryStream::Stderr);
     assert_eq!(delivery.wake_exit, DEFAULT_WAKE_EXIT);
     assert_eq!(delivery.launch_prompt, None);
-    assert_eq!(delivery.shim_guidance, None);
 }
 
 #[test]
@@ -116,9 +115,7 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
          wake_args = [\"queue\", \"--thread\", \"{session}\", \"--message\", \"{text}\"]\n\
          wake_stream = \"stdout\"\n\
          wake_exit = 3\n\
-         launch_prompt = [\"-i\", \"{prompt}\"]\n\
-         shim_guidance = { text = \"Install the standalone build:\", command = \"get it | run\", \
-         url = \"https://example.test/install\" }\n",
+         launch_prompt = [\"-i\", \"{prompt}\"]\n",
     );
 
     assert_eq!(
@@ -139,35 +136,38 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
     assert_eq!(delivery.wake_stream, DeliveryStream::Stdout);
     assert_eq!(delivery.wake_exit, 3);
     assert_eq!(delivery.launch_prompt, Some(strings(&["-i", "{prompt}"])));
-    assert_eq!(
-        delivery.shim_guidance,
-        Some(guidance(
-            "Install the standalone build:",
-            Some("get it | run"),
-            Some("https://example.test/install")
-        ))
-    );
 }
 
 #[test]
-fn a_shim_guidance_needs_only_its_text() {
-    assert_eq!(
-        delivery_of("[delivery]\nshim_guidance = { text = \"Use the native build.\" }\n")
-            .shim_guidance,
-        Some(guidance("Use the native build.", None, None))
-    );
-    assert_eq!(
-        delivery_of(
-            "[delivery]\n[delivery.shim_guidance]\ntext = \"Read the notes.\"\n\
-             url = \"https://example.test/notes\"\n"
-        )
-        .shim_guidance,
-        Some(guidance(
-            "Read the notes.",
-            None,
-            Some("https://example.test/notes")
-        ))
-    );
+fn a_top_level_shim_guidance_is_read_with_every_part_it_was_given_and_needs_only_its_text() {
+    let tree = TempDir::new("yagura-cli-test", "delivery-shim-guidance-read");
+    let bin = tree.make_dir("bin");
+    tree.write_file("bin/shimmed.cmd", "");
+    let config = config_with(None, lookup_in(&bin), ProfileOs::Windows);
+
+    for (top, expected) in [
+        (
+            "shim_guidance = { text = \"Install the standalone build:\", command = \"get it | run\", \
+             url = \"https://example.test/install\" }\n",
+            guidance(
+                "Install the standalone build:",
+                Some("get it | run"),
+                Some("https://example.test/install"),
+            ),
+        ),
+        (
+            "shim_guidance = { text = \"Use the native build.\" }\n",
+            guidance("Use the native build.", None, None),
+        ),
+        (
+            "[shim_guidance]\ntext = \"Read the notes.\"\nurl = \"https://example.test/notes\"\n",
+            guidance("Read the notes.", None, Some("https://example.test/notes")),
+        ),
+    ] {
+        let found = unavailability(&shim_profile(top, WAKE_COMMAND), &config)
+            .unwrap_or_else(|| panic!("{top:?}: a wake by command through a shim is unusable"));
+        assert_eq!(found.guidance, Some(expected), "{top:?}");
+    }
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn the_edges_of_each_value_domain_are_accepted() {
         ),
         (
             "a guidance url with a path, a query and a fragment",
-            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://a.test/b?c=d#e\" }\n",
+            "shim_guidance = { text = \"t\", url = \"https://a.test/b?c=d#e\" }\n",
         ),
     ] {
         parse_with(fragment)
@@ -213,7 +213,7 @@ fn the_edges_of_each_value_domain_are_accepted() {
 
 #[test]
 fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
-    let cases: [(&str, &str); 36] = [
+    let cases: [(&str, &str); 37] = [
         ("an unknown key", "[delivery]\nbogus = 1\n"),
         ("a delivery that is not a table", "delivery = 1\n"),
         ("max_chars as a string", "[delivery]\nmax_chars = \"10\"\n"),
@@ -281,52 +281,53 @@ fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
             "[delivery]\nlaunch_prompt = [\"\", \"{prompt}\"]\n",
         ),
         (
-            "a shim guidance that is a number",
-            "[delivery]\nshim_guidance = 5\n",
+            "a shim guidance inside the delivery table, which moved to the top level",
+            "[delivery]\nshim_guidance = { text = \"t\" }\n",
         ),
+        ("a shim guidance that is a number", "shim_guidance = 5\n"),
         (
             "a shim guidance that is a bare string",
-            "[delivery]\nshim_guidance = \"Use the native build.\"\n",
+            "shim_guidance = \"Use the native build.\"\n",
         ),
         (
             "a shim guidance without its text",
-            "[delivery]\nshim_guidance = { command = \"get it\" }\n",
+            "shim_guidance = { command = \"get it\" }\n",
         ),
         (
             "a shim guidance with an empty text",
-            "[delivery]\nshim_guidance = { text = \" \" }\n",
+            "shim_guidance = { text = \" \" }\n",
         ),
         (
             "a shim guidance with an empty command",
-            "[delivery]\nshim_guidance = { text = \"t\", command = \"\" }\n",
+            "shim_guidance = { text = \"t\", command = \"\" }\n",
         ),
         (
             "a shim guidance with a key nothing reads",
-            "[delivery]\nshim_guidance = { text = \"t\", link = \"https://a.test\" }\n",
+            "shim_guidance = { text = \"t\", link = \"https://a.test\" }\n",
         ),
         (
             "a shim guidance command that is not a string",
-            "[delivery]\nshim_guidance = { text = \"t\", command = [\"a\"] }\n",
+            "shim_guidance = { text = \"t\", command = [\"a\"] }\n",
         ),
         (
             "a shim guidance url that is not https",
-            "[delivery]\nshim_guidance = { text = \"t\", url = \"http://a.test\" }\n",
+            "shim_guidance = { text = \"t\", url = \"http://a.test\" }\n",
         ),
         (
             "a shim guidance url that runs script",
-            "[delivery]\nshim_guidance = { text = \"t\", url = \"javascript:alert(1)\" }\n",
+            "shim_guidance = { text = \"t\", url = \"javascript:alert(1)\" }\n",
         ),
         (
             "a shim guidance url with no host",
-            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://\" }\n",
+            "shim_guidance = { text = \"t\", url = \"https://\" }\n",
         ),
         (
             "a shim guidance url with a space in it",
-            "[delivery]\nshim_guidance = { text = \"t\", url = \"https://a.test/b c\" }\n",
+            "shim_guidance = { text = \"t\", url = \"https://a.test/b c\" }\n",
         ),
         (
             "a shim guidance text with a control character",
-            "[delivery]\nshim_guidance = { text = \"a\\u001bb\" }\n",
+            "shim_guidance = { text = \"a\\u001bb\" }\n",
         ),
     ];
     for (what, fragment) in cases {
@@ -419,7 +420,7 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
         ),
         (
             "delivery-secret",
-            "[delivery]\nshim_guidance = { text = \"SECRET-TOKEN-XYZ\" }\nbogus = 1\n",
+            "shim_guidance = { text = \"SECRET-TOKEN-XYZ\" }\n[delivery]\nbogus = 1\n",
         ),
     ];
     for (id, fragment) in invalid {
@@ -481,7 +482,6 @@ fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_
             "{id}: the prompt follows `--` because the MCP config flag takes several values"
         );
     }
-    assert_eq!(shipped_delivery("claude-code").shim_guidance, None);
 }
 
 #[test]
@@ -507,8 +507,15 @@ fn the_codex_profiles_wake_a_waiting_cli_by_queueing_a_message_on_its_session() 
 
 #[test]
 fn the_host_codex_profile_says_how_to_get_a_build_that_is_not_a_windows_shim() {
+    let tree = TempDir::new("yagura-cli-test", "delivery-shipped-codex-shim");
+    let bin = tree.make_dir("bin");
+    tree.write_file("bin/codex.cmd", "");
+    let config = config_with(None, lookup_in(&bin), ProfileOs::Windows);
+
+    let found = unavailability(&shipped("codex-cli"), &config)
+        .expect("a wake by command through codex.cmd is unusable");
     assert_eq!(
-        shipped_delivery("codex-cli").shim_guidance,
+        found.guidance,
         Some(guidance(
             "Install the standalone Codex from a new PowerShell window, then restart yagura:",
             Some(
@@ -517,11 +524,6 @@ fn the_host_codex_profile_says_how_to_get_a_build_that_is_not_a_windows_shim() {
             Some("https://learn.chatgpt.com/docs/codex/cli.md"),
         )),
         "the text, the command to copy and the page are carried apart"
-    );
-    assert_eq!(
-        shipped_delivery("wsl-codex-cli").shim_guidance,
-        None,
-        "a WSL program is never a Windows shim"
     );
 }
 
@@ -541,7 +543,6 @@ fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way
             Some(strings(&["-i", "{prompt}"])),
             "{id}"
         );
-        assert_eq!(delivery.shim_guidance, None, "{id}");
     }
 }
 
@@ -607,10 +608,19 @@ fn config_with(
 const WAKE_COMMAND: &str = "wake = \"command\"\nwake_args = [\"queue\", \"{text}\"]\n";
 
 fn profile_running(program: &str, delivery_lines: &str) -> Profile {
+    profile_source_running(program, "", delivery_lines)
+}
+
+/// A `shimmed` profile with `top_level` (top-level keys or tables) ahead of its `[command]`.
+fn shim_profile(top_level: &str, delivery_lines: &str) -> Profile {
+    profile_source_running("shimmed", top_level, delivery_lines)
+}
+
+fn profile_source_running(program: &str, top_level: &str, delivery_lines: &str) -> Profile {
     parse_profile(
         "shimmed",
         &format!(
-            "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"{program}\"]\n\n\
+            "schema = 1\ndisplay_name = \"Shimmed\"\n{top_level}\n[command]\ndefault = [\"{program}\"]\n\n\
              [delivery]\n{delivery_lines}"
         ),
     )
@@ -638,10 +648,7 @@ fn guidance_line(guidance: &ProfileGuidance) -> String {
 }
 
 fn guided_profile(guidance: &ProfileGuidance) -> Profile {
-    profile_running(
-        "shimmed",
-        &format!("{WAKE_COMMAND}{}", guidance_line(guidance)),
-    )
+    shim_profile(&guidance_line(guidance), WAKE_COMMAND)
 }
 
 /// What follows `sentence` in `reason`, after checking that `reason` starts with it.
@@ -744,8 +751,8 @@ fn the_shim_reason_is_listed_beside_the_entry_and_matches_the_availability_flag(
         &profiles_dir,
         "shimmed",
         &format!(
-            "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"shimmed\"]\n\n\
-             [delivery]\n{WAKE_COMMAND}{}",
+            "schema = 1\ndisplay_name = \"Shimmed\"\n{}\n[command]\ndefault = [\"shimmed\"]\n\n\
+             [delivery]\n{WAKE_COMMAND}",
             guidance_line(&declared)
         ),
     );

@@ -863,7 +863,6 @@ mod tests {
             wake_stream: yagura_protocol::DeliveryStream::Stderr,
             wake_exit: crate::inbox::DEFAULT_WAKE_EXIT,
             launch_prompt: None,
-            shim_guidance: None,
         };
         let opened = registry
             .open_with_extra_env(

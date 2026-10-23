@@ -110,7 +110,6 @@ fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
         wake_stream: yagura_protocol::DeliveryStream::Stderr,
         wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
         launch_prompt: None,
-        shim_guidance: None,
     }
 }
 

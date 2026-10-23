@@ -33,7 +33,8 @@ use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 use yagura_os::program;
 use yagura_protocol::{
-    LaunchOptionAlias, LaunchOptionInfo, ProfileGuidance, ProfileUnavailableKind,
+    LaunchOptionAlias, LaunchOptionInfo, ProfileCapability, ProfileGuidance, ProfileLimit,
+    ProfileUnavailableKind,
 };
 
 use crate::child_env::is_reserved_env_name;
@@ -41,7 +42,9 @@ use crate::config::DaemonConfig;
 use crate::detector::definition::is_valid_detection_name;
 use crate::detector::layers::{DetectionLayers, LayerError};
 use crate::host_paths::{HostPaths, HostPathsError, RawHostPaths, parse_host_paths};
-use crate::profile_delivery::{DeliveryError, ProfileDelivery, WakeMode, parse_delivery};
+use crate::profile_delivery::{
+    DeliveryError, ProfileDelivery, WakeMode, parse_delivery, parse_guidance,
+};
 use crate::window::{
     CliInjection, InjectedConfigDir, InjectedConfigFile, InjectionKind, RequestedCwd,
 };
@@ -96,6 +99,10 @@ const REASON_NO_DEFAULT_SHELL: &str = "no default shell was resolved when the da
 /// sentence.
 const REASON_WAKE_NEEDS_NATIVE_PROGRAM: &str =
     "this profile cannot be used through a Windows .cmd / .bat file";
+/// Reason text for a [`ProfileCapability::LaunchPrompt`] limit: the command
+/// interpreter would reinterpret the request on the program's command line.
+const REASON_LAUNCH_PROMPT_THROUGH_SHIM: &str = "a request handed over at launch cannot pass \
+     unchanged through this profile's program, a Windows .cmd / .bat file";
 /// The refusal text for a profile its `enabled` key switches off: the
 /// `Display` of [`ProfileLaunchError::Disabled`] and the reason
 /// [`resolve_model_choices`] gives, so both read the same.
@@ -147,6 +154,15 @@ impl LaunchOptionAxis {
         match self {
             Self::Model => "model",
             Self::Effort => "effort",
+        }
+    }
+
+    /// The capability a [`ProfileLimit`] names for this axis.
+    #[must_use]
+    pub fn capability(self) -> ProfileCapability {
+        match self {
+            Self::Model => ProfileCapability::Model,
+            Self::Effort => ProfileCapability::Effort,
         }
     }
 }
@@ -312,6 +328,9 @@ pub struct Profile {
     /// daemon-side path becomes the path this profile's CLI sees. `None`
     /// means paths are handed over unchanged.
     pub host_paths: Option<HostPaths>,
+    /// The top-level `[shim_guidance]` table: what to tell a user whose
+    /// program is a Windows `.cmd` / `.bat` file that something cannot pass.
+    pub shim_guidance: Option<ProfileGuidance>,
     /// Values that were dropped or ignored while staying valid overall
     /// (a relative/`~` `cwd`, a reserved environment key). Empty when
     /// nothing needed to be reported.
@@ -359,6 +378,9 @@ pub struct ProfileEntry {
     pub model: Option<LaunchOptionInfo>,
     /// The `effort` option this profile maps, `None` when it accepts none.
     pub effort: Option<LaunchOptionInfo>,
+    /// What the profile cannot do on this host, independent of `available`
+    /// ([`shim_limits`]).
+    pub limits: Vec<ProfileLimit>,
 }
 
 /// The result of enumerating the resolved profiles directory.
@@ -424,6 +446,9 @@ pub struct ProfileLaunch {
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
     /// [`ProfileLaunch::argv`].
     pub delivery: Option<ProfileDelivery>,
+    /// What the profile cannot do on this host ([`shim_limits`]), checked
+    /// before anyone is asked to approve the launch.
+    pub limits: Vec<ProfileLimit>,
 }
 
 /// A profile's `[mcp]` or `[hooks]` table: argv elements (and the settings
@@ -557,6 +582,11 @@ pub enum ProfileParseError {
     /// A `[host_paths]` table breaks its rule ([`HostPathsError`]).
     #[error("invalid host paths table")]
     InvalidHostPaths(#[source] HostPathsError),
+    /// A `[shim_guidance]` table breaks its rule: no visible one-line `text`,
+    /// a part that is not one visible line, a `url` that is not `https`, or a
+    /// key nothing reads.
+    #[error("invalid shim guidance table")]
+    InvalidShimGuidance,
 }
 
 /// Why a `[model]` / `[effort]` table was rejected. Carried only as the
@@ -757,6 +787,10 @@ struct RawProfile {
     delivery: Option<toml::Value>,
     #[serde(default)]
     host_paths: Option<RawHostPaths>,
+    /// Untyped so every rule it breaks is
+    /// [`ProfileParseError::InvalidShimGuidance`].
+    #[serde(default)]
+    shim_guidance: Option<toml::Value>,
 }
 
 /// A `[mcp]` or `[hooks]` table before validation. `args` is `Option` for the
@@ -965,6 +999,10 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         crate::mcp_registration::parse_mcp_registration(raw.mcp_registration, host_paths.as_ref())
             .map_err(ProfileParseError::InvalidMcpRegistration)?;
     let delivery = parse_delivery(raw.delivery).map_err(ProfileParseError::InvalidDelivery)?;
+    let shim_guidance = raw
+        .shim_guidance
+        .map(|raw| parse_guidance(raw).ok_or(ProfileParseError::InvalidShimGuidance))
+        .transpose()?;
 
     let mut warnings = Vec::new();
 
@@ -1011,6 +1049,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         mcp_registration,
         delivery,
         host_paths,
+        shim_guidance,
         warnings,
     })
 }
@@ -1866,32 +1905,90 @@ fn wake_command_unavailability(
     config: &DaemonConfig,
 ) -> Option<Unavailability> {
     let delivery = profile.delivery.as_ref()?;
-    if !matches!(delivery.wake, WakeMode::Command(_)) {
+    if !matches!(delivery.wake, WakeMode::Command(_)) || !resolves_to_shim(argv, config) {
         return None;
     }
-    let predicate = is_executable_predicate(config);
-    let resolution = program::resolve_program(
-        argv,
-        config.host_os.platform(),
-        &config.program_lookup,
-        &predicate,
-    )
-    .ok()?;
-    if !matches!(resolution, program::Resolution::CmdShim { .. }) {
-        return None;
-    }
-    let guidance = delivery.shim_guidance.clone();
     Some(Unavailability {
         kind: ProfileUnavailableKind::NeedsNativeProgram,
-        reason: match &guidance {
-            Some(guidance) => format!(
-                "{REASON_WAKE_NEEDS_NATIVE_PROGRAM}. {}",
-                guidance_sentence(guidance)
-            ),
-            None => REASON_WAKE_NEEDS_NATIVE_PROGRAM.to_string(),
-        },
-        guidance,
+        reason: guided_reason(
+            REASON_WAKE_NEEDS_NATIVE_PROGRAM,
+            profile.shim_guidance.as_ref(),
+        ),
+        guidance: profile.shim_guidance.clone(),
     })
+}
+
+/// What `profile` cannot do on this host although it may be launchable,
+/// because its program resolves to a Windows `.cmd` / `.bat` file whose
+/// arguments the command interpreter reads as its own syntax: a `model` /
+/// `effort` template with a metacharacter outside `{value}`, and a launch
+/// prompt. The single source both a listing and the checks made before a
+/// launch is approved read, so they never disagree. Empty when the program is
+/// not a shim, cannot be resolved, or nothing is limited.
+#[must_use]
+pub fn shim_limits(profile: &Profile, config: &DaemonConfig) -> Vec<ProfileLimit> {
+    let Ok(argv) = launch_argv(profile, config) else {
+        return Vec::new();
+    };
+    if !resolves_to_shim(&argv, config) {
+        return Vec::new();
+    }
+    let guidance = profile.shim_guidance.as_ref();
+    let limit = |capability, sentence: &str| ProfileLimit {
+        capability,
+        reason: guided_reason(sentence, guidance),
+        guidance: guidance.cloned(),
+    };
+    let mut limits = Vec::new();
+    for axis in LaunchOptionAxis::ALL {
+        let reinterpreted = profile.options.get(axis).is_some_and(|spec| {
+            spec.args
+                .iter()
+                .any(|arg| program::contains_cmd_metacharacter(&arg.replace(VALUE_PLACEHOLDER, "")))
+        });
+        if reinterpreted {
+            let sentence = format!(
+                "the {} option cannot pass unchanged through this profile's program, a Windows \
+                 .cmd / .bat file",
+                axis.name()
+            );
+            limits.push(limit(axis.capability(), &sentence));
+        }
+    }
+    if profile
+        .delivery
+        .as_ref()
+        .is_some_and(|delivery| delivery.launch_prompt.is_some())
+    {
+        limits.push(limit(
+            ProfileCapability::LaunchPrompt,
+            REASON_LAUNCH_PROMPT_THROUGH_SHIM,
+        ));
+    }
+    limits
+}
+
+/// Whether `argv`'s program resolves to a Windows `.cmd` / `.bat` file.
+fn resolves_to_shim(argv: &[String], config: &DaemonConfig) -> bool {
+    let predicate = is_executable_predicate(config);
+    matches!(
+        program::resolve_program(
+            argv,
+            config.host_os.platform(),
+            &config.program_lookup,
+            &predicate,
+        ),
+        Ok(program::Resolution::CmdShim { .. })
+    )
+}
+
+/// `sentence`, followed by `guidance` as one line when there is one, so a
+/// reader of the reason alone still learns what to do next.
+fn guided_reason(sentence: &str, guidance: Option<&ProfileGuidance>) -> String {
+    match guidance {
+        Some(guidance) => format!("{sentence}. {}", guidance_sentence(guidance)),
+        None => sentence.to_string(),
+    }
 }
 
 /// `guidance` as one line: the text, then the command, then the page.
@@ -2171,6 +2268,7 @@ fn listed_entry(profile: Profile, config: &DaemonConfig) -> ProfileEntry {
             None => (None, None, None),
         };
     let command = listed_argv(&profile, config);
+    let limits = shim_limits(&profile, config);
     ProfileEntry {
         id: profile.id,
         display_name: profile.display_name,
@@ -2185,6 +2283,7 @@ fn listed_entry(profile: Profile, config: &DaemonConfig) -> ProfileEntry {
         unavailable_guidance,
         model: launch_option_info(profile.options.model.as_ref()),
         effort: launch_option_info(profile.options.effort.as_ref()),
+        limits,
     }
 }
 
@@ -2327,6 +2426,7 @@ pub fn resolve_launch(
         .mcp_registration
         .as_ref()
         .and_then(|registration| registration.list().cloned());
+    let limits = shim_limits(&profile, config);
 
     Ok(ProfileLaunch {
         argv,
@@ -2347,6 +2447,7 @@ pub fn resolve_launch(
         bridge_listing,
         host_paths: profile.host_paths,
         delivery: profile.delivery,
+        limits,
     })
 }
 

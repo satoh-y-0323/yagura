@@ -2471,6 +2471,46 @@ async fn list_profiles_omits_every_key_the_daemon_left_empty() {
 }
 
 #[tokio::test]
+async fn list_profiles_carries_what_a_launchable_profile_cannot_do_under_a_limits_key() {
+    let mut profile = sample_profile("limited", "Limited");
+    profile.limits = vec![yagura_protocol::ProfileLimit {
+        capability: yagura_protocol::ProfileCapability::Effort,
+        reason: "LIMITREASON an effort cannot pass the shim.".to_string(),
+        guidance: Some(yagura_protocol::ProfileGuidance {
+            text: "LIMITGUIDE use the WSL profile.".to_string(),
+            command: None,
+            url: Some("https://a.test/wsl".to_string()),
+        }),
+    }];
+    let transport = MockTransport::with_response(Ok(DaemonMessage::ProfileList {
+        profiles: vec![profile],
+        warnings: Vec::new(),
+    }));
+
+    let result = list_profiles(&transport).await.expect("must succeed");
+
+    let entry = &result["profiles"][0];
+    assert_eq!(entry["available"], serde_json::Value::Bool(true));
+    let limits = entry["limits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a non-empty limits list is a `limits` array: {entry}"));
+    assert_eq!(limits.len(), 1, "{entry}");
+    assert_eq!(limits[0]["capability"], "effort", "{entry}");
+    assert_eq!(
+        limits[0]["reason"], "LIMITREASON an effort cannot pass the shim.",
+        "{entry}"
+    );
+    assert_eq!(
+        limits[0]["guidance"]["text"], "LIMITGUIDE use the WSL profile.",
+        "{entry}"
+    );
+    assert_eq!(
+        limits[0]["guidance"]["url"], "https://a.test/wsl",
+        "{entry}"
+    );
+}
+
+#[tokio::test]
 async fn list_profiles_reports_the_command_the_daemon_selected_for_this_operating_system() {
     let mut profile = sample_profile("claude-code", "Claude Code");
     profile.command = vec!["claude".to_string(), "--resume".to_string()];

@@ -665,6 +665,63 @@ async fn an_open_window_over_the_window_limit_is_refused_before_anyone_is_asked(
     );
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn an_effort_a_windows_shim_cannot_pass_is_refused_with_the_guidance_before_anyone_is_asked()
+{
+    let dir = TempDir::new("yagura-cli-test", "open-gate-shim-effort");
+    let bin = dir.make_dir("bin");
+    dir.write_file("bin/quoted-effort.cmd", "");
+    let profiles_dir = dir.make_dir("profiles");
+    write_profile(
+        &profiles_dir,
+        "quoted-effort",
+        "schema = 1\ndisplay_name = \"Quoted Effort\"\n\
+         shim_guidance = { text = \"SHIMGATE use the WSL profile.\" }\n\n\
+         [command]\ndefault = [\"quoted-effort\"]\n\n\
+         [effort]\nargs = [\"-c\", \"reasoning_effort=\\\"{value}\\\"\"]\n",
+    );
+    let mut config = config_with(&[], 30);
+    config.profiles_dir = Some(profiles_dir);
+    config.program_lookup = yagura_os::program::ProgramLookup {
+        path_dirs: vec![bin],
+        extra_bin_dirs: Vec::new(),
+        windows_comspec: yagura_os::program::ProgramLookup::from_env().windows_comspec,
+    };
+    let h = Harness::start("open-gate-shim-effort", config).await;
+    let mut approver = approver_connection(&h).await;
+    let mut requester = window_connection(&h).await;
+    let before = window_count(&h).await;
+
+    send(
+        &mut requester,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: "quoted-effort".to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: Some("high".to_string()),
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let message = expect_error(
+        read_response(&mut requester, Duration::from_secs(5)).await,
+        "unsupported",
+    );
+    assert!(
+        message.contains("SHIMGATE use the WSL profile."),
+        "the refusal says where the option works: {message}"
+    );
+    assert_eq!(window_count(&h).await, before, "nothing was started");
+
+    // The first request the approver sees is the valid one that follows, so
+    // the refusal queued no approval.
+    send_open_command(&mut requester, vec!["valid-command".to_string()], None).await;
+    let request = expect_approval_requested(&mut approver).await;
+    assert_eq!(text_lines(&request)[0], "command: valid-command");
+}
+
 // --- the requester leaves while the approval waits -------------------------
 
 async fn expect_withdrawn_because_requester_left(approver: &mut Connection, request_id: &str) {

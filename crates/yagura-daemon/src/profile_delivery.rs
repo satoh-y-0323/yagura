@@ -47,9 +47,6 @@ pub struct ProfileDelivery {
     /// The arguments that hand the CLI a first request at start-up, where
     /// `{prompt}` is filled in.
     pub launch_prompt: Option<Vec<String>>,
-    /// What to tell a user whose program cannot be used for a wake by command
-    /// because it is a Windows `.cmd` / `.bat` file.
-    pub shim_guidance: Option<ProfileGuidance>,
 }
 
 impl ProfileDelivery {
@@ -120,11 +117,6 @@ pub(crate) fn parse_delivery(
                 .ok_or(DeliveryError::Invalid("launch_prompt"))?,
         ),
     };
-    let shim_guidance = match table.remove("shim_guidance") {
-        None => None,
-        Some(raw) => Some(parse_guidance(raw)?),
-    };
-
     if let Some((key, _)) = table.into_iter().next() {
         return Err(DeliveryError::UnknownKey(key));
     }
@@ -135,34 +127,29 @@ pub(crate) fn parse_delivery(
         wake_stream,
         wake_exit,
         launch_prompt,
-        shim_guidance,
     }))
 }
 
 /// `{ text, command, url }`: `text` is required, the others optional. Each is
 /// one line of visible text, and `url` is an `https` address, because a client
-/// offers it to be opened.
-fn parse_guidance(raw: toml::Value) -> Result<ProfileGuidance, DeliveryError> {
-    let invalid = || DeliveryError::Invalid("shim_guidance");
+/// offers it to be opened. `None` when `raw` breaks any of these rules.
+pub(crate) fn parse_guidance(raw: toml::Value) -> Option<ProfileGuidance> {
     let toml::Value::Table(mut table) = raw else {
-        return Err(invalid());
+        return None;
     };
-    let mut take_line = |key: &'static str| -> Result<Option<String>, DeliveryError> {
-        match take_string(&mut table, key).map_err(|_| invalid())? {
-            Some(line) if !is_visible_line(&line) => Err(invalid()),
-            other => Ok(other),
+    let mut take_line = |key: &'static str| -> Option<Option<String>> {
+        match take_string(&mut table, key).ok()? {
+            Some(line) if !is_visible_line(&line) => None,
+            other => Some(other),
         }
     };
-    let text = take_line("text")?.ok_or_else(invalid)?;
+    let text = take_line("text")??;
     let command = take_line("command")?;
     let url = take_line("url")?;
-    if url.as_deref().is_some_and(|url| !is_https_url(url)) {
-        return Err(invalid());
+    if url.as_deref().is_some_and(|url| !is_https_url(url)) || !table.is_empty() {
+        return None;
     }
-    if !table.is_empty() {
-        return Err(invalid());
-    }
-    Ok(ProfileGuidance { text, command, url })
+    Some(ProfileGuidance { text, command, url })
 }
 
 /// Some visible character, and no control character a reader would act on.

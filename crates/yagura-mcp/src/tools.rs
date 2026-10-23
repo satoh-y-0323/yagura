@@ -811,6 +811,9 @@ pub async fn list_detections<T: DaemonTransport>(transport: &T) -> Result<Value,
 ///
 /// A profile the user has disabled is left out, since it cannot be launched.
 ///
+/// What a profile cannot do on this host although it is launchable is a
+/// `limits` array, present only when non-empty.
+///
 /// A `warnings` array the daemon reports (excluded files, or the reason the
 /// profiles directory could not be enumerated) is passed through as a key of
 /// the same name, present only when non-empty, and does not turn the response
@@ -877,6 +880,14 @@ pub async fn list_profiles<T: DaemonTransport>(transport: &T) -> Result<Value, T
                                 .map_err(|err| ToolError::Internal(err.to_string()))?,
                         );
                     }
+                    if !profile.limits.is_empty() {
+                        let limits = profile
+                            .limits
+                            .into_iter()
+                            .map(profile_limit_json)
+                            .collect::<Result<Vec<Value>, ToolError>>()?;
+                        obj.insert("limits".to_string(), Value::Array(limits));
+                    }
                     Ok(Value::Object(obj))
                 })
                 .collect::<Result<Vec<Value>, ToolError>>()?;
@@ -893,6 +904,30 @@ pub async fn list_profiles<T: DaemonTransport>(transport: &T) -> Result<Value, T
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
     }
+}
+
+/// One [`yagura_protocol::ProfileLimit`] as `{ capability, reason, guidance }`,
+/// leaving out each absent part rather than writing `null`.
+fn profile_limit_json(limit: yagura_protocol::ProfileLimit) -> Result<Value, ToolError> {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "capability".to_string(),
+        serde_json::to_value(limit.capability)
+            .map_err(|err| ToolError::Internal(err.to_string()))?,
+    );
+    obj.insert("reason".to_string(), Value::String(limit.reason));
+    if let Some(guidance) = limit.guidance {
+        let mut parts = serde_json::Map::new();
+        parts.insert("text".to_string(), Value::String(guidance.text));
+        if let Some(command) = guidance.command {
+            parts.insert("command".to_string(), Value::String(command));
+        }
+        if let Some(url) = guidance.url {
+            parts.insert("url".to_string(), Value::String(url));
+        }
+        obj.insert("guidance".to_string(), Value::Object(parts));
+    }
+    Ok(Value::Object(obj))
 }
 
 /// `read_output`: `window_id` is required and non-empty. `lines` is

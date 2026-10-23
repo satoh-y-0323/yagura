@@ -62,7 +62,6 @@ async fn open_delivering(h: &Harness, command: Vec<String>, detection: &str) -> 
                     wake_stream: yagura_protocol::DeliveryStream::Stderr,
                     wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
                     launch_prompt: None,
-                    shim_guidance: None,
                 }),
                 ..yagura_daemon::window::WindowProvenance::default()
             },

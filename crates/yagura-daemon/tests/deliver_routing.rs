@@ -1125,6 +1125,25 @@ async fn a_task_windows_launch_prompt_is_never_part_of_the_command_kept_for_a_re
 // =========================================================================================
 
 #[cfg(windows)]
+const SHIM_GUIDANCE_TEXT: &str = "SHIMROUTE use the WSL profile.";
+
+/// The refusal a launch through a shim gets before anything starts: `unsupported`, with the
+/// profile's own guidance in its reason.
+#[cfg(windows)]
+fn assert_refused_with_the_shim_guidance(reply: &DaemonMessage) {
+    match reply {
+        DaemonMessage::Error { code, message, .. } => {
+            assert_eq!(code, "unsupported", "{reply:?}");
+            assert!(
+                message.contains(SHIM_GUIDANCE_TEXT),
+                "the reason says where the request can be handed over: {reply:?}"
+            );
+        }
+        other => panic!("expected an unsupported refusal, got {other:?}"),
+    }
+}
+
+#[cfg(windows)]
 fn write_cmd_profile(scene: &Scene, id: &str) {
     let shim = scene.root.join("hc-shim.cmd");
     std::fs::write(&shim, "@echo off\r\n").expect("write the shim");
@@ -1132,7 +1151,8 @@ fn write_cmd_profile(scene: &Scene, id: &str) {
         &scene.root.join("profiles"),
         id,
         &format!(
-            "schema = 1\ndisplay_name = \"{id}\"\ndetection = \"{HOOK_DETECTION}\"\n\n\
+            "schema = 1\ndisplay_name = \"{id}\"\ndetection = \"{HOOK_DETECTION}\"\n\
+             shim_guidance = {{ text = \"{SHIM_GUIDANCE_TEXT}\" }}\n\n\
              [command]\ndefault = [{}]\n\n[delivery]\n{NONE_DELIVERY}\n",
             toml_path(&shim)
         ),
@@ -1154,11 +1174,8 @@ async fn an_instructed_task_window_whose_program_is_a_cmd_shim_is_refused_and_no
 
     let reply = open_task(&mut owner, &plan.plan_id, "t1", "window").await;
 
-    assert!(
-        matches!(reply, DaemonMessage::Error { .. }),
-        "the prompt would be dropped on the way through cmd.exe, so the window is refused: \
-         {reply:?}"
-    );
+    // The prompt would be dropped on the way through cmd.exe, so the window is refused.
+    assert_refused_with_the_shim_guidance(&reply);
     assert_eq!(
         call_list_windows(&mut owner).await.len(),
         before,
@@ -1189,10 +1206,8 @@ async fn a_handoff_that_opens_a_window_through_a_cmd_shim_is_refused_and_nothing
     )
     .await;
 
-    assert!(
-        matches!(reply, DaemonMessage::Error { .. }),
-        "the envelope would be dropped on the way through cmd.exe: {reply:?}"
-    );
+    // The envelope would be dropped on the way through cmd.exe.
+    assert_refused_with_the_shim_guidance(&reply);
     assert_eq!(
         call_list_windows(&mut user).await.len(),
         before,

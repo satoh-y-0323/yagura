@@ -404,10 +404,10 @@ async fn list_profiles_carries_a_shim_profiles_guidance_apart_from_its_reason() 
     write_profile(
         &profiles_dir,
         "shimmed",
-        "schema = 1\ndisplay_name = \"Shimmed\"\n\n[command]\ndefault = [\"shimmed\"]\n\n\
-         [delivery]\nwake = \"command\"\nwake_args = [\"queue\", \"{text}\"]\n\
+        "schema = 1\ndisplay_name = \"Shimmed\"\n\
          shim_guidance = { text = \"Use the native build:\", command = \"get-native\", \
-         url = \"https://a.test/native\" }\n",
+         url = \"https://a.test/native\" }\n\n[command]\ndefault = [\"shimmed\"]\n\n\
+         [delivery]\nwake = \"command\"\nwake_args = [\"queue\", \"{text}\"]\n",
     );
 
     let config = DaemonConfig {
@@ -434,6 +434,87 @@ async fn list_profiles_carries_a_shim_profiles_guidance_apart_from_its_reason() 
             url: Some("https://a.test/native".to_string()),
         }),
         "the three parts travel apart, so a client can show, copy and open each: {shimmed:?}"
+    );
+}
+
+/// A profile whose `[effort]` template quotes the value (a cmd metacharacter outside
+/// `{value}`), whose `[model]` does not, and which hands a request over at launch.
+#[cfg(windows)]
+const LIMITED_PROFILE_TABLES: &str = "shim_guidance = { text = \"LIMITGUIDE use the WSL profile.\" }\n\n\
+     [command]\ndefault = [\"limited\"]\n\n[model]\nargs = [\"--model\", \"{value}\"]\n\n\
+     [effort]\nargs = [\"-c\", \"reasoning_effort=\\\"{value}\\\"\"]\n\n\
+     [delivery]\nwake = \"none\"\nlaunch_prompt = [\"--\", \"{prompt}\"]\n";
+
+#[cfg(windows)]
+#[tokio::test]
+async fn list_profiles_keeps_a_shim_profile_available_and_lists_what_it_cannot_pass() {
+    use yagura_protocol::ProfileCapability;
+
+    let tree = TempDir::new("yagura-cli-test", "ipc-profile-list-shim-limits");
+    let shim_bin = tree.make_dir("shimbin");
+    tree.write_file("shimbin/limited.cmd", "");
+    let native_bin = tree.make_dir("nativebin");
+    tree.write_file("nativebin/limited.exe", "");
+    let profiles_dir = tree.make_dir("profiles");
+    write_profile(
+        &profiles_dir,
+        "limited",
+        &format!("schema = 1\ndisplay_name = \"Limited\"\n{LIMITED_PROFILE_TABLES}"),
+    );
+    let guidance = ProfileGuidance {
+        text: "LIMITGUIDE use the WSL profile.".to_string(),
+        command: None,
+        url: None,
+    };
+
+    let harness = Harness::start(
+        "ipc-profile-list-shim-limits",
+        config_with(Some(profiles_dir.clone()), lookup_in(&shim_bin)),
+    )
+    .await;
+    let mut client = harness.connect().await;
+    let (profiles, _warnings) = call_list_profiles(&mut client).await;
+    let limited = find_profile(&profiles, "limited");
+
+    assert!(
+        limited.available,
+        "a limit is not a reason the profile cannot be opened: {limited:?}"
+    );
+    let mut capabilities: Vec<String> = limited
+        .limits
+        .iter()
+        .map(|limit| format!("{:?}", limit.capability))
+        .collect();
+    capabilities.sort();
+    assert_eq!(
+        capabilities,
+        vec![
+            format!("{:?}", ProfileCapability::Effort),
+            format!("{:?}", ProfileCapability::LaunchPrompt),
+        ],
+        "the quoted effort and the launch prompt cannot pass the shim; the bare model can: \
+         {limited:?}"
+    );
+    for limit in &limited.limits {
+        assert!(
+            limit.reason.contains("LIMITGUIDE use the WSL profile."),
+            "the reason carries the profile's own guidance: {limit:?}"
+        );
+        assert_eq!(limit.guidance.as_ref(), Some(&guidance), "{limit:?}");
+    }
+
+    let native = Harness::start(
+        "ipc-profile-list-native-limits",
+        config_with(Some(profiles_dir), lookup_in(&native_bin)),
+    )
+    .await;
+    let mut client = native.connect().await;
+    let (profiles, _warnings) = call_list_profiles(&mut client).await;
+    let limited = find_profile(&profiles, "limited");
+    assert!(limited.available, "{limited:?}");
+    assert!(
+        limited.limits.is_empty(),
+        "a native program passes every option: {limited:?}"
     );
 }
 
