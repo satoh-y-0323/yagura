@@ -3645,12 +3645,20 @@ impl IpcServer {
             return;
         }
 
-        let outbound = outbound.clone();
+        let RequestWatch { outbound, mut left } =
+            RequestWatch::quiet(&self.registry, outbound, state);
         let window_id = entry.window_id().to_string();
         let timeout = Duration::from_secs(timeout_sec);
         let wait_rx = entry.watch_status();
+        let now = entry.watch_status();
         state.waiters.push(tokio::spawn(async move {
-            let outcome = waiter::wait_for_status(wait_rx, target_status, timeout).await;
+            // A wait its requester's CLI has dropped ends as if its time ran out.
+            let outcome = tokio::select! {
+                outcome = waiter::wait_for_status(wait_rx, target_status, timeout) => outcome,
+                () = request_left(&mut left) => WaitOutcome::Timeout {
+                    current: now.borrow().status,
+                },
+            };
             send_wait_result(&outbound, &window_id, outcome, target_status);
         }));
     }
@@ -6093,6 +6101,14 @@ async fn withdraw_at_turn_end(
                 }
             }
         }
+    }
+}
+
+/// Resolves once a [`RequestWatch`]'s requester has left the request; never
+/// when the watch can no longer say so.
+async fn request_left(left: &mut watch::Receiver<bool>) {
+    if left.wait_for(|left| *left).await.is_err() {
+        std::future::pending::<()>().await;
     }
 }
 

@@ -481,8 +481,10 @@ which is why the server's `env` names them too.
    inside the distribution.
 6. **In WSL the MCP call time limit cannot be raised.** Muse's `-c` refuses `tool_timeout_sec`, so a
    `wsl-muse-code` window runs a long `wait_for_status`, `wait_for_report` or `send_message` under
-   Muse's own default limit, which has not been measured. A call Muse gives up on is released when
-   its turn ends. A registration sets `tool_timeout_sec = 86400` for `muse-code`.
+   Muse's own default limit, 5 minutes in Muse Code 1.4.12: ask for a shorter `timeout_sec`, or wait
+   again. A call Muse gives up on ends when its turn ends: a wait answers as if its time had run
+   out, and a `wait_for_report` takes no report, so one that arrives later waits for the next call.
+   A registration sets `tool_timeout_sec = 86400` for `muse-code`.
 7. **Interrupting before the first output puts the text back in the input line**, text yagura typed
    included (see [Limits](../crates/yagura-daemon/detection/README.md#limits)).
 8. **Muse may ask before each call to a yagura tool**, depending on its own automatic approval

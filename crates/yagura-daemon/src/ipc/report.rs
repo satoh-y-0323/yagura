@@ -39,6 +39,7 @@ use crate::window::{TaskOrigin, WindowEntry, WindowLiveness, WindowRegistry};
 use super::notice_queue;
 use super::plan::{self, PlanRuntime};
 use super::{ConnectionState, Outbound, error_msg, now_ms};
+use super::{RequestWatch, request_left};
 
 /// How many reports one window's inbox holds before `send_report` to it is
 /// refused with `resource_exhausted`.
@@ -675,12 +676,18 @@ pub(super) async fn handle_wait_for_report(
             "this connection already holds the maximum number of pending waits",
         )),
         Taken::Waiting(registration) => {
+            let RequestWatch { outbound, mut left } =
+                RequestWatch::quiet(&inboxes.registry, outbound, state);
             let inboxes = Arc::clone(inboxes);
             let ledger = Arc::clone(ledger);
-            let outbound = Arc::clone(outbound);
             let timeout = Duration::from_secs(timeout_sec);
             state.waiters.push(tokio::spawn(async move {
-                let reports = registration.wait(timeout).await;
+                // A wait its requester's CLI has dropped takes nothing: the
+                // dropped registration puts back what reached it.
+                let reports = tokio::select! {
+                    reports = registration.wait(timeout) => reports,
+                    () = request_left(&mut left) => Vec::new(),
+                };
                 reply_reports(&inboxes, &ledger, &outbound, &window_id, reports).await;
             }));
         }

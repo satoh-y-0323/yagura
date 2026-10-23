@@ -547,6 +547,57 @@ async fn a_handoff_is_answered_undelivered_when_its_requester_goes_from_running_
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
 
+/// A `wait_for_status` the requester dropped at the end of its turn ends then,
+/// as if its time had run out, instead of holding the connection until it does.
+#[tokio::test]
+async fn a_wait_for_status_ends_as_timed_out_when_its_requester_goes_from_running_to_waiting_input()
+{
+    let (mut stage, mut requester) =
+        stage("turn-end-wait-status", Some(&abandoned_table(true))).await;
+    send(
+        &mut requester,
+        &ClientMessage::WaitForStatus {
+            window_id: stage.receiver.clone(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: 300,
+        },
+    )
+    .await;
+
+    stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
+    match read_response(&mut requester, HANG_GUARD).await {
+        DaemonMessage::WaitResult {
+            window_id, outcome, ..
+        } => {
+            assert_eq!(window_id, stage.receiver);
+            assert_eq!(outcome, "timeout");
+        }
+        other => panic!("expected a timed-out wait_result, got {other:?}"),
+    }
+    expect_pong(&mut requester).await;
+}
+
+/// A `wait_for_report` the requester dropped at the end of its turn ends then
+/// with nothing taken, so a report arriving later is not handed to a call no
+/// one reads.
+#[tokio::test]
+async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_waiting_input() {
+    let (mut stage, mut requester) =
+        stage("turn-end-wait-report", Some(&abandoned_table(true))).await;
+    send(
+        &mut requester,
+        &ClientMessage::WaitForReport { timeout_sec: 300 },
+    )
+    .await;
+
+    stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
+    match read_response(&mut requester, HANG_GUARD).await {
+        DaemonMessage::Reports { reports, .. } => assert!(reports.is_empty(), "{reports:?}"),
+        other => panic!("expected an empty reports answer, got {other:?}"),
+    }
+    expect_pong(&mut requester).await;
+}
+
 /// After the answer, the requester's window may do anything: nothing is
 /// answered again, and the connection carries on.
 #[tokio::test]
