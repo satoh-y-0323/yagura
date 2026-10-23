@@ -104,7 +104,7 @@ pub struct Activity {
 /// `marker`, `separator` and `continuation_prefix` are required: if the
 /// `[composer]` table is present, all three keys must be provided.
 /// `blank_lines_in_body` is optional and defaults to `false`; `left_panel`
-/// is optional and has no default.
+/// and `placeholder` are optional and have no default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerRawSection {
@@ -128,6 +128,9 @@ pub struct ComposerRawSection {
     /// A regex pattern string; see [`ComposerSection::left_panel`].
     #[serde(default)]
     pub left_panel: Option<String>,
+    /// A regex pattern string; see [`ComposerSection::placeholder`].
+    #[serde(default)]
+    pub placeholder: Option<String>,
 }
 
 /// The compiled section of a definition that identifies the composer (input area)
@@ -157,6 +160,12 @@ pub struct ComposerSection {
     /// holding a visible character and all its matches end at the same
     /// column is the composer read from that column; otherwise from column 0.
     pub left_panel: Option<Regex>,
+    /// A compiled regex matching a hint the CLI draws in an empty composer
+    /// without dimming it. The composer reads as empty only when nothing is
+    /// typed left of the cursor on the marker row and one match spans that
+    /// row's whole visible text right of the cursor; any other hint reads as
+    /// occupied.
+    pub placeholder: Option<Regex>,
 }
 
 /// Raw values from a definition's optional `[input]` table: how the CLI this
@@ -630,6 +639,7 @@ fn validate_input_section(
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {
     let marker = compile_composer_pattern(raw.marker)?;
     let left_panel = raw.left_panel.map(compile_composer_pattern).transpose()?;
+    let placeholder = raw.placeholder.map(compile_composer_pattern).transpose()?;
 
     Ok(ComposerSection {
         marker,
@@ -637,6 +647,7 @@ fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, 
         continuation_prefix: raw.continuation_prefix,
         blank_lines_in_body: raw.blank_lines_in_body,
         left_panel,
+        placeholder,
     })
 }
 

@@ -30,6 +30,7 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
         continuation_prefix: continuation_prefix.to_string(),
         blank_lines_in_body: false,
         left_panel: None,
+        placeholder: None,
     }
 }
 
@@ -753,4 +754,107 @@ fn copilot_composer_beside_the_open_session_sidebar_reads_empty_and_as_the_wrapp
         ),
         other => panic!("expected the wrapped draft as Body, got {other:?}"),
     }
+}
+
+// =====================================================================
+// A CLI that draws its empty-composer hint in a color only (no dim
+// attribute) declares the hints as `placeholder`: a hint is Empty only
+// when nothing is typed left of the cursor and the whole visible text
+// matches; a draft or an unknown hint is never Empty.
+// =====================================================================
+
+const MUSE_HINTS: &str = concat!(
+    "^(?:Start a message with ! to run a shell command yourself",
+    "|Type @ to search and insert workspace file paths",
+    "|Ask to monitor a running build or log and get pinged on changes)$"
+);
+
+fn composer_with_hints() -> ComposerSection {
+    ComposerSection {
+        placeholder: Some(Regex::new(MUSE_HINTS).expect("test fixture pattern must compile")),
+        ..composer("^\u{276f}", " ", "  ")
+    }
+}
+
+#[test]
+fn muse_captured_hints_read_as_empty() {
+    let section = composer_with_hints();
+
+    for name in [
+        "100x30-placeholder-shell",
+        "100x30-placeholder-mention",
+        "100x30-placeholder-monitor",
+    ] {
+        match captured_screen("muse-code", name, 100, 30).read_composer(&section) {
+            ComposerReadout::Empty => {}
+            other => panic!("{name}: expected Empty, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn muse_captured_empty_composer_and_drafts_keep_their_reading() {
+    let section = composer_with_hints();
+
+    match captured_screen("muse-code", "100x30-empty", 100, 30).read_composer(&section) {
+        ComposerReadout::Empty => {}
+        other => panic!("expected Empty, got {other:?}"),
+    }
+    match captured_screen("muse-code", "100x30-draft", 100, 30).read_composer(&section) {
+        ComposerReadout::Body(text) => assert_eq!(text, "hello draft"),
+        other => panic!("expected Body, got {other:?}"),
+    }
+    match captured_screen("muse-code", "100x30-multiline-draft", 100, 30).read_composer(&section) {
+        ComposerReadout::Body(text) => assert_eq!(squeezed(&text), "fast-oneline-aline-b"),
+        other => panic!("expected Body, got {other:?}"),
+    }
+}
+
+/// A one-row Muse composer showing `text` after the marker, with the cursor
+/// either at the body's start (an untyped composer) or after the text.
+fn muse_row(text: &str, cursor_at_start: bool) -> VtScreen {
+    let mut screen = feed_rows(100, &[&format!("\u{276f} {text}")]);
+    if cursor_at_start {
+        move_cursor(&mut screen, 0, 2);
+    }
+    screen
+}
+
+#[test]
+fn a_hint_is_empty_only_when_it_is_the_whole_untyped_text() {
+    let section = composer_with_hints();
+    let hint = "Type @ to search and insert workspace file paths";
+
+    match muse_row(hint, true).read_composer(&section) {
+        ComposerReadout::Empty => {}
+        other => panic!("expected the untyped hint as Empty, got {other:?}"),
+    }
+
+    let longer = format!("{hint}x");
+    let readout = muse_row(&longer, true).read_composer(&section);
+    assert!(
+        !matches!(readout, ComposerReadout::Empty),
+        "a hint with one more character must not read as Empty, got {readout:?}"
+    );
+
+    match muse_row(hint, false).read_composer(&section) {
+        ComposerReadout::Body(text) => assert_eq!(text, hint),
+        other => panic!("a draft typed as the hint's words must be Body, got {other:?}"),
+    }
+    match muse_row(&longer, false).read_composer(&section) {
+        ComposerReadout::Body(text) => assert_eq!(text, longer),
+        other => panic!("expected Body, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unknown_hint_is_never_read_as_empty() {
+    let section = composer_with_hints();
+
+    let readout =
+        muse_row("Press Tab to cycle through suggested prompts", true).read_composer(&section);
+    assert!(
+        !matches!(readout, ComposerReadout::Empty),
+        "an unknown hint must not read as Empty, got {readout:?}"
+    );
 }

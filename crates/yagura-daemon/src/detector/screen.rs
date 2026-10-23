@@ -544,7 +544,8 @@ impl VtScreen {
     ///   also how a cursor parked in the middle of a body avoids reporting a
     ///   shortened one
     /// - `Empty` if the marker is found and nothing but dimmed drawing is in
-    ///   the composer
+    ///   the composer, or nothing is typed and the rest of the marker row is
+    ///   the section's `placeholder`
     /// - `Body(text)` if body text is successfully extracted and normalized
     /// - `Tail(text)` if continuation rows reach the top row without the
     ///   marker, and joining them (normalized as below) leaves text; with no
@@ -582,7 +583,13 @@ impl VtScreen {
         // call the composer empty.
         let right_of_cursor = self.visible_text(cursor, cursor_col, cols);
         if !right_of_cursor.trim().is_empty() {
-            return ComposerReadout::NotObserved;
+            let untyped_hint = marker_row == Some(cursor)
+                && is_untyped_hint(section, &cursor_line, &right_of_cursor);
+            return if untyped_hint {
+                ComposerReadout::Empty
+            } else {
+                ComposerReadout::NotObserved
+            };
         }
 
         // Lines from marker to cursor, each cut at the cursor's column on the
@@ -912,6 +919,34 @@ impl VtScreen {
 #[allow(clippy::panic)] // the seam exists to make the guarded call panic
 fn fire_poison_seam() {
     panic!("poison seam: simulated engine panic");
+}
+
+/// Whether the marker row holds only the section's `placeholder`: nothing but
+/// the marker and blanks left of the cursor, and one match spanning the whole
+/// visible text right of it, so a hint followed by anything else is not one.
+fn is_untyped_hint(
+    section: &crate::detector::definition::ComposerSection,
+    cursor_line: &str,
+    right_of_cursor: &str,
+) -> bool {
+    let Some(placeholder) = &section.placeholder else {
+        return false;
+    };
+    let Some(marker_match) = section.marker.find(cursor_line) else {
+        return false;
+    };
+    let after_marker = &cursor_line[marker_match.end()..];
+    let typed = match after_marker.find(&section.separator) {
+        Some(pos) => &after_marker[pos + section.separator.len()..],
+        None => after_marker,
+    };
+    if !typed.trim().is_empty() {
+        return false;
+    }
+    let hint = right_of_cursor.trim();
+    placeholder
+        .find(hint)
+        .is_some_and(|found| found.start() == 0 && found.end() == hint.len())
 }
 
 fn has_content_row(row: &Row<Cell>) -> bool {
