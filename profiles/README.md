@@ -679,11 +679,11 @@ same way `shell` refuses `model`. An interactive `agy` does not fail on a
 refused selection: it warns and falls back to its own default model, which
 is the outcome this profile's `[model]` aliases exist to avoid.
 
-Muse Code saves a level given with `--reasoning-effort` into the user's own
-settings, so the Muse profiles pass `effort` as the one-run override `-c
-reasoning_effort="<level>"` instead. On Windows `muse-code` starts Muse
-through its `.cmd` launcher, which cannot carry that `"`, so asking it for
-`effort` is refused before approval and points at `wsl-muse-code` (see
+The Muse profiles ship no `[effort]` table, so asking either for `effort` is
+refused. Muse saves a level given with `--reasoning-effort` into the user's
+own settings, and its one-run override `-c reasoning_effort="<level>"` is
+ignored unless those settings already hold the key (Muse Code 1.4.12), so
+there is no way to set it for one window (see
 [Configuring Muse Code CLI](../docs/mcp-setup.md#configuring-muse-code-cli)).
 Muse has no command that lists its models, so `[model.choices]` is a fixed
 list.

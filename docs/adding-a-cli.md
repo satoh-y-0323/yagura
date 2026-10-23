@@ -111,7 +111,9 @@ going to change, and when you are done restore it and compare it byte for byte w
   item).
 - A flag can be saved as the user's default: Muse Code writes `--reasoning-effort` into its
   settings file. Prefer a one-run override, and compare the settings file before and after a
-  launch.
+  launch. Then check that the override takes effect with the user's settings as they are: Muse's
+  `-c reasoning_effort=...` is ignored unless the settings already hold that key, which a probe
+  run after the flag had been saved once did not show.
 - A hook that ends with exit code 2 can block the user's prompt or keep the turn going. Make sure
   no door yagura's hooks call can exit 2 at that event.
 - An Enter sent right after the text can add a line instead of sending (Muse Code needs about

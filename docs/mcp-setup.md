@@ -455,14 +455,13 @@ which is why the server's `env` names them too.
 
 ### Muse Code limits
 
-1. **On Windows, `muse-code` cannot take an effort level or a start-up request.** Muse's Windows
-   launcher (`muse.cmd`, which runs PowerShell 5.1) drops `"` and `--` from its arguments. So
-   `open_window` with `effort`, a `send_handoff` that opens a new window, and an `open_task_window`
-   for a task with an instruction are refused as `unsupported` before approval, and the GUI shows
-   the same limits before a window is opened (see
-   [Shim guidance](../profiles/README.md#shim-guidance)). `wsl-muse-code` takes all three. This is
-   to be measured again once Muse's Windows entry point passes `"`, `--` and any other argument
-   through unchanged.
+1. **On Windows, `muse-code` cannot take a start-up request.** Muse's Windows launcher
+   (`muse.cmd`, which runs PowerShell 5.1) drops `"` and `--` from its arguments. So a
+   `send_handoff` that opens a new window and an `open_task_window` for a task with an instruction
+   are refused as `unsupported` before approval, and the GUI shows the same limit before a window
+   is opened (see [Shim guidance](../profiles/README.md#shim-guidance)). `wsl-muse-code` takes
+   both. This is to be measured again once Muse's Windows entry point passes `"`, `--` and any
+   other argument through unchanged.
 2. **With two instances registered, every Muse session starts both instances' servers** (`muse-code`
    only). Each entry names its instance by value, so in a window of one instance the other
    instance's server takes the window's variables to its own daemon, where they name no window,
@@ -491,6 +490,11 @@ which is why the server's `env` names them too.
 9. **yagura does not answer Muse's folder trust prompt.** In a folder Muse has not been told to
    trust, a window starts with it and shows `waiting_approval`; choose `Trust and continue` on its
    screen.
+10. **Neither Muse profile takes an effort level.** `--reasoning-effort` is saved as your own
+    default in Muse's settings, and the one-launch override `-c reasoning_effort=...` is ignored
+    unless your settings already hold `reasoning_effort` (Muse Code 1.4.12), so yagura has no way
+    to set it for one window and refuses `effort` for both profiles. Set it in Muse itself. This
+    is to be measured again with each Muse release.
 
 Run the GUI and the daemon from the same release (see
 [Registering from the GUI](#registering-from-the-gui)).

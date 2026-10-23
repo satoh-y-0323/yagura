@@ -22,16 +22,17 @@ strong = "muse-wonder-1.0"
 [model.choices]
 values = ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
 
-# No aliases: the levels pass through as given into the -c key=value override.
-[effort]
-args = ["-c", "reasoning_effort=\"{value}\""]
+# No [effort]: Muse has no way to set it for one launch. `--reasoning-effort`
+# is saved as the user's own default, and `-c reasoning_effort=...` is ignored
+# unless the user's settings already hold that key (Muse Code 1.4.12). Measure
+# again with each Muse release; once `-c` takes effect on its own, map it here.
 
 # On Windows `muse.cmd` wraps PowerShell 5.1, which drops `"` and `--` from
-# the arguments, so the effort and the start-up request cannot reach the CLI.
-# Measure again once Muse's Windows entry point passes `"`, `--` and arbitrary
-# arguments through unchanged; then these limits can go.
+# the arguments, so the start-up request cannot reach the CLI. Measure again
+# once Muse's Windows entry point passes `"`, `--` and arbitrary arguments
+# through unchanged; then this limit can go.
 [shim_guidance]
-text = "On Windows, Muse Code's launcher cannot pass an effort level or a start-up request; use the WSL: Muse Code profile (wsl-muse-code) for those."
+text = "On Windows, Muse Code's launcher cannot pass a start-up request; use the WSL: Muse Code profile (wsl-muse-code) for task windows and for a handoff that opens a new window."
 url = "https://github.com/satoh-y-0323/yagura/blob/main/docs/mcp-setup.md#configuring-muse-code-cli"
 
 # SessionStart runs on the first prompt, not at start-up. Muse takes plain
