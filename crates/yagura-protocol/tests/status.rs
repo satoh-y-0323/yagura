@@ -45,34 +45,6 @@ fn window_status_deserialize_rejects_anything_but_a_snake_case_wire_string() {
 }
 
 // ---------------------------------------------------------------------
-// Unknown gate: is_actionable()
-// ---------------------------------------------------------------------
-
-#[test]
-fn is_actionable_returns_false_for_unknown() {
-    assert!(!WindowStatus::Unknown.is_actionable());
-}
-
-#[test]
-fn is_actionable_returns_false_for_exited() {
-    assert!(!WindowStatus::Exited.is_actionable());
-}
-
-#[test]
-fn is_actionable_returns_true_for_every_other_status() {
-    let actionable = [
-        WindowStatus::Running,
-        WindowStatus::WaitingInput,
-        WindowStatus::WaitingApproval,
-        WindowStatus::Interrupted,
-        WindowStatus::Idle,
-    ];
-    for status in actionable {
-        assert!(status.is_actionable(), "{status:?} must be actionable");
-    }
-}
-
-// ---------------------------------------------------------------------
 // ClientMessage::StatusEvent (C->D)
 // ---------------------------------------------------------------------
 

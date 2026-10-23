@@ -9,12 +9,8 @@
 
 mod common;
 
-use std::ffi::OsString;
-use std::path::PathBuf;
-
 use yagura_test_support::paths::{TempDir, write_definition};
 
-use yagura_daemon::cli;
 use yagura_daemon::{DaemonConfig, WindowRegistry};
 
 /// Stimulus string that the definitions built here map to `Running`.
@@ -37,35 +33,6 @@ priority = 10
 region = "bottom"
 "#
     )
-}
-
-#[test]
-fn detection_dir_is_explicit_covers_the_five_combinations() {
-    let arg = PathBuf::from("some-arg-dir");
-    let env = OsString::from("some-env-dir");
-    let empty_env = OsString::new();
-
-    assert!(
-        cli::detection_dir_is_explicit(Some(arg.as_path()), None),
-        "arg alone must be explicit"
-    );
-    assert!(
-        cli::detection_dir_is_explicit(None, Some(env.as_os_str())),
-        "env alone must be explicit"
-    );
-    assert!(
-        cli::detection_dir_is_explicit(Some(arg.as_path()), Some(env.as_os_str())),
-        "both arg and env must be explicit"
-    );
-    assert!(
-        !cli::detection_dir_is_explicit(None, None),
-        "neither arg nor env must not be explicit"
-    );
-    assert!(
-        !cli::detection_dir_is_explicit(None, Some(empty_env.as_os_str())),
-        "an empty-string env value counts as unset, symmetric with resolve_playbook, so \
-         it must not put the directory layer into its exclusive mode"
-    );
 }
 
 // Each case's expected substring is a single named constant matched against

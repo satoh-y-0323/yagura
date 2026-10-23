@@ -117,9 +117,9 @@ export function resolveConfirmTarget(
 }
 
 /**
- * Mirrors the daemon-side `WindowStatus::is_actionable`. The predicate names
- * the statuses it excludes, so the refused arm takes its reason from the
- * status itself instead of restating which two those are.
+ * An unknown window is refused by the daemon's status gate, and an exited one
+ * has nothing left to interrupt. The predicate names the statuses it excludes,
+ * so the refused arm takes its reason from the status itself.
  */
 function isActionable(status: WindowStatus): status is Exclude<WindowStatus, InterruptBlockReason> {
   return status !== 'unknown' && status !== 'exited';

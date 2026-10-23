@@ -24,8 +24,3 @@ export function keyboardPlatformOf(navigatorPlatform: string): KeyboardPlatform 
 export function hostKeyboardPlatform(): KeyboardPlatform {
   return typeof navigator === 'undefined' ? 'linux' : keyboardPlatformOf(navigator.platform);
 }
-
-/** True when `platform` (e.g. `navigator.platform`) identifies a Windows host. */
-export function isWindowsPlatform(platform: string): boolean {
-  return keyboardPlatformOf(platform) === 'windows';
-}

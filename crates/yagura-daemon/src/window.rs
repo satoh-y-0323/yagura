@@ -3769,13 +3769,6 @@ impl WindowEntry {
             .observe(self.status_snapshot(), tokio::time::Instant::now())
     }
 
-    /// Whether this window is already known to be past its startup phase.
-    /// Unlike [`WindowEntry::startup_evidence`], reading it never latches.
-    #[must_use]
-    pub fn has_left_startup_phase(&self) -> bool {
-        self.ready_hold.is_latched()
-    }
-
     /// Records what a completed hold wait proved, so the next handoff into
     /// this window does not wait again.
     pub fn note_left_startup_phase(&self) {

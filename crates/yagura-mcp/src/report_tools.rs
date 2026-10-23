@@ -11,18 +11,11 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::tools::{ToolError, map_daemon_error, map_transport_error, require_non_empty};
-use crate::transport::{DaemonTransport, message_kind};
+use crate::tools::{
+    ToolError, map_daemon_error, map_transport_error, require_non_empty, unexpected_response,
+};
+use crate::transport::DaemonTransport;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome};
-
-/// A daemon response of a variant the calling tool did not ask for is always
-/// a contract violation, never a panic.
-fn unexpected_response(response: &DaemonMessage) -> ToolError {
-    ToolError::Internal(format!(
-        "unexpected daemon response: {}",
-        message_kind(response)
-    ))
-}
 
 /// Parses the caller's `outcome` string into the typed [`ReportOutcome`],
 /// reusing serde's snake_case vocabulary instead of a second parser.

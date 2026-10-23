@@ -337,7 +337,7 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
 
 /// A daemon response of a variant the calling tool did not ask for is always
 /// a contract violation, never a panic.
-fn unexpected_response(response: &DaemonMessage) -> ToolError {
+pub(crate) fn unexpected_response(response: &DaemonMessage) -> ToolError {
     ToolError::Internal(format!(
         "unexpected daemon response: {}",
         message_kind(response)

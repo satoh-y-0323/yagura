@@ -10,7 +10,7 @@
 
 use yagura_daemon::plan::{
     Assignment, AssignmentSource, PlanError, PlanSpec, TaskSpec, WriteConflict, WritePathError,
-    compute_waves, normalize_write_path, resolve_assignment, validate_plan,
+    compute_waves, group_waves, normalize_write_path, resolve_assignment, validate_plan,
 };
 
 const MAX_PLAN_TASKS: usize = 256;
@@ -94,6 +94,12 @@ fn compute_waves_treats_dependency_free_tasks_as_wave_zero() {
 
 // --- wave grouping order and determinism via validate_plan -------------------
 
+fn waves_of(plan: &yagura_daemon::plan::ValidatedPlan) -> Vec<Vec<String>> {
+    let ids: Vec<String> = plan.tasks.iter().map(|t| t.task_id.clone()).collect();
+    let numbers: Vec<u32> = plan.tasks.iter().map(|t| t.wave).collect();
+    group_waves(&ids, &numbers)
+}
+
 #[test]
 fn pc_w1_groups_wave_members_in_registration_order() {
     // a -> {b, c} -> d, registered a, b, c, d.
@@ -105,7 +111,7 @@ fn pc_w1_groups_wave_members_in_registration_order() {
     ]);
     let validated = validate_plan(&spec, no_profiles).expect("acyclic plan validates");
     assert_eq!(
-        validated.waves,
+        waves_of(&validated),
         vec![
             vec!["a".to_string()],
             vec!["b".to_string(), "c".to_string()],
@@ -149,7 +155,7 @@ fn pc_w2_wave_numbers_are_stable_when_tasks_are_reordered_but_grouping_follows_t
 
     // Only the *grouping order* within a wave follows the new registration order.
     assert_eq!(
-        first.waves,
+        waves_of(&first),
         vec![
             vec!["a".to_string()],
             vec!["b".to_string(), "c".to_string()],
@@ -157,7 +163,7 @@ fn pc_w2_wave_numbers_are_stable_when_tasks_are_reordered_but_grouping_follows_t
         ]
     );
     assert_eq!(
-        second.waves,
+        waves_of(&second),
         vec![
             vec!["a".to_string()],
             vec!["c".to_string(), "b".to_string()],

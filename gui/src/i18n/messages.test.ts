@@ -102,7 +102,6 @@ export const dummyMessages: Messages = {
     effortLimited: 'DUMMY_effortLimited',
   },
   themes: {
-    appLabel: 'DUMMY_appLabel',
     systemOption: 'DUMMY_systemOption',
     windowFollowsAppOption: 'DUMMY_windowFollowsAppOption',
     windowSelectLabel: 'DUMMY_windowSelectLabel',
@@ -114,7 +113,6 @@ export const dummyMessages: Messages = {
   },
   errors: {
     missingCommand: 'DUMMY_missingCommand',
-    invalidCommand: 'DUMMY_invalidCommand',
     closeWindowFailed: 'DUMMY_closeWindowFailed',
     interruptWindowFailed: 'DUMMY_interruptWindowFailed',
     renameWindowFailed: 'DUMMY_renameWindowFailed',
@@ -390,10 +388,6 @@ export const dummyMessages: Messages = {
     approvalPlaybookFailed: 'DUMMY_settings_approvalPlaybookFailed',
     approvalPlaybookNotConfigured: 'DUMMY_settings_approvalPlaybookNotConfigured',
     approvalPlaybookUnknown: 'DUMMY_settings_approvalPlaybookUnknown',
-    approvalStillRunsAutomatically: 'DUMMY_settings_approvalStillRunsAutomatically',
-    approvalStillWaitsForApproval: 'DUMMY_settings_approvalStillWaitsForApproval',
-    planStillReviewsFirst: 'DUMMY_settings_planStillReviewsFirst',
-    planStillRunsWithoutReview: 'DUMMY_settings_planStillRunsWithoutReview',
     approvalToolUpdateFailure: (id: string, reason: string, wasOn: boolean) =>
       `DUMMY_settings_approvalToolUpdateFailure(${id},${reason},${wasOn})`,
     planUpdateFailure: (id: string, reason: string, wasOn: boolean) =>

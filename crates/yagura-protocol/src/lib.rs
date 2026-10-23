@@ -356,17 +356,6 @@ pub enum WindowStatus {
     Unknown,
 }
 
-impl WindowStatus {
-    /// Returns `true` if this status represents an actionable state.
-    ///
-    /// States that return `false` are `Unknown` and `Exited`. These states
-    /// indicate either indeterminacy or finality, and should gate destructive
-    /// operations.
-    pub fn is_actionable(&self) -> bool {
-        !matches!(self, Self::Unknown | Self::Exited)
-    }
-}
-
 /// The reason [`DetectedStatus::Unknown`] carries when a window's status
 /// cannot be determined more specifically.
 ///

@@ -16,8 +16,8 @@
 //! `--shutdown` -- none of which starts a detection engine or an approval gate,
 //! just as `--source` qualifies `--emit-status` only.
 
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
@@ -332,17 +332,6 @@ pub fn resolve_detection_dir(
     } else {
         DetectionDirResolution::Unresolved
     }
-}
-
-/// Whether a detection directory was given explicitly, i.e. whether
-/// [`resolve_detection_dir`]'s stage (1)/(2) answers for these inputs.
-///
-/// An empty-string `env` counts as unset (`false`), symmetric with
-/// [`resolve_playbook`]: exporting `YAGURA_DETECTION_DIR=` must not switch
-/// the daemon into the exclusive mode an explicit directory implies.
-#[must_use]
-pub fn detection_dir_is_explicit(arg: Option<&Path>, env: Option<&OsStr>) -> bool {
-    arg.is_some() || env.is_some_and(|value| !value.is_empty())
 }
 
 /// Resolves the playbook path: (1) `--playbook`, (2) the `YAGURA_PLAYBOOK`

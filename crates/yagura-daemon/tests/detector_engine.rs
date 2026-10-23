@@ -278,22 +278,6 @@ async fn an_arrival_notice_with_no_new_output_keeps_the_screen_and_its_status() 
     assert_eq!(engine.status(), WindowStatus::WaitingApproval);
 }
 
-#[test]
-fn is_actionable_returns_false_for_unknown_and_exited() {
-    assert!(!WindowStatus::Unknown.is_actionable());
-    assert!(!WindowStatus::Exited.is_actionable());
-
-    for status in [
-        WindowStatus::Running,
-        WindowStatus::WaitingInput,
-        WindowStatus::WaitingApproval,
-        WindowStatus::Interrupted,
-        WindowStatus::Idle,
-    ] {
-        assert!(status.is_actionable(), "{status:?} must be actionable");
-    }
-}
-
 // --- pattern matching ------------------------------------------------------
 
 #[tokio::test]

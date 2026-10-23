@@ -305,27 +305,17 @@ describe('isApprovalSettingsReadOnly', () => {
 });
 
 describe('approvalUpdateFailure', () => {
-  const CONSEQUENCES = {
-    toolOn: () => text(settings.approvalStillRunsAutomatically),
-    toolOff: () => text(settings.approvalStillWaitsForApproval),
-    planOn: () => text(settings.planStillReviewsFirst),
-    planOff: () => text(settings.planStillRunsWithoutReview),
-  };
-
-  it.each<[string, string, boolean, 'tool' | 'plan', keyof typeof CONSEQUENCES]>([
-    ['a tool that was running automatically', 'send_keys', true, 'tool', 'toolOn'],
-    ['a tool that was waiting for approval', 'send_keys', false, 'tool', 'toolOff'],
-    ['the plan gate that was on', 'require_approval', true, 'plan', 'planOn'],
-    ['the plan gate that was off', 'require_approval', false, 'plan', 'planOff'],
-  ])('reports %s as still in its old state', (_label, id, wasOn, kind, expected) => {
+  it.each<[string, boolean, 'tool' | 'plan']>([
+    ['send_keys', true, 'tool'],
+    ['send_keys', false, 'tool'],
+    ['require_approval', true, 'plan'],
+    ['require_approval', false, 'plan'],
+  ])('names %s and the reason (was on: %s, %s)', (id, wasOn, kind) => {
     const reason = 'the playbook could not be written';
     const line: string = approvalUpdateFailure(id, reason, wasOn, kind);
 
     expect(line).toContain(id);
     expect(line).toContain(reason);
-    for (const [key, consequence] of Object.entries(CONSEQUENCES)) {
-      expect(line.includes(consequence()), key).toBe(key === expected);
-    }
   });
 
   it('gives each of the four cases its own line', () => {

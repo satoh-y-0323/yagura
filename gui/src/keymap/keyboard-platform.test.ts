@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   hostKeyboardPlatform,
-  isWindowsPlatform,
   keyboardPlatformOf,
   type KeyboardPlatform,
 } from './keyboard-platform';
@@ -28,24 +27,6 @@ describe('keyboardPlatformOf', () => {
   it('matches only at the start of the string, so a platform merely mentioning Mac is not mac', () => {
     const platform: KeyboardPlatform = keyboardPlatformOf('Linux (not MacIntel)');
     expect(platform).toBe('linux');
-  });
-});
-
-describe('isWindowsPlatform', () => {
-  it.each<[string, boolean]>([
-    ['Win32', true],
-    ['MacIntel', false],
-    ['Linux x86_64', false],
-  ])('answers %j with %s', (navigatorPlatform, expected) => {
-    const isWindows: boolean = isWindowsPlatform(navigatorPlatform);
-    expect(isWindows).toBe(expected);
-  });
-
-  it('agrees with keyboardPlatformOf so the two cannot drift into different answers', () => {
-    for (const navigatorPlatform of ['Win32', 'MacIntel', 'iPad', 'Linux x86_64', '']) {
-      const platform: KeyboardPlatform = keyboardPlatformOf(navigatorPlatform);
-      expect(isWindowsPlatform(navigatorPlatform), navigatorPlatform).toBe(platform === 'windows');
-    }
   });
 });
 

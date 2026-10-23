@@ -142,18 +142,11 @@ impl ChangePermit {
 /// liveness, so this carries no guard.
 #[derive(Debug)]
 pub struct ReadPermit {
-    // Read only through `plan_id()` below, whose own caller is the IPC
-    // layer that wires `issue_read`'s `Ok` result to `PlanStore::get_plan`
-    // -- outside this crate's plan-ledger core, so `-D warnings`' dead-code
-    // lint sees no reader yet. Kept, rather than dropped, so the type
-    // matches the contract this module's own tests were written against.
-    #[allow(dead_code)]
     plan_id: String,
 }
 
 impl ReadPermit {
     /// The plan this permit licenses reading.
-    #[allow(dead_code)]
     pub(crate) fn plan_id(&self) -> &str {
         &self.plan_id
     }

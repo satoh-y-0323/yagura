@@ -133,9 +133,6 @@ pub struct ValidatedPlan {
     pub title: String,
     /// Tasks, in the same order as the submitted [`PlanSpec`].
     pub tasks: Vec<ValidatedTask>,
-    /// `task_id`s grouped by wave number; within a group, tasks keep their
-    /// registration order.
-    pub waves: Vec<Vec<String>>,
 }
 
 /// One pair of tasks whose normalized write targets collide without being
@@ -613,24 +610,6 @@ pub fn validate_plan(
         return Err(errors);
     }
 
-    let mut grouped: Vec<Vec<usize>> = Vec::new();
-    for (i, &wave) in topo.wave.iter().enumerate() {
-        let wave = wave as usize;
-        if grouped.len() <= wave {
-            grouped.resize_with(wave + 1, Vec::new);
-        }
-        grouped[wave].push(i);
-    }
-    let waves: Vec<Vec<String>> = grouped
-        .into_iter()
-        .map(|indices| {
-            indices
-                .into_iter()
-                .map(|i| spec.tasks[i].task_id.clone())
-                .collect()
-        })
-        .collect();
-
     let tasks: Vec<ValidatedTask> = spec
         .tasks
         .iter()
@@ -654,8 +633,25 @@ pub fn validate_plan(
     Ok(ValidatedPlan {
         title: spec.title.clone(),
         tasks,
-        waves,
     })
+}
+
+/// Groups `task_ids` by the wave number at the same index in
+/// `wave_numbers` (as [`compute_waves`] returns them), tasks within a wave
+/// kept in `task_ids`' own order.
+#[must_use]
+pub fn group_waves(task_ids: &[String], wave_numbers: &[u32]) -> Vec<Vec<String>> {
+    let mut waves: Vec<Vec<String>> = Vec::new();
+    for (id, &wave) in task_ids.iter().zip(wave_numbers) {
+        let index = wave as usize;
+        if waves.len() <= index {
+            waves.resize_with(index + 1, Vec::new);
+        }
+        if let Some(bucket) = waves.get_mut(index) {
+            bucket.push(id.clone());
+        }
+    }
+    waves
 }
 
 /// Resolves a task's profile/model/effort assignment: the user override

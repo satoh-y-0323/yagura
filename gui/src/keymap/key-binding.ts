@@ -17,14 +17,6 @@ export type ActionId =
   | 'toggle-plans'
   | 'toggle-settings';
 
-export interface KeyPress {
-  key: string;
-  ctrlKey: boolean;
-  altKey: boolean;
-  shiftKey: boolean;
-  metaKey: boolean;
-}
-
 export type KeyMap = Map<string, ActionId>;
 
 /**
@@ -45,38 +37,6 @@ export const ACTION_IDS: readonly ActionId[] = [
   'toggle-plans',
   'toggle-settings',
 ];
-
-/**
- * Resolve a key press to an action using the given keymap.
- *
- * The modifiers (ctrl, alt, shift, meta) must match the chord exactly:
- * if the chord requires Ctrl+Alt, then exactly those two must be held.
- * Extra or missing modifiers result in null.
- *
- * @param keyPress - The key press to resolve
- * @param keymap - The keymap to use for resolution
- * @returns The action ID if the key press matches a binding, null otherwise
- */
-export function resolveAction(keyPress: KeyPress, keymap: KeyMap): ActionId | null {
-  if (!keyPress.ctrlKey && !keyPress.altKey && !keyPress.shiftKey && !keyPress.metaKey) {
-    return null;
-  }
-
-  const chord = chordOf(
-    {
-      ctrl: keyPress.ctrlKey,
-      alt: keyPress.altKey,
-      shift: keyPress.shiftKey,
-      meta: keyPress.metaKey,
-    },
-    keyPress.key
-  );
-
-  const action = keymap.get(chord);
-
-  // Re-validated at runtime: the map may come from an external keymap file.
-  return action !== undefined && ACTION_IDS.includes(action) ? action : null;
-}
 
 /** A chord split into its modifiers and key. */
 export interface ParsedChord {
@@ -153,16 +113,4 @@ export function parseChord(chord: string): ParsedChord | null {
     meta: modifierParts.includes('Meta'),
     key,
   };
-}
-
-/**
- * Validate chord syntax and return the canonical form if valid, null otherwise.
- * At least one modifier is required.
- */
-export function validateChord(chord: string): string | null {
-  const parsed = parseChord(chord);
-  if (parsed === null || !(parsed.ctrl || parsed.alt || parsed.shift || parsed.meta)) {
-    return null;
-  }
-  return chord;
 }

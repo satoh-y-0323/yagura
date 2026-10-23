@@ -1443,24 +1443,6 @@ fn task_spec_from_record(record: &PlanTaskRecord) -> plan::TaskSpec {
     }
 }
 
-/// Groups `task_ids` by the wave number at the same index in
-/// `wave_numbers`, tasks within a wave kept in `task_ids`' own order --
-/// exactly the grouping [`plan::validate_plan`] itself produces, reshaped
-/// from [`plan::compute_waves`]'s flat output rather than re-derived.
-fn group_waves(task_ids: &[String], wave_numbers: &[u32]) -> Vec<Vec<String>> {
-    let mut waves: Vec<Vec<String>> = Vec::new();
-    for (id, &wave) in task_ids.iter().zip(wave_numbers) {
-        let index = wave as usize;
-        if waves.len() <= index {
-            waves.resize_with(index + 1, Vec::new);
-        }
-        if let Some(bucket) = waves.get_mut(index) {
-            bucket.push(id.clone());
-        }
-    }
-    waves
-}
-
 /// Builds the wire [`PlanInfo`] for a stored plan, resolving each task's
 /// assignment against `roles` (`None` when the table could not be read,
 /// `roles_warning` carrying why).
@@ -1476,7 +1458,7 @@ fn build_plan_info_from_detail(
         .iter()
         .map(|task| task.task_id.clone())
         .collect();
-    let waves = group_waves(&task_ids, &wave_numbers);
+    let waves = plan::group_waves(&task_ids, &wave_numbers);
 
     let tasks = detail
         .tasks

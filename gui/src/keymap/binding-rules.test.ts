@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { validateBinding, type BindingRejection } from './binding-rules';
-import { validateChord } from './key-binding';
 import type { KeyEventLike } from './key-chord';
 import type { KeyboardPlatform } from './keyboard-platform';
 import { isReloadKey } from './reload-keys';
@@ -38,17 +37,10 @@ function expectRejection(
   expect(rejection, `${chord} on ${platform}`).toBe(expected);
 }
 
-describe('validateChord is shared with the binding rules', () => {
-  it('returns the canonical chord for a well-formed one', () => {
-    const canonical: string | null = validateChord('Ctrl+Shift+a');
-    expect(canonical).toBe('Ctrl+Shift+a');
-  });
-
+describe('a malformed chord', () => {
   it.each(['Shift+Ctrl+a', 'Ctrl+A', 'Ctrl+', 'Hyper+a', 'Ctrl++', ''])(
-    'rejects the malformed chord %j and so does validateBinding',
+    'rejects the malformed chord %j',
     (chord) => {
-      const canonical: string | null = validateChord(chord);
-      expect(canonical).toBeNull();
       for (const platform of ALL_PLATFORMS) {
         expectRejection(chord, platform, 'invalid-chord');
       }

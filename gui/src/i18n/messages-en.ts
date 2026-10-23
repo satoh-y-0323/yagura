@@ -7,11 +7,7 @@
 const RESTART_CLOSES_ALL_WINDOWS =
   'Restarting the daemon closes every window that is currently open.';
 
-/**
- * The consequence lines `settings.approvalUpdateFailure` picks from, held as
- * constants so the switch/plan wording travels identically whether it is
- * quoted standalone (`settings.approvalStill*`) or inside that sentence.
- */
+/** The consequence lines the two update-failure sentences pick from. */
 const APPROVAL_STILL_RUNS_AUTOMATICALLY = 'It still runs automatically.';
 const APPROVAL_STILL_WAITS_FOR_APPROVAL = 'It still waits for your approval.';
 const PLAN_STILL_REVIEWS_FIRST = 'It still reviews new plans before they run.';
@@ -208,7 +204,6 @@ export const messagesEn = {
   },
 
   themes: {
-    appLabel: 'Theme',
     systemOption: 'System',
     windowFollowsAppOption: 'Same as app',
     windowSelectLabel: 'Theme for this window',
@@ -228,7 +223,6 @@ export const messagesEn = {
 
   errors: {
     missingCommand: 'A command is required',
-    invalidCommand: 'The command has to be non-empty text',
     closeWindowFailed: 'Could not close the window',
     interruptWindowFailed: 'Could not interrupt the process',
     renameWindowFailed: 'Could not rename the window',
@@ -808,11 +802,6 @@ export const messagesEn = {
     approvalPlaybookUnknown:
       'This daemon reported a playbook state this build does not recognize, so approval ' +
       'settings are read-only until you update yagura.',
-
-    approvalStillRunsAutomatically: APPROVAL_STILL_RUNS_AUTOMATICALLY,
-    approvalStillWaitsForApproval: APPROVAL_STILL_WAITS_FOR_APPROVAL,
-    planStillReviewsFirst: PLAN_STILL_REVIEWS_FIRST,
-    planStillRunsWithoutReview: PLAN_STILL_RUNS_WITHOUT_REVIEW,
 
     /**
      * Split into a tool line and a plan line, rather than one function taking

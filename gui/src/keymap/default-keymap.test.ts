@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { validateBinding } from './binding-rules';
 import { defaultKeysFor } from './default-keymap';
 import type { KeyboardPlatform } from './keyboard-platform';
-import { ACTION_IDS, validateChord, type ActionId } from './key-binding';
+import { ACTION_IDS, type ActionId } from './key-binding';
 
 const PLATFORMS: readonly KeyboardPlatform[] = ['windows', 'mac', 'linux'];
 
@@ -64,13 +64,6 @@ describe.each(PLATFORMS)('the default table on %s', (platform) => {
   it('never puts one chord on two actions', () => {
     const chords = ACTION_IDS.map((action) => table[action]);
     expect(new Set(chords).size).toBe(chords.length);
-  });
-
-  it('is written in the canonical chord form', () => {
-    for (const action of ACTION_IDS) {
-      const canonical: string | null = validateChord(table[action]);
-      expect(canonical, `${action}: ${table[action]}`).toBe(table[action]);
-    }
   });
 
   it('breaks none of the rules a user binding has to obey', () => {
