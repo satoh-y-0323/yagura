@@ -2012,6 +2012,37 @@ fn an_unknown_key_in_a_launch_option_table_is_refused_while_the_document_is_read
 }
 
 #[test]
+fn an_unknown_top_level_or_command_key_is_refused_while_the_document_is_read() {
+    for (case, source) in [
+        (
+            "a misspelt table heading",
+            "schema = 1
+display_name = \"X\"
+[command]
+default = [\"x\"]
+[hook]
+args = []
+",
+        ),
+        (
+            "an unknown [command] key",
+            "schema = 1
+display_name = \"X\"
+[command]
+default = [\"x\"]
+window = [\"y\"]
+",
+        ),
+    ] {
+        let err = parse_profile("unknown-key", source).expect_err(case);
+        assert!(
+            matches!(err, ProfileParseError::Toml(_)),
+            "{case}: a key the profile does not take must leave it out of the listing              rather than be ignored, got {err:?}"
+        );
+    }
+}
+
+#[test]
 fn a_launch_option_warning_never_carries_a_value_read_from_the_document() {
     let tree = TempDir::new("yagura-cli-test", "profile-list-launch-option-excluded");
     let dir = tree.make_dir("profiles");

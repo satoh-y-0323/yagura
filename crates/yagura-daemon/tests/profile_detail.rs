@@ -114,17 +114,26 @@ fn a_profile_of_the_users_own_has_no_shipped_values() {
 fn an_array_of_tables_is_one_value_holding_each_table() {
     let tree = TempDir::new("yagura-cli-test", "detail-array-of-tables");
     let dir = tree.make_dir("profiles");
-    std::fs::write(
-        dir.join("my-tool.toml"),
-        "schema = 1\ndisplay_name = \"My tool\"\n\n[command]\ndefault = [\"my-tool\"]\n\n[[notes]]\ntext = \"a\"\n\n[[notes]]\ntext = \"b\"\n",
-    )
-    .unwrap();
 
-    let detail = read_profile_detail(&config(dir), "my-tool").unwrap();
+    let detail = read_profile_detail(&config(dir), "muse-code").unwrap();
 
+    let value = &entry(&detail.entries, &["mcp_registration", "json_entry"]).value;
+    let files: Vec<&str> = value
+        .as_array()
+        .expect("an array of tables is one array value")
+        .iter()
+        .map(|table| {
+            table["file"]
+                .as_str()
+                .expect("each table keeps its own keys")
+        })
+        .collect();
     assert_eq!(
-        entry(&detail.entries, &["notes"]).value,
-        json!([{ "text": "a" }, { "text": "b" }])
+        files,
+        [
+            ".config/muse/settings.json",
+            ".config/muse/yagura-managed-hooks.json"
+        ]
     );
 }
 

@@ -748,10 +748,11 @@ pub fn validate_profile_id(id: &str) -> bool {
 }
 
 /// Raw, pre-validation representation of a profile document. Structural
-/// rejection (a missing `schema` or `display_name`, or a `[command]`/`[env]`
-/// table of the wrong shape) happens here, through `serde`/`toml`, and
-/// surfaces as [`ProfileParseError::Toml`].
+/// rejection (a missing `schema` or `display_name`, an unknown key, or a
+/// `[command]`/`[env]` table of the wrong shape) happens here, through
+/// `serde`/`toml`, and surfaces as [`ProfileParseError::Toml`].
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawProfile {
     schema: u32,
     display_name: String,
@@ -913,6 +914,7 @@ impl<'de> Deserialize<'de> for OrderedAliases {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCommand {
     #[serde(default)]
     default: Option<Vec<String>>,

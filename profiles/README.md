@@ -96,10 +96,9 @@ own file sets.
 schema = 1                     # required; must be 1
 enabled = true                 # optional; defaults to true when omitted. Must
                                 # be written before the file's first `[table]`
-                                # heading -- inside a table it is either
-                                # ignored or excludes the whole profile,
-                                # depending on that table's own rule. See
-                                # "Disabling a profile" below
+                                # heading -- inside a table it is a key that
+                                # table does not take, and excludes the whole
+                                # profile. See "Disabling a profile" below
 display_name = "Codex CLI"     # required; becomes the window's default name,
                                 # so it must satisfy the window-label rule
                                 # (non-empty, at most 128 UTF-8 bytes, no
@@ -187,7 +186,8 @@ whose content fails validation, is left out of the listing entirely, with
 one warning line naming it -- it never stops the rest of the directory from
 being read.
 
-A profile document fails validation outright (and is excluded) when: `schema`
+A profile document fails validation outright (and is excluded) when: it
+has a top-level key or a `[command]` key not listed here; `schema`
 is not `1`; `display_name` is missing or violates the window-label rule; any
 argv element under `[command]` is empty or contains a NUL byte; a
 `[model]` / `[effort]` table breaks one of the rules under
