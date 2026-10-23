@@ -3,8 +3,9 @@
 **Run agent CLIs from different vendors side by side, and let them work together.**
 
 yagura is a desktop app that runs any command -- Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Muse Code, or a plain shell -- in its own window, tells you at a glance which window is working and which one is
-waiting for you, and gives the agents in those windows an MCP server to see and talk to each other.
+Copilot CLI, Muse Code, or a plain shell -- in its own window, tells you at a glance which window
+is working and which one is waiting for you, and gives the agents in those windows an MCP server to
+see and talk to each other.
 You stay in control: anything one agent does to another window waits for your approval unless you
 allow it.
 
@@ -34,7 +35,9 @@ allow it.
 **Agents that work together**
 
 - `yagura-mcp` gives an agent tools to list, open, read, message and close windows. Windows opened
-  from the bundled Claude Code and Codex CLI profiles are connected automatically.
+  from the bundled Claude Code, Codex CLI and GitHub Copilot CLI profiles, and from the WSL Muse
+  Code profile, are connected automatically; register yagura in Settings > Integrations for
+  Antigravity CLI and Muse Code.
 - **Handoff**: pass a reference and a note to another window -- or to a new one, opened with the
   CLI you choose -- and learn whether its CLI took it.
 - **Chat rooms**: agents and you post to each other with `@name`, `@parent` and `@user`. A room
@@ -76,11 +79,11 @@ allow it.
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Muse Code), installed
-and signed in as usual. yagura does not install or sign in to them for you. On Windows, install
-Codex CLI's standalone build rather than the npm package: yagura wakes a waiting Codex CLI with a
-command that the npm package's `.cmd` launcher cannot pass text through, and lists the Codex CLI
-profile as unavailable until the standalone build is first on `PATH` (see
+Copilot CLI, Muse Code), installed and signed in as usual. yagura does not install or sign in to
+them for you. On Windows, install Codex CLI's standalone build rather than the npm package: yagura
+wakes a waiting Codex CLI with a command that the npm package's `.cmd` launcher cannot pass text
+through, and lists the Codex CLI profile as unavailable until the standalone build is first on
+`PATH` (see
 [profiles/README.md](profiles/README.md#delivery)).
 
 ## Quick Start

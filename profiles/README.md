@@ -1133,6 +1133,7 @@ window, which covers a hook written by hand without the check. The
 `wsl-muse-code` hooks file is passed with each launch and read only by that
 window's CLI, so its commands carry no check.
 
+## Delivery
 
 A profile's optional `[delivery]` table says how the daemon hands the profile's CLI the text it sends of its own accord -- chat, handoffs and notices -- without typing it into the composer. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
 
