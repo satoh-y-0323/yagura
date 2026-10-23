@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "productName": "yagura",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "io.github.satoh-y-0323.yagura",
   "build": {
     "beforeBuildCommand": "npm run type-check && node scripts/prepare-sidecar.mjs",
