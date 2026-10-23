@@ -456,6 +456,7 @@ describe('invokeListProfiles', () => {
         model: null,
         effort: null,
         enabled: true,
+        limits: [],
       },
     ]);
   });
@@ -688,6 +689,60 @@ describe('invokeListProfiles', () => {
       });
 
       await expect(invokeListProfiles()).rejects.toThrow(BoundaryError);
+    });
+  });
+
+  /**
+   * `limits` lists what a launchable profile cannot do on this host, apart
+   * from `available`. A daemon that predates the field reports none.
+   */
+  describe('limits', () => {
+    it('carries each limit of a launchable profile, with its guidance', async () => {
+      invokeMock.mockResolvedValueOnce({
+        profiles: [
+          {
+            ...RAW_PROFILE,
+            available: true,
+            limits: [
+              {
+                capability: 'effort',
+                reason: 'the launcher drops quotes',
+                guidance: {
+                  text: 'Use the native program.',
+                  command: 'install alpha',
+                  url: 'https://example.invalid/alpha',
+                },
+              },
+              { capability: 'launch_prompt', reason: 'the launcher drops --', guidance: null },
+            ],
+          },
+        ],
+        warnings: [],
+      });
+
+      const result = await invokeListProfiles();
+
+      expect(result.profiles[0]?.available).toBe(true);
+      expect(result.profiles[0]?.limits).toEqual([
+        {
+          capability: 'effort',
+          reason: 'the launcher drops quotes',
+          guidance: {
+            text: 'Use the native program.',
+            command: 'install alpha',
+            url: 'https://example.invalid/alpha',
+          },
+        },
+        { capability: 'launch_prompt', reason: 'the launcher drops --', guidance: null },
+      ]);
+    });
+
+    it('reads a missing limits key as no limits', async () => {
+      invokeMock.mockResolvedValueOnce({ profiles: [RAW_PROFILE], warnings: [] });
+
+      const result = await invokeListProfiles();
+
+      expect(result.profiles[0]?.limits).toEqual([]);
     });
   });
 });

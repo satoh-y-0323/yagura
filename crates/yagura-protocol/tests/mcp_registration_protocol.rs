@@ -14,6 +14,8 @@
 //!   unrecognized value decodes to it without failing the frame.
 //! - Every optional field accepts both `null` and an omitted key as "not
 //!   carried".
+//! - A row may carry no `add` / `remove` command (a registration that only
+//!   writes files); what it writes travels under `entries`.
 //! - Both requests require `MCP_REGISTRATION_MIN_REVISION` (also see
 //!   `required_revision.rs`'s per-variant corpus).
 
@@ -70,10 +72,10 @@ fn sample_row() -> McpRegistrationRow {
         profile: "cli-host".to_string(),
         display_name: "CLI".to_string(),
         group: Some("host".to_string()),
-        add: sample_command("add"),
-        remove: sample_command("remove"),
+        add: Some(sample_command("add")),
+        remove: Some(sample_command("remove")),
         toml_set: Some(sample_toml_set()),
-        hook_entries: Vec::new(),
+        entries: Vec::new(),
     }
 }
 
@@ -85,6 +87,7 @@ fn sample_status(state: McpRegistrationState) -> McpRegistrationStatusInfo {
         reason: Some("a fixed reason".to_string()),
         add: Some(sample_command("add")),
         remove: Some(sample_command("remove")),
+        refused_by_claim: Some("/managed_hooks_path".to_string()),
     }
 }
 
@@ -474,6 +477,128 @@ fn an_absent_result_error_is_carried_as_none() {
             DaemonMessage::McpRegistrationResult { error: None, .. }
         )
     });
+}
+
+#[test]
+fn an_absent_status_refused_by_claim_is_carried_as_none() {
+    assert_absent_is_carried_as_none(
+        &sample_status_push(),
+        "/status",
+        "refused_by_claim",
+        |message| pushed_status(message).refused_by_claim.is_none(),
+    );
+}
+
+#[test]
+fn a_status_refused_by_a_claim_carries_the_claim_pointer_through_a_round_trip() {
+    let decoded = decoded_status(&to_bytes(&serde_json::json!({
+        "type": "mcp_registration_status",
+        "request_id": 1,
+        "status": {
+            "profile": "cli-host",
+            "state": "differs",
+            "differs_in": ["/managed_hooks_path"],
+            "reason": null,
+            "add": null,
+            "remove": null,
+            "refused_by_claim": "/managed_hooks_path",
+        },
+    })));
+    assert_eq!(
+        decoded.refused_by_claim.as_deref(),
+        Some("/managed_hooks_path"),
+        "a status Register / Update would refuse must name the claim that refuses it"
+    );
+    assert_eq!(
+        as_json(&decoded)["refused_by_claim"],
+        serde_json::json!("/managed_hooks_path"),
+        "the claim pointer must be written back under the same key"
+    );
+}
+
+// =============================================================================
+// A registration that has no add / remove command of its own.
+// =============================================================================
+
+fn commandless_listed_frame() -> Vec<u8> {
+    to_bytes(&serde_json::json!({
+        "type": "mcp_registrations_listed",
+        "request_id": 7,
+        "bridge": null,
+        "rows": [{
+            "profile": "file-host",
+            "display_name": "File host",
+            "group": null,
+            "toml_set": null,
+            "entries": [
+                {
+                    "file": ".cli/settings.json",
+                    "name": "/mcpServers/yagura",
+                    "content": "{\"command\":\"bridge\"}",
+                },
+                {
+                    "file": ".cli/hooks.json",
+                    "name": "/hooks",
+                    "content": "{}",
+                },
+            ],
+        }],
+    }))
+}
+
+#[test]
+fn a_row_without_add_and_remove_decodes_and_writes_neither_key_back() {
+    let decoded = decode_daemon_message(&commandless_listed_frame())
+        .expect("a row with no add / remove command must decode");
+    let row: &McpRegistrationRow = &listed_rows(&decoded)[0];
+    assert!(
+        row.add.is_none(),
+        "an absent add must decode as none, got {row:?}"
+    );
+    assert!(
+        row.remove.is_none(),
+        "an absent remove must decode as none, got {row:?}"
+    );
+
+    let written = as_json(&decoded);
+    let object = written
+        .pointer("/rows/0")
+        .and_then(serde_json::Value::as_object)
+        .expect("the row is an object");
+    for key in ["add", "remove", "hook_entries"] {
+        assert!(
+            !object.contains_key(key),
+            "a row without a command must not write {key:?}, got {written}"
+        );
+    }
+    assert_eq!(
+        decode_daemon_message(&encode_daemon_message(&decoded)).expect("must round trip"),
+        decoded
+    );
+}
+
+#[test]
+fn a_row_carries_what_registration_writes_under_entries() {
+    let decoded =
+        decode_daemon_message(&commandless_listed_frame()).expect("a row with entries must decode");
+    let written = as_json(&decoded);
+    assert_eq!(
+        written.pointer("/rows/0/entries"),
+        Some(&serde_json::json!([
+            {
+                "file": ".cli/settings.json",
+                "name": "/mcpServers/yagura",
+                "content": "{\"command\":\"bridge\"}",
+            },
+            {
+                "file": ".cli/hooks.json",
+                "name": "/hooks",
+                "content": "{}",
+            },
+        ])),
+        "every file, pointer and value registration writes must survive under entries, \
+         got {written}"
+    );
 }
 
 // =============================================================================

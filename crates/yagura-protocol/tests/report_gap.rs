@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! Wire revision 14: the mark that a window's status reports stopped arriving
-//! (`WindowInfo.status_reports_missing`), the hook entries a registration
-//! writes (`McpRegistrationRow.hook_entries`), and the removal of
-//! `StatusEvent.ttl_ms`.
+//! (`WindowInfo.status_reports_missing`), the entries a registration writes
+//! (`McpRegistrationRow.entries`, named `hook_entries` until revision 28), and
+//! the removal of `StatusEvent.ttl_ms`.
 //!
 //! Every property is read off the serialized JSON, because the wire is the
 //! contract: the mark and the entries must reach a peer under exactly these
@@ -112,24 +112,24 @@ fn reserialized_row(value: &Value) -> Value {
 }
 
 #[test]
-fn a_registration_row_without_hook_entries_decodes_as_having_none() {
-    // A daemon older than the field, or a profile that writes no hooks.
+fn a_registration_row_without_entries_decodes_as_having_none() {
+    // A daemon older than the field, or a profile that writes no entries.
     let value = reserialized_row(&row_json(json!({})));
-    let none = match value.get("hook_entries") {
+    let none = match value.get("entries") {
         None => true,
         Some(entries) => entries == &json!([]),
     };
-    assert!(none, "no hook entries must read as none, got: {value}");
+    assert!(none, "no entries must read as none, got: {value}");
 }
 
 #[test]
-fn a_registration_row_with_a_hook_entry_survives_a_listing_round_trip() {
+fn a_registration_row_with_an_entry_survives_a_listing_round_trip() {
     let body = json!({
         "type": "mcp_registrations_listed",
         "request_id": 7,
         "bridge": null,
         "rows": [row_json(json!({
-            "hook_entries": [{ "file": "f", "name": "n", "content": "c" }],
+            "entries": [{ "file": "f", "name": "n", "content": "c" }],
         }))],
     })
     .to_string();
@@ -137,7 +137,7 @@ fn a_registration_row_with_a_hook_entry_survives_a_listing_round_trip() {
     let value: Value =
         serde_json::from_slice(&encode_daemon_message(&decoded)).expect("valid json");
     assert_eq!(
-        value["rows"][0]["hook_entries"],
+        value["rows"][0]["entries"],
         json!([{ "file": "f", "name": "n", "content": "c" }])
     );
 }

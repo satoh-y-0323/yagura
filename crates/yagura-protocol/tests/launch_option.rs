@@ -453,6 +453,7 @@ fn profile_info_with(
         enabled: true,
         unavailable_kind: None,
         unavailable_guidance: None,
+        limits: Vec::new(),
     }
 }
 
@@ -498,4 +499,64 @@ fn an_axis_with_no_alias_is_reported_as_an_empty_list_rather_than_a_missing_one(
             .aliases
             .is_empty()
     );
+}
+
+// ===========================================================================
+// ProfileInfo.limits: what a launchable profile cannot do on this host.
+// ===========================================================================
+
+const LIMITED_PROFILE: &str = r#"{"id":"alpha","display_name":"Alpha","detection":null,"detection_warning":null,"cwd":null,"command":["alpha-program"],"available":true,"unavailable_reason":null,"limits":[{"capability":"effort","reason":"the launcher drops quotes","guidance":{"text":"Use the native program.","command":"install alpha","url":"https://example.invalid/alpha"}},{"capability":"launch_prompt","reason":"the launcher drops --","guidance":null}]}"#;
+
+#[test]
+fn a_launchable_profile_carries_its_limits_through_a_round_trip() {
+    let decoded: ProfileInfo =
+        serde_json::from_str(LIMITED_PROFILE).expect("a profile with limits must decode");
+    assert!(
+        decoded.available,
+        "limits must not make a launchable profile unavailable"
+    );
+    assert_eq!(
+        decoded.limits.len(),
+        2,
+        "both limits must decode, got {decoded:?}"
+    );
+
+    let written = serde_json::to_value(&decoded).expect("ProfileInfo must serialize");
+    assert_eq!(written["available"], serde_json::json!(true));
+    let limits = written["limits"]
+        .as_array()
+        .unwrap_or_else(|| panic!("limits must be written back as an array, got {written}"));
+    assert_eq!(limits.len(), 2, "got {written}");
+    assert_eq!(limits[0]["capability"], serde_json::json!("effort"));
+    assert_eq!(
+        limits[0]["reason"],
+        serde_json::json!("the launcher drops quotes")
+    );
+    assert_eq!(
+        limits[0]["guidance"],
+        serde_json::json!({
+            "text": "Use the native program.",
+            "command": "install alpha",
+            "url": "https://example.invalid/alpha",
+        }),
+        "a limit's guidance must keep its three parts, got {written}"
+    );
+    assert_eq!(limits[1]["capability"], serde_json::json!("launch_prompt"));
+    assert!(
+        limits[1]
+            .get("guidance")
+            .is_none_or(serde_json::Value::is_null),
+        "a limit without guidance must not invent one, got {written}"
+    );
+
+    let again: ProfileInfo = serde_json::from_value(written).expect("must decode again");
+    assert_eq!(again, decoded);
+}
+
+#[test]
+fn a_profile_info_written_before_limits_existed_decodes_with_none() {
+    let body = r#"{"id":"alpha","display_name":"Alpha","detection":null,"detection_warning":null,"cwd":null,"command":["alpha-program"],"available":true,"unavailable_reason":null}"#;
+    let decoded: ProfileInfo =
+        serde_json::from_str(body).expect("a document without limits must decode");
+    assert!(decoded.limits.is_empty(), "got {decoded:?}");
 }

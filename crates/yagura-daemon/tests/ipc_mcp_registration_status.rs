@@ -601,12 +601,12 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
     assert_eq!(alpha.toml_set, None);
     assert_eq!(
         alpha.add,
-        command(&[&stub, "mcp", "add", "yagura", "--", &bridge], 0),
+        Some(command(&[&stub, "mcp", "add", "yagura", "--", &bridge], 0)),
         "a host row's add is rendered with the bridge, after the launch argv"
     );
     assert_eq!(
         alpha.remove,
-        command(&[&stub, "mcp", "remove", "yagura"], 0)
+        Some(command(&[&stub, "mcp", "remove", "yagura"], 0))
     );
 
     let bravo = row_of(&listed.rows, "bravo");
@@ -627,7 +627,10 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
     assert_eq!(charlie.group.as_deref(), Some("WSL"));
     assert_eq!(
         charlie.add,
-        command(&[&stub, "mcp", "add", "yagura", "--", "{bridge}"], 0),
+        Some(command(
+            &[&stub, "mcp", "add", "yagura", "--", "{bridge}"],
+            0
+        )),
         "a probed row's bridge is not known before its probe runs, so the listing keeps the \
          placeholder"
     );
@@ -635,7 +638,7 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
     let golf = row_of(&listed.rows, "golf");
     assert_eq!(
         golf.add,
-        command(
+        Some(command(
             &[
                 NONEXISTENT_LAUNCHER,
                 "--launcher-flag",
@@ -647,12 +650,12 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
                 &bridge,
             ],
             2
-        ),
+        )),
         "the CLI starts at the launch argv's last element"
     );
     assert_eq!(
         golf.remove,
-        command(
+        Some(command(
             &[
                 NONEXISTENT_LAUNCHER,
                 "--launcher-flag",
@@ -662,7 +665,7 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
                 "yagura",
             ],
             2
-        )
+        ))
     );
 
     let statuses = collect_statuses(&mut approver, 7, listed.rows.len()).await;
@@ -1339,7 +1342,10 @@ async fn without_a_bridge_rows_are_listed_with_placeholders_and_no_state_is_push
     assert_eq!(listed.bridge, None);
     assert_eq!(
         row_of(&listed.rows, "alpha").add,
-        command(&[&stub, "mcp", "add", "yagura", "--", "{bridge}"], 0)
+        Some(command(
+            &[&stub, "mcp", "add", "yagura", "--", "{bridge}"],
+            0
+        ))
     );
     let unexpected: Option<DaemonMessage> =
         try_read_daemon_message(&mut approver, NEGATIVE_OBSERVATION).await;
@@ -1455,7 +1461,7 @@ async fn a_named_instance_renders_its_own_name_and_environment_and_reads_its_own
 
     assert_eq!(
         row_of(&listed.rows, "sierra").add,
-        command(
+        Some(command(
             &[
                 &stub,
                 "mcp",
@@ -1467,15 +1473,15 @@ async fn a_named_instance_renders_its_own_name_and_environment_and_reads_its_own
                 &bridge,
             ],
             0
-        )
+        ))
     );
     assert_eq!(
         row_of(&listed.rows, "sierra").remove,
-        command(&[&stub, "mcp", "remove", "yagura-dev"], 0)
+        Some(command(&[&stub, "mcp", "remove", "yagura-dev"], 0))
     );
     assert_eq!(
         row_of(&listed.rows, "uniform").add,
-        command(
+        Some(command(
             &[
                 &stub,
                 "mcp",
@@ -1489,7 +1495,7 @@ async fn a_named_instance_renders_its_own_name_and_environment_and_reads_its_own
                 "{bridge}",
             ],
             0
-        ),
+        )),
         "a row forwarding the environment also carries the forwarded names"
     );
 

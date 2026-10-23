@@ -59,8 +59,8 @@ export interface McpRegistrationTomlSet {
   values: { key: string; value: string }[];
 }
 
-/** One entry registration adds to a host settings file so the CLI runs yagura's hooks. */
-export interface McpRegistrationHookEntry {
+/** One entry registration writes into a host file. */
+export interface McpRegistrationEntry {
   file: string;
   name: string;
   content: string;
@@ -71,11 +71,12 @@ export interface McpRegistrationRow {
   profile: string;
   displayName: string;
   group: string | null;
-  add: McpRegistrationCommand;
-  remove: McpRegistrationCommand;
+  /** `null` when the registration only writes files. */
+  add: McpRegistrationCommand | null;
+  remove: McpRegistrationCommand | null;
   tomlSet: McpRegistrationTomlSet | null;
   /** Empty when the profile writes none or the daemon predates the field. */
-  hookEntries: McpRegistrationHookEntry[];
+  entries: McpRegistrationEntry[];
 }
 
 /** Reply to `list_mcp_registrations`. */
@@ -93,6 +94,8 @@ export interface McpRegistrationStatusInfo {
   reason: string | null;
   add: McpRegistrationCommand | null;
   remove: McpRegistrationCommand | null;
+  /** The pointer of the claim that makes Register and Update refuse; `null` when nothing refuses. */
+  refusedByClaim: string | null;
 }
 
 /** Payload of `session://mcp-registration-status`. */
@@ -163,7 +166,7 @@ function narrowMcpRegistrationCommand(value: unknown, context: string): McpRegis
   };
 }
 
-/** Reads a command field the core serializes as `null` when the row carries none. */
+/** Reads a command field the core serializes as `null`, or leaves out, when the row carries none. */
 function readOptionalCommand(
   record: UntrustedRecord,
   key: string,
@@ -203,12 +206,12 @@ function readOptionalTomlSet(
   return narrowMcpRegistrationTomlSet(value, `${context}.toml_set`);
 }
 
-function readHookEntries(record: UntrustedRecord, context: string): McpRegistrationHookEntry[] {
-  const value = readOwnField(record, 'hook_entries');
+function readEntries(record: UntrustedRecord, context: string): McpRegistrationEntry[] {
+  const value = readOwnField(record, 'entries');
   if (value === null || value === undefined) {
     return [];
   }
-  const entriesContext = `${context}.hook_entries`;
+  const entriesContext = `${context}.entries`;
   return requireArray(value, entriesContext).map((entry) => {
     const row = requireRecord(entry, entriesContext);
     return {
@@ -225,10 +228,10 @@ function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrat
     profile: requireString(record, 'profile', context),
     displayName: requireString(record, 'display_name', context),
     group: readOptionalString(record, 'group', context),
-    add: narrowMcpRegistrationCommand(readOwnField(record, 'add'), `${context}.add`),
-    remove: narrowMcpRegistrationCommand(readOwnField(record, 'remove'), `${context}.remove`),
+    add: readOptionalCommand(record, 'add', context),
+    remove: readOptionalCommand(record, 'remove', context),
     tomlSet: readOptionalTomlSet(record, context),
-    hookEntries: readHookEntries(record, context),
+    entries: readEntries(record, context),
   };
 }
 
@@ -278,6 +281,7 @@ function narrowMcpRegistrationStatusInfo(
     reason: readOptionalString(record, 'reason', context),
     add: readOptionalCommand(record, 'add', context),
     remove: readOptionalCommand(record, 'remove', context),
+    refusedByClaim: readOptionalString(record, 'refused_by_claim', context),
   };
 }
 

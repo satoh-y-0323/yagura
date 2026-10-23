@@ -465,6 +465,27 @@ export interface ProfileGuidance {
   url: string | null;
 }
 
+/**
+ * A capability a launchable profile can lack on this host (protocol
+ * `ProfileCapability`). `'unknown'` stands for one this build does not know.
+ */
+export type ProfileCapability = 'model' | 'effort' | 'launch_prompt' | 'unknown';
+
+const PROFILE_CAPABILITIES: ReadonlySet<string> = new Set<ProfileCapability>([
+  'model',
+  'effort',
+  'launch_prompt',
+]);
+
+/** One capability a launchable profile cannot offer on this host (protocol `ProfileLimit`). */
+export interface ProfileLimit {
+  capability: ProfileCapability;
+  /** The daemon's English reason text. */
+  reason: string;
+  /** The profile's own guidance for the limit, `null` when it declares none. */
+  guidance: ProfileGuidance | null;
+}
+
 /** One launch profile the daemon offers, in the WebView's vocabulary. */
 export interface ProfileEntry {
   /** The profile identifier, which `invokeOpenWindow`'s `profile` takes. */
@@ -496,6 +517,8 @@ export interface ProfileEntry {
   effort: LaunchOptionInfo | null;
   /** Whether the user left this profile switched on. */
   enabled: boolean;
+  /** What the profile cannot do on this host, apart from `available`; empty from a daemon that predates the field. */
+  limits: ProfileLimit[];
 }
 
 /** Result of `invokeListProfiles`. */
@@ -754,11 +777,38 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
     available,
     reason: readOptionalString(record, 'unavailable_reason', context),
     unavailableKind: narrowUnavailableKind(readOptionalString(record, 'unavailable_kind', context)),
-    guidance: narrowProfileGuidance(readOwnField(record, 'unavailable_guidance'), context),
+    guidance: narrowProfileGuidance(
+      readOwnField(record, 'unavailable_guidance'),
+      `${context}.unavailable_guidance`
+    ),
     model: narrowLaunchOptionInfo(readOwnField(record, 'model'), `${context}.profiles.model`),
     effort: narrowLaunchOptionInfo(readOwnField(record, 'effort'), `${context}.profiles.effort`),
     enabled: narrowProfileEnabled(readOwnField(record, 'enabled'), `${context}.profiles.enabled`),
+    limits: narrowProfileLimits(readOwnField(record, 'limits'), `${context}.profiles.limits`),
   };
+}
+
+/**
+ * Validates a profile's `limits`. A daemon that predates the field reports
+ * none, so a missing key reads as empty.
+ *
+ * @throws {BoundaryError} when it is present and not a list of limits.
+ */
+function narrowProfileLimits(value: unknown, context: string): ProfileLimit[] {
+  if (value === null || value === undefined) {
+    return [];
+  }
+  return requireArray(value, context).map((entry) => {
+    const record = requireRecord(entry, context);
+    const capability = requireString(record, 'capability', context);
+    return {
+      capability: PROFILE_CAPABILITIES.has(capability)
+        ? (capability as ProfileCapability)
+        : 'unknown',
+      reason: requireString(record, 'reason', context),
+      guidance: narrowProfileGuidance(readOwnField(record, 'guidance'), `${context}.guidance`),
+    };
+  });
 }
 
 /**
@@ -767,11 +817,10 @@ function narrowProfileEntry(value: unknown, context: string): ProfileEntry {
  *
  * @throws {BoundaryError} when it is present and not of the guidance shape.
  */
-function narrowProfileGuidance(value: unknown, context: string): ProfileGuidance | null {
+function narrowProfileGuidance(value: unknown, guidanceContext: string): ProfileGuidance | null {
   if (value === null || value === undefined) {
     return null;
   }
-  const guidanceContext = `${context}.unavailable_guidance`;
   const record = requireRecord(value, guidanceContext);
   const url = readOptionalString(record, 'url', guidanceContext);
   return {

@@ -112,6 +112,9 @@ impl Permit<LaunchHandoff> {
 
 /// Outcome of running one destructive request past the status, composer and
 /// approval gates.
+// Built once per request and consumed at once; boxing the answer would put an
+// indirection in every caller's pattern and buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum GateOutcome<T: GatedTool> {
     /// The operation may run now, under the permit it carries.
     Proceed(Permit<T>),

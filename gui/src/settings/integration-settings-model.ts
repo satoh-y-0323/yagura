@@ -9,8 +9,8 @@
 import { MCP_REGISTRATION_MIN_REVISION } from '../ipc/session-boundary';
 import type {
   McpRegistrationCommand,
+  McpRegistrationEntry,
   McpRegistrationResultPayload,
-  McpRegistrationHookEntry,
   McpRegistrationRow,
   McpRegistrationState,
   McpRegistrationsListed,
@@ -44,10 +44,10 @@ export interface IntegrationRowView {
   reason: string | null;
   /** The settings-file change this row's registration also makes, `null` for a row with none. */
   tomlSetNote: string | null;
-  /** The settings entries this row's registration adds for its CLI's hooks, `null` for a row with none. */
-  hookEntriesNote: string | null;
+  /** The entries this row's registration writes into its CLI's files, `null` for a row with none. */
+  entriesNote: string | null;
   /** Every such entry written out in full, for a tooltip; `null` alongside a `null` note. */
-  hookEntriesTitle: string | null;
+  entriesTitle: string | null;
 }
 
 /** One heading and the rows under it. */
@@ -101,12 +101,13 @@ export function displayCommand(command: McpRegistrationCommand): string {
 /**
  * The command a row shows: the settled command a status push carried, if
  * any, else the one the listing itself carried. `remove` for a registered
- * row, `add` for every other state.
+ * row, `add` for every other state; `null` for a registration that runs no
+ * command.
  */
 function commandFor(
   row: McpRegistrationRow,
   status: McpRegistrationStatusInfo | undefined
-): McpRegistrationCommand {
+): McpRegistrationCommand | null {
   if (status?.state === 'registered') {
     return status.remove ?? row.remove;
   }
@@ -171,8 +172,8 @@ function buildRowView(
     name: row.displayName,
     stateLabel: label,
     stateTone: tone,
-    command: displayCommand(command),
-    commandTitle: joinArgv(command.argv),
+    command: command === null ? '' : displayCommand(command),
+    commandTitle: command === null ? '' : joinArgv(command.argv),
     primaryAction: primaryActionFor(state),
     isPrimaryDisabled: state === 'not_installed' || operationRunning,
     canRemove: canRemoveFor(state),
@@ -182,16 +183,16 @@ function buildRowView(
       row.tomlSet === null
         ? null
         : settings.integrationTomlSetNote(row.tomlSet.file, row.tomlSet.table, row.tomlSet.values),
-    hookEntriesNote: hookEntriesNote(row.hookEntries),
-    hookEntriesTitle:
-      row.hookEntries.length === 0
+    entriesNote: entriesNote(row.entries),
+    entriesTitle:
+      row.entries.length === 0
         ? null
-        : row.hookEntries.map((entry) => `${entry.name} = ${entry.content}`).join('\n'),
+        : row.entries.map((entry) => `${entry.name} = ${entry.content}`).join('\n'),
   };
 }
 
 /** One sentence per file the entries go into, in the order the files first appear. */
-function hookEntriesNote(entries: readonly McpRegistrationHookEntry[]): string | null {
+function entriesNote(entries: readonly McpRegistrationEntry[]): string | null {
   if (entries.length === 0) {
     return null;
   }

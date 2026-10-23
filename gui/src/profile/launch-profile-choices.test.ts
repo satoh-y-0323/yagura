@@ -37,6 +37,7 @@ function profile(
     model,
     effort,
     enabled: true,
+    limits: [],
   };
 }
 

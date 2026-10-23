@@ -30,6 +30,7 @@ function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
     model: null,
     effort: null,
     enabled: true,
+    limits: [],
     ...overrides,
   };
 }

@@ -828,18 +828,18 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     assert_eq!(host.group, None);
     assert_eq!(
         host.add,
-        McpRegistrationCommand {
+        Some(McpRegistrationCommand {
             argv: placed_argv(&["mcp", "add", "yagura", "--", "{bridge}"]),
             program_at: 0,
-        },
+        }),
         "the shipped table renders after the placed profile's own launch argv"
     );
     assert_eq!(
         host.remove,
-        McpRegistrationCommand {
+        Some(McpRegistrationCommand {
             argv: placed_argv(&["mcp", "remove", "yagura"]),
             program_at: 0,
-        }
+        })
     );
     assert_eq!(
         host.toml_set,
@@ -857,8 +857,8 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     assert_eq!(wsl.display_name, "Placed Wsl Row");
     assert_eq!(wsl.group.as_deref(), Some("WSL"));
     assert_eq!(
-        wsl.add.argv,
-        placed_argv(&["mcp", "add", "yagura", "--", "{bridge}"])
+        wsl.add.as_ref().map(|add| add.argv.clone()),
+        Some(placed_argv(&["mcp", "add", "yagura", "--", "{bridge}"]))
     );
     assert_eq!(wsl.toml_set, None);
 

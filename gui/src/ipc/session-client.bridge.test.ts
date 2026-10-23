@@ -275,6 +275,7 @@ describe('invokeListProfiles', () => {
       model: { aliases: [{ alias: 'fast', value: 'm' }] },
       effort: null,
       enabled: false,
+      limits: [],
     });
     expect(result.warnings).toEqual(['w']);
   });

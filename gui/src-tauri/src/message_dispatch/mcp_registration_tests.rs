@@ -33,17 +33,29 @@ fn sample_rows() -> Vec<McpRegistrationRow> {
             profile: "sample-cli".to_owned(),
             display_name: "Sample CLI".to_owned(),
             group: None,
-            add: sample_command(&["sample-cli", "mcp", "add", "yagura", "/bridge"], 0),
-            remove: sample_command(&["sample-cli", "mcp", "remove", "yagura"], 0),
+            add: Some(sample_command(
+                &["sample-cli", "mcp", "add", "yagura", "/bridge"],
+                0,
+            )),
+            remove: Some(sample_command(
+                &["sample-cli", "mcp", "remove", "yagura"],
+                0,
+            )),
             toml_set: None,
-            hook_entries: Vec::new(),
+            entries: Vec::new(),
         },
         McpRegistrationRow {
             profile: "sample-cli-wsl".to_owned(),
             display_name: "Sample CLI (WSL)".to_owned(),
             group: Some("wsl".to_owned()),
-            add: sample_command(&["wsl", "--", "sample-cli", "mcp", "add", "{bridge}"], 2),
-            remove: sample_command(&["wsl", "--", "sample-cli", "mcp", "remove"], 2),
+            add: Some(sample_command(
+                &["wsl", "--", "sample-cli", "mcp", "add", "{bridge}"],
+                2,
+            )),
+            remove: Some(sample_command(
+                &["wsl", "--", "sample-cli", "mcp", "remove"],
+                2,
+            )),
             toml_set: Some(McpRegistrationTomlSet {
                 file: ".sample/config.toml".to_owned(),
                 table: vec!["mcp_servers".to_owned(), "yagura".to_owned()],
@@ -52,7 +64,7 @@ fn sample_rows() -> Vec<McpRegistrationRow> {
                     value: "600".to_owned(),
                 }],
             }),
-            hook_entries: Vec::new(),
+            entries: Vec::new(),
         },
     ]
 }
@@ -71,6 +83,7 @@ fn sample_status() -> McpRegistrationStatusInfo {
             &["wsl", "--", "sample-cli", "mcp", "remove"],
             2,
         )),
+        refused_by_claim: None,
     }
 }
 
@@ -89,6 +102,7 @@ fn sample_status_json() -> serde_json::Value {
             "argv": ["wsl", "--", "sample-cli", "mcp", "remove"],
             "program_at": 2,
         },
+        "refused_by_claim": null,
     })
 }
 

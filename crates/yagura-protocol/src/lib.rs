@@ -70,7 +70,7 @@
 //! caller establishes [`MCP_REGISTRATION_MIN_REVISION`] before sending either.
 //!
 //! Revision 14 adds `status_reports_missing` to [`WindowInfo`] and
-//! `hook_entries` (of [`McpRegistrationHookEntry`]) to [`McpRegistrationRow`],
+//! `hook_entries` (of `McpRegistrationHookEntry`) to [`McpRegistrationRow`],
 //! and drops `ttl_ms` from `status_event`. Both new fields are optional on
 //! decode and a frame still carrying `ttl_ms` decodes with it ignored, so no
 //! message needs a revision gate.
@@ -152,6 +152,17 @@
 //! the GUI would draw a new window with, which the daemon keeps and answers a
 //! window's color queries with until a view sends that window its own. A
 //! caller establishes [`DEFAULT_PALETTES_MIN_REVISION`] before sending it.
+//!
+//! Revision 28 lets a registration have no command of its own:
+//! [`McpRegistrationRow`]'s `add` and `remove` become optional and are left
+//! out when absent, and `hook_entries` is renamed `entries`
+//! ([`McpRegistrationEntry`]), since it now lists every entry registration
+//! writes into a CLI's files. [`McpRegistrationStatusInfo`] gains
+//! `refused_by_claim`, the pointer of a claim that makes Register and Update
+//! refuse, and [`ProfileInfo`] gains `limits` ([`ProfileLimit`]), what a
+//! launchable profile cannot do on this host. A client built before this
+//! revision reads a row without `add` as malformed, so the GUI and the daemon
+//! must be the same version.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -163,7 +174,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 27;
+pub const PROTOCOL_REVISION: u32 = 28;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -1808,10 +1819,47 @@ pub struct ProfileInfo {
     /// the field.
     #[serde(default)]
     pub unavailable_guidance: Option<ProfileGuidance>,
+    /// What the profile cannot do on this host although it is launchable;
+    /// independent of `available`. Empty when nothing is limited and when the
+    /// peer does not carry the field.
+    #[serde(default)]
+    pub limits: Vec<ProfileLimit>,
 }
 
 fn enabled_when_absent() -> bool {
     true
+}
+
+/// One capability a launchable profile cannot offer on this host, as
+/// [`ProfileInfo::limits`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileLimit {
+    /// The capability that does not work.
+    pub capability: ProfileCapability,
+    /// English reason text.
+    pub reason: String,
+    /// The profile's own guidance for the limit. `None` when the profile
+    /// declares none or the peer does not carry the field.
+    #[serde(default)]
+    pub guidance: Option<ProfileGuidance>,
+}
+
+/// A capability of a launch profile that [`ProfileLimit`] can name.
+///
+/// Carries a catch-all (R3) so a client built before a new capability still
+/// reads the whole profile list. This build never sends `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileCapability {
+    /// The `model` launch option.
+    Model,
+    /// The `effort` launch option.
+    Effort,
+    /// Launching the CLI with a first prompt.
+    LaunchPrompt,
+    /// A capability this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a launch profile tells its user to do about a reason it cannot be
@@ -3750,25 +3798,28 @@ pub struct McpRegistrationRow {
     #[serde(default)]
     pub group: Option<String>,
     /// The command that adds the registration. Where the bridge path is not
-    /// yet known, the element carrying it is still a placeholder.
-    pub add: McpRegistrationCommand,
-    /// The command that removes the registration.
-    pub remove: McpRegistrationCommand,
+    /// yet known, the element carrying it is still a placeholder. `None`,
+    /// with the key left out, when the registration only writes files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add: Option<McpRegistrationCommand>,
+    /// The command that removes the registration, with the same absence
+    /// semantics as `add`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove: Option<McpRegistrationCommand>,
     /// The settings written after `add`. `None` when the profile writes none
     /// or the peer does not carry the field.
     #[serde(default)]
     pub toml_set: Option<McpRegistrationTomlSet>,
-    /// The hook entries registration adds to the CLI's settings files, for
-    /// display. Empty when the profile writes none or the peer does not
-    /// carry the field.
+    /// The entries registration writes into the CLI's files, for display.
+    /// Empty when the profile writes none or the peer does not carry the
+    /// field.
     #[serde(default)]
-    pub hook_entries: Vec<McpRegistrationHookEntry>,
+    pub entries: Vec<McpRegistrationEntry>,
 }
 
-/// One entry a registration adds to a CLI's settings file so the CLI runs
-/// yagura's hooks, for display.
+/// One entry a registration writes into a CLI's file, for display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpRegistrationHookEntry {
+pub struct McpRegistrationEntry {
     /// The file, relative to the home directory.
     pub file: String,
     /// The entry's name within the file.
@@ -3799,6 +3850,11 @@ pub struct McpRegistrationStatusInfo {
     /// `add`.
     #[serde(default)]
     pub remove: Option<McpRegistrationCommand>,
+    /// The pointer of the claim whose value differs from the one
+    /// registration would write, so Register and Update refuse. `None` when
+    /// nothing refuses or the peer does not carry the field.
+    #[serde(default)]
+    pub refused_by_claim: Option<String>,
 }
 
 /// One step of a [`DaemonMessage::McpRegistrationResult`].

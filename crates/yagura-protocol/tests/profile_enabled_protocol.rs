@@ -233,6 +233,7 @@ fn sample_profile(enabled: bool) -> ProfileInfo {
         enabled,
         unavailable_kind: None,
         unavailable_guidance: None,
+        limits: Vec::new(),
     }
 }
 

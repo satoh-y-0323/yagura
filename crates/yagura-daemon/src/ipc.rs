@@ -3981,6 +3981,7 @@ fn to_profile_info(entry: crate::profile::ProfileEntry) -> ProfileInfo {
         enabled: entry.enabled,
         unavailable_kind: entry.unavailable_kind,
         unavailable_guidance: entry.unavailable_guidance,
+        limits: Vec::new(),
     }
 }
 

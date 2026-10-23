@@ -81,15 +81,16 @@ use yagura_protocol::{
     ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
     DaemonProblemKind, DefaultPalettes, DeliveryStream, Frame, FrameLine, FrameRun,
     HandoffDelivery, InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias,
-    LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry,
+    LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
     McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
     McpRegistrationTomlSet, McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers,
     NamedKey, OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
-    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCommandDetail,
-    ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, ReceivedReport,
-    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
-    RoomRef, TaskAssignment, TaskReport, TerminalSize, ToolAutoApprove, UnknownReason, ViewState,
-    WheelInput, WindowInfo, WindowStatus as WireWindowStatus, WithdrawReason,
+    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
+    ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
+    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
+    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
+    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
+    WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -245,6 +246,7 @@ wire_sample!(enum McpRegistrationAction => Register);
 wire_sample!(enum DaemonProblemKind => WindowsUnavailable);
 wire_sample!(enum DeliveryStream => Stdout);
 wire_sample!(enum ProfileUnavailableKind => NotFound);
+wire_sample!(enum ProfileCapability => Effort);
 wire_sample!(enum NamedKey => ArrowUp);
 wire_sample!(enum PointerKind => Down);
 wire_sample!(enum OnNameTaken => Number);
@@ -328,8 +330,14 @@ wire_sample!(struct ProfileInfo {
     enabled,
     unavailable_kind,
     unavailable_guidance,
+    limits,
 });
 wire_sample!(struct ProfileGuidance { text, command, url });
+wire_sample!(struct ProfileLimit {
+    capability,
+    reason,
+    guidance,
+});
 wire_sample!(struct LaunchOptionInfo { aliases });
 wire_sample!(struct LaunchOptionAlias { alias, value });
 wire_sample!(struct ModelChoice { id, label });
@@ -475,9 +483,9 @@ wire_sample!(struct McpRegistrationRow {
     add,
     remove,
     toml_set,
-    hook_entries,
+    entries,
 });
-wire_sample!(struct McpRegistrationHookEntry {
+wire_sample!(struct McpRegistrationEntry {
     file,
     name,
     content,
@@ -489,6 +497,7 @@ wire_sample!(struct McpRegistrationStatusInfo {
     reason,
     add,
     remove,
+    refused_by_claim,
 });
 wire_sample!(struct TerminalSize { cols, rows });
 wire_sample!(struct Modifiers { shift, alt, ctrl });
@@ -1141,6 +1150,26 @@ fn profile_unavailable_kind_wire_variants() -> BTreeSet<String> {
     .collect()
 }
 
+fn profile_capability_wire_variants() -> BTreeSet<String> {
+    [
+        ProfileCapability::Model,
+        ProfileCapability::Effort,
+        ProfileCapability::LaunchPrompt,
+        ProfileCapability::Unknown,
+    ]
+    .into_iter()
+    .map(|capability| {
+        let hand = match &capability {
+            ProfileCapability::Model => "model",
+            ProfileCapability::Effort => "effort",
+            ProfileCapability::LaunchPrompt => "launch_prompt",
+            ProfileCapability::Unknown => "unknown",
+        };
+        serde_spelling(&capability, hand)
+    })
+    .collect()
+}
+
 fn mcp_registration_state_wire_variants() -> BTreeSet<String> {
     [
         McpRegistrationState::Registered,
@@ -1479,6 +1508,10 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         (
             "ProfileUnavailableKind".to_string(),
             profile_unavailable_kind_wire_variants(),
+        ),
+        (
+            "ProfileCapability".to_string(),
+            profile_capability_wire_variants(),
         ),
         ("NamedKey".to_string(), named_key_wire_variants()),
         ("Key".to_string(), key_wire_variants()),

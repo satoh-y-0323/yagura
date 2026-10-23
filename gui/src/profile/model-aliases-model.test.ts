@@ -41,6 +41,7 @@ function profileEntry(overrides: Partial<ProfileEntry> = {}): ProfileEntry {
     model: { aliases: [{ alias: 'fast', value: 'haiku' }] },
     effort: null,
     enabled: true,
+    limits: [],
     ...overrides,
   };
 }

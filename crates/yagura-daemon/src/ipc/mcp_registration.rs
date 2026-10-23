@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use yagura_protocol::{
-    DaemonMessage, McpRegistrationAction, McpRegistrationCommand, McpRegistrationHookEntry,
+    DaemonMessage, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
     McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
     McpRegistrationTomlSet, McpRegistrationTomlValue,
 };
@@ -190,16 +190,16 @@ fn build_rows(
         let toml_set = spec
             .toml_set()
             .map(|toml_set| to_wire_toml_set(toml_set, &target));
-        let hook_entries = hook_entries_preview(config, &spec, &target);
+        let entries = entries_preview(config, &spec, &target);
 
         rows.push(McpRegistrationRow {
             profile: entry.id.clone(),
             display_name: entry.display_name.clone(),
             group: spec.group().map(str::to_string),
-            add,
-            remove,
+            add: Some(add),
+            remove: Some(remove),
             toml_set,
-            hook_entries,
+            entries,
         });
 
         sources.push(RowSource {
@@ -342,11 +342,11 @@ fn to_wire_toml_set(
 /// registration would write it on this host. A row whose daemon path is
 /// converted by its probe keeps the `{daemon}` placeholder, as its `add`
 /// keeps `{bridge}`.
-fn hook_entries_preview(
+fn entries_preview(
     config: &DaemonConfig,
     spec: &mcp_registration::McpRegistrationSpec,
     target: &mcp_registration::RegistrationTarget,
-) -> Vec<McpRegistrationHookEntry> {
+) -> Vec<McpRegistrationEntry> {
     let daemon = if spec.converts_paths() {
         None
     } else {
@@ -656,6 +656,7 @@ fn build_status_info(
         reason: derived.reason,
         add: Some(add),
         remove: Some(remove),
+        refused_by_claim: None,
     }
 }
 
@@ -1574,14 +1575,14 @@ impl SettingsEdit {
 
     /// The entries the edit owns on `context.os`, each named and written in
     /// the file's own notation as [`SettingsEdit::rewrite`] adds it.
-    fn preview(&self, context: &EditContext) -> Vec<McpRegistrationHookEntry> {
+    fn preview(&self, context: &EditContext) -> Vec<McpRegistrationEntry> {
         let file = self.file().to_string();
         match self {
             Self::Toml(toml_set) => toml_set
                 .entry_edits(context.os)
                 .into_iter()
                 .filter_map(|edit| {
-                    Some(McpRegistrationHookEntry {
+                    Some(McpRegistrationEntry {
                         file: file.clone(),
                         name: edit.table.last()?.clone(),
                         content: toml::Value::Table(edit.values.clone()).to_string(),
@@ -1593,7 +1594,7 @@ impl SettingsEdit {
                 json_entry
                     .entries(&context.target, daemon)
                     .into_iter()
-                    .map(|(name, value)| McpRegistrationHookEntry {
+                    .map(|(name, value)| McpRegistrationEntry {
                         file: file.clone(),
                         name,
                         content: value.to_string(),

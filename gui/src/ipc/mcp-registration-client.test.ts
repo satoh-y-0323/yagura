@@ -165,7 +165,7 @@ describe('invokeListMcpRegistrations', () => {
             table: ['mcp_servers', 'yagura'],
             values: [{ key: 'call_timeout', value: '86400' }],
           },
-          hookEntries: [],
+          entries: [],
         },
       ],
     });
@@ -185,7 +185,7 @@ describe('invokeListMcpRegistrations', () => {
 
   it('rejects with BoundaryError when a required field is missing', async () => {
     const row = rowWire();
-    delete row['add'];
+    delete row['display_name'];
     invokeMock.mockResolvedValueOnce(listedWire({ rows: [row] }));
 
     await expect(invokeListMcpRegistrations(7)).rejects.toThrow(BoundaryError);
@@ -260,6 +260,7 @@ describe('listenMcpRegistrationStatus', () => {
           programAt: 0,
         },
         remove: null,
+        refusedByClaim: null,
       },
     };
     expect(onStatus).toHaveBeenCalledWith(expected);
@@ -334,6 +335,7 @@ describe('listenMcpRegistrationResult', () => {
           programAt: 0,
         },
         remove: null,
+        refusedByClaim: null,
       },
     };
     expect(onResult).toHaveBeenCalledWith(expected);

@@ -8,47 +8,13 @@
  * both sides, where the two could drift without a compiler error.
  */
 
-import type {
-  LaunchOptionInfo,
-  ProfileGuidance,
-  ProfileUnavailableKind,
-} from '../ipc/session-client';
+import type { ProfileEntry } from '../ipc/session-client';
 
 /**
  * One launch profile the dialog offers, already narrowed to the WebView's
  * camelCase vocabulary by `session-client`.
  */
-export interface ProfileOption {
-  /** The profile identifier, which is also the option's value. */
-  id: string;
-  /** What the option shows. */
-  displayName: string;
-  /** The detection definition this profile names, `null` for the default. */
-  detection: string | null;
-  /** Why that definition could not be found, `null` when it was. */
-  detectionWarning: string | null;
-  /** The profile's own default working directory, `null` when it has none. */
-  cwd: string | null;
-  /**
-   * The unresolved argv launching this profile would run, empty when the
-   * daemon has none to offer on its operating system.
-   */
-  command: string[];
-  /** Whether the profile currently resolves to something launchable. */
-  available: boolean;
-  /** The daemon's English reason text when `available` is false. */
-  reason: string | null;
-  /** The kind of that reason, `null` when available or from a daemon that does not say. */
-  unavailableKind: ProfileUnavailableKind | null;
-  /** The profile's own guidance for a `needs_native_program` reason, `null` otherwise. */
-  guidance: ProfileGuidance | null;
-  /** This profile's `model` launch option, `null` when it maps no such axis. */
-  model: LaunchOptionInfo | null;
-  /** This profile's `effort` launch option, `null` when it maps no such axis. */
-  effort: LaunchOptionInfo | null;
-  /** Whether the user left this profile switched on. */
-  enabled: boolean;
-}
+export type ProfileOption = ProfileEntry;
 
 /**
  * What the dialog submits: a launch profile the daemon expands, or the

@@ -53,7 +53,7 @@ function row(profile: string, overrides: Partial<McpRegistrationRow> = {}): McpR
     add: command(['launcher', profile, 'mcp', 'add', 'yagura', '--', BRIDGE], 1),
     remove: command(['launcher', profile, 'mcp', 'remove', 'yagura'], 1),
     tomlSet: null,
-    hookEntries: [],
+    entries: [],
     ...overrides,
   };
 }
@@ -70,7 +70,16 @@ function status(
   state: McpRegistrationState,
   overrides: Partial<McpRegistrationStatusInfo> = {}
 ): McpRegistrationStatusInfo {
-  return { profile, state, differsIn: [], reason: null, add: null, remove: null, ...overrides };
+  return {
+    profile,
+    state,
+    differsIn: [],
+    reason: null,
+    add: null,
+    remove: null,
+    refusedByClaim: null,
+    ...overrides,
+  };
 }
 
 function statuses(
@@ -418,45 +427,43 @@ describe('resultLines', () => {
   });
 });
 
-describe('integrationGroups: the hook-entries note', () => {
+describe('integrationGroups: the entries note', () => {
   it('names the single entry and the file it is added to', () => {
-    const hookEntries = [
-      { file: '.beta/config/hooks.json', name: 'yagura', content: '{"Event":[]}' },
-    ];
+    const entries = [{ file: '.beta/config/hooks.json', name: 'yagura', content: '{"Event":[]}' }];
 
-    const view = viewOf('not_registered', {}, null, { hookEntries });
+    const view = viewOf('not_registered', {}, null, { entries });
 
-    expect(view.hookEntriesNote).toBe(
+    expect(view.entriesNote).toBe(
       text(settings.integrationHookEntriesNote('.beta/config/hooks.json', ['yagura']))
     );
     for (const part of ['.beta/config/hooks.json', 'yagura']) {
-      expect(view.hookEntriesNote).toContain(part);
+      expect(view.entriesNote).toContain(part);
     }
-    expect(view.hookEntriesTitle).toContain('{"Event":[]}');
+    expect(view.entriesTitle).toContain('{"Event":[]}');
   });
 
   it('counts several entries added to one file', () => {
-    const hookEntries = ['a', 'b', 'c'].map((name) => ({
+    const entries = ['a', 'b', 'c'].map((name) => ({
       file: '.alpha/config.toml',
       name,
       content: `{ hash = "${name}" }`,
     }));
 
-    const view = viewOf('not_registered', {}, null, { hookEntries });
+    const view = viewOf('not_registered', {}, null, { entries });
 
-    expect(view.hookEntriesNote).toBe(
+    expect(view.entriesNote).toBe(
       text(settings.integrationHookEntriesNote('.alpha/config.toml', ['a', 'b', 'c']))
     );
     for (const name of ['a', 'b', 'c']) {
-      expect(view.hookEntriesTitle).toContain(`${name} = { hash = "${name}" }`);
+      expect(view.entriesTitle).toContain(`${name} = { hash = "${name}" }`);
     }
   });
 
-  it('has no note for a row without hook entries', () => {
+  it('has no note for a row without entries', () => {
     const view = viewOf('not_registered');
 
-    expect(view.hookEntriesNote).toBeNull();
-    expect(view.hookEntriesTitle).toBeNull();
+    expect(view.entriesNote).toBeNull();
+    expect(view.entriesTitle).toBeNull();
   });
 });
 
@@ -485,24 +492,22 @@ describe('integrationGroups: details of the state and the notes', () => {
   });
 
   it('lists each hook entry on a line of its own in the title', () => {
-    const hookEntries = [
+    const entries = [
       { file: 'a.json', name: 'one', content: '1' },
       { file: 'a.json', name: 'two', content: '2' },
     ];
 
-    expect(viewOf('not_registered', {}, null, { hookEntries }).hookEntriesTitle).toBe(
-      'one = 1\ntwo = 2'
-    );
+    expect(viewOf('not_registered', {}, null, { entries }).entriesTitle).toBe('one = 1\ntwo = 2');
   });
 
   it('writes one sentence per file, in the order the files first appear, joined by a space', () => {
-    const hookEntries = [
+    const entries = [
       { file: 'b.json', name: 'one', content: '1' },
       { file: 'a.json', name: 'two', content: '2' },
       { file: 'b.json', name: 'three', content: '3' },
     ];
 
-    expect(viewOf('not_registered', {}, null, { hookEntries }).hookEntriesNote).toBe(
+    expect(viewOf('not_registered', {}, null, { entries }).entriesNote).toBe(
       `${settings.integrationHookEntriesNote('b.json', ['one', 'three'])} ${settings.integrationHookEntriesNote('a.json', ['two'])}`
     );
   });

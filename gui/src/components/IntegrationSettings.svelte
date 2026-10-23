@@ -56,9 +56,9 @@
             {#if row.tomlSetNote}
               <div class="integration-settings__extra">{row.tomlSetNote}</div>
             {/if}
-            {#if row.hookEntriesNote}
-              <div class="integration-settings__extra" title={row.hookEntriesTitle}>
-                {row.hookEntriesNote}
+            {#if row.entriesNote}
+              <div class="integration-settings__extra" title={row.entriesTitle}>
+                {row.entriesNote}
               </div>
             {/if}
             {#if row.reason}

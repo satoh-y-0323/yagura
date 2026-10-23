@@ -3,7 +3,7 @@
 //! Wire revision 14 as the daemon answers it: the mark that a window's status
 //! reports stopped arriving (`WindowInfo.status_reports_missing` on
 //! `list_windows`) and the hook entries a registration will write
-//! (`McpRegistrationRow.hook_entries`).
+//! (`McpRegistrationRow.entries`).
 //!
 //! Both are driven through a real `Harness` over a real IPC endpoint. The
 //! mark is produced the way it happens in use: a window launched with hooks
@@ -23,7 +23,7 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::REPORT_GAP_GRACE;
 use yagura_daemon::profile::ProfileOs;
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, McpRegistrationHookEntry, McpRegistrationRow, WindowInfo,
+    ClientMessage, DaemonMessage, McpRegistrationEntry, McpRegistrationRow, WindowInfo,
     WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
@@ -246,7 +246,7 @@ fn row<'a>(rows: &'a [McpRegistrationRow], profile: &str) -> &'a McpRegistration
 #[tokio::test]
 async fn the_antigravity_row_previews_the_hooks_entry_it_will_add() {
     let rows = listed_rows("hook-preview-agy", &["antigravity-cli"]).await;
-    let entries = &row(&rows, "antigravity-cli").hook_entries;
+    let entries = &row(&rows, "antigravity-cli").entries;
 
     assert_eq!(
         entries.len(),
@@ -277,9 +277,9 @@ async fn the_codex_row_previews_the_trust_entries_next_to_its_settings_preview()
     let codex = row(&rows, "codex-cli");
 
     let mut events: Vec<&str> = codex
-        .hook_entries
+        .entries
         .iter()
-        .map(|entry: &McpRegistrationHookEntry| {
+        .map(|entry: &McpRegistrationEntry| {
             assert_eq!(entry.file, ".codex/config.toml");
             assert!(
                 entry.content.contains("trusted_hash") && entry.content.contains("sha256:"),
@@ -338,7 +338,7 @@ async fn a_row_that_writes_no_hook_entries_lists_none() {
     // Claude Code receives its hooks at launch, so registration writes none.
     let rows = listed_rows("hook-preview-none", &["claude-code"]).await;
     assert!(
-        row(&rows, "claude-code").hook_entries.is_empty(),
+        row(&rows, "claude-code").entries.is_empty(),
         "a profile that injects its hooks at launch has nothing to preview"
     );
 }

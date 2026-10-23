@@ -25,7 +25,7 @@ function rowWire(overrides: Record<string, unknown> = {}): Record<string, unknow
     add: commandWire(),
     remove: commandWire({ argv: ['alpha', 'mcp', 'remove'] }),
     toml_set: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
-    hook_entries: [{ file: 'h.json', name: 'n', content: 'c' }],
+    entries: [{ file: 'h.json', name: 'n', content: 'c' }],
     ...overrides,
   };
 }
@@ -95,6 +95,24 @@ describe('the registration state of a status push', () => {
     expect(status.remove).toEqual({ argv: ['alpha', 'mcp', 'add'], programAt: 0 });
   });
 
+  it('keeps the claim pointer a refused Register or Update names', () => {
+    const { status } = narrowMcpRegistrationStatusPayload({
+      request_id: 1,
+      status: statusInfoWire({ state: 'differs', refused_by_claim: '/managed_hooks_path' }),
+    });
+    expect(status.refusedByClaim).toBe('/managed_hooks_path');
+  });
+
+  it('reads an omitted or null claim refusal as none', () => {
+    for (const absent of [null, undefined]) {
+      const { status } = narrowMcpRegistrationStatusPayload({
+        request_id: 1,
+        status: statusInfoWire({ refused_by_claim: absent }),
+      });
+      expect(status.refusedByClaim).toBeNull();
+    }
+  });
+
   it('reads an omitted add or remove as none', () => {
     const info = statusInfoWire();
     delete info['add'];
@@ -130,40 +148,50 @@ describe('narrowMcpRegistrationsListed', () => {
           add: { argv: ['alpha', 'mcp', 'add'], programAt: 1 },
           remove: { argv: ['alpha', 'mcp', 'remove'], programAt: 1 },
           tomlSet: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
-          hookEntries: [{ file: 'h.json', name: 'n', content: 'c' }],
+          entries: [{ file: 'h.json', name: 'n', content: 'c' }],
         },
       ],
     });
   });
 
-  it('reads omitted or null hook entries and settings-file change as none', () => {
+  it('reads omitted or null entries and settings-file change as none', () => {
     for (const absent of [null, undefined]) {
-      const row = rowWire({ hook_entries: absent, toml_set: absent });
+      const row = rowWire({ entries: absent, toml_set: absent });
       const listed = narrowMcpRegistrationsListed(listedWire({ rows: [row] }));
-      expect(listed.rows[0]?.hookEntries).toEqual([]);
+      expect(listed.rows[0]?.entries).toEqual([]);
       expect(listed.rows[0]?.tomlSet).toBeNull();
     }
   });
 
-  it('refuses a hook entry that lacks a field or is not an object', () => {
+  it('refuses an entry that lacks a field or is not an object', () => {
     for (const entry of [
       { name: 'n', content: 'c' },
       { file: 'f', content: 'c' },
       { file: 'f', name: 'n' },
       'x',
     ]) {
-      const row = rowWire({ hook_entries: [entry] });
+      const row = rowWire({ entries: [entry] });
       expect(() => narrowMcpRegistrationsListed(listedWire({ rows: [row] }))).toThrow(
-        /rows\.hook_entries/
+        /rows\.entries/
       );
     }
   });
 
-  it('refuses hook entries that are not an array', () => {
-    const row = rowWire({ hook_entries: {} });
+  it('refuses entries that are not an array', () => {
+    const row = rowWire({ entries: {} });
     expect(() => narrowMcpRegistrationsListed(listedWire({ rows: [row] }))).toThrow(
-      /rows\.hook_entries/
+      /rows\.entries/
     );
+  });
+
+  it('reads a row with no add or remove command as having none', () => {
+    for (const absent of [null, undefined]) {
+      const row = rowWire({ add: absent, remove: absent });
+      const listed = narrowMcpRegistrationsListed(listedWire({ rows: [row] }));
+      expect(listed.rows[0]?.add).toBeNull();
+      expect(listed.rows[0]?.remove).toBeNull();
+      expect(listed.rows[0]?.entries).toEqual([{ file: 'h.json', name: 'n', content: 'c' }]);
+    }
   });
 
   it('names the part of the reply that is wrong', () => {
@@ -218,6 +246,7 @@ describe('narrowMcpRegistrationResultPayload', () => {
         reason: null,
         add: null,
         remove: null,
+        refusedByClaim: null,
       },
     });
   });
