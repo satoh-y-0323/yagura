@@ -28,7 +28,7 @@ footer below the lower rule reads `<model> · <effort> · <folder> · <approval>
 | 100x30-mcp-approval | 100 | 30 | WaitingApproval | 1.4.12 |
 | 100x30-settled1 | 100 | 30 | WaitingInput | 1.4.12 |
 | 100x30-interrupted | 100 | 30 | WaitingInput | 1.4.12 |
-| 100x30-mcp-long-done | 100 | 30 | WaitingInput | 1.4.12 |
+| 100x30-mcp-long-done | 100 | 30 | Running | 1.4.12 |
 | 100x30-echo-wake-async | 100 | 30 | WaitingInput | 1.4.12 |
 | 100x30-wsl-idle | 100 | 30 | WaitingInput | 1.4.12 |
 | 100x30-wsl-done | 100 | 30 | WaitingInput | 1.4.12 |

@@ -1,0 +1,66 @@
+# Detection definition for the Muse Code CLI (`muse`).
+#
+# Vendor identity lives only in this filename and the `name` value below --
+# never in the daemon's core types (project convention: vendor-neutral
+# vocabulary).
+schema_version = 1
+name = "muse-code"
+# Captured against Muse Code 1.4.12 on 2026-10-23 at 100x30; see
+# tests/fixtures/muse-code/README.md for the extraction rule. The turn's
+# status line sits up to six rows above the footer (status, blank, upper
+# rule, composer, lower rule, footer), and the approval hint stays within
+# eight rows of the last written one.
+bottom_line_count = 8
+
+[debounce]
+confirm_ms = 300
+
+# The command and MCP tool approval boxes end with `Change approval defaults
+# in /permissions`; the folder trust prompt ends with its own key hint.
+# Highest priority: the turn's `esc to interrupt)` line stays drawn above the
+# approval boxes (checked on 1.4.12).
+[[rules]]
+status = "waiting_approval"
+pattern = 'Change approval defaults in /permissions|Use Up/Down or 1/2, then Enter\. Esc quits\.'
+priority = 30
+region = "bottom"
+
+# The status line a turn draws above the composer; its leading word changes
+# (`Thinking`, `Double checking`, `Calling tools`, `Running command`) but the
+# parenthesis always closes with this hint (checked on 1.4.12).
+[[rules]]
+status = "running"
+pattern = 'esc to interrupt\)'
+priority = 20
+region = "bottom"
+
+# The rule under the composer, right above the footer. On Windows the rule
+# above the composer carries `Voice input`, under WSL it is plain as well;
+# either way a plain rule is drawn only around the composer (checked on 1.4.12).
+[[rules]]
+status = "waiting_input"
+pattern = '^─+\s*$'
+priority = 10
+region = "bottom"
+
+# The composer is a `❯ ` row between the two rules; a wrapped draft continues
+# on rows indented by two spaces. An empty composer shows one of these hints,
+# drawn in color only, which a typed `x` replaces (checked on 1.4.12); an
+# unknown hint reads as occupied.
+[composer]
+marker = '^❯'
+separator = " "
+continuation_prefix = "  "
+placeholder = '^(?:Start a message with ! to run a shell command yourself|Type @ to search and insert workspace file paths|Ask to monitor a running build or log and get pinged on changes)$'
+
+[input]
+bracketed_paste = true
+submit = "\r"
+submit_delay_ms = 800       # an Enter about 0.1s after the text added a row instead of sending (1.4.12)
+clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.4.12)
+probe = "x"                 # shows as typed, erased by DEL, triggers nothing, and replaces the hint (1.4.12)
+ready_hold_ms = 0           # the composer, once drawn, was never swapped back for a startup screen (1.4.12)
+delivery_confirm_ms = 8000
+
+[requests]
+abandoned_at_turn_end = true  # a call that times out is never cancelled, so only the turn's end releases it (1.4.12)
