@@ -17,7 +17,7 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use yagura_protocol::{DetectedStatus, UnknownReason};
 
-use crate::config::{DaemonConfig, InterruptMethod};
+use crate::config::DaemonConfig;
 use crate::room::{ChatLimits, ChatLimitsError};
 use crate::window::{InputOrigin, WindowEntry};
 
@@ -204,10 +204,6 @@ pub struct ApprovalSection {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyLimits {
-    /// How `interrupt_window` delivers the interrupt (`"bytes"` / `"signal"`).
-    /// An unknown value fails the whole load rather than falling back to the
-    /// default, so a mistyped method can never be silently ignored.
-    pub interrupt_method: Option<InterruptMethod>,
     /// Byte sequence written to the PTY by `interrupt_window`. The escape
     /// hatch for a CLI that does not react to the default `0x03`.
     pub interrupt_bytes: Option<Vec<u8>>,
@@ -760,9 +756,6 @@ pub fn apply_limits(config: &mut DaemonConfig, limits: Option<&PolicyLimits>) {
     let Some(limits) = limits else {
         return;
     };
-    if let Some(method) = limits.interrupt_method {
-        config.interrupt_method = method;
-    }
     if let Some(bytes) = limits.interrupt_bytes.as_ref() {
         config.interrupt_bytes = bytes.clone();
     }
@@ -843,41 +836,30 @@ pub enum ControlError {
     /// summary meant for a log line, never for the client.
     #[error("failed to write to the pty: {0}")]
     WriteFailed(String),
-    /// The configured interrupt method is not implemented by this build.
-    /// Refused rather than served by the other method, so a selection that
-    /// cannot be honoured is visible instead of silently substituted.
-    #[error("the configured interrupt method is not supported")]
-    UnsupportedInterruptMethod,
 }
 
-/// Interrupts `entry`'s child the way `config` prescribes.
+/// Interrupts `entry`'s child by writing `DaemonConfig::interrupt_bytes` into
+/// its PTY.
 ///
-/// Both the method (`DaemonConfig::interrupt_method`) and the byte sequence it
-/// uses (`DaemonConfig::interrupt_bytes`) are configuration, overridable
-/// through a playbook's `[limits]`, rather than constants: whether `0x03`
-/// interrupts a given CLI depends on that CLI's console input mode, and which
-/// delivery mechanism reaches it depends on the platform.
+/// The bytes are configuration, overridable through a playbook's `[limits]`,
+/// rather than a constant: whether `0x03` interrupts a given CLI depends on
+/// that CLI's console input mode.
 ///
 /// # Errors
 ///
-/// Returns [`ControlError::ChildExited`] when the child is already gone,
-/// [`ControlError::WriteFailed`] when the PTY write fails and
-/// [`ControlError::UnsupportedInterruptMethod`] when the configured method has
-/// no implementation ([`InterruptMethod::Signal`]).
+/// Returns [`ControlError::ChildExited`] when the child is already gone and
+/// [`ControlError::WriteFailed`] when the PTY write fails.
 pub async fn interrupt_window(
     entry: &WindowEntry,
     config: &DaemonConfig,
 ) -> Result<(), ControlError> {
-    match config.interrupt_method {
-        InterruptMethod::Bytes => entry
-            .write_pty_input(&config.interrupt_bytes, InputOrigin::Control)
-            .await
-            .map_err(|err| match err {
-                crate::pty::PtyError::ChildExited => ControlError::ChildExited,
-                other => ControlError::WriteFailed(other.to_string()),
-            }),
-        InterruptMethod::Signal => Err(ControlError::UnsupportedInterruptMethod),
-    }
+    entry
+        .write_pty_input(&config.interrupt_bytes, InputOrigin::Control)
+        .await
+        .map_err(|err| match err {
+            crate::pty::PtyError::ChildExited => ControlError::ChildExited,
+            other => ControlError::WriteFailed(other.to_string()),
+        })
 }
 
 /// Closes `entry`, guaranteeing that no descendant of its child survives.

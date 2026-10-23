@@ -31,7 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use common::{
     CONTROL_DETECTION_NAME, Harness, READY_MARKER, SubmitDefinitionInput, VALID_TOKEN,
     approval_config, approver_base_config as base_config, assert_file_len_stable,
-    call_list_windows, contains_subsequence, count_marker, decide, echo_child_path, env_probe_path,
+    call_list_windows, count_marker, decide, echo_child_path, env_probe_path,
     expect_approval_requested, expect_error, hex_echo_path, identify, open_submit_child_window,
     open_submit_child_window_with_clear_scope, open_submit_child_window_with_composer,
     open_submit_child_window_with_composer_and_bottom_line_count,
@@ -45,7 +45,6 @@ use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::exit_with_code_command;
 use yagura_test_support::process::submit_child_command;
 
-use yagura_daemon::config::InterruptMethod;
 use yagura_daemon::handoff::{EnvelopeFrom, compose_envelope};
 use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
@@ -213,42 +212,6 @@ async fn interrupt_window_acknowledges_and_delivers_configured_bytes_when_approv
     // configured bytes are observable in the scrollback.
     h.wait_for_scrollback(&window_id, INTERRUPT_MARKER, Duration::from_secs(10))
         .await;
-}
-
-#[tokio::test]
-async fn interrupt_window_with_an_unimplemented_method_is_refused_without_falling_back() {
-    // With `interrupt_method = signal` selected, an approved interrupt on an idle
-    // window must come back as an error, and the bytes of the other method must
-    // not be delivered behind the caller's back (no silent fallback).
-    let dir = unique_temp_dir("interrupt-signal");
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["interrupt_window"])),
-        interrupt_method: InterruptMethod::Signal,
-        interrupt_bytes: INTERRUPT_MARKER.to_vec(),
-        ..detection_config(&dir)
-    };
-    let h = Harness::start("interrupt-signal", config).await;
-    let mut client = h.connect().await;
-    let window_id = h.open_idle_window(&mut client).await;
-
-    send(
-        &mut client,
-        &ClientMessage::InterruptWindow {
-            window_id: window_id.clone(),
-        },
-    )
-    .await;
-
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
-    expect_error(msg, "unsupported_interrupt_method");
-
-    // The echo child writes back whatever reaches its PTY, so the marker appearing at all
-    // would mean the refusal was accompanied by a byte-write fallback.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        !contains_subsequence(&h.scrollback(&window_id), INTERRUPT_MARKER),
-        "a refused interrupt method must not fall back to writing the interrupt bytes"
-    );
 }
 
 #[tokio::test]

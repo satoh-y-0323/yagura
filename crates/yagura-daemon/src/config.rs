@@ -4,7 +4,6 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use yagura_os::InstanceNamespace;
 use yagura_os::program::ProgramLookup;
 
@@ -13,26 +12,6 @@ use crate::control::ApprovalPolicy;
 use crate::inbox::DeliverySpec;
 use crate::profile::ProfileOs;
 use crate::room;
-
-/// How `interrupt_window` delivers an interrupt to a window.
-///
-/// The method is configuration rather than a per-platform constant: which of
-/// the two a given CLI reacts to depends on how it reads its console input,
-/// so an operator can select it through a playbook's `[limits]` table
-/// (`interrupt_method = "bytes" | "signal"`).
-///
-/// Selecting a method this build cannot carry out is refused rather than
-/// silently served by the other one: [`InterruptMethod::Signal`] currently
-/// answers `ControlError::UnsupportedInterruptMethod`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InterruptMethod {
-    /// Write [`DaemonConfig::interrupt_bytes`] into the window's PTY.
-    Bytes,
-    /// Send an interrupt signal to the window's process group. Not implemented
-    /// on any platform yet.
-    Signal,
-}
 
 /// Detection definition selected when nothing overrides it. Defined here
 /// only; every other layer receives the value through
@@ -83,13 +62,7 @@ pub struct DaemonConfig {
     /// Defaults to 32.
     pub max_windows: usize,
 
-    /// How `interrupt_window` delivers the interrupt. Defaults to
-    /// [`InterruptMethod::Bytes`]. Overridable through a playbook's
-    /// `[limits] interrupt_method`.
-    pub interrupt_method: InterruptMethod,
-
-    /// Byte sequence `interrupt_window` writes to a window's PTY under
-    /// [`InterruptMethod::Bytes`].
+    /// Byte sequence `interrupt_window` writes to a window's PTY.
     /// Defaults to `[0x03]` (Ctrl-C), which ConPTY turns into the console
     /// interrupt event. A CLI that does not react to it can be served by
     /// overriding this through a playbook's `[limits]`.
@@ -658,7 +631,6 @@ impl Default for DaemonConfig {
             detection_name: DEFAULT_DETECTION_NAME.to_string(),
             bundled_definitions: false,
             max_windows: DEFAULT_MAX_WINDOWS,
-            interrupt_method: InterruptMethod::Bytes,
             interrupt_bytes: vec![CTRL_C],
             close_grace_ms: 500,
             close_settle_ms: DEFAULT_CLOSE_SETTLE_MS,

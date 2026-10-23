@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tracing_test::traced_test;
-use yagura_daemon::config::{APPROVAL_TIMEOUT_DEFAULT_SECS, DaemonConfig, InterruptMethod};
+use yagura_daemon::config::{APPROVAL_TIMEOUT_DEFAULT_SECS, DaemonConfig};
 use yagura_daemon::control::{
     ApprovalPolicy, ApprovalSection, ChatSection, ComposerAccess, ComposerWrite, DenyReason,
     DestructiveTool, GateVerdict, PolicyError, PolicyLimits, PolicySource, RateBucket,
@@ -411,7 +411,6 @@ fn limits_reject_a_value_of_the_wrong_type() {
 fn apply_limits_overrides_every_specified_field() {
     let mut config = DaemonConfig::default();
     let limits = PolicyLimits {
-        interrupt_method: Some(InterruptMethod::Signal),
         interrupt_bytes: Some(vec![0x1B]),
         wait_timeout_max_secs: Some(120),
         approval_timeout_secs: Some(90),
@@ -422,11 +421,6 @@ fn apply_limits_overrides_every_specified_field() {
 
     apply_limits(&mut config, Some(&limits));
 
-    assert_eq!(
-        config.interrupt_method,
-        InterruptMethod::Signal,
-        "[limits] interrupt_method must replace the built-in default"
-    );
     assert_eq!(
         config.interrupt_bytes,
         vec![0x1Bu8],
@@ -451,7 +445,6 @@ fn apply_limits_keeps_the_defaults_when_no_limits_are_given() {
 
     apply_limits(&mut config, None);
 
-    assert_eq!(config.interrupt_method, defaults.interrupt_method);
     assert_eq!(config.interrupt_bytes, defaults.interrupt_bytes);
     assert_eq!(config.wait_timeout_max_secs, defaults.wait_timeout_max_secs);
     assert_eq!(config.approval_timeout_secs, defaults.approval_timeout_secs);
@@ -462,7 +455,6 @@ fn apply_limits_overrides_only_the_specified_field() {
     let defaults = DaemonConfig::default();
     let mut config = DaemonConfig::default();
     let limits = PolicyLimits {
-        interrupt_method: None,
         interrupt_bytes: None,
         wait_timeout_max_secs: Some(42),
         approval_timeout_secs: None,
@@ -473,10 +465,6 @@ fn apply_limits_overrides_only_the_specified_field() {
 
     apply_limits(&mut config, Some(&limits));
 
-    assert_eq!(
-        config.interrupt_method, defaults.interrupt_method,
-        "a field omitted from [limits] must leave the corresponding default untouched"
-    );
     assert_eq!(
         config.interrupt_bytes, defaults.interrupt_bytes,
         "a field omitted from [limits] must leave the corresponding default untouched"
@@ -494,85 +482,6 @@ fn daemon_config_defaults_to_the_ctrl_c_interrupt_byte() {
     // The effectiveness of 0x03 itself is a manual check; that the default is 0x03 is
     // pinned here.
     assert_eq!(DaemonConfig::default().interrupt_bytes, vec![0x03u8]);
-}
-
-// Refusing a selected but unimplemented interrupt method needs the primitive and a real
-// window, so that case lives in `tests/ipc_control.rs` rather than here.
-
-#[test]
-fn daemon_config_defaults_to_the_bytes_interrupt_method() {
-    // With nothing configured the default stays the current behaviour: writing the byte
-    // sequence pinned by the test above.
-    assert_eq!(
-        DaemonConfig::default().interrupt_method,
-        InterruptMethod::Bytes
-    );
-}
-
-#[test]
-fn a_playbook_can_select_the_interrupt_method() {
-    // Run end to end through the actual configuration path: TOML text -> parse_policy ->
-    // limits() -> apply_limits -> DaemonConfig.
-    let policy = parse_policy("[limits]\ninterrupt_method = \"signal\"\n")
-        .expect("a [limits] interrupt_method must parse");
-    assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .interrupt_method,
-        Some(InterruptMethod::Signal),
-        "the TOML spelling \"signal\" must map onto InterruptMethod::Signal"
-    );
-
-    let mut config = DaemonConfig::default();
-    apply_limits(&mut config, policy.limits());
-    assert_eq!(
-        config.interrupt_method,
-        InterruptMethod::Signal,
-        "a method selected in the playbook must reach the daemon configuration"
-    );
-}
-
-#[test]
-fn a_playbook_can_select_the_bytes_interrupt_method_explicitly() {
-    let policy = parse_policy("[limits]\ninterrupt_method = \"bytes\"\n")
-        .expect("a [limits] interrupt_method must parse");
-    let mut config = DaemonConfig {
-        interrupt_method: InterruptMethod::Signal,
-        ..DaemonConfig::default()
-    };
-    apply_limits(&mut config, policy.limits());
-    assert_eq!(
-        config.interrupt_method,
-        InterruptMethod::Bytes,
-        "the TOML spelling \"bytes\" must map onto InterruptMethod::Bytes"
-    );
-}
-
-#[test]
-fn parse_policy_rejects_an_unknown_interrupt_method() {
-    // A mistyped method must fail the load rather than silently fall back to the default,
-    // which would hide the operator's mistake.
-    let result = parse_policy("[limits]\ninterrupt_method = \"foo\"\n");
-    assert!(
-        matches!(result, Err(PolicyError::Parse { .. })),
-        "an unknown interrupt_method value must be a parse error (no serde(other) \
-         fallback), got {result:?}"
-    );
-}
-
-#[test]
-fn interrupt_method_is_none_when_omitted_from_the_limits_section() {
-    let policy = parse_policy("[limits]\ninterrupt_bytes = [3]\n")
-        .expect("a [limits] section without interrupt_method must parse");
-    assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .interrupt_method,
-        None,
-        "an omitted interrupt_method must stay None so apply_limits keeps the default"
-    );
 }
 
 // `Instant` is injected rather than read from the clock, so none of these tests sleep.
@@ -1561,8 +1470,8 @@ fn approval_timeout_secs_accepts_the_whole_permitted_range() {
 #[test]
 fn approval_timeout_secs_rejects_a_value_outside_the_permitted_range() {
     // Validated while deserialising, so an out-of-range value fails the whole
-    // load exactly like an unknown interrupt_method: the gate then sees a broken
-    // playbook rather than a silently clamped deadline.
+    // load like a value of the wrong type: the gate then sees a broken playbook
+    // rather than a silently clamped deadline.
     for seconds in [0u64, 601, 3600] {
         let source = format!("[limits]\napproval_timeout_secs = {seconds}\n");
         let result = parse_policy(&source);

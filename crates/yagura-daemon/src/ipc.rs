@@ -4390,10 +4390,6 @@ fn control_error_msg(err: &ControlError) -> DaemonMessage {
             tracing::warn!(error = %summary, "control operation failed");
             error_msg("internal", "the control operation failed")
         }
-        ControlError::UnsupportedInterruptMethod => error_msg(
-            "unsupported_interrupt_method",
-            "the configured interrupt method is not supported by this build",
-        ),
     }
 }
 
