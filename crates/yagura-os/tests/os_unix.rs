@@ -659,31 +659,25 @@ async fn bind_unlinks_and_rebinds_a_stale_dead_socket() {
 
     // bind takes `<endpoint>.lock` before it binds the socket, so a sibling
     // forked in between inherits the lock's fd without the listener's: the
-    // socket is already refusing while that fork still holds the lock.
-    let lock_path = dir.path().join("e.sock.lock");
+    // socket is already refusing while that fork still holds the lock, and
+    // bind answers EndpointHeld until the fork execs. Probing the lock from
+    // here would open one more fd for a sibling to inherit, so bind itself is
+    // retried until that answer stops.
     loop {
-        let lock = std::fs::File::open(&lock_path).expect("the endpoint lock file must exist");
-        // SAFETY: `lock` owns this fd for the call; flock only reads it.
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&lock);
-        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "the dropped listener's endpoint lock was still taken after {:?}",
+        let security = ipc
+            .endpoint_security()
+            .expect("endpoint_security should succeed");
+        match ipc.bind(endpoint_str, security).await {
+            Ok(_listener) => break,
+            Err(yagura_os::OsError::EndpointHeld(_)) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(err) => panic!(
+                "bind must detect the dead socket (connect fails with ConnectionRefused),                  unlink it, and rebind once, got {err:?} after {:?}",
                 start.elapsed()
-            );
+            ),
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-
-    let second_security = ipc
-        .endpoint_security()
-        .expect("endpoint_security should succeed");
-    let _second_listener = ipc.bind(endpoint_str, second_security).await.expect(
-        "bind must detect the dead socket (connect fails with ConnectionRefused), unlink it, \
-         and rebind once",
-    );
 }
 
 // A live daemon whose queue of pending connections is full refuses a connect
