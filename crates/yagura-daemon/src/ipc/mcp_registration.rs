@@ -23,7 +23,7 @@ use yagura_protocol::{
 
 use crate::config::{DaemonConfig, REPORT_EXE_NAME};
 use crate::control::RequestOrigin;
-use crate::host_paths::HostPaths;
+use crate::host_paths::{FileTools, HostPaths};
 use crate::json_entry;
 use crate::mcp_registration;
 use crate::model_choices::parse_json_document;
@@ -832,10 +832,30 @@ async fn read_file_observation(
     env: &[(OsString, OsString)],
     file: &str,
 ) -> Result<mcp_registration::StatusObservation, &'static str> {
-    let Some(argv) = spec.render_file_read(file) else {
+    read_file_with(
+        config,
+        spec.file_tools(),
+        env,
+        file,
+        config.mcp_registration_timeout,
+    )
+    .await
+}
+
+/// Reads `file` through `tools` when given, otherwise directly under the
+/// configured home directory, a tool bounded by `timeout`.
+async fn read_file_with(
+    config: &DaemonConfig,
+    tools: Option<&FileTools>,
+    env: &[(OsString, OsString)],
+    file: &str,
+    timeout: std::time::Duration,
+) -> Result<mcp_registration::StatusObservation, &'static str> {
+    let Some(argv) = tools.map(|tools| tools.render_read(file)) else {
         return Ok(read_host_file_observation(config, file).await);
     };
-    Ok(match run_captured(config, argv, env, None).await {
+    let outcome = run_captured_within(config, argv, env, None, timeout).await;
+    Ok(match outcome {
         SpawnOutcome::Refused(reason) => return Err(reason),
         SpawnOutcome::SpawnFailed => mcp_registration::StatusObservation::NotInstalled,
         SpawnOutcome::Exited { code, stdout, .. } => mcp_registration::StatusObservation::Exited {
@@ -1072,6 +1092,44 @@ fn warn_left_on(reason: &str) {
         "could not read the CLI's registrations; the window opens without turning the other \
          instances' bridge registrations off"
     );
+}
+
+/// What a window launch reads to tell whether the CLI's own settings already
+/// name the server its `[mcp]` injection adds ([`mcp_injection_conflicts`]).
+pub(super) struct AbsentRead {
+    /// The settings file, relative to the CLI environment's home directory.
+    pub(super) file: String,
+    /// The JSON Pointer naming the injected server, already rendered.
+    pub(super) pointer: String,
+    /// The profile's `[host_paths]` file tools; `None` reads on the host.
+    pub(super) tools: Option<FileTools>,
+    pub(super) env: Vec<(OsString, OsString)>,
+    /// Bounds how many launches run a conversion or a listing at once.
+    pub(super) permits: Arc<Semaphore>,
+}
+
+/// Why a launch leaves its `[mcp]` injection out, or `None` to keep it: the
+/// file is missing or does not name the server. A CLI that refuses to start
+/// on a second definition of one name would leave a window that cannot open,
+/// so a file that cannot be read in time drops the injection too.
+///
+/// The wait for a slot and the read together stay within
+/// `config.mcp_listing_timeout`.
+pub(super) async fn mcp_injection_conflicts(
+    config: &DaemonConfig,
+    read: AbsentRead,
+) -> Option<&'static str> {
+    let deadline = Instant::now() + config.mcp_listing_timeout;
+    let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, read.permits.acquire()).await else {
+        return Some("no slot to read the CLI's settings in");
+    };
+    let within = deadline.saturating_duration_since(Instant::now());
+    match read_json_with(config, read.tools.as_ref(), &read.env, &read.file, within).await {
+        JsonFile::Missing => None,
+        JsonFile::Document(document) if document.pointer(&read.pointer).is_none() => None,
+        JsonFile::Document(_) => Some("the CLI's settings already define a server of that name"),
+        JsonFile::Unreadable => Some("the CLI's settings could not be read"),
+    }
 }
 
 /// How a window launch converts the daemon-side paths its injections name
@@ -1472,8 +1530,26 @@ async fn read_json_file(
     env: &[(OsString, OsString)],
     file: &str,
 ) -> JsonFile {
-    let absent_exit = spec.files_absent_exit();
-    match read_file_observation(config, spec, env, file).await {
+    read_json_with(
+        config,
+        spec.file_tools(),
+        env,
+        file,
+        config.mcp_registration_timeout,
+    )
+    .await
+}
+
+/// [`read_json_file`] through `tools` alone, a tool bounded by `timeout`.
+async fn read_json_with(
+    config: &DaemonConfig,
+    tools: Option<&FileTools>,
+    env: &[(OsString, OsString)],
+    file: &str,
+    timeout: std::time::Duration,
+) -> JsonFile {
+    let absent_exit = tools.and_then(FileTools::absent_exit);
+    match read_file_with(config, tools, env, file, timeout).await {
         Ok(mcp_registration::StatusObservation::FileMissing) => JsonFile::Missing,
         Ok(mcp_registration::StatusObservation::Exited { code, .. })
             if absent_exit.is_some() && code == absent_exit =>

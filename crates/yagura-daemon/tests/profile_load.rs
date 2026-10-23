@@ -2495,3 +2495,82 @@ fn enumeration_of_every_document_predating_launch_options_is_unchanged_and_maps_
         );
     }
 }
+
+// --- the CLI environment's file tools live in `[host_paths]` -----------------
+
+/// A WSL-hosted read tool: `{file}` arrives as the script's one positional
+/// argument.
+const HOST_READ: &str = r#"["wsl", "-e", "sh", "-c", "[ -e \"$HOME/$1\" ] || exit 3; cat \"$HOME/$1\"", "sh", "{file}"]"#;
+/// The matching replace tool, taking the new content on standard input.
+const HOST_REPLACE: &str = r#"["wsl", "-e", "sh", "-c", "cat > \"$HOME/$1\"", "sh", "{file}"]"#;
+
+/// A WSL-hosted profile with a registration row whose status is a settings
+/// file. `host_tools` is spliced into `[host_paths]`, `files` into
+/// `[mcp_registration]`.
+fn file_tools_profile(host_tools: &str, files: &str) -> String {
+    format!(
+        "schema = 1\ndisplay_name = \"File Tools\"\n\n\
+         [command]\ndefault = [\"wsl\", \"cli\"]\n\n\
+         [host_paths]\nconvert = [\"wsl\", \"-e\", \"wslpath\", \"-u\", \"{{path}}\"]\n{host_tools}\n\
+         [mcp_registration]\ngroup = \"WSL\"\n\
+         add = [\"mcp\", \"add\", \"{{server}}\", \"{{env_args}}\", \"{{bridge}}\"]\n\
+         remove = [\"mcp\", \"remove\", \"{{server}}\"]\n\
+         env_arg = [\"--env\", \"{{env}}\"]\n\
+         env_forward = {{ name = \"WSLENV\", separator = \":\" }}\n{files}\n\
+         [mcp_registration.status]\nfile = \".neutral/mcp_config.json\"\nformat = \"json\"\n\
+         command = \"/mcpServers/{{server}}/command\"\n"
+    )
+}
+
+/// `tools` (a TOML argv array) with `{file}` replaced by `file`.
+fn rendered_tool(tools: &str, file: &str) -> Vec<String> {
+    let argv: Vec<String> = toml::from_str::<toml::Table>(&format!("argv = {tools}"))
+        .expect("the tool is a TOML array")["argv"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|arg| arg.as_str().expect("a string").replace("{file}", file))
+        .collect();
+    argv
+}
+
+#[test]
+fn a_registration_reads_and_writes_through_the_host_paths_file_tools_and_never_through_two() {
+    let file = ".neutral/mcp_config.json";
+    let host_tools = format!("read = {HOST_READ}\nreplace = {HOST_REPLACE}\nabsent_exit = 3\n");
+
+    let profile =
+        parse_profile("host-tools", &file_tools_profile(&host_tools, "")).unwrap_or_else(|err| {
+            panic!("[host_paths] must accept read / replace / absent_exit: {err:?}")
+        });
+    let spec = profile
+        .mcp_registration
+        .expect("the profile carries a registration row");
+    assert_eq!(
+        spec.render_file_read(file),
+        Some(rendered_tool(HOST_READ, file)),
+        "a row without its own files table must read through [host_paths].read"
+    );
+    assert_eq!(
+        spec.render_file_replace(file),
+        Some(rendered_tool(HOST_REPLACE, file)),
+        "a row without its own files table must write through [host_paths].replace"
+    );
+    assert_eq!(spec.files_absent_exit(), Some(3));
+
+    let files = format!("files = {{ read = {HOST_READ}, absent_exit = 3 }}\n");
+    let legacy = parse_profile("legacy-files", &file_tools_profile("", &files))
+        .unwrap_or_else(|err| panic!("[mcp_registration.files] alone must still load: {err:?}"))
+        .mcp_registration
+        .expect("the profile carries a registration row");
+    assert_eq!(
+        legacy.render_file_read(file),
+        Some(rendered_tool(HOST_READ, file))
+    );
+    assert_eq!(legacy.files_absent_exit(), Some(3));
+
+    assert!(
+        parse_profile("both", &file_tools_profile(&host_tools, &files)).is_err(),
+        "declaring the read tool in both [host_paths] and [mcp_registration.files] must be refused"
+    );
+}

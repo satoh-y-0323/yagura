@@ -377,6 +377,10 @@ struct PlannedOpen {
     /// How the paths `profile_injections` name are converted for the CLI;
     /// `None` when the profile hands them over unchanged.
     host_paths: Option<mcp_registration::PathConversion>,
+    /// What tells, right before spawn, whether the CLI's own settings already
+    /// name the `[mcp]` injection's server; `None` when the profile has no
+    /// `absent` guard or no `[mcp]` injection was planned.
+    mcp_absent: Option<mcp_registration::AbsentRead>,
     /// The injections that follow the profile's own (a launch prompt), in
     /// argv order.
     injections: Vec<CliInjection>,
@@ -2461,6 +2465,7 @@ impl IpcServer {
         let target = crate::mcp_registration::RegistrationTarget::for_instance(
             self.config.instance_id.as_deref(),
         );
+        let mut mcp_absent = None;
         if let (Some(spec), Some(bridge)) = (launch.mcp.as_ref(), self.config.mcp_bridge.as_deref())
         {
             injections.extend(crate::profile::plan_mcp_injection(
@@ -2469,6 +2474,24 @@ impl IpcServer {
                 bridge,
                 config_dir,
             ));
+            mcp_absent = spec
+                .absent
+                .as_ref()
+                .map(|guard| mcp_registration::AbsentRead {
+                    file: guard.file().to_string(),
+                    pointer: guard.pointer_for(target.server()),
+                    tools: launch
+                        .host_paths
+                        .as_ref()
+                        .and_then(crate::host_paths::HostPaths::file_tools)
+                        .cloned(),
+                    env: launch
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.into(), value.into()))
+                        .collect(),
+                    permits: Arc::clone(&self.mcp_launch_listings),
+                });
         }
         // Independent of the bridge: the hooks reach the daemon through the
         // window's own environment.
@@ -2587,6 +2610,7 @@ impl IpcServer {
             extra_env: launch.env.into_iter().collect(),
             profile_injections: injections,
             host_paths,
+            mcp_absent,
             injections: Vec::new(),
             hooks_gate,
             hooks,
@@ -5610,6 +5634,18 @@ async fn open_planned(
             planned.hooks = HooksRoute::LeftOut;
             hooks_left_out = Some((gate.profile, reason));
         }
+    }
+    if let Some(read) = planned.mcp_absent.take()
+        && let Some(reason) = mcp_registration::mcp_injection_conflicts(config, read).await
+    {
+        planned
+            .profile_injections
+            .retain(|injection| injection.kind() != crate::window::InjectionKind::Mcp);
+        tracing::warn!(
+            profile = %planned.launch.profile,
+            reason,
+            "the MCP bridge was left out of this launch; the window opens without it"
+        );
     }
     // A table whose path cannot be converted is left out here; a `[hooks]`
     // table left out this way settles as left out at spawn.

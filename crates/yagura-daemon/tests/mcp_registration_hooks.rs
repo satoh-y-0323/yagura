@@ -171,26 +171,29 @@ fn fixture_profile(profile: &str, layout: &Layout, alive_ms: Option<&str>) -> St
     root.insert("command".into(), toml::Value::Table(command));
 
     if profile == WSL_PROFILE {
-        let mut host_paths = toml::Table::new();
-        host_paths.insert("convert".into(), str_array(&[stub, "probe", "{path}"]));
-        root.insert("host_paths".into(), toml::Value::Table(host_paths));
-        let registration = root
-            .get_mut("mcp_registration")
-            .and_then(toml::Value::as_table_mut)
+        root.get("mcp_registration")
+            .and_then(toml::Value::as_table)
             .expect("the shipped profile carries a registration table");
-        let files = registration
-            .get_mut("files")
-            .and_then(toml::Value::as_table_mut)
+        let shipped_tools = root
+            .get("host_paths")
+            .and_then(toml::Value::as_table)
+            .filter(|tools| tools.contains_key("read"))
             .expect("the WSL row edits its settings through file tools");
+        let mut host_paths = toml::Table::new();
+        if let Some(absent_exit) = shipped_tools.get("absent_exit") {
+            host_paths.insert("absent_exit".into(), absent_exit.clone());
+        }
+        host_paths.insert("convert".into(), str_array(&[stub, "probe", "{path}"]));
         let file_arg = format!("{home}/{{file}}");
-        files.insert(
+        host_paths.insert(
             "read".into(),
             str_array(&[stub, "file-read", file_arg.as_str()]),
         );
-        files.insert(
+        host_paths.insert(
             "replace".into(),
             str_array(&[stub, "file-replace", file_arg.as_str()]),
         );
+        root.insert("host_paths".into(), toml::Value::Table(host_paths));
     }
 
     let mut env = toml::Table::new();

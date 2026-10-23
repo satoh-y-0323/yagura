@@ -145,6 +145,17 @@ fn raw_registration_table(id: &str) -> toml::Table {
     }
 }
 
+/// The shipped profile's `[host_paths]` table, untyped, when it carries the
+/// file tools (`read`, and `replace` / `absent_exit` beside it).
+fn host_file_tools(id: &str) -> Option<toml::Table> {
+    let document: toml::Table =
+        toml::from_str(&shipped_source(id)).expect("shipped profile must be valid TOML");
+    match document.get("host_paths") {
+        Some(toml::Value::Table(table)) if table.contains_key("read") => Some(table.clone()),
+        _ => None,
+    }
+}
+
 /// Every id under `profiles/`, derived from the directory itself so a newly
 /// shipped profile is judged without editing this test.
 fn every_shipped_profile_id() -> Vec<String> {
@@ -296,14 +307,12 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
         );
 
         // A row that reads no file of its own has no use for the file tools.
-        if !reads_files(&spec, *form) && !raw.contains_key("files") {
+        let tools = host_file_tools(id);
+        if !reads_files(&spec, *form) && tools.is_none() {
             continue;
         }
-        let files = match raw.get("files") {
-            Some(toml::Value::Table(files)) => files.clone(),
-            other => {
-                panic!("{id} reads settings files, so it must carry a files table, got {other:?}")
-            }
+        let Some(files) = tools else {
+            panic!("{id} reads settings files, so its [host_paths] must carry the read tool")
         };
         assert_eq!(
             files.get("absent_exit").and_then(toml::Value::as_integer),
@@ -882,7 +891,7 @@ mod wsl_file_tools {
     use yagura_daemon::pty::{CaptureChildEnv, spawn_one_shot};
     use yagura_os::{CaptureLimits, CaptureOutcome};
 
-    use super::{AGY_SETTINGS_FILE, CODEX_SETTINGS_FILE, raw_registration_table, shipped_spec};
+    use super::{AGY_SETTINGS_FILE, CODEX_SETTINGS_FILE, host_file_tools, shipped_spec};
     use crate::common::unique_temp_dir;
 
     /// Far above a shell snippet's run time, so it only bounds a hang.
@@ -932,12 +941,9 @@ mod wsl_file_tools {
     }
 
     fn absent_exit(id: &str) -> i32 {
-        let raw = raw_registration_table(id);
-        let exit = raw
-            .get("files")
-            .and_then(|files| files.get("absent_exit"))
-            .and_then(toml::Value::as_integer)
-            .unwrap_or_else(|| panic!("{id} must declare files.absent_exit"));
+        let exit = host_file_tools(id)
+            .and_then(|tools| tools.get("absent_exit").and_then(toml::Value::as_integer))
+            .unwrap_or_else(|| panic!("{id} must declare host_paths.absent_exit"));
         i32::try_from(exit).expect("an exit code fits in i32")
     }
 

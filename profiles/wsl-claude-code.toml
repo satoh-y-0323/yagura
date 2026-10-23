@@ -62,6 +62,10 @@ launch_prompt = ["--", "{prompt}"]
 # WSL's own tool first is the bridge a registration writes.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+absent_exit = 3
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same
@@ -81,9 +85,3 @@ format = "lines"
 command = "Command:"
 require = { "Scope:" = "User" }
 absent = "No MCP server named"
-
-[mcp_registration.files]
-# `{file}` is a positional argument to `sh`, resolved against $HOME inside
-# the script -- never spliced into the script string itself.
-read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
-absent_exit = 3

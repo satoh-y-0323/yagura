@@ -47,9 +47,17 @@ launch_prompt = ["-i", "{prompt}"]
 # the daemon its hook entries run.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself. The replace
+# tool follows a symlinked file to its target and keeps its mode, as in
+# wsl-codex-cli.toml, but creates the file (and its directory) when it is
+# not there yet: the hooks file need not exist before registration.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; if [ -e "$f" ]; then r=$(readlink -f -- "$f") || exit 1; else r="$f"; mkdir -p -- "$(dirname -- "$r")" || exit 1; fi; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && { [ ! -e "$r" ] || chmod --reference="$r" "$t"; } && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
+absent_exit = 3
 
 # agy keeps its registrations in a settings file, not behind a status
-# command, so the daemon reads that file through the read tool below rather
+# command, so the daemon reads that file through the read tool above rather
 # than running a status command.
 [mcp_registration]
 group = "WSL"
@@ -75,13 +83,3 @@ file = ".gemini/config/hooks.json"
 PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }, { type = "command", command = "{daemon} --deliver-take", timeout = 10 }]
 SessionStart = [{ type = "command", command = "{daemon} --deliver-context", timeout = 10 }]
 PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }] }]
-
-[mcp_registration.files]
-# `{file}` is a positional argument to `sh`, resolved against $HOME inside
-# the script -- never spliced into the script string itself. The replace
-# tool follows a symlinked file to its target and keeps its mode, as in
-# wsl-codex-cli.toml, but creates the file (and its directory) when it is
-# not there yet: the hooks file need not exist before registration.
-read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
-replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; if [ -e "$f" ]; then r=$(readlink -f -- "$f") || exit 1; else r="$f"; mkdir -p -- "$(dirname -- "$r")" || exit 1; fi; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && { [ ! -e "$r" ] || chmod --reference="$r" "$t"; } && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
-absent_exit = 3

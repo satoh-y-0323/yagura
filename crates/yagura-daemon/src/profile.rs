@@ -454,6 +454,33 @@ pub struct InjectionSpec {
     /// contents is substituted, and nothing else. `None` when the table has
     /// none.
     pub config_dir: Option<BTreeMap<String, String>>,
+    /// An `[mcp]` table's `absent` guard: the entry of the CLI's own settings
+    /// that, when present, takes the injection out of a launch. Always `None`
+    /// for `[hooks]`.
+    pub absent: Option<AbsentGuard>,
+}
+
+/// Where the CLI's own settings would already name the server an `[mcp]`
+/// injection adds: a CLI that refuses to start on a second definition of the
+/// same name is launched without the injection instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbsentGuard {
+    file: String,
+    pointer: String,
+}
+
+impl AbsentGuard {
+    /// The settings file, relative to the CLI environment's home directory.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The JSON Pointer into `file` that names `server`.
+    #[must_use]
+    pub fn pointer_for(&self, server: &str) -> String {
+        self.pointer.replace(MCP_SERVER_PLACEHOLDER, server)
+    }
 }
 
 impl InjectionSpec {
@@ -586,6 +613,11 @@ pub enum InjectionSpecError {
     /// ([`is_config_dir_file_name`]).
     #[error("a config_dir key is not a plain file name")]
     InvalidConfigDirFileName,
+    /// `absent` is on a `[hooks]` table, names a file outside the home
+    /// directory, or a pointer that is not a JSON Pointer naming at most
+    /// `{server}`.
+    #[error("the absent guard is not usable")]
+    InvalidAbsent,
 }
 
 /// The schema version [`ProfileParseError::UnsupportedSchema`] rejected.
@@ -741,6 +773,15 @@ struct RawInjection {
     config_file: Option<String>,
     #[serde(default)]
     config_dir: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    absent: Option<RawAbsentGuard>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAbsentGuard {
+    file: String,
+    pointer: String,
 }
 
 /// A `[model]` / `[effort]` table before validation. `args` is `Option` so
@@ -1217,10 +1258,27 @@ fn parse_injection_spec(
         }
         _ => {}
     }
+    let absent = match raw.absent {
+        Some(guard)
+            if kind == TableKind::Mcp
+                && crate::mcp_registration::is_safe_relative_home_path(&guard.file)
+                && !contains_placeholder_outside(&guard.file, &[])
+                && is_json_pointer(&guard.pointer)
+                && !contains_placeholder_outside(&guard.pointer, &[MCP_SERVER_PLACEHOLDER]) =>
+        {
+            Some(AbsentGuard {
+                file: guard.file,
+                pointer: guard.pointer,
+            })
+        }
+        Some(_) => return Err(invalid(InjectionSpecError::InvalidAbsent)),
+        None => None,
+    };
     Ok(Some(InjectionSpec {
         args,
         config_file: raw.config_file,
         config_dir: raw.config_dir,
+        absent,
     }))
 }
 

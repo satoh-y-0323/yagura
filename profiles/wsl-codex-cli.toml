@@ -80,6 +80,15 @@ launch_prompt = ["{prompt}"]
 # WSL's own tool first is the bridge a registration writes.
 [host_paths]
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself. `readlink -f`
+# follows a symlinked settings file to its real target, and the replacement
+# is written to a temporary file in the same directory, given the target's
+# own mode, then renamed over it -- so a dotfiles-managed link stays a link
+# and the file's mode never widens.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; r=$(readlink -f -- "$f") || exit 1; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && chmod --reference="$r" "$t" && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
+absent_exit = 3
 
 # The registration commands below run the same way any other window from
 # this profile does: through the launch argv above, so they reach the same
@@ -141,14 +150,3 @@ under = ["hooks", "state"]
 '/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:4797ec0bdc9f2dd9beb2dc55e20215a4609c6f6d15ff49f8c2f2e493e6bb6dc5" }
 '/<session-flags>/config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:5be51c65610812ad8b436954dbec8df94f5845db00dfbd5baa17ec8b8092dd00" }
 '/<session-flags>/config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:dab1ea0140be7aef663bdd6dc37130d16134a4b43755295d4d043eaf78b1f4b4" }
-
-[mcp_registration.files]
-# `{file}` is a positional argument to `sh`, resolved against $HOME inside
-# the script -- never spliced into the script string itself. `readlink -f`
-# follows a symlinked settings file to its real target, and the replacement
-# is written to a temporary file in the same directory, given the target's
-# own mode, then renamed over it -- so a dotfiles-managed link stays a link
-# and the file's mode never widens.
-read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
-replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; r=$(readlink -f -- "$f") || exit 1; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && chmod --reference="$r" "$t" && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
-absent_exit = 3

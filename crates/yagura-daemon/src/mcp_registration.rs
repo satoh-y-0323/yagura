@@ -16,7 +16,7 @@ use serde_json::Value as JsonValue;
 use thiserror::Error;
 use yagura_os::program::{self, HostOs, Platform};
 
-use crate::host_paths::HostPaths;
+use crate::host_paths::{FileTools, HostPaths};
 use crate::model_choices::{COMMAND_NOT_FOUND_STATUS, output_lines, parse_json_document};
 use crate::profile;
 use crate::toml_set::TableEdit;
@@ -150,14 +150,6 @@ struct StatusSpec {
 struct EnvForward {
     name: String,
     separator: String,
-}
-
-/// A validated `files` table.
-#[derive(Debug, Clone)]
-struct FilesSpec {
-    read: Vec<String>,
-    replace: Option<Vec<String>>,
-    absent_exit: Option<i32>,
 }
 
 /// A validated `[mcp_registration.toml_set]` table: an in-place edit made to
@@ -803,7 +795,9 @@ pub struct McpRegistrationSpec {
     env_arg: Option<Vec<String>>,
     env_forward: Option<EnvForward>,
     host_paths: Option<HostPaths>,
-    files: Option<FilesSpec>,
+    /// The row's own `files` table, or else its profile's `[host_paths]`
+    /// file tools: the one way this row reads and writes the CLI's files.
+    files: Option<FileTools>,
     status: StatusSpec,
     toml_set: Option<TomlSetSpec>,
     json_entry: Option<JsonEntrySpec>,
@@ -954,13 +948,18 @@ impl McpRegistrationSpec {
             .map(|host_paths| host_paths.render(path))
     }
 
+    /// The tools this row reads and replaces settings files with, `None`
+    /// when it reads them directly on the host.
+    #[must_use]
+    pub fn file_tools(&self) -> Option<&FileTools> {
+        self.files.as_ref()
+    }
+
     /// Renders the command that reads `file`'s content, `None` when the row
     /// reads settings files directly rather than through a tool.
     #[must_use]
     pub fn render_file_read(&self, file: &str) -> Option<Vec<String>> {
-        self.files
-            .as_ref()
-            .map(|files| substitute_all(&files.read, "{file}", file))
+        self.files.as_ref().map(|files| files.render_read(file))
     }
 
     /// Renders the command that replaces `file`'s content (the new content
@@ -970,15 +969,14 @@ impl McpRegistrationSpec {
     pub fn render_file_replace(&self, file: &str) -> Option<Vec<String>> {
         self.files
             .as_ref()
-            .and_then(|files| files.replace.as_ref())
-            .map(|args| substitute_all(args, "{file}", file))
+            .and_then(|files| files.render_replace(file))
     }
 
-    /// The exit code the row's `files.read` tool uses for "the file is not
-    /// there", when it declares one.
+    /// The exit code the row's read tool uses for "the file is not there",
+    /// when it declares one.
     #[must_use]
     pub fn files_absent_exit(&self) -> Option<i32> {
-        self.files.as_ref().and_then(|files| files.absent_exit)
+        self.files.as_ref().and_then(FileTools::absent_exit)
     }
 
     /// Like [`McpRegistrationSpec::render_add`], but never fails: a table
@@ -1677,19 +1675,15 @@ fn build_spec(
         validate_args_placeholders(env_arg, &["{env}"])?;
     }
 
+    let host_tools = host_paths.as_ref().and_then(HostPaths::file_tools);
     let files = match raw.files {
-        Some(raw_files) => {
-            validate_args_placeholders(&raw_files.read, &["{file}"])?;
-            if let Some(replace) = &raw_files.replace {
-                validate_args_placeholders(replace, &["{file}"])?;
-            }
-            Some(FilesSpec {
-                read: raw_files.read,
-                replace: raw_files.replace,
-                absent_exit: raw_files.absent_exit,
-            })
-        }
-        None => None,
+        // One way to read the CLI's files, never two that could disagree.
+        Some(_) if host_tools.is_some() => return Err(invalid()),
+        Some(raw_files) => Some(
+            FileTools::new(raw_files.read, raw_files.replace, raw_files.absent_exit)
+                .map_err(|_| invalid())?,
+        ),
+        None => host_tools.cloned(),
     };
 
     let status = build_status(raw.status)?;
@@ -2025,7 +2019,7 @@ fn validate_args_placeholders(
 /// accepted as separators, and a Windows drive letter is rejected, so the
 /// check does not depend on the host operating system parsing the profile
 /// (a `C:\...` path must be rejected even when the daemon runs on Linux).
-fn is_safe_relative_home_path(path: &str) -> bool {
+pub(crate) fn is_safe_relative_home_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.starts_with('\\') || path.contains(':') {
         return false;
     }

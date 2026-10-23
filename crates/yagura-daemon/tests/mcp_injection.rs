@@ -1159,3 +1159,109 @@ async fn a_named_instances_window_lists_the_inherited_instance_variable_in_env_r
         "`{{env_refs}}` must list exactly the channel variables the child receives"
     );
 }
+
+// =============================================================================
+// `[mcp] absent`: a server of the same name already in the CLI's own settings
+// file takes the `[mcp]` injection out of the launch, read through the
+// profile's `[host_paths].read` tool; the window opens either way
+// =============================================================================
+
+/// The flag every `absent` case's `[command]` passes first, so its child
+/// always reports something before any injected element.
+const ABSENT_FIRST_ARG: &str = "--first";
+
+/// The source of an `argv_probe` profile whose `[mcp]` injection appends
+/// `--mcp <server>`, guarded by `absent` on `file`, read through the stub's
+/// `file-read` under `home`; `env` is the profile's own `[env]` body.
+fn absent_profile_source(home: &Path, file: &str, env: &str) -> String {
+    let probe = argv_probe_path();
+    let probe = probe.to_str().expect("argv_probe path must be valid UTF-8");
+    let stub = common::mcp_cli_stub_toml_literal();
+    let home = home.to_str().expect("home path must be valid UTF-8");
+    format!(
+        "schema = 1\ndisplay_name = \"Absent Probe\"\n\n\
+         [command]\ndefault = ['{probe}', '{ABSENT_FIRST_ARG}']\n\n\
+         [mcp]\nargs = [\"--mcp\", \"{{server}}\"]\n\
+         absent = {{ file = \"{file}\", pointer = \"/mcpServers/{{server}}\" }}\n\n\
+         [host_paths]\nconvert = [{stub}, \"probe\", \"{{path}}\"]\n\
+         read = [{stub}, \"file-read\", '{home}/{{file}}']\n\
+         absent_exit = 3\n\n\
+         [env]\n{env}"
+    )
+}
+
+/// Opens `profile`'s window and reports whether its child received the
+/// `--mcp` injection, once the child has exited.
+async fn absent_case_injected(h: &Harness, client: &mut Connection, profile: &str) -> bool {
+    let window_id = match call_open_window_from_profile(client, profile).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("{profile}: the window must open either way, got {other:?}"),
+    };
+    h.wait_until_child_exited(&window_id, Duration::from_secs(15))
+        .await;
+    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
+    assert!(
+        text.contains(&format!("<<argv[1]={ABSENT_FIRST_ARG}>>")),
+        "{profile}: the profile's own argv must reach the child; scrollback: {text:?}"
+    );
+    text.contains("<<argv[2]=--mcp>>")
+}
+
+#[tokio::test]
+async fn an_mcp_absent_guard_drops_the_injection_when_the_clis_settings_name_the_server_or_cannot_be_read()
+ {
+    let tree = TempDir::new("yagura-cli-test", "mcp-inject-absent");
+    let profiles_dir = tree.make_dir("profiles");
+    let mcp_dir = tree.make_dir("mcp");
+    let home = tree.make_dir("home");
+    let server = yagura_daemon::mcp_registration::RegistrationTarget::for_instance(None)
+        .server()
+        .to_string();
+    let settings_dir = home.join(".cli");
+    std::fs::create_dir_all(&settings_dir).unwrap();
+    std::fs::write(
+        settings_dir.join("named.json"),
+        format!("{{\"mcpServers\":{{\"{server}\":{{\"command\":\"mine\"}}}}}}"),
+    )
+    .unwrap();
+    std::fs::write(
+        settings_dir.join("other.json"),
+        "{\"mcpServers\":{\"someone-else\":{\"command\":\"theirs\"}}}",
+    )
+    .unwrap();
+    // A directory where the file should be: the read tool fails without
+    // the missing-file exit.
+    std::fs::create_dir_all(settings_dir.join("unreadable.json")).unwrap();
+
+    // (profile id, settings file, profile [env] body, injected expected)
+    let cases: [(&str, &str, &str, bool); 5] = [
+        ("absent-named", ".cli/named.json", "", false),
+        ("absent-missing-file", ".cli/missing.json", "", true),
+        ("absent-missing-pointer", ".cli/other.json", "", true),
+        ("absent-unreadable", ".cli/unreadable.json", "", false),
+        (
+            "absent-timed-out",
+            ".cli/missing.json",
+            "MCP_CLI_STUB_DELAY_MS = \"8000\"\n",
+            false,
+        ),
+    ];
+    for (id, file, env, _) in &cases {
+        write_profile(&profiles_dir, id, &absent_profile_source(&home, file, env));
+    }
+    let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
+    let mut config = mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge));
+    config.home_dir = Some(home.clone());
+    config.mcp_listing_timeout = Duration::from_millis(2000);
+    let h = Harness::start("mcp-inject-absent", config).await;
+    let mut client = h.connect().await;
+
+    for (id, _, _, expected) in &cases {
+        assert_eq!(
+            absent_case_injected(&h, &mut client, id).await,
+            *expected,
+            "{id}: the [mcp] injection must be kept only when the settings file is missing or \
+             does not name the server"
+        );
+    }
+}
