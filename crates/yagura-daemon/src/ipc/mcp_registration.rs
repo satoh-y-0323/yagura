@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::Value as JsonValue;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use yagura_protocol::{
@@ -25,6 +26,7 @@ use crate::control::RequestOrigin;
 use crate::host_paths::HostPaths;
 use crate::json_entry;
 use crate::mcp_registration;
+use crate::model_choices::parse_json_document;
 use crate::profile;
 use crate::pty;
 use crate::toml_set;
@@ -186,18 +188,19 @@ fn build_rows(
         // listing keeps the `{bridge}` placeholder even when this daemon's
         // own bridge is known.
         let bridge_for_listing = if spec.converts_paths() { None } else { bridge };
-        let (add, remove) = row_commands(&spec, &target, &entry.command, bridge_for_listing);
+        let (add, remove) =
+            row_commands(&spec, &target, &entry.command, bridge_for_listing).unzip();
         let toml_set = spec
             .toml_set()
             .map(|toml_set| to_wire_toml_set(toml_set, &target));
-        let entries = entries_preview(config, &spec, &target);
+        let entries = entries_preview(config, &spec, &target, bridge_for_listing);
 
         rows.push(McpRegistrationRow {
             profile: entry.id.clone(),
             display_name: entry.display_name.clone(),
             group: spec.group().map(str::to_string),
-            add: Some(add),
-            remove: Some(remove),
+            add,
+            remove,
             toml_set,
             entries,
         });
@@ -282,13 +285,17 @@ async fn resolve_row_source(
 /// child is started. `bridge` is `None` while the bridge this row would
 /// register is not yet known here -- no configured bridge, or a row whose
 /// probe has not run -- which keeps the `{bridge}` placeholder in the
-/// rendered `add` rather than guessing at it.
+/// rendered `add` rather than guessing at it. `None` for a row whose CLI has
+/// no such commands.
 fn row_commands(
     spec: &mcp_registration::McpRegistrationSpec,
     target: &mcp_registration::RegistrationTarget,
     launch_argv: &[String],
     bridge: Option<&str>,
-) -> (McpRegistrationCommand, McpRegistrationCommand) {
+) -> Option<(McpRegistrationCommand, McpRegistrationCommand)> {
+    if !spec.has_commands() {
+        return None;
+    }
     let program_at = program_at_for(launch_argv);
     let bridge = bridge.unwrap_or("{bridge}");
     let add = McpRegistrationCommand {
@@ -299,7 +306,7 @@ fn row_commands(
         argv: full_argv(launch_argv, spec.render_remove(target)),
         program_at,
     };
-    (add, remove)
+    Some((add, remove))
 }
 
 /// `launch_argv` followed by `rendered`.
@@ -341,11 +348,12 @@ fn to_wire_toml_set(
 /// The entries `spec` owns in its settings files, for display: each as
 /// registration would write it on this host. A row whose daemon path is
 /// converted by its probe keeps the `{daemon}` placeholder, as its `add`
-/// keeps `{bridge}`.
+/// keeps `{bridge}`; `bridge` is `None` while the bridge is not known.
 fn entries_preview(
     config: &DaemonConfig,
     spec: &mcp_registration::McpRegistrationSpec,
     target: &mcp_registration::RegistrationTarget,
+    bridge: Option<&str>,
 ) -> Vec<McpRegistrationEntry> {
     let daemon = if spec.converts_paths() {
         None
@@ -356,6 +364,8 @@ fn entries_preview(
         target: target.clone(),
         os: config.host_os,
         daemon,
+        bridge: bridge.map(str::to_string),
+        remove_shared: false,
     };
     SettingsEdit::of(spec)
         .iter()
@@ -376,7 +386,20 @@ fn to_wire_state(state: mcp_registration::RegistrationState) -> McpRegistrationS
 
 /// Reads one row's registration state from its own CLI: a probe first (when
 /// the row has one), then the status itself, both under `config`'s limits.
+/// A registration another value holds the claim of is marked as refused.
 async fn compute_status(
+    config: &DaemonConfig,
+    source: &RowSource,
+    bridge: &str,
+) -> McpRegistrationStatusInfo {
+    let mut status = compute_state(config, source, bridge).await;
+    if let ClaimCheck::Held(pointer) = check_claim(config, source).await {
+        status.refused_by_claim = Some(pointer);
+    }
+    status
+}
+
+async fn compute_state(
     config: &DaemonConfig,
     source: &RowSource,
     bridge: &str,
@@ -387,7 +410,7 @@ async fn compute_status(
                 Ok(observation) => derive(source, &observation, bridge),
                 Err(reason) => refused_status(reason),
             };
-            let derived = with_entries_status(config, source, derived).await;
+            let derived = with_entries_status(config, source, derived, bridge).await;
             build_status_info(source, derived, bridge)
         }
         ProbeOutcome::Bridge(probed) => {
@@ -395,7 +418,7 @@ async fn compute_status(
                 Ok(observation) => derive(source, &observation, &probed),
                 Err(reason) => refused_status(reason),
             };
-            let derived = with_entries_status(config, source, derived).await;
+            let derived = with_entries_status(config, source, derived, &probed).await;
             build_status_info(source, derived, &probed)
         }
         ProbeOutcome::Refused(reason) => build_status_info(source, refused_status(reason), bridge),
@@ -441,6 +464,7 @@ async fn with_entries_status(
     config: &DaemonConfig,
     source: &RowSource,
     mut derived: mcp_registration::DerivedStatus,
+    bridge: &str,
 ) -> mcp_registration::DerivedStatus {
     if !source.spec.owns_entries() {
         return derived;
@@ -452,7 +476,15 @@ async fn with_entries_status(
     ) {
         return derived;
     }
-    match read_entries(config, &source.spec, &source.target, &source.env).await {
+    match read_entries(
+        config,
+        &source.spec,
+        &source.target,
+        &source.env,
+        Some(bridge),
+    )
+    .await
+    {
         EntriesRead::Hold => {}
         EntriesRead::Differ(labels) => {
             derived.state = mcp_registration::RegistrationState::Differs;
@@ -477,7 +509,7 @@ pub(super) async fn read_registration_entries(
     env: &[(OsString, OsString)],
 ) -> EntriesRead {
     let target = mcp_registration::RegistrationTarget::for_instance(config.instance_id.as_deref());
-    read_entries(config, spec, &target, env).await
+    read_entries(config, spec, &target, env, None).await
 }
 
 /// What reading a row's owned entries back found.
@@ -489,20 +521,24 @@ pub(super) enum EntriesRead {
     Unreadable,
 }
 
+/// `bridge` is the path to the bridge the entries are compared against, as
+/// the row's environment sees it; `None` resolves the configured one.
 async fn read_entries(
     config: &DaemonConfig,
     spec: &mcp_registration::McpRegistrationSpec,
     target: &mcp_registration::RegistrationTarget,
     env: &[(OsString, OsString)],
+    bridge: Option<&str>,
 ) -> EntriesRead {
+    let os = config.host_os;
     let edits: Vec<SettingsEdit> = SettingsEdit::of(spec)
         .into_iter()
-        .filter(|edit| edit.owns_entries_on(config.host_os))
+        .filter(|edit| edit.owns_entries_on(os))
         .collect();
     if edits.is_empty() {
         return EntriesRead::Hold;
     }
-    let daemon = if edits.iter().any(SettingsEdit::names_daemon) {
+    let daemon = if edits.iter().any(|edit| edit.names_daemon(os)) {
         match resolve_status_daemon(config, spec, env).await {
             Ok(daemon) => daemon,
             Err(()) => return EntriesRead::Unreadable,
@@ -510,10 +546,22 @@ async fn read_entries(
     } else {
         None
     };
+    let bridge = match bridge {
+        Some(bridge) => Some(bridge.to_string()),
+        None if edits.iter().any(|edit| edit.names_bridge(os)) => {
+            match resolve_status_bridge(config, spec, env).await {
+                Ok(bridge) => bridge,
+                Err(()) => return EntriesRead::Unreadable,
+            }
+        }
+        None => None,
+    };
     let context = EditContext {
         target: target.clone(),
-        os: config.host_os,
+        os,
         daemon,
+        bridge,
+        remove_shared: false,
     };
     let absent_exit = spec.files_absent_exit();
     let mut differ = Vec::new();
@@ -538,13 +586,13 @@ async fn read_entries(
             {
                 Some(Ok(holds)) => holds,
                 // No daemon path the entries could name: they cannot hold.
-                Some(Err(EditError::NoDaemon)) => false,
+                Some(Err(EditError::NoDaemon | EditError::NoBridge)) => false,
                 _ => return EntriesRead::Unreadable,
             },
             _ => return EntriesRead::Unreadable,
         };
         if !holds {
-            differ.push(edit.entries_label(target).unwrap_or_default());
+            differ.push(edit.entries_label(target, os).unwrap_or_default());
         }
     }
     if differ.is_empty() {
@@ -571,6 +619,24 @@ async fn resolve_status_daemon(
         ProbeOutcome::Bridge(converted) => {
             Ok(usable_in_hook_command(&converted).then_some(converted))
         }
+        _ => Err(()),
+    }
+}
+
+/// The bridge an owned entry names, as the row's own environment sees it, for
+/// reading a status: `Ok(None)` when none is configured, `Err` when the row's
+/// probe could not convert it.
+async fn resolve_status_bridge(
+    config: &DaemonConfig,
+    spec: &mcp_registration::McpRegistrationSpec,
+    env: &[(OsString, OsString)],
+) -> Result<Option<String>, ()> {
+    let Some(bridge) = config.mcp_bridge.as_deref().and_then(Path::to_str) else {
+        return Ok(None);
+    };
+    match probe_path(config, spec, env, bridge).await {
+        ProbeOutcome::NoProbe => Ok(Some(bridge.to_string())),
+        ProbeOutcome::Bridge(converted) => Ok(Some(converted)),
         _ => Err(()),
     }
 }
@@ -648,14 +714,15 @@ fn build_status_info(
         &source.target,
         &source.launch_argv,
         Some(observed_bridge),
-    );
+    )
+    .unzip();
     McpRegistrationStatusInfo {
         profile: source.profile.clone(),
         state: to_wire_state(derived.state),
         differs_in: derived.differs_in,
         reason: derived.reason,
-        add: Some(add),
-        remove: Some(remove),
+        add,
+        remove,
         refused_by_claim: None,
     }
 }
@@ -1199,7 +1266,8 @@ pub(super) async fn handle_run_mcp_registration(
             .and_then(|path| path.to_str())
             .unwrap_or_default();
         let status = compute_status(&config, &source, bridge).await;
-        let error = error.or_else(|| unconfirmed_toml_set(&source, action, &status));
+        let error =
+            error.or_else(|| unconfirmed_toml_set(&source, config.host_os, action, &status));
         outbound.reply(&DaemonMessage::McpRegistrationResult {
             request_id,
             profile: source.profile,
@@ -1220,6 +1288,7 @@ const REASON_TOML_SET_UNCONFIRMED: &str = "the CLI does not report the value tha
 /// `toml_set` but `status` (read after it) still differs in one of its keys.
 fn unconfirmed_toml_set(
     source: &RowSource,
+    os: yagura_os::program::HostOs,
     action: McpRegistrationAction,
     status: &McpRegistrationStatusInfo,
 ) -> Option<String> {
@@ -1232,7 +1301,7 @@ fn unconfirmed_toml_set(
         .map(mcp_registration::TomlSetSpec::values);
     let labels: Vec<String> = SettingsEdit::of(&source.spec)
         .iter()
-        .filter_map(|edit| edit.entries_label(&source.target))
+        .filter_map(|edit| edit.entries_label(&source.target, os))
         .collect();
     status
         .differs_in
@@ -1242,55 +1311,73 @@ fn unconfirmed_toml_set(
 }
 
 /// Runs one operation against `source`:
-/// - Register: `[probe]` (when the row has one) → `add` → `[daemon probe]`
-///   (when an edit names the daemon and the row has a probe) → each
-///   settings-file edit (`toml_set`, then `json_entry`).
-/// - Update: the same steps as Remove, then the same steps as Register.
-/// - Remove: `remove` → the removal of each edit's owned entries.
+/// - Register: the claim check -> `[probe]` (when the row has one) -> `add`
+///   (when the CLI has commands) -> `[daemon probe]` (when an edit names the
+///   daemon and the row has a probe) -> each settings-file edit.
+/// - Update: the claim check -> the steps of Remove -> the steps of Register.
+/// - Remove: `remove` (when the CLI has commands) -> the removal of each
+///   edit's owned entries.
 ///
 /// A step that fails stops the operation there -- no later step runs -- and
-/// `add` is never undone: a settings-file edit that later fails leaves the
-/// row `differs`, fixable by running Update.
+/// nothing already done is undone: a settings-file edit that later fails
+/// leaves the row `differs`, fixable by running Update.
+///
+/// Files are written in an order that keeps that safe. The file holding the
+/// claim names the others' entries (or is read together with them), so it is
+/// written last and emptied first: whichever step fails, no file points at
+/// one that was never written, and what is left over is unreferenced.
 async fn run_operation(
     config: &DaemonConfig,
     source: &RowSource,
     action: McpRegistrationAction,
 ) -> (Vec<McpRegistrationStep>, Option<String>) {
     let mut steps = Vec::new();
+    let os = config.host_os;
 
     let carries_registration = matches!(
         action,
         McpRegistrationAction::Register | McpRegistrationAction::Update
     );
-    // Checked before any step runs (a row with no
-    // `env_arg` cannot carry a named instance's environment), with a
-    // placeholder bridge -- carrying the instance's environment never
-    // depends on the bridge value itself, so this check is valid before the
-    // bridge (and, for a probed row, its probe) is resolved below.
-    if carries_registration && let Err(err) = source.spec.render_add(&source.target, "") {
-        return (steps, Some(err.to_string()));
+    // Checked before any step runs (a row that cannot carry a named
+    // instance's environment would silently reach the default instance's
+    // daemon), and before anything is written: the claim a registration is
+    // refused over, once for the whole operation.
+    if carries_registration {
+        if let Err(err) = source.spec.check_target(&source.target) {
+            return (steps, Some(err.to_string()));
+        }
+        match check_claim(config, source).await {
+            ClaimCheck::Free => {}
+            ClaimCheck::Held(pointer) => return (steps, Some(claim_refusal(source, &pointer))),
+            ClaimCheck::Unreadable(file) => {
+                return (steps, Some(format!("`{file}` could not be read")));
+            }
+        }
     }
 
     if matches!(
         action,
         McpRegistrationAction::Update | McpRegistrationAction::Remove
     ) {
-        match run_remove_step(config, source).await {
-            Ok(step) => steps.push(step),
-            Err((step, reason)) => {
-                steps.push(step);
-                return (steps, Some(reason));
+        if source.spec.has_commands() {
+            match run_remove_step(config, source).await {
+                Ok(step) => steps.push(step),
+                Err((step, reason)) => {
+                    steps.push(step);
+                    return (steps, Some(reason));
+                }
             }
         }
+        // Decided before the first removal: it reads the files as they are.
         let context = EditContext {
             target: source.target.clone(),
-            os: config.host_os,
+            os,
             daemon: None,
+            bridge: None,
+            remove_shared: shared_entries_removable(config, source).await,
         };
-        for edit in SettingsEdit::of(&source.spec)
-            .iter()
-            .filter(|edit| edit.owns_entries())
-        {
+        let edits = ordered(SettingsEdit::of(&source.spec), EditChange::RemoveEntries);
+        for edit in edits.iter().filter(|edit| edit.owns_entries(os)) {
             match run_edit(config, source, edit, EditChange::RemoveEntries, &context).await {
                 EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
                 EditOutcome::Failed(mut edit_steps, reason) => {
@@ -1304,7 +1391,7 @@ async fn run_operation(
         }
     }
 
-    // Register, or Update continuing after its own `remove`: `run_operation`
+    // Register, or Update continuing after its own removal: `run_operation`
     // was only ever called after the caller (`handle_run_mcp_registration`)
     // confirmed `config.mcp_bridge` is configured for one of these two
     // actions, so its absence here is unreachable in practice.
@@ -1319,16 +1406,18 @@ async fn run_operation(
         Err(reason) => return (steps, Some(reason)),
     };
 
-    match run_add_step(config, source, &bridge).await {
-        Ok(step) => steps.push(step),
-        Err((step, reason)) => {
-            steps.push(step);
-            return (steps, Some(reason));
+    if source.spec.has_commands() {
+        match run_add_step(config, source, &bridge).await {
+            Ok(step) => steps.push(step),
+            Err((step, reason)) => {
+                steps.push(step);
+                return (steps, Some(reason));
+            }
         }
     }
 
-    let edits = SettingsEdit::of(&source.spec);
-    let daemon = if edits.iter().any(SettingsEdit::names_daemon) {
+    let edits = ordered(SettingsEdit::of(&source.spec), EditChange::Set);
+    let daemon = if edits.iter().any(|edit| edit.names_daemon(os)) {
         match resolve_operation_daemon(config, source, &mut steps).await {
             Ok(daemon) => daemon,
             Err(reason) => return (steps, Some(reason)),
@@ -1338,10 +1427,12 @@ async fn run_operation(
     };
     let context = EditContext {
         target: source.target.clone(),
-        os: config.host_os,
+        os,
         daemon,
+        bridge: Some(bridge),
+        remove_shared: false,
     };
-    for edit in &edits {
+    for edit in edits.iter().filter(|edit| edit.writes_on(os)) {
         match run_edit(config, source, edit, EditChange::Set, &context).await {
             EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
             EditOutcome::Failed(mut edit_steps, reason) => {
@@ -1352,6 +1443,134 @@ async fn run_operation(
     }
 
     (steps, None)
+}
+
+/// `edits` in the order `change` makes them: the edit holding the claim last
+/// when setting, first when removing; the rest keep the profile's order.
+fn ordered(mut edits: Vec<SettingsEdit>, change: EditChange) -> Vec<SettingsEdit> {
+    match change {
+        EditChange::Set => edits.sort_by_key(SettingsEdit::holds_claim),
+        EditChange::RemoveEntries => edits.sort_by_key(|edit| !edit.holds_claim()),
+    }
+    edits
+}
+
+/// What a settings file read as JSON came back with.
+enum JsonFile {
+    /// The file is not there.
+    Missing,
+    Document(JsonValue),
+    /// It could not be read, or is not JSON.
+    Unreadable,
+}
+
+/// Reads `file` as a JSON document, through the row's own `files.read` tool
+/// when it has one.
+async fn read_json_file(
+    config: &DaemonConfig,
+    spec: &mcp_registration::McpRegistrationSpec,
+    env: &[(OsString, OsString)],
+    file: &str,
+) -> JsonFile {
+    let absent_exit = spec.files_absent_exit();
+    match read_file_observation(config, spec, env, file).await {
+        Ok(mcp_registration::StatusObservation::FileMissing) => JsonFile::Missing,
+        Ok(mcp_registration::StatusObservation::Exited { code, .. })
+            if absent_exit.is_some() && code == absent_exit =>
+        {
+            JsonFile::Missing
+        }
+        Ok(mcp_registration::StatusObservation::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        }) => std::str::from_utf8(&stdout)
+            .ok()
+            .and_then(parse_json_document)
+            .map_or(JsonFile::Unreadable, JsonFile::Document),
+        _ => JsonFile::Unreadable,
+    }
+}
+
+/// Whether a registration may write into the entry it claims.
+enum ClaimCheck {
+    /// There is no claim, or the entry is absent or holds this registration's
+    /// own value.
+    Free,
+    /// The entry holds another value: the claimed pointer.
+    Held(String),
+    /// The claimed file could not be read: its path.
+    Unreadable(String),
+}
+
+async fn check_claim(config: &DaemonConfig, source: &RowSource) -> ClaimCheck {
+    let Some(claim) = source
+        .spec
+        .json_entry()
+        .and_then(mcp_registration::JsonEntrySpec::claim)
+    else {
+        return ClaimCheck::Free;
+    };
+    match read_json_file(config, &source.spec, &source.env, claim.file()).await {
+        JsonFile::Missing => ClaimCheck::Free,
+        JsonFile::Document(document) if claim.is_held_by_another(&document) => {
+            ClaimCheck::Held(claim.pointer().to_string())
+        }
+        JsonFile::Document(_) => ClaimCheck::Free,
+        JsonFile::Unreadable => ClaimCheck::Unreadable(claim.file().to_string()),
+    }
+}
+
+/// The fixed failure for a Register / Update the claim refuses.
+fn claim_refusal(source: &RowSource, pointer: &str) -> String {
+    let file = source
+        .spec
+        .json_entry()
+        .and_then(mcp_registration::JsonEntrySpec::claim)
+        .map_or("", mcp_registration::Claim::file);
+    format!("`{file}` already holds another value at `{pointer}`; nothing was written")
+}
+
+/// Whether a removal also takes out the entries every instance shares: only
+/// while the claim holds this registration's own value and no other
+/// instance's bridge entry is left. Any doubt (a file that cannot be read, a
+/// bridge that is not configured) keeps them.
+async fn shared_entries_removable(config: &DaemonConfig, source: &RowSource) -> bool {
+    let Some(json_entry) = source.spec.json_entry() else {
+        return false;
+    };
+    let (Some(claim), Some(bridge_file)) = (json_entry.claim(), json_entry.bridge_file()) else {
+        return false;
+    };
+    let Some(bridge_name) = config
+        .mcp_bridge
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+    else {
+        return false;
+    };
+    let JsonFile::Document(claim_document) =
+        read_json_file(config, &source.spec, &source.env, claim.file()).await
+    else {
+        return false;
+    };
+    if !claim.is_held_by_us(&claim_document) {
+        return false;
+    }
+    let bridge_document = if bridge_file == claim.file() {
+        claim_document
+    } else {
+        let JsonFile::Document(document) =
+            read_json_file(config, &source.spec, &source.env, bridge_file).await
+        else {
+            return false;
+        };
+        document
+    };
+    json_entry
+        .other_bridges(&bridge_document, bridge_name, source.target.server())
+        .is_some_and(|others| others.is_empty())
 }
 
 /// The daemon path the row's owned entries name, as its CLI's environment
@@ -1471,7 +1690,7 @@ enum EditOutcome {
 #[derive(Debug, Clone)]
 enum SettingsEdit {
     Toml(mcp_registration::TomlSetSpec),
-    Json(mcp_registration::JsonEntrySpec),
+    Json(mcp_registration::JsonFileSpec),
 }
 
 /// What a [`SettingsEdit`] renders its values with, beyond the file itself.
@@ -1482,6 +1701,23 @@ struct EditContext {
     /// The path a hook command runs the daemon by, as the CLI's own
     /// environment sees it. `None` when there is none to name.
     daemon: Option<String>,
+    /// The path to the bridge, as the CLI's own environment sees it. `None`
+    /// when it is not known.
+    bridge: Option<String>,
+    /// Whether a removal takes out the entries every instance shares as well
+    /// as this instance's own.
+    remove_shared: bool,
+}
+
+impl EditContext {
+    fn vars(&self) -> mcp_registration::EntryVars<'_> {
+        mcp_registration::EntryVars {
+            target: &self.target,
+            os: self.os,
+            daemon: self.daemon.as_deref(),
+            bridge: self.bridge.as_deref(),
+        }
+    }
 }
 
 /// Why a settings-file edit could not be made.
@@ -1492,6 +1728,18 @@ enum EditError {
     /// The entries name the daemon, but there is no path to it they can
     /// carry.
     NoDaemon,
+    /// The entries name the bridge, but there is no path to it they can
+    /// carry.
+    NoBridge,
+}
+
+impl From<mcp_registration::MissingPath> for EditError {
+    fn from(missing: mcp_registration::MissingPath) -> Self {
+        match missing {
+            mcp_registration::MissingPath::Daemon => Self::NoDaemon,
+            mcp_registration::MissingPath::Bridge => Self::NoBridge,
+        }
+    }
 }
 
 /// Which change an edit step makes to its settings file.
@@ -1515,7 +1763,7 @@ enum MissingFile {
 }
 
 impl SettingsEdit {
-    /// Every settings file `spec` edits, in the order registration writes
+    /// Every settings file `spec` edits, in the order the profile declares
     /// them.
     fn of(spec: &mcp_registration::McpRegistrationSpec) -> Vec<Self> {
         let mut edits = Vec::new();
@@ -1523,7 +1771,7 @@ impl SettingsEdit {
             edits.push(Self::Toml(toml_set.clone()));
         }
         if let Some(json_entry) = spec.json_entry() {
-            edits.push(Self::Json(json_entry.clone()));
+            edits.extend(json_entry.files().iter().cloned().map(Self::Json));
         }
         edits
     }
@@ -1531,15 +1779,29 @@ impl SettingsEdit {
     fn file(&self) -> &str {
         match self {
             Self::Toml(toml_set) => toml_set.file(),
-            Self::Json(json_entry) => json_entry.file(),
+            Self::Json(file) => file.file(),
         }
     }
 
-    /// Whether the edit owns entries that removal takes out again.
-    fn owns_entries(&self) -> bool {
+    /// Whether the edit holds the claim: the file that names, or is read
+    /// together with, the files written before it.
+    fn holds_claim(&self) -> bool {
+        matches!(self, Self::Json(file) if file.claim().is_some())
+    }
+
+    /// Whether the edit has anything to write on `os`.
+    fn writes_on(&self, os: yagura_os::program::HostOs) -> bool {
+        match self {
+            Self::Toml(_) => true,
+            Self::Json(file) => file.owns_entries_on(os),
+        }
+    }
+
+    /// Whether the edit owns entries that removal takes out again on `os`.
+    fn owns_entries(&self, os: yagura_os::program::HostOs) -> bool {
         match self {
             Self::Toml(toml_set) => toml_set.has_entries(),
-            Self::Json(_) => true,
+            Self::Json(file) => file.owns_entries_on(os),
         }
     }
 
@@ -1547,30 +1809,38 @@ impl SettingsEdit {
     fn owns_entries_on(&self, os: yagura_os::program::HostOs) -> bool {
         match self {
             Self::Toml(toml_set) => !toml_set.entry_edits(os).is_empty(),
-            Self::Json(_) => true,
+            Self::Json(file) => file.owns_entries_on(os),
         }
     }
 
-    /// Whether the edit's values name the daemon.
-    fn names_daemon(&self) -> bool {
-        matches!(self, Self::Json(_))
+    /// Whether the edit's values written on `os` name the daemon.
+    fn names_daemon(&self, os: yagura_os::program::HostOs) -> bool {
+        matches!(self, Self::Json(file) if file.names_daemon(os))
+    }
+
+    /// Whether the edit's values written on `os` name the bridge.
+    fn names_bridge(&self, os: yagura_os::program::HostOs) -> bool {
+        matches!(self, Self::Json(file) if file.names_bridge(os))
     }
 
     /// The name [`mcp_registration::DerivedStatus::differs_in`] gives the
     /// owned entries.
-    fn entries_label(&self, target: &mcp_registration::RegistrationTarget) -> Option<String> {
+    fn entries_label(
+        &self,
+        target: &mcp_registration::RegistrationTarget,
+        os: yagura_os::program::HostOs,
+    ) -> Option<String> {
         match self {
             Self::Toml(toml_set) => toml_set.entries_label(),
-            Self::Json(json_entry) => Some(json_entry.names(target).join(", ")),
+            Self::Json(file) => Some(file.label(target, os)),
         }
     }
 
     fn json_entries(
-        json_entry: &mcp_registration::JsonEntrySpec,
+        file: &mcp_registration::JsonFileSpec,
         context: &EditContext,
-    ) -> Result<Vec<(String, serde_json::Value)>, EditError> {
-        let daemon = context.daemon.as_deref().ok_or(EditError::NoDaemon)?;
-        Ok(json_entry.entries(&context.target, daemon))
+    ) -> Result<Vec<(String, JsonValue)>, EditError> {
+        Ok(file.entries(&context.vars())?)
     }
 
     /// The entries the edit owns on `context.os`, each named and written in
@@ -1589,18 +1859,15 @@ impl SettingsEdit {
                     })
                 })
                 .collect(),
-            Self::Json(json_entry) => {
-                let daemon = context.daemon.as_deref().unwrap_or("{daemon}");
-                json_entry
-                    .entries(&context.target, daemon)
-                    .into_iter()
-                    .map(|(name, value)| McpRegistrationEntry {
-                        file: file.clone(),
-                        name,
-                        content: value.to_string(),
-                    })
-                    .collect()
-            }
+            Self::Json(spec) => spec
+                .preview(&context.vars())
+                .into_iter()
+                .map(|(name, value)| McpRegistrationEntry {
+                    file: file.clone(),
+                    name,
+                    content: value.to_string(),
+                })
+                .collect(),
         }
     }
 
@@ -1624,14 +1891,15 @@ impl SettingsEdit {
                     .collect();
                 toml_set::remove_tables(content, &tables).map_err(EditError::Toml)?
             }
-            (Self::Json(json_entry), EditChange::Set) => {
-                json_entry::set_entries(content, &Self::json_entries(json_entry, context)?)
+            (Self::Json(file), EditChange::Set) => {
+                json_entry::set_entries(content, &Self::json_entries(file, context)?)
                     .map_err(EditError::Json)?
             }
-            (Self::Json(json_entry), EditChange::RemoveEntries) => {
-                json_entry::remove_entries(content, &json_entry.names(&context.target))
-                    .map_err(EditError::Json)?
-            }
+            (Self::Json(file), EditChange::RemoveEntries) => json_entry::remove_entries(
+                content,
+                &file.removal_keys(&context.target, context.os, context.remove_shared),
+            )
+            .map_err(EditError::Json)?,
         };
         Ok((updated != content).then_some(updated))
     }
@@ -1644,8 +1912,8 @@ impl SettingsEdit {
                 toml_set::edits_hold(content, &toml_set.entry_edits(context.os))
                     .map_err(EditError::Toml)
             }
-            Self::Json(json_entry) => {
-                json_entry::entries_hold(content, &Self::json_entries(json_entry, context)?)
+            Self::Json(file) => {
+                json_entry::entries_hold(content, &Self::json_entries(file, context)?)
                     .map_err(EditError::Json)
             }
         }
@@ -1662,12 +1930,9 @@ impl SettingsEdit {
     }
 
     /// The step output naming what changed and where, never the values.
-    fn describe(
-        &self,
-        change: EditChange,
-        target: &mcp_registration::RegistrationTarget,
-    ) -> String {
+    fn describe(&self, change: EditChange, context: &EditContext) -> String {
         let file = self.file();
+        let target = &context.target;
         match self {
             Self::Toml(toml_set) => {
                 let entries = toml_set.entries_label();
@@ -1687,15 +1952,16 @@ impl SettingsEdit {
                     ),
                 }
             }
-            Self::Json(json_entry) => {
-                let names = json_entry.names(target).join(", ");
-                match change {
-                    EditChange::Set => format!("set its entries {names} in {file}"),
-                    EditChange::RemoveEntries => {
-                        format!("removed its entries {names} from {file}")
-                    }
+            Self::Json(spec) => match change {
+                EditChange::Set => format!(
+                    "set its entries {} in {file}",
+                    spec.label(target, context.os)
+                ),
+                EditChange::RemoveEntries => {
+                    let keys = spec.removal_keys(target, context.os, context.remove_shared);
+                    format!("removed its entries {} from {file}", keys.join(", "))
                 }
-            }
+            },
         }
     }
 
@@ -1713,8 +1979,19 @@ impl SettingsEdit {
             (_, Some(EditError::Json(json_entry::JsonEntryError::NotAnObject))) => {
                 format!("`{file}` does not hold a JSON object")
             }
+            (_, Some(EditError::Json(json_entry::JsonEntryError::ParentNotAnObject))) => {
+                format!(
+                    "a value in `{file}` that is not an object is in the way of an entry to write"
+                )
+            }
+            (_, Some(EditError::Json(json_entry::JsonEntryError::InvalidPointer))) => {
+                format!("an entry name for `{file}` is not a valid JSON Pointer")
+            }
             (_, Some(EditError::NoDaemon)) => {
                 format!("no path to the daemon can be written into `{file}`")
+            }
+            (_, Some(EditError::NoBridge)) => {
+                format!("no path to the bridge can be written into `{file}`")
             }
             (Self::Json(_), _) => format!("`{file}` could not be read"),
             (Self::Toml(_), _) => format!("the table was not found in `{file}`"),
@@ -1734,7 +2011,7 @@ async fn run_edit(
     context: &EditContext,
 ) -> EditOutcome {
     match source.spec.render_file_read(edit.file()) {
-        None => run_edit_host(config, source, edit, change, context).await,
+        None => run_edit_host(config, edit, change, context).await,
         Some(read_argv) => {
             run_edit_via_files(config, source, edit, change, context, read_argv).await
         }
@@ -1747,7 +2024,6 @@ async fn run_edit(
 /// of the value it wrote.
 async fn run_edit_host(
     config: &DaemonConfig,
-    source: &RowSource,
     edit: &SettingsEdit,
     change: EditChange,
     context: &EditContext,
@@ -1772,7 +2048,7 @@ async fn run_edit_host(
             argv: Vec::new(),
             program_at: 0,
             exit_code: None,
-            output: edit.describe(change, &source.target),
+            output: edit.describe(change, context),
         }]),
         Err(err) => EditOutcome::Failed(Vec::new(), edit.failed(err)),
     }

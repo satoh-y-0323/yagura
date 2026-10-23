@@ -21,9 +21,11 @@ use common::{
     mcp_cli_stub_toml_literal, read_response, register_approver, send, unique_temp_dir,
     write_profile,
 };
+use serde_json::{Value, json};
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::mcp_registration::STEP_OUTPUT_MAX_BYTES;
+use yagura_daemon::mcp_registration::{RenderError, STEP_OUTPUT_MAX_BYTES};
+use yagura_daemon::profile::ProfileOs;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, McpRegistrationAction, McpRegistrationState,
     McpRegistrationStatusInfo, McpRegistrationStep,
@@ -1632,4 +1634,402 @@ async fn register_refuses_a_metacharacter_argument_for_a_cmd_shim_before_anythin
         "the shim never ran: {:?}",
         std::fs::read_to_string(&marker).ok()
     );
+}
+
+// =============================================================================
+// A registration with no add / remove command: its CLI reads the bridge
+// from a settings file, and hooks from a second file that settings file
+// names (the claim). The shared entries serve every instance at once.
+// =============================================================================
+
+const SETTINGS_FILE: &str = ".neutral/settings.json";
+const MANAGED_HOOKS_FILE: &str = ".neutral/managed-hooks.json";
+const CLAIM: &str = "/managed_hooks_path";
+const OWN_CLAIM_VALUE: &str = "managed-hooks.json";
+
+/// The settings file's own content before any registration: one entry of the
+/// user's that every operation must leave as it is.
+const USER_SETTINGS: &str = "{\n  \"theme\": \"dark\"\n}\n";
+
+/// A command-less row over two files. The element holding the claim comes
+/// first, so writing in the declared order would write the referring file
+/// before the file it refers to.
+const COMMANDLESS_TABLE: &str = "[mcp_registration.status]\n\
+file = \".neutral/settings.json\"\n\
+format = \"json\"\n\
+command = \"/mcpServers/{server}/command\"\n\
+\n\
+[[mcp_registration.json_entry]]\n\
+file = \".neutral/settings.json\"\n\
+claim = \"/managed_hooks_path\"\n\
+[mcp_registration.json_entry.entries]\n\
+\"/mcpServers/{server}\" = { command = \"{bridge}\", args = [], env = \"{env_refs}\" }\n\
+\"/managed_hooks_path\" = \"managed-hooks.json\"\n\
+\n\
+[[mcp_registration.json_entry]]\n\
+file = \".neutral/managed-hooks.json\"\n\
+[mcp_registration.json_entry.by_os.windows]\n\
+\"/hooks\" = { Stop = \"windows-hook\" }\n\
+[mcp_registration.json_entry.by_os.default]\n\
+\"/hooks\" = { Stop = \"default-hook\" }\n";
+
+fn commandless_profile(display_name: &str, table: &str) -> String {
+    mcp_cli_stub_profile_with_table(display_name, "", table, &[])
+}
+
+fn home_file(layout: &Layout, file: &str) -> PathBuf {
+    layout.home_dir.join(file)
+}
+
+fn seed_home_file(layout: &Layout, file: &str, content: &str) {
+    let path = home_file(layout, file);
+    std::fs::create_dir_all(path.parent().expect("has a parent")).expect("create settings dir");
+    std::fs::write(path, content).expect("seed the settings file");
+}
+
+fn read_home_json(layout: &Layout, file: &str) -> Value {
+    let text = std::fs::read_to_string(home_file(layout, file))
+        .unwrap_or_else(|err| panic!("read {file}: {err}"));
+    serde_json::from_str(&text).unwrap_or_else(|err| panic!("{file} is JSON ({err}): {text}"))
+}
+
+/// What `{env_refs}` writes for an instance: each variable a window's bridge
+/// needs, referenced by name for the CLI to fill in.
+fn env_refs(named: bool) -> Value {
+    let mut refs = json!({
+        "YAGURA_WINDOW_ID": "${YAGURA_WINDOW_ID}",
+        "YAGURA_STATUS_TOKEN": "${YAGURA_STATUS_TOKEN}",
+    });
+    if named {
+        refs["YAGURA_INSTANCE"] = json!("${YAGURA_INSTANCE}");
+    }
+    refs
+}
+
+fn assert_ran_no_command(result: &RunResult, context: &str) {
+    assert!(
+        result.steps.iter().all(|step| step.argv.is_empty()),
+        "{context}: a row without add / remove runs no command, only file edits: {:?}",
+        result.steps
+    );
+}
+
+#[tokio::test]
+async fn register_without_commands_writes_every_entry_with_the_set_for_its_os() {
+    for (os, tag, expected_hook) in [
+        (ProfileOs::Windows, "mcpreg-run-cl-win", "windows-hook"),
+        (ProfileOs::Linux, "mcpreg-run-cl-linux", "default-hook"),
+    ] {
+        let layout = Layout::new(tag);
+        let bridge = layout.bridge_str();
+        seed_home_file(&layout, SETTINGS_FILE, USER_SETTINGS);
+        write_profile(
+            &layout.profiles_dir,
+            "romeo",
+            &commandless_profile("Romeo", COMMANDLESS_TABLE),
+        );
+        let config = DaemonConfig {
+            host_os: os,
+            ..registration_config(&layout, Some(layout.bridge.clone()))
+        };
+        // No report folder: there is no daemon path to write, and none of
+        // these entries names one.
+        assert!(config.report_dir.is_none());
+        let h = Harness::start(tag, config).await;
+        let mut approver = approver_connection(&h).await;
+
+        let (_, result) =
+            run_and_collect(&mut approver, "romeo", McpRegistrationAction::Register, 1).await;
+        assert!(result.error.is_none(), "{os:?}: {result:?}");
+        assert_ran_no_command(&result, &format!("{os:?}"));
+        assert_eq!(
+            result.status.state,
+            McpRegistrationState::Registered,
+            "{os:?}: {result:?}"
+        );
+        assert_eq!(result.status.refused_by_claim, None, "{os:?}");
+
+        let settings = read_home_json(&layout, SETTINGS_FILE);
+        assert_eq!(
+            settings.pointer("/mcpServers/yagura"),
+            Some(&json!({ "command": bridge, "args": [], "env": env_refs(false) })),
+            "{os:?}: {settings}"
+        );
+        assert_eq!(settings.pointer(CLAIM), Some(&json!(OWN_CLAIM_VALUE)));
+        assert_eq!(settings.pointer("/theme"), Some(&json!("dark")));
+        let hooks = read_home_json(&layout, MANAGED_HOOKS_FILE);
+        assert_eq!(
+            hooks.pointer("/hooks"),
+            Some(&json!({ "Stop": expected_hook })),
+            "{os:?}: the set chosen for the host, or default without one: {hooks}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_single_json_entry_table_writes_what_a_one_element_array_writes() {
+    let layout = Layout::new("mcpreg-run-cl-single");
+    let bridge = layout.bridge_str();
+    let table = |file: &str, header: &str| {
+        format!(
+            "[mcp_registration.status]\nfile = \"{file}\"\nformat = \"json\"\n\
+             command = \"/{{server}}/command\"\n\n{header}\nfile = \"{file}\"\n\
+             [mcp_registration.json_entry.entries]\n\
+             \"{{server}}\" = {{ command = \"{{bridge}}\", env = \"{{env_refs}}\" }}\n"
+        )
+    };
+    let single_file = ".neutral/single.json";
+    let array_file = ".neutral/array.json";
+    for file in [single_file, array_file] {
+        seed_home_file(&layout, file, USER_SETTINGS);
+    }
+    write_profile(
+        &layout.profiles_dir,
+        "single",
+        &commandless_profile(
+            "Single",
+            &table(single_file, "[mcp_registration.json_entry]"),
+        ),
+    );
+    write_profile(
+        &layout.profiles_dir,
+        "array",
+        &commandless_profile(
+            "Array",
+            &table(array_file, "[[mcp_registration.json_entry]]"),
+        ),
+    );
+    let h = Harness::start(
+        "mcpreg-run-cl-single",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let mut approver = approver_connection(&h).await;
+
+    for (request_id, profile) in [(1, "single"), (2, "array")] {
+        let (_, result) = run_and_collect(
+            &mut approver,
+            profile,
+            McpRegistrationAction::Register,
+            request_id,
+        )
+        .await;
+        assert!(result.error.is_none(), "{profile}: {result:?}");
+        assert_eq!(result.status.state, McpRegistrationState::Registered);
+    }
+    let single = std::fs::read(home_file(&layout, single_file)).expect("read single");
+    let array = std::fs::read(home_file(&layout, array_file)).expect("read array");
+    assert_eq!(
+        String::from_utf8_lossy(&single),
+        String::from_utf8_lossy(&array)
+    );
+    // A key without a leading `/` names a top-level entry.
+    assert_eq!(
+        read_home_json(&layout, single_file).pointer("/yagura"),
+        Some(&json!({ "command": bridge, "env": env_refs(false) }))
+    );
+}
+
+#[tokio::test]
+async fn a_named_instance_whose_bridge_entry_lacks_env_refs_is_refused_before_any_write() {
+    let layout = Layout::new("mcpreg-run-cl-no-refs");
+    let table = "[mcp_registration.status]\n\
+                 file = \".neutral/settings.json\"\n\
+                 format = \"json\"\n\
+                 command = \"/mcpServers/{server}/command\"\n\
+                 \n\
+                 [mcp_registration.json_entry]\n\
+                 file = \".neutral/settings.json\"\n\
+                 [mcp_registration.json_entry.entries]\n\
+                 \"/mcpServers/{server}\" = { command = \"{bridge}\" }\n";
+    write_profile(
+        &layout.profiles_dir,
+        "sierra",
+        &commandless_profile("Sierra", table),
+    );
+    let config = DaemonConfig {
+        instance_id: Some("dev".to_string()),
+        ..registration_config(&layout, Some(layout.bridge.clone()))
+    };
+    let h = Harness::start("mcpreg-run-cl-no-refs", config).await;
+    let mut approver = approver_connection(&h).await;
+
+    for (request_id, action) in [
+        (1, McpRegistrationAction::Register),
+        (2, McpRegistrationAction::Update),
+    ] {
+        let (_, result) = run_and_collect(&mut approver, "sierra", action, request_id).await;
+        assert_eq!(
+            result.error,
+            Some(RenderError::InstanceNotCarried.to_string()),
+            "{action:?}: {result:?}"
+        );
+        assert!(result.steps.is_empty(), "{action:?}: {result:?}");
+        assert!(
+            !home_file(&layout, SETTINGS_FILE).exists(),
+            "{action:?}: nothing was written"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_claim_holding_another_value_refuses_register_and_update_and_changes_no_byte() {
+    let layout = Layout::new("mcpreg-run-cl-claim");
+    let theirs_settings =
+        "{\n  \"managed_hooks_path\": \"theirs.json\",\n  \"theme\": \"dark\"\n}\n";
+    let theirs_hooks = "{ \"hooks\": { \"Stop\": \"theirs\" } }\n";
+    seed_home_file(&layout, SETTINGS_FILE, theirs_settings);
+    seed_home_file(&layout, MANAGED_HOOKS_FILE, theirs_hooks);
+    write_profile(
+        &layout.profiles_dir,
+        "tango",
+        &commandless_profile("Tango", COMMANDLESS_TABLE),
+    );
+    let h = Harness::start(
+        "mcpreg-run-cl-claim",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let mut approver = approver_connection(&h).await;
+
+    for (request_id, action) in [
+        (1, McpRegistrationAction::Register),
+        (2, McpRegistrationAction::Update),
+    ] {
+        let (_, result) = run_and_collect(&mut approver, "tango", action, request_id).await;
+        let error = result
+            .error
+            .as_deref()
+            .unwrap_or_else(|| panic!("{action:?}: a claim held by another value refuses"));
+        assert!(error.contains(CLAIM), "{action:?}: {error}");
+        assert_eq!(
+            std::fs::read_to_string(home_file(&layout, SETTINGS_FILE)).expect("read settings"),
+            theirs_settings,
+            "{action:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home_file(&layout, MANAGED_HOOKS_FILE)).expect("read hooks"),
+            theirs_hooks,
+            "{action:?}"
+        );
+        assert_eq!(
+            result.status.refused_by_claim.as_deref(),
+            Some(CLAIM),
+            "{action:?}: the status says Register and Update are refused, and by which claim: \
+             {:?}",
+            result.status
+        );
+    }
+}
+
+#[tokio::test]
+async fn two_instances_keep_the_shared_entries_until_the_last_one_is_removed() {
+    let layout = Layout::new("mcpreg-run-cl-two");
+    let bridge = layout.bridge_str();
+    seed_home_file(&layout, SETTINGS_FILE, USER_SETTINGS);
+    write_profile(
+        &layout.profiles_dir,
+        "uniform",
+        &commandless_profile("Uniform", COMMANDLESS_TABLE),
+    );
+    let default_daemon = Harness::start(
+        "mcpreg-run-cl-two-default",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let dev_daemon = Harness::start(
+        "mcpreg-run-cl-two-dev",
+        DaemonConfig {
+            instance_id: Some("dev".to_string()),
+            ..registration_config(&layout, Some(layout.bridge.clone()))
+        },
+    )
+    .await;
+    let mut default_approver = approver_connection(&default_daemon).await;
+    let mut dev_approver = approver_connection(&dev_daemon).await;
+
+    for (approver, context) in [
+        (&mut default_approver, "default"),
+        (&mut dev_approver, "dev"),
+    ] {
+        let (_, result) =
+            run_and_collect(approver, "uniform", McpRegistrationAction::Register, 1).await;
+        assert!(result.error.is_none(), "{context}: {result:?}");
+        assert_eq!(result.status.state, McpRegistrationState::Registered);
+    }
+    let settings = read_home_json(&layout, SETTINGS_FILE);
+    assert_eq!(
+        settings.pointer("/mcpServers/yagura-dev"),
+        Some(&json!({ "command": bridge, "args": [], "env": env_refs(true) })),
+        "{settings}"
+    );
+
+    let (_, removed) = run_and_collect(
+        &mut default_approver,
+        "uniform",
+        McpRegistrationAction::Remove,
+        2,
+    )
+    .await;
+    assert!(removed.error.is_none(), "{removed:?}");
+    assert_ran_no_command(&removed, "remove");
+    assert_eq!(removed.status.state, McpRegistrationState::NotRegistered);
+    let settings = read_home_json(&layout, SETTINGS_FILE);
+    assert_eq!(settings.pointer("/mcpServers/yagura"), None, "{settings}");
+    assert!(settings.pointer("/mcpServers/yagura-dev").is_some());
+    assert_eq!(
+        settings.pointer(CLAIM),
+        Some(&json!(OWN_CLAIM_VALUE)),
+        "another instance still needs the shared entries: {settings}"
+    );
+    assert!(
+        read_home_json(&layout, MANAGED_HOOKS_FILE)
+            .pointer("/hooks")
+            .is_some()
+    );
+
+    let (_, removed) = run_and_collect(
+        &mut dev_approver,
+        "uniform",
+        McpRegistrationAction::Remove,
+        2,
+    )
+    .await;
+    assert!(removed.error.is_none(), "{removed:?}");
+    assert_eq!(
+        read_home_json(&layout, SETTINGS_FILE),
+        json!({ "theme": "dark", "mcpServers": {} }),
+        "only the registration's own entries are gone; the emptied parent stays"
+    );
+    assert_eq!(read_home_json(&layout, MANAGED_HOOKS_FILE), json!({}));
+}
+
+#[tokio::test]
+async fn a_hook_file_that_cannot_be_written_leaves_the_file_referring_to_it_unchanged() {
+    let layout = Layout::new("mcpreg-run-cl-order");
+    seed_home_file(&layout, SETTINGS_FILE, USER_SETTINGS);
+    // A directory where the hook file belongs: it can be neither read nor
+    // replaced as a file.
+    std::fs::create_dir_all(home_file(&layout, MANAGED_HOOKS_FILE)).expect("block the hook file");
+    write_profile(
+        &layout.profiles_dir,
+        "victor",
+        &commandless_profile("Victor", COMMANDLESS_TABLE),
+    );
+    let h = Harness::start(
+        "mcpreg-run-cl-order",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let mut approver = approver_connection(&h).await;
+
+    let (_, result) =
+        run_and_collect(&mut approver, "victor", McpRegistrationAction::Register, 1).await;
+    assert!(result.error.is_some(), "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(home_file(&layout, SETTINGS_FILE)).expect("read settings"),
+        USER_SETTINGS,
+        "the settings file must not point at a hook file that was never written"
+    );
+    assert_ne!(result.status.state, McpRegistrationState::Registered);
 }

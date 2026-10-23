@@ -15,7 +15,7 @@ use yagura_daemon::mcp_registration::{
     STEP_OUTPUT_MAX_BYTES, StatusObservation, derive_status, json_value_matches, sanitize_output,
     validate_probe_output,
 };
-use yagura_daemon::profile::parse_profile;
+use yagura_daemon::profile::{ProfileParseError, parse_profile};
 use yagura_os::program::Platform;
 
 const HEADER: &str =
@@ -930,4 +930,216 @@ fn output_is_cut_at_the_byte_limit_without_splitting_a_character() {
     // Three 3-byte characters under a 7-byte limit leave two.
     let euros = "\u{20ac}\u{20ac}\u{20ac}";
     assert_eq!(sanitize_output(euros.as_bytes(), 7), "\u{20ac}\u{20ac}");
+}
+
+// ---------------------------------------------------------------------
+// A registration with no add / remove command: settings-file entries only
+// ---------------------------------------------------------------------
+
+const COMMANDLESS_STATUS: &str = "[mcp_registration.status]\n\
+file = \".neutral/settings.json\"\n\
+format = \"json\"\n\
+command = \"/mcpServers/{server}/command\"\n";
+
+/// The bridge entry a command-less registration needs: it names `{bridge}`
+/// and its pointer ends in `{server}`.
+const BRIDGE_ENTRY: &str =
+    "\"/mcpServers/{server}\" = { command = \"{bridge}\", args = [], env = \"{env_refs}\" }\n";
+
+/// A command-less table: `head` goes under `[mcp_registration]`, `elements`
+/// after the status table.
+fn commandless(head: &str, elements: &str) -> String {
+    format!("[mcp_registration]\n{head}\n{COMMANDLESS_STATUS}\n{elements}")
+}
+
+/// One `[[mcp_registration.json_entry]]` element of `.neutral/settings.json`.
+fn settings_element(extra_keys: &str, entries: &str) -> String {
+    format!(
+        "[[mcp_registration.json_entry]]\nfile = \".neutral/settings.json\"\n{extra_keys}\n\
+         [mcp_registration.json_entry.entries]\n{entries}\n"
+    )
+}
+
+fn parse_table(table: &str) -> Result<(), ProfileParseError> {
+    let mut source = HEADER.to_string();
+    source.push_str(table);
+    parse_profile("neutral-cli", &source).map(|profile| {
+        assert!(
+            profile.mcp_registration.is_some(),
+            "an accepted table must be carried: {table}"
+        );
+    })
+}
+
+fn assert_accepted(context: &str, table: &str) {
+    if let Err(err) = parse_table(table) {
+        panic!("{context}: the table must be accepted, got {err:?}\n{table}");
+    }
+}
+
+fn assert_table_rejected(context: &str, table: &str) {
+    let result = parse_table(table);
+    assert!(
+        matches!(result, Err(ProfileParseError::InvalidMcpRegistration(_))),
+        "{context}: the table must be rejected as a registration table, got {result:?}\n{table}"
+    );
+}
+
+#[test]
+fn add_and_remove_may_both_be_omitted_when_a_bridge_entry_ends_in_the_server() {
+    let bridge_only = settings_element("", BRIDGE_ENTRY);
+    assert_accepted("both omitted", &commandless("", &bridge_only));
+
+    let cases = [
+        (
+            "add alone",
+            commandless(
+                "add = [\"mcp\", \"add\", \"{server}\", \"{bridge}\"]",
+                &bridge_only,
+            ),
+        ),
+        (
+            "remove alone",
+            commandless("remove = [\"mcp\", \"remove\", \"{server}\"]", &bridge_only),
+        ),
+        (
+            "env_arg without commands",
+            commandless("env_arg = [\"--env\", \"{env}\"]", &bridge_only),
+        ),
+        (
+            "env_forward without commands",
+            commandless(
+                "env_forward = { name = \"WSLENV\", separator = \":\" }",
+                &bridge_only,
+            ),
+        ),
+        (
+            "no entry names the bridge",
+            commandless(
+                "",
+                &settings_element(
+                    "",
+                    "\"/mcpServers/{server}\" = { command = \"x\", env = \"{env_refs}\" }\n",
+                ),
+            ),
+        ),
+        (
+            "the bridge entry's pointer does not end in the server",
+            commandless(
+                "",
+                &settings_element(
+                    "",
+                    "\"/mcpServers/{server}/inner\" = { command = \"{bridge}\", env = \
+                     \"{env_refs}\" }\n",
+                ),
+            ),
+        ),
+    ];
+    for (context, table) in cases {
+        assert_table_rejected(context, &table);
+    }
+}
+
+#[test]
+fn json_entry_is_read_as_a_single_table_or_an_array_of_tables() {
+    let single = commandless(
+        "",
+        &format!(
+            "[mcp_registration.json_entry]\nfile = \".neutral/settings.json\"\n\n\
+             [mcp_registration.json_entry.entries]\n{BRIDGE_ENTRY}"
+        ),
+    );
+    assert_accepted("a single table", &single);
+
+    let two_files = commandless(
+        "",
+        &format!(
+            "{}{}",
+            settings_element(
+                "claim = \"/managed_hooks_path\"",
+                &format!("{BRIDGE_ENTRY}\"/managed_hooks_path\" = \"managed-hooks.json\"\n"),
+            ),
+            "[[mcp_registration.json_entry]]\nfile = \".neutral/managed-hooks.json\"\n\n\
+             [mcp_registration.json_entry.entries]\n\"/hooks\" = { Stop = \"run\" }\n"
+        ),
+    );
+    assert_accepted("an array of two tables", &two_files);
+}
+
+#[test]
+fn by_os_sets_are_read_and_a_set_may_not_repeat_a_pointer_of_the_entries() {
+    let element = |by_os: &str| {
+        commandless(
+            "",
+            &format!(
+                "{}{by_os}",
+                settings_element(
+                    "claim = \"/managed_hooks_path\"",
+                    &format!("{BRIDGE_ENTRY}\"/managed_hooks_path\" = \"managed-hooks.json\"\n"),
+                )
+            ),
+        )
+    };
+    assert_accepted(
+        "every operating-system key",
+        &element(
+            "[mcp_registration.json_entry.by_os.windows]\n\"/hooks\" = { Stop = \"win\" }\n\
+             [mcp_registration.json_entry.by_os.macos]\n\"/hooks\" = { Stop = \"mac\" }\n\
+             [mcp_registration.json_entry.by_os.linux]\n\"/hooks\" = { Stop = \"linux\" }\n\
+             [mcp_registration.json_entry.by_os.default]\n\"/hooks\" = { Stop = \"any\" }\n",
+        ),
+    );
+    // Only `default` is given, so it is the set chosen on every host.
+    assert_table_rejected(
+        "the chosen set repeats a pointer of the entries",
+        &element(
+            "[mcp_registration.json_entry.by_os.default]\n\
+             \"/managed_hooks_path\" = \"other.json\"\n",
+        ),
+    );
+}
+
+#[test]
+fn a_claim_is_required_by_a_shared_entry_and_at_most_one_is_allowed() {
+    let shared = format!("{BRIDGE_ENTRY}\"/managed_hooks_path\" = \"managed-hooks.json\"\n");
+    let hooks_element = |extra_keys: &str| {
+        format!(
+            "[[mcp_registration.json_entry]]\nfile = \".neutral/managed-hooks.json\"\n\
+             {extra_keys}\n[mcp_registration.json_entry.entries]\n\"/hooks\" = {{ Stop = \"run\" \
+             }}\n"
+        )
+    };
+    assert_accepted(
+        "one claim over the shared entries",
+        &commandless(
+            "",
+            &format!(
+                "{}{}",
+                settings_element("claim = \"/managed_hooks_path\"", &shared),
+                hooks_element("")
+            ),
+        ),
+    );
+    assert_accepted(
+        "no shared entry needs no claim",
+        &commandless("", &settings_element("", BRIDGE_ENTRY)),
+    );
+    assert_table_rejected(
+        "a shared entry without a claim",
+        &commandless(
+            "",
+            &format!("{}{}", settings_element("", &shared), hooks_element("")),
+        ),
+    );
+    assert_table_rejected(
+        "two claims",
+        &commandless(
+            "",
+            &format!(
+                "{}{}",
+                settings_element("claim = \"/managed_hooks_path\"", &shared),
+                hooks_element("claim = \"/hooks\"")
+            ),
+        ),
+    );
 }

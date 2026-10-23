@@ -405,11 +405,11 @@ fn a_json_entry_naming_only_the_daemon_inside_a_home_relative_file_is_read() {
 }
 
 #[test]
-fn a_json_entry_value_naming_a_placeholder_other_than_the_daemon_is_rejected() {
+fn a_json_entry_value_naming_a_placeholder_it_does_not_know_is_rejected() {
     // Nested inside an object and an array, so every level of the walk is crossed.
     assert_rejected(
-        "json-entry-bridge",
-        &json_entry_table(".neutral/hooks.json", "{bridge} --emit-status running"),
+        "json-entry-unknown",
+        &json_entry_table(".neutral/hooks.json", "{nosuch} --emit-status running"),
     );
 }
 

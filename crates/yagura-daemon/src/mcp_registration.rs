@@ -267,42 +267,413 @@ impl TomlSetSpec {
     }
 }
 
-/// A validated `[mcp_registration.json_entry]` table: top-level entries of a
-/// JSON settings file the registration owns outright -- added by
-/// registration, taken out by removal, read back from the file itself.
-/// Entry names may carry `{server}`; string values may carry `{daemon}`,
-/// the path a hook command runs the daemon by.
+const SERVER_PLACEHOLDER: &str = "{server}";
+
+/// The placeholder that stands for a whole object value: the variables a
+/// window passes to the bridge, each named for the CLI to fill in.
+const ENV_REFS_PLACEHOLDER: &str = "{env_refs}";
+
+/// The one entry of a `json_entry` that a registration's CLI reads the
+/// bridge from.
 #[derive(Debug, Clone)]
-pub struct JsonEntrySpec {
-    file: String,
-    entries: Vec<(String, JsonValue)>,
+struct BridgeEntry {
+    /// JSON Pointer to the object holding every instance's bridge entry; empty
+    /// when they are top-level entries of the document.
+    items: String,
+    /// JSON Pointer, inside one such entry, to the string holding `{bridge}`.
+    command: String,
+    /// Whether the entry carries the instance's variables (`{env_refs}`).
+    carries_env: bool,
 }
 
-impl JsonEntrySpec {
+/// The entry a registration is refused over when it already holds another
+/// value, and whose own value marks the shared entries as this
+/// registration's.
+#[derive(Debug, Clone)]
+pub struct Claim {
+    file: String,
+    pointer: String,
+    value: JsonValue,
+}
+
+impl Claim {
+    /// The home-relative path of the file holding the claimed entry.
+    #[must_use]
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    /// The claimed entry, as the profile spells it.
+    #[must_use]
+    pub fn pointer(&self) -> &str {
+        &self.pointer
+    }
+
+    /// Whether `document` holds a value at the claimed entry other than the
+    /// one this registration writes.
+    #[must_use]
+    pub fn is_held_by_another(&self, document: &JsonValue) -> bool {
+        document
+            .pointer(&as_pointer(&self.pointer))
+            .is_some_and(|held| *held != self.value)
+    }
+
+    /// Whether `document` holds exactly the value this registration writes.
+    #[must_use]
+    pub fn is_held_by_us(&self, document: &JsonValue) -> bool {
+        document.pointer(&as_pointer(&self.pointer)) == Some(&self.value)
+    }
+}
+
+/// A path a `json_entry` value names that the caller has none for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingPath {
+    /// `{daemon}`.
+    Daemon,
+    /// `{bridge}`.
+    Bridge,
+}
+
+/// What a `json_entry` value is rendered with.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryVars<'a> {
+    /// The instance the entries are written for (`{server}`, `{env_refs}`).
+    pub target: &'a RegistrationTarget,
+    /// The operating system the CLI runs on (the `by_os` set to use).
+    pub os: HostOs,
+    /// `{daemon}`: the path a hook command runs the daemon by.
+    pub daemon: Option<&'a str>,
+    /// `{bridge}`: the path to the bridge.
+    pub bridge: Option<&'a str>,
+}
+
+/// Entries per operating system, chosen the way `[command]`'s argv is.
+#[derive(Debug, Clone, Default)]
+struct EntriesByOs {
+    default: Option<Vec<(String, JsonValue)>>,
+    windows: Option<Vec<(String, JsonValue)>>,
+    macos: Option<Vec<(String, JsonValue)>>,
+    linux: Option<Vec<(String, JsonValue)>>,
+}
+
+impl EntriesByOs {
+    fn selected(&self, os: HostOs) -> &[(String, JsonValue)] {
+        program::select_for_os(
+            os,
+            self.windows.as_deref(),
+            self.macos.as_deref(),
+            self.linux.as_deref(),
+            self.default.as_deref(),
+        )
+        .unwrap_or_default()
+    }
+
+    fn all(&self) -> impl Iterator<Item = &(String, JsonValue)> {
+        [&self.default, &self.windows, &self.macos, &self.linux]
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
+}
+
+/// One settings file a `json_entry` writes: the entries it owns there, and
+/// the entry (if any) it claims.
+#[derive(Debug, Clone)]
+pub struct JsonFileSpec {
+    file: String,
+    entries: Vec<(String, JsonValue)>,
+    by_os: EntriesByOs,
+    claim: Option<Claim>,
+}
+
+impl JsonFileSpec {
     /// The settings file's path, home-relative.
     #[must_use]
     pub fn file(&self) -> &str {
         &self.file
     }
 
-    /// The entry names for `target`.
+    /// The entry this file claims, when it does.
     #[must_use]
-    pub fn names(&self, target: &RegistrationTarget) -> Vec<String> {
-        self.entries
-            .iter()
-            .map(|(name, _)| name.replace("{server}", target.server()))
+    pub fn claim(&self) -> Option<&Claim> {
+        self.claim.as_ref()
+    }
+
+    /// Every entry written on `os`: the `entries` first, then the chosen
+    /// `by_os` set.
+    fn selected(&self, os: HostOs) -> impl Iterator<Item = &(String, JsonValue)> {
+        self.entries.iter().chain(self.by_os.selected(os))
+    }
+
+    /// Whether the file has entries to write on `os`.
+    #[must_use]
+    pub fn owns_entries_on(&self, os: HostOs) -> bool {
+        self.selected(os).next().is_some()
+    }
+
+    /// Whether an entry written on `os` names the daemon.
+    #[must_use]
+    pub fn names_daemon(&self, os: HostOs) -> bool {
+        self.selected(os)
+            .any(|(_, value)| json_contains(value, "{daemon}"))
+    }
+
+    /// Whether an entry written on `os` names the bridge.
+    #[must_use]
+    pub fn names_bridge(&self, os: HostOs) -> bool {
+        self.selected(os)
+            .any(|(_, value)| json_contains(value, "{bridge}"))
+    }
+
+    /// The entries written on `vars.os`, each key and value rendered.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`MissingPath`] of the first path a value names that
+    /// `vars` has none for.
+    pub fn entries(&self, vars: &EntryVars<'_>) -> Result<Vec<(String, JsonValue)>, MissingPath> {
+        self.selected(vars.os)
+            .map(|(key, value)| Ok((fill(key, vars, false)?, render_json(value, vars, false)?)))
             .collect()
     }
 
-    /// The entries for `target`, with `daemon` in place of `{daemon}`.
+    /// [`JsonFileSpec::entries`] for display: a path `vars` has none for stays
+    /// as its placeholder.
     #[must_use]
-    pub fn entries(&self, target: &RegistrationTarget, daemon: &str) -> Vec<(String, JsonValue)> {
-        self.names(target)
-            .into_iter()
-            .zip(&self.entries)
-            .map(|(name, (_, value))| (name, substitute_json(value, "{daemon}", daemon)))
+    pub fn preview(&self, vars: &EntryVars<'_>) -> Vec<(String, JsonValue)> {
+        self.selected(vars.os)
+            .filter_map(|(key, value)| {
+                Some((
+                    fill(key, vars, true).ok()?,
+                    render_json(value, vars, true).ok()?,
+                ))
+            })
             .collect()
     }
+
+    /// The keys a removal takes out on `os`: the entries of this instance
+    /// alone, plus the shared ones when `shared` says they go too.
+    #[must_use]
+    pub fn removal_keys(
+        &self,
+        target: &RegistrationTarget,
+        os: HostOs,
+        shared: bool,
+    ) -> Vec<String> {
+        self.selected(os)
+            .filter(|(key, _)| shared || key.contains(SERVER_PLACEHOLDER))
+            .map(|(key, _)| key.replace(SERVER_PLACEHOLDER, target.server()))
+            .collect()
+    }
+
+    /// The name [`DerivedStatus::differs_in`] gives this file's entries.
+    #[must_use]
+    pub fn label(&self, target: &RegistrationTarget, os: HostOs) -> String {
+        self.removal_keys(target, os, true).join(", ")
+    }
+}
+
+/// A validated `[[mcp_registration.json_entry]]` array: entries of JSON
+/// settings files the registration owns outright -- added by registration,
+/// taken out by removal, read back from the files themselves. A key starting
+/// with `/` is a JSON Pointer, any other a top-level name; both may carry
+/// `{server}`. String values may carry `{daemon}` (the path a hook command
+/// runs the daemon by), `{bridge}` and `{server}`; a value that is exactly
+/// `{env_refs}` stands for the variables a window passes to the bridge.
+///
+/// Entries without `{server}` are shared by every instance. One of them is
+/// the `claim`: while the file holds another value there, nothing is written
+/// or taken out of the shared entries.
+#[derive(Debug, Clone)]
+pub struct JsonEntrySpec {
+    files: Vec<JsonFileSpec>,
+    bridge_entry: Option<BridgeEntry>,
+}
+
+impl JsonEntrySpec {
+    /// The files, in the order the profile declares them.
+    #[must_use]
+    pub fn files(&self) -> &[JsonFileSpec] {
+        &self.files
+    }
+
+    /// The claim, when the registration has one.
+    #[must_use]
+    pub fn claim(&self) -> Option<&Claim> {
+        self.files.iter().find_map(JsonFileSpec::claim)
+    }
+
+    /// Whether a window of a named instance can reach its own bridge through
+    /// the entry the registration writes for it.
+    #[must_use]
+    pub fn carries_instance(&self) -> bool {
+        self.bridge_entry
+            .as_ref()
+            .is_some_and(|entry| entry.carries_env)
+    }
+
+    /// The file holding the bridge entries of every instance.
+    #[must_use]
+    pub fn bridge_file(&self) -> Option<&str> {
+        self.files
+            .iter()
+            .find(|file| {
+                file.entries
+                    .iter()
+                    .any(|(key, value)| is_bridge_entry(key, value))
+            })
+            .map(JsonFileSpec::file)
+    }
+
+    /// The names, in the order `document` holds them, of the registered
+    /// servers that are yagura's bridge for some instance other than the one
+    /// named `keep`. Decided the way [`ListSpec::other_bridges`] decides it.
+    ///
+    /// `None` when the registration has no bridge entry, or `document` holds
+    /// something other than an object where the bridge entries belong.
+    #[must_use]
+    pub fn other_bridges(
+        &self,
+        document: &JsonValue,
+        bridge_file_name: &str,
+        keep: &str,
+    ) -> Option<Vec<String>> {
+        let entry = self.bridge_entry.as_ref()?;
+        let Some(items) = document.pointer(&entry.items) else {
+            return Some(Vec::new());
+        };
+        let named = items
+            .as_object()?
+            .iter()
+            .map(|(name, item)| (name.as_str(), item));
+        Some(other_bridge_names(
+            named,
+            &entry.command,
+            bridge_file_name,
+            keep,
+        ))
+    }
+}
+
+/// The key every instance's bridge entry has: the instance's name as the last
+/// token of the pointer.
+fn is_bridge_key(key: &str) -> bool {
+    key == SERVER_PLACEHOLDER || key.ends_with(&format!("/{SERVER_PLACEHOLDER}"))
+}
+
+/// Whether `key`'s entry is the one that registers the bridge: it is named
+/// for the instance and holds `{bridge}` as a string of its own.
+fn is_bridge_entry(key: &str, value: &JsonValue) -> bool {
+    is_bridge_key(key) && bridge_pointer(value).is_some()
+}
+
+/// The JSON Pointer to the string that is exactly `{bridge}` inside `value`.
+fn bridge_pointer(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(text) => (text == "{bridge}").then(String::new),
+        JsonValue::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| Some(format!("/{index}{}", bridge_pointer(item)?))),
+        JsonValue::Object(map) => map.iter().find_map(|(key, item)| {
+            let token = key.replace('~', "~0").replace('/', "~1");
+            Some(format!("/{token}{}", bridge_pointer(item)?))
+        }),
+        _ => None,
+    }
+}
+
+/// `key` as a JSON Pointer: a key starting with `/` already is one, any other
+/// names a top-level entry.
+fn as_pointer(key: &str) -> String {
+    if key.starts_with('/') {
+        key.to_string()
+    } else {
+        format!("/{}", key.replace('~', "~0").replace('/', "~1"))
+    }
+}
+
+/// Whether a string `value` holds contains `needle`.
+fn json_contains(value: &JsonValue, needle: &str) -> bool {
+    match value {
+        JsonValue::String(text) => text.contains(needle),
+        JsonValue::Array(items) => items.iter().any(|item| json_contains(item, needle)),
+        JsonValue::Object(map) => map.values().any(|item| json_contains(item, needle)),
+        _ => false,
+    }
+}
+
+/// The variables a window passes to the bridge, each as a reference the CLI
+/// fills in from its own environment -- never the value itself.
+fn env_refs(target: &RegistrationTarget) -> JsonValue {
+    let instance = target.env().iter().map(|(name, _)| name.as_str());
+    JsonValue::Object(
+        [
+            yagura_protocol::WINDOW_ID_ENV,
+            yagura_protocol::STATUS_TOKEN_ENV,
+        ]
+        .into_iter()
+        .chain(instance)
+        .map(|name| (name.to_string(), JsonValue::String(format!("${{{name}}}"))))
+        .collect(),
+    )
+}
+
+/// `text` with `{server}`, `{daemon}` and `{bridge}` replaced in one pass, so
+/// a substituted path that spells a placeholder is never rewritten. A path
+/// `vars` has none for is an error, or stays as its placeholder when `lossy`.
+fn fill(text: &str, vars: &EntryVars<'_>, lossy: bool) -> Result<String, MissingPath> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        let (before, after) = rest.split_at(open);
+        out.push_str(before);
+        let hit = [
+            (SERVER_PLACEHOLDER, Some(vars.target.server()), None),
+            ("{daemon}", vars.daemon, Some(MissingPath::Daemon)),
+            ("{bridge}", vars.bridge, Some(MissingPath::Bridge)),
+        ]
+        .into_iter()
+        .find(|(placeholder, _, _)| after.starts_with(placeholder));
+        let Some((placeholder, value, missing)) = hit else {
+            out.push('{');
+            rest = after.strip_prefix('{').unwrap_or_default();
+            continue;
+        };
+        match (value, missing) {
+            (Some(value), _) => out.push_str(value),
+            (None, Some(missing)) if !lossy => return Err(missing),
+            (None, _) => out.push_str(placeholder),
+        }
+        rest = after.strip_prefix(placeholder).unwrap_or_default();
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// `value` with every placeholder in its strings replaced ([`fill`]), and a
+/// string that is exactly `{env_refs}` replaced by the object it stands for.
+fn render_json(
+    value: &JsonValue,
+    vars: &EntryVars<'_>,
+    lossy: bool,
+) -> Result<JsonValue, MissingPath> {
+    Ok(match value {
+        JsonValue::String(text) if text == ENV_REFS_PLACEHOLDER => env_refs(vars.target),
+        JsonValue::String(text) => JsonValue::String(fill(text, vars, lossy)?),
+        JsonValue::Array(items) => JsonValue::Array(
+            items
+                .iter()
+                .map(|item| render_json(item, vars, lossy))
+                .collect::<Result<_, _>>()?,
+        ),
+        JsonValue::Object(map) => JsonValue::Object(
+            map.iter()
+                .map(|(key, item)| Ok((key.clone(), render_json(item, vars, lossy)?)))
+                .collect::<Result<_, MissingPath>>()?,
+        ),
+        other => other.clone(),
+    })
 }
 
 /// A validated `[mcp_registration.list]` table: how to read every server the
@@ -365,19 +736,12 @@ impl ListSpec {
                 .map(|(name, item)| (name.as_str(), item))
                 .collect(),
         };
-        Some(
-            named
-                .into_iter()
-                .filter_map(|(name, item)| {
-                    let command = item.pointer(&self.command)?.as_str()?;
-                    let file_name = command.rsplit(['/', '\\']).next().unwrap_or(command);
-                    (name != keep
-                        && RegistrationTarget::is_bridge_server(name)
-                        && file_name.eq_ignore_ascii_case(bridge_file_name))
-                    .then(|| name.to_string())
-                })
-                .collect(),
-        )
+        Some(other_bridge_names(
+            named.into_iter(),
+            &self.command,
+            bridge_file_name,
+            keep,
+        ))
     }
 
     /// The launch arguments that turn `servers` off, in order.
@@ -390,23 +754,28 @@ impl ListSpec {
     }
 }
 
-/// `value` with `placeholder` replaced by `with` in every string it holds.
-fn substitute_json(value: &JsonValue, placeholder: &str, with: &str) -> JsonValue {
-    match value {
-        JsonValue::String(text) => JsonValue::String(text.replace(placeholder, with)),
-        JsonValue::Array(items) => JsonValue::Array(
-            items
-                .iter()
-                .map(|item| substitute_json(item, placeholder, with))
-                .collect(),
-        ),
-        JsonValue::Object(map) => JsonValue::Object(
-            map.iter()
-                .map(|(key, item)| (key.clone(), substitute_json(item, placeholder, with)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
+/// The names, in order, of the servers in `named` that are yagura's bridge
+/// for some instance other than `keep`: the name is one
+/// [`RegistrationTarget::is_bridge_server`] accepts and the command found at
+/// the JSON Pointer `command` inside the server ends in `bridge_file_name`. A
+/// server of the user's own, or a bridge-named one that runs something else,
+/// is never in the result.
+fn other_bridge_names<'a>(
+    named: impl Iterator<Item = (&'a str, &'a JsonValue)>,
+    command: &str,
+    bridge_file_name: &str,
+    keep: &str,
+) -> Vec<String> {
+    named
+        .filter_map(|(name, item)| {
+            let registered = item.pointer(command)?.as_str()?;
+            let file_name = registered.rsplit(['/', '\\']).next().unwrap_or(registered);
+            (name != keep
+                && RegistrationTarget::is_bridge_server(name)
+                && file_name.eq_ignore_ascii_case(bridge_file_name))
+            .then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Whether every string `value` holds is free of placeholders outside
@@ -430,8 +799,7 @@ fn json_placeholders_allowed(value: &JsonValue, allowed: &[&str]) -> bool {
 #[derive(Debug, Clone)]
 pub struct McpRegistrationSpec {
     group: Option<String>,
-    add: Vec<String>,
-    remove: Vec<String>,
+    commands: Option<RegistrationCommands>,
     env_arg: Option<Vec<String>>,
     env_forward: Option<EnvForward>,
     host_paths: Option<HostPaths>,
@@ -440,6 +808,14 @@ pub struct McpRegistrationSpec {
     toml_set: Option<TomlSetSpec>,
     json_entry: Option<JsonEntrySpec>,
     list: Option<ListSpec>,
+}
+
+/// The CLI's own commands for registering and unregistering a server. A
+/// registration without them is made entirely by editing settings files.
+#[derive(Debug, Clone)]
+struct RegistrationCommands {
+    add: Vec<String>,
+    remove: Vec<String>,
 }
 
 impl McpRegistrationSpec {
@@ -487,7 +863,37 @@ impl McpRegistrationSpec {
         self.host_paths.is_some()
     }
 
-    /// Renders the command that registers `target` with `bridge`.
+    /// Whether the CLI has commands that register and unregister a server;
+    /// without them a registration only edits settings files.
+    #[must_use]
+    pub fn has_commands(&self) -> bool {
+        self.commands.is_some()
+    }
+
+    /// Checks that `target`'s registration can carry the instance it names:
+    /// by `env_arg` when the CLI registers through a command, by the
+    /// `{env_refs}` of the bridge entry when it is written to a settings file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::InstanceNotCarried`] when it cannot.
+    pub fn check_target(&self, target: &RegistrationTarget) -> Result<(), RenderError> {
+        if self.commands.is_some() {
+            return self.render_env_args(target).map(drop);
+        }
+        let carried = self
+            .json_entry
+            .as_ref()
+            .is_some_and(JsonEntrySpec::carries_instance);
+        if target.env().is_empty() || carried {
+            Ok(())
+        } else {
+            Err(RenderError::InstanceNotCarried)
+        }
+    }
+
+    /// Renders the command that registers `target` with `bridge`; empty when
+    /// the table has no commands.
     ///
     /// # Errors
     ///
@@ -498,9 +904,12 @@ impl McpRegistrationSpec {
         target: &RegistrationTarget,
         bridge: &str,
     ) -> Result<Vec<String>, RenderError> {
+        let Some(commands) = &self.commands else {
+            return Ok(Vec::new());
+        };
         let env_args = self.render_env_args(target)?;
-        let mut argv = Vec::with_capacity(self.add.len());
-        for element in &self.add {
+        let mut argv = Vec::with_capacity(commands.add.len());
+        for element in &commands.add {
             if element == "{env_args}" {
                 argv.extend(env_args.iter().cloned());
             } else {
@@ -514,10 +923,13 @@ impl McpRegistrationSpec {
         Ok(argv)
     }
 
-    /// Renders the command that unregisters `target`.
+    /// Renders the command that unregisters `target`; empty when the table has
+    /// no commands.
     #[must_use]
     pub fn render_remove(&self, target: &RegistrationTarget) -> Vec<String> {
-        substitute_all(&self.remove, "{server}", target.server())
+        self.commands.as_ref().map_or_else(Vec::new, |commands| {
+            substitute_all(&commands.remove, "{server}", target.server())
+        })
     }
 
     /// Renders how `target`'s status should be read: either a command to
@@ -1095,8 +1507,10 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> String {
 struct RawMcpRegistrationTable {
     #[serde(default)]
     group: Option<String>,
-    add: Vec<String>,
-    remove: Vec<String>,
+    #[serde(default)]
+    add: Option<Vec<String>>,
+    #[serde(default)]
+    remove: Option<Vec<String>>,
     #[serde(default)]
     env_arg: Option<Vec<String>>,
     #[serde(default)]
@@ -1107,7 +1521,7 @@ struct RawMcpRegistrationTable {
     #[serde(default)]
     toml_set: Option<RawTomlSet>,
     #[serde(default)]
-    json_entry: Option<RawJsonEntry>,
+    json_entry: Option<RawJsonEntries>,
     #[serde(default)]
     list: Option<RawList>,
 }
@@ -1168,11 +1582,37 @@ struct RawTomlSet {
     entries: Option<RawEntries>,
 }
 
+/// `json_entry` as a single table or an array of tables.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawJsonEntries {
+    One(RawJsonEntry),
+    Many(Vec<RawJsonEntry>),
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawJsonEntry {
     file: String,
+    #[serde(default)]
     entries: toml::Table,
+    #[serde(default)]
+    by_os: Option<RawByOs>,
+    #[serde(default)]
+    claim: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawByOs {
+    #[serde(default)]
+    default: Option<toml::Table>,
+    #[serde(default)]
+    windows: Option<toml::Table>,
+    #[serde(default)]
+    macos: Option<toml::Table>,
+    #[serde(default)]
+    linux: Option<toml::Table>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1220,8 +1660,19 @@ fn build_spec(
         yagura_protocol::validate_display_label(group).map_err(|_| invalid())?;
     }
 
-    validate_add_placeholders(&raw.add)?;
-    validate_args_placeholders(&raw.remove, &["{server}"])?;
+    let commands = match (raw.add, raw.remove) {
+        (Some(add), Some(remove)) => {
+            validate_add_placeholders(&add)?;
+            validate_args_placeholders(&remove, &["{server}"])?;
+            Some(RegistrationCommands { add, remove })
+        }
+        (None, None) => None,
+        _ => return Err(invalid()),
+    };
+    // Without commands there is no argv for the environment to ride on.
+    if commands.is_none() && (raw.env_arg.is_some() || raw.env_forward.is_some()) {
+        return Err(invalid());
+    }
     if let Some(env_arg) = &raw.env_arg {
         validate_args_placeholders(env_arg, &["{env}"])?;
     }
@@ -1269,12 +1720,19 @@ fn build_spec(
     };
 
     let json_entry = raw.json_entry.map(build_json_entry).transpose()?;
+    // Registered by editing files alone, the bridge entry is the registration.
+    if commands.is_none()
+        && json_entry
+            .as_ref()
+            .is_none_or(|entry| entry.bridge_entry.is_none())
+    {
+        return Err(invalid());
+    }
     let list = raw.list.map(build_list).transpose()?;
 
     Ok(McpRegistrationSpec {
         group: raw.group,
-        add: raw.add,
-        remove: raw.remove,
+        commands,
         env_arg: raw.env_arg,
         env_forward: raw.env_forward.map(|forward| EnvForward {
             name: forward.name,
@@ -1316,28 +1774,150 @@ fn build_list(raw: RawList) -> Result<ListSpec, McpRegistrationError> {
     })
 }
 
-/// Validates `json_entry`: a safe home-relative `file`, at least one entry,
-/// names carrying no placeholder but `{server}`, and values carrying none
-/// but `{daemon}`.
-fn build_json_entry(raw: RawJsonEntry) -> Result<JsonEntrySpec, McpRegistrationError> {
+/// Validates `json_entry`: every file safe and home-relative with at least one
+/// entry, keys carrying no placeholder but `{server}`, values carrying none
+/// but `{daemon}`, `{bridge}`, `{server}` and a whole-value `{env_refs}`.
+///
+/// Entries without `{server}` are shared by every instance, so they need a
+/// claim (at most one, over a shared entry holding a plain value) and a
+/// bridge entry to tell whether another instance is still registered.
+fn build_json_entry(raw: RawJsonEntries) -> Result<JsonEntrySpec, McpRegistrationError> {
     let invalid = || McpRegistrationError::InvalidShape;
-    if !is_safe_relative_home_path(&raw.file) || raw.entries.is_empty() {
+    let elements = match raw {
+        RawJsonEntries::One(element) => vec![element],
+        RawJsonEntries::Many(elements) => elements,
+    };
+    if elements.is_empty() {
         return Err(invalid());
     }
-    let mut entries = Vec::with_capacity(raw.entries.len());
-    for (name, value) in raw.entries {
+    let files = elements
+        .into_iter()
+        .map(build_json_file)
+        .collect::<Result<Vec<_>, _>>()?;
+    if files.iter().filter(|file| file.claim.is_some()).count() > 1 {
+        return Err(invalid());
+    }
+    let bridge_entry = files
+        .iter()
+        .flat_map(|file| &file.entries)
+        .find(|(key, value)| is_bridge_entry(key, value))
+        .and_then(|(key, value)| {
+            let command = bridge_pointer(value)?;
+            let items = key.strip_suffix(SERVER_PLACEHOLDER)?;
+            Some(BridgeEntry {
+                items: items.strip_suffix('/').unwrap_or(items).to_string(),
+                command,
+                carries_env: json_contains(value, ENV_REFS_PLACEHOLDER),
+            })
+        });
+    let shared = files
+        .iter()
+        .flat_map(|file| file.entries.iter().chain(file.by_os.all()))
+        .any(|(key, _)| !key.contains(SERVER_PLACEHOLDER));
+    if shared && (bridge_entry.is_none() || files.iter().all(|file| file.claim.is_none())) {
+        return Err(invalid());
+    }
+    Ok(JsonEntrySpec {
+        files,
+        bridge_entry,
+    })
+}
+
+/// Validates one `json_entry` element (see [`build_json_entry`]).
+fn build_json_file(raw: RawJsonEntry) -> Result<JsonFileSpec, McpRegistrationError> {
+    let invalid = || McpRegistrationError::InvalidShape;
+    if !is_safe_relative_home_path(&raw.file) {
+        return Err(invalid());
+    }
+    let entries = build_json_entries(raw.entries)?;
+    let by_os = match raw.by_os {
+        Some(by_os) => EntriesByOs {
+            default: by_os.default.map(build_json_entries).transpose()?,
+            windows: by_os.windows.map(build_json_entries).transpose()?,
+            macos: by_os.macos.map(build_json_entries).transpose()?,
+            linux: by_os.linux.map(build_json_entries).transpose()?,
+        },
+        None => EntriesByOs::default(),
+    };
+    if entries.is_empty() && by_os.all().next().is_none() {
+        return Err(invalid());
+    }
+    // A set chosen for some operating system must not rewrite an entry the
+    // file always writes.
+    let overlaps = [HostOs::Windows, HostOs::MacOs, HostOs::Linux]
+        .into_iter()
+        .any(|os| {
+            by_os
+                .selected(os)
+                .iter()
+                .any(|(key, _)| entries.iter().any(|(own, _)| own == key))
+        });
+    if overlaps {
+        return Err(invalid());
+    }
+    let claim = raw
+        .claim
+        .map(|pointer| {
+            let (key, value) = entries
+                .iter()
+                .find(|(key, _)| *key == pointer)
+                .ok_or_else(invalid)?;
+            // A shared entry holding a plain value: both sides must be able
+            // to compare it without knowing an instance or a path.
+            if key.contains(SERVER_PLACEHOLDER) || !json_placeholders_allowed(value, &[]) {
+                return Err(invalid());
+            }
+            Ok(Claim {
+                file: raw.file.clone(),
+                pointer,
+                value: value.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(JsonFileSpec {
+        file: raw.file,
+        entries,
+        by_os,
+        claim,
+    })
+}
+
+/// Validates the entries of one table of a `json_entry` element.
+fn build_json_entries(raw: toml::Table) -> Result<Vec<(String, JsonValue)>, McpRegistrationError> {
+    let invalid = || McpRegistrationError::InvalidShape;
+    let mut entries = Vec::with_capacity(raw.len());
+    for (key, value) in raw {
         let value = serde_json::to_value(value).map_err(|_| invalid())?;
-        if profile::contains_placeholder_outside(&name, &["{server}"])
-            || !json_placeholders_allowed(&value, &["{daemon}"])
+        if profile::contains_placeholder_outside(&key, &[SERVER_PLACEHOLDER])
+            || !json_placeholders_allowed(
+                &value,
+                &[
+                    SERVER_PLACEHOLDER,
+                    "{daemon}",
+                    "{bridge}",
+                    ENV_REFS_PLACEHOLDER,
+                ],
+            )
+            || !env_refs_stand_alone(&value)
         {
             return Err(invalid());
         }
-        entries.push((name, value));
+        entries.push((key, value));
     }
-    Ok(JsonEntrySpec {
-        file: raw.file,
-        entries,
-    })
+    Ok(entries)
+}
+
+/// Whether every string of `value` that mentions `{env_refs}` is exactly it:
+/// it stands for an object, which cannot be spliced into a larger string.
+fn env_refs_stand_alone(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::String(text) => {
+            !text.contains(ENV_REFS_PLACEHOLDER) || text == ENV_REFS_PLACEHOLDER
+        }
+        JsonValue::Array(items) => items.iter().all(env_refs_stand_alone),
+        JsonValue::Object(map) => map.values().all(env_refs_stand_alone),
+        _ => true,
+    }
 }
 
 /// Validates `toml_set.entries`: a non-empty `under` without placeholders,
