@@ -1,0 +1,16 @@
+  └ tool cancelled
+
+◆ Interrupted · Report issues with /feedback
+
+◆ Recap: Goal is to run the sleep command and reply DONE, currently the attempt was cancelled, next
+         rerun the command to completion.
+
+❯ Use your shell tool to run exactly this PowerShell command once and reply with its output only:   
+  (Invoke-WebRequest -UseBasicParsing https://example.com).StatusCode                               
+
+◇ Running command · Fetch example.com status code — running (2m 34s · esc to interrupt)
+                                   
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+❯                                                                                                   
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · high · ~/work/project              · Launch overrides

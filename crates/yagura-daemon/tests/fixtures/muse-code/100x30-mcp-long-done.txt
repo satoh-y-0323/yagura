@@ -1,0 +1,16 @@
+
+  Muse Code 1.4.12
+
+❯ Call the probe_wait tool once and reply with its output only.                                     
+
+◆ probe_wait · probe · ✓ · 3m · ctrl+o
+
+◆ WAITED-200
+
+◇ Double checking (3m 34s · esc to interrupt)                                                       
+  
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+❯                                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · low · ~/work/project               · Launch overrides
+

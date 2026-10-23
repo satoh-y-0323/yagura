@@ -1,0 +1,16 @@
+
+❯ Use your shell tool to run exactly this PowerShell command once, then reply DONE: Start-Sleep     
+  -Seconds 40                                                                                       
+
+◆ Ran Start-Sleep -Seconds 40 — cancelled
+  └ tool cancelled
+
+◆ Interrupted · Report issues with /feedback
+
+◆ Recap: Goal is to run the sleep command and reply DONE, currently the attempt was cancelled, next
+         rerun the command to completion.
+
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+❯ Start a message with ! to run a shell command yourself
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · high · ~/work/project              · Launch overrides

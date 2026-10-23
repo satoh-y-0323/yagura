@@ -1,0 +1,16 @@
+  separated by a space.                                                                             
+
+◈ Calling tools (5s · esc to interrupt)                
+
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+Would you like to allow this tool action? 
+                                                                                                    
+  tool action: mcp__probe__probe_ping                                    
+
+⟩ 1. Yes, proceed (y)
+  2. Yes, don't ask again this session (p)  tool `mcp__probe__probe_ping`
+  3. Always allow this MCP tool  tool `mcp__probe__probe_ping`
+  4. No, and tell Muse Code what to do differently (esc)
+Change approval defaults in /permissions
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · low · ~/work/project               · Launch overrides

@@ -1,0 +1,16 @@
+❯ Use your shell tool to run exactly this PowerShell command once and reply with its output only:   
+  (Invoke-WebRequest -UseBasicParsing https://example.com).StatusCode                               
+
+◆ Calling tools (2m 02s · esc to interrupt)                                        
+└ last event 1m 50s ago            
+                                                                                                    
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+Would you like to run the following command?                                                        
+                                                                         
+  $ (Invoke-WebRequest -UseBasicParsing https://example.com).StatusCode
+                     
+⟩ 1. Yes, proceed (y)                                   
+  2. No, and tell Muse Code what to do differently (esc)
+Change approval defaults in /permissions                                                            
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · high · ~/work/project              · Launch overrides

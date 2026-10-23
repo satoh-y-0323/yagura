@@ -1,0 +1,16 @@
+
+  Muse Code 1.4.12
+
+  Hooks: 0 runnable · 1 warning
+  wake-async.json: UnsupportedHandler: D97: `asyncRewake: true` handlers are unsupported
+
+❯ first                                                                                             
+
+◆ echo: first
+
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+❯ Type @ to search and insert workspace file paths
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  echo · ~/work/project               · Auto-review
+
+

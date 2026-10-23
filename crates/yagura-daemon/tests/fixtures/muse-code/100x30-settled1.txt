@@ -1,0 +1,16 @@
+
+  Muse Code 1.4.12
+
+❯ Reply with only the secret words given to you in your context for this session, separated by a    
+  space. Nothing else. Do not use tools.                                                            
+
+◆ PAPAYA-91 MANGO-27
+
+── Voice input (Alt+V to start) ────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-wonder-1.0 · high · ~/work/project              · Launch overrides
+
+
+
+
