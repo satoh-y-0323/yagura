@@ -63,6 +63,10 @@ const MCP_CONFIG_DIR_PLACEHOLDER: &str = "{mcp_config_dir}";
 const MCP_BRIDGE_TOML_PLACEHOLDER: &str = "{bridge_toml}";
 const MCP_ENV_NAMES_TOML_PLACEHOLDER: &str = "{env_names_toml}";
 const MCP_WSLENV_TOML_PLACEHOLDER: &str = "{wslenv_toml}";
+const MCP_BRIDGE_JSON_PLACEHOLDER: &str = "{bridge_json}";
+/// Left in the rendered `args` by [`render_mcp_args`]: only the window being
+/// opened knows which variables its child receives ([`fill_env_refs`]).
+const MCP_ENV_REFS_PLACEHOLDER: &str = "{env_refs}";
 /// The one placeholder an `[mcp]` table's `config_file` content may spell as
 /// well as its `args`.
 const MCP_SERVER_PLACEHOLDER: &str = "{server}";
@@ -1131,6 +1135,8 @@ fn known_placeholders(kind: TableKind) -> &'static [&'static str] {
             MCP_BRIDGE_TOML_PLACEHOLDER,
             MCP_ENV_NAMES_TOML_PLACEHOLDER,
             MCP_WSLENV_TOML_PLACEHOLDER,
+            MCP_BRIDGE_JSON_PLACEHOLDER,
+            MCP_ENV_REFS_PLACEHOLDER,
             MCP_SERVER_PLACEHOLDER,
         ],
         TableKind::Hooks => &[HOOKS_CONFIG_FILE_PLACEHOLDER, HOOKS_CONFIG_DIR_PLACEHOLDER],
@@ -1285,7 +1291,9 @@ fn toml_literal_string_array(items: &[&str]) -> Option<String> {
 /// literal string, [`yagura_protocol::MCP_CHANNEL_ENV_VARS`] joined by `:` --
 /// a `WSLENV` value), and `paths` for `{mcp_config_file}` /
 /// `{mcp_config_dir}` (substituted verbatim -- they are path arguments, not
-/// TOML content). An element with none of them passes through unchanged.
+/// TOML content), and the bridge path as a JSON string for `{bridge_json}`.
+/// `{env_refs}` is left for [`fill_env_refs`]. An element with none of them
+/// passes through unchanged.
 ///
 /// Returns `None` when `bridge_path` cannot be rendered as a TOML literal
 /// string (it contains a single quote or a newline): emitting a broken TOML
@@ -1297,7 +1305,10 @@ pub fn render_mcp_args(
     bridge_path: &Path,
     paths: InjectedPaths<'_>,
 ) -> Option<Vec<String>> {
-    let bridge_toml = toml_literal_string(&bridge_path.to_string_lossy())?;
+    // Refused only when an element spells `{bridge_toml}`: a JSON string has
+    // no such limit.
+    let bridge_toml = toml_literal_string(&bridge_path.to_string_lossy());
+    let bridge_json = serde_json::Value::String(bridge_path.to_string_lossy().into_owned());
 
     let mut env_names: Vec<String> = yagura_protocol::MCP_CHANNEL_ENV_VARS
         .iter()
@@ -1314,12 +1325,37 @@ pub fn render_mcp_args(
         // First, so a substituted path that happens to spell `{server}` is
         // never rewritten.
         let mut value = substitute_server(arg, server);
-        value = value.replace(MCP_BRIDGE_TOML_PLACEHOLDER, &bridge_toml);
+        if value.contains(MCP_BRIDGE_TOML_PLACEHOLDER) {
+            value = value.replace(MCP_BRIDGE_TOML_PLACEHOLDER, bridge_toml.as_deref()?);
+        }
+        value = value.replace(MCP_BRIDGE_JSON_PLACEHOLDER, &bridge_json.to_string());
         value = value.replace(MCP_ENV_NAMES_TOML_PLACEHOLDER, &env_names_toml);
         value = value.replace(MCP_WSLENV_TOML_PLACEHOLDER, &wslenv_toml);
         rendered.push(substitute_paths(value, TableKind::Mcp, paths));
     }
     Some(rendered)
+}
+
+/// `arg` with `{env_refs}` replaced by a JSON object naming each of `names`
+/// as a reference to itself (`{"NAME":"${NAME}"}`). Only names and references
+/// are written, never values.
+pub(crate) fn fill_env_refs(arg: &str, names: &[&str]) -> String {
+    if !arg.contains(MCP_ENV_REFS_PLACEHOLDER) {
+        return arg.to_string();
+    }
+    let refs: serde_json::Map<String, serde_json::Value> = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                serde_json::Value::String(format!("${{{name}}}")),
+            )
+        })
+        .collect();
+    arg.replace(
+        MCP_ENV_REFS_PLACEHOLDER,
+        &serde_json::Value::Object(refs).to_string(),
+    )
 }
 
 /// Replaces `kind`'s config-file and config-directory placeholders in `arg`
@@ -1486,7 +1522,7 @@ impl UnrenderedInjection {
             paths.push(dir.path());
         }
         if let Some(mcp) = &self.mcp
-            && named(MCP_BRIDGE_TOML_PLACEHOLDER)
+            && (named(MCP_BRIDGE_TOML_PLACEHOLDER) || named(MCP_BRIDGE_JSON_PLACEHOLDER))
         {
             paths.push(mcp.bridge.clone());
         }

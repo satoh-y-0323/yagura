@@ -4515,15 +4515,25 @@ impl WindowRegistry {
                     reason: rejected.0,
                     argument: None,
                 })?;
+        let mut child_env =
+            child_environment(&self.config, status_token, window_id, extra_profile_env);
+        let env_refs = env_refs_names(&self.config, status_token, &child_env);
         let mut full_argv = argv.to_vec();
         let mut hooks_injected = false;
         for injection in injections {
-            let args = injection_args_for(&resolution, injection);
-            hooks_injected |= injection.kind == InjectionKind::Hooks && !args.is_empty();
+            // Filled before the shim check, which judges the argument as spawned.
+            let filled = PreparedInjection {
+                kind: injection.kind,
+                args: injection
+                    .args
+                    .iter()
+                    .map(|arg| crate::profile::fill_env_refs(arg, &env_refs))
+                    .collect(),
+            };
+            let args = injection_args_for(&resolution, &filled);
+            hooks_injected |= filled.kind == InjectionKind::Hooks && !args.is_empty();
             full_argv.extend_from_slice(args);
         }
-        let mut child_env =
-            child_environment(&self.config, status_token, window_id, extra_profile_env);
         // The hooks name the daemon bare, and cmd looks in the working
         // directory before PATH unless told not to. A profile's own value wins.
         if hooks_injected
@@ -5111,12 +5121,13 @@ fn child_environment(
     extra_profile_env: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
-    let mut forwarded: Vec<String> = Vec::new();
+    let mut forwarded: Vec<String> = channel_env_names(status_token)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     if let Some(hex) = status_token.as_hex() {
         env.push((STATUS_TOKEN_ENV.to_string(), hex.to_string()));
         env.push((WINDOW_ID_ENV.to_string(), window_id.to_string()));
-        forwarded.push(WINDOW_ID_ENV.to_string());
-        forwarded.push(STATUS_TOKEN_ENV.to_string());
     }
     if let Some(bridge) = config.mcp_bridge.as_deref() {
         env.push((
@@ -5144,9 +5155,6 @@ fn child_environment(
     }
 
     if forwards_across_wsl {
-        if std::env::var_os(INSTANCE_ENV).is_some() {
-            forwarded.push(INSTANCE_ENV.to_string());
-        }
         let base = profile_wslenv
             .clone()
             .or_else(|| std::env::var_os(WSLENV).and_then(|value| value.into_string().ok()));
@@ -5157,6 +5165,43 @@ fn child_environment(
         }
     }
     env
+}
+
+/// The MCP channel variables a window's child receives: its identity pair
+/// when its token is verifiable, and the instance name when the daemon has
+/// one (inherited, never set). The one source for the `WSLENV` forwarding
+/// and for `{env_refs}`.
+fn channel_env_names(status_token: &StatusToken) -> Vec<&'static str> {
+    yagura_protocol::MCP_CHANNEL_ENV_VARS
+        .into_iter()
+        .filter(|name| match *name {
+            INSTANCE_ENV => std::env::var_os(INSTANCE_ENV).is_some(),
+            _ => status_token.as_hex().is_some(),
+        })
+        .collect()
+}
+
+/// The variables `{env_refs}` names for one window: [`channel_env_names`]
+/// plus `WSLENV` when the child ends up with one (set by
+/// [`child_environment`] or inherited).
+fn env_refs_names(
+    config: &DaemonConfig,
+    status_token: &StatusToken,
+    child_env: &[(String, String)],
+) -> Vec<&'static str> {
+    let mut names = channel_env_names(status_token);
+    let has_wslenv = child_env
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case(WSLENV))
+        || config
+            .child_base_env
+            .get(std::ffi::OsStr::new(WSLENV))
+            .is_some()
+        || std::env::var_os(WSLENV).is_some();
+    if has_wslenv {
+        names.push(WSLENV);
+    }
+    names
 }
 
 /// The variable naming which environment variables cross the WSL boundary.

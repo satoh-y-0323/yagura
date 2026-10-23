@@ -875,3 +875,287 @@ async fn open_window_from_profile_with_launch_options_persists_profile_model_and
     assert_eq!(raw.model, None);
     assert_eq!(raw.effort, None);
 }
+
+// =============================================================================
+// `{env_refs}` names exactly the channel variables the window's child
+// receives, and `{bridge_json}` renders the (converted) bridge as JSON
+// =============================================================================
+
+/// A profile's `[mcp]` table in the shape of a CLI that takes one JSON server
+/// entry through `-c`, naming the variables it passes to the bridge.
+const ENV_REFS_TABLE: &str = r#"
+[mcp]
+args = ['-c', 'mcpServers.{server}={"transport":"stdio","command":{bridge_json},"args":[],"env":{env_refs}}']
+"#;
+
+/// The variables `{env_refs}` may name: the MCP channel plus `WSLENV`.
+fn env_refs_candidates() -> Vec<&'static str> {
+    let mut names = yagura_protocol::MCP_CHANNEL_ENV_VARS.to_vec();
+    names.push("WSLENV");
+    names
+}
+
+/// `text` with line breaks removed, so a value the terminal wrapped reads as
+/// one run.
+fn without_line_breaks(text: &str) -> String {
+    text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect()
+}
+
+/// Whether `text` (flattened) holds a complete `<<name...>>` report.
+fn has_report(text: &str, name: &str) -> bool {
+    let marker = format!("<<{name}");
+    text.rfind(&marker)
+        .is_some_and(|start| text[start + marker.len()..].contains(">>"))
+}
+
+/// `Some(true)` when an `env_probe` report says `name` is set, `Some(false)`
+/// when unset, `None` before the report is complete.
+fn reported_set(text: &str, name: &str) -> Option<bool> {
+    let marker = format!("<<{name}");
+    let rest = &text[text.rfind(&marker)? + marker.len()..];
+    if rest.starts_with(" unset>>") {
+        Some(false)
+    } else if rest.starts_with('=') && rest.contains(">>") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// The JSON server entry an `ENV_REFS_TABLE` window's `argv[2]` carries:
+/// everything after the first `=` of `mcpServers.<server>=<json>`.
+fn server_entry(argv2: &str) -> serde_json::Value {
+    let (_, json) = argv2
+        .split_once('=')
+        .unwrap_or_else(|| panic!("argv[2] must be `key=json`; got {argv2:?}"));
+    serde_json::from_str(json)
+        .unwrap_or_else(|err| panic!("argv[2]'s entry must be JSON: {err}; got {json:?}"))
+}
+
+/// The names `entry["env"]` lists, after checking it is an object whose every
+/// value is the `${NAME}` reference to its own key (never a value).
+fn env_ref_names(entry: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let env = entry["env"]
+        .as_object()
+        .unwrap_or_else(|| panic!("`env` must be a JSON object; got {entry}"));
+    for (name, value) in env {
+        assert_eq!(
+            value.as_str(),
+            Some(format!("${{{name}}}").as_str()),
+            "`env.{name}` must reference the variable by name; got {entry}"
+        );
+    }
+    env.keys().cloned().collect()
+}
+
+/// Writes the `argv_probe` profile and one `env_probe` profile per candidate
+/// name, all carrying `tables`; returns the env probes' ids with their names.
+fn write_env_refs_profiles(profiles_dir: &Path, tables: &str) -> Vec<(String, &'static str)> {
+    write_profile(
+        profiles_dir,
+        "argv-probe",
+        &argv_probe_profile_source("Argv Probe", tables),
+    );
+    env_refs_candidates()
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let id = format!("env-probe-{index}");
+            write_profile(
+                profiles_dir,
+                &id,
+                &env_probe_profile_source("Env Probe", name, tables),
+            );
+            (id, name)
+        })
+        .collect()
+}
+
+/// The `argv[2]` an in-process daemon's `argv-probe` window reports.
+async fn harness_argv2(h: &Harness, client: &mut Connection) -> String {
+    let window_id = expect_window_opened(call_open_window_from_profile(client, "argv-probe").await);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = h.flattened_scrollback(&window_id);
+        if has_report(&text, "argv[2]") {
+            return extract_sentinel_value(&text, "argv[2]").expect("the report was just seen");
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for argv[2]; scrollback: {text:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The candidate names an in-process daemon's windows' children receive.
+async fn harness_received_names(
+    h: &Harness,
+    client: &mut Connection,
+    probes: &[(String, &'static str)],
+) -> std::collections::BTreeSet<String> {
+    let mut received = std::collections::BTreeSet::new();
+    for (id, name) in probes {
+        let window_id = expect_window_opened(call_open_window_from_profile(client, id).await);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let set = loop {
+            let text = h.flattened_scrollback(&window_id);
+            if let Some(set) = reported_set(&text, name) {
+                break set;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the {name} report; scrollback: {text:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        if set {
+            received.insert((*name).to_string());
+        }
+    }
+    received
+}
+
+#[tokio::test]
+async fn open_window_from_profile_renders_env_refs_as_exactly_the_channel_variables_the_child_receives()
+ {
+    let tree = TempDir::new("yagura-cli-test", "mcp-inject-env-refs");
+    let profiles_dir = tree.make_dir("profiles");
+    let mcp_dir = tree.make_dir("mcp");
+    let probes = write_env_refs_profiles(&profiles_dir, ENV_REFS_TABLE);
+    let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
+    let config = mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge.clone()));
+    let h = Harness::start("mcp-inject-env-refs", config).await;
+    let mut client = h.connect().await;
+
+    let argv2 = harness_argv2(&h, &mut client).await;
+    let entry = server_entry(&argv2);
+    let listed = env_ref_names(&entry);
+    let received = harness_received_names(&h, &mut client, &probes).await;
+
+    for name in [
+        yagura_protocol::WINDOW_ID_ENV,
+        yagura_protocol::STATUS_TOKEN_ENV,
+    ] {
+        assert!(
+            received.contains(name),
+            "a verifiable window's child must receive {name:?}; received {received:?}"
+        );
+    }
+    assert_eq!(
+        listed, received,
+        "`{{env_refs}}` must list exactly the channel variables the child receives"
+    );
+    assert_eq!(
+        entry["command"].as_str(),
+        bridge.to_str(),
+        "`{{bridge_json}}` must render the bridge path as a JSON string; got {entry}"
+    );
+    assert!(
+        !argv2.contains(VALID_TOKEN),
+        "the child's argv must never carry the window's status token, only its name"
+    );
+}
+
+/// The path `CONVERTING_TABLES`' converter prints for any daemon-side path.
+const CONVERTED_BRIDGE_PATH: &str = "/converted/yagura-mcp";
+
+#[tokio::test]
+async fn open_window_from_profile_renders_bridge_json_from_the_host_paths_converter() {
+    let tree = TempDir::new("yagura-cli-test", "mcp-inject-bridge-json-host");
+    let profiles_dir = tree.make_dir("profiles");
+    let mcp_dir = tree.make_dir("mcp");
+    let tables = format!(
+        "{ENV_REFS_TABLE}\n[host_paths]\nconvert = ['{}', \"probe\", \"{{path}}\"]\n\n\
+         [env]\nMCP_CLI_STUB_PROBE_OUTPUT = \"{CONVERTED_BRIDGE_PATH}\"\n\
+         MCP_CLI_STUB_PROBE_EXIT_CODE = \"0\"\n",
+        common::mcp_cli_stub_path().display()
+    );
+    write_profile(
+        &profiles_dir,
+        "argv-probe",
+        &argv_probe_profile_source("Argv Probe", &tables),
+    );
+    let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
+    let config = mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge));
+    let h = Harness::start("mcp-inject-bridge-json-host", config).await;
+    let mut client = h.connect().await;
+
+    let entry = server_entry(&harness_argv2(&h, &mut client).await);
+    assert_eq!(
+        entry["command"].as_str(),
+        Some(CONVERTED_BRIDGE_PATH),
+        "`{{bridge_json}}` must carry the converter's path, not the daemon-side one; got {entry}"
+    );
+}
+
+/// A copy of the built daemon in a folder of its own, beside a stand-in MCP
+/// bridge (and, on Windows, the vendored pseudoconsole pair it needs).
+fn install_daemon_with_bridge(sandbox: &common::real_daemon::Sandbox) -> PathBuf {
+    let dir = sandbox.tree.make_dir("install");
+    #[cfg(windows)]
+    {
+        let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/conpty/x64");
+        for name in ["conpty.dll", "OpenConsole.exe"] {
+            std::fs::copy(vendored.join(name), dir.join(name)).unwrap();
+        }
+    }
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let bin = dir.join(format!("yagura-daemon{suffix}"));
+    std::fs::copy(common::real_daemon::daemon_bin(), &bin).unwrap();
+    std::fs::copy(env_probe_path(), dir.join(format!("yagura-mcp{suffix}"))).unwrap();
+    bin
+}
+
+#[tokio::test]
+async fn a_named_instances_window_lists_the_inherited_instance_variable_in_env_refs() {
+    let sandbox = common::real_daemon::Sandbox::new("mcp-inject-env-refs-named");
+    let bin = install_daemon_with_bridge(&sandbox);
+    let argv_probe = argv_probe_path();
+    let argv_probe = argv_probe.to_str().expect("argv_probe path must be UTF-8");
+    sandbox.write_probe_profile("argv-probe", &[argv_probe], ENV_REFS_TABLE);
+    let probes: Vec<(String, &'static str)> = env_refs_candidates()
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let id = format!("env-probe-{index}");
+            sandbox.write_var_probe_profile(&id, name, ENV_REFS_TABLE);
+            (id, name)
+        })
+        .collect();
+    let mut daemon = sandbox.start_bin(&bin).await;
+
+    let window_id = daemon.open_profile_window(&sandbox, "argv-probe").await;
+    let text = daemon
+        .output_until(&window_id, "the argv report", |text| {
+            has_report(&without_line_breaks(text), "argv[2]")
+        })
+        .await;
+    let argv2 = extract_sentinel_value(&without_line_breaks(&text), "argv[2]")
+        .expect("the report was just seen");
+    let listed = env_ref_names(&server_entry(&argv2));
+
+    let mut received = std::collections::BTreeSet::new();
+    for (id, name) in &probes {
+        let window_id = daemon.open_profile_window(&sandbox, id).await;
+        let text = daemon
+            .output_until(&window_id, "the variable report", |text| {
+                reported_set(&without_line_breaks(text), name).is_some()
+            })
+            .await;
+        if reported_set(&without_line_breaks(&text), name) == Some(true) {
+            received.insert((*name).to_string());
+        }
+    }
+
+    assert!(
+        received.contains(yagura_protocol::INSTANCE_ENV),
+        "a named instance's window inherits {:?}; received {received:?}; daemon log:\n{}",
+        yagura_protocol::INSTANCE_ENV,
+        sandbox.daemon_log()
+    );
+    assert_eq!(
+        listed, received,
+        "`{{env_refs}}` must list exactly the channel variables the child receives"
+    );
+}
