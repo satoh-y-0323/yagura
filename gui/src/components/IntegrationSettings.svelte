@@ -52,7 +52,18 @@
                 {row.stateLabel}
               </span>
             </div>
-            <div class="integration-settings__command" title={row.commandTitle}>{row.command}</div>
+            {#if row.fileWrites !== null}
+              <div class="integration-settings__writes">
+                <span>{settings.integrationFileWritesLead}</span>
+                {#each row.fileWrites as write (write.file)}
+                  <span><code>{write.file}</code> — <code>{write.names.join(', ')}</code></span>
+                {/each}
+              </div>
+            {:else}
+              <div class="integration-settings__command" title={row.commandTitle}>
+                {row.command}
+              </div>
+            {/if}
             {#if row.tomlSetNote}
               <div class="integration-settings__extra">{row.tomlSetNote}</div>
             {/if}
@@ -86,6 +97,9 @@
                 >
               {/if}
             </div>
+            {#if row.refusal}
+              <p class="integration-settings__refusal">{row.refusal}</p>
+            {/if}
             {#if results.has(row.profile)}
               {@const outcome = resultLines(
                 results.get(row.profile) as McpRegistrationResultPayload
@@ -198,6 +212,31 @@
     font-family: var(--font-family-mono);
     font-size: var(--font-size-xs);
     color: var(--color-text-secondary);
+  }
+
+  .integration-settings__writes {
+    grid-column: 1;
+    display: grid;
+    gap: 2px;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+  }
+
+  .integration-settings__writes code {
+    font-family: var(--font-family-mono);
+    color: var(--color-text-primary);
+  }
+
+  .integration-settings__refusal {
+    grid-column: 1 / -1;
+    margin: 0;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-warning);
+    color: var(--color-warning);
+    font-size: var(--font-size-sm);
+    overflow-wrap: anywhere;
   }
 
   .integration-settings__extra {

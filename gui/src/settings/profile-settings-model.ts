@@ -6,8 +6,20 @@ import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { ProfileGuidance } from '../ipc/session-client';
 import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
 import type { RoleEntry } from '../ipc/plan-boundary';
-import { unavailableText } from '../profile/launch-profile-choices';
+import {
+  limitGuidance,
+  unavailableText,
+  type LimitGuidance,
+} from '../profile/launch-profile-choices';
 import { settings } from '../ui-messages';
+
+/** What a ready profile cannot do on this host, and what its profile says to do instead. */
+export interface ProfileLimitNote {
+  /** One line per limit. */
+  items: string[];
+  /** The first guidance a limit carries, `null` when none does. */
+  guidance: LimitGuidance | null;
+}
 
 /** What one row of the Profiles tab shows. */
 export interface ProfileSettingsRow {
@@ -34,6 +46,8 @@ export interface ProfileSettingsRow {
    * those roles' tasks cannot open windows until it is switched back on.
    */
   rolesUsing: string[];
+  /** What this profile cannot do here although it is launchable; `null` when nothing. */
+  limitNote: ProfileLimitNote | null;
 }
 
 /** Names the roles whose profile is exactly `profileId`, in table order. */
@@ -48,6 +62,16 @@ function unavailableLine(profile: ProfileOption): string {
   return profile.unavailableKind === 'not_found'
     ? settings.profileNotFound(why)
     : settings.profileUnavailable(why);
+}
+
+function limitNoteOf(profile: ProfileOption): ProfileLimitNote | null {
+  if (profile.limits.length === 0) {
+    return null;
+  }
+  return {
+    items: profile.limits.map((limit) => settings.profileLimitItem(limit.capability, limit.reason)),
+    guidance: profile.limits.map(limitGuidance).find((guidance) => guidance !== null) ?? null,
+  };
 }
 
 /** Builds one row per profile, in the order the profiles arrived in. */
@@ -67,6 +91,7 @@ export function profileSettingsRows(
         : null,
     enabled: profile.enabled,
     rolesUsing: profile.enabled ? [] : rolesUsingProfile(roles, profile.id),
+    limitNote: limitNoteOf(profile),
   }));
 }
 

@@ -202,6 +202,9 @@ export const messagesEn = {
     optionalSuffix: 'optional',
     modelLabel: 'Model',
     effortLabel: 'Effort',
+    /** Under a disabled launch-option field: why it cannot be used with the chosen profile here. */
+    modelLimited: "A model can't be set for this profile on this computer.",
+    effortLimited: "An effort level can't be set for this profile on this computer.",
   },
 
   themes: {
@@ -607,6 +610,15 @@ export const messagesEn = {
     defaultRoleLabel: 'Default role',
     defaultRoleNone: 'None',
     defaultRoleHint: 'Used for any task whose role is missing or not in this table.',
+    /** Under a role row, and on a task card: the profile cannot take a task's instruction at launch here. */
+    roleLaunchLimited: (profile: string, guidance: string | null): string =>
+      `On this computer, tasks with this role can't open a ${profile} window, because their instruction is handed over at launch.${
+        guidance === null ? '' : ` ${guidance}`
+      }`,
+    taskOpenLimited: (profile: string, guidance: string | null): string =>
+      `Can't open on this computer: ${profile} takes no instruction at launch here.${
+        guidance === null ? '' : ` ${guidance}`
+      }`,
 
     // The Models tab: the model each alias of a launch profile stands for.
     modelsTab: 'Models',
@@ -656,6 +668,25 @@ export const messagesEn = {
     /** Labels the page a profile's guidance points to; shown as text to copy, not a link. */
     profileInstallGuide: 'Install guide',
     profileSwitchLabel: (name: string): string => `Use ${name}`,
+    /** A launchable profile that lacks a capability here: the heading, one line per capability, the page. */
+    profileLimitsHeading: "On this computer, this profile can't take:",
+    profileLimitItem: (
+      capability: 'model' | 'effort' | 'launch_prompt' | 'unknown',
+      reason: string
+    ): string => {
+      switch (capability) {
+        case 'model':
+          return 'a model';
+        case 'effort':
+          return 'an effort level';
+        case 'launch_prompt':
+          return "a request at launch, so it can't be used for task windows or for a handoff that opens a new window";
+        case 'unknown':
+          return reason;
+      }
+    },
+    profileLimitGuide: 'More information',
+    profileCopyLimitGuide: 'Copy address of the page',
 
     /** List and plural form policy lives with the resource, not the machinery. */
     profileUsedByRoles: (roles: readonly string[]): string => {
@@ -828,6 +859,9 @@ export const messagesEn = {
       const changes = values.map((entry) => `${entry.key} = ${entry.value}`).join(', ');
       return `Also sets ${changes} in [${path}] of ${file}.`;
     },
+    integrationFileWritesLead: 'yagura edits these files instead of running a command:',
+    integrationRefusedByClaim: (pointer: string): string =>
+      `Can't register or update: ${pointer} already holds a different value, and yagura does not overwrite it.`,
     integrationHookEntriesNote: (file: string, names: readonly string[]): string =>
       names.length === 1
         ? `Also adds the "${names[0] ?? ''}" entry to ${file} so the CLI reports its status.`

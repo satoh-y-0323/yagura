@@ -7,9 +7,10 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type { LaunchOptionInfo, ProfileEntry } from '../ipc/session-client';
+import type { LaunchOptionInfo, ProfileEntry, ProfileLimit } from '../ipc/session-client';
 import {
   launchOptionAxes,
+  launchOptionLimit,
   mappedLaunchOptionValues,
   profileChoiceLabel,
   profileChoices,
@@ -201,5 +202,70 @@ describe('profileChoiceLabel', () => {
     const [choice] = profileChoices(profiles, '');
 
     expect(choice && profileChoiceLabel(choice)).toBe('Codex CLI');
+  });
+});
+
+const MUSE_GUIDANCE = {
+  text: 'Use the WSL: Muse Code profile (wsl-muse-code) for those.',
+  command: null,
+  url: 'https://example.com/muse',
+};
+
+function limited(
+  id: string,
+  capabilities: readonly ProfileLimit['capability'][],
+  model: LaunchOptionInfo | null = CLAUDE_MODEL,
+  effort: LaunchOptionInfo | null = CLAUDE_EFFORT
+): ProfileEntry {
+  return {
+    ...profile(id, `${id} name`, model, effort),
+    limits: capabilities.map((capability) => ({
+      capability,
+      reason: `the ${capability} option cannot pass a .cmd file unchanged`,
+      guidance: MUSE_GUIDANCE,
+    })),
+  };
+}
+
+describe('launchOptionLimit', () => {
+  const choices: ProfileEntry[] = [
+    limited('muse-code', ['effort', 'launch_prompt']),
+    limited('model-limited', ['model']),
+    profile('claude-code', 'Claude Code', CLAUDE_MODEL, CLAUDE_EFFORT),
+  ];
+
+  it('disables the effort field of a profile whose effort is limited, with a reason and the guidance', () => {
+    const effort = launchOptionLimit(choices, 'muse-code', 'effort');
+
+    expect(effort).not.toBeNull();
+    expect(effort?.reason.length).toBeGreaterThan(0);
+    expect(effort?.guidance).toMatchObject({ text: MUSE_GUIDANCE.text, url: MUSE_GUIDANCE.url });
+  });
+
+  it('leaves the other field of that profile enabled', () => {
+    expect(launchOptionLimit(choices, 'muse-code', 'model')).toBeNull();
+  });
+
+  it('disables the model field in the same form when the model is limited', () => {
+    const model = launchOptionLimit(choices, 'model-limited', 'model');
+
+    expect(model?.reason.length).toBeGreaterThan(0);
+    expect(model?.guidance).toMatchObject({ text: MUSE_GUIDANCE.text });
+    expect(launchOptionLimit(choices, 'model-limited', 'effort')).toBeNull();
+  });
+
+  it('disables nothing for a profile without limits or one the list does not hold', () => {
+    expect(launchOptionLimit(choices, 'claude-code', 'effort')).toBeNull();
+    expect(launchOptionLimit(choices, 'claude-code', 'model')).toBeNull();
+    expect(launchOptionLimit(choices, 'gone', 'effort')).toBeNull();
+  });
+
+  it('never sends text left in a field the chosen profile disables', () => {
+    expect(
+      mappedLaunchOptionValues(choices, 'muse-code', { model: 'strong', effort: 'high' })
+    ).toEqual({ model: 'strong', effort: '' });
+    expect(
+      mappedLaunchOptionValues(choices, 'model-limited', { model: 'strong', effort: 'high' })
+    ).toEqual({ model: '', effort: 'high' });
   });
 });

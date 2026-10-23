@@ -13,6 +13,7 @@ import {
 import { PROFILE_ENABLED_MIN_REVISION } from '../ipc/session-boundary';
 import type { ProfileOption } from '../components/add-window-dialog-types';
 import type { RoleEntry } from '../ipc/plan-boundary';
+import type { ProfileLimit } from '../ipc/session-client';
 import { settings } from '../ui-messages';
 
 function option(overrides: Partial<ProfileOption> = {}): ProfileOption {
@@ -90,6 +91,7 @@ describe('profileSettingsRows', () => {
         guidance: null,
         enabled: false,
         rolesUsing: ['reviewer', 'tester'],
+        limitNote: null,
       },
     ]);
   });
@@ -220,5 +222,75 @@ describe('isProfileSettingsReadOnly', () => {
   it('is editable from the revision that carries the enabled state onward', () => {
     expect(isProfileSettingsReadOnly(11)).toBe(false);
     expect(isProfileSettingsReadOnly(12)).toBe(false);
+  });
+});
+
+const SHIM_GUIDANCE = {
+  text: 'Use the WSL profile for those.',
+  command: null,
+  url: 'https://example.com/muse',
+};
+
+function limit(capability: ProfileLimit['capability'], reason: string): ProfileLimit {
+  return { capability, reason, guidance: SHIM_GUIDANCE };
+}
+
+describe('profileSettingsRows: what a ready profile cannot do here', () => {
+  it('stays ready and notes one line per limit, then the guidance text and page once', () => {
+    const [row] = profileSettingsRows(
+      [
+        option({
+          limits: [
+            limit('effort', 'the effort option cannot pass a .cmd file unchanged'),
+            limit('launch_prompt', 'a request at launch cannot pass a .cmd file unchanged'),
+          ],
+        }),
+      ],
+      ROLES
+    );
+
+    expect(row?.isReady).toBe(true);
+    expect(row?.limitNote?.items).toHaveLength(2);
+    for (const item of row?.limitNote?.items ?? []) {
+      expect(item.length).toBeGreaterThan(0);
+    }
+    expect(row?.limitNote?.guidance).toMatchObject({
+      text: SHIM_GUIDANCE.text,
+      url: SHIM_GUIDANCE.url,
+    });
+  });
+
+  it("shows the daemon's own reason for a capability this build does not know", () => {
+    const [row] = profileSettingsRows(
+      [option({ limits: [limit('unknown', 'a newer capability is not carried')] })],
+      ROLES
+    );
+
+    expect(row?.limitNote?.items).toEqual(['a newer capability is not carried']);
+  });
+
+  it('links only an https:// page', () => {
+    const [row] = profileSettingsRows(
+      [
+        option({
+          limits: [
+            {
+              capability: 'effort',
+              reason: 'no effort here',
+              guidance: { text: 'See the page.', command: null, url: 'http://example.com/muse' },
+            },
+          ],
+        }),
+      ],
+      ROLES
+    );
+
+    expect(row?.limitNote?.guidance).toMatchObject({ text: 'See the page.', url: null });
+  });
+
+  it('has no note for a profile without limits', () => {
+    const [row] = profileSettingsRows([option()], ROLES);
+
+    expect(row?.limitNote).toBeNull();
   });
 });

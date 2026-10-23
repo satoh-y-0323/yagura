@@ -17,6 +17,8 @@ import type {
 } from '../ipc/plan-boundary';
 import { daemonRejectionCode } from '../ipc/daemon-rejection';
 import type { DetectedStatusView } from '../ipc/session-boundary';
+import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
+import { plans } from '../ui-messages';
 import type { WindowEntry } from '../stores/window-registry';
 
 /** The least of a window-list entry the board needs to read. */
@@ -213,6 +215,28 @@ export function ownerCandidates(
   return windows
     .filter((window) => isWindowLive(windows, window.windowId))
     .map((window) => ({ windowId: window.windowId, name: window.name }));
+}
+
+/**
+ * The one line saying why the daemon will refuse to open this task's window,
+ * `null` when it will not. Only an assigned profile that cannot take the
+ * task's instruction at launch is refused; the rest is left to the daemon.
+ */
+export function taskOpenRefusal(
+  task: PlanTaskInfo,
+  profiles: readonly Pick<LaunchProfile, 'id' | 'displayName' | 'limits'>[]
+): string | null {
+  const profileId = task.resolved.assignment?.profile;
+  const profile = profiles.find((entry) => entry.id === profileId);
+  const limit = profileId === undefined ? null : profileLimit(profiles, profileId, 'launch_prompt');
+  if (profile === undefined || limit === null) {
+    return null;
+  }
+  const guidance = limitGuidance(limit)?.text ?? null;
+  return plans.taskOpenLimited(
+    profile.displayName,
+    guidance === null ? null : guidance.replace(/\s+/g, ' ').trim()
+  );
 }
 
 /** The editor's text fields for an assignment; an unset value reads as blank text. */

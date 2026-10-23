@@ -17,6 +17,7 @@
     planOwner,
     reportOutcomeKey,
     reviewBannerKind,
+    taskOpenRefusal,
     unappliedTaskIds,
     type BoardWindow,
     type EditorFields,
@@ -204,6 +205,7 @@
           <ul class="plan-board__cards">
             {#each column.cards as card (card.task.task_id)}
               {@const fields = draftFor(drafts, card.task)}
+              {@const refusal = taskOpenRefusal(card.task, profileOptions)}
               <li
                 class="plan-card"
                 data-unassigned={isUnassigned(card.task.resolved)}
@@ -226,6 +228,9 @@
                     >{plansLabel(assignmentSourceKey(card.task.resolved.source))}</span
                   >
                 </div>
+                {#if refusal !== null}
+                  <div class="plan-card__refusal">{refusal}</div>
+                {/if}
                 {#if card.task.writes.length > 0}
                   <div class="plan-card__writes">{card.task.writes.join(', ')}</div>
                 {/if}
@@ -499,6 +504,12 @@
     display: flex;
     gap: var(--space-xs);
     justify-content: space-between;
+  }
+
+  .plan-card__refusal {
+    font-size: var(--font-size-xs);
+    color: var(--color-warning);
+    overflow-wrap: anywhere;
   }
 
   .plan-card__writes,

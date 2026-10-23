@@ -10,6 +10,7 @@
    */
   import {
     launchOptionAxes,
+    launchOptionLimit,
     profileChoiceLabel,
     profileChoices,
   } from '../profile/launch-profile-choices';
@@ -86,6 +87,7 @@
     </select>
   </label>
   {#each launchOptionAxes(profileOptions, profileValue) as axis (axis.key)}
+    {@const limit = launchOptionLimit(profileOptions, profileValue, axis.key)}
     <label class="dialog-field">
       <span class="dialog-label">
         {labelOf(axis.key)}
@@ -95,9 +97,9 @@
         type="text"
         class="dialog-input"
         list={listPrefix + axis.key}
-        value={valueOf(axis.key, modelValue, effortValue)}
+        value={limit === null ? valueOf(axis.key, modelValue, effortValue) : ''}
         on:input={(event) => reportText(axis.key, event)}
-        {disabled}
+        disabled={disabled || limit !== null}
         spellcheck="false"
       />
       <datalist id={listPrefix + axis.key}>
@@ -105,6 +107,12 @@
           <option value={entry.alias}>{entry.alias} — {entry.value}</option>
         {/each}
       </datalist>
+      {#if limit !== null}
+        <span class="launch-option-limit">
+          {limit.reason}
+          {#if limit.guidance !== null}{limit.guidance.text}{/if}
+        </span>
+      {/if}
     </label>
   {/each}
 </div>
@@ -119,6 +127,12 @@
     font-size: var(--font-size-xs);
     font-weight: 400;
     color: var(--color-text-secondary);
+  }
+
+  .launch-option-limit {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
   }
 
   /* Left otherwise unstyled: a native select draws itself from the

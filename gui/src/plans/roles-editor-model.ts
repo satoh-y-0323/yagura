@@ -1,3 +1,23 @@
+import { limitGuidance, profileLimit, type LaunchProfile } from '../profile/launch-profile-choices';
+import { plans } from '../ui-messages';
+
+/**
+ * Why a task of a role that uses `profileId` cannot open a window here,
+ * `null` when it can or the profile is unknown. Only a profile that cannot
+ * take the task's instruction at launch is noted.
+ */
+export function roleLaunchNote(
+  profiles: readonly Pick<LaunchProfile, 'id' | 'displayName' | 'limits'>[],
+  profileId: string
+): string | null {
+  const limit = profileLimit(profiles, profileId, 'launch_prompt');
+  const profile = profiles.find((entry) => entry.id === profileId);
+  if (limit === null || profile === undefined) {
+    return null;
+  }
+  return plans.roleLaunchLimited(profile.displayName, limitGuidance(limit)?.text ?? null);
+}
+
 /**
  * Whether a role table that just arrived may replace the rows being edited.
  * An ordinary load never erases an unsaved edit; the echo of the editor's

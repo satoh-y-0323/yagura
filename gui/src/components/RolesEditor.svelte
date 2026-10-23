@@ -8,7 +8,11 @@
   import type { ProfileOption } from './add-window-dialog-types';
   import { assignmentFromEditor, type EditorFields } from '../plans/plan-board-model';
   import { mappedLaunchOptionValues } from '../profile/launch-profile-choices';
-  import { acceptsRoleTableReload, defaultRoleAfterEdit } from '../plans/roles-editor-model';
+  import {
+    acceptsRoleTableReload,
+    defaultRoleAfterEdit,
+    roleLaunchNote,
+  } from '../plans/roles-editor-model';
   import { forms, plans } from '../ui-messages';
 
   /** One row of the role table, as the daemon stores it. */
@@ -109,6 +113,7 @@
 <div class="roles-editor">
   <ul class="roles-editor__rows">
     {#each rows as row (row)}
+      {@const note = roleLaunchNote(profileOptions, row.profile)}
       <li class="roles-editor__row">
         <label class="roles-editor__field"
           >{forms.nameLabel}<input bind:value={row.name} spellcheck="false" /></label
@@ -129,6 +134,9 @@
           on:click={() => (rows = rows.filter((other) => other !== row))}
           >{plans.removeRoleButton}</button
         >
+        {#if note !== null}
+          <span class="roles-editor__note">{note}</span>
+        {/if}
       </li>
     {/each}
   </ul>
@@ -170,8 +178,16 @@
 
   .roles-editor__row {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--space-xs);
     align-items: flex-end;
+  }
+
+  .roles-editor__note {
+    flex: 1 1 100%;
+    font-size: var(--font-size-xs);
+    color: var(--color-warning);
+    overflow-wrap: anywhere;
   }
 
   .roles-editor__field {

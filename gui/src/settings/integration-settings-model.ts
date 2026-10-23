@@ -18,6 +18,12 @@ import type {
 } from '../ipc/mcp-registration-boundary';
 import { settings } from '../ui-messages';
 
+/** The entries a command-less registration writes into one of its CLI's files. */
+export interface IntegrationFileWrite {
+  file: string;
+  names: string[];
+}
+
 /** What one row of the Integrations tab shows. */
 export interface IntegrationRowView {
   /** The profile's wire id. */
@@ -48,6 +54,13 @@ export interface IntegrationRowView {
   entriesNote: string | null;
   /** Every such entry written out in full, for a tooltip; `null` alongside a `null` note. */
   entriesTitle: string | null;
+  /**
+   * The files a registration that runs no command writes, with the entries in
+   * each; `null` for a row that runs a command.
+   */
+  fileWrites: IntegrationFileWrite[] | null;
+  /** Why Register / Update would be refused before it is pressed, `null` when it would not. */
+  refusal: string | null;
 }
 
 /** One heading and the rows under it. */
@@ -167,6 +180,10 @@ function buildRowView(
   const { label, tone } = stateView(status);
   const operationRunning = running !== null;
   const command = commandFor(row, status);
+  const writesFiles = command === null && row.entries.length > 0;
+  const primaryAction = primaryActionFor(state);
+  const claim = status?.refusedByClaim ?? null;
+  const refused = primaryAction !== null && claim !== null;
   return {
     profile: row.profile,
     name: row.displayName,
@@ -174,8 +191,8 @@ function buildRowView(
     stateTone: tone,
     command: command === null ? '' : displayCommand(command),
     commandTitle: command === null ? '' : joinArgv(command.argv),
-    primaryAction: primaryActionFor(state),
-    isPrimaryDisabled: state === 'not_installed' || operationRunning,
+    primaryAction,
+    isPrimaryDisabled: state === 'not_installed' || operationRunning || refused,
     canRemove: canRemoveFor(state),
     isRemoveDisabled: operationRunning,
     reason: status?.reason ?? null,
@@ -183,12 +200,25 @@ function buildRowView(
       row.tomlSet === null
         ? null
         : settings.integrationTomlSetNote(row.tomlSet.file, row.tomlSet.table, row.tomlSet.values),
-    entriesNote: entriesNote(row.entries),
+    entriesNote: writesFiles ? null : entriesNote(row.entries),
     entriesTitle:
       row.entries.length === 0
         ? null
         : row.entries.map((entry) => `${entry.name} = ${entry.content}`).join('\n'),
+    fileWrites: writesFiles ? fileWrites(row.entries) : null,
+    refusal: refused ? settings.integrationRefusedByClaim(claim) : null,
   };
+}
+
+/** The entries grouped by file, in the order the files first appear. */
+function fileWrites(entries: readonly McpRegistrationEntry[]): IntegrationFileWrite[] {
+  const namesByFile = new Map<string, string[]>();
+  for (const entry of entries) {
+    const names = namesByFile.get(entry.file) ?? [];
+    names.push(entry.name);
+    namesByFile.set(entry.file, names);
+  }
+  return [...namesByFile].map(([file, names]) => ({ file, names }));
 }
 
 /** One sentence per file the entries go into, in the order the files first appear. */
@@ -196,14 +226,8 @@ function entriesNote(entries: readonly McpRegistrationEntry[]): string | null {
   if (entries.length === 0) {
     return null;
   }
-  const namesByFile = new Map<string, string[]>();
-  for (const entry of entries) {
-    const names = namesByFile.get(entry.file) ?? [];
-    names.push(entry.name);
-    namesByFile.set(entry.file, names);
-  }
-  return [...namesByFile]
-    .map(([file, names]) => settings.integrationHookEntriesNote(file, names))
+  return fileWrites(entries)
+    .map(({ file, names }) => settings.integrationHookEntriesNote(file, names))
     .join(' ');
 }
 

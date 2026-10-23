@@ -115,6 +115,48 @@
             {/if}
           </div>
         {/if}
+        {#if row.limitNote !== null}
+          {@const note = row.limitNote}
+          <div class="profile-settings__limits">
+            <p class="profile-settings__limits-text">{settings.profileLimitsHeading}</p>
+            <ul class="profile-settings__limits-list">
+              {#each note.items as item (item)}
+                <li>{item}</li>
+              {/each}
+            </ul>
+            {#if note.guidance !== null}
+              {@const guidance = note.guidance}
+              <p class="profile-settings__limits-text profile-settings__limits-sub">
+                {guidance.text}
+              </p>
+              {#if guidance.command !== null}
+                {@const command = guidance.command}
+                <div class="profile-settings__copyable">
+                  <code class="profile-settings__copy-value">{command}</code>
+                  <button
+                    type="button"
+                    class="btn btn-secondary profile-settings__copy"
+                    on:click={() => detailActions.onCopyText(command)}
+                    >{settings.profileCopyCommand}</button
+                  >
+                </div>
+              {/if}
+              {#if guidance.url !== null}
+                {@const url = guidance.url}
+                <span class="profile-settings__guide-label">{settings.profileLimitGuide}</span>
+                <div class="profile-settings__copyable">
+                  <code class="profile-settings__copy-value">{url}</code>
+                  <button
+                    type="button"
+                    class="btn btn-secondary profile-settings__copy"
+                    on:click={() => detailActions.onCopyText(url)}
+                    >{settings.profileCopyLimitGuide}</button
+                  >
+                </div>
+              {/if}
+            {/if}
+          </div>
+        {/if}
         {#if row.rolesUsing.length > 0}
           <p class="profile-settings__roles">{settings.profileUsedByRoles(row.rolesUsing)}</p>
         {/if}
@@ -258,6 +300,34 @@
     background-color: var(--color-background);
     border: 1px solid var(--color-warning);
     font-size: var(--font-size-sm);
+  }
+
+  .profile-settings__limits {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-sm);
+    border-radius: var(--radius-sm);
+    background-color: var(--color-background);
+    border: 1px solid var(--color-border);
+    font-size: var(--font-size-sm);
+  }
+
+  .profile-settings__limits-text {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .profile-settings__limits-sub {
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-xs);
+  }
+
+  .profile-settings__limits-list {
+    margin: 0;
+    padding-left: 1.2rem;
+    overflow-wrap: anywhere;
   }
 
   .profile-settings__guidance-text {

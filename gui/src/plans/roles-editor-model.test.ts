@@ -10,7 +10,8 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { acceptsRoleTableReload, defaultRoleAfterEdit } from './roles-editor-model';
+import type { ProfileEntry, ProfileLimit } from '../ipc/session-client';
+import { acceptsRoleTableReload, defaultRoleAfterEdit, roleLaunchNote } from './roles-editor-model';
 
 describe('acceptsRoleTableReload', () => {
   it('accepts an ordinary load when the rows carry no unsaved edit', () => {
@@ -50,5 +51,53 @@ describe('defaultRoleAfterEdit', () => {
 
   it('leaves no default role as none', () => {
     expect(defaultRoleAfterEdit(null, rows)).toBeNull();
+  });
+});
+
+function launchProfile(id: string, limits: ProfileLimit['capability'][]): ProfileEntry {
+  return {
+    id,
+    displayName: `${id} name`,
+    detection: null,
+    detectionWarning: null,
+    cwd: null,
+    command: [id],
+    available: true,
+    reason: null,
+    unavailableKind: null,
+    guidance: null,
+    model: null,
+    effort: null,
+    enabled: true,
+    limits: limits.map((capability) => ({
+      capability,
+      reason: `the ${capability} cannot pass a .cmd file unchanged`,
+      guidance: { text: 'Use the WSL profile.', command: null, url: null },
+    })),
+  };
+}
+
+describe('roleLaunchNote', () => {
+  const profiles = [
+    launchProfile('muse-code', ['effort', 'launch_prompt']),
+    launchProfile('effort-only', ['effort']),
+    launchProfile('claude-code', []),
+  ];
+
+  it("notes a role whose profile cannot take the task's instruction at launch", () => {
+    const note = roleLaunchNote(profiles, 'muse-code');
+
+    expect(note).not.toBeNull();
+    expect(note?.length).toBeGreaterThan(0);
+  });
+
+  it('notes nothing for a profile whose limits leave the launch instruction alone', () => {
+    expect(roleLaunchNote(profiles, 'effort-only')).toBeNull();
+    expect(roleLaunchNote(profiles, 'claude-code')).toBeNull();
+  });
+
+  it('notes nothing for a row with no profile yet or one the list does not hold', () => {
+    expect(roleLaunchNote(profiles, '')).toBeNull();
+    expect(roleLaunchNote(profiles, 'gone')).toBeNull();
   });
 });

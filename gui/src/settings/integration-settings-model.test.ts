@@ -512,3 +512,87 @@ describe('integrationGroups: details of the state and the notes', () => {
     );
   });
 });
+
+/** A row whose registration runs no command and only writes into its CLI's files. */
+function commandlessRow(entries: McpRegistrationRow['entries']): Partial<McpRegistrationRow> {
+  return { add: null, remove: null, entries };
+}
+
+const MUSE_ENTRIES: McpRegistrationRow['entries'] = [
+  { file: '.config/muse/settings.json', name: '/mcpServers/yagura', content: '{}' },
+  { file: '.config/muse/yagura-managed-hooks.json', name: '/hooks', content: '{}' },
+  { file: '.config/muse/settings.json', name: '/managed_hooks_path', content: '"x.json"' },
+];
+
+describe('integrationGroups: a registration that runs no command', () => {
+  it('shows each file it writes and the entries in it, in place of a command', () => {
+    for (const state of ['not_registered', 'registered', 'differs'] as const) {
+      const view = viewOf(state, {}, null, commandlessRow(MUSE_ENTRIES));
+
+      expect(view.command).toBe('');
+      expect(view.commandTitle).toBe('');
+      expect(view.fileWrites).toEqual([
+        {
+          file: '.config/muse/settings.json',
+          names: ['/mcpServers/yagura', '/managed_hooks_path'],
+        },
+        { file: '.config/muse/yagura-managed-hooks.json', names: ['/hooks'] },
+      ]);
+    }
+  });
+
+  it('does not also describe those entries as an addition to a command', () => {
+    const view = viewOf('not_registered', {}, null, commandlessRow(MUSE_ENTRIES));
+
+    expect(view.entriesNote).toBeNull();
+  });
+
+  it('keeps the command and its entries note for a registration that runs one', () => {
+    const entries = [{ file: '.beta/config/hooks.json', name: 'yagura', content: '{}' }];
+
+    const view = viewOf('not_registered', {}, null, { entries });
+
+    expect(view.fileWrites).toBeNull();
+    expect(view.command).not.toBe('');
+    expect(view.entriesNote).not.toBeNull();
+  });
+});
+
+describe('integrationGroups: a claim another value holds', () => {
+  const CLAIM = '/managed_hooks_path';
+
+  it('refuses Register before it is pressed and says which claim refuses it', () => {
+    const view = viewOf(
+      'not_registered',
+      { refusedByClaim: CLAIM },
+      null,
+      commandlessRow(MUSE_ENTRIES)
+    );
+
+    expect(view.primaryAction).toBe('register');
+    expect(view.isPrimaryDisabled).toBe(true);
+    expect(view.refusal).toContain('managed_hooks_path');
+  });
+
+  it('refuses Update but leaves Remove pressable, since only Register and Update are refused', () => {
+    const view = viewOf(
+      'differs',
+      { differsIn: [CLAIM], refusedByClaim: CLAIM },
+      null,
+      commandlessRow(MUSE_ENTRIES)
+    );
+
+    expect(view.primaryAction).toBe('update');
+    expect(view.isPrimaryDisabled).toBe(true);
+    expect(view.canRemove).toBe(true);
+    expect(view.isRemoveDisabled).toBe(false);
+    expect(view.refusal).toContain('managed_hooks_path');
+  });
+
+  it('refuses nothing and says nothing when no claim refuses', () => {
+    const view = viewOf('not_registered', {}, null, commandlessRow(MUSE_ENTRIES));
+
+    expect(view.isPrimaryDisabled).toBe(false);
+    expect(view.refusal).toBeNull();
+  });
+});

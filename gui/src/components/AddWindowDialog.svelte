@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { mappedLaunchOptionValues } from '../profile/launch-profile-choices';
   import { buttons, errors, forms } from '../ui-messages';
   import { describeWindowOpenFailure, windowOpenFailureOf } from '../window-open-failure-model';
   import type { OpenWindowSubmission, ProfileOption } from './add-window-dialog-types';
@@ -104,12 +105,15 @@
     const cwd = cwdValue || undefined;
     const name = nameInput.trim() || undefined;
     if (profileValue !== '') {
-      // A field is sent only for an axis the profile actually maps, and
-      // only when it holds text: a value typed then hidden by switching
-      // profiles must not slip into a launch that no longer offers it.
-      const model = selectedProfile?.model !== null && modelValue !== '' ? modelValue : undefined;
-      const effort =
-        selectedProfile?.effort !== null && effortValue !== '' ? effortValue : undefined;
+      // A field is sent only for an axis the profile maps and can take here,
+      // and only when it holds text: a value typed then hidden or disabled by
+      // switching profiles must not slip into a launch that no longer offers it.
+      const mapped = mappedLaunchOptionValues(profileOptions, profileValue, {
+        model: modelValue,
+        effort: effortValue,
+      });
+      const model = mapped.model !== '' ? mapped.model : undefined;
+      const effort = mapped.effort !== '' ? mapped.effort : undefined;
       return { kind: 'profile', profile: profileValue, cwd, name, model, effort };
     }
     // One line is one token, so a path containing spaces needs no quoting.

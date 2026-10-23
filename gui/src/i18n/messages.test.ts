@@ -98,6 +98,8 @@ export const dummyMessages: Messages = {
     // model / effort spec.
     modelLabel: 'DUMMY_modelLabel',
     effortLabel: 'DUMMY_effortLabel',
+    modelLimited: 'DUMMY_modelLimited',
+    effortLimited: 'DUMMY_effortLimited',
   },
   themes: {
     appLabel: 'DUMMY_appLabel',
@@ -295,6 +297,11 @@ export const dummyMessages: Messages = {
     profileCopyInstallGuide: 'DUMMY_settings_profileCopyInstallGuide',
     profileInstallGuide: 'DUMMY_settings_profileInstallGuide',
     profileSwitchLabel: (name: string) => `DUMMY_settings_profileSwitchLabel(${name})`,
+    profileLimitsHeading: 'DUMMY_settings_profileLimitsHeading',
+    profileLimitItem: (capability: string, reason: string) =>
+      `DUMMY_settings_profileLimitItem(${capability},${reason})`,
+    profileLimitGuide: 'DUMMY_settings_profileLimitGuide',
+    profileCopyLimitGuide: 'DUMMY_settings_profileCopyLimitGuide',
     profileUsedByRoles: (roles: readonly string[]) =>
       `DUMMY_settings_profileUsedByRoles(${roles.join(',')})`,
     profileUpdateFailed: (id: string, reason: string, isEnabled: boolean) =>
@@ -413,6 +420,9 @@ export const dummyMessages: Messages = {
       `DUMMY_settings_integrationTomlSetNote(${file},${table.join('.')},${values
         .map((entry) => `${entry.key}=${entry.value}`)
         .join(',')})`,
+    integrationFileWritesLead: 'DUMMY_settings_integrationFileWritesLead',
+    integrationRefusedByClaim: (pointer: string) =>
+      `DUMMY_settings_integrationRefusedByClaim(${pointer})`,
     integrationHookEntriesNote: (file: string, names: readonly string[]) =>
       `DUMMY_settings_integrationHookEntriesNote(${file},${names.join(',')})`,
     integrationsNoBridge: 'DUMMY_settings_integrationsNoBridge',
@@ -557,6 +567,10 @@ export const dummyMessages: Messages = {
     defaultRoleLabel: 'DUMMY_plans_defaultRoleLabel',
     defaultRoleNone: 'DUMMY_plans_defaultRoleNone',
     defaultRoleHint: 'DUMMY_plans_defaultRoleHint',
+    roleLaunchLimited: (profile: string, guidance: string | null) =>
+      `DUMMY_plans_roleLaunchLimited(${profile},${guidance ?? ''})`,
+    taskOpenLimited: (profile: string, guidance: string | null) =>
+      `DUMMY_plans_taskOpenLimited(${profile},${guidance ?? ''})`,
     modelsTab: 'DUMMY_plans_modelsTab',
     modelsProfileLabel: 'DUMMY_plans_modelsProfileLabel',
     modelAliasColumn: 'DUMMY_plans_modelAliasColumn',

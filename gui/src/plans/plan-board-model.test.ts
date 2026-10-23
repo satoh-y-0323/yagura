@@ -18,7 +18,7 @@ import type {
   PlanTaskInfo,
   TaskAssignment,
 } from '../ipc/plan-boundary';
-import type { WindowInfo } from '../ipc/session-client';
+import type { ProfileEntry, ProfileLimit, WindowInfo } from '../ipc/session-client';
 import { plans } from '../ui-messages';
 import { createWindowRegistry, type WindowEntry } from '../stores/window-registry';
 
@@ -38,6 +38,7 @@ import {
   reviewMarksOf,
   selectionAfterPlanReadFailure,
   shouldMarkPlanSeen,
+  taskOpenRefusal,
   unappliedTaskIds,
   withRetainedMarks,
   type BoardWindow,
@@ -824,5 +825,65 @@ describe('retained marks', () => {
     const current = plan();
 
     expect(withRetainedMarks(current, {})).toBe(current);
+  });
+});
+
+function launchProfile(id: string, limits: ProfileLimit['capability'][]): ProfileEntry {
+  return {
+    id,
+    displayName: `${id} name`,
+    detection: null,
+    detectionWarning: null,
+    cwd: null,
+    command: [id],
+    available: true,
+    reason: null,
+    unavailableKind: null,
+    guidance: null,
+    model: null,
+    effort: null,
+    enabled: true,
+    limits: limits.map((capability) => ({
+      capability,
+      reason: `the ${capability} cannot pass a .cmd file unchanged`,
+      guidance: { text: 'Use the WSL profile.', command: null, url: null },
+    })),
+  };
+}
+
+describe('taskOpenRefusal', () => {
+  const profiles = [
+    launchProfile('muse-code', ['effort', 'launch_prompt']),
+    launchProfile('effort-only', ['effort']),
+    launchProfile('claude', []),
+  ];
+
+  function assignedTo(profile: string): PlanTaskInfo {
+    return task('alpha', 0, {
+      resolved: { source: 'role', assignment: { profile, model: null, effort: null } },
+    });
+  }
+
+  it('refuses to open a task whose profile cannot take its instruction at launch, in one line', () => {
+    const refusal = taskOpenRefusal(assignedTo('muse-code'), profiles);
+
+    expect(refusal).not.toBeNull();
+    expect(refusal?.length).toBeGreaterThan(0);
+    expect(refusal).not.toContain('\n');
+  });
+
+  it('lets a task open when its profile carries the instruction at launch', () => {
+    expect(taskOpenRefusal(assignedTo('effort-only'), profiles)).toBeNull();
+    expect(taskOpenRefusal(assignedTo('claude'), profiles)).toBeNull();
+  });
+
+  it('leaves an unassigned task, or one whose profile the list does not hold, to the daemon', () => {
+    expect(
+      taskOpenRefusal(
+        task('alpha', 0, { resolved: { source: 'unassigned', assignment: null } }),
+        profiles
+      )
+    ).toBeNull();
+    expect(taskOpenRefusal(assignedTo('gone'), profiles)).toBeNull();
   });
 });
