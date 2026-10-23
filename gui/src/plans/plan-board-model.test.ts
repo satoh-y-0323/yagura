@@ -75,6 +75,7 @@ function task(taskId: string, wave: number, overrides: Partial<PlanTaskInfo> = {
     window_id: null,
     report: null,
     review_mark: null,
+    has_instruction: false,
     ...overrides,
   };
 }
@@ -858,9 +859,10 @@ describe('taskOpenRefusal', () => {
     launchProfile('claude', []),
   ];
 
-  function assignedTo(profile: string): PlanTaskInfo {
+  function assignedTo(profile: string, hasInstruction = true): PlanTaskInfo {
     return task('alpha', 0, {
       resolved: { source: 'role', assignment: { profile, model: null, effort: null } },
+      has_instruction: hasInstruction,
     });
   }
 
@@ -870,6 +872,10 @@ describe('taskOpenRefusal', () => {
     expect(refusal).not.toBeNull();
     expect(refusal?.length).toBeGreaterThan(0);
     expect(refusal).not.toContain('\n');
+  });
+
+  it('lets a task with no instruction open whatever its profile takes at launch', () => {
+    expect(taskOpenRefusal(assignedTo('muse-code', false), profiles)).toBeNull();
   });
 
   it('lets a task open when its profile carries the instruction at launch', () => {

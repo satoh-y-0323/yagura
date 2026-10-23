@@ -105,6 +105,8 @@ export interface PlanTaskInfo {
   report: TaskReport | null;
   /** Why the task needs another look since the last approval, `null` when it does not. */
   review_mark: ReviewMark | null;
+  /** Whether the task carries an instruction, which its window is handed at launch. */
+  has_instruction: boolean;
 }
 
 /** One stored plan in full, as `get_plan` and every plan update reply with it. */
@@ -260,6 +262,7 @@ function narrowPlanTaskInfo(value: unknown, context: string): PlanTaskInfo {
     window_id: readOptionalString(record, 'window_id', context),
     report: readOptionalReport(record, context),
     review_mark: readOptionalClosed<ReviewMark>(record, 'review_mark', context, REVIEW_MARK_VALUES),
+    has_instruction: readOptionalString(record, 'instruction', context) !== null,
   };
 }
 

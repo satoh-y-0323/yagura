@@ -158,6 +158,15 @@ describe('narrowPlanInfo', () => {
     expect(info.tasks[0]?.window_id).toBeNull();
   });
 
+  it('reads whether a task carries an instruction, which the core omits when it has none', () => {
+    const withOne = narrowPlanInfo(
+      planInfoWire({ tasks: [planTaskInfoWire({ instruction: 'Say hello.' })] })
+    );
+    const without = narrowPlanInfo(planInfoWire({ tasks: [planTaskInfoWire()] }));
+    expect(withOne.tasks[0]?.has_instruction).toBe(true);
+    expect(without.tasks[0]?.has_instruction).toBe(false);
+  });
+
   it('accepts a resolved assignment with no source and a null assignment', () => {
     const info = narrowPlanInfo(
       planInfoWire({

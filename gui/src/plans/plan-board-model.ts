@@ -219,14 +219,14 @@ export function ownerCandidates(
 
 /**
  * The one line saying why the daemon will refuse to open this task's window,
- * `null` when it will not. Only an assigned profile that cannot take the
- * task's instruction at launch is refused; the rest is left to the daemon.
+ * `null` when it will not. Only a task with an instruction, assigned a profile
+ * that cannot take it at launch, is refused; the rest is left to the daemon.
  */
 export function taskOpenRefusal(
   task: PlanTaskInfo,
   profiles: readonly Pick<LaunchProfile, 'id' | 'displayName' | 'limits'>[]
 ): string | null {
-  const profileId = task.resolved.assignment?.profile;
+  const profileId = task.has_instruction ? task.resolved.assignment?.profile : undefined;
   const profile = profiles.find((entry) => entry.id === profileId);
   const limit = profileId === undefined ? null : profileLimit(profiles, profileId, 'launch_prompt');
   if (profile === undefined || limit === null) {
