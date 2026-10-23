@@ -7,6 +7,7 @@
    */
   import type { ProfileOption } from './add-window-dialog-types';
   import type { RoleEntry } from '../ipc/plan-boundary';
+  import GuidanceCopyRows from './GuidanceCopyRows.svelte';
   import ProfileDetailView from './ProfileDetailView.svelte';
   import SettingsSwitch from './SettingsSwitch.svelte';
   import type { ProfileDetailActions, ProfileDetailsState } from '../settings/profile-detail-model';
@@ -88,31 +89,14 @@
           {@const guidance = row.guidance}
           <div class="profile-settings__guidance">
             <p class="profile-settings__guidance-text">{guidance.text}</p>
-            {#if guidance.command !== null}
-              {@const command = guidance.command}
-              <div class="profile-settings__copyable">
-                <code class="profile-settings__copy-value">{command}</code>
-                <button
-                  type="button"
-                  class="btn btn-secondary profile-settings__copy"
-                  on:click={() => detailActions.onCopyText(command)}
-                  >{settings.profileCopyCommand}</button
-                >
-              </div>
-            {/if}
-            {#if guidance.url !== null}
-              {@const url = guidance.url}
-              <span class="profile-settings__guide-label">{settings.profileInstallGuide}</span>
-              <div class="profile-settings__copyable">
-                <code class="profile-settings__copy-value">{url}</code>
-                <button
-                  type="button"
-                  class="btn btn-secondary profile-settings__copy"
-                  on:click={() => detailActions.onCopyText(url)}
-                  >{settings.profileCopyInstallGuide}</button
-                >
-              </div>
-            {/if}
+            <GuidanceCopyRows
+              command={guidance.command}
+              url={guidance.url}
+              urlLabel={settings.profileInstallGuide}
+              copyCommandLabel={settings.profileCopyCommand}
+              copyUrlLabel={settings.profileCopyInstallGuide}
+              onCopy={detailActions.onCopyText}
+            />
           </div>
         {/if}
         {#if row.limitNote !== null}
@@ -129,31 +113,14 @@
               <p class="profile-settings__limits-text profile-settings__limits-sub">
                 {guidance.text}
               </p>
-              {#if guidance.command !== null}
-                {@const command = guidance.command}
-                <div class="profile-settings__copyable">
-                  <code class="profile-settings__copy-value">{command}</code>
-                  <button
-                    type="button"
-                    class="btn btn-secondary profile-settings__copy"
-                    on:click={() => detailActions.onCopyText(command)}
-                    >{settings.profileCopyCommand}</button
-                  >
-                </div>
-              {/if}
-              {#if guidance.url !== null}
-                {@const url = guidance.url}
-                <span class="profile-settings__guide-label">{settings.profileLimitGuide}</span>
-                <div class="profile-settings__copyable">
-                  <code class="profile-settings__copy-value">{url}</code>
-                  <button
-                    type="button"
-                    class="btn btn-secondary profile-settings__copy"
-                    on:click={() => detailActions.onCopyText(url)}
-                    >{settings.profileCopyLimitGuide}</button
-                  >
-                </div>
-              {/if}
+              <GuidanceCopyRows
+                command={guidance.command}
+                url={guidance.url}
+                urlLabel={settings.profileLimitGuide}
+                copyCommandLabel={settings.profileCopyCommand}
+                copyUrlLabel={settings.profileCopyLimitGuide}
+                onCopy={detailActions.onCopyText}
+              />
             {/if}
           </div>
         {/if}
@@ -333,38 +300,6 @@
   .profile-settings__guidance-text {
     margin: 0;
     overflow-wrap: anywhere;
-  }
-
-  .profile-settings__guide-label {
-    color: var(--color-text-secondary);
-  }
-
-  .profile-settings__copyable {
-    display: flex;
-    gap: var(--space-sm);
-    align-items: stretch;
-  }
-
-  /* 44px is the smallest comfortable pointer target. */
-  .profile-settings__copy-value {
-    flex: 1;
-    min-width: 0;
-    min-height: 44px;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-    padding: 0 var(--space-sm);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    font-family: var(--font-family-mono);
-    overflow-wrap: anywhere;
-    user-select: text;
-  }
-
-  .profile-settings__copy {
-    flex-shrink: 0;
-    min-height: 44px;
-    white-space: nowrap;
   }
 
   .profile-settings__roles {
