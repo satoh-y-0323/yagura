@@ -599,15 +599,13 @@ fn json_contains(value: &JsonValue, needle: &str) -> bool {
 /// fills in from its own environment -- never the value itself.
 fn env_refs(target: &RegistrationTarget) -> JsonValue {
     let instance = target.env().iter().map(|(name, _)| name.as_str());
-    JsonValue::Object(
+    profile::env_refs_object(
         [
             yagura_protocol::WINDOW_ID_ENV,
             yagura_protocol::STATUS_TOKEN_ENV,
         ]
         .into_iter()
-        .chain(instance)
-        .map(|name| (name.to_string(), JsonValue::String(format!("${{{name}}}"))))
-        .collect(),
+        .chain(instance),
     )
 }
 

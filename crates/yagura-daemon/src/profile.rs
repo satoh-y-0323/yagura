@@ -1440,18 +1440,25 @@ pub(crate) fn fill_env_refs(arg: &str, names: &[&str]) -> String {
     if !arg.contains(MCP_ENV_REFS_PLACEHOLDER) {
         return arg.to_string();
     }
-    let refs: serde_json::Map<String, serde_json::Value> = names
-        .iter()
-        .map(|name| {
-            (
-                (*name).to_string(),
-                serde_json::Value::String(format!("${{{name}}}")),
-            )
-        })
-        .collect();
     arg.replace(
         MCP_ENV_REFS_PLACEHOLDER,
-        &serde_json::Value::Object(refs).to_string(),
+        &env_refs_object(names.iter().copied()).to_string(),
+    )
+}
+
+/// A JSON object naming each of `names` as a reference to itself
+/// (`{"NAME":"${NAME}"}`), which the CLI fills in from its own environment.
+pub(crate) fn env_refs_object<'a>(names: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    serde_json::Value::Object(
+        names
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    serde_json::Value::String(format!("${{{name}}}")),
+                )
+            })
+            .collect(),
     )
 }
 
