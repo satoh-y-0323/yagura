@@ -1135,12 +1135,15 @@ async fn main() -> anyhow::Result<()> {
     // Both must be present: a window's own agent CLI inherits this pair from
     // the daemon, so a partial set (e.g. the token stripped by an
     // intermediate launcher) is treated as no claim at all rather than a
-    // malformed one.
+    // malformed one. An empty value is absent too: a CLI's registered entry
+    // can only spell "unset" as empty outside a window.
     let identity = match (
         std::env::var(WINDOW_ID_ENV),
         std::env::var(STATUS_TOKEN_ENV),
     ) {
-        (Ok(window_id), Ok(token)) => Some(WindowIdentity { window_id, token }),
+        (Ok(window_id), Ok(token)) if !window_id.is_empty() && !token.is_empty() => {
+            Some(WindowIdentity { window_id, token })
+        }
         _ => None,
     };
     let transport = EndpointTransport::new(endpoint, identity);

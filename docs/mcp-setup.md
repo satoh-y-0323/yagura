@@ -463,39 +463,34 @@ which is why the server's `env` names them too.
    [Shim guidance](../profiles/README.md#shim-guidance)). `wsl-muse-code` takes all three. This is
    to be measured again once Muse's Windows entry point passes `"`, `--` and any other argument
    through unchanged.
-2. **A Muse session outside a yagura window cannot reach yagura's MCP server.** The registered
-   server names the window's variables, which such a session does not have, so Muse leaves the
-   server out of it (the session still runs). Unlike the other CLIs, a Muse you start yourself in a
-   plain terminal cannot drive yagura's windows. Started inside a yagura window, such as a shell
-   window, it does reach it, as that window.
-3. **With two instances registered, a window of the named instance also starts the default
-   instance's `yagura` server** (`muse-code` only). That server takes the window's variables to the
-   default instance's daemon, where they name no window. Muse refuses to start when a launch
+2. **With two instances registered, every Muse session starts both instances' servers** (`muse-code`
+   only). Each entry names its instance by value, so in a window of one instance the other
+   instance's server takes the window's variables to its own daemon, where they name no window,
+   and it works there as a client from outside a window. Muse refuses to start when a launch
    argument touches a server its settings define, so there is no way to switch it off for one
-   window; the server is optional, so the session runs either way. A window of the default
-   instance does not start the named instance's server, whose `YAGURA_INSTANCE` it lacks.
-4. **In WSL, a server of your own named `yagura`** (or `yagura-<instance>`) in the distribution's
+   window. A Muse you start yourself outside yagura reaches each registered instance the same way.
+3. **In WSL, a server of your own named `yagura`** (or `yagura-<instance>`) in the distribution's
    `~/.config/muse/settings.json` would make Muse refuse the launch, so the window opens without
    yagura's server and the daemon logs one warning saying so.
-5. **In WSL, your own `managed_hooks_path` is replaced in yagura's windows.** The window's `-c`
+4. **In WSL, your own `managed_hooks_path` is replaced in yagura's windows.** The window's `-c`
    points Muse at yagura's hooks file for that window only, so your managed hooks do not run there.
    Your settings file is not changed, and Muse sessions outside yagura are unaffected. On the host,
    Register is refused while your settings hold a `managed_hooks_path` of your own (see
    [Registering from the GUI](#registering-from-the-gui)).
-6. **`XDG_CONFIG_HOME` is not supported.** yagura always reads and writes `~/.config/muse`
+5. **`XDG_CONFIG_HOME` is not supported.** yagura always reads and writes `~/.config/muse`
    (`%USERPROFILE%\.config\muse` on Windows), and the `wsl-muse-code` checks read the same place
    inside the distribution.
-7. **In WSL the MCP call time limit cannot be raised.** Muse's `-c` refuses `tool_timeout_sec`, so a
+6. **In WSL the MCP call time limit cannot be raised.** Muse's `-c` refuses `tool_timeout_sec`, so a
    `wsl-muse-code` window runs a long `wait_for_status`, `wait_for_report` or `send_message` under
    Muse's own default limit, which has not been measured. A call Muse gives up on is released when
    its turn ends. A registration sets `tool_timeout_sec = 86400` for `muse-code`.
-8. **Interrupting before the first output puts the text back in the input line**, text yagura typed
+7. **Interrupting before the first output puts the text back in the input line**, text yagura typed
    included (see [Limits](../crates/yagura-daemon/detection/README.md#limits)).
-9. **Muse may ask before each call to a yagura tool**, depending on its own automatic approval
+8. **Muse may ask before each call to a yagura tool**, depending on its own automatic approval
    (`--approval-judge`). A call waits on that dialog on the window's screen until it is answered.
-10. **yagura does not answer Muse's folder trust prompt.** In a folder Muse has not been told to
-    trust, a window starts with it and shows `waiting_approval`; choose `Trust and continue` on its
-    screen.
+9. **yagura does not answer Muse's folder trust prompt.** In a folder Muse has not been told to
+   trust, a window starts with it and shows `waiting_approval`; choose `Trust and continue` on its
+   screen.
 
 Run the GUI and the daemon from the same release (see
 [Registering from the GUI](#registering-from-the-gui)).

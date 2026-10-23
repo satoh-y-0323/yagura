@@ -267,3 +267,41 @@ async fn a_bridge_started_with_both_identity_variables_claims_that_window_before
 
     bridge.kill().await;
 }
+
+// A registered entry outside a window can only spell its identity as empty.
+#[tokio::test]
+async fn a_bridge_started_with_empty_identity_variables_claims_no_window() {
+    const INSTANCE: &str = "mcpbridgeempty";
+    let mut daemon = ScriptedDaemon::bind(INSTANCE).await;
+    let mut bridge = McpChild::spawn(&[
+        (INSTANCE_ENV, INSTANCE),
+        (WINDOW_ID_ENV, ""),
+        (STATUS_TOKEN_ENV, ""),
+    ]);
+    bridge.initialize().await;
+    bridge.call_tool("list_windows", json!({})).await;
+
+    let mut seen = Vec::new();
+    tokio::time::timeout(LINE_TIMEOUT, async {
+        loop {
+            let request = daemon
+                .received
+                .recv()
+                .await
+                .expect("the scripted daemon stopped");
+            let wire_type = wire_type(&request).to_string();
+            seen.push(wire_type.clone());
+            if wire_type == "list_windows" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the daemon never received list_windows: {seen:?}"));
+    assert!(
+        !seen.iter().any(|wire_type| wire_type == "identify"),
+        "empty identity variables must not be claimed as a window: {seen:?}"
+    );
+
+    bridge.kill().await;
+}

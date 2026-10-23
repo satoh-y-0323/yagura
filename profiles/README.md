@@ -1364,9 +1364,11 @@ hooks only once something is written into its own files (see
   present, `default` otherwise); a set may not repeat a key of `entries`.
   A value is any TOML value, written as JSON, whose strings may carry
   `{daemon}`, `{bridge}` and `{server}`; a string that is exactly
-  `{env_refs}` becomes an object naming each variable the bridge needs as a
-  reference the CLI fills in (`{"YAGURA_WINDOW_ID":"${YAGURA_WINDOW_ID}",...}`,
-  with `YAGURA_INSTANCE` for a named instance), never a value. `{daemon}` is
+  `{env_refs}` becomes the bridge's environment: the window's identity as a
+  reference that is empty where it is unset (`{"YAGURA_WINDOW_ID":"${YAGURA_WINDOW_ID:-}",
+  "YAGURA_STATUS_TOKEN":"${YAGURA_STATUS_TOKEN:-}"}`), never its value, and for a named instance
+  `YAGURA_INSTANCE` by value. Every session of the CLI reads the entry, inside a window or not,
+  and Muse turns off all of a session's MCP servers when one names an unset variable. `{daemon}` is
   replaced by the absolute path of the daemon's copy in its report folder,
   and `{bridge}` by the bridge's path -- both converted by the profile's
   `[host_paths]` when it has one -- and a `{daemon}` path containing

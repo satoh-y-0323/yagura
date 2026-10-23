@@ -1448,7 +1448,7 @@ pub(crate) fn fill_env_refs(arg: &str, names: &[&str]) -> String {
 
 /// A JSON object naming each of `names` as a reference to itself
 /// (`{"NAME":"${NAME}"}`), which the CLI fills in from its own environment.
-pub(crate) fn env_refs_object<'a>(names: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+fn env_refs_object<'a>(names: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
     serde_json::Value::Object(
         names
             .into_iter()

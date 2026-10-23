@@ -595,18 +595,27 @@ fn json_contains(value: &JsonValue, needle: &str) -> bool {
     }
 }
 
-/// The variables a window passes to the bridge, each as a reference the CLI
-/// fills in from its own environment -- never the value itself.
+/// The bridge's environment in a registered entry, which every session of the
+/// CLI reads, inside a window or not. A window's identity is a reference that
+/// falls back to empty, so a session outside a window still starts its MCP
+/// servers (an unset plain reference disables them all); the instance is the
+/// value itself, as the command rows carry it.
 fn env_refs(target: &RegistrationTarget) -> JsonValue {
-    let instance = target.env().iter().map(|(name, _)| name.as_str());
-    profile::env_refs_object(
-        [
-            yagura_protocol::WINDOW_ID_ENV,
-            yagura_protocol::STATUS_TOKEN_ENV,
-        ]
-        .into_iter()
-        .chain(instance),
-    )
+    let identity = [
+        yagura_protocol::WINDOW_ID_ENV,
+        yagura_protocol::STATUS_TOKEN_ENV,
+    ]
+    .map(|name| {
+        (
+            name.to_string(),
+            JsonValue::String(format!("${{{name}:-}}")),
+        )
+    });
+    let instance = target
+        .env()
+        .iter()
+        .map(|(name, value)| (name.clone(), JsonValue::String(value.clone())));
+    JsonValue::Object(identity.into_iter().chain(instance).collect())
 }
 
 /// `text` with `{server}`, `{daemon}` and `{bridge}` replaced in one pass, so

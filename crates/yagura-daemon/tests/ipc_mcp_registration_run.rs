@@ -1693,15 +1693,15 @@ fn read_home_json(layout: &Layout, file: &str) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|err| panic!("{file} is JSON ({err}): {text}"))
 }
 
-/// What `{env_refs}` writes for an instance: each variable a window's bridge
-/// needs, referenced by name for the CLI to fill in.
+/// What `{env_refs}` writes for an instance: the window's identity as a
+/// reference that is empty outside a window, and the `dev` instance by value.
 fn env_refs(named: bool) -> Value {
     let mut refs = json!({
-        "YAGURA_WINDOW_ID": "${YAGURA_WINDOW_ID}",
-        "YAGURA_STATUS_TOKEN": "${YAGURA_STATUS_TOKEN}",
+        "YAGURA_WINDOW_ID": "${YAGURA_WINDOW_ID:-}",
+        "YAGURA_STATUS_TOKEN": "${YAGURA_STATUS_TOKEN:-}",
     });
     if named {
-        refs["YAGURA_INSTANCE"] = json!("${YAGURA_INSTANCE}");
+        refs["YAGURA_INSTANCE"] = json!("dev");
     }
     refs
 }
