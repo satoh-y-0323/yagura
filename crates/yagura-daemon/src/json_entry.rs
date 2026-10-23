@@ -1,12 +1,13 @@
-//! Editing named top-level entries of a user's own JSON settings file, in
-//! place: [`set_entries`] adds or replaces them, [`remove_entries`] takes them
-//! out, and [`entries_hold`] reads back whether they are in place. Every other
-//! entry keeps its bytes -- content, order and formatting -- because the
-//! rewrite splices the document's text rather than serializing a parsed map
-//! (whose key order is not the file's). Nothing here reads or writes a file
-//! itself.
+//! Editing named entries of a user's own JSON settings file, in place:
+//! [`set_entries`] adds or replaces them, [`remove_entries`] takes them out,
+//! and [`entries_hold`] reads back whether they are in place. A key starting
+//! with `/` is a JSON Pointer (RFC 6901) through nested objects; any other key
+//! names a top-level entry, the same as a one-token pointer. Every other entry
+//! keeps its bytes -- content, order and formatting -- because the rewrite
+//! splices the document's text rather than serializing a parsed map (whose key
+//! order is not the file's). Nothing here reads or writes a file itself.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::config_rewrite;
@@ -21,59 +22,104 @@ pub enum JsonEntryError {
     /// The document parses, but is not a JSON object.
     #[error("the document is not an object")]
     NotAnObject,
+    /// A pointer's parent exists but holds something other than an object.
+    #[error("a value that is not an object is in the way of the entry")]
+    ParentNotAnObject,
+    /// A pointer holds a `~` not followed by `0` or `1`.
+    #[error("the pointer has an invalid escape")]
+    InvalidPointer,
 }
 
-/// Sets each `(name, value)` of `entries` as a top-level entry of the JSON
-/// object `source`, changing nothing else. An entry already present has its
-/// value replaced where it stands (a repeated name keeps only its first
-/// occurrence); a new one is added after the last entry, indented like it.
-/// `source`'s line endings (LF or CRLF, taken from its first line) are kept.
+/// Sets each `(key, value)` of `entries` as an entry of the JSON object
+/// `source`, changing nothing else. A pointer's missing parents are created as
+/// objects. An entry already present has its value replaced where it stands (a
+/// repeated name keeps only its first occurrence, and a pointer passes through
+/// the first occurrence of each parent); a new one is added after the last
+/// entry of its object, indented like it. `source`'s line endings (LF or CRLF,
+/// taken from its first line) are kept.
 ///
 /// # Errors
 ///
-/// Returns [`JsonEntryError::Unparsable`] when `source` is not JSON, and
-/// [`JsonEntryError::NotAnObject`] when it is JSON but not an object.
+/// Returns [`JsonEntryError::Unparsable`] when `source` is not JSON,
+/// [`JsonEntryError::NotAnObject`] when it is JSON but not an object,
+/// [`JsonEntryError::ParentNotAnObject`] when a pointer's parent holds a
+/// non-object, and [`JsonEntryError::InvalidPointer`] for a bad `~` escape.
 pub fn set_entries(source: &str, entries: &[(String, Value)]) -> Result<String, JsonEntryError> {
     let mut text = source.to_string();
-    for (name, value) in entries {
-        text = remove_duplicates(&text, name)?;
-        text = set_one(&text, name, value)?;
+    for (key, value) in entries {
+        text = set_at(&text, &path_of(key)?, value)?;
     }
     Ok(config_rewrite::with_line_endings_of(source, &text))
 }
 
-/// Takes every top-level entry named in `names` out of the JSON object
-/// `source`, changing nothing else. A name that is not there is skipped.
+/// Takes every entry named by a key of `names` out of the JSON object
+/// `source`, changing nothing else. A key that is not there, or whose parent
+/// is not an object, is skipped; an object the removal empties stays.
 ///
 /// # Errors
 ///
-/// As [`set_entries`].
+/// As [`set_entries`], except that a non-object parent is not an error.
 pub fn remove_entries(source: &str, names: &[String]) -> Result<String, JsonEntryError> {
     let mut text = source.to_string();
-    for name in names {
-        while let Some(updated) = remove_first(&text, name)? {
+    outline(&text)?;
+    for key in names {
+        let path = path_of(key)?;
+        while let Some(updated) = remove_first(&text, &path)? {
             text = updated;
         }
     }
-    outline(&text)?;
     Ok(text)
 }
 
-/// Whether every `(name, value)` of `entries` is a top-level entry of
-/// `source` holding exactly `value`.
+/// Whether every `(key, value)` of `entries` is an entry of `source` holding
+/// exactly `value`.
 ///
 /// # Errors
 ///
-/// As [`set_entries`].
+/// As [`set_entries`], except that a non-object parent only means `false`.
 pub fn entries_hold(source: &str, entries: &[(String, Value)]) -> Result<bool, JsonEntryError> {
     let document: Value = serde_json::from_str(source).map_err(|_| JsonEntryError::Unparsable)?;
-    let object = document.as_object().ok_or(JsonEntryError::NotAnObject)?;
-    Ok(entries
-        .iter()
-        .all(|(name, value)| object.get(name) == Some(value)))
+    if !document.is_object() {
+        return Err(JsonEntryError::NotAnObject);
+    }
+    for (key, value) in entries {
+        let found = path_of(key)?
+            .iter()
+            .try_fold(&document, |node, name| node.as_object()?.get(name));
+        if found != Some(value) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
-/// One top-level entry's byte offsets in the document's text.
+/// The names a key walks through: a pointer's unescaped tokens, or the key
+/// itself as a single top-level name.
+fn path_of(key: &str) -> Result<Vec<String>, JsonEntryError> {
+    let Some(pointer) = key.strip_prefix('/') else {
+        return Ok(vec![key.to_string()]);
+    };
+    pointer.split('/').map(unescape_token).collect()
+}
+
+fn unescape_token(token: &str) -> Result<String, JsonEntryError> {
+    let mut name = String::with_capacity(token.len());
+    let mut chars = token.chars();
+    while let Some(c) = chars.next() {
+        if c != '~' {
+            name.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => name.push('~'),
+            Some('1') => name.push('/'),
+            _ => return Err(JsonEntryError::InvalidPointer),
+        }
+    }
+    Ok(name)
+}
+
+/// One entry's byte offsets in the document's text.
 struct Member {
     key: String,
     start: usize,
@@ -81,7 +127,7 @@ struct Member {
     value_end: usize,
 }
 
-/// The top-level object's braces and entries, in the order they are written.
+/// An object's braces and entries, in the order they are written.
 struct Outline {
     open: usize,
     close: usize,
@@ -96,62 +142,113 @@ enum Layout {
     Inline,
 }
 
+/// The top-level object of `source`, after checking the whole text is JSON.
 fn outline(source: &str) -> Result<Outline, JsonEntryError> {
     let document: Value = serde_json::from_str(source).map_err(|_| JsonEntryError::Unparsable)?;
     if !document.is_object() {
         return Err(JsonEntryError::NotAnObject);
     }
-    scan_object(source).ok_or(JsonEntryError::Unparsable)
+    object_at(source, 0)
 }
 
-fn set_one(text: &str, name: &str, value: &Value) -> Result<String, JsonEntryError> {
-    let outline = outline(text)?;
-    if let Some(index) = outline.members.iter().position(|member| member.key == name)
-        && let Some(member) = outline.members.get(index)
-    {
-        let rendered = render_value(value, &layout_of(text, &outline, index))?;
-        return Ok(splice(
-            text,
-            member.value_start,
-            member.value_end,
-            &rendered,
-        ));
+fn object_at(text: &str, at: usize) -> Result<Outline, JsonEntryError> {
+    scan_object(text, at).ok_or(JsonEntryError::Unparsable)
+}
+
+/// The object `member` holds.
+fn nested_object(text: &str, member: &Member) -> Result<Outline, JsonEntryError> {
+    if text.as_bytes().get(member.value_start) != Some(&b'{') {
+        return Err(JsonEntryError::ParentNotAnObject);
     }
+    object_at(text, member.value_start)
+}
+
+fn set_at(text: &str, path: &[String], value: &Value) -> Result<String, JsonEntryError> {
+    let Some((name, parents)) = path.split_last() else {
+        return Ok(text.to_string());
+    };
+    let mut object = outline(text)?;
+    for (depth, parent) in parents.iter().enumerate() {
+        let Some(member) = object.members.iter().find(|member| member.key == *parent) else {
+            // The rest of the path does not exist yet: it goes in as one value.
+            let below = path.get(depth.saturating_add(1)..).unwrap_or_default();
+            let nested = below.iter().rev().fold(value.clone(), |inner, key| {
+                Value::Object(Map::from_iter([(key.clone(), inner)]))
+            });
+            return add_member(text, &object, parent, &nested);
+        };
+        object = nested_object(text, member)?;
+    }
+    let text = remove_duplicates(text, object.open, name)?;
+    let object = object_at(&text, object.open)?;
+    match object.members.iter().position(|member| member.key == *name) {
+        Some(index) => {
+            let rendered = render_value(value, &layout_of(&text, &object, index))?;
+            Ok(object.members.get(index).map_or(text.clone(), |member| {
+                splice(&text, member.value_start, member.value_end, &rendered)
+            }))
+        }
+        None => add_member(&text, &object, name, value),
+    }
+}
+
+/// `text` with `name : value` added as the last entry of `object`.
+fn add_member(
+    text: &str,
+    object: &Outline,
+    name: &str,
+    value: &Value,
+) -> Result<String, JsonEntryError> {
     let key = serde_json::to_string(name).map_err(|_| JsonEntryError::Unparsable)?;
-    match outline.members.len().checked_sub(1) {
+    match object.members.len().checked_sub(1) {
         Some(last_index) => {
-            let layout = layout_of(text, &outline, last_index);
+            let layout = layout_of(text, object, last_index);
             let rendered = render_value(value, &layout)?;
             let inserted = match &layout {
                 Layout::Lines(indent) => format!(",\n{indent}{key}: {rendered}"),
                 Layout::Inline => format!(", {key}: {rendered}"),
             };
-            let at = outline
+            let at = object
                 .members
                 .get(last_index)
-                .map_or(outline.close, |member| member.value_end);
+                .map_or(object.close, |member| member.value_end);
             Ok(splice(text, at, at, &inserted))
         }
         None => {
-            let indent = "  ";
-            let rendered = render_value(value, &Layout::Lines(indent.to_string()))?;
-            let inserted = format!("\n{indent}{key}: {rendered}\n");
+            let base = line_indent(text, object.open);
+            let indent = format!("{base}  ");
+            let rendered = render_value(value, &Layout::Lines(indent.clone()))?;
+            let inserted = format!("\n{indent}{key}: {rendered}\n{base}");
             Ok(splice(
                 text,
-                outline.open.saturating_add(1),
-                outline.close,
+                object.open.saturating_add(1),
+                object.close,
                 &inserted,
             ))
         }
     }
 }
 
-/// `text` with every occurrence of `name` after the first taken out.
-fn remove_duplicates(text: &str, name: &str) -> Result<String, JsonEntryError> {
+/// The spaces and tabs that start the line holding `at`.
+fn line_indent(text: &str, at: usize) -> &str {
+    let line_start = text
+        .get(..at)
+        .and_then(|before| before.rfind('\n'))
+        .map_or(0, |newline| newline.saturating_add(1));
+    let line = text.get(line_start..).unwrap_or("");
+    let width = line
+        .len()
+        .saturating_sub(line.trim_start_matches([' ', '\t']).len());
+    line.get(..width).unwrap_or("")
+}
+
+/// `text` with every occurrence of `name` after the first taken out of the
+/// object opening at `open`.
+fn remove_duplicates(text: &str, open: usize, name: &str) -> Result<String, JsonEntryError> {
     let mut text = text.to_string();
     loop {
-        let outline = outline(&text)?;
-        let mut matching = outline
+        let object = object_at(&text, open)?;
+        let mut matching = object
             .members
             .iter()
             .enumerate()
@@ -160,19 +257,31 @@ fn remove_duplicates(text: &str, name: &str) -> Result<String, JsonEntryError> {
         let (Some(_), Some(second)) = (matching.next(), matching.next()) else {
             return Ok(text);
         };
-        text = remove_member(&text, &outline, second);
+        text = remove_member(&text, &object, second);
     }
 }
 
-/// `text` with the first entry named `name` taken out, `None` when there is
-/// none.
-fn remove_first(text: &str, name: &str) -> Result<Option<String>, JsonEntryError> {
-    let outline = outline(text)?;
-    Ok(outline
+/// `text` with the first entry at `path` taken out, `None` when there is none.
+fn remove_first(text: &str, path: &[String]) -> Result<Option<String>, JsonEntryError> {
+    let Some((name, parents)) = path.split_last() else {
+        return Ok(None);
+    };
+    let mut object = outline(text)?;
+    for parent in parents {
+        let Some(member) = object.members.iter().find(|member| member.key == *parent) else {
+            return Ok(None);
+        };
+        object = match nested_object(text, member) {
+            Ok(nested) => nested,
+            Err(JsonEntryError::ParentNotAnObject) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+    }
+    Ok(object
         .members
         .iter()
-        .position(|member| member.key == name)
-        .map(|index| remove_member(text, &outline, index)))
+        .position(|member| member.key == *name)
+        .map(|index| remove_member(text, &object, index)))
 }
 
 /// Takes the entry at `index` out together with the separator that joins it
@@ -233,9 +342,9 @@ fn render_value(value: &Value, layout: &Layout) -> Result<String, JsonEntryError
 // Scanning the text of a document already known to be a JSON object
 // ---------------------------------------------------------------------
 
-fn scan_object(source: &str) -> Option<Outline> {
+fn scan_object(source: &str, from: usize) -> Option<Outline> {
     let bytes = source.as_bytes();
-    let open = skip_whitespace(bytes, 0);
+    let open = skip_whitespace(bytes, from);
     if bytes.get(open) != Some(&b'{') {
         return None;
     }
