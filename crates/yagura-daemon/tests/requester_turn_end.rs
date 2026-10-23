@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, call_list_windows,
+    Harness, SubmitDefinitionInput, approver_base_config, call_list_windows, decide,
     expect_approval_requested, expect_error, identify, let_every_clock_bound_run_out, policy,
     read_approver_reply, read_response, register_approver, send, unique_temp_dir,
     wait_until_composer_is, wait_until_input_log_contains, wait_until_status,
@@ -33,7 +33,7 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
-use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus, WithdrawReason};
+use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
@@ -578,12 +578,32 @@ async fn a_wait_for_status_ends_as_timed_out_when_its_requester_goes_from_runnin
 }
 
 /// A `wait_for_report` the requester dropped at the end of its turn ends then
-/// with nothing taken, so a report arriving later is not handed to a call no
-/// one reads.
+/// with nothing taken, so a report arriving later waits for the next call
+/// instead of going to a call no one reads.
 #[tokio::test]
 async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_waiting_input() {
     let (mut stage, mut requester) =
         stage("turn-end-wait-report", Some(&abandoned_table(true))).await;
+    let mut approver = stage.h.connect().await;
+    register_approver(&mut approver).await;
+    send(
+        &mut requester,
+        &ClientMessage::OpenWindow {
+            command: process::echo_child_command(),
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let request = expect_approval_requested(&mut approver).await;
+    decide(&mut approver, &request.request_id, true).await;
+    let child = match read_response(&mut requester, HANG_GUARD).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    };
     send(
         &mut requester,
         &ClientMessage::WaitForReport { timeout_sec: 300 },
@@ -596,6 +616,39 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
         other => panic!("expected an empty reports answer, got {other:?}"),
     }
     expect_pong(&mut requester).await;
+
+    let mut reporter = stage.h.connect().await;
+    identify(&mut reporter, &child).await;
+    send(
+        &mut reporter,
+        &ClientMessage::SendReport {
+            outcome: ReportOutcome::Succeeded,
+            summary: "after the turn".to_string(),
+            path: None,
+        },
+    )
+    .await;
+    match read_response(&mut reporter, HANG_GUARD).await {
+        DaemonMessage::ReportSent { delivered_to, .. } => {
+            assert_eq!(
+                delivered_to.as_deref(),
+                Some(stage.requester_window.as_str())
+            );
+        }
+        other => panic!("expected report_sent, got {other:?}"),
+    }
+    send(
+        &mut requester,
+        &ClientMessage::WaitForReport { timeout_sec: 0 },
+    )
+    .await;
+    match read_response(&mut requester, HANG_GUARD).await {
+        DaemonMessage::Reports { reports, .. } => {
+            assert_eq!(reports.len(), 1, "{reports:?}");
+            assert_eq!(reports[0].summary, "after the turn");
+        }
+        other => panic!("expected the later report on the next call, got {other:?}"),
+    }
 }
 
 /// After the answer, the requester's window may do anything: nothing is
