@@ -164,6 +164,8 @@ fn sample_summary() -> TicketSummary {
         state: "on-hold".to_string(),
         milestone: Some("v1".to_string()),
         updated_at: 1_700_000_000_500,
+        plan_count: 2,
+        fields: field_map(&[("resume_trigger", "after the release")]),
     }
 }
 
@@ -714,6 +716,8 @@ async fn list_tickets_reports_the_config_the_milestones_the_summaries_and_trunca
             "state": "on-hold",
             "milestone": "v1",
             "updated_at": 1_700_000_000_500u64,
+            "plan_count": 2,
+            "fields": { "resume_trigger": "after the release" },
         }])
     );
     assert_eq!(reply["truncated"], json!(true));

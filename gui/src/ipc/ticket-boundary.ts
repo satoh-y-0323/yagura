@@ -86,6 +86,10 @@ export interface TicketSummary {
   milestone: string | null;
   /** When the ticket last changed, in milliseconds since the Unix epoch. */
   updated_at: number;
+  /** How many plans were made from the ticket. */
+  plan_count: number;
+  /** Values of the fields the ticket's current state requires; empty when it has none. */
+  fields: Record<string, string>;
 }
 
 /** The reply of `list_tickets`. */
@@ -314,6 +318,8 @@ function narrowTicketSummary(value: unknown, context: string): TicketSummary {
     state: requireString(record, 'state', context),
     milestone: readOptionalString(record, 'milestone', context),
     updated_at: requireNonNegativeInteger(record, 'updated_at', context),
+    plan_count: requireNonNegativeInteger(record, 'plan_count', context),
+    fields: narrowFieldValues(readOwnField(record, 'fields'), `${context}.fields`),
   };
 }
 

@@ -229,15 +229,23 @@ pub(super) async fn handle_ticket_request(
                     &format!("limit must be at most {MAX_LIST_LIMIT}"),
                 ));
             }
+            let mut required = BTreeMap::new();
             let (config, config_error) = match tickets.load_config().await {
-                ConfigLoad::Ready(config) => (Some(config_info(config)), None),
+                ConfigLoad::Ready(config) => {
+                    required = config
+                        .states
+                        .iter()
+                        .map(|state| (state.name.clone(), state.requires.clone()))
+                        .collect();
+                    (Some(config_info(config)), None)
+                }
                 ConfigLoad::Missing => (None, Some(TICKETS_NOT_CONFIGURED_REASON.to_string())),
                 ConfigLoad::Invalid(err) => (None, Some(err.to_string())),
                 ConfigLoad::Unavailable => return outbound.reply(&internal_msg()),
             };
             tickets
                 .read(outbound, move |store| {
-                    let listing = store.list_tickets(&permit, &query)?;
+                    let listing = store.list_tickets_with_required(&permit, &query, &required)?;
                     Ok(DaemonMessage::TicketList {
                         workspace_id,
                         config,

@@ -3979,6 +3979,12 @@ pub struct TicketSummary {
     pub milestone: Option<String>,
     /// When the ticket last changed, in milliseconds since the Unix epoch.
     pub updated_at: u64,
+    /// How many plans were made from the ticket.
+    pub plan_count: u32,
+    /// The values of the fields the ticket's current state requires, by
+    /// field name; a field with no value is left out, so this is empty when
+    /// the settings do not name the state.
+    pub fields: BTreeMap<String, String>,
 }
 
 /// One ticket in full, in a [`DaemonMessage::TicketDetail`].

@@ -583,6 +583,8 @@ wire_sample!(struct TicketSummary {
     state,
     milestone,
     updated_at,
+    plan_count,
+    fields,
 });
 wire_sample!(struct TicketInfo {
     number,

@@ -1329,8 +1329,12 @@
         ],
         "tickets": [
           {
+            "fields": {
+              "sample": "string"
+            },
             "milestone": "string",
             "number": "number",
+            "plan_count": "number",
             "state": "string",
             "title": "string",
             "updated_at": "number"

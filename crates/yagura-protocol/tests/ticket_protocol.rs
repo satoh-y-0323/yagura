@@ -163,7 +163,7 @@ fn ticket_replies_and_push_round_trip_through_their_snake_case_tags() {
                 { "name": "m1", "position": 1, "title": "First", "description": "The board." },
             ],
             "tickets": [
-                { "number": 12, "title": "Ship the board", "state": "todo", "milestone": "m1", "updated_at": 1_790_000_000_000_u64 },
+                { "number": 12, "title": "Ship the board", "state": "todo", "milestone": "m1", "updated_at": 1_790_000_000_000_u64, "plan_count": 0, "fields": {} },
             ],
             "truncated": false,
         }),
@@ -201,7 +201,7 @@ fn ticket_replies_keep_omitted_optional_fields_off_the_wire() {
             "config_error": "tickets.toml could not be read",
             "milestones": [ { "name": "m1", "position": 0, "title": "First" } ],
             "tickets": [
-                { "number": 1, "title": "No milestone", "state": "gone-state", "updated_at": 5 },
+                { "number": 1, "title": "No milestone", "state": "gone-state", "updated_at": 5, "plan_count": 0, "fields": {} },
             ],
             "truncated": true,
         }),
@@ -227,6 +227,26 @@ fn ticket_replies_keep_omitted_optional_fields_off_the_wire() {
     for frame in frames {
         assert_daemon_round_trip(frame);
     }
+}
+
+#[test]
+fn a_ticket_summary_carries_its_plan_count_and_required_field_values() {
+    let frame = json!({
+        "type": "ticket_list",
+        "milestones": [],
+        "tickets": [
+            {
+                "number": 7,
+                "title": "Paused work",
+                "state": "on-hold",
+                "updated_at": 9,
+                "plan_count": 2,
+                "fields": { "resume_trigger": "after the release" },
+            },
+        ],
+        "truncated": false,
+    });
+    assert_daemon_round_trip(frame);
 }
 
 #[test]

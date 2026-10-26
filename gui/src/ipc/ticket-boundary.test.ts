@@ -40,6 +40,8 @@ function summaryWire(overrides: Wire = {}): Wire {
     state: 'todo',
     milestone: 'v1',
     updated_at: 1_790_000_000,
+    plan_count: 0,
+    fields: {},
     ...overrides,
   };
 }
@@ -127,6 +129,37 @@ describe('narrowTicketList', () => {
     delete wire['milestone'];
 
     expect(narrowTicketList(listWire({ tickets: [wire] })).tickets[0]?.milestone).toBeNull();
+  });
+
+  it('reads the plan count and the field values of each summary', () => {
+    const wire = summaryWire({
+      state: 'on-hold',
+      plan_count: 2,
+      fields: { resume_trigger: 'when the daemon lands' },
+    });
+
+    const summary = narrowTicketList(listWire({ tickets: [wire] })).tickets[0];
+
+    expect(summary?.plan_count).toBe(2);
+    expect(summary?.fields).toEqual({ resume_trigger: 'when the daemon lands' });
+  });
+
+  it('rejects a summary without a plan count or with a malformed one', () => {
+    const missing = summaryWire();
+    delete missing['plan_count'];
+    const noFields = summaryWire();
+    delete noFields['fields'];
+    const cases: Wire[] = [
+      listWire({ tickets: [missing] }),
+      listWire({ tickets: [noFields] }),
+      listWire({ tickets: [summaryWire({ plan_count: '2' })] }),
+      listWire({ tickets: [summaryWire({ plan_count: -1 })] }),
+      listWire({ tickets: [summaryWire({ fields: { reason: 7 } })] }),
+      listWire({ tickets: [summaryWire({ fields: ['reason'] })] }),
+    ];
+    for (const wire of cases) {
+      expect(() => narrowTicketList(wire)).toThrow(BoundaryError);
+    }
   });
 
   it('keeps the truncated flag', () => {
@@ -285,6 +318,8 @@ describe('the one-line fields of a ticket', () => {
       state: 's',
       milestone: null,
       updated_at: 1,
+      plan_count: 0,
+      fields: {},
     });
     expect(shown.label).toBe('T-12');
     expect(shown.milestone).toBeNull();
@@ -297,6 +332,8 @@ describe('the one-line fields of a ticket', () => {
       state: 's',
       milestone: null,
       updated_at: 1,
+      plan_count: 0,
+      fields: {},
     });
     expect(shown.title).toBe(`${'x'.repeat(MAX_DISPLAY_FIELD_CHARS)}…`);
   });

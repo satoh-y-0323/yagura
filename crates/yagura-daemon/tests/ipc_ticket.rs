@@ -21,7 +21,7 @@ use common::{
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, MilestoneInfo, TICKET_BODY_MAX_BYTES,
+    ClientMessage, DaemonMessage, MilestoneInfo, PlanTaskSpec, TICKET_BODY_MAX_BYTES,
     TICKET_FIELD_VALUE_MAX_BYTES, TICKET_RESULT_MAX_BYTES, TicketConfigInfo, TicketInfo,
     TicketSummary, TicketWorkspaceInfo,
 };
@@ -891,4 +891,89 @@ async fn ticket_writes_never_ask_for_approval_even_when_the_playbook_approves_no
     send(&mut a, &set_milestone("m1", "Milestone one")).await;
     next_ticket_changed(&mut appr).await;
     expect_milestone(read_response(&mut a, REPLY_GUARD).await);
+}
+
+// --- 11. what a summary carries for the board card ---------------------
+
+fn create_plan_from(ticket: u32) -> ClientMessage {
+    ClientMessage::CreatePlan {
+        title: format!("from T-{ticket}"),
+        tasks: vec![PlanTaskSpec {
+            task_id: "a".to_string(),
+            title: "do the thing".to_string(),
+            role: None,
+            profile: None,
+            model: None,
+            effort: None,
+            depends_on: Vec::new(),
+            writes: vec!["a.txt".to_string()],
+            instruction: None,
+        }],
+        ticket: Some(ticket),
+    }
+}
+
+/// The summary of `number` as it travels on the wire.
+fn summary_wire(listing: &Listing, number: u32) -> serde_json::Value {
+    let summary = listing
+        .tickets
+        .iter()
+        .find(|t| t.number == number)
+        .unwrap_or_else(|| panic!("no summary for T-{number}"));
+    serde_json::to_value(summary).expect("a summary encodes")
+}
+
+#[tokio::test]
+async fn a_summary_carries_only_its_states_required_field_values_and_its_plan_count() {
+    let dir = unique_temp_dir("ipc-ticket-summary");
+    write_reference_config(&dir);
+    let repo = second_workspace_dir("ipc-ticket-summary-a");
+    let h = start("ipc-ticket-summary", ticket_config(&dir)).await;
+    let mut a = window_in(&h, &repo).await;
+
+    let held = expect_detail(
+        request(
+            &mut a,
+            create_in(
+                "paused",
+                "on-hold",
+                &[("resume_trigger", "after the release"), ("reason", "kept")],
+            ),
+        )
+        .await,
+    );
+    let waiting = expect_detail(
+        request(
+            &mut a,
+            create_in("queued", "todo", &[("start_condition", "the wire lands")]),
+        )
+        .await,
+    );
+    for _ in 0..2 {
+        match approver_request(&mut a, create_plan_from(waiting.number)).await {
+            DaemonMessage::PlanDetail { .. } => {}
+            other => panic!("expected plan_detail, got {other:?}"),
+        }
+    }
+
+    let listing = expect_list(request(&mut a, list()).await);
+    let held_wire = summary_wire(&listing, held.number);
+    let waiting_wire = summary_wire(&listing, waiting.number);
+
+    assert_eq!(
+        held_wire["fields"],
+        serde_json::json!({ "resume_trigger": "after the release" }),
+        "an on-hold summary carries its state's required field and nothing else"
+    );
+    assert_eq!(
+        waiting_wire["fields"],
+        serde_json::json!({}),
+        "a todo summary carries no field values, even ones the ticket has"
+    );
+    assert_eq!(
+        waiting_wire["plan_count"],
+        serde_json::json!(2),
+        "two plans were made from the ticket"
+    );
+    assert_eq!(held_wire["plan_count"], serde_json::json!(0));
 }

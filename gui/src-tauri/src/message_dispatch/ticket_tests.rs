@@ -34,6 +34,8 @@ fn sample_summary() -> TicketSummary {
         state: "todo".to_owned(),
         milestone: Some("v1".to_owned()),
         updated_at: 1_790_000_000,
+        plan_count: 0,
+        fields: BTreeMap::new(),
     }
 }
 

@@ -445,6 +445,24 @@ impl TicketStore {
         permit: &TicketReadPermit,
         query: &TicketQuery,
     ) -> Result<TicketListing, TicketStoreError> {
+        self.list_tickets_with_required(permit, query, &BTreeMap::new())
+    }
+
+    /// [`Self::list_tickets`] where each summary's `fields` carries the values
+    /// of the fields `required` names for its state (state name to field
+    /// names); a state `required` lacks gets none. Plan counts and field
+    /// values are read for the whole workspace in one pass each, not per
+    /// ticket.
+    ///
+    /// # Errors
+    ///
+    /// A storage failure.
+    pub fn list_tickets_with_required(
+        &self,
+        permit: &TicketReadPermit,
+        query: &TicketQuery,
+        required: &BTreeMap<String, Vec<String>>,
+    ) -> Result<TicketListing, TicketStoreError> {
         let Some(workspace_id) = resolve_scope(&self.conn, permit.scope())? else {
             return Ok(TicketListing {
                 milestones: Vec::new(),
@@ -479,12 +497,15 @@ impl TicketStore {
                         state: row.get(2)?,
                         milestone: row.get(3)?,
                         updated_at: millis_from_column(row.get(4)?),
+                        plan_count: 0,
+                        fields: BTreeMap::new(),
                     })
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let truncated = tickets.len() > limit as usize;
         tickets.truncate(limit as usize);
+        attach_card_details(&self.conn, workspace_id, required, &mut tickets)?;
 
         let mut stmt = self.conn.prepare_fixed(
             "SELECT name, position, title, description FROM ticket_milestone \
@@ -545,6 +566,56 @@ impl TicketStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// Fills each summary's `plan_count` and `fields` from one read of the
+/// workspace's plans and one of its field values.
+fn attach_card_details(
+    conn: &Connection,
+    workspace_id: i64,
+    required: &BTreeMap<String, Vec<String>>,
+    tickets: &mut [TicketSummary],
+) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare_fixed(
+        "SELECT ticket_number, COUNT(*) FROM plan \
+         WHERE ticket_workspace_id = ?1 AND ticket_number IS NOT NULL GROUP BY ticket_number",
+    )?;
+    let counts = stmt
+        .query_map(params![workspace_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    let mut stmt =
+        conn.prepare_fixed("SELECT number, name, value FROM ticket_field WHERE workspace_id = ?1")?;
+    let mut values: BTreeMap<i64, BTreeMap<String, String>> = BTreeMap::new();
+    for row in stmt.query_map(params![workspace_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (number, name, value) = row?;
+        values.entry(number).or_default().insert(name, value);
+    }
+    for summary in tickets {
+        let number = i64::from(summary.number);
+        summary.plan_count = counts
+            .get(&number)
+            .map_or(0, |count| u32::try_from(*count).unwrap_or(u32::MAX));
+        let (Some(names), Some(held)) = (required.get(&summary.state), values.get(&number)) else {
+            continue;
+        };
+        summary.fields = names
+            .iter()
+            .filter_map(|name| {
+                held.get(name)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| (name.clone(), value.clone()))
+            })
+            .collect();
+    }
+    Ok(())
 }
 
 /// `Some(value)` unless it is absent or `""` (which means "none").
