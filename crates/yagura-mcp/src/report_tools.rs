@@ -12,7 +12,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::tools::{
-    ToolError, map_daemon_error, map_transport_error, require_non_empty, unexpected_response,
+    ToolError, map_daemon_error, map_transport_error, require_non_empty, to_json,
+    unexpected_response,
 };
 use crate::transport::DaemonTransport;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome};
@@ -26,10 +27,6 @@ fn parse_outcome(value: Option<String>) -> Result<ReportOutcome, ToolError> {
             "outcome {raw:?} is not one of \"succeeded\" or \"failed\""
         ))
     })
-}
-
-fn to_json<S: serde::Serialize>(value: S) -> Result<Value, ToolError> {
-    serde_json::to_value(value).map_err(|err| ToolError::Internal(err.to_string()))
 }
 
 /// Arguments for the `send_report` tool.

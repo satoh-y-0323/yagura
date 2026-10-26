@@ -6,5 +6,6 @@
 
 pub mod plan_tools;
 pub mod report_tools;
+pub mod ticket_tools;
 pub mod tools;
 pub mod transport;

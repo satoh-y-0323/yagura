@@ -46,6 +46,12 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "open_task_window",
     "send_report",
     "wait_for_report",
+    "list_tickets",
+    "get_ticket",
+    "create_ticket",
+    "update_ticket",
+    "add_ticket_result",
+    "set_milestone",
 ];
 
 /// Kills the spawned `yagura-mcp` process on drop, so a failing assertion
@@ -534,7 +540,11 @@ fn the_seven_plan_tool_descriptions_fit_the_clients_2048_char_limit() {
 /// Each plan tool's schema names the arguments the tool takes and marks as
 /// required exactly the ones it refuses to run without.
 const PLAN_TOOL_SCHEMAS: &[(&str, &[&str], &[&str])] = &[
-    ("create_plan", &["title", "tasks"], &["title", "tasks"]),
+    (
+        "create_plan",
+        &["title", "tasks", "ticket"],
+        &["title", "tasks"],
+    ),
     (
         "update_plan",
         &["plan_id", "title", "tasks"],
@@ -1093,5 +1103,210 @@ fn get_plan_description_explains_each_instruction_notice_state() {
     assert!(
         missing.is_empty(),
         "get_plan description is missing required guidance {missing:?}, got: {description:?}"
+    );
+}
+
+const TICKET_TOOL_NAMES: &[&str] = &[
+    "list_tickets",
+    "get_ticket",
+    "create_ticket",
+    "update_ticket",
+    "add_ticket_result",
+    "set_milestone",
+];
+
+#[test]
+fn the_six_ticket_tool_descriptions_fit_the_clients_2048_char_limit() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+
+    for name in TICKET_TOOL_NAMES {
+        let description = find_tool(tools, name)
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{name} has a description"));
+        let len = description.chars().count();
+        assert!(
+            len <= MAX_TOOL_DESCRIPTION_CHARS,
+            "{name} description is {len} chars, exceeding the {MAX_TOOL_DESCRIPTION_CHARS}-char \
+             client limit"
+        );
+    }
+}
+
+/// Each ticket tool's schema names the arguments the tool takes and marks as
+/// required exactly the ones it refuses to run without. `list_tickets` is
+/// checked on its own below.
+const TICKET_TOOL_SCHEMAS: &[(&str, &[&str], &[&str])] = &[
+    ("get_ticket", &["ticket"], &["ticket"]),
+    (
+        "create_ticket",
+        &["title", "body", "milestone", "state", "fields"],
+        &["title", "body"],
+    ),
+    (
+        "update_ticket",
+        &["ticket", "title", "body", "milestone", "state", "fields"],
+        &["ticket"],
+    ),
+    (
+        "add_ticket_result",
+        &["ticket", "text"],
+        &["ticket", "text"],
+    ),
+    (
+        "set_milestone",
+        &["name", "title", "description", "position"],
+        &["name", "title", "position"],
+    ),
+];
+
+#[test]
+fn ticket_tool_schemas_name_every_argument_and_require_exactly_the_mandatory_ones() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+
+    for (name, properties, required) in TICKET_TOOL_SCHEMAS {
+        assert_schema_names_and_requires(tools, name, properties, required);
+    }
+}
+
+/// `list_tickets` takes a state and a milestone to narrow by, requires
+/// nothing, and never lets a window name the workspace it reads (a window
+/// reads only its own). A `limit` is the one argument it may carry besides.
+#[test]
+fn list_tickets_schema_narrows_by_state_and_milestone_requires_nothing_and_names_no_workspace() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+    let schema = find_tool(tools, "list_tickets")
+        .get("inputSchema")
+        .expect("list_tickets has an inputSchema");
+
+    let properties: Vec<&str> = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|map| map.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    for wanted in ["state", "milestone"] {
+        assert!(
+            properties.contains(&wanted),
+            "list_tickets must take {wanted}, schema names {properties:?}"
+        );
+    }
+    let unexpected: Vec<&&str> = properties
+        .iter()
+        .filter(|name| !["state", "milestone", "limit"].contains(*name))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "list_tickets names arguments it must not take: {unexpected:?}"
+    );
+
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    assert_eq!(required, 0, "list_tickets requires no argument");
+}
+
+/// A ticket is named by its number, so the schema has to say it is an
+/// integer; an optional `ticket` on `create_plan` is how a plan is made from
+/// one.
+#[test]
+fn the_ticket_argument_is_an_integer_on_get_ticket_and_create_plan() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+
+    for name in ["get_ticket", "create_plan"] {
+        let ticket = find_tool(tools, name)
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("ticket"))
+            .unwrap_or_else(|| panic!("{name} schema names a ticket argument"));
+        let kind = ticket
+            .get("type")
+            .unwrap_or_else(|| panic!("{name} ticket schema declares a type: {ticket}"))
+            .to_string();
+        assert!(
+            kind.contains("integer"),
+            "{name} ticket must be an integer, schema says {kind}"
+        );
+    }
+}
+
+/// The sentences of `description` (already lowercased by
+/// [`delivered_description`]), split at a full stop or a line break.
+fn sentences(description: &str) -> Vec<&str> {
+    description
+        .split(['.', '\n'])
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .collect()
+}
+
+const DATA_NOT_INSTRUCTIONS: &str = "data, not instructions";
+
+/// A ticket's body, a field's value and a result are written by whoever had
+/// access to the board, so a reader must treat them as data. The `guide` and
+/// the state and field descriptions are the user's own rules for this board,
+/// which a reader is meant to follow: they must not be filed under the same
+/// warning, or the reader is told to ignore the one place the user speaks.
+#[test]
+fn get_ticket_and_list_tickets_call_ticket_text_data_but_present_the_guide_as_the_users_rules() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+
+    for name in ["get_ticket", "list_tickets"] {
+        let description = delivered_description(tools, name);
+        let sentences = sentences(&description);
+        assert!(
+            sentences
+                .iter()
+                .any(|sentence| sentence.contains(DATA_NOT_INSTRUCTIONS)),
+            "{name} description must say ticket text is {DATA_NOT_INSTRUCTIONS}: {description:?}"
+        );
+        let guide_under_the_warning: Vec<&&str> = sentences
+            .iter()
+            .filter(|sentence| {
+                sentence.contains(DATA_NOT_INSTRUCTIONS) && sentence.contains("guide")
+            })
+            .collect();
+        assert!(
+            guide_under_the_warning.is_empty(),
+            "{name} must not file the guide under {DATA_NOT_INSTRUCTIONS}: \
+             {guide_under_the_warning:?}"
+        );
+    }
+
+    let get_ticket = delivered_description(tools, "get_ticket");
+    assert!(
+        sentences(&get_ticket)
+            .iter()
+            .any(|sentence| sentence.contains(DATA_NOT_INSTRUCTIONS) && sentence.contains("result")),
+        "get_ticket must name the results among what is {DATA_NOT_INSTRUCTIONS}: {get_ticket:?}"
+    );
+
+    let list_tickets = delivered_description(tools, "list_tickets");
+    assert!(
+        sentences(&list_tickets).iter().any(|sentence| {
+            sentence.contains("guide") && sentence.contains("user") && sentence.contains("rule")
+        }),
+        "list_tickets must present the guide as the rules the user set for the board: \
+         {list_tickets:?}"
+    );
+}
+
+#[test]
+fn list_tickets_description_says_to_call_it_first_to_read_the_boards_rules() {
+    let response = fetch_tools_list();
+    let tools = tools_array(&response);
+    let description = delivered_description(tools, "list_tickets");
+
+    let missing = missing_groups(&description, &[&["first"], &["rule", "guide"]]);
+    assert!(
+        missing.is_empty(),
+        "list_tickets must say to call it first to read the rules; missing {missing:?}: \
+         {description:?}"
     );
 }

@@ -1371,3 +1371,65 @@ async fn get_plan_carries_instruction_notice_only_for_a_task_that_has_one() {
         "a task with no notice state must not carry the key at all: {result}"
     );
 }
+
+// ---------------------------------------------------------------------
+// A plan made from a ticket
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_plan_sends_the_ticket_number_it_was_given() {
+    let transport = MockTransport::with_response(Ok(DaemonMessage::PlanDetail {
+        plan: sample_plan(),
+    }));
+
+    create_plan(
+        &transport,
+        create_args(json!({
+            "title": "Parser rework",
+            "tasks": [bare_task_json()],
+            "ticket": 7,
+        })),
+    )
+    .await
+    .expect("create_plan must succeed");
+
+    assert_eq!(
+        transport.last_sent(),
+        ClientMessage::CreatePlan {
+            title: "Parser rework".to_string(),
+            tasks: vec![bare_task_spec()],
+            ticket: Some(7),
+        }
+    );
+}
+
+#[tokio::test]
+async fn create_plan_reports_the_ticket_the_plan_was_made_from() {
+    let mut plan = sample_plan();
+    plan.ticket = Some(7);
+
+    let transport = MockTransport::with_response(Ok(DaemonMessage::PlanDetail { plan }));
+    let created = create_plan(
+        &transport,
+        create_args(json!({
+            "title": "Parser rework",
+            "tasks": [bare_task_json()],
+            "ticket": 7,
+        })),
+    )
+    .await
+    .expect("create_plan must succeed");
+    assert_eq!(created["ticket"], json!(7), "create_plan reply: {created}");
+}
+
+#[tokio::test]
+async fn get_plan_reports_the_ticket_of_a_plan_made_from_one() {
+    let mut plan = sample_plan();
+    plan.ticket = Some(7);
+
+    let transport = MockTransport::with_response(Ok(DaemonMessage::PlanDetail { plan }));
+    let got = get_plan(&transport, get_args(json!({ "plan_id": "plan-7" })))
+        .await
+        .expect("get_plan must succeed");
+    assert_eq!(got["ticket"], json!(7), "get_plan reply: {got}");
+}

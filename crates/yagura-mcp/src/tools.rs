@@ -101,6 +101,18 @@ pub enum ToolError {
     /// Not an argument error: repeating the same request reworded will not help.
     #[error("profile disabled: {0}")]
     ProfileDisabled(String),
+    /// The daemon reported that the named ticket number does not exist in
+    /// the calling window's workspace, or belongs to another workspace.
+    #[error("ticket not found: {0}")]
+    TicketNotFound(String),
+    /// The daemon refused a ticket write because the user has no
+    /// `tickets.toml` defining the board's states and fields.
+    #[error("tickets not configured: {0}")]
+    TicketsNotConfigured(String),
+    /// The daemon refused a ticket write because the user's `tickets.toml`
+    /// could not be read as valid settings.
+    #[error("tickets config invalid: {0}")]
+    TicketsConfigInvalid(String),
     /// A contract violation by the daemon (undecodable/unexpected
     /// response), or any other failure that is not the caller's fault.
     #[error("internal error: {0}")]
@@ -133,6 +145,9 @@ impl ToolError {
             Self::PlanNotApproved(_) => "plan_not_approved",
             Self::NameTaken(_) => "name_taken",
             Self::ProfileDisabled(_) => "profile_disabled",
+            Self::TicketNotFound(_) => "ticket_not_found",
+            Self::TicketsNotConfigured(_) => "tickets_not_configured",
+            Self::TicketsConfigInvalid(_) => "tickets_config_invalid",
             Self::Internal(_) => "internal",
         }
     }
@@ -331,6 +346,9 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "plan_not_approved" => ToolError::PlanNotApproved(message),
         "name_taken" => ToolError::NameTaken(message),
         "profile_disabled" => ToolError::ProfileDisabled(message),
+        "ticket_not_found" => ToolError::TicketNotFound(message),
+        "tickets_not_configured" => ToolError::TicketsNotConfigured(message),
+        "tickets_config_invalid" => ToolError::TicketsConfigInvalid(message),
         _ => ToolError::Internal(message),
     }
 }
@@ -371,6 +389,25 @@ fn with_requester(mut result: Value, identity: RequesterIdentity) -> Value {
 /// through this one function rather than re-deriving the `||` twice.
 fn has_launch_option(model: Option<&str>, effort: Option<&str>) -> bool {
     model.is_some() || effort.is_some()
+}
+
+/// Rejects a missing argument as `invalid_argument`. Whether a present value
+/// is acceptable is left to the daemon.
+pub(crate) fn require_present<T>(value: Option<T>, field: &str) -> Result<T, ToolError> {
+    value.ok_or_else(|| ToolError::InvalidArgument(format!("{field} must be provided")))
+}
+
+/// Rewrites CRLF and a lone CR to LF: the daemon's text rules forbid a bare
+/// `\r`, so a caller that wrote its request on Windows must not be refused
+/// for that alone.
+pub(crate) fn normalize_to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Serializes a reply value into the JSON a tool returns. An absent optional
+/// field stays absent, the same rule the wire itself uses.
+pub(crate) fn to_json<S: serde::Serialize>(value: S) -> Result<Value, ToolError> {
+    serde_json::to_value(value).map_err(|err| ToolError::Internal(err.to_string()))
 }
 
 /// Rejects `None` and `Some(String::new())` alike as `invalid_argument`.

@@ -13,40 +13,29 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::tools::{
-    ToolError, map_daemon_error, map_transport_error, require_non_empty, unexpected_response,
+    ToolError, map_daemon_error, map_transport_error, normalize_to_lf, require_non_empty,
+    require_present, to_json, unexpected_response,
 };
 use crate::transport::DaemonTransport;
-use yagura_protocol::{ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec};
+use yagura_protocol::{ClientMessage, DaemonMessage, PlanTaskSpec};
 
 /// Rejects a missing `tasks` argument. A present, empty list is a plan the
 /// daemon itself refuses (`invalid_argument`), not a locally missing
 /// argument, so it is passed through unchanged.
 fn require_tasks(value: Option<Vec<PlanTaskSpec>>) -> Result<Vec<PlanTaskSpec>, ToolError> {
-    value.ok_or_else(|| ToolError::InvalidArgument("tasks must be provided".to_string()))
+    require_present(value, "tasks")
 }
 
 /// Normalizes every task's `instruction` to LF line endings before it is
-/// sent: the daemon's own validation
-/// (`validate_task_instruction`) forbids a bare `\r`, so a caller that wrote
-/// its request on Windows must not have it refused for that alone.
+/// sent (see [`normalize_to_lf`]).
 fn normalize_task_instructions(tasks: Vec<PlanTaskSpec>) -> Vec<PlanTaskSpec> {
     tasks
         .into_iter()
         .map(|mut task| {
-            task.instruction = task
-                .instruction
-                .map(|text| text.replace("\r\n", "\n").replace('\r', "\n"));
+            task.instruction = task.instruction.as_deref().map(normalize_to_lf);
             task
         })
         .collect()
-}
-
-/// Serializes a [`PlanInfo`] into the flat JSON object `create_plan`,
-/// `update_plan` and `get_plan` all reply with: the struct's own fields at
-/// the top level, an absent optional field carried as `null` (the same rule
-/// the wire itself uses).
-fn plan_detail_json(plan: PlanInfo) -> Result<Value, ToolError> {
-    serde_json::to_value(plan).map_err(|err| ToolError::Internal(err.to_string()))
 }
 
 /// Arguments for the `create_plan` tool.
@@ -57,6 +46,9 @@ pub struct CreatePlanArgs {
     /// Every task of the plan, in the caller's order (required; an empty
     /// list is forwarded to the daemon, which refuses it).
     pub tasks: Option<Vec<PlanTaskSpec>>,
+    /// The number of the ticket in the calling window's workspace the plan
+    /// is made from. Whether it exists there is the daemon's call.
+    pub ticket: Option<u32>,
 }
 
 /// Arguments for the `update_plan` tool.
@@ -114,12 +106,12 @@ pub async fn create_plan<T: DaemonTransport>(
         .round_trip(ClientMessage::CreatePlan {
             title,
             tasks,
-            ticket: None,
+            ticket: args.ticket,
         })
         .await
         .map_err(map_transport_error)?;
     match response {
-        DaemonMessage::PlanDetail { plan } => plan_detail_json(plan),
+        DaemonMessage::PlanDetail { plan } => to_json(plan),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
     }
@@ -143,7 +135,7 @@ pub async fn update_plan<T: DaemonTransport>(
         .await
         .map_err(map_transport_error)?;
     match response {
-        DaemonMessage::PlanDetail { plan } => plan_detail_json(plan),
+        DaemonMessage::PlanDetail { plan } => to_json(plan),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
     }
@@ -173,7 +165,7 @@ pub async fn get_plan<T: DaemonTransport>(
                     )));
                 }
             }
-            plan_detail_json(plan)
+            to_json(plan)
         }
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),
@@ -189,8 +181,7 @@ pub async fn list_plans<T: DaemonTransport>(transport: &T) -> Result<Value, Tool
         .map_err(map_transport_error)?;
     match response {
         DaemonMessage::PlanList { plans } => {
-            let plans_json =
-                serde_json::to_value(plans).map_err(|err| ToolError::Internal(err.to_string()))?;
+            let plans_json = to_json(plans)?;
             Ok(json!({ "plans": plans_json }))
         }
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
@@ -227,8 +218,7 @@ pub async fn list_roles<T: DaemonTransport>(transport: &T) -> Result<Value, Tool
             roles,
             default_role,
         } => {
-            let roles_json =
-                serde_json::to_value(roles).map_err(|err| ToolError::Internal(err.to_string()))?;
+            let roles_json = to_json(roles)?;
             let mut reply = json!({ "roles": roles_json });
             if let (Some(default_role), Some(object)) = (default_role, reply.as_object_mut()) {
                 object.insert("default_role".to_string(), Value::String(default_role));
@@ -264,8 +254,7 @@ pub async fn open_task_window<T: DaemonTransport>(
             name,
             assignment,
         } => {
-            let assignment_json = serde_json::to_value(assignment)
-                .map_err(|err| ToolError::Internal(err.to_string()))?;
+            let assignment_json = to_json(assignment)?;
             let mut result = json!({
                 "plan_id": plan_id,
                 "task_id": task_id,

@@ -219,6 +219,28 @@ fn tool_cases() -> Vec<(&'static str, Value, &'static str)> {
             json!({ "timeout_sec": 0 }),
             "wait_for_report",
         ),
+        ("list_tickets", json!({}), "list_tickets"),
+        ("get_ticket", json!({ "ticket": 1 }), "get_ticket"),
+        (
+            "create_ticket",
+            json!({ "title": "a title", "body": "a body" }),
+            "create_ticket",
+        ),
+        (
+            "update_ticket",
+            json!({ "ticket": 1, "state": "in-progress" }),
+            "update_ticket",
+        ),
+        (
+            "add_ticket_result",
+            json!({ "ticket": 1, "text": "merged" }),
+            "add_ticket_result",
+        ),
+        (
+            "set_milestone",
+            json!({ "name": "v1", "title": "Version 1", "position": 1 }),
+            "set_milestone",
+        ),
     ]
 }
 
