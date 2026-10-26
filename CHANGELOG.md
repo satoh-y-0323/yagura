@@ -5,6 +5,19 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The IPC protocol is now revision 29.** The ticket requests (`list_ticket_workspaces`, `list_tickets`, `get_ticket`, `create_ticket`, `update_ticket`, `add_ticket_result`, `set_milestone`) and their replies are new, as is the push `ticket_changed`, which the daemon sends to every approver after a ticket is written. `create_plan` takes an optional `ticket` and `PlanInfo` carries it; both are left out when absent. A client sending a ticket request checks the daemon's revision first.
+- **The session database is now at schema 016, which cannot be undone.** A database this version has opened is refused by an older daemon (its `user_version` is newer than that daemon knows). Run the GUI and the daemon from the same release.
+
+### Added
+
+- **A ticket board for each repository.** Six MCP tools, `list_tickets`, `get_ticket`, `create_ticket`, `update_ticket`, `add_ticket_result` and `set_milestone`, let an agent keep tickets in the workspace of its window (the git repository, or the directory outside one). Numbers start at 1 per workspace; results are append-only; a ticket is never deleted. A window reaches only its own workspace's tickets, and the tools are not put through the approval gate. See [`docs/tickets.md`](docs/tickets.md) and [`docs/mcp-setup.md`](docs/mcp-setup.md#tickets).
+- **`tickets.toml` defines the board's states and fields.** The order of the states is the order of the board's columns, and a state may require fields: a ticket cannot be written into it without a value for each. That is the only rule yagura enforces; the file's `guide` and descriptions are shown to the agent as the board's rules. The daemon finds it by `--tickets`, then `YAGURA_TICKETS`, then the config root, and reads it again at every request. The GUI places a reference file (`todo`, `in-progress`, `done`, `considering`, `on-hold`, `cancelled`) on first launch and never overwrites an existing one.
+- **`create_plan` takes an optional `ticket`**, and `get_plan` and `get_ticket` report the link in both directions. Making a plan does not change the ticket's state.
+- **The Plans panel has a Tickets tab**, now the first and the one it opens on. It shows a workspace's tickets in a column per state, and a ticket's description, fields, results and plans. It only shows: tickets are edited by agents through MCP. Opening the panel does not mark a plan as seen; showing the Board tab does.
+- Limits: 256 workspaces with tickets, 10,000 tickets per workspace, 256 results per ticket and 64 milestones per workspace.
+
 ## [0.2.0] - 2026-10-24
 
 ### Changed

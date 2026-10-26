@@ -17,6 +17,16 @@ not decide which role a task needs, and never starts a task by itself: the paren
 what the tasks are and when to open each one. Role names are opaque strings the operator defines in
 `roles.toml`; yagura only looks them up.
 
+## Plans made from a ticket
+
+`create_plan` may name a ticket of the calling window's workspace (its `ticket` argument, the number
+shown as `T-<n>`). The plan then records where it came from: `get_plan` reports the `ticket`, and
+the ticket's `get_ticket` lists the plan's id. Several plans may come from one ticket. The link is
+only a record: creating a plan never changes the ticket's state, and deleting the plan removes it
+from the ticket's list without touching the ticket. A number the workspace does not hold, whether
+it does not exist or belongs to another workspace, is refused as `ticket_not_found` and creates no
+plan. See [Tickets](tickets.md) for the board itself.
+
 ## Waves
 
 A task's wave is the length of the longest dependency chain that reaches it: a task with no

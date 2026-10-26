@@ -49,6 +49,9 @@ allow it.
   run in parallel, refuses tasks that would write the same files at the same time, and opens each
   task's window with the CLI, model and effort you assign.
 - **Reports**: a window tells the one that opened it how its work ended.
+- **Tickets**: each repository has a ticket board that agents keep through MCP and you read in the
+  app. The states and the rules are yours, in `tickets.toml`; yagura enforces only the fields a
+  state requires.
 
 ![An approval dialog asking whether one window may send a message to another](docs/images/approval.png)
 
@@ -108,6 +111,7 @@ To use yagura's tools from a CLI session that yagura did not start, register the
 
 - [MCP setup and tool reference](docs/mcp-setup.md)
 - [Plans](docs/plans.md)
+- [Tickets](docs/tickets.md)
 - [Launch profiles](profiles/README.md)
 - [Detection definitions](crates/yagura-daemon/detection/README.md)
 - [Adding a CLI](docs/adding-a-cli.md)
