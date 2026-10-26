@@ -104,16 +104,13 @@ impl TicketRuntime {
         }
     }
 
-    /// The settings a write needs, or the refusal to send instead.
-    async fn config_for_write(&self) -> Result<TicketConfig, DaemonMessage> {
+    /// The settings a write needs, or why the write cannot have them.
+    async fn config_for_write(&self) -> Result<TicketConfig, ConfigRefusal> {
         match self.load_config().await {
             ConfigLoad::Ready(config) => Ok(config),
-            ConfigLoad::Missing => Err(error_msg(
-                "tickets_not_configured",
-                TICKETS_NOT_CONFIGURED_REASON,
-            )),
-            ConfigLoad::Invalid(err) => Err(error_msg("tickets_config_invalid", &err.to_string())),
-            ConfigLoad::Unavailable => Err(internal_msg()),
+            ConfigLoad::Missing => Err(ConfigRefusal::NotConfigured),
+            ConfigLoad::Invalid(err) => Err(ConfigRefusal::Invalid(err.to_string())),
+            ConfigLoad::Unavailable => Err(ConfigRefusal::Unavailable),
         }
     }
 
@@ -282,7 +279,7 @@ pub(super) async fn handle_ticket_request(
             }
             let config = match tickets.config_for_write().await {
                 Ok(config) => config,
-                Err(refusal) => return outbound.reply(&refusal),
+                Err(refusal) => return outbound.reply(&refusal.to_msg()),
             };
             tickets
                 .write(broker, outbound, move |store| {
@@ -301,7 +298,7 @@ pub(super) async fn handle_ticket_request(
             }
             let config = match tickets.config_for_write().await {
                 Ok(config) => config,
-                Err(refusal) => return outbound.reply(&refusal),
+                Err(refusal) => return outbound.reply(&refusal.to_msg()),
             };
             tickets
                 .write(broker, outbound, move |store| {
@@ -406,6 +403,26 @@ impl TextRefusal {
             self.argument,
             &format!("{} is invalid: {}", self.argument, self.err),
         )
+    }
+}
+
+/// Why a write cannot have the board's settings.
+enum ConfigRefusal {
+    NotConfigured,
+    /// The reason text, which never quotes the file.
+    Invalid(String),
+    Unavailable,
+}
+
+impl ConfigRefusal {
+    fn to_msg(&self) -> DaemonMessage {
+        match self {
+            Self::NotConfigured => {
+                error_msg("tickets_not_configured", TICKETS_NOT_CONFIGURED_REASON)
+            }
+            Self::Invalid(reason) => error_msg("tickets_config_invalid", reason),
+            Self::Unavailable => internal_msg(),
+        }
     }
 }
 
