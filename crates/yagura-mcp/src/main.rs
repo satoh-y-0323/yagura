@@ -1068,7 +1068,7 @@ impl YaguraMcpServer {
             values of the fields its state requires) without its body; read a \
             ticket in full with get_ticket. state and milestone narrow the list, limit caps it \
             (the daemon's default is 200, at most 1000), and truncated is true when more \
-            tickets matched. When the user has no ticket settings, or they cannot be read, \
+            tickets matched or the reply was cut to stay within its size limit. When the user has no ticket settings, or they cannot be read, \
             config is left out and config_error says why: the summaries still come back, and \
             create_ticket and update_ticket are refused with tickets_not_configured or \
             tickets_config_invalid.",

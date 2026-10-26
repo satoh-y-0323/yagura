@@ -152,6 +152,7 @@ refused as `ticket_not_found`, and no plan is created. See [Plans](plans.md).
 | States / fields in `tickets.toml` | 32 / 32 |
 | `tickets.toml` | 64 KiB |
 | `list_tickets` `limit` | default 200, at most 1000 |
+| `list_tickets` summaries | 15 MiB serialized; the list stops before the summary that would pass it |
 
 Body, field values, results and milestone descriptions may span several lines; newlines and tabs
 are allowed, and no other control characters and no characters that could reorder or hide text.

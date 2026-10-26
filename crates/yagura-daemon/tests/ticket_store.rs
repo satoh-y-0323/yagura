@@ -21,9 +21,10 @@ use yagura_daemon::ticket::{TicketConfig, TicketField, TicketState};
 use yagura_daemon::ticket_permit::{self, TicketReadPermit, TicketWritePermit};
 use yagura_daemon::ticket_store::{
     NewTicket, TicketChange, TicketLimitKind, TicketQuery, TicketStore, TicketStoreError,
+    fit_summaries_to_budget,
 };
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
-use yagura_protocol::{MilestoneInfo, TicketInfo};
+use yagura_protocol::{MilestoneInfo, TicketInfo, TicketSummary};
 use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
@@ -1042,4 +1043,66 @@ async fn a_ticket_in_a_state_the_config_dropped_is_still_read_as_stored() {
         .list_tickets(&w.read, &TicketQuery::default())
         .expect("list");
     assert_eq!(listing.tickets[0].state, "review");
+}
+
+fn summary_with_title(number: u32, title: &str) -> TicketSummary {
+    TicketSummary {
+        number,
+        title: title.to_string(),
+        state: "todo".to_string(),
+        milestone: None,
+        updated_at: 1,
+        plan_count: 0,
+        fields: BTreeMap::new(),
+    }
+}
+
+fn serialized_len(summaries: &[TicketSummary]) -> usize {
+    summaries
+        .iter()
+        .map(|s| serde_json::to_vec(s).expect("serialize").len())
+        .sum()
+}
+
+#[test]
+fn a_listing_is_cut_at_the_budget_in_order_and_says_so() {
+    let all: Vec<TicketSummary> = (1..=10)
+        .map(|n| summary_with_title(n, &"t".repeat(100)))
+        .collect();
+    let total = serialized_len(&all);
+
+    let (fits, truncated) = fit_summaries_to_budget(all.clone(), false, total);
+    assert_eq!(
+        fits, all,
+        "a listing that fits the budget is returned whole"
+    );
+    assert!(!truncated);
+
+    let budget = total / 2;
+    let (cut, truncated) = fit_summaries_to_budget(all.clone(), false, budget);
+    assert!(truncated, "a listing that does not fit must say it was cut");
+    assert!(!cut.is_empty() && cut.len() < all.len());
+    assert_eq!(cut[..], all[..cut.len()], "the head is kept in order");
+    assert!(serialized_len(&cut) <= budget);
+    let one_more = serialized_len(&all[..cut.len() + 1]);
+    assert!(
+        one_more > budget,
+        "the cut stops only when the next one would not fit"
+    );
+
+    let (none, truncated) = fit_summaries_to_budget(all, false, 1);
+    assert!(none.is_empty(), "nothing fits a budget below one summary");
+    assert!(truncated);
+}
+
+#[test]
+fn a_listing_already_cut_by_the_limit_stays_truncated_within_the_budget() {
+    let all: Vec<TicketSummary> = (1..=3).map(|n| summary_with_title(n, "t")).collect();
+    let budget = serialized_len(&all) + 1_000;
+    let (fits, truncated) = fit_summaries_to_budget(all.clone(), true, budget);
+    assert_eq!(fits, all);
+    assert!(
+        truncated,
+        "a limit cut is not forgotten when the budget is not reached"
+    );
 }

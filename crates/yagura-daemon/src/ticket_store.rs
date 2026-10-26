@@ -20,7 +20,8 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use thiserror::Error;
 use yagura_protocol::{
-    MilestoneInfo, TicketInfo, TicketResultInfo, TicketSummary, TicketWorkspaceInfo,
+    MAX_FRAME_BODY_LEN, MilestoneInfo, TicketInfo, TicketResultInfo, TicketSummary,
+    TicketWorkspaceInfo,
 };
 
 use crate::sql::FixedSql;
@@ -48,6 +49,10 @@ pub const DEFAULT_LIST_LIMIT: u32 = 200;
 
 /// Most rows a listing returns, whatever limit the query names.
 pub const MAX_LIST_LIMIT: u32 = 1_000;
+
+/// Serialized bytes of summaries one listing may carry. The reserve leaves room
+/// for the config, the milestones and the envelope, each bounded far below it.
+pub const LIST_SUMMARY_BYTE_BUDGET: usize = MAX_FRAME_BODY_LEN - 1024 * 1024;
 
 /// Code points of a field value a summary carries; a longer value is cut and
 /// ends in U+2026. A listing of many tickets with many required fields must
@@ -148,7 +153,8 @@ pub struct TicketListing {
     pub milestones: Vec<MilestoneInfo>,
     /// Matching tickets, summaries only, in board order.
     pub tickets: Vec<TicketSummary>,
-    /// Whether more tickets matched than the limit allowed.
+    /// Whether more tickets matched than the limit allowed, or the summaries
+    /// were cut to [`LIST_SUMMARY_BYTE_BUDGET`].
     pub truncated: bool,
 }
 
@@ -511,6 +517,8 @@ impl TicketStore {
         let truncated = tickets.len() > limit as usize;
         tickets.truncate(limit as usize);
         attach_card_details(&self.conn, workspace_id, required, &mut tickets)?;
+        let (tickets, truncated) =
+            fit_summaries_to_budget(tickets, truncated, LIST_SUMMARY_BYTE_BUDGET);
 
         let mut stmt = self.conn.prepare_fixed(
             "SELECT name, position, title, description FROM ticket_milestone \
@@ -571,6 +579,33 @@ impl TicketStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// Keeps the leading summaries whose serialized sizes add up to at most
+/// `budget` bytes, stopping at the first that would not fit. The flag is
+/// `already_truncated`, or `true` when any summary was dropped.
+#[must_use]
+pub fn fit_summaries_to_budget(
+    mut summaries: Vec<TicketSummary>,
+    already_truncated: bool,
+    budget: usize,
+) -> (Vec<TicketSummary>, bool) {
+    let mut used = 0usize;
+    let mut kept = summaries.len();
+    for (index, summary) in summaries.iter().enumerate() {
+        // A summary that cannot be serialized cannot be sent either, so it ends the listing.
+        let size = serde_json::to_vec(summary).map_or(usize::MAX, |bytes| bytes.len());
+        match used.checked_add(size) {
+            Some(total) if total <= budget => used = total,
+            _ => {
+                kept = index;
+                break;
+            }
+        }
+    }
+    let cut = kept < summaries.len();
+    summaries.truncate(kept);
+    (summaries, already_truncated || cut)
 }
 
 /// Fills each summary's `plan_count` and `fields` from one read of the
