@@ -72,6 +72,7 @@ fn sample_plan_info(review: Option<PlanReview>, version: u64) -> PlanInfo {
         roles_warning: None,
         review,
         version,
+        ticket: None,
     }
 }
 

@@ -220,6 +220,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
         ClientMessage::CreatePlan {
             title: "t".to_string(),
             tasks: vec![],
+            ticket: None,
         },
         ClientMessage::UpdatePlan {
             plan_id: "p1".to_string(),
@@ -321,6 +322,42 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
             session: "s".to_string(),
+        },
+        ClientMessage::ListTicketWorkspaces,
+        ClientMessage::ListTickets {
+            workspace_id: None,
+            state: None,
+            milestone: None,
+            limit: None,
+        },
+        ClientMessage::GetTicket {
+            workspace_id: None,
+            ticket: 1,
+        },
+        ClientMessage::CreateTicket {
+            title: "t".to_string(),
+            body: "b".to_string(),
+            milestone: None,
+            state: None,
+            fields: None,
+        },
+        ClientMessage::UpdateTicket {
+            ticket: 1,
+            title: None,
+            body: None,
+            milestone: None,
+            state: None,
+            fields: None,
+        },
+        ClientMessage::AddTicketResult {
+            ticket: 1,
+            text: "r".to_string(),
+        },
+        ClientMessage::SetMilestone {
+            name: "m".to_string(),
+            title: "M".to_string(),
+            description: None,
+            position: 0,
         },
     ]
 }
@@ -467,6 +504,13 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::DeliverTake { .. }
                         | ClientMessage::DeliverWait { .. }
                         | ClientMessage::ReportSession { .. }
+                        | ClientMessage::ListTicketWorkspaces
+                        | ClientMessage::ListTickets { .. }
+                        | ClientMessage::GetTicket { .. }
+                        | ClientMessage::CreateTicket { .. }
+                        | ClientMessage::UpdateTicket { .. }
+                        | ClientMessage::AddTicketResult { .. }
+                        | ClientMessage::SetMilestone { .. }
                 )
         })
     {
@@ -522,6 +566,7 @@ fn create_plan_or_update_plan_with_any_task_instruction_requires_the_instruction
                 plan_task_spec_with_instruction(None),
                 plan_task_spec_with_instruction(Some("read this before you start")),
             ],
+            ticket: None,
         },
         ClientMessage::UpdatePlan {
             plan_id: "p1".to_string(),
@@ -546,6 +591,7 @@ fn create_plan_or_update_plan_with_no_task_instruction_requires_no_more_than_bas
         ClientMessage::CreatePlan {
             title: "t".to_string(),
             tasks: vec![plan_task_spec_with_instruction(None)],
+            ticket: None,
         },
         ClientMessage::UpdatePlan {
             plan_id: "p1".to_string(),

@@ -125,6 +125,8 @@ export interface PlanInfo {
   review: PlanReview | null;
   /** The stored revision, echoed back when approving or marking the plan seen. */
   version: number;
+  /** The number of the ticket the plan was made from, `null` when it was made from none. */
+  ticket: number | null;
 }
 
 /** One row of the `list_plans` result. */
@@ -186,6 +188,7 @@ export function narrowPlanInfo(value: unknown): PlanInfo {
     roles_warning: readOptionalString(record, 'roles_warning', context),
     review: readOptionalClosed<PlanReview>(record, 'review', context, PLAN_REVIEW_VALUES),
     version: readVersion(record, context),
+    ticket: readOptionalTicket(record, context),
   };
 }
 
@@ -347,6 +350,14 @@ function readVersion(record: UntrustedRecord, context: string): number {
   return readOwnField(record, 'version') === undefined
     ? 0
     : requireNonNegativeInteger(record, 'version', context);
+}
+
+/** Reads a plan's ticket number; a core omits the key for a plan made from no ticket. */
+function readOptionalTicket(record: UntrustedRecord, context: string): number | null {
+  const value = readOwnField(record, 'ticket');
+  return value === null || value === undefined
+    ? null
+    : requireNonNegativeInteger(record, 'ticket', context);
 }
 
 /**

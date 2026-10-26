@@ -2823,6 +2823,7 @@ mod tests {
             roles_warning: None,
             review: None,
             version: 3,
+            ticket: None,
         };
 
         let (plans, sent) = tokio::join!(

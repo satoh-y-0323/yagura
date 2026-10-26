@@ -71,6 +71,11 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::McpRegistrationStatus { .. } => "McpRegistrationStatus",
         DaemonMessage::McpRegistrationRequested { .. } => "McpRegistrationRequested",
         DaemonMessage::McpRegistrationResult { .. } => "McpRegistrationResult",
+        DaemonMessage::TicketWorkspaceList { .. } => "TicketWorkspaceList",
+        DaemonMessage::TicketList { .. } => "TicketList",
+        DaemonMessage::TicketDetail { .. } => "TicketDetail",
+        DaemonMessage::MilestoneSet { .. } => "MilestoneSet",
+        DaemonMessage::TicketChanged { .. } => "TicketChanged",
     }
 }
 

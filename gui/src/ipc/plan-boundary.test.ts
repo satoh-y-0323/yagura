@@ -781,3 +781,23 @@ describe('a refusal says which part of the reply was wrong', () => {
     expect(() => narrowRoleList({ roles: [1] })).toThrow(/^list_roles\.roles/);
   });
 });
+
+describe('the ticket a plan was made from', () => {
+  it('keeps the ticket number the daemon reported', () => {
+    expect(narrowPlanInfo(planInfoWire({ ticket: 12 })).ticket).toBe(12);
+  });
+
+  it('reads a plan without a ticket key, as an older daemon sends it, as made from no ticket', () => {
+    expect(narrowPlanInfo(planInfoWire()).ticket).toBeNull();
+  });
+
+  it('reads a null ticket as made from no ticket', () => {
+    expect(narrowPlanInfo(planInfoWire({ ticket: null })).ticket).toBeNull();
+  });
+
+  it('rejects a ticket that is not a non-negative integer rather than passing it on', () => {
+    for (const ticket of [-1, 1.5, '12', 'T-12', true]) {
+      expect(() => narrowPlanInfo(planInfoWire({ ticket }))).toThrow(BoundaryError);
+    }
+  });
+});

@@ -83,12 +83,14 @@ use yagura_protocol::{
     HandoffDelivery, InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias,
     LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
     McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
-    McpRegistrationTomlSet, McpRegistrationTomlValue, ModelChoice, ModelChoiceSource, Modifiers,
-    NamedKey, OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
-    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
-    ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
-    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
-    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
+    McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo, ModelChoice,
+    ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot, PlanInfo,
+    PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState, PointerButton,
+    PointerInput, PointerKind, ProfileCapability, ProfileCommandDetail, ProfileDetailEntry,
+    ProfileGuidance, ProfileInfo, ProfileLimit, ProfileUnavailableKind, ReceivedReport,
+    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
+    RoomRef, TaskAssignment, TaskReport, TerminalSize, TicketConfigInfo, TicketFieldInfo,
+    TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
     ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
     WindowStatus as WireWindowStatus, WithdrawReason,
 };
@@ -446,6 +448,7 @@ wire_sample!(struct PlanInfo {
     roles_warning,
     review,
     version,
+    ticket,
 });
 wire_sample!(struct PlanSummary {
     plan_id,
@@ -552,6 +555,48 @@ wire_sample!(struct McpRegistrationStep {
     exit_code,
     output,
 });
+wire_sample!(struct TicketWorkspaceInfo {
+    workspace_id,
+    kind,
+    path,
+});
+wire_sample!(struct TicketConfigInfo {
+    guide,
+    states,
+    fields,
+});
+wire_sample!(struct TicketStateInfo {
+    name,
+    description,
+    requires,
+});
+wire_sample!(struct TicketFieldInfo { name, description });
+wire_sample!(struct MilestoneInfo {
+    name,
+    position,
+    title,
+    description,
+});
+wire_sample!(struct TicketSummary {
+    number,
+    title,
+    state,
+    milestone,
+    updated_at,
+});
+wire_sample!(struct TicketInfo {
+    number,
+    title,
+    body,
+    state,
+    milestone,
+    fields,
+    results,
+    plans,
+    created_at,
+    updated_at,
+});
+wire_sample!(struct TicketResultInfo { seq, at, text });
 
 // ---------------------------------------------------------------------
 // The corpus: one value per ClientMessage / DaemonMessage variant.
@@ -659,7 +704,11 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             token,
             session,
         }),
-        wire_sample!(ClientMessage::CreatePlan { title, tasks }),
+        wire_sample!(ClientMessage::CreatePlan {
+            title,
+            tasks,
+            ticket,
+        }),
         wire_sample!(ClientMessage::UpdatePlan {
             plan_id,
             title,
@@ -709,6 +758,39 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             profile,
             action,
             request_id,
+        }),
+        wire_sample!(ClientMessage::ListTicketWorkspaces),
+        wire_sample!(ClientMessage::ListTickets {
+            workspace_id,
+            state,
+            milestone,
+            limit,
+        }),
+        wire_sample!(ClientMessage::GetTicket {
+            workspace_id,
+            ticket,
+        }),
+        wire_sample!(ClientMessage::CreateTicket {
+            title,
+            body,
+            milestone,
+            state,
+            fields,
+        }),
+        wire_sample!(ClientMessage::UpdateTicket {
+            ticket,
+            title,
+            body,
+            milestone,
+            state,
+            fields,
+        }),
+        wire_sample!(ClientMessage::AddTicketResult { ticket, text }),
+        wire_sample!(ClientMessage::SetMilestone {
+            name,
+            title,
+            description,
+            position,
         }),
     ]
 }
@@ -883,6 +965,18 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             error,
             status,
         }),
+        wire_sample!(DaemonMessage::TicketWorkspaceList { workspaces }),
+        wire_sample!(DaemonMessage::TicketList {
+            workspace_id,
+            config,
+            config_error,
+            milestones,
+            tickets,
+            truncated,
+        }),
+        wire_sample!(DaemonMessage::TicketDetail { ticket }),
+        wire_sample!(DaemonMessage::MilestoneSet { milestone }),
+        wire_sample!(DaemonMessage::TicketChanged { workspace_id }),
     ]
 }
 

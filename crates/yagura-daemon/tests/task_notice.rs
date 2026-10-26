@@ -217,6 +217,7 @@ async fn create_ok(client: &mut Connection, title: &str, tasks: Vec<PlanTaskSpec
         &ClientMessage::CreatePlan {
             title: title.to_string(),
             tasks,
+            ticket: None,
         },
     )
     .await;

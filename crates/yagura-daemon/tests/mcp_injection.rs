@@ -189,6 +189,7 @@ async fn create_plan_ok(
         &ClientMessage::CreatePlan {
             title: title.to_string(),
             tasks,
+            ticket: None,
         },
     )
     .await;

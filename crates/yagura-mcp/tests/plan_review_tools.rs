@@ -105,6 +105,7 @@ fn plan(review: Option<PlanReview>, version: u64, tasks: Vec<PlanTaskInfo>) -> P
         roles_warning: None,
         review,
         version,
+        ticket: None,
     }
 }
 

@@ -856,6 +856,7 @@ async fn create_plan(owner: &mut Connection, task_id: &str) -> PlanInfo {
         &ClientMessage::CreatePlan {
             title: format!("plan with {task_id}"),
             tasks: vec![plan_task(task_id)],
+            ticket: None,
         },
     )
     .await;

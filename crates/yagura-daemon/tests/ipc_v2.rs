@@ -312,6 +312,11 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::McpRegistrationStatus { .. } => "McpRegistrationStatus".to_string(),
         DaemonMessage::McpRegistrationRequested { .. } => "McpRegistrationRequested".to_string(),
         DaemonMessage::McpRegistrationResult { .. } => "McpRegistrationResult".to_string(),
+        DaemonMessage::TicketWorkspaceList { .. } => "TicketWorkspaceList".to_string(),
+        DaemonMessage::TicketList { .. } => "TicketList".to_string(),
+        DaemonMessage::TicketDetail { .. } => "TicketDetail".to_string(),
+        DaemonMessage::MilestoneSet { .. } => "MilestoneSet".to_string(),
+        DaemonMessage::TicketChanged { .. } => "TicketChanged".to_string(),
     }
 }
 

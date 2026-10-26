@@ -962,6 +962,7 @@ async fn create_plan(owner: &mut Connection, tasks: Vec<PlanTaskSpec>) -> PlanIn
         ClientMessage::CreatePlan {
             title: "plan".to_string(),
             tasks,
+            ticket: None,
         },
     )
     .await

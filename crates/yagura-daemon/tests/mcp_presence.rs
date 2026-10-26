@@ -223,6 +223,7 @@ async fn create_plan(client: &mut Connection, task_ids: &[&str]) -> PlanInfo {
         &ClientMessage::CreatePlan {
             title: "plan".to_string(),
             tasks,
+            ticket: None,
         },
     )
     .await;

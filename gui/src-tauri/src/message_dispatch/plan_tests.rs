@@ -63,6 +63,7 @@ fn sample_plan_info() -> PlanInfo {
         // Same note as `sample_plan_task_info` above.
         review: None,
         version: 0,
+        ticket: None,
     }
 }
 

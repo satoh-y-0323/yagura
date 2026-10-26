@@ -208,6 +208,7 @@ fn sample_plan() -> PlanInfo {
         roles_warning: Some("roles.toml could not be parsed".to_string()),
         review: None,
         version: 0,
+        ticket: None,
     }
 }
 
@@ -388,6 +389,7 @@ async fn create_plan_sends_the_title_and_every_task_field_verbatim() {
         ClientMessage::CreatePlan {
             title: "Parser rework".to_string(),
             tasks: vec![bare_task_spec(), full_task_spec()],
+            ticket: None,
         }
     );
 }
@@ -802,6 +804,7 @@ async fn create_plan_forwards_every_plan_the_daemon_refuses_and_relays_its_inval
             ClientMessage::CreatePlan {
                 title: "Parser rework".to_string(),
                 tasks: expected_tasks,
+                ticket: None,
             },
             "{case}: the task list must reach the daemon unchanged"
         );

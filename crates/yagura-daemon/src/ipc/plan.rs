@@ -1518,6 +1518,7 @@ fn build_plan_info_from_detail(
         roles_warning,
         review: detail.review,
         version: detail.version,
+        ticket: None,
     }
 }
 

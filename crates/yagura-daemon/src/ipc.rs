@@ -143,6 +143,14 @@ pub const RESTORE_REPLY_BUDGET_BYTES: usize = 2_097_152;
 /// SQLite failure, neither of which may cross the protocol boundary.
 const RESTORE_READ_FAILED_MESSAGE: &str = "failed to read the previous session's windows";
 
+/// The refusal for a ticket request on a daemon without a ticket store.
+const TICKETS_UNAVAILABLE_MESSAGE: &str = "tickets are not available on this daemon";
+
+/// The refusal for a `create_plan` that names a ticket on a daemon that
+/// cannot record the link.
+const PLAN_TICKET_UNAVAILABLE_MESSAGE: &str =
+    "a plan made from a ticket is not available on this daemon; nothing was created";
+
 /// How many daemon -> client frames may sit in a connection's outbound queue
 /// before back pressure applies. The queue is what decouples this connection's
 /// reader from a client that has stopped draining the connection; the bound
@@ -1765,7 +1773,19 @@ impl IpcServer {
                 }
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::CreatePlan { title, tasks }) => {
+            // Refused rather than created without its ticket, so a caller
+            // never holds a plan that silently lost the link it asked for.
+            Ok(ClientMessage::CreatePlan {
+                ticket: Some(_), ..
+            }) => {
+                outbound.reply(&error_msg("unsupported", PLAN_TICKET_UNAVAILABLE_MESSAGE));
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::CreatePlan {
+                title,
+                tasks,
+                ticket: None,
+            }) => {
                 plan::handle_create_plan(
                     &self.ledger,
                     &self.registry,
@@ -2097,6 +2117,18 @@ impl IpcServer {
                     },
                 )
                 .await;
+                FrameOutcome::Continue
+            }
+            Ok(
+                ClientMessage::ListTicketWorkspaces
+                | ClientMessage::ListTickets { .. }
+                | ClientMessage::GetTicket { .. }
+                | ClientMessage::CreateTicket { .. }
+                | ClientMessage::UpdateTicket { .. }
+                | ClientMessage::AddTicketResult { .. }
+                | ClientMessage::SetMilestone { .. },
+            ) => {
+                outbound.reply(&error_msg("unsupported", TICKETS_UNAVAILABLE_MESSAGE));
                 FrameOutcome::Continue
             }
         }

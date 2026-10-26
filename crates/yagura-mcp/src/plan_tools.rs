@@ -111,7 +111,11 @@ pub async fn create_plan<T: DaemonTransport>(
     let title = require_non_empty(args.title, "title")?;
     let tasks = normalize_task_instructions(require_tasks(args.tasks)?);
     let response = transport
-        .round_trip(ClientMessage::CreatePlan { title, tasks })
+        .round_trip(ClientMessage::CreatePlan {
+            title,
+            tasks,
+            ticket: None,
+        })
         .await
         .map_err(map_transport_error)?;
     match response {

@@ -386,7 +386,14 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // Delivery and SessionRecorded answer the doors a CLI's hook reads a
         // window's inbox through; this client never sends those.
         | DaemonMessage::Delivery { .. }
-        | DaemonMessage::SessionRecorded { .. } => None,
+        | DaemonMessage::SessionRecorded { .. }
+        // The ticket replies answer requests this client does not send, and
+        // the ticket_changed push has no listener in the WebView.
+        | DaemonMessage::TicketWorkspaceList { .. }
+        | DaemonMessage::TicketList { .. }
+        | DaemonMessage::TicketDetail { .. }
+        | DaemonMessage::MilestoneSet { .. }
+        | DaemonMessage::TicketChanged { .. } => None,
     }
 }
 

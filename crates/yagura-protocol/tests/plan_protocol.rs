@@ -102,6 +102,7 @@ fn sample_plan_info() -> PlanInfo {
         // Same note as `PlanTaskInfo::review_mark` above.
         review: None,
         version: 0,
+        ticket: None,
     }
 }
 
@@ -136,6 +137,7 @@ fn client_message_create_plan_round_trips() {
     let decoded = ClientMessage::CreatePlan {
         title: "ship the plan ledger".to_string(),
         tasks: vec![sample_plan_task_spec()],
+        ticket: None,
     };
     let value = as_json(&decoded);
     assert_wire_tag(&value, "create_plan");
@@ -607,6 +609,7 @@ fn plan_info_absent_optionals_serialize_as_null_not_omitted() {
         // Same note as `sample_plan_info` above.
         review: None,
         version: 0,
+        ticket: None,
     });
     let object = value
         .as_object()
@@ -671,6 +674,7 @@ fn one_instance_of_every_new_client_message() -> Vec<ClientMessage> {
         ClientMessage::CreatePlan {
             title: "ship the plan ledger".to_string(),
             tasks: vec![sample_plan_task_spec()],
+            ticket: None,
         },
         ClientMessage::UpdatePlan {
             plan_id: "p-sample".to_string(),

@@ -91,6 +91,7 @@ function plan(overrides: Partial<PlanInfo> = {}): PlanInfo {
     roles_warning: null,
     review: null,
     version: 0,
+    ticket: null,
     ...overrides,
   };
 }

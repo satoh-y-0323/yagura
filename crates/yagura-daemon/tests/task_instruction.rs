@@ -140,6 +140,7 @@ async fn create_plan(
         &ClientMessage::CreatePlan {
             title: title.to_string(),
             tasks: plan_tasks,
+            ticket: None,
         },
     )
     .await;

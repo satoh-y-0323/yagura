@@ -627,6 +627,7 @@ async fn a_plan_task_title_with_a_double_quote_is_refused() {
         &ClientMessage::CreatePlan {
             title: "plan".to_string(),
             tasks: vec![task_titled("t1", "Say \"hi\"", "t1.txt")],
+            ticket: None,
         },
     )
     .await;
@@ -753,6 +754,7 @@ async fn task_windows_number_a_shared_title_and_refuse_a_taken_supplied_name() {
                 task_titled("t2", "Review", "t2.txt"),
                 task_titled("t3", "Other", "t3.txt"),
             ],
+            ticket: None,
         },
     )
     .await;

@@ -255,6 +255,7 @@ async fn get_plan_resolves_tasks_without_a_known_role_to_the_default_row() {
                     task("unknown-role", Some("docs")),
                     task("known-role", Some("review")),
                 ],
+                ticket: None,
             },
         )
         .await,
@@ -296,6 +297,7 @@ async fn open_task_window_launches_the_default_rows_profile_for_tasks_without_a_
             &ClientMessage::CreatePlan {
                 title: "plan".to_string(),
                 tasks: vec![task("no-role", None), task("unknown-role", Some("docs"))],
+                ticket: None,
             },
         )
         .await,
@@ -351,6 +353,7 @@ async fn a_roles_file_whose_default_names_no_row_leaves_every_task_unassigned() 
             &ClientMessage::CreatePlan {
                 title: "plan".to_string(),
                 tasks: vec![task("no-role", None), task("known-role", Some("impl"))],
+                ticket: None,
             },
         )
         .await,

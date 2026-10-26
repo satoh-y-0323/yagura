@@ -477,6 +477,7 @@ async fn create_one_task_plan(owner: &mut Connection) -> String {
         &ClientMessage::CreatePlan {
             title: "plan".to_string(),
             tasks: vec![task("t1")],
+            ticket: None,
         },
     )
     .await;

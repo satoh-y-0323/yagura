@@ -163,6 +163,18 @@
 //! launchable profile cannot do on this host. A client built before this
 //! revision reads a row without `add` as malformed, so the GUI and the daemon
 //! must be the same version.
+//!
+//! Revision 29 adds tickets, a workspace's record of what is to be done.
+//! `list_ticket_workspaces` (approver-only, answered with
+//! `ticket_workspace_list`), `list_tickets` (answered with `ticket_list`),
+//! `get_ticket`, `create_ticket`, `update_ticket` and `add_ticket_result`
+//! (answered with `ticket_detail`) and `set_milestone` (answered with
+//! `milestone_set`) read and write them. A `ticket_changed` push, sent only to
+//! approvers, names the workspace whose tickets changed. `create_plan` may
+//! name the `ticket` the plan is made from, and [`PlanInfo`] carries it back.
+//! State, field and milestone names are opaque strings on the wire, since the
+//! user's settings define them. A caller establishes [`TICKETS_MIN_REVISION`]
+//! before sending any ticket request or a `create_plan` that names a ticket.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -174,7 +186,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 28;
+pub const PROTOCOL_REVISION: u32 = 29;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -303,6 +315,13 @@ pub const INBOX_MIN_REVISION: u32 = 22;
 /// An older daemon refuses it by name, so a caller establishes this revision
 /// before sending it.
 pub const DEFAULT_PALETTES_MIN_REVISION: u32 = 27;
+
+/// The first wire revision that understands the ticket requests and a
+/// [`ClientMessage::CreatePlan`] that names a `ticket`.
+///
+/// An older daemon refuses the requests by name and silently drops a plan's
+/// `ticket`, so a caller establishes this revision before sending either.
+pub const TICKETS_MIN_REVISION: u32 = 29;
 
 /// The most vendors one [`DefaultPalettes`] may assign a palette to; the
 /// daemon refuses a larger one as `invalid_argument`.
@@ -1213,23 +1232,93 @@ fn is_forbidden_instruction_char(ch: char) -> bool {
 /// ));
 /// ```
 pub fn validate_task_instruction(value: &str) -> Result<(), TaskInstructionError> {
-    if value.is_empty() {
-        return Err(TaskInstructionError::Empty);
+    validate_multiline_text(value, TASK_INSTRUCTION_MAX_BYTES).map_err(TaskInstructionError::from)
+}
+
+impl From<MultilineTextError> for TaskInstructionError {
+    fn from(err: MultilineTextError) -> Self {
+        match err {
+            MultilineTextError::Empty => Self::Empty,
+            MultilineTextError::TooLong { len, max } => Self::TooLong { len, max },
+            MultilineTextError::ForbiddenChar { at, ch } => Self::ForbiddenChar { at, ch },
+        }
     }
-    if value.len() > TASK_INSTRUCTION_MAX_BYTES {
-        return Err(TaskInstructionError::TooLong {
+}
+
+/// Why a multi-line text value (a plan task's instruction, a ticket's body,
+/// field value or result, a milestone's description) was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MultilineTextError {
+    /// The value is the empty string.
+    #[error("text must not be empty")]
+    Empty,
+    /// The value exceeds the byte limit it was checked against.
+    #[error("text is {len} bytes, exceeding the {max}-byte limit")]
+    TooLong {
+        /// The value's actual length in UTF-8 bytes.
+        len: usize,
+        /// The limit that was exceeded.
+        max: usize,
+    },
+    /// The value contains a character [`TaskInstructionError::ForbiddenChar`]
+    /// documents. The character is reported as a code point, never echoed.
+    #[error("text contains the forbidden character U+{:04X} at byte offset {at}", *ch as u32)]
+    ForbiddenChar {
+        /// Byte offset of the offending character within the value.
+        at: usize,
+        /// The offending character.
+        ch: char,
+    },
+}
+
+/// Validates multi-line text: non-empty, at most `max_bytes` UTF-8 bytes, and
+/// free of every control and bidirectional-control character except `\n`
+/// and `\t`. The one rule behind [`validate_task_instruction`] and the ticket
+/// text limits ([`TICKET_BODY_MAX_BYTES`] and its siblings).
+///
+/// # Errors
+///
+/// Returns the first violation found, checked in the order empty -> too
+/// long -> forbidden character.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_protocol::{MultilineTextError, TICKET_RESULT_MAX_BYTES, validate_multiline_text};
+///
+/// assert_eq!(validate_multiline_text("merged\n\tas abc123", TICKET_RESULT_MAX_BYTES), Ok(()));
+/// assert_eq!(validate_multiline_text("", TICKET_RESULT_MAX_BYTES), Err(MultilineTextError::Empty));
+/// ```
+pub fn validate_multiline_text(value: &str, max_bytes: usize) -> Result<(), MultilineTextError> {
+    if value.is_empty() {
+        return Err(MultilineTextError::Empty);
+    }
+    if value.len() > max_bytes {
+        return Err(MultilineTextError::TooLong {
             len: value.len(),
-            max: TASK_INSTRUCTION_MAX_BYTES,
+            max: max_bytes,
         });
     }
     match value
         .char_indices()
         .find(|&(_, ch)| is_forbidden_instruction_char(ch))
     {
-        Some((at, ch)) => Err(TaskInstructionError::ForbiddenChar { at, ch }),
+        Some((at, ch)) => Err(MultilineTextError::ForbiddenChar { at, ch }),
         None => Ok(()),
     }
 }
+
+/// Upper bound (bytes) on a ticket's `body`.
+pub const TICKET_BODY_MAX_BYTES: usize = 16 * 1024;
+
+/// Upper bound (bytes) on one value of a ticket's `fields`.
+pub const TICKET_FIELD_VALUE_MAX_BYTES: usize = 2 * 1024;
+
+/// Upper bound (bytes) on one result added to a ticket.
+pub const TICKET_RESULT_MAX_BYTES: usize = 4 * 1024;
+
+/// Upper bound (bytes) on a milestone's `description`.
+pub const MILESTONE_DESCRIPTION_MAX_BYTES: usize = 2 * 1024;
 
 /// Same set as [`is_forbidden_label_char`], except `\n` and `\r`: a
 /// `send_message` body uses them as its own submit marker (a single
@@ -2794,6 +2883,11 @@ pub enum ClientMessage {
         title: String,
         /// Every task of the plan, in the caller's order.
         tasks: Vec<PlanTaskSpec>,
+        /// The number of the ticket, in the caller's workspace, the plan is
+        /// made from. `None`, and left off the wire, for a plan made from no
+        /// ticket.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<u32>,
     },
     /// Replaces every task of an existing plan (and optionally its title);
     /// answered with [`DaemonMessage::PlanDetail`].
@@ -2991,6 +3085,94 @@ pub enum ClientMessage {
         /// Echoed by the answer and the push it causes.
         request_id: u64,
     },
+    /// Lists every workspace that has tickets; answered with
+    /// [`DaemonMessage::TicketWorkspaceList`]. Approver-only.
+    ListTicketWorkspaces,
+    /// Reads a workspace's ticket settings, milestones and ticket summaries;
+    /// answered with [`DaemonMessage::TicketList`].
+    ListTickets {
+        /// The workspace to read. An approver names one; a window reads its
+        /// own and may not name one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<i64>,
+        /// Only tickets in this state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// Only tickets in this milestone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        milestone: Option<String>,
+        /// The most summaries to return. `None` leaves it to the daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Reads one ticket in full; answered with [`DaemonMessage::TicketDetail`].
+    GetTicket {
+        /// Same as [`ClientMessage::ListTickets::workspace_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<i64>,
+        /// The ticket's number in the workspace.
+        ticket: u32,
+    },
+    /// Creates a ticket in the calling window's workspace; answered with
+    /// [`DaemonMessage::TicketDetail`].
+    CreateTicket {
+        /// The ticket's title.
+        title: String,
+        /// The ticket's body, bounded by [`TICKET_BODY_MAX_BYTES`].
+        body: String,
+        /// The milestone the ticket belongs to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        milestone: Option<String>,
+        /// The state to start in. `None` leaves it to the daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// Field values by field name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fields: Option<BTreeMap<String, String>>,
+    },
+    /// Changes a ticket in the calling window's workspace; answered with
+    /// [`DaemonMessage::TicketDetail`]. Only what is given changes.
+    UpdateTicket {
+        /// The ticket's number in the workspace.
+        ticket: u32,
+        /// The new title.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The new body.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        /// The new milestone; `""` takes the ticket out of its milestone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        milestone: Option<String>,
+        /// The new state.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// The fields to change; a value of `""` removes that field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fields: Option<BTreeMap<String, String>>,
+    },
+    /// Appends a result to a ticket in the calling window's workspace;
+    /// answered with [`DaemonMessage::TicketDetail`].
+    AddTicketResult {
+        /// The ticket's number in the workspace.
+        ticket: u32,
+        /// The result, bounded by [`TICKET_RESULT_MAX_BYTES`].
+        text: String,
+    },
+    /// Creates or changes a milestone in the calling window's workspace;
+    /// answered with [`DaemonMessage::MilestoneSet`].
+    SetMilestone {
+        /// The milestone's name.
+        name: String,
+        /// The milestone's display title.
+        title: String,
+        /// The milestone's description, bounded by
+        /// [`MILESTONE_DESCRIPTION_MAX_BYTES`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Where the milestone sorts; equal positions sort by name.
+        position: i64,
+    },
 }
 
 /// The wire revision a peer must implement before `msg` may be sent to it.
@@ -3044,6 +3226,16 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         | ClientMessage::Wheel(_)
         | ClientMessage::Focus { .. } => STRUCTURED_INPUT_MIN_REVISION,
         ClientMessage::SendKeys { .. } => SEND_KEYS_MIN_REVISION,
+        ClientMessage::ListTicketWorkspaces
+        | ClientMessage::ListTickets { .. }
+        | ClientMessage::GetTicket { .. }
+        | ClientMessage::CreateTicket { .. }
+        | ClientMessage::UpdateTicket { .. }
+        | ClientMessage::AddTicketResult { .. }
+        | ClientMessage::SetMilestone { .. }
+        | ClientMessage::CreatePlan {
+            ticket: Some(_), ..
+        } => TICKETS_MIN_REVISION,
         ClientMessage::OpenWindowFromProfile { model, effort, .. }
         | ClientMessage::SendHandoff { model, effort, .. }
             if model.is_some() || effort.is_some() =>
@@ -3673,6 +3865,159 @@ pub enum DaemonMessage {
         /// The registration state read after the operation.
         status: McpRegistrationStatusInfo,
     },
+    /// Response to [`ClientMessage::ListTicketWorkspaces`].
+    TicketWorkspaceList {
+        /// Every workspace that has tickets.
+        workspaces: Vec<TicketWorkspaceInfo>,
+    },
+    /// Response to [`ClientMessage::ListTickets`].
+    TicketList {
+        /// The workspace read. `None` when the caller's own workspace was
+        /// read on its behalf.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<i64>,
+        /// The user's ticket settings. `None` when they could not be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config: Option<TicketConfigInfo>,
+        /// Fixed English text naming why the settings could not be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_error: Option<String>,
+        /// The workspace's milestones, in position order.
+        milestones: Vec<MilestoneInfo>,
+        /// The tickets that matched, in board order.
+        tickets: Vec<TicketSummary>,
+        /// Whether more tickets matched than were returned.
+        truncated: bool,
+    },
+    /// Response to [`ClientMessage::GetTicket`], [`ClientMessage::CreateTicket`],
+    /// [`ClientMessage::UpdateTicket`] and [`ClientMessage::AddTicketResult`]:
+    /// the ticket as stored after the request.
+    TicketDetail {
+        /// The ticket in full.
+        ticket: TicketInfo,
+    },
+    /// Response to [`ClientMessage::SetMilestone`].
+    MilestoneSet {
+        /// The milestone as stored.
+        milestone: MilestoneInfo,
+    },
+    /// Sent to every registered approver connection after a workspace's
+    /// tickets or milestones changed.
+    TicketChanged {
+        /// The workspace whose tickets changed.
+        workspace_id: i64,
+    },
+}
+
+/// One workspace in a [`DaemonMessage::TicketWorkspaceList`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketWorkspaceInfo {
+    /// The workspace's identifier.
+    pub workspace_id: i64,
+    /// How the workspace is keyed (an opaque string, such as `git`).
+    pub kind: String,
+    /// The workspace's path, for display.
+    pub path: String,
+}
+
+/// A workspace's ticket settings, as the user wrote them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketConfigInfo {
+    /// The rules the user set for the board.
+    pub guide: String,
+    /// The states, in board column order.
+    pub states: Vec<TicketStateInfo>,
+    /// The fields a ticket may carry.
+    pub fields: Vec<TicketFieldInfo>,
+}
+
+/// One state of a [`TicketConfigInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketStateInfo {
+    /// The state's name.
+    pub name: String,
+    /// What the state means.
+    pub description: String,
+    /// The fields a ticket in this state must have.
+    pub requires: Vec<String>,
+}
+
+/// One field of a [`TicketConfigInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketFieldInfo {
+    /// The field's name.
+    pub name: String,
+    /// What the field holds.
+    pub description: String,
+}
+
+/// One milestone of a workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MilestoneInfo {
+    /// The milestone's name.
+    pub name: String,
+    /// Where the milestone sorts; equal positions sort by name.
+    pub position: i64,
+    /// The milestone's display title.
+    pub title: String,
+    /// The milestone's description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One ticket in a [`DaemonMessage::TicketList`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketSummary {
+    /// The ticket's number in the workspace.
+    pub number: u32,
+    /// The ticket's title.
+    pub title: String,
+    /// The ticket's state, which may name a state the settings no longer have.
+    pub state: String,
+    /// The ticket's milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    /// When the ticket last changed, in milliseconds since the Unix epoch.
+    pub updated_at: u64,
+}
+
+/// One ticket in full, in a [`DaemonMessage::TicketDetail`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketInfo {
+    /// The ticket's number in the workspace.
+    pub number: u32,
+    /// The ticket's title.
+    pub title: String,
+    /// The ticket's body.
+    pub body: String,
+    /// The ticket's state.
+    pub state: String,
+    /// The ticket's milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    /// Field values by field name, including fields the settings no longer
+    /// define.
+    pub fields: BTreeMap<String, String>,
+    /// The results added to the ticket, oldest first.
+    pub results: Vec<TicketResultInfo>,
+    /// The plans made from the ticket.
+    pub plans: Vec<String>,
+    /// When the ticket was created, in milliseconds since the Unix epoch.
+    pub created_at: u64,
+    /// When the ticket last changed, in milliseconds since the Unix epoch.
+    pub updated_at: u64,
+}
+
+/// One result of a [`TicketInfo`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketResultInfo {
+    /// The result's sequence number within the ticket.
+    pub seq: u64,
+    /// When the daemon recorded the result, in milliseconds since the Unix
+    /// epoch.
+    pub at: u64,
+    /// The result's text.
+    pub text: String,
 }
 
 /// The stream a hook prints a [`DaemonMessage::Delivery`] on.
@@ -4181,6 +4526,11 @@ pub struct PlanInfo {
     /// daemon predating this field reports `0`.
     #[serde(default)]
     pub version: u64,
+    /// The number of the ticket, in the plan's workspace, the plan was made
+    /// from. `None`, and left off the wire, for a plan made from no ticket or
+    /// read from a daemon predating this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<u32>,
 }
 
 /// One plan in a [`DaemonMessage::PlanList`] listing.
@@ -4580,6 +4930,13 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "deliver_take",
     "deliver_wait",
     "report_session",
+    "list_ticket_workspaces",
+    "list_tickets",
+    "get_ticket",
+    "create_ticket",
+    "update_ticket",
+    "add_ticket_result",
+    "set_milestone",
 ];
 
 /// The `type` values recognized by [`DaemonMessage`].
@@ -4644,6 +5001,11 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "mcp_registration_result",
     "delivery",
     "session_recorded",
+    "ticket_workspace_list",
+    "ticket_list",
+    "ticket_detail",
+    "milestone_set",
+    "ticket_changed",
 ];
 
 /// Every `type` value [`decode_client_message`] accepts.
