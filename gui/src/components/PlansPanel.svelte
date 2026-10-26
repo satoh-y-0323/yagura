@@ -11,6 +11,7 @@
 
   import IconButton from './IconButton.svelte';
   import ModelAliasesEditor from './ModelAliasesEditor.svelte';
+  import PlansAttentionMark from './PlansAttentionMark.svelte';
   import PlanBoard from './PlanBoard.svelte';
   import RolesEditor from './RolesEditor.svelte';
   import TicketBoard from './TicketBoard.svelte';
@@ -18,6 +19,7 @@
   import { closeOnEscape } from './panel-focus';
   import { observeSize } from './observe-size';
   import { PANEL_MIN_SIZE, type PanelSize } from '../settings/panel-size';
+  import type { PlansAttention } from '../plans/plan-board-model';
   import type { PlansTab } from '../tickets/ticket-board-model';
   import { buttons, nav, plans } from '../ui-messages';
 
@@ -42,6 +44,8 @@
   export let onSaveRoles: EditorProps['onSave'];
   export let onApprovePlan: BoardProps['onApprovePlan'];
   export let activeTab: PlansTab;
+  /** What the Board tab flags, the same mark the rail's Plans button shows. */
+  export let plansAttention: PlansAttention;
   export let onSelectTab: (tab: PlansTab) => void;
   export let ticketWorkspaces: TicketBoardProps['workspaces'];
   export let selectedTicketWorkspaceId: TicketBoardProps['selectedWorkspaceId'];
@@ -94,7 +98,10 @@
           type="button"
           class="plans-panel__tab"
           aria-pressed={activeTab === entry.tab}
-          on:click={() => onSelectTab(entry.tab)}>{entry.label}</button
+          on:click={() => onSelectTab(entry.tab)}
+          >{entry.label}{#if entry.tab === 'board' && plansAttention !== null}<PlansAttentionMark
+              attention={plansAttention}
+            />{/if}</button
         >
       {/each}
     </div>

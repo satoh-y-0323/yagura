@@ -205,7 +205,8 @@
   .ticket-board__state {
     margin: 0;
     display: flex;
-    justify-content: space-between;
+    align-items: center;
+    justify-content: flex-start;
     gap: var(--space-xs);
     font-size: var(--font-size-xs);
     font-weight: 600;
@@ -214,6 +215,11 @@
   }
 
   .ticket-board__count {
+    padding: 0 var(--space-xs);
+    border-radius: var(--radius-sm);
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-border);
+    font-weight: 400;
     font-variant-numeric: tabular-nums;
   }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { chat, describeAttentionBadge, nav, plans } from '../ui-messages';
+  import PlansAttentionMark from './PlansAttentionMark.svelte';
   import type { PlansAttention } from '../plans/plan-board-model';
   import { themeMarkOf } from './theme-mark';
   import IconButton from './IconButton.svelte';
@@ -103,7 +104,7 @@
       />
     </svg>
     {#if plansAttention !== null}
-      <span class="app-rail__badge" data-tone="attention" aria-label={plansAttentionText}></span>
+      <span class="app-rail__plans-mark"><PlansAttentionMark attention={plansAttention} /></span>
     {/if}
   </IconButton>
 
@@ -268,6 +269,13 @@
     font-size: 10px;
     line-height: 16px;
     text-align: center;
+  }
+
+  .app-rail__plans-mark {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: flex;
   }
 
   .app-rail__spacer {

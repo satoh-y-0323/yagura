@@ -501,7 +501,7 @@
   // owner candidates are derived by the panel from the window registry, so
   // nothing here is read again when only the window list moves.
   let isPlansOpen = false;
-  // The tab the plans panel shows. Every opening starts on Tickets.
+  // The tab the plans panel shows: the last one viewed while the app runs, Tickets at first.
   let plansTab: PlansTab = 'tickets';
   // Marks the user was shown this time the panel is open; the daemon clears
   // them as soon as the plan is seen, so they are kept here until it closes.
@@ -513,7 +513,6 @@
     requestedModelProfile = null;
     modelChoices = new Map();
     latestChoicesRequestIds.clear();
-    plansTab = 'tickets';
     openTicketNumber = null;
     openTicket = null;
   }
@@ -3368,6 +3367,7 @@
       void saveRoles(next, nextDefaultRole)}
     onApprovePlan={() => void approvePlan()}
     activeTab={plansTab}
+    plansAttention={plansAttention(planList)}
     onSelectTab={selectPlansTab}
     {ticketWorkspaces}
     selectedTicketWorkspaceId={ticketWorkspaceId}
