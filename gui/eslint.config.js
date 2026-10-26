@@ -301,6 +301,7 @@ export default [
       'src/ipc/session-boundary.ts',
       'src/ipc/session-client.ts',
       'src/ipc/plan-boundary.ts',
+      'src/ipc/ticket-boundary.ts',
       'src/ipc/model-boundary.ts',
       'src/ipc/mcp-registration-boundary.ts',
       'src/ipc/profile-detail-boundary.ts',

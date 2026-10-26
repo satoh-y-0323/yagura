@@ -80,6 +80,10 @@ pub const EVENT_CHAT_HISTORY_CLEARED: &str = "session://chat-history-cleared";
 /// again. Payload: [`PlanChangedPayload`].
 pub const EVENT_PLAN_CHANGED: &str = "session://plan-changed";
 
+/// A workspace's tickets or milestones changed, so a displayed board or
+/// ticket of it should be read again. Payload: [`TicketChangedPayload`].
+pub const EVENT_TICKET_CHANGED: &str = "session://ticket-changed";
+
 /// The model list a `list_model_choices` request asked for is ready or could
 /// not be taken. Payload: [`ModelChoicesPayload`].
 pub const EVENT_MODEL_CHOICES: &str = "session://model-choices";
@@ -236,6 +240,13 @@ pub struct ChatHistoryClearedPayload {
 pub struct PlanChangedPayload {
     /// The plan that changed.
     pub plan_id: String,
+}
+
+/// Payload of [`EVENT_TICKET_CHANGED`].
+#[derive(Debug, Clone, Serialize)]
+pub struct TicketChangedPayload {
+    /// The workspace whose tickets changed.
+    pub workspace_id: i64,
 }
 
 /// Payload of [`EVENT_MODEL_CHOICES`].

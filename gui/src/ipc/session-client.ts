@@ -1549,7 +1549,7 @@ async function listenWindowEvent<T extends WindowScoped>(
 }
 
 /** Listens to one application-scoped event, validating its payload. */
-async function listenAppEvent<T>(
+export async function listenAppEvent<T>(
   name: SessionEventName | typeof WINDOW_LIST_EVENT,
   narrow: (value: unknown) => T,
   handle: (payload: T) => void,

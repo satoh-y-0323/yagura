@@ -14,7 +14,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use yagura_protocol::{
     ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction, OnNameTaken,
-    PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize, WindowInfo, WindowStatus,
+    PlanInfo, PlanSummary, RoleEntry, TaskAssignment, TerminalSize, TicketInfo,
+    TicketWorkspaceInfo, WindowInfo, WindowStatus,
 };
 
 use crate::commands::{
@@ -22,7 +23,8 @@ use crate::commands::{
     DaemonHealthReply, DetectionListReply, McpRegistrationRequestedReply,
     McpRegistrationsListedReply, ModelAliasesSavedReply, ModelChoicesRequestedReply,
     OpenWindowReply, ProfileCommandSetReply, ProfileDetailReply, ProfileEnabledSetReply,
-    ProfileListReply, RestoreCandidateListReply, RoleListReply, UpdateWindowLayoutReply,
+    ProfileListReply, RestoreCandidateListReply, RoleListReply, TicketListReply,
+    UpdateWindowLayoutReply,
 };
 use crate::events::AttachResponse;
 use crate::frame_mailbox::FrameMailbox;
@@ -464,6 +466,55 @@ impl ConnectionPool {
         self.control(app)
             .await?
             .mark_plan_seen(plan_id, version)
+            .await
+    }
+
+    /// Lists every workspace that has tickets, through the control
+    /// connection: the daemon answers it as the approver it registered.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
+    /// request.
+    pub async fn list_ticket_workspaces(
+        &self,
+        app: &impl GuiHost,
+    ) -> Result<Vec<TicketWorkspaceInfo>, IpcError> {
+        self.control(app).await?.list_ticket_workspaces().await
+    }
+
+    /// Reads one workspace's ticket list, through the control connection.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
+    /// request.
+    pub async fn list_tickets(
+        &self,
+        app: &impl GuiHost,
+        workspace_id: i64,
+        state: Option<String>,
+        milestone: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<TicketListReply, IpcError> {
+        self.control(app)
+            .await?
+            .list_tickets(workspace_id, state, milestone, limit)
+            .await
+    }
+
+    /// Reads one ticket in full, through the control connection.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached or rejects the
+    /// request.
+    pub async fn get_ticket(
+        &self,
+        app: &impl GuiHost,
+        workspace_id: i64,
+        ticket: u32,
+    ) -> Result<TicketInfo, IpcError> {
+        self.control(app)
+            .await?
+            .get_ticket(workspace_id, ticket)
             .await
     }
 

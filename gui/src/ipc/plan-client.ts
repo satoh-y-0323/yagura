@@ -9,7 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { type UnlistenFn } from '@tauri-apps/api/event';
 
 import {
   narrowPlanChanged,
@@ -24,6 +24,7 @@ import {
   type TaskAssignment,
 } from './plan-boundary';
 import { narrowStringResult, SESSION_EVENT } from './session-boundary';
+import { listenAppEvent } from './session-client';
 
 /**
  * Lists the plans the daemon lets this GUI see.
@@ -157,14 +158,10 @@ export async function subscribePlanChanged(
   onPlanChanged: (payload: PlanChanged) => void,
   onBoundaryError: (error: unknown) => void
 ): Promise<UnlistenFn> {
-  return listen<unknown>(SESSION_EVENT.planChanged, (event) => {
-    let payload: PlanChanged;
-    try {
-      payload = narrowPlanChanged(event.payload);
-    } catch (error) {
-      onBoundaryError(error);
-      return;
-    }
-    onPlanChanged(payload);
-  });
+  return listenAppEvent(
+    SESSION_EVENT.planChanged,
+    narrowPlanChanged,
+    onPlanChanged,
+    onBoundaryError
+  );
 }

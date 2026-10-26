@@ -24,7 +24,7 @@ use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc, default_endpoint};
 use yagura_protocol::{
     ApprovalRequest, ClientMessage, DefaultPalettes, LaunchOptionAlias, McpRegistrationAction,
     OnNameTaken, PROTOCOL_REVISION_BASELINE, PlanInfo, PlanSummary, RoleEntry, TaskAssignment,
-    TerminalSize, WindowInfo,
+    TerminalSize, TicketInfo, TicketWorkspaceInfo, WindowInfo,
 };
 
 use crate::commands::{
@@ -33,7 +33,7 @@ use crate::commands::{
     McpRegistrationsListedReply, ModelAliasesSavedReply, ModelChoicesRequestedReply,
     OpenWindowReply, ProfileCommandSetReply, ProfileDetailReply, ProfileEnabledSetReply,
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TaskWindowOpenedReply,
-    UpdateWindowLayoutReply,
+    TicketListReply, UpdateWindowLayoutReply,
 };
 use crate::constants::{
     ATTACH_TIMEOUT, CONNECT_RETRY_INTERVAL, CONNECT_RETRY_LIMIT, RECONNECT_ATTEMPT_LIMIT,
@@ -198,6 +198,11 @@ pub(crate) enum PendingKind {
     ListMcpRegistrations,
     RunMcpRegistration,
     CopySelection,
+    TicketWorkspaceList,
+    TicketList,
+    /// Every request answered with a whole ticket waits under one tag; this
+    /// client only reads, so the one it sends is `get_ticket`.
+    TicketDetail,
 }
 
 impl PendingKind {
@@ -279,6 +284,9 @@ pub(crate) enum Reply {
     /// The selected text of the attached window; `None` when nothing is
     /// selected.
     SelectionText(Option<String>),
+    TicketWorkspaceList(Vec<TicketWorkspaceInfo>),
+    TicketList(TicketListReply),
+    TicketDetail(TicketInfo),
     /// The request succeeded and carries no value beyond that.
     Done,
 }
@@ -1184,6 +1192,65 @@ impl IpcClient {
             .await?
         {
             Reply::PlanApprovalRequiredSet(settings) => Ok(settings),
+            _ => Err(IpcError::UnexpectedReply),
+        }
+    }
+
+    /// Lists every workspace that has tickets.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
+    /// ticket board, or rejects the request.
+    pub async fn list_ticket_workspaces(&self) -> Result<Vec<TicketWorkspaceInfo>, IpcError> {
+        match self
+            .request(
+                &ClientMessage::ListTicketWorkspaces,
+                PendingKind::TicketWorkspaceList,
+            )
+            .await?
+        {
+            Reply::TicketWorkspaceList(workspaces) => Ok(workspaces),
+            _ => Err(IpcError::UnexpectedReply),
+        }
+    }
+
+    /// Reads one workspace's ticket settings, milestones and the summaries of
+    /// the tickets that match `state` and `milestone`, at most `limit` of them.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
+    /// ticket board, or rejects the request.
+    pub async fn list_tickets(
+        &self,
+        workspace_id: i64,
+        state: Option<String>,
+        milestone: Option<String>,
+        limit: Option<u32>,
+    ) -> Result<TicketListReply, IpcError> {
+        let message = ClientMessage::ListTickets {
+            workspace_id: Some(workspace_id),
+            state,
+            milestone,
+            limit,
+        };
+        match self.request(&message, PendingKind::TicketList).await? {
+            Reply::TicketList(list) => Ok(list),
+            _ => Err(IpcError::UnexpectedReply),
+        }
+    }
+
+    /// Reads one ticket of a workspace in full.
+    ///
+    /// # Errors
+    /// Returns [`IpcError`] when the daemon cannot be reached, predates the
+    /// ticket board, or rejects the request (an unknown ticket included).
+    pub async fn get_ticket(&self, workspace_id: i64, ticket: u32) -> Result<TicketInfo, IpcError> {
+        let message = ClientMessage::GetTicket {
+            workspace_id: Some(workspace_id),
+            ticket,
+        };
+        match self.request(&message, PendingKind::TicketDetail).await? {
+            Reply::TicketDetail(ticket) => Ok(ticket),
             _ => Err(IpcError::UnexpectedReply),
         }
     }

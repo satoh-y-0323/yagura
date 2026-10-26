@@ -52,6 +52,7 @@ fn main() -> anyhow::Result<()> {
                 // installed config root already has a playbook when the
                 // daemon reads it.
                 config_paths::ensure_default_playbook_in(base, namespace);
+                config_paths::ensure_default_tickets_in(base, namespace);
                 tauri::async_runtime::spawn(window_list_poll::run_window_list_poll(
                     poll_pool,
                     app.handle().clone(),
@@ -120,6 +121,9 @@ fn main() -> anyhow::Result<()> {
             commands::set_plan_owner,
             commands::approve_plan,
             commands::mark_plan_seen,
+            commands::list_ticket_workspaces,
+            commands::list_tickets,
+            commands::get_ticket,
             commands::list_roles,
             commands::save_roles,
             commands::list_model_choices,

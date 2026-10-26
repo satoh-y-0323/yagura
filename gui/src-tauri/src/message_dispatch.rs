@@ -20,7 +20,7 @@ use crate::commands::{
     McpRegistrationsListedReply, ModelAliasesSavedReply, ModelChoicesRequestedReply,
     OpenWindowReply, ProfileCommandSetReply, ProfileDetailReply, ProfileEnabledSetReply,
     ProfileListReply, RestoreCandidateListReply, RoleListReply, TaskWindowOpenedReply,
-    ToolAutoApproveReply, UpdateWindowLayoutReply, mcp_registration_action_str,
+    TicketListReply, ToolAutoApproveReply, UpdateWindowLayoutReply, mcp_registration_action_str,
 };
 use crate::constants::READ_CHUNK_LEN;
 use crate::events::{
@@ -29,8 +29,8 @@ use crate::events::{
     EVENT_APPROVAL_WITHDRAWN, EVENT_CHAT_CHANGED, EVENT_CHAT_HISTORY_CLEARED,
     EVENT_CHAT_PARTICIPANTS_CHANGED, EVENT_EXIT, EVENT_MCP_REGISTRATION_RESULT,
     EVENT_MCP_REGISTRATION_STATUS, EVENT_MODEL_CHOICES, EVENT_PLAN_CHANGED, EVENT_STATUS,
-    ExitPayload, McpRegistrationResultPayload, McpRegistrationStatusPayload, ModelChoicesPayload,
-    PlanChangedPayload, StatusPayload,
+    EVENT_TICKET_CHANGED, ExitPayload, McpRegistrationResultPayload, McpRegistrationStatusPayload,
+    ModelChoicesPayload, PlanChangedPayload, StatusPayload, TicketChangedPayload,
 };
 use crate::host::GuiHost;
 use crate::ipc_client::{
@@ -350,6 +350,31 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
                 action: mcp_registration_action_str(action).to_owned(),
             }),
         )),
+        DaemonMessage::TicketWorkspaceList { workspaces } => Some((
+            PendingKind::TicketWorkspaceList,
+            Reply::TicketWorkspaceList(workspaces),
+        )),
+        DaemonMessage::TicketList {
+            workspace_id,
+            config,
+            config_error,
+            milestones,
+            tickets,
+            truncated,
+        } => Some((
+            PendingKind::TicketList,
+            Reply::TicketList(TicketListReply {
+                workspace_id,
+                config,
+                config_error,
+                milestones,
+                tickets,
+                truncated,
+            }),
+        )),
+        DaemonMessage::TicketDetail { ticket } => {
+            Some((PendingKind::TicketDetail, Reply::TicketDetail(ticket)))
+        }
         // Identified and HandoffSent are never received: this client sends
         // neither `identify` nor `send_handoff`.
         // ApprovalRequested / ApprovalWithdrawn are unsolicited event-class
@@ -369,13 +394,15 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         | DaemonMessage::ApprovalRequested { .. }
         | DaemonMessage::ApprovalWithdrawn { .. }
         | DaemonMessage::HandoffSent { .. }
-        // ChatChanged, PlanChanged, ModelChoices and the two MCP registration
-        // pushes are turned into events by `dispatch`; the ones answering a
-        // request follow its acknowledgement rather than answering it.
+        // ChatChanged, PlanChanged, TicketChanged, ModelChoices and the two
+        // MCP registration pushes are turned into events by `dispatch`; the
+        // ones answering a request follow its acknowledgement rather than
+        // answering it.
         | DaemonMessage::ChatChanged { .. }
         | DaemonMessage::ChatParticipantsChanged
         | DaemonMessage::ChatHistoryCleared { .. }
         | DaemonMessage::PlanChanged { .. }
+        | DaemonMessage::TicketChanged { .. }
         | DaemonMessage::ModelChoices { .. }
         | DaemonMessage::McpRegistrationStatus { .. }
         | DaemonMessage::McpRegistrationResult { .. }
@@ -387,13 +414,8 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // window's inbox through; this client never sends those.
         | DaemonMessage::Delivery { .. }
         | DaemonMessage::SessionRecorded { .. }
-        // The ticket replies answer requests this client does not send, and
-        // the ticket_changed push has no listener in the WebView.
-        | DaemonMessage::TicketWorkspaceList { .. }
-        | DaemonMessage::TicketList { .. }
-        | DaemonMessage::TicketDetail { .. }
-        | DaemonMessage::MilestoneSet { .. }
-        | DaemonMessage::TicketChanged { .. } => None,
+        // MilestoneSet is never received: the GUI only reads tickets.
+        | DaemonMessage::MilestoneSet { .. } => None,
     }
 }
 
@@ -632,6 +654,10 @@ async fn dispatch(
             app.emit_event(EVENT_PLAN_CHANGED, PlanChangedPayload { plan_id });
             false
         }
+        DaemonMessage::TicketChanged { workspace_id } => {
+            app.emit_event(EVENT_TICKET_CHANGED, TicketChangedPayload { workspace_id });
+            false
+        }
         DaemonMessage::ModelChoices {
             request_id,
             profile,
@@ -669,6 +695,9 @@ async fn dispatch(
 
 #[cfg(test)]
 mod plan_tests;
+
+#[cfg(test)]
+mod ticket_tests;
 
 #[cfg(test)]
 mod model_tests;

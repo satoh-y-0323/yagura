@@ -240,6 +240,34 @@ pub struct PlanListReply {
     pub plans: Vec<yagura_protocol::PlanSummary>,
 }
 
+/// The reply of [`list_ticket_workspaces`]: every workspace that has
+/// tickets, wrapped in `workspaces` like the daemon's own
+/// `TicketWorkspaceList`.
+#[derive(Debug, serde::Serialize)]
+pub struct TicketWorkspaceListReply {
+    /// Every workspace, in the order the daemon listed them.
+    pub workspaces: Vec<yagura_protocol::TicketWorkspaceInfo>,
+}
+
+/// The reply of [`list_tickets`]: one workspace's ticket settings,
+/// milestones and the matching ticket summaries, as the daemon's `TicketList`
+/// carries them.
+#[derive(Debug, serde::Serialize)]
+pub struct TicketListReply {
+    /// The workspace read.
+    pub workspace_id: Option<i64>,
+    /// The user's ticket settings, `None` when they could not be read.
+    pub config: Option<yagura_protocol::TicketConfigInfo>,
+    /// Why the settings could not be read, `None` when they were.
+    pub config_error: Option<String>,
+    /// The workspace's milestones, in position order.
+    pub milestones: Vec<yagura_protocol::MilestoneInfo>,
+    /// The matching tickets, in board order.
+    pub tickets: Vec<yagura_protocol::TicketSummary>,
+    /// Whether more tickets matched than were returned.
+    pub truncated: bool,
+}
+
 /// The reply of [`list_roles`] and [`save_roles`]: the role table as the
 /// daemon stores it, wrapped in `roles` like the daemon's own `RoleList`.
 #[derive(Debug, serde::Serialize)]
@@ -1005,6 +1033,64 @@ pub async fn mark_plan_seen(
         .map_err(stringify)
 }
 
+/// Lists every workspace that has tickets. The ticket commands are read-only
+/// and go through the control connection, like the plan-ledger commands.
+///
+/// # Errors
+/// Returns a human-readable message when the daemon cannot be reached,
+/// predates the ticket board, or rejects the request.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_ticket_workspaces(
+    app: AppHandle,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<TicketWorkspaceListReply, String> {
+    let workspaces = pool.list_ticket_workspaces(&app).await.map_err(stringify)?;
+    Ok(TicketWorkspaceListReply { workspaces })
+}
+
+/// Reads one workspace's ticket settings, milestones and the summaries of
+/// the tickets in `state` and `milestone` (`None` applies no filter), at most
+/// `limit` of them (`None` leaves the cap to the daemon).
+///
+/// # Errors
+/// Returns a human-readable message when `state` or `milestone` is not a
+/// name the daemon could hold, the daemon cannot be reached, or it rejects
+/// the request.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_tickets(
+    app: AppHandle,
+    workspace_id: i64,
+    state: Option<String>,
+    milestone: Option<String>,
+    limit: Option<u32>,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<TicketListReply, String> {
+    validate_optional_token(state.as_deref(), "state must be a lowercase token")
+        .map_err(stringify)?;
+    validate_optional_token(milestone.as_deref(), "milestone must be a lowercase token")
+        .map_err(stringify)?;
+    pool.list_tickets(&app, workspace_id, state, milestone, limit)
+        .await
+        .map_err(stringify)
+}
+
+/// Reads one ticket of a workspace in full.
+///
+/// # Errors
+/// Returns a human-readable message when the daemon cannot be reached or
+/// rejects the request (an unknown ticket included).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn get_ticket(
+    app: AppHandle,
+    workspace_id: i64,
+    ticket: u32,
+    pool: State<'_, Arc<ConnectionPool>>,
+) -> Result<yagura_protocol::TicketInfo, String> {
+    pool.get_ticket(&app, workspace_id, ticket)
+        .await
+        .map_err(stringify)
+}
+
 /// Reads the role-to-assignment table.
 ///
 /// # Errors
@@ -1424,6 +1510,17 @@ fn validate_plan_id(plan_id: &str) -> Result<(), IpcError> {
         Err(IpcError::InvalidArgument("plan_id must not be empty"))
     } else {
         Ok(())
+    }
+}
+
+/// Rejects a filter name that is given but outside the character set the
+/// daemon accepts for state and milestone names.
+fn validate_optional_token(value: Option<&str>, reason: &'static str) -> Result<(), IpcError> {
+    match value {
+        Some(name) if !yagura_protocol::is_valid_token(name) => {
+            Err(IpcError::InvalidArgument(reason))
+        }
+        _ => Ok(()),
     }
 }
 

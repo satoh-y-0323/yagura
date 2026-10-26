@@ -30,6 +30,7 @@ export const SESSION_EVENT = {
   chatParticipantsChanged: 'session://chat-participants-changed',
   chatHistoryCleared: 'session://chat-history-cleared',
   planChanged: 'session://plan-changed',
+  ticketChanged: 'session://ticket-changed',
   modelChoices: 'session://model-choices',
   daemonRecovery: 'session://daemon-recovery',
   mcpRegistrationStatus: 'session://mcp-registration-status',
@@ -1698,34 +1699,49 @@ export function sanitizeForDisplay(value: string): string {
 }
 
 /**
- * Control characters other than the line feed, and the bidirectional controls
- * (U+061C, U+200E/F, U+202A-E, U+2066-9) that reorder what is drawn.
+ * Control characters and the bidirectional controls (U+061C, U+200E/F,
+ * U+202A-E, U+2066-9) that reorder what is drawn.
  */
-const APPROVAL_BODY_HIDDEN_CHARS = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+const MULTILINE_HIDDEN_CHARS = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
 
 /**
- * Prepares an approval request's body for display. The body is several lines
- * (command, directory, purpose), so line feeds are kept. Every other control
- * character, and every bidirectional control, is written out as `\u{202E}`
- * rather than removed or drawn: an approver must see everything that will run,
- * and a hidden character could change what the text appears to say. Capped at
- * {@link MAX_DISPLAY_FIELD_CHARS} code points before escaping, so an escape is
- * never cut in half.
- * @param value the body text to display
+ * Prepares untrusted text of several lines for display. Every control
+ * character outside `keptControls`, and every bidirectional control, is
+ * written out as `\u{202E}` rather than removed or drawn: a hidden character
+ * could change what the text appears to say. Capped at `maxChars` code points
+ * before escaping, so an escape is never cut in half.
+ * @param value the text to display
+ * @param maxChars the most code points kept before the text is cut
+ * @param keptControls the control characters drawn as they are
  */
-export function formatApprovalBody(value: string): string {
+export function formatMultilineText(
+  value: string,
+  maxChars: number,
+  keptControls: ReadonlySet<string>
+): string {
   const codePoints = Array.from(value);
   const capped =
-    codePoints.length <= MAX_DISPLAY_FIELD_CHARS
-      ? value
-      : `${codePoints.slice(0, MAX_DISPLAY_FIELD_CHARS).join('')}…`;
-  return capped.replace(APPROVAL_BODY_HIDDEN_CHARS, (char) => {
-    if (char === '\n') {
+    codePoints.length <= maxChars ? value : `${codePoints.slice(0, maxChars).join('')}…`;
+  return capped.replace(MULTILINE_HIDDEN_CHARS, (char) => {
+    if (keptControls.has(char)) {
       return char;
     }
     const hex = (char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0');
     return `\\u{${hex}}`;
   });
+}
+
+const APPROVAL_BODY_KEPT_CONTROLS: ReadonlySet<string> = new Set(['\n']);
+
+/**
+ * Prepares an approval request's body for display. The body is several lines
+ * (command, directory, purpose), so line feeds are kept; every other control
+ * is written out, since an approver must see everything that will run. Capped
+ * at {@link MAX_DISPLAY_FIELD_CHARS} code points.
+ * @param value the body text to display
+ */
+export function formatApprovalBody(value: string): string {
+  return formatMultilineText(value, MAX_DISPLAY_FIELD_CHARS, APPROVAL_BODY_KEPT_CONTROLS);
 }
 
 /** One restore candidate, execution-value fields plus their display\* derivatives. */
@@ -1989,7 +2005,13 @@ export function requireBoolean(record: UntrustedRecord, key: string, context: st
   return value;
 }
 
-function requireInteger(record: UntrustedRecord, key: string, context: string): number {
+/**
+ * Reads a required integer field, negative values included.
+ *
+ * @throws {BoundaryError} when the record owns no such field, or owns one
+ * that is not an integer.
+ */
+export function requireInteger(record: UntrustedRecord, key: string, context: string): number {
   const value = readOwnField(record, key);
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new BoundaryError(`${context}.${key}: expected an integer`);
