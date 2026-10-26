@@ -458,13 +458,52 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "plan_task_write".to_string(),
             "snapshot_meta".to_string(),
             "snapshot_windows".to_string(),
+            "ticket".to_string(),
+            "ticket_field".to_string(),
+            "ticket_milestone".to_string(),
+            "ticket_result".to_string(),
+            "ticket_workspace".to_string(),
         ],
         "migration 007 (the plan module) adds four new tables, migration 014 the chat numbering \
-         table and migration 015 the default palettes table on top of the six the chat and \
-         session-store migrations already left \
+         table, migration 015 the default palettes table and migration 016 the five ticket \
+         tables on top of the six the chat and session-store migrations already left \
          in place; nothing after the fourth migration changes any of those first six object \
          names"
     );
+}
+
+/// A database at schema v15 keeps its plans when migration 016 is applied, and every such
+/// plan reads as made from no ticket.
+#[test]
+fn a_plan_written_at_v15_survives_migration_016_with_no_ticket() {
+    let db = temp_store_db("store-v15-plan-to-v16");
+    {
+        let mut conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..15])
+            .expect("the first fifteen migrations must apply");
+        conn.execute_batch(
+            "INSERT INTO plan (plan_id, title, cwd, owner_window, created_at, updated_at) \
+             VALUES ('p-v15', 'kept', 'C:/work', NULL, 1000, 1000);",
+        )
+        .expect("seeding a v15 plan row must succeed");
+        store::apply_migrations(&mut conn, store::MIGRATIONS)
+            .expect("the rest of the shipped series must apply on top of v15");
+    }
+
+    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
+    assert_eq!(
+        user_version(&conn),
+        16,
+        "a v15 database must be migrated to v16 (the ticket tables)"
+    );
+    let row: (String, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT title, ticket_workspace_id, ticket_number FROM plan WHERE plan_id = 'p-v15'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("the v15 plan row must be readable with its ticket columns after migration");
+    assert_eq!(row, ("kept".to_string(), None, None));
 }
 
 /// The plan module's own schema plus the task-report columns migration 008 adds to

@@ -151,27 +151,6 @@ pub struct RoomRow {
     pub halted: Option<(room::HaltReason, i64)>,
 }
 
-/// The wire-adjacent vocabulary [`WorkspaceKind`] is stored as, in
-/// `chat_room.workspace_kind`.
-fn workspace_kind_str(kind: WorkspaceKind) -> &'static str {
-    match kind {
-        WorkspaceKind::Git => "git",
-        WorkspaceKind::Directory => "directory",
-    }
-}
-
-/// The inverse of [`workspace_kind_str`]. `None` for anything unrecognized --
-/// unreachable in practice, since that function is this column's only
-/// writer, but a mismatch here must read back as "no workspace kind" rather
-/// than panic.
-fn parse_workspace_kind(kind: &str) -> Option<WorkspaceKind> {
-    match kind {
-        "git" => Some(WorkspaceKind::Git),
-        "directory" => Some(WorkspaceKind::Directory),
-        _ => None,
-    }
-}
-
 /// The columns and joins every [`RoomRow`] read shares: [`ChatStore::find_room`]
 /// appends its own `WHERE`, [`ChatStore::list_rooms`] its own `ORDER BY`. A
 /// macro rather than a constant, so both statements are joined by `concat!`
@@ -203,7 +182,7 @@ fn row_to_room_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
     };
     Ok(RoomRow {
         room_id,
-        kind: kind.as_deref().and_then(parse_workspace_kind),
+        kind: kind.as_deref().and_then(WorkspaceKind::parse),
         key,
         created_at_ms,
         last_at_ms,
@@ -570,12 +549,12 @@ impl ChatStore {
                     "INSERT INTO chat_room \
                      (room_id, needs_user, workspace_kind, workspace_key, created_at_ms) \
                      VALUES (?1, 0, ?2, ?3, ?4)",
-                    params![room_id, workspace_kind_str(kind), key, now_ms],
+                    params![room_id, kind.as_str(), key, now_ms],
                 )?;
                 EnsureRoom::Created
             }
             Some((stored_kind, stored_key)) => {
-                if stored_kind.as_deref() == Some(workspace_kind_str(kind))
+                if stored_kind.as_deref() == Some(kind.as_str())
                     && stored_key.as_deref() == Some(key)
                 {
                     EnsureRoom::Existing

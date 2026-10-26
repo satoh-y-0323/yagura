@@ -22,6 +22,26 @@ pub enum WorkspaceKind {
     Directory,
 }
 
+impl WorkspaceKind {
+    /// The text a store keeps this kind as (`chat_room.workspace_kind`,
+    /// `ticket_workspace.kind`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkspaceKind::Git => "git",
+            WorkspaceKind::Directory => "directory",
+        }
+    }
+
+    /// The inverse of [`WorkspaceKind::as_str`]; `None` for any other text.
+    pub fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "git" => Some(WorkspaceKind::Git),
+            "directory" => Some(WorkspaceKind::Directory),
+            _ => None,
+        }
+    }
+}
+
 /// The stable identity of a window's working directory, from which a chat
 /// room's id and display name are both derived. Two windows opened against
 /// the same repository (however they reached it -- a worktree checkout, a

@@ -155,6 +155,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/013_chat_delivery_state_check.sql"),
     include_str!("../migrations/014_chat_seq.sql"),
     include_str!("../migrations/015_default_palettes.sql"),
+    include_str!("../migrations/016_tickets.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a
@@ -367,6 +368,15 @@ pub(crate) fn current_epoch_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+/// [`current_epoch_secs`] in milliseconds, with the same degrade-to-`0` rule.
+pub(crate) fn current_epoch_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0)
 }
 
