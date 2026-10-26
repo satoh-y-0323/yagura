@@ -15,10 +15,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use yagura_protocol::{is_valid_token, validate_launch_option_value};
 
+use crate::config_file::{ConfigFileError, read_config_file};
 use crate::plan::Assignment;
 
 /// Maximum number of `[[role]]` rows a table may declare.
 pub const MAX_ROLE_ROWS: usize = 64;
+
+/// Largest `roles.toml` [`read_roles`] reads, in bytes.
+pub const MAX_ROLES_FILE_BYTES: usize = crate::config_file::MAX_CONFIG_FILE_BYTES;
 
 /// Schema version [`read_roles`] / [`save_roles`] accept.
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -98,6 +102,12 @@ pub enum RolesError {
     /// be written.
     #[error("roles.toml could not be read or written")]
     Io(#[source] std::io::Error),
+    /// The file is larger than [`MAX_ROLES_FILE_BYTES`].
+    #[error("roles.toml exceeds the {max}-byte limit")]
+    TooLarge {
+        /// The limit that was exceeded.
+        max: usize,
+    },
     /// The document failed to parse as TOML, or carries an unknown key
     /// (`#[serde(deny_unknown_fields)]`).
     #[error("roles.toml could not be parsed")]
@@ -230,7 +240,9 @@ fn validate_rows(
 /// # Errors
 ///
 /// Returns [`RolesError::Io`] for a read failure other than the file being
-/// absent, [`RolesError::Toml`] for malformed TOML or an unknown key,
+/// absent or for a file that is not UTF-8, [`RolesError::TooLarge`] for a
+/// file over [`MAX_ROLES_FILE_BYTES`], [`RolesError::Toml`] for malformed
+/// TOML or an unknown key,
 /// [`RolesError::UnsupportedSchema`] for a `schema` other than `1`, and
 /// [`RolesError::InvalidName`] / [`RolesError::DuplicateName`] /
 /// [`RolesError::InvalidLaunchOptionValue`] / [`RolesError::TooManyRows`]
@@ -238,16 +250,23 @@ fn validate_rows(
 /// when `default_role` names no row. Any single violation rejects the whole
 /// table.
 pub fn read_roles(path: &Path) -> Result<RolesTable, RolesError> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    let bytes = match read_config_file(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
             return Ok(RolesTable {
                 rows: Vec::new(),
                 default_role: None,
             });
         }
-        Err(err) => return Err(RolesError::Io(err)),
+        Err(ConfigFileError::Io(err)) => return Err(RolesError::Io(err)),
+        Err(ConfigFileError::TooLarge) => {
+            return Err(RolesError::TooLarge {
+                max: MAX_ROLES_FILE_BYTES,
+            });
+        }
     };
+    let content = String::from_utf8(bytes)
+        .map_err(|err| RolesError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, err)))?;
     let raw: RawRolesTable = toml::from_str(&content).map_err(RolesError::Toml)?;
     let rows = validate_rows(&raw, None)?;
     Ok(RolesTable {

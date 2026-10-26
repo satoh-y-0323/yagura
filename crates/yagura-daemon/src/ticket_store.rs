@@ -49,6 +49,11 @@ pub const DEFAULT_LIST_LIMIT: u32 = 200;
 /// Most rows a listing returns, whatever limit the query names.
 pub const MAX_LIST_LIMIT: u32 = 1_000;
 
+/// Code points of a field value a summary carries; a longer value is cut and
+/// ends in U+2026. A listing of many tickets with many required fields must
+/// still fit in one frame, so the full value is read with the ticket itself.
+pub const SUMMARY_FIELD_EXCERPT_CHARS: usize = 256;
+
 /// Which limit [`TicketStoreError::ResourceExhausted`] was refused by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketLimitKind {
@@ -611,11 +616,20 @@ fn attach_card_details(
             .filter_map(|name| {
                 held.get(name)
                     .filter(|value| !value.is_empty())
-                    .map(|value| (name.clone(), value.clone()))
+                    .map(|value| (name.clone(), summary_excerpt(value)))
             })
             .collect();
     }
     Ok(())
+}
+
+/// `value` cut to [`SUMMARY_FIELD_EXCERPT_CHARS`] code points plus U+2026, or
+/// whole when it is no longer than that.
+fn summary_excerpt(value: &str) -> String {
+    match value.char_indices().nth(SUMMARY_FIELD_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}\u{2026}", &value[..cut]),
+        None => value.to_string(),
+    }
 }
 
 /// `Some(value)` unless it is absent or `""` (which means "none").

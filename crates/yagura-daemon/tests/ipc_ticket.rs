@@ -977,3 +977,60 @@ async fn a_summary_carries_only_its_states_required_field_values_and_its_plan_co
     );
     assert_eq!(held_wire["plan_count"], serde_json::json!(0));
 }
+
+// --- 12. a summary's field values are card excerpts --------------------
+
+/// Code points the board card shows of a field value in a summary.
+const SUMMARY_FIELD_EXCERPT_CHARS: usize = 256;
+
+#[tokio::test]
+async fn a_summary_cuts_a_long_field_value_to_an_excerpt_and_get_ticket_keeps_it_whole() {
+    let dir = unique_temp_dir("ipc-ticket-excerpt");
+    write_reference_config(&dir);
+    let repo = second_workspace_dir("ipc-ticket-excerpt-a");
+    let h = start("ipc-ticket-excerpt", ticket_config(&dir)).await;
+    let mut a = window_in(&h, &repo).await;
+
+    // A four-byte code point, so a cut by bytes or UTF-16 units lands elsewhere.
+    let at_limit = "\u{1D11E}".repeat(SUMMARY_FIELD_EXCERPT_CHARS);
+    let one_over = "\u{1D11E}".repeat(SUMMARY_FIELD_EXCERPT_CHARS + 1);
+    let well_over = format!(
+        "{}{}",
+        "\u{3042}".repeat(SUMMARY_FIELD_EXCERPT_CHARS),
+        "z".repeat(200)
+    );
+    let excerpt_of_one_over = format!("{}\u{2026}", at_limit);
+    let excerpt_of_well_over =
+        format!("{}\u{2026}", "\u{3042}".repeat(SUMMARY_FIELD_EXCERPT_CHARS));
+
+    let mut numbers = Vec::new();
+    for value in [&at_limit, &one_over, &well_over] {
+        let ticket = expect_detail(
+            request(
+                &mut a,
+                create_in("paused", "on-hold", &[("resume_trigger", value)]),
+            )
+            .await,
+        );
+        numbers.push(ticket.number);
+    }
+
+    let listing = expect_list(request(&mut a, list()).await);
+    let expected = [&at_limit, &excerpt_of_one_over, &excerpt_of_well_over];
+    for (number, excerpt) in numbers.iter().zip(expected) {
+        assert_eq!(
+            summary_wire(&listing, *number)["fields"],
+            serde_json::json!({ "resume_trigger": excerpt }),
+            "T-{number}'s summary carries the first {SUMMARY_FIELD_EXCERPT_CHARS} code points"
+        );
+    }
+
+    for (number, whole) in numbers.iter().zip([&at_limit, &one_over, &well_over]) {
+        let detail = expect_detail(request(&mut a, get(*number)).await);
+        assert_eq!(
+            detail.fields.get("resume_trigger"),
+            Some(whole),
+            "T-{number}'s get_ticket keeps the whole value"
+        );
+    }
+}

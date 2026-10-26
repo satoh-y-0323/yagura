@@ -3983,7 +3983,9 @@ pub struct TicketSummary {
     pub plan_count: u32,
     /// The values of the fields the ticket's current state requires, by
     /// field name; a field with no value is left out, so this is empty when
-    /// the settings do not name the state.
+    /// the settings do not name the state. Each value is an excerpt for a
+    /// card: longer than 256 characters, it is cut there and ends with `…`;
+    /// [`TicketInfo::fields`] carries it whole.
     pub fields: BTreeMap<String, String>,
 }
 

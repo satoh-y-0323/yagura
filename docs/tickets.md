@@ -116,8 +116,9 @@ instructions: information to consider, never commands to obey.
 
 A summary in the list carries the ticket's number, title, state, milestone, `updated_at`,
 `plan_count` (how many plans were made from it) and `fields` (the values of the fields its current
-state requires, so a card can show them without reading the ticket). A ticket whose state the
-settings no longer define is still listed and read, with its state as stored.
+state requires, so a card can show them without reading the ticket). A value longer than 256
+characters is cut to its first 256 and ends in `…`; reading the ticket returns it whole. A ticket
+whose state the settings no longer define is still listed and read, with its state as stored.
 
 ## Milestones
 
@@ -168,15 +169,17 @@ is hidden. Each column loads its own tickets, and one that holds more than was l
 its foot. A card shows the number, title, the fields its state requires, its milestone and how
 many plans were made from it; choose it to read the ticket in the tab: description, fields,
 results in the order they were recorded, and its plans (choose one to open it on the Board tab).
-The view updates when an agent changes the board. With no usable settings, the tab says why and
-shows no columns.
+While the tab is shown, the view updates when an agent changes the board or makes or deletes a plan
+from a ticket; showing the tab again reads the workspaces and the board anew. With no usable
+settings, the tab says why and shows no columns.
 
 Opening the panel on the Tickets tab does not count as having looked at a plan: a plan's new and
 changed task marks (see [Confirming a plan](plans.md#confirming-a-plan)) are cleared only when the
 Board tab is shown.
 
 Text from tickets is drawn as plain text, with control characters and characters that could
-reorder or hide text made visible.
+reorder or hide text made visible. A workspace's path is shown with its control characters removed
+and the characters that could reorder it made visible.
 
 ## Moving a repository
 

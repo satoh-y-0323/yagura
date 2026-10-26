@@ -264,15 +264,24 @@ export function displayTicketSummary(summary: TicketSummary): TicketSummaryDispl
   };
 }
 
+const NO_KEPT_CONTROLS: ReadonlySet<string> = new Set();
+
 /**
- * A workspace row with its kind and path through `sanitizeForDisplay`.
+ * A workspace row with its kind and path through `sanitizeForDisplay`. The
+ * path also has its bidirectional controls written out, as an approval body
+ * does, so a reordered path cannot pass for another repository.
  * @param workspace the workspace to display
  */
 export function displayTicketWorkspace(workspace: TicketWorkspace): TicketWorkspace {
   return {
     workspace_id: workspace.workspace_id,
     kind: sanitizeForDisplay(workspace.kind),
-    path: sanitizeForDisplay(workspace.path),
+    // Already capped by `sanitizeForDisplay`, so it is not cut a second time.
+    path: formatMultilineText(
+      sanitizeForDisplay(workspace.path),
+      Number.POSITIVE_INFINITY,
+      NO_KEPT_CONTROLS
+    ),
   };
 }
 

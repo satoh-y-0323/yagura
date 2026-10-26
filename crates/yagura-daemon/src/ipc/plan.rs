@@ -262,11 +262,13 @@ pub(super) async fn handle_create_plan(
 
     match result {
         Ok(Ok(detail)) => {
+            let ticket_workspace_id = detail.ticket_workspace_id;
             let (roles, roles_warning) = split_roles_result(roles_result);
             let info = build_plan_info_from_detail(detail, roles.as_ref(), roles_warning);
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: info.plan_id.clone(),
             });
+            notify_ticket_plans_changed(broker, ticket_workspace_id);
             outbound.reply(&DaemonMessage::PlanDetail { plan: info });
         }
         Ok(Err(CreateOutcome::Create(PlanStoreError::ResourceExhausted(_)))) => {
@@ -628,6 +630,14 @@ pub(super) async fn record_task_notice(
     }
 }
 
+/// A ticket's summary and detail list the plans made from it, so creating or
+/// deleting such a plan changes that ticket's workspace too.
+fn notify_ticket_plans_changed(broker: &ApprovalBroker, ticket_workspace_id: Option<i64>) {
+    if let Some(workspace_id) = ticket_workspace_id {
+        broker.notify_approvers(&DaemonMessage::TicketChanged { workspace_id });
+    }
+}
+
 pub(super) async fn handle_delete_plan(
     ledger: &PlanRuntime,
     registry: &Arc<WindowRegistry>,
@@ -661,7 +671,7 @@ pub(super) async fn handle_delete_plan(
     let origin = state.origin.clone();
     let registry = Arc::clone(registry);
     let result = ledger
-        .with_store(move |store| -> Result<(), ChangeOutcome> {
+        .with_store(move |store| -> Result<Option<i64>, ChangeOutcome> {
             let permit =
                 plan_permit::issue_change(&origin, ChangeKind::DeletePlan, guard, store, &registry)
                     .map_err(ChangeOutcome::Permit)?;
@@ -670,11 +680,12 @@ pub(super) async fn handle_delete_plan(
         .await;
 
     match result {
-        Ok(Ok(())) => {
+        Ok(Ok(ticket_workspace_id)) => {
             ledger.locks().remove(&plan_id);
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: plan_id.clone(),
             });
+            notify_ticket_plans_changed(broker, ticket_workspace_id);
             outbound.reply(&DaemonMessage::PlanDeleted { plan_id });
         }
         Ok(Err(ChangeOutcome::Permit(PermitError::PlanNotFound))) => {

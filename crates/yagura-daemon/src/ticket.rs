@@ -7,11 +7,12 @@
 //! fields and its position; no state name is special.
 
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::config_file::ConfigFileError;
 use yagura_protocol::{
     MILESTONE_DESCRIPTION_MAX_BYTES, MultilineTextError, TICKET_BODY_MAX_BYTES,
     TICKET_FIELD_VALUE_MAX_BYTES, TICKET_RESULT_MAX_BYTES, WindowNameError, is_valid_token,
@@ -19,7 +20,7 @@ use yagura_protocol::{
 };
 
 /// Largest `tickets.toml` [`read_ticket_config`] reads, in bytes.
-pub const MAX_TICKET_CONFIG_BYTES: usize = 64 * 1024;
+pub const MAX_TICKET_CONFIG_BYTES: usize = crate::config_file::MAX_CONFIG_FILE_BYTES;
 
 /// Most `[[state]]` entries a `tickets.toml` may declare.
 pub const MAX_TICKET_STATES: usize = 32;
@@ -223,34 +224,21 @@ struct RawField {
 /// shape, or breaks one of the rules its variants list. Any single violation
 /// rejects the whole file.
 pub fn read_ticket_config(path: &Path) -> Result<Option<TicketConfig>, TicketConfigError> {
-    let Some(bytes) = read_bounded(path)? else {
-        return Ok(None);
+    let bytes = match crate::config_file::read_config_file(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(None),
+        Err(ConfigFileError::Io(err)) => return Err(TicketConfigError::Io(err)),
+        Err(ConfigFileError::TooLarge) => {
+            return Err(TicketConfigError::TooLarge {
+                max: MAX_TICKET_CONFIG_BYTES,
+            });
+        }
     };
     let text = String::from_utf8(bytes).map_err(|_| TicketConfigError::NotUtf8)?;
     let raw: RawTicketConfig = toml::from_str(&text).map_err(|err| TicketConfigError::Toml {
         line: err.span().map(|span| line_of(&text, span.start)),
     })?;
     validate(raw).map(Some)
-}
-
-/// Reads at most one byte past the limit, so an oversized file is rejected
-/// without being loaded whole.
-fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, TicketConfigError> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(TicketConfigError::Io(err)),
-    };
-    let mut bytes = Vec::new();
-    file.take(MAX_TICKET_CONFIG_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(TicketConfigError::Io)?;
-    if bytes.len() > MAX_TICKET_CONFIG_BYTES {
-        return Err(TicketConfigError::TooLarge {
-            max: MAX_TICKET_CONFIG_BYTES,
-        });
-    }
-    Ok(Some(bytes))
 }
 
 fn line_of(text: &str, offset: usize) -> usize {

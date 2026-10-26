@@ -3,6 +3,7 @@ pub mod chat_store;
 pub mod child_env;
 pub mod cli;
 pub mod config;
+mod config_file;
 mod config_rewrite;
 pub mod control;
 pub mod detector;

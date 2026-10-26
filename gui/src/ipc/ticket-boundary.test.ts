@@ -346,4 +346,11 @@ describe('the one-line fields of a ticket', () => {
     });
     expect(shown.path).toBe('C:\\repo');
   });
+
+  it('writes out a bidirectional control in a workspace path the way an approval body does', () => {
+    const path = 'C:\\work\\\u202Egpj.exe';
+    const shown = displayTicketWorkspace({ workspace_id: 1, kind: 'git', path });
+    expect(shown.path).toBe(formatApprovalBody(path));
+    expect(shown.path).toBe('C:\\work\\\\u{202E}gpj.exe');
+  });
 });

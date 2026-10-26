@@ -331,6 +331,8 @@ pub struct PlanDetail {
     /// The number of the ticket, in the creating window's workspace, the plan
     /// was made from.
     pub ticket: Option<u32>,
+    /// The ticket workspace `ticket` belongs to; set exactly when `ticket` is.
+    pub ticket_workspace_id: Option<i64>,
 }
 
 /// One plan as read back by [`PlanStore::list_plans`].
@@ -556,13 +558,14 @@ fn insert_tasks(
 }
 
 /// One raw `plan` row as [`read_plan`] selects it: title, cwd, owner window,
-/// review, version and ticket number.
+/// review, version, ticket number and ticket workspace.
 type PlanHeaderRow = (
     String,
     String,
     Option<String>,
     Option<String>,
     i64,
+    Option<i64>,
     Option<i64>,
 );
 
@@ -571,8 +574,8 @@ type PlanHeaderRow = (
 fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, StoreError> {
     let header: Option<PlanHeaderRow> = conn
         .query_row_fixed(
-            "SELECT title, cwd, owner_window, review, version, ticket_number FROM plan \
-             WHERE plan_id = ?1",
+            "SELECT title, cwd, owner_window, review, version, ticket_number, \
+             ticket_workspace_id FROM plan WHERE plan_id = ?1",
             params![plan_id],
             |row| {
                 Ok((
@@ -582,11 +585,13 @@ fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, Sto
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((title, cwd, owner_window, review, version, ticket)) = header else {
+    let Some((title, cwd, owner_window, review, version, ticket, ticket_workspace_id)) = header
+    else {
         return Ok(None);
     };
 
@@ -674,6 +679,7 @@ fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, Sto
         review: review_from_column(review.as_deref()),
         version: version_from_column(version),
         ticket: ticket.and_then(|number| u32::try_from(number).ok()),
+        ticket_workspace_id,
     }))
 }
 
@@ -1099,16 +1105,24 @@ impl PlanStore {
     }
 
     /// Deletes `permit`'s plan and every row it owns across the three child
-    /// tables.
+    /// tables, returning the ticket workspace the plan was linked to, if any.
     ///
     /// # Errors
     ///
     /// Any [`StoreError`] from the underlying transaction.
-    pub fn delete_plan(&mut self, permit: ChangePermit) -> Result<(), StoreError> {
+    pub fn delete_plan(&mut self, permit: ChangePermit) -> Result<Option<i64>, StoreError> {
         let plan_id = permit.plan_id();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ticket_workspace_id: Option<i64> = tx
+            .query_row_fixed(
+                "SELECT ticket_workspace_id FROM plan WHERE plan_id = ?1",
+                params![plan_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
         tx.execute_fixed(
             "DELETE FROM plan_task_write WHERE plan_id = ?1",
             params![plan_id],
@@ -1120,7 +1134,7 @@ impl PlanStore {
         tx.execute_fixed("DELETE FROM plan_task WHERE plan_id = ?1", params![plan_id])?;
         tx.execute_fixed("DELETE FROM plan WHERE plan_id = ?1", params![plan_id])?;
         tx.commit()?;
-        Ok(())
+        Ok(ticket_workspace_id)
     }
 
     /// Sets (or, passing `None`, clears) `task_id`'s user override within

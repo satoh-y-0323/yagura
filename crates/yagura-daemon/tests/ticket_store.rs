@@ -162,7 +162,7 @@ fn milestone(name: &str, position: i64) -> MilestoneInfo {
     }
 }
 
-// Property 2: numbering per workspace.
+// Numbering per workspace.
 
 #[tokio::test]
 async fn numbers_start_at_one_per_workspace_and_a_subdirectory_shares_its_repository() {
@@ -288,7 +288,7 @@ async fn reading_an_empty_workspace_returns_nothing_and_creates_no_workspace() {
     );
 }
 
-// Property 3: the default state and the required-field gate.
+// The default state and the required-field gate.
 
 #[tokio::test]
 async fn a_ticket_without_a_state_starts_in_the_configs_first_state() {
@@ -569,7 +569,7 @@ fn assert_unchanged(store: &TicketStore, read: &TicketReadPermit, before: &Ticke
     );
 }
 
-// Property 4: append-only results, timed by the store.
+// Append-only results, timed by the store.
 
 #[tokio::test]
 async fn results_are_appended_in_order_and_timed_by_the_store() {
@@ -612,7 +612,7 @@ async fn results_are_appended_in_order_and_timed_by_the_store() {
     ));
 }
 
-// Property 5 and B-8: resource limits.
+// Resource limits.
 
 #[tokio::test]
 async fn a_workspace_holds_at_most_ten_thousand_tickets() {
@@ -799,7 +799,7 @@ async fn at_most_256_workspaces_exist_and_a_further_new_one_is_refused() {
         .expect("an existing workspace keeps writing at the limit");
 }
 
-// Property 6: listing.
+// Listing.
 
 #[tokio::test]
 async fn the_listing_filters_orders_by_milestone_then_number_and_reports_truncation() {
@@ -905,7 +905,7 @@ async fn the_listing_filters_orders_by_milestone_then_number_and_reports_truncat
     );
 }
 
-// Property 7: milestones.
+// Milestones.
 
 #[tokio::test]
 async fn a_ticket_may_only_name_a_milestone_of_its_own_workspace() {
@@ -996,7 +996,7 @@ async fn a_ticket_may_only_name_a_milestone_of_its_own_workspace() {
     );
 }
 
-// Property 8: a state the config no longer declares.
+// A state the config no longer declares.
 
 #[tokio::test]
 async fn a_ticket_in_a_state_the_config_dropped_is_still_read_as_stored() {

@@ -1571,7 +1571,8 @@
     plansTab = tab;
     closeTicket();
     if (tab === 'tickets') {
-      void refreshTicketBoard();
+      // Reads the board too, so a workspace that appeared meanwhile is listed.
+      void readTicketWorkspaces();
     }
     if (
       planBoardBecameVisible(previous, { open: isPlansOpen, tab }) ||

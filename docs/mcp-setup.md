@@ -1465,7 +1465,7 @@ Call this first. Returns the board's rules, the workspace's milestones and a sum
 
 - `config.states` are in the order of the user's `tickets.toml`, which is the board's column order; the first one is where a new ticket starts. `requires` lists the fields a ticket in that state must have a value for.
 - `milestones` are in `position` order, equal positions by name. `tickets` are in the order of their milestone's position (tickets with no milestone after them), then by `number`.
-- A summary's `fields` holds the values of the fields its current state requires, and leaves out a field that has no value. `plan_count` is how many plans were made from the ticket. `updated_at` is in milliseconds since the Unix epoch. `milestone` is left out for a ticket with none.
+- A summary's `fields` holds the values of the fields its current state requires, and leaves out a field that has no value. A value longer than 256 characters (Unicode code points) is cut to its first 256 and ends in `…` (U+2026); [get_ticket](#get_ticket) returns it whole. `plan_count` is how many plans were made from the ticket. `updated_at` is in milliseconds since the Unix epoch. `milestone` is left out for a ticket with none.
 - `truncated` is `true` when more tickets matched than `limit` allows.
 - When the user has no `tickets.toml`, or it cannot be read, `config` is left out and `config_error` says why (without quoting the file). The summaries are still returned.
 

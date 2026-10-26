@@ -474,3 +474,41 @@ fn assignment_for_handles_a_row_without_model_or_effort() {
         })
     );
 }
+
+// ---------------------------------------------------------------------
+// the size of the file read
+// ---------------------------------------------------------------------
+
+/// The most bytes a `roles.toml` may hold, the same as `tickets.toml`.
+const ROLES_MAX_BYTES: usize = 64 * 1024;
+
+/// [`valid_toml`] padded with a trailing comment to exactly `total` bytes.
+fn padded_roles(total: usize) -> String {
+    let mut text = valid_toml().to_string();
+    let padding = total - text.len() - 2;
+    text.push('#');
+    text.push_str(&"x".repeat(padding));
+    text.push('\n');
+    assert_eq!(text.len(), total);
+    text
+}
+
+#[test]
+fn read_roles_accepts_a_file_of_exactly_sixty_four_kib_and_rejects_one_byte_more() {
+    let dir = TempDir::new("yagura-roles-test", "size");
+    let path = roles_path(&dir);
+
+    write(&path, &padded_roles(ROLES_MAX_BYTES));
+    let at_limit = read_roles(&path);
+    assert!(
+        matches!(&at_limit, Ok(table) if table.rows.len() == 2),
+        "a file of exactly 64 KiB is within the limit, got {at_limit:?}"
+    );
+
+    write(&path, &padded_roles(ROLES_MAX_BYTES + 1));
+    let over = read_roles(&path);
+    assert!(
+        over.is_err(),
+        "a file over 64 KiB must be refused, got {over:?}"
+    );
+}

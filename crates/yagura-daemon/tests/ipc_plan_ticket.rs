@@ -342,3 +342,87 @@ async fn making_a_plan_from_a_ticket_leaves_its_state_fields_and_results_as_they
         assert_eq!(after.milestone, before.milestone, "T-{number}'s milestone");
     }
 }
+
+// --- 6. the ticket board hears of its plans ----------------------------
+
+/// The `ticket_changed` workspaces an approver is sent up to and including
+/// the one naming `sentinel`, which is left out. Plan and chat pushes are
+/// skipped; anything else fails the case.
+async fn ticket_pushes_until(approver: &mut Connection, sentinel: i64) -> Vec<i64> {
+    let mut seen = Vec::new();
+    loop {
+        match read_response(approver, REPLY_GUARD).await {
+            DaemonMessage::TicketChanged { workspace_id } if workspace_id == sentinel => {
+                return seen;
+            }
+            DaemonMessage::TicketChanged { workspace_id } => seen.push(workspace_id),
+            DaemonMessage::PlanChanged { .. } | DaemonMessage::ChatChanged { .. } => continue,
+            other => panic!("expected ticket_changed, got {other:?}"),
+        }
+    }
+}
+
+/// A write in another workspace whose push marks where a step's pushes end.
+async fn sentinel(
+    window: &mut Connection,
+    approver: &mut Connection,
+    sentinel_id: i64,
+) -> Vec<i64> {
+    expect_ticket(request(window, create_ticket("sentinel")).await);
+    ticket_pushes_until(approver, sentinel_id).await
+}
+
+#[tokio::test]
+async fn making_or_deleting_a_plan_of_a_ticket_pushes_ticket_changed_and_a_plain_plan_does_not() {
+    let repo_a = second_workspace_dir("ipc-plan-ticket-push-a");
+    let repo_b = second_workspace_dir("ipc-plan-ticket-push-b");
+    let h = start("ipc-plan-ticket-push").await;
+    let mut appr = approver(&h).await;
+    let mut a = window_in(&h, &repo_a).await;
+    let mut b = window_in(&h, &repo_b).await;
+
+    expect_ticket(request(&mut b, create_ticket("b one")).await);
+    let id_b = match read_response(&mut appr, REPLY_GUARD).await {
+        DaemonMessage::TicketChanged { workspace_id } => workspace_id,
+        other => panic!("expected ticket_changed, got {other:?}"),
+    };
+    expect_ticket(request(&mut a, create_ticket("a one")).await);
+    let pushed = sentinel(&mut b, &mut appr, id_b).await;
+    assert_eq!(pushed.len(), 1, "creating a ticket pushes once: {pushed:?}");
+    let id_a = pushed[0];
+    assert_ne!(id_a, id_b);
+
+    let linked = expect_plan(request(&mut a, create_plan("from T-1", Some(1))).await);
+    assert_eq!(
+        sentinel(&mut b, &mut appr, id_b).await,
+        vec![id_a],
+        "a plan made from a ticket changes that ticket's plan count"
+    );
+
+    let plain = expect_plan(request(&mut a, create_plan("from no ticket", None)).await);
+    assert_eq!(
+        sentinel(&mut b, &mut appr, id_b).await,
+        Vec::<i64>::new(),
+        "a plan made from no ticket changes no ticket"
+    );
+
+    match request(&mut a, delete_plan(&plain.plan_id)).await {
+        DaemonMessage::PlanDeleted { .. } => {}
+        other => panic!("expected plan_deleted, got {other:?}"),
+    }
+    assert_eq!(
+        sentinel(&mut b, &mut appr, id_b).await,
+        Vec::<i64>::new(),
+        "deleting a plan of no ticket changes no ticket"
+    );
+
+    match request(&mut a, delete_plan(&linked.plan_id)).await {
+        DaemonMessage::PlanDeleted { .. } => {}
+        other => panic!("expected plan_deleted, got {other:?}"),
+    }
+    assert_eq!(
+        sentinel(&mut b, &mut appr, id_b).await,
+        vec![id_a],
+        "deleting a plan of a ticket changes that ticket's plan count"
+    );
+}
