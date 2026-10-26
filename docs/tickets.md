@@ -100,9 +100,25 @@ The file the GUI places has six states, in this order:
 | `on-hold` | Paused | `resume_trigger` |
 | `cancelled` | Will not be done | `reason` |
 
-Its `guide` asks for one purpose per ticket, one or two tickets in progress at a time, deferred
-work kept in `considering` or `on-hold` rather than dropped, results recorded as soon as they are
-known and before a ticket is marked `done`, and cancellation with a reason in place of deletion.
+It also defines four fields:
+
+| Field | Meaning |
+|---|---|
+| `start_condition` | What has to be true before the ticket moves to `todo` |
+| `resume_trigger` | The event or condition that brings the ticket back |
+| `reason` | Why the ticket was cancelled |
+| `spec` | Where the specification the ticket follows lives: a file and its section in the repository |
+
+The first three are the ones the states require. No state requires `spec`; a ticket without a
+specification leaves it empty. Its description asks the agent to read that file before starting, and
+to update it and record the change as a result when the work changes the specification. Like any
+field that the ticket's state does not require, `spec` is shown when you open the ticket, not on its
+card.
+
+Its `guide` asks for one purpose per ticket, one or two tickets in progress at a time, deferred work
+kept in `considering` or `on-hold` rather than dropped, results recorded as soon as they are known
+and before a ticket is marked `done`, cancellation with a reason in place of deletion, and the
+specification kept in the repository's files rather than in tickets, named in a ticket's `spec`.
 Those are requests to the agent, not checks; only the three required fields are enforced. Edit the
 file freely.
 

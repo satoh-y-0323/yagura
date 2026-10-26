@@ -9,6 +9,7 @@ Do not drop deferred work: put it in considering with the condition that would s
 Record results as soon as you have them (add_ticket_result): decisions, measurements, what was merged or pushed.
 Move a ticket to done only after its results are recorded.
 Never delete a ticket: move it to cancelled with the reason.
+Keep the specification in the repository's files, not in tickets: name the file and section in a ticket's spec field, and update the file when the work changes it.
 """
 
 [[state]]
@@ -52,3 +53,7 @@ description = "The event or condition that brings this ticket back."
 [[field]]
 name = "reason"
 description = "Why this ticket was cancelled."
+
+[[field]]
+name = "spec"
+description = "Where the specification this ticket follows lives: a file and its section, relative to the repository root, such as docs/spec/gui.md#tickets. Leave it empty when there is none. Read it before starting; when the work changes the specification, update that file and record the change as a result."
