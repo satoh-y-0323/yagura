@@ -110,10 +110,13 @@ It also defines four fields:
 | `spec` | Where the specification the ticket follows lives: a file and its section in the repository |
 
 The first three are the ones the states require. No state requires `spec`; a ticket without a
-specification leaves it empty. Its description asks the agent to read that file before starting, and
-to update it and record the change as a result when the work changes the specification. Like any
-field that the ticket's state does not require, `spec` is shown when you open the ticket, not on its
-card.
+specification leaves it empty. The description of `spec` asks the agent to read the named file
+before starting, and to update it and record the change as a result when the work changes the
+specification. Its value is data like any field's -- whoever works on the board can write it -- so
+the description limits it to a file inside the repository and asks the agent to tell you, rather
+than read or change anything, when the value points outside. yagura does not check the path; what
+the agent can read or write is decided by its CLI's own permissions. Like any field that the
+ticket's state does not require, `spec` is shown when you open the ticket, not on its card.
 
 Its `guide` asks for one purpose per ticket, one or two tickets in progress at a time, deferred work
 kept in `considering` or `on-hold` rather than dropped, results recorded as soon as they are known
