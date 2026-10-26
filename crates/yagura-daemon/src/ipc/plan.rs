@@ -199,13 +199,18 @@ pub(super) async fn handle_create_plan(
     state: &super::ConnectionState,
     title: String,
     tasks: Vec<PlanTaskSpec>,
+    ticket: Option<u32>,
 ) {
     if !ledger.is_enabled() {
         outbound.reply(&unsupported_msg());
         return;
     }
 
-    let create_permit = match plan_permit::issue_create(&state.origin, registry) {
+    let issued = match ticket {
+        Some(number) => plan_permit::issue_create_from_ticket(&state.origin, registry, number),
+        None => plan_permit::issue_create(&state.origin, registry),
+    };
+    let create_permit = match issued {
         Ok(permit) => permit,
         Err(err) => {
             outbound.reply(&permit_error_msg(err));
@@ -266,6 +271,9 @@ pub(super) async fn handle_create_plan(
         }
         Ok(Err(CreateOutcome::Create(PlanStoreError::ResourceExhausted(_)))) => {
             outbound.reply(&resource_exhausted_msg());
+        }
+        Ok(Err(CreateOutcome::Create(PlanStoreError::TicketNotFound))) => {
+            outbound.reply(&super::ticket::ticket_not_found_msg());
         }
         Ok(Err(CreateOutcome::Create(PlanStoreError::Store(store_err)))) => {
             tracing::warn!(error = %store_err, "plan create failed");
@@ -1518,7 +1526,7 @@ fn build_plan_info_from_detail(
         roles_warning,
         review: detail.review,
         version: detail.version,
-        ticket: None,
+        ticket: detail.ticket,
     }
 }
 

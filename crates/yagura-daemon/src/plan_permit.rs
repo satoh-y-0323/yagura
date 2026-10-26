@@ -24,6 +24,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use crate::control::RequestOrigin;
 use crate::plan_store::{PlanReview, PlanStore};
 use crate::pty::lock_recover;
+use crate::ticket_permit::WorkspaceRef;
 use crate::window::{WindowLiveness, WindowRegistry};
 
 /// Which kind of plan-changing request an [`issue_change`] call is judging.
@@ -99,12 +100,14 @@ pub enum PermitError {
 
 /// Proof that the calling window is alive, carrying the facts
 /// [`crate::plan_store::PlanStore::create_plan`] needs and does not accept
-/// as separate arguments: the window that will own the new plan, and its
-/// cwd.
+/// as separate arguments: the window that will own the new plan, its cwd,
+/// and, for a plan made from a ticket, which ticket of the window's own
+/// workspace it names.
 #[derive(Debug)]
 pub struct CreatePermit {
     owner_window: String,
     cwd: String,
+    ticket: Option<TicketLink>,
 }
 
 impl CreatePermit {
@@ -116,6 +119,34 @@ impl CreatePermit {
     /// The cwd a plan created under this permit is stamped with.
     pub(crate) fn cwd(&self) -> &str {
         &self.cwd
+    }
+
+    /// The ticket a plan created under this permit is made from, if any.
+    pub(crate) fn ticket(&self) -> Option<&TicketLink> {
+        self.ticket.as_ref()
+    }
+}
+
+/// A ticket number scoped to the workspace the creating window is registered
+/// in. The workspace comes from the registry at issue time, never from the
+/// caller, so a window can only name its own workspace's tickets; whether
+/// the number exists is decided by the store inside the write that records
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketLink {
+    workspace: WorkspaceRef,
+    number: u32,
+}
+
+impl TicketLink {
+    /// The workspace the ticket must belong to.
+    pub(crate) fn workspace(&self) -> &WorkspaceRef {
+        &self.workspace
+    }
+
+    /// The ticket's number within that workspace.
+    pub(crate) fn number(&self) -> u32 {
+        self.number
     }
 }
 
@@ -347,6 +378,30 @@ pub fn issue_create(
     origin: &RequestOrigin,
     registry: &WindowRegistry,
 ) -> Result<CreatePermit, PermitError> {
+    issue_create_with(origin, registry, None)
+}
+
+/// [`issue_create`] for a plan made from ticket `number` of the calling
+/// window's own workspace, read from the same registry entry the liveness
+/// decision is made on. The store refuses the write when that workspace has
+/// no such ticket.
+///
+/// # Errors
+///
+/// The same as [`issue_create`].
+pub fn issue_create_from_ticket(
+    origin: &RequestOrigin,
+    registry: &WindowRegistry,
+    number: u32,
+) -> Result<CreatePermit, PermitError> {
+    issue_create_with(origin, registry, Some(number))
+}
+
+fn issue_create_with(
+    origin: &RequestOrigin,
+    registry: &WindowRegistry,
+    ticket: Option<u32>,
+) -> Result<CreatePermit, PermitError> {
     let RequestOrigin::Window(window_id) = origin else {
         return Err(PermitError::AuthFailed);
     };
@@ -354,6 +409,10 @@ pub fn issue_create(
         WindowLiveness::Alive(entry) => Ok(CreatePermit {
             owner_window: window_id.clone(),
             cwd: entry.cwd().to_string(),
+            ticket: ticket.map(|number| TicketLink {
+                workspace: WorkspaceRef::from(entry.workspace()),
+                number,
+            }),
         }),
         WindowLiveness::Dead | WindowLiveness::NotFound => Err(PermitError::InvalidState),
     }

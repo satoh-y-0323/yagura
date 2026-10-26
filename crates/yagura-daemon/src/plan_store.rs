@@ -23,7 +23,9 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 use crate::plan::{Assignment, ValidatedPlan, ValidatedTask};
-use crate::plan_permit::{ChangePermit, CreatePermit, NominatePermit, NoticePermit, ReportPermit};
+use crate::plan_permit::{
+    ChangePermit, CreatePermit, NominatePermit, NoticePermit, ReportPermit, TicketLink,
+};
 use crate::sql::FixedSql;
 use crate::store::{self, StoreError};
 
@@ -62,6 +64,11 @@ pub enum PlanStoreError {
     /// bounds in [`ResourceLimitKind`]. No row was written.
     #[error("plan creation was refused: the resource limit is already reached")]
     ResourceExhausted(ResourceLimitKind),
+    /// The permit names a ticket its workspace does not hold -- the same
+    /// answer whether the number is absent or belongs to another workspace.
+    /// No row was written.
+    #[error("plan creation was refused: no such ticket")]
+    TicketNotFound,
 }
 
 /// A resolved profile/model/effort triple as stored, mirroring
@@ -321,6 +328,9 @@ pub struct PlanDetail {
     pub review: Option<PlanReview>,
     /// How many times the task list has been replaced since creation.
     pub version: u64,
+    /// The number of the ticket, in the creating window's workspace, the plan
+    /// was made from.
+    pub ticket: Option<u32>,
 }
 
 /// One plan as read back by [`PlanStore::list_plans`].
@@ -546,15 +556,23 @@ fn insert_tasks(
 }
 
 /// One raw `plan` row as [`read_plan`] selects it: title, cwd, owner window,
-/// review and version.
-type PlanHeaderRow = (String, String, Option<String>, Option<String>, i64);
+/// review, version and ticket number.
+type PlanHeaderRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<i64>,
+);
 
 /// [`PlanStore::get_plan`] on any connection, so [`PlanStore::replace_tasks`]
 /// can read the previous version of a plan inside its own transaction.
 fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, StoreError> {
     let header: Option<PlanHeaderRow> = conn
         .query_row_fixed(
-            "SELECT title, cwd, owner_window, review, version FROM plan WHERE plan_id = ?1",
+            "SELECT title, cwd, owner_window, review, version, ticket_number FROM plan \
+             WHERE plan_id = ?1",
             params![plan_id],
             |row| {
                 Ok((
@@ -563,11 +581,12 @@ fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, Sto
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((title, cwd, owner_window, review, version)) = header else {
+    let Some((title, cwd, owner_window, review, version, ticket)) = header else {
         return Ok(None);
     };
 
@@ -654,6 +673,7 @@ fn read_plan(conn: &Connection, plan_id: &str) -> Result<Option<PlanDetail>, Sto
         tasks,
         review: review_from_column(review.as_deref()),
         version: version_from_column(version),
+        ticket: ticket.and_then(|number| u32::try_from(number).ok()),
     }))
 }
 
@@ -757,7 +777,9 @@ impl PlanStore {
     ///
     /// [`PlanStoreError::ResourceExhausted`] when creating this plan would
     /// exceed [`MAX_TOTAL_PLANS`] or [`MAX_PLANS_PER_OWNER`] for `permit`'s
-    /// window. [`PlanStoreError::Store`] for any underlying storage failure.
+    /// window. [`PlanStoreError::TicketNotFound`] when `permit` names a ticket
+    /// its workspace does not hold. [`PlanStoreError::Store`] for any
+    /// underlying storage failure.
     pub fn create_plan(
         &mut self,
         permit: &CreatePermit,
@@ -768,6 +790,28 @@ impl PlanStore {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from)?;
+
+        // Resolved inside this write's transaction, on this same database, so
+        // the link recorded is to a ticket that exists at the moment it is written.
+        let ticket_workspace_id = match permit.ticket() {
+            Some(link) => Some(
+                tx.query_row_fixed(
+                    "SELECT w.workspace_id FROM ticket_workspace w JOIN ticket t \
+                     ON t.workspace_id = w.workspace_id \
+                     WHERE w.kind = ?1 AND w.key = ?2 AND t.number = ?3",
+                    params![
+                        link.workspace().kind(),
+                        link.workspace().path(),
+                        link.number()
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(StoreError::from)?
+                .ok_or(PlanStoreError::TicketNotFound)?,
+            ),
+            None => None,
+        };
 
         // The owner-specific cap is checked before the overall one: a window that has
         // reached its own 16-plan cap must be refused OwnerPlans even in the exact case
@@ -799,7 +843,8 @@ impl PlanStore {
         let now = store::current_epoch_secs();
         tx.execute_fixed(
             "INSERT INTO plan (plan_id, title, cwd, owner_window, created_at, updated_at, \
-             review) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             review, ticket_workspace_id, ticket_number) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 plan_id,
                 plan.title,
@@ -807,7 +852,9 @@ impl PlanStore {
                 permit.owner_window(),
                 now,
                 now,
-                review.map(review_to_column)
+                review.map(review_to_column),
+                ticket_workspace_id,
+                permit.ticket().map(TicketLink::number)
             ],
         )
         .map_err(StoreError::from)?;

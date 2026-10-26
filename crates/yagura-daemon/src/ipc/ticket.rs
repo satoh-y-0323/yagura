@@ -509,10 +509,7 @@ fn permit_error_msg(err: TicketPermitError) -> DaemonMessage {
 
 fn store_error_msg(err: TicketStoreError) -> DaemonMessage {
     match err {
-        TicketStoreError::TicketNotFound => error_msg(
-            "ticket_not_found",
-            "no ticket with this number in the caller's workspace",
-        ),
+        TicketStoreError::TicketNotFound => ticket_not_found_msg(),
         TicketStoreError::ResourceExhausted(kind) => {
             let what = match kind {
                 TicketLimitKind::Tickets => "the workspace already holds the most tickets allowed",
@@ -552,6 +549,15 @@ fn store_error_msg(err: TicketStoreError) -> DaemonMessage {
             internal_msg()
         }
     }
+}
+
+/// The one answer for a ticket number the caller's workspace does not hold,
+/// whether it is absent or belongs to another workspace.
+pub(super) fn ticket_not_found_msg() -> DaemonMessage {
+    error_msg(
+        "ticket_not_found",
+        "no ticket with this number in the caller's workspace",
+    )
 }
 
 fn access_error_msg(err: StoreAccessError) -> DaemonMessage {
