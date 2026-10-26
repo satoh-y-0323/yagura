@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Reads tickets.toml directly; the daemon's bounded reader is not under test here.
+#![allow(clippy::disallowed_methods)]
 
 //! Integration test: the ticket rules a user configures in `tickets.toml`
 //! (states, fields, the board guide), the required-field check a state

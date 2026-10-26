@@ -35,7 +35,7 @@ use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
 use yagura_daemon::inbox::{is_session_id, session_at_pointer};
-use yagura_daemon::ipc::{chat, plan};
+use yagura_daemon::ipc::{chat, plan, ticket};
 use yagura_daemon::palette_store::PaletteStore;
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
@@ -504,6 +504,17 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         .context("plan ledger initialization panicked")?,
     );
 
+    // The ticket board shares the plan ledger's database file; opened on a
+    // blocking thread for the same reason.
+    let tickets = Arc::new(
+        tokio::task::spawn_blocking({
+            let config = config.clone();
+            move || ticket::TicketRuntime::from_config(&config)
+        })
+        .await
+        .context("ticket board initialization panicked")?,
+    );
+
     // Read before any window can be opened, so the first one already answers
     // with what the GUI last sent.
     let palette_store = tokio::task::spawn_blocking({
@@ -514,7 +525,9 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
     .await
     .context("default palette store initialization panicked")?;
 
-    let mut server = IpcServer::new_with_chat(registry, endpoint, config, chat).with_ledger(ledger);
+    let mut server = IpcServer::new_with_chat(registry, endpoint, config, chat)
+        .with_ledger(ledger)
+        .with_tickets(tickets);
     if let Some(palette_store) = palette_store {
         server = server.with_palette_store(palette_store);
     }

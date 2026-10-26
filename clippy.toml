@@ -45,6 +45,7 @@ disallowed-methods = [
     { path = "yagura_daemon::workspace::resolve_key", reason = "blocking filesystem walk: call resolve_key_blocking so it runs on the blocking pool" },
     { path = "yagura_daemon::roles::read_roles", reason = "blocking file read: go through ipc::plan's bounded load_role_and_profile_state_blocking" },
     { path = "yagura_daemon::profile::list_profiles", reason = "blocking directory read: go through ipc::plan's bounded load_role_and_profile_state_blocking" },
+    { path = "yagura_daemon::ticket::read_ticket_config", reason = "blocking file read: go through ipc::ticket's bounded TicketRuntime::load_config" },
     { path = "yagura_daemon::window::WindowRegistry::list_participation", reason = "read a room's members through ipc::chat's room_members so every reader applies the same membership rule" },
     { path = "yagura_daemon::chat_store::ChatStore::ensure_room", reason = "create rooms only through ipc::chat's resolve_room, which decides who may own one" },
     { path = "yagura_daemon::store::rotate_slots", reason = "rotate once at startup through store::wire_into: a second rotation overwrites the previous session" },

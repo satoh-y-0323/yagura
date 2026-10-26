@@ -46,6 +46,7 @@ mod profile_enabled;
 mod profile_job;
 pub mod report;
 mod store_gate;
+pub mod ticket;
 
 use crate::approval::{
     ApprovalBroker, ApprovalLimits, ApproverSink, DecideError, Ticket, WithdrawReason,
@@ -71,6 +72,7 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
 use crate::pty::{InputState, PtyError};
 use crate::store::{self, SnapshotWindow, StoreError};
+use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
 use crate::window::{
@@ -142,9 +144,6 @@ pub const RESTORE_REPLY_BUDGET_BYTES: usize = 2_097_152;
 /// Fixed and generic: the underlying error names a path and an
 /// SQLite failure, neither of which may cross the protocol boundary.
 const RESTORE_READ_FAILED_MESSAGE: &str = "failed to read the previous session's windows";
-
-/// The refusal for a ticket request on a daemon without a ticket store.
-const TICKETS_UNAVAILABLE_MESSAGE: &str = "tickets are not available on this daemon";
 
 /// The refusal for a `create_plan` that names a ticket on a daemon that
 /// cannot record the link.
@@ -923,6 +922,9 @@ pub struct IpcServer {
     /// [`IpcServer::new_with_chat`] build this disabled the same way `chat`
     /// is; the ledger-serving entry point is [`IpcServer::new_with_ledger`].
     ledger: Arc<plan::PlanRuntime>,
+    /// The ticket board's runtime state, disabled until
+    /// [`IpcServer::with_tickets`] wires one in.
+    tickets: Arc<ticket::TicketRuntime>,
     /// Admits `plan::load_role_and_profile_state_blocking`'s blocking reads
     /// so they never run on a request's own async task, sized the same way
     /// `WindowRegistry`'s own `workspace_walks` is.
@@ -1034,6 +1036,7 @@ impl IpcServer {
             shutdown_rx,
             chat,
             ledger,
+            tickets: Arc::new(ticket::TicketRuntime::disabled()),
             role_and_profile_reads,
             window_text_reads,
             model_choices_listing,
@@ -1071,6 +1074,14 @@ impl IpcServer {
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<plan::PlanRuntime>) -> Self {
         self.ledger = ledger;
+        self
+    }
+
+    /// Swaps in an already-built ticket board runtime. `tickets` is built by
+    /// the caller (`main.rs`) on a blocking thread, as the plan ledger is.
+    #[must_use]
+    pub fn with_tickets(mut self, tickets: Arc<ticket::TicketRuntime>) -> Self {
+        self.tickets = tickets;
         self
     }
 
@@ -2119,19 +2130,113 @@ impl IpcServer {
                 .await;
                 FrameOutcome::Continue
             }
-            Ok(
-                ClientMessage::ListTicketWorkspaces
-                | ClientMessage::ListTickets { .. }
-                | ClientMessage::GetTicket { .. }
-                | ClientMessage::CreateTicket { .. }
-                | ClientMessage::UpdateTicket { .. }
-                | ClientMessage::AddTicketResult { .. }
-                | ClientMessage::SetMilestone { .. },
-            ) => {
-                outbound.reply(&error_msg("unsupported", TICKETS_UNAVAILABLE_MESSAGE));
-                FrameOutcome::Continue
+            Ok(ClientMessage::ListTicketWorkspaces) => {
+                self.handle_ticket(outbound, state, ticket::TicketRequest::ListWorkspaces)
+                    .await
+            }
+            Ok(ClientMessage::ListTickets {
+                workspace_id,
+                state: ticket_state,
+                milestone,
+                limit,
+            }) => {
+                let request = ticket::TicketRequest::List {
+                    workspace_id,
+                    query: TicketQuery {
+                        state: ticket_state,
+                        milestone,
+                        limit,
+                    },
+                };
+                self.handle_ticket(outbound, state, request).await
+            }
+            Ok(ClientMessage::GetTicket {
+                workspace_id,
+                ticket,
+            }) => {
+                let request = ticket::TicketRequest::Get {
+                    workspace_id,
+                    number: ticket,
+                };
+                self.handle_ticket(outbound, state, request).await
+            }
+            Ok(ClientMessage::CreateTicket {
+                title,
+                body,
+                milestone,
+                state: ticket_state,
+                fields,
+            }) => {
+                let request = ticket::TicketRequest::Create(ticket::new_ticket(
+                    title,
+                    body,
+                    milestone,
+                    ticket_state,
+                    fields,
+                ));
+                self.handle_ticket(outbound, state, request).await
+            }
+            Ok(ClientMessage::UpdateTicket {
+                ticket,
+                title,
+                body,
+                milestone,
+                state: ticket_state,
+                fields,
+            }) => {
+                let request = ticket::TicketRequest::Update {
+                    number: ticket,
+                    change: TicketChange {
+                        title,
+                        body,
+                        milestone,
+                        state: ticket_state,
+                        fields: fields.unwrap_or_default(),
+                    },
+                };
+                self.handle_ticket(outbound, state, request).await
+            }
+            Ok(ClientMessage::AddTicketResult { ticket, text }) => {
+                let request = ticket::TicketRequest::AddResult {
+                    number: ticket,
+                    text,
+                };
+                self.handle_ticket(outbound, state, request).await
+            }
+            Ok(ClientMessage::SetMilestone {
+                name,
+                title,
+                description,
+                position,
+            }) => {
+                let request = ticket::TicketRequest::SetMilestone(ticket::milestone(
+                    name,
+                    title,
+                    description,
+                    position,
+                ));
+                self.handle_ticket(outbound, state, request).await
             }
         }
+    }
+
+    /// Serves one ticket request through [`ticket::handle_ticket_request`].
+    async fn handle_ticket(
+        &self,
+        outbound: &Arc<Outbound>,
+        state: &ConnectionState,
+        request: ticket::TicketRequest,
+    ) -> FrameOutcome {
+        ticket::handle_ticket_request(
+            &self.tickets,
+            &self.registry,
+            &self.broker,
+            outbound,
+            &state.origin,
+            request,
+        )
+        .await;
+        FrameOutcome::Continue
     }
 
     /// Answers `list_restore_candidates` from the previous boot's stored

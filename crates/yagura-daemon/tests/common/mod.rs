@@ -627,6 +627,51 @@ impl Harness {
         )
     }
 
+    /// [`Self::start_with_ledger`] with the ticket board wired in as well:
+    /// the plan ledger and the ticket store are opened against the same
+    /// `config.store_db_path_resolved`, in the order `main.rs` opens them, and
+    /// `config.tickets_path` is read on every ticket request.
+    pub async fn start_with_ledger_and_tickets(
+        tag: &str,
+        config: DaemonConfig,
+    ) -> (Self, Arc<yagura_daemon::plan_permit::LockTable>) {
+        let registry = Arc::new(WindowRegistry::new(config.clone()));
+        let ledger = Arc::new(
+            tokio::task::spawn_blocking({
+                let from_config_config = config.clone();
+                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config)
+            })
+            .await
+            .expect("PlanRuntime::from_config must not panic"),
+        );
+        let tickets = Arc::new(
+            tokio::task::spawn_blocking({
+                let from_config_config = config.clone();
+                move || yagura_daemon::ipc::ticket::TicketRuntime::from_config(&from_config_config)
+            })
+            .await
+            .expect("TicketRuntime::from_config must not panic"),
+        );
+        let locks = ledger.locks();
+        let endpoint = unique_pipe_name(tag);
+        let server = Arc::new(
+            IpcServer::new_with_ledger(registry.clone(), endpoint.clone(), config.clone(), ledger)
+                .with_tickets(tickets),
+        );
+        let handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        (
+            Self {
+                registry,
+                endpoint,
+                delivery: config.delivery.clone(),
+                _server: handle,
+            },
+            locks,
+        )
+    }
+
     /// [`Self::start_with_chat`] and [`Self::start_with_ledger`] combined, in
     /// the same order `main.rs` builds them (chat, then the ledger, both
     /// against the same `config.store_db_path_resolved`): both `send_chat` /
