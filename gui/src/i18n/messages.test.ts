@@ -526,6 +526,7 @@ export const dummyMessages: Messages = {
    * literals, and `plan-board-model.ts` holds the same strings as values.
    */
   plans: {
+    ticketsTab: 'DUMMY_plans_ticketsTab',
     boardTab: 'DUMMY_plans_boardTab',
     rolesTab: 'DUMMY_plans_rolesTab',
     noOwnerBanner: 'DUMMY_plans_noOwnerBanner',
@@ -583,6 +584,26 @@ export const dummyMessages: Messages = {
     refreshModelChoicesLabel: 'DUMMY_plans_refreshModelChoicesLabel',
     resetToShippedLabel: 'DUMMY_plans_resetToShippedLabel',
     modelForAliasLabel: (alias: string) => `DUMMY_plans_modelForAliasLabel(${alias})`,
+  },
+  tickets: {
+    workspaceLabel: 'DUMMY_tickets_workspaceLabel',
+    milestoneLabel: 'DUMMY_tickets_milestoneLabel',
+    allMilestones: 'DUMMY_tickets_allMilestones',
+    noWorkspaces: 'DUMMY_tickets_noWorkspaces',
+    boardNote: (ticketCount: number, milestoneCount: number) =>
+      `DUMMY_tickets_boardNote(${ticketCount},${milestoneCount})`,
+    unconfigured: (reason: string) => `DUMMY_tickets_unconfigured(${reason})`,
+    columnTruncated: 'DUMMY_tickets_columnTruncated',
+    planCount: (count: number) => `DUMMY_tickets_planCount(${count})`,
+    backButton: 'DUMMY_tickets_backButton',
+    descriptionHeading: 'DUMMY_tickets_descriptionHeading',
+    fieldsHeading: 'DUMMY_tickets_fieldsHeading',
+    noRequiredFields: 'DUMMY_tickets_noRequiredFields',
+    fieldNotSet: 'DUMMY_tickets_fieldNotSet',
+    resultsHeading: 'DUMMY_tickets_resultsHeading',
+    noResults: 'DUMMY_tickets_noResults',
+    plansHeading: 'DUMMY_tickets_plansHeading',
+    noPlans: 'DUMMY_tickets_noPlans',
   },
 };
 

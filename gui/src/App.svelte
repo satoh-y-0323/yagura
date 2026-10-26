@@ -123,6 +123,13 @@
     invokeSetTaskAssignment,
     subscribePlanChanged,
   } from './ipc/plan-client';
+  import type { Ticket, TicketChanged, TicketList, TicketWorkspace } from './ipc/ticket-boundary';
+  import {
+    invokeGetTicket,
+    invokeListTicketWorkspaces,
+    invokeListTickets,
+    subscribeTicketChanged,
+  } from './ipc/ticket-client';
   import {
     MODEL_ALIASES_MIN_REVISION,
     type LaunchOptionAlias,
@@ -188,6 +195,14 @@
     withRetainedMarks,
     type PlanReload,
   } from './plans/plan-board-model';
+  import {
+    buildTicketBoard,
+    planBoardBecameVisible,
+    ticketColumnQueries,
+    ticketReloadFor,
+    type PlansTab,
+    type TicketBoard,
+  } from './tickets/ticket-board-model';
   import {
     approvalSettingsNotice,
     approvalUpdateFailure,
@@ -280,6 +295,7 @@
     describeOperationFailure,
     describeThemeName,
     foldExternalText,
+    plans as plansText,
     settings,
   } from './ui-messages';
   import { shouldDropRememberedCwd, windowOpenFailureOf } from './window-open-failure-model';
@@ -485,6 +501,8 @@
   // owner candidates are derived by the panel from the window registry, so
   // nothing here is read again when only the window list moves.
   let isPlansOpen = false;
+  // The tab the plans panel shows. Every opening starts on Tickets.
+  let plansTab: PlansTab = 'tickets';
   // Marks the user was shown this time the panel is open; the daemon clears
   // them as soon as the plan is seen, so they are kept here until it closes.
   let retainedMarks: Readonly<Record<string, ReviewMark>> = {};
@@ -495,6 +513,9 @@
     requestedModelProfile = null;
     modelChoices = new Map();
     latestChoicesRequestIds.clear();
+    plansTab = 'tickets';
+    openTicketNumber = null;
+    openTicket = null;
   }
   // What the board shows: the daemon's plan with the retained marks laid over
   // it, so no writer of `plan` has to remember them.
@@ -506,6 +527,17 @@
   // Kept as read so a save does not clear the table's default role.
   let defaultRole: string | null = null;
   let unsubscribePlanChanged: (() => void) | null = null;
+
+  // The Tickets tab: read only, so all it keeps is what was last read for
+  // the workspace and milestone chosen, and the ticket whose details are open.
+  let ticketWorkspaces: TicketWorkspace[] = [];
+  let ticketWorkspaceId: number | null = null;
+  let ticketMilestone: string | null = null;
+  let ticketOverview: TicketList | null = null;
+  let ticketBoard: TicketBoard | null = null;
+  let openTicketNumber: number | null = null;
+  let openTicket: Ticket | null = null;
+  let unsubscribeTicketChanged: (() => void) | null = null;
 
   // The Settings panel: its own open flag and active tab, plus the state of
   // the one operation it can start (switching a profile on or off).
@@ -1048,8 +1080,11 @@
     if (isPlansOpen) {
       panelOrigins.set('plans', focusOrigin());
       void focusPanelStart('.plans-panel');
+      void readTicketWorkspaces();
       await applyPlanReload({ list: true, roles: true, planId: selectedPlanId });
-      notePlanViewed();
+      if (planBoardBecameVisible({ open: false, tab: plansTab }, { open: true, tab: plansTab })) {
+        notePlanViewed();
+      }
     } else {
       closePlans();
     }
@@ -1306,9 +1341,13 @@
   /**
    * Tells the daemon the user has looked at the selected plan's marked
    * tasks, but only when opening it is what "seen" means here:
-   * a push re-reading the plan is not a look.
+   * a push re-reading the plan is not a look, and neither is a plan read
+   * while another tab of the panel is shown.
    */
   function notePlanViewed(): void {
+    if (!isPlansOpen || plansTab !== 'board') {
+      return;
+    }
     if (plan !== null && shouldMarkPlanSeen('open', plan)) {
       void markPlanSeen();
     }
@@ -1519,7 +1558,165 @@
     if (!isPlansOpen) {
       await togglePlans();
     }
+    selectPlansTab('models');
     requestedModelProfile = { id, seq: (requestedModelProfile?.seq ?? 0) + 1 };
+  }
+
+  /**
+   * Shows one tab of the plans panel. Pressing the Board tab counts as
+   * looking at the plan, even when it was already shown.
+   */
+  function selectPlansTab(tab: PlansTab): void {
+    const previous = { open: isPlansOpen, tab: plansTab };
+    plansTab = tab;
+    closeTicket();
+    if (tab === 'tickets') {
+      void refreshTicketBoard();
+    }
+    if (
+      planBoardBecameVisible(previous, { open: isPlansOpen, tab }) ||
+      (previous.tab === 'board' && tab === 'board')
+    ) {
+      notePlanViewed();
+    }
+  }
+
+  /** Reads the workspaces that have tickets, and keeps or picks the one shown. */
+  async function readTicketWorkspaces(): Promise<void> {
+    let workspaces: TicketWorkspace[];
+    try {
+      workspaces = await invokeListTicketWorkspaces();
+    } catch (error) {
+      reportOperationFailure(plansText.ticketsTab, error);
+      return;
+    }
+    ticketWorkspaces = workspaces;
+    const shown = ticketWorkspaceId;
+    if (shown === null || !workspaces.some((entry) => entry.workspace_id === shown)) {
+      selectTicketWorkspace(workspaces[0]?.workspace_id ?? null);
+    } else {
+      void refreshTicketBoard();
+    }
+  }
+
+  function selectTicketWorkspace(workspaceId: number | null): void {
+    ticketWorkspaceId = workspaceId;
+    ticketMilestone = null;
+    ticketOverview = null;
+    ticketBoard = null;
+    closeTicket();
+    void refreshTicketBoard();
+  }
+
+  function selectTicketMilestone(milestone: string | null): void {
+    ticketMilestone = milestone;
+    void refreshTicketBoard();
+  }
+
+  /**
+   * Reads the board of the workspace shown: one read for the settings,
+   * milestones and tickets in states the settings no longer name, then one
+   * read per state. The answer is dropped if the choice changed meanwhile.
+   */
+  async function readTicketBoardOnce(): Promise<void> {
+    const workspaceId = ticketWorkspaceId;
+    const milestone = ticketMilestone;
+    if (workspaceId === null) {
+      return;
+    }
+    try {
+      const overview = await invokeListTickets({
+        workspaceId,
+        ...(milestone === null ? {} : { milestone }),
+      });
+      const config = overview.config;
+      const columns =
+        config === null
+          ? []
+          : await Promise.all(
+              ticketColumnQueries(workspaceId, config, milestone).map(
+                async (query) => [query.state ?? '', await invokeListTickets(query)] as const
+              )
+            );
+      if (ticketWorkspaceId !== workspaceId || ticketMilestone !== milestone) {
+        return;
+      }
+      ticketOverview = overview;
+      ticketBoard = buildTicketBoard(overview, new Map(columns));
+    } catch (error) {
+      if (ticketWorkspaceId === workspaceId) {
+        reportOperationFailure(plansText.ticketsTab, error);
+      }
+      return;
+    }
+    if (openTicketNumber !== null) {
+      await readOpenTicket();
+    }
+  }
+
+  /** Serialized so concurrent pushes cannot pile up board reads. */
+  const refreshTicketBoard = serializeRefresh(readTicketBoardOnce);
+
+  function openTicketCard(ticket: number): void {
+    openTicketNumber = ticket;
+    openTicket = null;
+    void readOpenTicket();
+  }
+
+  function closeTicket(): void {
+    openTicketNumber = null;
+    openTicket = null;
+  }
+
+  /** Reads the open ticket in full; a failed read goes back to the board. */
+  async function readOpenTicket(): Promise<void> {
+    const workspaceId = ticketWorkspaceId;
+    const ticket = openTicketNumber;
+    if (workspaceId === null || ticket === null) {
+      return;
+    }
+    const isStillOpen = (): boolean =>
+      ticketWorkspaceId === workspaceId && openTicketNumber === ticket;
+    try {
+      const next = await invokeGetTicket(workspaceId, ticket);
+      if (isStillOpen()) {
+        openTicket = next;
+      }
+    } catch (error) {
+      if (isStillOpen()) {
+        reportOperationFailure(plansText.ticketsTab, error);
+        closeTicket();
+      }
+    }
+  }
+
+  /** Takes the user from a ticket's details to one of its plans on the Board tab. */
+  function openTicketPlan(planId: string): void {
+    // Selected first, so the Board tab coming into view is never counted as
+    // a look at the plan shown before.
+    selectPlan(planId);
+    selectPlansTab('board');
+  }
+
+  /**
+   * A `ticket_changed` push is read only while the Tickets tab is shown:
+   * there is no badge to keep current, and showing the tab reads it again.
+   */
+  function applyTicketChanged(payload: TicketChanged): void {
+    if (!isPlansOpen || plansTab !== 'tickets') {
+      return;
+    }
+    const reload = ticketReloadFor(
+      payload,
+      ticketWorkspaceId,
+      ticketWorkspaces.map((entry) => entry.workspace_id)
+    );
+    if (reload.workspaces) {
+      void readTicketWorkspaces();
+    }
+    if (reload.board) {
+      void refreshTicketBoard();
+    }
   }
 
   async function copyText(text: string): Promise<void> {
@@ -2061,6 +2258,7 @@
     unsubscribeChatParticipantsChanged?.();
     unsubscribeChatHistoryCleared?.();
     unsubscribePlanChanged?.();
+    unsubscribeTicketChanged?.();
     unsubscribeModelChoices?.();
     unsubscribeMcpRegistrationStatus?.();
     unsubscribeMcpRegistrationResult?.();
@@ -2193,6 +2391,12 @@
     // next push or reopening the panel reads it again.
     unsubscribePlanChanged = await subscribePlanChanged(applyPlanChanged, (error) => {
       console.error('planChanged boundary error:', error);
+    });
+
+    // A dropped ticket push leaves the board at most one push behind, and the
+    // next push or showing the Tickets tab again reads it.
+    unsubscribeTicketChanged = await subscribeTicketChanged(applyTicketChanged, (error) => {
+      console.error('ticketChanged boundary error:', error);
     });
 
     // A dropped model-list push leaves that profile fetching until the
@@ -3162,7 +3366,21 @@
     onSaveRoles={(next: RoleEntry[], nextDefaultRole: string | null) =>
       void saveRoles(next, nextDefaultRole)}
     onApprovePlan={() => void approvePlan()}
-    onBoardTabSelected={notePlanViewed}
+    activeTab={plansTab}
+    onSelectTab={selectPlansTab}
+    {ticketWorkspaces}
+    selectedTicketWorkspaceId={ticketWorkspaceId}
+    ticketMilestones={ticketOverview?.milestones ?? []}
+    ticketMilestoneFilter={ticketMilestone}
+    {ticketBoard}
+    ticketConfig={ticketOverview?.config ?? null}
+    {openTicketNumber}
+    {openTicket}
+    onSelectTicketWorkspace={selectTicketWorkspace}
+    onSelectTicketMilestone={selectTicketMilestone}
+    onOpenTicket={openTicketCard}
+    onCloseTicket={closeTicket}
+    onOpenTicketPlan={openTicketPlan}
     profileOptions={offeredProfileOptions}
     {shippedModels}
     {requestedModelProfile}

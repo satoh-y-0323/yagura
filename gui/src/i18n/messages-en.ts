@@ -551,6 +551,7 @@ export const messagesEn = {
    * are the ones `assignmentSourceKey` returns, looked up by that value.
    */
   plans: {
+    ticketsTab: 'Tickets',
     boardTab: 'Board',
     rolesTab: 'Roles',
     noOwnerBanner:
@@ -634,6 +635,37 @@ export const messagesEn = {
     refreshModelChoicesLabel: 'Refresh the model list',
     resetToShippedLabel: 'Reset to the shipped value',
     modelForAliasLabel: (alias: string): string => `Model for ${alias}`,
+  },
+
+  // The Tickets tab of the plans panel: the board of one repository and one
+  // ticket's details. Read only; agents edit tickets through MCP.
+  tickets: {
+    workspaceLabel: 'Workspace',
+    milestoneLabel: 'Milestone',
+    allMilestones: 'All milestones',
+    noWorkspaces: 'No workspace has tickets yet. Agents add them through MCP.',
+    boardNote: (ticketCount: number, milestoneCount: number): string => {
+      const tickets = ticketCount === 1 ? '1 ticket' : `${ticketCount} tickets`;
+      const milestones =
+        milestoneCount === 0
+          ? ''
+          : milestoneCount === 1
+            ? ' in 1 milestone'
+            : ` in ${milestoneCount} milestones`;
+      return `Edited by agents through MCP. ${tickets}${milestones}.`;
+    },
+    unconfigured: (reason: string): string => `The ticket settings could not be read: ${reason}`,
+    columnTruncated: 'More tickets than shown.',
+    planCount: (count: number): string => (count === 1 ? '1 plan' : `${count} plans`),
+    backButton: 'Back',
+    descriptionHeading: 'Description',
+    fieldsHeading: 'Fields',
+    noRequiredFields: 'None required in this state.',
+    fieldNotSet: 'Not set',
+    resultsHeading: 'Results',
+    noResults: 'No results recorded yet.',
+    plansHeading: 'Plans',
+    noPlans: 'No plans were made from this ticket.',
   },
 
   settings: {

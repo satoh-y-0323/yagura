@@ -74,6 +74,9 @@ export const chat = messages.chat;
 /** The plans panel's text: its tabs, board, owner banner and role editor. */
 export const plans = messages.plans;
 
+/** The plans panel's Tickets tab: the ticket board and one ticket's details. */
+export const tickets = messages.tickets;
+
 /** The settings panel's text: its tabs and the Profiles tab's rows. */
 export const settings = messages.settings;
 

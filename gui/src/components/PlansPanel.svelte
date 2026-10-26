@@ -1,9 +1,11 @@
 <script lang="ts">
   /**
-   * The plans panel: a floating panel with a Board, a Roles and a Models tab.
+   * The plans panel: a floating panel with a Tickets, a Board, a Roles and a
+   * Models tab.
    *
-   * It owns no IPC and no store: the shell holds the plan ledger state and
-   * hands it in, and every change goes back out through its callbacks.
+   * It owns no IPC and no store: the shell holds the plan ledger and ticket
+   * state, the active tab included, and hands them in; every change goes back
+   * out through its callbacks.
    */
   import type { ComponentProps } from 'svelte';
 
@@ -11,14 +13,19 @@
   import ModelAliasesEditor from './ModelAliasesEditor.svelte';
   import PlanBoard from './PlanBoard.svelte';
   import RolesEditor from './RolesEditor.svelte';
+  import TicketBoard from './TicketBoard.svelte';
+  import TicketDetail from './TicketDetail.svelte';
   import { closeOnEscape } from './panel-focus';
   import { observeSize } from './observe-size';
   import { PANEL_MIN_SIZE, type PanelSize } from '../settings/panel-size';
+  import type { PlansTab } from '../tickets/ticket-board-model';
   import { buttons, nav, plans } from '../ui-messages';
 
   type BoardProps = ComponentProps<typeof PlanBoard>;
   type EditorProps = ComponentProps<typeof RolesEditor>;
   type ModelEditorProps = ComponentProps<typeof ModelAliasesEditor>;
+  type TicketBoardProps = ComponentProps<typeof TicketBoard>;
+  type TicketDetailProps = ComponentProps<typeof TicketDetail>;
 
   export let planList: BoardProps['planList'];
   export let selectedPlanId: BoardProps['selectedPlanId'];
@@ -34,8 +41,22 @@
   export let onSetPlanOwner: BoardProps['onSetPlanOwner'];
   export let onSaveRoles: EditorProps['onSave'];
   export let onApprovePlan: BoardProps['onApprovePlan'];
-  /** Notified when the Board tab is selected, one of the three "seen" triggers. */
-  export let onBoardTabSelected: () => void;
+  export let activeTab: PlansTab;
+  export let onSelectTab: (tab: PlansTab) => void;
+  export let ticketWorkspaces: TicketBoardProps['workspaces'];
+  export let selectedTicketWorkspaceId: TicketBoardProps['selectedWorkspaceId'];
+  export let ticketMilestones: TicketBoardProps['milestones'];
+  export let ticketMilestoneFilter: TicketBoardProps['milestoneFilter'];
+  export let ticketBoard: TicketBoardProps['board'];
+  export let ticketConfig: TicketDetailProps['config'];
+  /** The ticket whose details replace the board, `null` while the board is shown. */
+  export let openTicketNumber: number | null;
+  export let openTicket: TicketDetailProps['ticket'];
+  export let onSelectTicketWorkspace: TicketBoardProps['onSelectWorkspace'];
+  export let onSelectTicketMilestone: TicketBoardProps['onSelectMilestone'];
+  export let onOpenTicket: TicketBoardProps['onOpenTicket'];
+  export let onCloseTicket: TicketDetailProps['onBack'];
+  export let onOpenTicketPlan: TicketDetailProps['onOpenPlan'];
   export let profileOptions: BoardProps['profileOptions'];
   export let shippedModels: ModelEditorProps['shipped'];
   export let modelChoices: ModelEditorProps['choices'];
@@ -48,12 +69,12 @@
   export let maxSize: PanelSize;
   export let onResize: (size: PanelSize) => void;
 
-  let activeTab: 'board' | 'roles' | 'models' = 'board';
-  let switchedForSeq = 0;
-  $: if (requestedModelProfile !== null && requestedModelProfile.seq !== switchedForSeq) {
-    switchedForSeq = requestedModelProfile.seq;
-    activeTab = 'models';
-  }
+  const TABS: readonly { tab: PlansTab; label: string }[] = [
+    { tab: 'tickets', label: plans.ticketsTab },
+    { tab: 'board', label: plans.boardTab },
+    { tab: 'roles', label: plans.rolesTab },
+    { tab: 'models', label: plans.modelsTab },
+  ];
 </script>
 
 <section
@@ -68,33 +89,42 @@
 >
   <header class="plans-panel__header">
     <div class="plans-panel__tabs">
-      <button
-        type="button"
-        class="plans-panel__tab"
-        aria-pressed={activeTab === 'board'}
-        on:click={() => {
-          activeTab = 'board';
-          onBoardTabSelected();
-        }}>{plans.boardTab}</button
-      >
-      <button
-        type="button"
-        class="plans-panel__tab"
-        aria-pressed={activeTab === 'roles'}
-        on:click={() => (activeTab = 'roles')}>{plans.rolesTab}</button
-      >
-      <button
-        type="button"
-        class="plans-panel__tab"
-        aria-pressed={activeTab === 'models'}
-        on:click={() => (activeTab = 'models')}>{plans.modelsTab}</button
-      >
+      {#each TABS as entry (entry.tab)}
+        <button
+          type="button"
+          class="plans-panel__tab"
+          aria-pressed={activeTab === entry.tab}
+          on:click={() => onSelectTab(entry.tab)}>{entry.label}</button
+        >
+      {/each}
     </div>
     <IconButton class="plans-panel__close" label={buttons.close} on:click={onClose}>✕</IconButton>
   </header>
 
   <div class="plans-panel__body">
-    {#if activeTab === 'board'}
+    {#if activeTab === 'tickets'}
+      {#if openTicketNumber === null}
+        <TicketBoard
+          workspaces={ticketWorkspaces}
+          selectedWorkspaceId={selectedTicketWorkspaceId}
+          milestones={ticketMilestones}
+          milestoneFilter={ticketMilestoneFilter}
+          board={ticketBoard}
+          onSelectWorkspace={onSelectTicketWorkspace}
+          onSelectMilestone={onSelectTicketMilestone}
+          {onOpenTicket}
+        />
+      {:else}
+        <TicketDetail
+          ticket={openTicket}
+          config={ticketConfig}
+          milestones={ticketMilestones}
+          {planList}
+          onBack={onCloseTicket}
+          onOpenPlan={onOpenTicketPlan}
+        />
+      {/if}
+    {:else if activeTab === 'board'}
       <PlanBoard
         {planList}
         {selectedPlanId}

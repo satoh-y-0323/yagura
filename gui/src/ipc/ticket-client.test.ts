@@ -41,7 +41,15 @@ function listWire(overrides: Record<string, unknown> = {}): Record<string, unkno
     config: { guide: 'g', states: [], fields: [] },
     milestones: [],
     tickets: [
-      { number: 3, title: 'A ticket', state: 'todo', milestone: null, updated_at: 1_790_000_000 },
+      {
+        number: 3,
+        title: 'A ticket',
+        state: 'todo',
+        milestone: null,
+        updated_at: 1_790_000_000,
+        plan_count: 0,
+        fields: {},
+      },
     ],
     truncated: false,
     ...overrides,
