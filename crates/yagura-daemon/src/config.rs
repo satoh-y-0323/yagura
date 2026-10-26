@@ -242,6 +242,12 @@ pub struct DaemonConfig {
     /// is nowhere to read or save the table.
     pub roles_path: Option<PathBuf>,
 
+    /// Path to the ticket rules (`tickets.toml`), resolved by
+    /// `cli::resolve_tickets_path` and read again on every ticket request.
+    /// `None` means no config root could be composed, so tickets are not
+    /// configured.
+    pub tickets_path: Option<PathBuf>,
+
     /// The operating system this daemon is running on, decided in exactly
     /// one place ([`ProfileOs::host`]) so that no other module re-derives
     /// it and risks disagreeing with this field. Selects which of a launch
@@ -566,6 +572,8 @@ pub struct StartupParts {
     pub bundled_profiles: bool,
     /// Becomes [`DaemonConfig::roles_path`].
     pub roles_path: Option<PathBuf>,
+    /// Becomes [`DaemonConfig::tickets_path`].
+    pub tickets_path: Option<PathBuf>,
     /// Becomes [`DaemonConfig::program_lookup`].
     pub program_lookup: ProgramLookup,
     /// Becomes [`DaemonConfig::child_base_env`].
@@ -594,6 +602,7 @@ impl DaemonConfig {
             profiles_dir,
             bundled_profiles,
             roles_path,
+            tickets_path,
             program_lookup,
             child_base_env,
             default_window_cwd,
@@ -614,6 +623,7 @@ impl DaemonConfig {
             profiles_dir,
             bundled_profiles,
             roles_path,
+            tickets_path,
             program_lookup,
             child_base_env,
             default_window_cwd,
@@ -658,6 +668,7 @@ impl Default for DaemonConfig {
             profiles_dir: None,
             bundled_profiles: false,
             roles_path: None,
+            tickets_path: None,
             host_os: ProfileOs::host(),
             program_lookup: ProgramLookup {
                 path_dirs: Vec::new(),
@@ -921,6 +932,7 @@ mod tests {
             profiles_dir: None,
             bundled_profiles: false,
             roles_path: None,
+            tickets_path: None,
             program_lookup: ProgramLookup {
                 path_dirs: Vec::new(),
                 extra_bin_dirs: Vec::new(),
@@ -950,6 +962,7 @@ mod tests {
             profiles_dir: path("profiles-dir"),
             bundled_profiles: !defaults.bundled_profiles,
             roles_path: path("roles.toml"),
+            tickets_path: path("tickets.toml"),
             program_lookup: ProgramLookup {
                 path_dirs: vec![PathBuf::from("lookup-dir")],
                 extra_bin_dirs: Vec::new(),
@@ -985,6 +998,7 @@ mod tests {
         assert_eq!(config.profiles_dir, path("profiles-dir"));
         assert_eq!(config.bundled_profiles, !defaults.bundled_profiles);
         assert_eq!(config.roles_path, path("roles.toml"));
+        assert_eq!(config.tickets_path, path("tickets.toml"));
         assert_eq!(
             config.program_lookup.path_dirs,
             vec![PathBuf::from("lookup-dir")]

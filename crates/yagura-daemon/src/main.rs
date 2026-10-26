@@ -112,6 +112,7 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         profiles_dir_arg,
         approver_exe_arg,
         roles_arg,
+        tickets_arg,
     ) = match command {
         CliCommand::Shutdown => return send_shutdown(&ipc, &endpoint).await.map(succeeded),
         CliCommand::EmitStatus { status, source } => {
@@ -124,9 +125,9 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         | CliCommand::DeliverWait
         | CliCommand::ReportSession { .. }) => return run_hook_door(&ipc, &endpoint, door).await,
         // `--detection` / `--detection-dir` / `--playbook` /
-        // `--profiles-dir` / `--approver-exe` / `--roles` configure the
-        // daemon this process is about to start, and are meaningless for
-        // the client-side commands above.
+        // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
+        // configure the daemon this process is about to start, and are
+        // meaningless for the client-side commands above.
         CliCommand::Run {
             detection_name,
             detection_dir_arg,
@@ -134,6 +135,7 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
             profiles_dir_arg,
             approver_exe_arg,
             roles_arg,
+            tickets_arg,
         } => (
             detection_name,
             detection_dir_arg,
@@ -141,6 +143,7 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
             profiles_dir_arg,
             approver_exe_arg,
             roles_arg,
+            tickets_arg,
         ),
     };
 
@@ -308,12 +311,22 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
     let roles_path = cli::resolve_roles_path(
         roles_arg,
         std::env::var_os("YAGURA_ROLES"),
-        config_base,
+        config_base.clone(),
         &namespace,
     );
     match roles_path.as_deref() {
         Some(path) => tracing::info!("resolved roles path: {}", path.display()),
         None => tracing::info!("no roles path resolved"),
+    }
+    let tickets_path = cli::resolve_tickets_path(
+        tickets_arg,
+        std::env::var_os("YAGURA_TICKETS"),
+        config_base,
+        &namespace,
+    );
+    match tickets_path.as_deref() {
+        Some(path) => tracing::info!("resolved tickets path: {}", path.display()),
+        None => tracing::info!("no tickets path resolved"),
     }
 
     // One home directory serves both the default window cwd and
@@ -365,6 +378,7 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         profiles_dir,
         bundled_profiles,
         roles_path,
+        tickets_path,
         program_lookup,
         child_base_env,
         default_window_cwd,

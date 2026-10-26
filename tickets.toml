@@ -1,0 +1,54 @@
+# yagura ticket rules, read from <config dir>/<instance>/tickets.toml (or --tickets / YAGURA_TICKETS).
+# The GUI places this file there on first launch and never overwrites an existing one.
+schema = 1
+
+guide = """
+One ticket, one purpose: when work has two goals, split it into two tickets.
+Keep no more than one or two tickets in-progress at a time.
+Do not drop deferred work: put it in considering with the condition that would start it, or in on-hold with the trigger that resumes it.
+Record results as soon as you have them (add_ticket_result): decisions, measurements, what was merged or pushed.
+Move a ticket to done only after its results are recorded.
+Never delete a ticket: move it to cancelled with the reason.
+"""
+
+[[state]]
+name = "todo"
+description = "Decided to do, not started yet."
+requires = []
+
+[[state]]
+name = "in-progress"
+description = "Being worked on now. Keep this to one or two tickets."
+requires = []
+
+[[state]]
+name = "done"
+description = "Finished, with its results recorded."
+requires = []
+
+[[state]]
+name = "considering"
+description = "Not decided yet. Say what would make it start."
+requires = ["start_condition"]
+
+[[state]]
+name = "on-hold"
+description = "Paused. Say what brings it back."
+requires = ["resume_trigger"]
+
+[[state]]
+name = "cancelled"
+description = "Will not be done. Say why."
+requires = ["reason"]
+
+[[field]]
+name = "start_condition"
+description = "What has to be true before this ticket moves to todo."
+
+[[field]]
+name = "resume_trigger"
+description = "The event or condition that brings this ticket back."
+
+[[field]]
+name = "reason"
+description = "Why this ticket was cancelled."

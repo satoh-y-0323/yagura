@@ -36,6 +36,7 @@ pub mod room;
 mod sql;
 pub mod store;
 pub mod terminal_identity;
+pub mod ticket;
 pub mod token;
 pub mod toml_set;
 pub mod waiter;

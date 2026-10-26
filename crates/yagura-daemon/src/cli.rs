@@ -10,8 +10,8 @@
 //! default definition name.
 //!
 //! Flags are scoped to one command: `--detection` / `--detection-dir` /
-//! `--playbook` / `--profiles-dir` / `--approver-exe` / `--roles` configure
-//! the daemon itself and are ignored on the client-side paths -- `--emit-status`,
+//! `--playbook` / `--profiles-dir` / `--approver-exe` / `--roles` /
+//! `--tickets` configure the daemon itself and are ignored on the client-side paths -- `--emit-status`,
 //! `--deliver-context`, `--deliver-take`, `--deliver-wait`, `--report-session` and
 //! `--shutdown` -- none of which starts a detection engine or an approval gate,
 //! just as `--source` qualifies `--emit-status` only.
@@ -33,6 +33,12 @@ const DEFAULT_EMIT_STATUS_SOURCE: &str = "cli";
 /// Name of the directory holding detection definitions under the config
 /// root.
 const DETECTION_DIR_NAME: &str = "detection";
+
+/// File name of the role table under the config root.
+const ROLES_FILE_NAME: &str = "roles.toml";
+
+/// File name of the ticket rules under the config root.
+const TICKETS_FILE_NAME: &str = "tickets.toml";
 
 /// What the command line asked the daemon binary to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +66,9 @@ pub enum CliCommand {
         /// Role table path given with `--roles`, i.e. stage (1) of
         /// [`resolve_roles_path`].
         roles_arg: Option<PathBuf>,
+        /// Ticket rules path given with `--tickets`, i.e. stage (1) of
+        /// [`resolve_tickets_path`].
+        tickets_arg: Option<PathBuf>,
     },
     /// Ask an already-running daemon to terminate (`--shutdown`).
     Shutdown,
@@ -157,6 +166,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut profiles_dir_arg: Option<PathBuf> = None;
     let mut approver_exe_arg: Option<PathBuf> = None;
     let mut roles_arg: Option<PathBuf> = None;
+    let mut tickets_arg: Option<PathBuf> = None;
 
     let mut remaining = args.iter();
     while let Some(arg) = remaining.next() {
@@ -197,40 +207,17 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                 detection_name = Some(value.clone());
             }
             "--detection-dir" => {
-                let value = next_value(&mut remaining, "--detection-dir")?;
-                if value.is_empty() {
-                    return Err(invalid("--detection-dir", value));
-                }
-                detection_dir_arg = Some(PathBuf::from(value));
+                detection_dir_arg = Some(next_path(&mut remaining, "--detection-dir")?);
             }
-            "--playbook" => {
-                let value = next_value(&mut remaining, "--playbook")?;
-                if value.is_empty() {
-                    return Err(invalid("--playbook", value));
-                }
-                playbook_arg = Some(PathBuf::from(value));
-            }
+            "--playbook" => playbook_arg = Some(next_path(&mut remaining, "--playbook")?),
             "--profiles-dir" => {
-                let value = next_value(&mut remaining, "--profiles-dir")?;
-                if value.is_empty() {
-                    return Err(invalid("--profiles-dir", value));
-                }
-                profiles_dir_arg = Some(PathBuf::from(value));
+                profiles_dir_arg = Some(next_path(&mut remaining, "--profiles-dir")?);
             }
             "--approver-exe" => {
-                let value = next_value(&mut remaining, "--approver-exe")?;
-                if value.is_empty() {
-                    return Err(invalid("--approver-exe", value));
-                }
-                approver_exe_arg = Some(PathBuf::from(value));
+                approver_exe_arg = Some(next_path(&mut remaining, "--approver-exe")?);
             }
-            "--roles" => {
-                let value = next_value(&mut remaining, "--roles")?;
-                if value.is_empty() {
-                    return Err(invalid("--roles", value));
-                }
-                roles_arg = Some(PathBuf::from(value));
-            }
+            "--roles" => roles_arg = Some(next_path(&mut remaining, "--roles")?),
+            "--tickets" => tickets_arg = Some(next_path(&mut remaining, "--tickets")?),
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
     }
@@ -257,6 +244,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             profiles_dir_arg,
             approver_exe_arg,
             roles_arg,
+            tickets_arg,
         }),
     }
 }
@@ -414,13 +402,47 @@ pub fn resolve_roles_path(
     config_base: Option<PathBuf>,
     namespace: &InstanceNamespace,
 ) -> Option<PathBuf> {
+    resolve_config_file(arg, env, config_base, namespace, ROLES_FILE_NAME)
+}
+
+/// Resolves the ticket rules path: (1) `--tickets`, (2) the `YAGURA_TICKETS`
+/// environment variable (an empty value counts as unset), (3) the
+/// `tickets.toml` file under `namespace`'s config root -- the same order as
+/// [`resolve_roles_path`].
+///
+/// Stage (3) is returned whether or not the file exists: an absent file reads
+/// as "not configured" (`crate::ticket::read_ticket_config`), and the file is
+/// read again on every request, so creating it later takes effect.
+///
+/// The caller supplies all three path inputs, so this function reads
+/// neither the environment nor the filesystem.
+#[must_use]
+pub fn resolve_tickets_path(
+    arg: Option<PathBuf>,
+    env: Option<OsString>,
+    config_base: Option<PathBuf>,
+    namespace: &InstanceNamespace,
+) -> Option<PathBuf> {
+    resolve_config_file(arg, env, config_base, namespace, TICKETS_FILE_NAME)
+}
+
+/// The shared order of [`resolve_roles_path`] and [`resolve_tickets_path`]:
+/// the flag, then a non-empty environment value, then `file_name` under the
+/// config root.
+fn resolve_config_file(
+    arg: Option<PathBuf>,
+    env: Option<OsString>,
+    config_base: Option<PathBuf>,
+    namespace: &InstanceNamespace,
+    file_name: &str,
+) -> Option<PathBuf> {
     if let Some(arg) = arg {
         return Some(arg);
     }
     if let Some(env) = env.filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(env));
     }
-    Some(yagura_os::instance_dir(&config_base?, namespace).join("roles.toml"))
+    Some(yagura_os::instance_dir(&config_base?, namespace).join(file_name))
 }
 
 /// Resolves a window ID from the `YAGURA_WINDOW_ID` environment variable.
@@ -453,6 +475,19 @@ fn next_value<'a>(
     remaining.next().ok_or_else(|| CliError::MissingValue {
         flag: flag.to_string(),
     })
+}
+
+/// The value of a path-taking flag; an empty value is rejected rather than
+/// read as the current directory.
+fn next_path(
+    remaining: &mut std::slice::Iter<'_, String>,
+    flag: &str,
+) -> Result<PathBuf, CliError> {
+    let value = next_value(remaining, flag)?;
+    if value.is_empty() {
+        return Err(invalid(flag, value));
+    }
+    Ok(PathBuf::from(value))
 }
 
 fn invalid(flag: &str, value: &str) -> CliError {
