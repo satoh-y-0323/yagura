@@ -737,6 +737,25 @@ describe('invokeListProfiles', () => {
       ]);
     });
 
+    it('keeps launch_context as a known capability, not unknown', async () => {
+      invokeMock.mockResolvedValueOnce({
+        profiles: [
+          {
+            ...RAW_PROFILE,
+            available: true,
+            limits: [
+              { capability: 'launch_context', reason: 'the launcher drops quotes', guidance: null },
+            ],
+          },
+        ],
+        warnings: [],
+      });
+
+      const result = await invokeListProfiles();
+
+      expect(result.profiles[0]?.limits[0]?.capability).toBe('launch_context');
+    });
+
     it('reads a missing limits key as no limits', async () => {
       invokeMock.mockResolvedValueOnce({ profiles: [RAW_PROFILE], warnings: [] });
 

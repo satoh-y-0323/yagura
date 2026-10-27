@@ -61,6 +61,8 @@ export interface IntegrationRowView {
   fileWrites: IntegrationFileWrite[] | null;
   /** Why Register / Update would be refused before it is pressed, `null` when it would not. */
   refusal: string | null;
+  /** The profile's own sentence for this row, shown in every state; `null` when it writes none. */
+  notice: string | null;
 }
 
 /** One heading and the rows under it. */
@@ -207,6 +209,7 @@ function buildRowView(
         : row.entries.map((entry) => `${entry.name} = ${entry.content}`).join('\n'),
     fileWrites: writesFiles ? fileWrites(row.entries) : null,
     refusal: refused ? settings.integrationRefusedByClaim(claim) : null,
+    notice: row.notice ?? null,
   };
 }
 

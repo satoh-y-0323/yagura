@@ -149,6 +149,7 @@ describe('narrowMcpRegistrationsListed', () => {
           remove: { argv: ['alpha', 'mcp', 'remove'], programAt: 1 },
           tomlSet: { file: 'c.toml', table: ['t'], values: [{ key: 'k', value: 'v' }] },
           entries: [{ file: 'h.json', name: 'n', content: 'c' }],
+          notice: null,
         },
       ],
     });
@@ -182,6 +183,26 @@ describe('narrowMcpRegistrationsListed', () => {
     expect(() => narrowMcpRegistrationsListed(listedWire({ rows: [row] }))).toThrow(
       /rows\.entries/
     );
+  });
+
+  it('passes a notice through verbatim and reads an omitted or null one as none', () => {
+    const notice = 'While this is registered, the CLI asks before trusting a folder.';
+    const withNotice = narrowMcpRegistrationsListed(listedWire({ rows: [rowWire({ notice })] }));
+    expect(withNotice.rows[0]?.notice).toBe(notice);
+    for (const absent of [null, undefined]) {
+      const row = rowWire({ notice: absent });
+      const listed = narrowMcpRegistrationsListed(listedWire({ rows: [row] }));
+      expect(listed.rows[0]?.notice).toBeNull();
+    }
+  });
+
+  it('refuses a notice that is not a string', () => {
+    for (const notice of [1, true, ['a'], { text: 'a' }]) {
+      const row = rowWire({ notice });
+      expect(() => narrowMcpRegistrationsListed(listedWire({ rows: [row] }))).toThrow(
+        /rows\.notice/
+      );
+    }
   });
 
   it('reads a row with no add or remove command as having none', () => {

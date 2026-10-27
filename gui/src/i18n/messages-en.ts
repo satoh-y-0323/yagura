@@ -697,7 +697,7 @@ export const messagesEn = {
     /** A launchable profile that lacks a capability here: the heading, one line per capability, the page. */
     profileLimitsHeading: "On this computer, this profile can't take:",
     profileLimitItem: (
-      capability: 'model' | 'effort' | 'launch_prompt' | 'unknown',
+      capability: 'model' | 'effort' | 'launch_prompt' | 'launch_context' | 'unknown',
       reason: string
     ): string => {
       switch (capability) {
@@ -707,6 +707,8 @@ export const messagesEn = {
           return 'an effort level';
         case 'launch_prompt':
           return "a request at launch, so it can't be used for task windows or for a handoff that opens a new window";
+        case 'launch_context':
+          return "the room's introduction at launch";
         case 'unknown':
           return reason;
       }

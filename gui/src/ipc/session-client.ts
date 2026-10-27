@@ -469,12 +469,13 @@ export interface ProfileGuidance {
  * A capability a launchable profile can lack on this host (protocol
  * `ProfileCapability`). `'unknown'` stands for one this build does not know.
  */
-export type ProfileCapability = 'model' | 'effort' | 'launch_prompt' | 'unknown';
+export type ProfileCapability = 'model' | 'effort' | 'launch_prompt' | 'launch_context' | 'unknown';
 
 const PROFILE_CAPABILITIES: ReadonlySet<string> = new Set<ProfileCapability>([
   'model',
   'effort',
   'launch_prompt',
+  'launch_context',
 ]);
 
 /** One capability a launchable profile cannot offer on this host (protocol `ProfileLimit`). */

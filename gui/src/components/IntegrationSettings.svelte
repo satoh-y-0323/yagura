@@ -75,6 +75,9 @@
             {#if row.reason}
               <div class="integration-settings__extra">{row.reason}</div>
             {/if}
+            {#if row.notice}
+              <div class="integration-settings__extra">{row.notice}</div>
+            {/if}
             <div class="integration-settings__actions">
               {#if row.primaryAction}
                 <button

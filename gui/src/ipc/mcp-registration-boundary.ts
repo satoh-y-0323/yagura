@@ -77,6 +77,11 @@ export interface McpRegistrationRow {
   tomlSet: McpRegistrationTomlSet | null;
   /** Empty when the profile writes none or the daemon predates the field. */
   entries: McpRegistrationEntry[];
+  /**
+   * The sentence the profile asks to show with the row, verbatim; `null` (or
+   * absent in a hand-built row) when it writes none or the daemon predates the field.
+   */
+  notice?: string | null;
 }
 
 /** Reply to `list_mcp_registrations`. */
@@ -232,6 +237,7 @@ function narrowMcpRegistrationRow(value: unknown, context: string): McpRegistrat
     remove: readOptionalCommand(record, 'remove', context),
     tomlSet: readOptionalTomlSet(record, context),
     entries: readEntries(record, context),
+    notice: readOptionalString(record, 'notice', context),
   };
 }
 

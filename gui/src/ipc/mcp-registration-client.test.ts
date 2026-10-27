@@ -166,6 +166,7 @@ describe('invokeListMcpRegistrations', () => {
             values: [{ key: 'call_timeout', value: '86400' }],
           },
           entries: [],
+          notice: null,
         },
       ],
     });

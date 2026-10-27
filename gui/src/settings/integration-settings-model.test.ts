@@ -327,6 +327,18 @@ describe('integrationGroups: the settings-file note', () => {
   });
 });
 
+describe('integrationGroups: the notice a profile asks to show', () => {
+  it("shows the profile's own sentence before and after registering, and none without one", () => {
+    const notice = 'While this is registered, the CLI asks before trusting a folder.';
+    const states: (McpRegistrationState | null)[] = [null, 'not_registered', 'registered'];
+    for (const state of states) {
+      expect(viewOf(state, {}, null, { notice }).notice).toBe(notice);
+    }
+    expect(viewOf('not_registered').notice).toBeNull();
+    expect(viewOf('registered', {}, null, { notice: null }).notice).toBeNull();
+  });
+});
+
 describe('displayCommand', () => {
   it('shows the argv from the CLI on, joined by spaces', () => {
     expect(displayCommand(command(['wrap', '-x', 'alpha', 'mcp', 'remove', 'yagura'], 2))).toBe(
