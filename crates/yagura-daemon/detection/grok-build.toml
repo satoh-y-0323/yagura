@@ -1,0 +1,74 @@
+# Detection definition for the Grok Build CLI (`grok`).
+#
+# Vendor identity lives only in this filename and the `name` value below --
+# never in the daemon's core types (project convention: vendor-neutral
+# vocabulary).
+schema_version = 1
+name = "grok-build"
+# Captured against Grok Build 1.0.70 on 2026-10-28 at 100x30; see
+# tests/fixtures/grok-build/README.md for the extraction rule. The rules read
+# the composer box's lower rule, the blank row and the footer under it.
+bottom_line_count = 3
+
+[debounce]
+confirm_ms = 300
+
+# A permission box's own footer (`1/5:select`), and the footer once Esc moved
+# the focus to the history with the box still open. Highest priority: the
+# turn's `Ctrl+c:cancel` stays in the footer while the box is shown (1.0.70).
+[[rules]]
+status = "waiting_approval"
+pattern = '\d+/\d+:select|Tab/Space:permission'
+priority = 30
+region = "bottom"
+
+# The folder trust prompt. Its question sits mid-screen; only the version line
+# it ends with reaches the bottom rows. The welcome screen's last row shows the
+# channel without the version (1.0.70).
+[[rules]]
+status = "waiting_approval"
+pattern = 'Grok Build\s+\d+\.\d+\.\d+\s+\[\w+\]\s*$'
+priority = 30
+region = "bottom"
+
+# The history holds the focus (after Ctrl+C or Esc): a key acts on the history
+# and never reaches the composer, so there is nothing to type into (1.0.70).
+[[rules]]
+status = "unknown"
+pattern = 'Space:prompt'
+priority = 25
+region = "bottom"
+
+# Shown in the footer only while a turn runs (1.0.70). The `[stop]` row is not
+# used: a consent notice can push it out of the bottom rows.
+[[rules]]
+status = "running"
+pattern = 'Ctrl\+c:cancel'
+priority = 20
+region = "bottom"
+
+# The composer box's lower rule. The box is drawn during a turn too, hence the
+# lowest priority; a permission box has no such corner (1.0.70).
+[[rules]]
+status = "waiting_input"
+pattern = '^\s*╰─+.*─╯\s*$'
+priority = 10
+region = "bottom"
+
+# The composer is a `│ > ` row (`│ ❯ ` under WSL; what picks the mark is not
+# known) inside a box whose right border is drawn like text, so it is removed
+# before reading. A wrapped draft continues on rows indented by three columns.
+# The hint shown after a cancelled turn reads as empty (1.0.70).
+[composer]
+marker = '^\s*│ [>❯]'
+separator = " "
+continuation_prefix = "  │   "
+right_border = '│\s*$'
+placeholder = '^Build anything$'
+
+[input]
+bracketed_paste = true      # a long write left unwrapped stops the CLI under WSL (1.0.70)
+submit = "\r"
+submit_delay_ms = 800       # the text and the Enter written together were sent (1.0.70); kept above confirm_ms
+clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.0.70)
+probe = "x"                 # shows as typed and is erased by DEL, with or without a conversation (1.0.70)

@@ -8,21 +8,23 @@
 //!
 //! No real CLI is started here. The status outputs below are the shapes the
 //! CLIs themselves print (captured against throwaway configuration
-//! directories), fed to the pure derivation.
+//! directories), fed to the pure derivation; the Grok Build rows are also run
+//! end to end with their launch command swapped for the `mcp_cli_stub` fixture.
 
 mod common;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
 use common::{
-    Harness, approver_base_config, read_response, register_approver, send, unique_temp_dir,
-    write_profile,
+    Harness, approver_base_config, empty_lookup, mcp_cli_stub_path, read_response,
+    register_approver, send, unique_temp_dir, write_profile,
 };
 use serde_json::json;
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::config::REPORT_EXE_NAME;
 use yagura_daemon::mcp_registration::{
     McpRegistrationSpec, RegistrationState, RegistrationTarget, StatusObservation, StatusPlan,
     derive_status,
@@ -71,6 +73,19 @@ enum StatusForm {
     Lines,
     /// A JSON settings file read directly.
     JsonFile,
+    /// `mcp list --json`, the server picked out of the array by name, plus a
+    /// settings-file edit.
+    JsonListWithTomlSet,
+}
+
+impl StatusForm {
+    /// Whether the row edits its CLI's TOML settings file after `add`.
+    fn edits_toml(self) -> bool {
+        matches!(
+            self,
+            Self::JsonCommandWithTomlSet | Self::JsonListWithTomlSet
+        )
+    }
 }
 
 const CLAUDE_FORM: CliForm = CliForm {
@@ -102,6 +117,13 @@ const COPILOT_FORM: CliForm = CliForm {
     status: StatusForm::JsonCommand,
 };
 
+const GROK_FORM: CliForm = CliForm {
+    scope: &[],
+    add_options: &[],
+    env_flag: "--env",
+    status: StatusForm::JsonListWithTomlSet,
+};
+
 /// Every shipped profile expected to carry a registration table: its id,
 /// its CLI's form, and whether it runs inside WSL.
 const SHIPPED_ROWS: &[(&str, CliForm, bool)] = &[
@@ -109,10 +131,12 @@ const SHIPPED_ROWS: &[(&str, CliForm, bool)] = &[
     ("codex-cli", CODEX_FORM, false),
     ("antigravity-cli", AGY_FORM, false),
     ("copilot-cli", COPILOT_FORM, false),
+    ("grok-build", GROK_FORM, false),
     ("wsl-claude-code", CLAUDE_FORM, true),
     ("wsl-codex-cli", CODEX_FORM, true),
     ("wsl-antigravity-cli", AGY_FORM, true),
     ("wsl-copilot-cli", COPILOT_FORM, true),
+    ("wsl-grok-build", GROK_FORM, true),
 ];
 
 /// Shipped profiles whose CLI has no registration command, so registering
@@ -295,7 +319,7 @@ fn host_rows_have_no_group_no_probe_and_no_file_tools() {
         );
         assert_eq!(
             spec.toml_set().is_some(),
-            form.status == StatusForm::JsonCommandWithTomlSet,
+            form.status.edits_toml(),
             "{id}: only the CLI whose add drops hand-written keys edits its settings file"
         );
     }
@@ -357,10 +381,7 @@ fn wsl_rows_carry_the_group_the_path_probe_the_env_forward_and_the_read_tool() {
             spec.toml_set().is_some() || spec.json_entry().is_some(),
             "{id}: only the row that edits a settings file needs the replace tool"
         );
-        assert_eq!(
-            spec.toml_set().is_some(),
-            form.status == StatusForm::JsonCommandWithTomlSet
-        );
+        assert_eq!(spec.toml_set().is_some(), form.status.edits_toml());
     }
 }
 
@@ -503,6 +524,7 @@ fn each_row_reads_its_status_the_way_its_cli_reports_it() {
             StatusForm::JsonFile => StatusPlan::ReadFile {
                 file: AGY_SETTINGS_FILE.to_string(),
             },
+            StatusForm::JsonListWithTomlSet => StatusPlan::Run(strings(&["mcp", "list", "--json"])),
         };
         assert_eq!(spec.render_status(&default_target()), expected, "{id}");
     }
@@ -1096,6 +1118,211 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
 
         h.registry.terminate_all().await;
     }
+}
+
+// =============================================================================
+// Grok Build: the shipped tables run end to end against the `mcp_cli_stub`
+// fixture standing in for `grok`, so a wrong pointer or path in the profile
+// shows as a registration that does not read back as registered.
+// =============================================================================
+
+const GROK_SETTINGS_FILE: &str = ".grok/config.toml";
+const GROK_HOOKS_FILE: &str = ".grok/hooks/yagura.json";
+
+/// The id the fixture profile is placed under, so no shipped table is laid
+/// under it.
+const GROK_PLACED_ID: &str = "grok";
+
+fn string_array(items: &[&str]) -> toml::Value {
+    toml::Value::Array(
+        items
+            .iter()
+            .map(|item| toml::Value::String((*item).to_string()))
+            .collect(),
+    )
+}
+
+/// The shipped `profile` with only what would reach the real CLI replaced:
+/// the launch command, the environment (the stub's own variables), and for
+/// the WSL row the path conversion and file tools.
+fn grok_fixture_profile(profile: &str, home: &Path, state: &Path) -> String {
+    let stub = mcp_cli_stub_path();
+    let stub = stub.to_str().expect("stub path is UTF-8");
+    let home_str = home.to_str().expect("home is UTF-8");
+    let mut root: toml::Table = shipped_source(profile)
+        .parse()
+        .expect("the shipped profile is TOML");
+    let mut command = toml::Table::new();
+    command.insert("default".into(), string_array(&[stub]));
+    root.insert("command".into(), toml::Value::Table(command));
+
+    if profile.starts_with("wsl-") {
+        let absent_exit = root
+            .get("host_paths")
+            .and_then(|tools| tools.get("absent_exit"))
+            .cloned()
+            .expect("the WSL row declares its read tool's missing-file exit");
+        let file_arg = format!("{home_str}/{{file}}");
+        let mut host_paths = toml::Table::new();
+        host_paths.insert("absent_exit".into(), absent_exit);
+        host_paths.insert("convert".into(), string_array(&[stub, "probe", "{path}"]));
+        host_paths.insert("read".into(), string_array(&[stub, "file-read", &file_arg]));
+        host_paths.insert(
+            "replace".into(),
+            string_array(&[stub, "file-replace", &file_arg]),
+        );
+        root.insert("host_paths".into(), toml::Value::Table(host_paths));
+    }
+
+    let settings = home.join(GROK_SETTINGS_FILE);
+    let mut env = toml::Table::new();
+    for (key, value) in [
+        ("MCP_CLI_STUB_STATE_DIR", state.to_str().expect("UTF-8")),
+        (
+            "MCP_CLI_STUB_TOML_TABLE_PATH",
+            settings.to_str().expect("UTF-8"),
+        ),
+        ("MCP_CLI_STUB_LIST_SHAPE", "flat"),
+    ] {
+        env.insert(key.into(), toml::Value::String(value.to_string()));
+    }
+    root.insert("env".into(), toml::Value::Table(env));
+    toml::to_string(&root).expect("serialize the fixture profile")
+}
+
+fn is_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Runs a registration change and returns the state its result reads back.
+async fn run_grok_action(
+    client: &mut yagura_test_support::ipc::Connection,
+    action: McpRegistrationAction,
+    request_id: u64,
+) -> McpRegistrationState {
+    send(
+        client,
+        &ClientMessage::RunMcpRegistration {
+            profile: GROK_PLACED_ID.to_string(),
+            action,
+            request_id,
+        },
+    )
+    .await;
+    match read_response(client, REPLY_TIMEOUT).await {
+        DaemonMessage::McpRegistrationRequested { .. } => {}
+        other => panic!("expected mcp_registration_requested, got {other:?}"),
+    }
+    match read_response(client, REPLY_TIMEOUT).await {
+        DaemonMessage::McpRegistrationResult {
+            error,
+            status,
+            steps,
+            ..
+        } => {
+            assert_eq!(error, None, "{steps:?}");
+            status.state
+        }
+        other => panic!("expected mcp_registration_result, got {other:?}"),
+    }
+}
+
+async fn grok_register_then_remove_case(profile: &str, tag: &str) {
+    let root = unique_temp_dir(tag);
+    let profiles_dir = root.join("profiles");
+    let home = root.join("home");
+    let state = root.join("stub-state");
+    let report_dir = root.join("state").join("bin");
+    for dir in [&profiles_dir, &home, &state] {
+        std::fs::create_dir_all(dir).expect("create fixture dir");
+    }
+    std::fs::write(state.join("registry.json"), "{}").expect("seed registry");
+    write_profile(
+        &profiles_dir,
+        GROK_PLACED_ID,
+        &grok_fixture_profile(profile, &home, &state),
+    );
+
+    let config = DaemonConfig {
+        profiles_dir: Some(profiles_dir),
+        home_dir: Some(home.clone()),
+        instance_id: None,
+        mcp_bridge: Some(root.join("bridge").join("yagura-mcp.exe")),
+        report_dir: Some(report_dir.clone()),
+        mcp_registration_timeout: REPLY_TIMEOUT,
+        host_os: yagura_daemon::profile::ProfileOs::host(),
+        program_lookup: empty_lookup(),
+        program_is_executable: is_file,
+        default_shell: None,
+        ..approver_base_config()
+    };
+    let h = Harness::start(tag, config).await;
+    let mut client = h.connect().await;
+    register_approver(&mut client).await;
+
+    assert_eq!(
+        run_grok_action(&mut client, McpRegistrationAction::Register, 1).await,
+        McpRegistrationState::Registered,
+        "{profile}: the shipped status, settings edit and hooks file must read back as registered"
+    );
+
+    let daemon = report_dir.join(REPORT_EXE_NAME);
+    let daemon = daemon.to_str().expect("report path is UTF-8");
+    let daemon = if profile.starts_with("wsl-") {
+        // The stub's `probe` stands in for `wslpath -u`.
+        format!("/probed{}", daemon.replace('\\', "/"))
+    } else {
+        daemon.to_string()
+    };
+    let hooks = read_json(&home.join(GROK_HOOKS_FILE));
+    let mut commands = Vec::new();
+    hook_commands(
+        hooks
+            .pointer("/hooks")
+            .unwrap_or_else(|| panic!("{profile}: no /hooks in {hooks}")),
+        &mut commands,
+    );
+    assert!(!commands.is_empty(), "{profile}: {hooks}");
+    assert!(
+        commands.iter().all(|command| *command == daemon),
+        "{profile}: every handler runs this daemon by its absolute path: {commands:?}"
+    );
+    let settings: toml::Table = std::fs::read_to_string(home.join(GROK_SETTINGS_FILE))
+        .expect("read the settings file")
+        .parse()
+        .expect("the settings file stays TOML");
+    assert_eq!(
+        settings
+            .get("mcp_servers")
+            .and_then(|servers| servers.get("yagura"))
+            .and_then(|server| server.get("tool_timeout_sec")),
+        Some(&toml::Value::Integer(86400)),
+        "{profile}: {settings}"
+    );
+
+    assert_eq!(
+        run_grok_action(&mut client, McpRegistrationAction::Remove, 2).await,
+        McpRegistrationState::NotRegistered,
+        "{profile}"
+    );
+    let hooks = read_json(&home.join(GROK_HOOKS_FILE));
+    assert_eq!(
+        hooks.pointer("/hooks"),
+        None,
+        "{profile}: removing takes the hooks away: {hooks}"
+    );
+
+    h.registry.terminate_all().await;
+}
+
+#[tokio::test]
+async fn registering_grok_build_reads_back_registered_and_removing_reads_back_not_registered() {
+    grok_register_then_remove_case("grok-build", "bundled-mcpreg-grok-host").await;
+}
+
+#[tokio::test]
+async fn registering_wsl_grok_build_reads_back_registered_and_removing_reads_back_not_registered() {
+    grok_register_then_remove_case("wsl-grok-build", "bundled-mcpreg-grok-wsl").await;
 }
 
 // =============================================================================

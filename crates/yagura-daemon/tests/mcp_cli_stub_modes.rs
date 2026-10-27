@@ -465,6 +465,47 @@ fn add_captures_k_equals_v_tokens_before_the_separator_as_environment_entries() 
 }
 
 // ---------------------------------------------------------------------
+// mcp list --json: the nested element shape by default, the flat one when
+// MCP_CLI_STUB_LIST_SHAPE=flat.
+// ---------------------------------------------------------------------
+
+fn list_json(state: &Path, extra_vars: &[(&str, &str)]) -> serde_json::Value {
+    let mut vars = vec![state_var(state)];
+    vars.extend_from_slice(extra_vars);
+    let outcome = run(&stub_argv(&["mcp", "list", "--json"]), &vars, None);
+    serde_json::from_str(&exited_stdout(outcome, 0)).expect("list --json must print JSON")
+}
+
+#[test]
+fn list_json_writes_the_nested_shape_by_default_and_the_flat_one_on_request() {
+    let state = unique_state_dir("list-shape");
+    let outcome = run(
+        &stub_argv(&["mcp", "add", "yagura", "--", "prog", "arg1"]),
+        &[state_var(&state)],
+        None,
+    );
+    assert_exit(&outcome, 0);
+
+    assert_eq!(
+        list_json(&state, &[]),
+        serde_json::json!([
+            { "name": "yagura", "transport": { "command": "prog", "args": ["arg1"] } }
+        ])
+    );
+    assert_eq!(
+        list_json(&state, &[("MCP_CLI_STUB_LIST_SHAPE", "flat")]),
+        serde_json::json!([{
+            "command": "prog",
+            "args": ["arg1"],
+            "env": {},
+            "enabled": true,
+            "name": "yagura",
+            "scope": "user",
+        }])
+    );
+}
+
+// ---------------------------------------------------------------------
 // probe: the fixed fixture transform, overridable for a broken-output case.
 // ---------------------------------------------------------------------
 

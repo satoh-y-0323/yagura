@@ -1,0 +1,124 @@
+# Runs Grok Build inside a WSL distribution. Windows only (see
+# wsl-claude-code.toml for why this profile carries no other operating
+# system's argv). The shell is both a login and an interactive shell so
+# `~/.bashrc` runs too, which is where a tool such as nvm adds its own
+# install to `PATH`.
+# The launch options below follow `grok --help` (1.0.70). Model names change
+# over time -- edit the aliases to match what your own account can run.
+# No approval-skip, `--trust` or `--no-auto-update` flag: each would change a
+# decision that is the user's own (approvals, folder trust, updates).
+schema = 1
+display_name = "WSL: Grok Build"
+detection = "grok-build"
+
+[command]
+windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "grok"]
+
+# Grok Build also runs Claude Code's and Cursor's hooks and MCP servers.
+# Switched off for the window so it runs only the ones registered for Grok
+# Build; skills, rules and agents are still read (checked with 1.0.70).
+[env]
+GROK_CLAUDE_HOOKS_ENABLED = "false"
+GROK_CLAUDE_MCPS_ENABLED = "false"
+GROK_CURSOR_HOOKS_ENABLED = "false"
+GROK_CURSOR_MCPS_ENABLED = "false"
+# A variable crosses into WSL only when WSLENV names it. One left unset arrives
+# empty, and an empty GROK_DEFAULT_MODEL keeps the default model (1.0.70).
+WSLENV = "GROK_CLAUDE_HOOKS_ENABLED:GROK_CLAUDE_MCPS_ENABLED:GROK_CURSOR_HOOKS_ENABLED:GROK_CURSOR_MCPS_ENABLED:GROK_DEFAULT_MODEL"
+
+# `-m` saves the model as the user's own default; the variable selects it for
+# this launch only (1.0.70).
+[model]
+env = { GROK_DEFAULT_MODEL = "{value}" }
+
+[model.aliases]
+fast = "grok-4.7-build-fast"
+default = "grok-4.7"
+strong = "grok-4.7"
+
+# Grok Build lists no models in a machine-readable form, so the choices are
+# fixed. Once `grok models` prints JSON, list them through that command.
+[model.choices]
+values = ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]
+
+# A level the model does not take falls back to its default without stopping
+# the launch (1.0.70).
+[effort]
+args = ["--reasoning-effort", "{value}"]
+
+# Hook output reaches the model only from the tool-call hooks, not at session
+# start or prompt submit (1.0.70), so the start-up context goes in as `--rules`
+# and other text waits for the next call. Grok has no way to wake an idle
+# session, so `wake` stays `none`.
+[delivery]
+output = '{"hookSpecificOutput":{"additionalContext":{text}}}'
+max_chars = 10000
+wake = "none"
+launch_context = ["--rules", "{context}"]
+launch_prompt = ["--", "{prompt}"]
+
+# A Windows path is unreadable from the WSL CLI as it is. A launch names no
+# path (this profile has no [mcp] or [hooks] table), so the paths converted with
+# WSL's own tool first are the ones a registration writes: the bridge, and
+# the daemon its hook entries run.
+[host_paths]
+convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+# `{file}` is a positional argument to `sh`, resolved against $HOME inside
+# the script -- never spliced into the script string itself. The replace
+# tool follows a symlinked file to its target and keeps its mode, as in
+# wsl-codex-cli.toml, but creates the file (and its directory) when it is
+# not there yet: the hooks and config files need not exist before registration.
+read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
+replace = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; if [ -e "$f" ]; then r=$(readlink -f -- "$f") || exit 1; else r="$f"; mkdir -p -- "$(dirname -- "$r")" || exit 1; fi; t=$(mktemp "$r.XXXXXX") || exit 1; if cat > "$t" && { [ ! -e "$r" ] || chmod --reference="$r" "$t"; } && mv -f -- "$t" "$r"; then exit 0; fi; rm -f -- "$t"; exit 1', "sh", "{file}"]
+absent_exit = 3
+
+[mcp_registration]
+group = "WSL"
+add = ["mcp", "add", "{env_args}", "{server}", "--", "{bridge}"]
+remove = ["mcp", "remove", "{server}"]
+env_arg = ["--env={env}"]
+env_forward = { name = "WSLENV", separator = ":" }
+notice = "While this is registered, Grok Build asks whether to trust every folder it starts in outside your home directory, including sessions you start yourself. Answering yes also lets that folder's own hooks, MCP servers and instructions run."
+
+[mcp_registration.status]
+args = ["mcp", "list", "--json"]
+format = "json"
+items = ""
+name = "/name"
+command = "/command"
+
+# Every grok session sees every registered server; a window turns off the
+# ones of other instances. A denied server's tools still show by name in
+# `search_tool` but cannot be called (1.0.70).
+[mcp_registration.list]
+args = ["mcp", "list", "--json"]
+items = ""
+name = "/name"
+command = "/command"
+disable = ["--deny", "MCPTool({server}__*)"]
+
+# `tool_timeout_sec` keeps a long `wait_for_status` from being cut off.
+[mcp_registration.toml_set]
+file = ".grok/config.toml"
+table = ["mcp_servers", "{server}"]
+values = { tool_timeout_sec = 86400 }
+confirm = {}
+
+# One hooks file per instance, so removing one registration leaves the others.
+# The handlers run the daemon directly with `args` (no shell), so outside a
+# window the daemon itself does nothing. A sub-agent's session runs these hooks
+# too and its payload carries `subagentType`, so each call skips it. The order
+# of events and the approval notification follow a real session (1.0.70).
+# The inbox is taken once a call has run, where its output reaches the model.
+[mcp_registration.json_entry]
+file = ".grok/hooks/{server}.json"
+
+[mcp_registration.json_entry.entries."/hooks"]
+UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+PreToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+PostToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }, { type = "command", command = "{daemon}", args = ["--deliver-take", "--skip-if", "/subagentType"], timeout = 10 }] }]
+PostToolUseFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }, { type = "command", command = "{daemon}", args = ["--deliver-take", "--skip-if", "/subagentType"], timeout = 10 }] }]
+Notification = [{ matcher = "permission_prompt", hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "waiting_approval", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+Stop = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+StopFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]

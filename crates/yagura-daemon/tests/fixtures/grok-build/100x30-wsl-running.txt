@@ -1,0 +1,16 @@
+                                                                                                   █
+                                                                                                   █
+                                                                                                    
+   ⠴ Waiting for response… 2.3s                                                 2.4s ⇣1.79k [stop]  
+                                                                                                    
+  Help improve Grok                                                             [Opt out] [Opt in]  
+  Off by default. Opt-in to allow SpaceXAI to retain coding data, e.g.,                             
+  prompts, traces, & metrics, for training and debugging purposes. Change                           
+  anytime via settings.                                                                             
+  Read Terms and Privacy Policy.                                                                    
+                                                                                                    
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────╮  
+  │ ❯                                                                                            │  
+  ╰──────────────────────────────────────────────────────────────────────────── Grok 4.7 (high) ─╯  
+                                                                                                    
+  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts                                             

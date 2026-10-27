@@ -311,7 +311,7 @@ const WITHOUT_MODEL_CHOICES: &[&str] = &["copilot-cli", "shell", "wsl-copilot-cl
 #[test]
 fn every_bundled_profile_with_a_model_list_source_ships_model_choices() {
     let ids = bundled_profile_ids();
-    assert_eq!(ids.len(), 11, "the bundled set this test covers: {ids:?}");
+    assert_eq!(ids.len(), 13, "the bundled set this test covers: {ids:?}");
     let mut with_choices = Vec::new();
     for id in &ids {
         let profile = parse_repo_profile(id);

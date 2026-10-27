@@ -1,0 +1,16 @@
+  prompts, traces, & metrics, for training and debugging purposes. Change                           
+  Read Terms and Privacy Policy.                                                                    
+                                                                                                    
+  │                                                                                                 
+  │  >  Remove probe.txt as requested                                                               
+  │  │ rm probe.txt                                                                                 
+  │  ← → narrow scope  ·  e edit pattern                                                            
+  │                                                                                                 
+  │  1 (○) Yes, and don't ask again for anything (always-approve mode)                              
+  │  2 (○) Always allow: rm probe.txt                                                               
+  │  3 (•) Yes, proceed                                                                             
+  │  4 (○) No, reject (type to add feedback)                                                        
+  │  5 (○) Never allow: rm probe.txt                                                                
+  │                                                                                                 
+                                                                                                    
+  Tab/Space:permission  │  Ctrl+e:collapse thinking  │  Ctrl+c:cancel  │  Ctrl+b:send to bg  │      

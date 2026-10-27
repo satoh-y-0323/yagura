@@ -25,7 +25,9 @@
 //!   `1` (the shape the real CLIs use).
 //! - `mcp_cli_stub mcp list --json`: writes the registry as a JSON array,
 //!   one `{"name":..,"transport":{"command":..,"args":[..]}}` element per
-//!   registration, in name order.
+//!   registration, in name order; with `MCP_CLI_STUB_LIST_SHAPE=flat`, one
+//!   `{"command":..,"args":[..],"env":{..},"enabled":true,"name":..,"scope":"user"}`
+//!   element instead.
 //! - `mcp_cli_stub probe <path>`: writes one transformed line for `<path>`
 //!   (see [`transform_probe_path`]), standing in for a `wslpath`-style call.
 //! - `mcp_cli_stub file-read <path>`: writes `<path>`'s bytes to stdout, or
@@ -40,6 +42,8 @@
 //!   directory this process keeps its own registration record in
 //!   (`registry.json`), independent of any settings file below -- modelling
 //!   a CLI's private registry.
+//! - `MCP_CLI_STUB_LIST_SHAPE`: `"nested"` (the default) or `"flat"`, the
+//!   element shape `mcp list --json` writes.
 //! - `MCP_CLI_STUB_ON_DUPLICATE`: `"refuse"` (the default) or `"overwrite"`,
 //!   `mcp add`'s behavior when `<name>` is already registered.
 //! - `MCP_CLI_STUB_TOML_TABLE_PATH`: a path (resolved against the current
@@ -375,13 +379,25 @@ fn run_get(args: &[String]) -> io::Result<i32> {
 
 fn run_list() -> io::Result<i32> {
     let registry = read_registry()?;
+    let flat = env::var("MCP_CLI_STUB_LIST_SHAPE").is_ok_and(|shape| shape == "flat");
     let entries: Vec<Value> = registry
         .iter()
         .map(|(name, registration)| {
-            serde_json::json!({
-                "name": name,
-                "transport": { "command": registration.command, "args": registration.args },
-            })
+            if flat {
+                serde_json::json!({
+                    "command": registration.command,
+                    "args": registration.args,
+                    "env": registration.env,
+                    "enabled": true,
+                    "name": name,
+                    "scope": "user",
+                })
+            } else {
+                serde_json::json!({
+                    "name": name,
+                    "transport": { "command": registration.command, "args": registration.args },
+                })
+            }
         })
         .collect();
     println!("{}", Value::Array(entries));

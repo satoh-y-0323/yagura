@@ -647,11 +647,12 @@ names, are behind it:
 | `antigravity-cli`, `wsl-antigravity-cli` | `fast` = `gemini-3.8-flash-low`, `default` = `gemini-3.8-flash-medium`, `strong` = `gemini-3.1-pro-high` | not accepted (see below) |
 | `copilot-cli`, `wsl-copilot-cli` | `default` = `auto` only (see below) | accepted, no aliases (levels pass through) |
 | `muse-code`, `wsl-muse-code` | `fast` = `muse-spark-1.3`, `default` = `muse-spark-1.3`, `strong` = `muse-wonder-1.0` | accepted, no aliases (levels pass through) on macOS, Linux and in WSL; refused on Windows (see below) |
+| `grok-build`, `wsl-grok-build` | `fast` = `grok-4.7-build-fast`, `default` = `grok-4.7`, `strong` = `grok-4.7` | accepted, no aliases (levels pass through) |
 | `shell` | accepts neither option | -- |
 
 Those mappings come from each CLI's own `--help` (Claude Code 2.1.263, Codex
 CLI 0.153.4, Antigravity CLI 1.2.11, GitHub Copilot CLI 1.0.101, Muse Code
-1.4.12) and, for the reasoning levels and the
+1.4.12, Grok Build 1.0.70) and, for the reasoning levels and the
 model names, the Codex configuration and models reference and Muse's models
 page. **Model names
 change over time**: read the table as the state when these profiles were
