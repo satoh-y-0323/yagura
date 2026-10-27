@@ -103,8 +103,8 @@ pub struct Activity {
 ///
 /// `marker`, `separator` and `continuation_prefix` are required: if the
 /// `[composer]` table is present, all three keys must be provided.
-/// `blank_lines_in_body` is optional and defaults to `false`; `left_panel`
-/// and `placeholder` are optional and have no default.
+/// `blank_lines_in_body` is optional and defaults to `false`; `left_panel`,
+/// `right_border` and `placeholder` are optional and have no default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerRawSection {
@@ -128,6 +128,9 @@ pub struct ComposerRawSection {
     /// A regex pattern string; see [`ComposerSection::left_panel`].
     #[serde(default)]
     pub left_panel: Option<String>,
+    /// A regex pattern string; see [`ComposerSection::right_border`].
+    #[serde(default)]
+    pub right_border: Option<String>,
     /// A regex pattern string; see [`ComposerSection::placeholder`].
     #[serde(default)]
     pub placeholder: Option<String>,
@@ -160,6 +163,12 @@ pub struct ComposerSection {
     /// holding a visible character and all its matches end at the same
     /// column is the composer read from that column; otherwise from column 0.
     pub left_panel: Option<Regex>,
+    /// A compiled regex matching an edge the CLI draws at the right end of
+    /// each composer row (a box's right border), so the edge can be told
+    /// from typed text. On the marker row and every continuation row, a
+    /// match ending at the row's last visible character is dropped before
+    /// the row is read, before anything right of the cursor is judged.
+    pub right_border: Option<Regex>,
     /// A compiled regex matching a hint the CLI draws in an empty composer
     /// without dimming it. The composer reads as empty only when nothing is
     /// typed left of the cursor on the marker row and one match spans that
@@ -639,6 +648,7 @@ fn validate_input_section(
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {
     let marker = compile_composer_pattern(raw.marker)?;
     let left_panel = raw.left_panel.map(compile_composer_pattern).transpose()?;
+    let right_border = raw.right_border.map(compile_composer_pattern).transpose()?;
     let placeholder = raw.placeholder.map(compile_composer_pattern).transpose()?;
 
     Ok(ComposerSection {
@@ -647,6 +657,7 @@ fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, 
         continuation_prefix: raw.continuation_prefix,
         blank_lines_in_body: raw.blank_lines_in_body,
         left_panel,
+        right_border,
         placeholder,
     })
 }

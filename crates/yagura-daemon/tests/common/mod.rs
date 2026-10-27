@@ -3375,6 +3375,7 @@ pub fn submit_child_composer_section() -> ComposerSection {
         continuation_prefix: yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
         blank_lines_in_body: false,
         left_panel: None,
+        right_border: None,
         placeholder: None,
     }
 }

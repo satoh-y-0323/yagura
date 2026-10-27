@@ -561,6 +561,10 @@ impl VtScreen {
     /// section's `left_panel` when it matches every row holding a visible
     /// character and all its matches end at one column, else column 0. A
     /// cursor left of the origin is outside the composer: `NotObserved`.
+    ///
+    /// Every row of the region, the cursor's included, ends where the
+    /// section's `right_border` starts, so the edge is neither body text nor
+    /// something standing right of the cursor.
     pub fn read_composer(
         &self,
         section: &crate::detector::definition::ComposerSection,
@@ -569,7 +573,8 @@ impl VtScreen {
         let origin = self.composer_origin(section);
         let (cursor, cursor_col) = self.cursor_position();
         let cursor_col = cursor_col.min(cols);
-        let cursor_line = self.text_left_of_cursor(cursor, origin, cursor_col);
+        let cursor_end = self.composer_row_end(section, cursor, origin);
+        let cursor_line = self.text_left_of_cursor(cursor, origin, cursor_col.min(cursor_end));
 
         let marker_row = match self.walk_to_marker(section, origin) {
             ComposerWalk::Marker(row) => Some(row),
@@ -581,7 +586,7 @@ impl VtScreen {
         // own drawing (dimmed, and already dropped) or something this section
         // cannot name: refuse to judge rather than fold it into the body or
         // call the composer empty.
-        let right_of_cursor = self.visible_text(cursor, cursor_col, cols);
+        let right_of_cursor = self.visible_text(cursor, cursor_col, cursor_end);
         if !right_of_cursor.trim().is_empty() {
             let untyped_hint = marker_row == Some(cursor)
                 && is_untyped_hint(section, &cursor_line, &right_of_cursor);
@@ -598,7 +603,7 @@ impl VtScreen {
             if row == cursor {
                 cursor_line.clone()
             } else {
-                self.visible_text(row, origin, cols)
+                self.visible_text(row, origin, self.composer_row_end(section, row, origin))
             }
         };
         let continuation_text = |row: u16| {
@@ -778,6 +783,38 @@ impl VtScreen {
         self.row_text(row, start, end, true)
             .map(|(text, _)| text)
             .unwrap_or_default()
+    }
+
+    /// The column a composer row read from `start` ends at: where the
+    /// section's `right_border` match ending at the row's last visible
+    /// character begins, else the screen's width.
+    fn composer_row_end(
+        &self,
+        section: &crate::detector::definition::ComposerSection,
+        row: u16,
+        start: u16,
+    ) -> u16 {
+        let (cols, _rows) = self.size();
+        let Some(border) = &section.right_border else {
+            return cols;
+        };
+        let grid = self.model.term().grid();
+        if usize::from(row) >= grid.screen_lines() {
+            return cols;
+        }
+        let mut columns = Vec::new();
+        let (text, _) = cells_text_mapped(
+            &grid[Line(i32::from(row))],
+            usize::from(start),
+            usize::from(cols),
+            true,
+            |byte, col| columns.push((byte, col)),
+        );
+        border
+            .find_iter(&text)
+            .find(|found| found.end() == text.len())
+            .and_then(|found| column_at_byte(&columns, found.start()))
+            .unwrap_or(cols)
     }
 
     /// The cursor row from column `start` up to the cursor's column, with

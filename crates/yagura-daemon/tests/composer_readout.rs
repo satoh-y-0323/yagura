@@ -30,6 +30,7 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
         continuation_prefix: continuation_prefix.to_string(),
         blank_lines_in_body: false,
         left_panel: None,
+        right_border: None,
         placeholder: None,
     }
 }
