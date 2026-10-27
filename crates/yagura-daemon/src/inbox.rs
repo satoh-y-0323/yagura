@@ -53,6 +53,26 @@ pub fn is_session_id(value: &str) -> bool {
 /// at the pointer, or what is there is not a string.
 #[must_use]
 pub fn session_at_pointer(input: &[u8], pointer: &str) -> Option<String> {
+    match value_at_pointer(input, pointer) {
+        Some(PointerValue::Text(text)) => Some(text),
+        Some(PointerValue::Other) | None => None,
+    }
+}
+
+/// Whether `input` has a value other than `null` at `pointer`, of any type.
+/// Reads the way [`session_at_pointer`] does.
+#[must_use]
+pub fn has_value_at_pointer(input: &[u8], pointer: &str) -> bool {
+    value_at_pointer(input, pointer).is_some()
+}
+
+/// What a JSON pointer ends at, short of `null`.
+enum PointerValue {
+    Text(String),
+    Other,
+}
+
+fn value_at_pointer(input: &[u8], pointer: &str) -> Option<PointerValue> {
     let path: Vec<String> = pointer
         .strip_prefix('/')?
         .split('/')
@@ -75,7 +95,16 @@ pub fn session_at_pointer(input: &[u8], pointer: &str) -> Option<String> {
 /// Walks a JSON document along a pointer, recording the string it ends at.
 struct PointerSeek<'a> {
     path: &'a [String],
-    found: &'a mut Option<String>,
+    found: &'a mut Option<PointerValue>,
+}
+
+impl PointerSeek<'_> {
+    /// Records a value that is not a string, when the pointer ends here.
+    fn mark_other(self) {
+        if self.path.is_empty() {
+            *self.found = Some(PointerValue::Other);
+        }
+    }
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for PointerSeek<'_> {
@@ -95,14 +124,35 @@ impl<'de> serde::de::Visitor<'de> for PointerSeek<'_> {
 
     fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<(), E> {
         if self.path.is_empty() {
-            *self.found = Some(value.to_string());
+            *self.found = Some(PointerValue::Text(value.to_string()));
         }
+        Ok(())
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
+        self.mark_other();
+        Ok(())
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
+        self.mark_other();
+        Ok(())
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
+        self.mark_other();
+        Ok(())
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
+        self.mark_other();
         Ok(())
     }
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
         use serde::de::{Error, IgnoredAny};
         let Some((token, rest)) = self.path.split_first() else {
+            self.mark_other();
             return Ok(());
         };
         while let Some(key) = map.next_key::<String>()? {
@@ -122,6 +172,7 @@ impl<'de> serde::de::Visitor<'de> for PointerSeek<'_> {
     fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         use serde::de::{Error, IgnoredAny};
         let Some((token, rest)) = self.path.split_first() else {
+            self.mark_other();
             return Ok(());
         };
         let Ok(index) = token.parse::<usize>() else {

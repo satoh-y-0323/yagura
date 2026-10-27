@@ -34,7 +34,7 @@ use yagura_daemon::config::{
 use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
-use yagura_daemon::inbox::{is_session_id, session_at_pointer};
+use yagura_daemon::inbox::{has_value_at_pointer, is_session_id, session_at_pointer};
 use yagura_daemon::ipc::{chat, plan, ticket};
 use yagura_daemon::palette_store::PaletteStore;
 use yagura_daemon::profile::ProfileOs;
@@ -58,19 +58,24 @@ const DOOR_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 /// How much of a hook's stdin is looked at for the session it names.
 const HOOK_STDIN_PARSED_BYTES: usize = 64 * 1024;
 
+/// The most a hook waits, after its answer is printed, for the rest of its
+/// stdin to be read. Bounds a CLI that leaves stdin open; a CLI that closes it
+/// is waited for until it has written everything.
+const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
 fn main() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = cli::parse_args(&args).context("invalid command line")?;
-    // A CLI started by hand outside any window still runs its hooks; decided
-    // before logging is set up so such a hook stays silent and leaves no trace.
-    if command.is_hook_command() && !runs_inside_window() {
-        if matches!(command, CliCommand::ReportSession { .. }) {
-            // The CLI writes its input to the hook; a hook that leaves it
-            // unread would make that write fail.
-            read_hook_stdin();
-        }
+    // A hook also runs outside any window (a CLI started by hand) and may carry
+    // arguments only a newer copy knows, so it is decided on the raw arguments,
+    // before they are parsed and before logging is set up: such a hook stays
+    // silent and leaves no trace.
+    if cli::names_hook_door(&args) && !runs_inside_window() {
+        // The CLI writes its input to the hook; a hook that leaves it unread
+        // would make that write fail.
+        read_hook_stdin();
         return Ok(ExitCode::SUCCESS);
     }
+    let command = cli::parse_args(&args).context("invalid command line")?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -115,15 +120,11 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         tickets_arg,
     ) = match command {
         CliCommand::Shutdown => return send_shutdown(&ipc, &endpoint).await.map(succeeded),
-        CliCommand::EmitStatus { status, source } => {
-            return send_status_event(&ipc, &endpoint, status, source)
-                .await
-                .map(succeeded);
-        }
-        door @ (CliCommand::DeliverContext
-        | CliCommand::DeliverTake
-        | CliCommand::DeliverWait
-        | CliCommand::ReportSession { .. }) => return run_hook_door(&ipc, &endpoint, door).await,
+        door @ (CliCommand::EmitStatus { .. }
+        | CliCommand::DeliverContext { .. }
+        | CliCommand::DeliverTake { .. }
+        | CliCommand::DeliverWait { .. }
+        | CliCommand::ReportSession { .. }) => return run_hook(&ipc, &endpoint, door).await,
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
         // configure the daemon this process is about to start, and are
@@ -701,6 +702,54 @@ fn runs_inside_window() -> bool {
         .all(|name| std::env::var_os(name).is_some())
 }
 
+/// Runs a hook door from inside a window (see [`runs_inside_window`]).
+///
+/// The door always reads the CLI's stdin to the end, so the CLI's write never
+/// fails. It reads it in full first only when the door needs it (`--skip-if`,
+/// `--report-session`); otherwise the reading runs beside the request, so an
+/// answer is never held back by a CLI that leaves stdin open.
+async fn run_hook(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Result<ExitCode> {
+    let needs_input =
+        command.skip_if().is_some() || matches!(command, CliCommand::ReportSession { .. });
+    let (input, drained) = if needs_input {
+        let input = tokio::task::spawn_blocking(read_hook_stdin)
+            .await
+            .context("reading the hook input panicked")?;
+        (input, None)
+    } else {
+        (Vec::new(), Some(drain_hook_stdin()))
+    };
+    if let Some(pointer) = command.skip_if()
+        && has_value_at_pointer(&input, pointer)
+    {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let result = match command {
+        CliCommand::EmitStatus { status, source, .. } => {
+            send_status_event(ipc, endpoint, status, source)
+                .await
+                .map(succeeded)
+        }
+        door => run_hook_door(ipc, endpoint, door, &input).await,
+    };
+    if let Some(drained) = drained {
+        // Only the end of stdin is waited for; what was read is of no use.
+        let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
+    }
+    result
+}
+
+/// Reads stdin to its end on a thread of its own; the receiver gets one value
+/// when it has ended.
+fn drain_hook_stdin() -> std::sync::mpsc::Receiver<()> {
+    let (done, drained) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        read_hook_stdin();
+        let _ = done.send(());
+    });
+    drained
+}
+
 /// Connects to `endpoint` and sends one `StatusEvent` (the `--emit-status`
 /// helper). No reply is expected; failing to reach a daemon is an error, so a
 /// hook that reports into nothing does not look successful.
@@ -739,26 +788,29 @@ async fn send_status_event(
 
 /// Runs one of the commands a CLI's hook uses to reach its window's inbox,
 /// only reached from inside a window (see [`runs_inside_window`]): the token and
-/// window id are the ones the window's child inherited.
+/// window id are the ones the window's child inherited. `input` is the hook's
+/// stdin when the door read it first.
 ///
 /// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
 /// with the exit code the window's profile declares. A refusal prints nothing
 /// to stdout and ends with 1, which is never a code a hook reads as a wake.
-async fn run_hook_door(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Result<ExitCode> {
+async fn run_hook_door(
+    ipc: &PlatformIpc,
+    endpoint: &str,
+    command: CliCommand,
+    input: &[u8],
+) -> Result<ExitCode> {
     let token = std::env::var(STATUS_TOKEN_ENV)
         .with_context(|| format!("{STATUS_TOKEN_ENV} is not valid Unicode"))?;
     let window_id = std::env::var(WINDOW_ID_ENV)
         .with_context(|| format!("{WINDOW_ID_ENV} is not valid Unicode"))?;
-    let waits = matches!(command, CliCommand::DeliverWait);
+    let waits = matches!(command, CliCommand::DeliverWait { .. });
     let message = match command {
-        CliCommand::DeliverContext => ClientMessage::DeliverContext { window_id, token },
-        CliCommand::DeliverTake => ClientMessage::DeliverTake { window_id, token },
-        CliCommand::DeliverWait => ClientMessage::DeliverWait { window_id, token },
-        CliCommand::ReportSession { pointer } => {
-            let input = tokio::task::spawn_blocking(read_hook_stdin)
-                .await
-                .context("reading the hook input panicked")?;
-            let Some(session) = session_at_pointer(&input, &pointer).filter(|s| is_session_id(s))
+        CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext { window_id, token },
+        CliCommand::DeliverTake { .. } => ClientMessage::DeliverTake { window_id, token },
+        CliCommand::DeliverWait { .. } => ClientMessage::DeliverWait { window_id, token },
+        CliCommand::ReportSession { pointer, .. } => {
+            let Some(session) = session_at_pointer(input, &pointer).filter(|s| is_session_id(s))
             else {
                 return Ok(ExitCode::SUCCESS);
             };

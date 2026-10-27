@@ -79,37 +79,69 @@ pub enum CliCommand {
         status: WindowStatus,
         /// Reporting source name, defaulting to `"cli"`.
         source: String,
+        /// `--skip-if`: see [`CliCommand::skip_if`].
+        skip_if: Option<String>,
     },
     /// Print the start-up context of the window the hook runs in
     /// (`--deliver-context`).
-    DeliverContext,
+    DeliverContext {
+        /// `--skip-if`: see [`CliCommand::skip_if`].
+        skip_if: Option<String>,
+    },
     /// Print the parcels waiting for the window the hook runs in
     /// (`--deliver-take`).
-    DeliverTake,
+    DeliverTake {
+        /// `--skip-if`: see [`CliCommand::skip_if`].
+        skip_if: Option<String>,
+    },
     /// Wait for a parcel for the window the hook runs in (`--deliver-wait`).
-    DeliverWait,
+    DeliverWait {
+        /// `--skip-if`: see [`CliCommand::skip_if`].
+        skip_if: Option<String>,
+    },
     /// Tell the daemon the session the CLI's hook input names
     /// (`--report-session`).
     ReportSession {
         /// The JSON pointer (RFC 6901) of the string in the hook's stdin.
         pointer: String,
+        /// `--skip-if`: see [`CliCommand::skip_if`].
+        skip_if: Option<String>,
     },
 }
 
 impl CliCommand {
-    /// Whether a CLI's hook runs this command: it only acts inside a window
-    /// and is silent anywhere else.
+    /// The JSON pointer (RFC 6901) given with `--skip-if` to a hook door: when
+    /// the hook's stdin has a value there, the hook does nothing. The pointer
+    /// is profile data, so the daemon names no CLI's field.
     #[must_use]
-    pub fn is_hook_command(&self) -> bool {
-        matches!(
-            self,
-            Self::EmitStatus { .. }
-                | Self::DeliverContext
-                | Self::DeliverTake
-                | Self::DeliverWait
-                | Self::ReportSession { .. }
-        )
+    pub fn skip_if(&self) -> Option<&str> {
+        match self {
+            Self::EmitStatus { skip_if, .. }
+            | Self::DeliverContext { skip_if }
+            | Self::DeliverTake { skip_if }
+            | Self::DeliverWait { skip_if }
+            | Self::ReportSession { skip_if, .. } => skip_if.as_deref(),
+            Self::Run { .. } | Self::Shutdown => None,
+        }
     }
+}
+
+/// Whether `args` name a hook door (`--emit-status`, `--deliver-*`,
+/// `--report-session`). Decided on the raw arguments, before [`parse_args`], so
+/// that a hook outside a window stays silent even when a copy of the binary
+/// older than the hook file does not know one of its other arguments.
+#[must_use]
+pub fn names_hook_door(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--emit-status"
+                | "--deliver-context"
+                | "--deliver-take"
+                | "--deliver-wait"
+                | "--report-session"
+        )
+    })
 }
 
 /// Why a command line was rejected.
@@ -160,6 +192,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut emit_status: Option<WindowStatus> = None;
     let mut source: Option<String> = None;
     let mut hook_door: Option<CliCommand> = None;
+    let mut skip_if: Option<String> = None;
     let mut detection_name: Option<String> = None;
     let mut detection_dir_arg: Option<PathBuf> = None;
     let mut playbook_arg: Option<PathBuf> = None;
@@ -177,9 +210,15 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                 emit_status =
                     Some(parse_status(value).ok_or_else(|| invalid("--emit-status", value))?);
             }
-            "--deliver-context" => set_hook_door(&mut hook_door, CliCommand::DeliverContext)?,
-            "--deliver-take" => set_hook_door(&mut hook_door, CliCommand::DeliverTake)?,
-            "--deliver-wait" => set_hook_door(&mut hook_door, CliCommand::DeliverWait)?,
+            "--deliver-context" => {
+                set_hook_door(&mut hook_door, CliCommand::DeliverContext { skip_if: None })?
+            }
+            "--deliver-take" => {
+                set_hook_door(&mut hook_door, CliCommand::DeliverTake { skip_if: None })?;
+            }
+            "--deliver-wait" => {
+                set_hook_door(&mut hook_door, CliCommand::DeliverWait { skip_if: None })?;
+            }
             "--report-session" => {
                 let value = next_value(&mut remaining, "--report-session")?;
                 if !value.starts_with('/') {
@@ -189,8 +228,16 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                     &mut hook_door,
                     CliCommand::ReportSession {
                         pointer: value.clone(),
+                        skip_if: None,
                     },
                 )?;
+            }
+            "--skip-if" => {
+                let value = next_value(&mut remaining, "--skip-if")?;
+                if !value.starts_with('/') {
+                    return Err(invalid("--skip-if", value));
+                }
+                skip_if = Some(value.clone());
             }
             "--source" => {
                 let value = next_value(&mut remaining, "--source")?;
@@ -229,13 +276,17 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         return Err(CliError::ConflictingCommands);
     }
     if let Some(door) = hook_door {
-        return Ok(door);
+        return Ok(with_skip_if(door, skip_if));
+    }
+    if skip_if.is_some() && emit_status.is_none() {
+        return Err(CliError::UnknownArgument("--skip-if".to_string()));
     }
     match (shutdown, emit_status) {
         (true, _) => Ok(CliCommand::Shutdown),
         (false, Some(status)) => Ok(CliCommand::EmitStatus {
             status,
             source: source.unwrap_or_else(|| DEFAULT_EMIT_STATUS_SOURCE.to_string()),
+            skip_if,
         }),
         (false, None) => Ok(CliCommand::Run {
             detection_name,
@@ -246,6 +297,22 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             roles_arg,
             tickets_arg,
         }),
+    }
+}
+
+/// `door` with the `--skip-if` pointer the command line carried.
+fn with_skip_if(door: CliCommand, pointer: Option<String>) -> CliCommand {
+    match door {
+        CliCommand::DeliverContext { .. } => CliCommand::DeliverContext { skip_if: pointer },
+        CliCommand::DeliverTake { .. } => CliCommand::DeliverTake { skip_if: pointer },
+        CliCommand::DeliverWait { .. } => CliCommand::DeliverWait { skip_if: pointer },
+        CliCommand::ReportSession {
+            pointer: session, ..
+        } => CliCommand::ReportSession {
+            pointer: session,
+            skip_if: pointer,
+        },
+        other => other,
     }
 }
 
