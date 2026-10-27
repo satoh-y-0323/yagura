@@ -302,6 +302,15 @@ impl HooksRoute {
     }
 }
 
+/// Whether what the daemon sends of its own accord can reach a CLI: its
+/// profile declares delivery (`has_delivery`), and the `hooks` the daemon
+/// arranged were not left out. The one rule [`WindowEntry::delivers`] and the
+/// choice made before a launch both read.
+#[must_use]
+pub(crate) fn takes_delivery(has_delivery: bool, hooks: HooksRoute) -> bool {
+    has_delivery && hooks != HooksRoute::LeftOut
+}
+
 /// The program a profile's wake command runs, and the environment it runs
 /// under: the profile's own argv without launch options, and its `[env]`.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -347,6 +356,9 @@ pub enum InjectionKind {
     /// The `[delivery]` table's `launch_prompt`: hands the CLI a first
     /// request at start-up.
     LaunchPrompt,
+    /// The `[delivery]` table's `launch_context`: hands a chat participant
+    /// the room's introduction at start-up.
+    LaunchContext,
 }
 
 impl InjectionKind {
@@ -357,6 +369,7 @@ impl InjectionKind {
             Self::Mcp => "MCP",
             Self::Hooks => "hooks",
             Self::LaunchPrompt => "launch prompt",
+            Self::LaunchContext => "launch context",
         }
     }
 }
@@ -3628,7 +3641,7 @@ impl WindowEntry {
     /// arranged were not left out at launch.
     #[must_use]
     pub fn delivers(&self) -> bool {
-        self.provenance.delivery.is_some() && self.provenance.hooks != HooksRoute::LeftOut
+        takes_delivery(self.provenance.delivery.is_some(), self.provenance.hooks)
     }
 
     /// The program a wake by command runs, when the profile declares one.

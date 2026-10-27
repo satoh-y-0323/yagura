@@ -17,6 +17,8 @@ const TEXT_PLACEHOLDER: &str = "{text}";
 const SESSION_PLACEHOLDER: &str = "{session}";
 /// Where a launch prompt template takes the prompt.
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
+/// Where a launch context template takes the room's introduction.
+const CONTEXT_PLACEHOLDER: &str = "{context}";
 
 /// How the daemon wakes a CLI that is waiting for its user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,9 @@ pub struct ProfileDelivery {
     /// The arguments that hand the CLI a first request at start-up, where
     /// `{prompt}` is filled in.
     pub launch_prompt: Option<Vec<String>>,
+    /// The arguments that hand a chat participant the room's introduction at
+    /// start-up, where `{context}` is filled in.
+    pub launch_context: Option<Vec<String>>,
 }
 
 impl ProfileDelivery {
@@ -117,6 +122,13 @@ pub(crate) fn parse_delivery(
                 .ok_or(DeliveryError::Invalid("launch_prompt"))?,
         ),
     };
+    let launch_context = match take_strings(&mut table, "launch_context")? {
+        None => None,
+        Some(args) => Some(
+            validated_args(args, &[CONTEXT_PLACEHOLDER], CONTEXT_PLACEHOLDER)
+                .ok_or(DeliveryError::Invalid("launch_context"))?,
+        ),
+    };
     if let Some((key, _)) = table.into_iter().next() {
         return Err(DeliveryError::UnknownKey(key));
     }
@@ -127,6 +139,7 @@ pub(crate) fn parse_delivery(
         wake_stream,
         wake_exit,
         launch_prompt,
+        launch_context,
     }))
 }
 
@@ -282,6 +295,23 @@ pub fn launch_prompt_injection(delivery: &ProfileDelivery, prompt: &str) -> Opti
         args: template
             .iter()
             .map(|arg| arg.replace(PROMPT_PLACEHOLDER, prompt))
+            .collect(),
+        config_file: None,
+        config_dir: None,
+    })
+}
+
+/// The injection that hands a CLI `intro` as the room's introduction, or `None`
+/// when the profile declares no way to. Like the launch prompt, the text is put
+/// into each element of the template once and stays as written.
+#[must_use]
+pub fn launch_context_injection(delivery: &ProfileDelivery, intro: &str) -> Option<CliInjection> {
+    let template = delivery.launch_context.as_ref()?;
+    Some(CliInjection {
+        kind: InjectionKind::LaunchContext,
+        args: template
+            .iter()
+            .map(|arg| arg.replace(CONTEXT_PLACEHOLDER, intro))
             .collect(),
         config_file: None,
         config_dir: None,

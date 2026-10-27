@@ -69,7 +69,9 @@ use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::palette_store::{self, PaletteStore};
 use crate::plan_permit::{self, ChangeKind, PermitError};
-use crate::profile_delivery::{ProfileDelivery, WakeMode, launch_prompt_injection};
+use crate::profile_delivery::{
+    ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
+};
 use crate::pty::{InputState, PtyError};
 use crate::store::{self, SnapshotWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
@@ -405,6 +407,9 @@ struct PlannedOpen {
     /// What the profile cannot do on this host
     /// ([`crate::profile::shim_limits`]).
     limits: Vec<yagura_protocol::ProfileLimit>,
+    /// Decides, right before spawn, whether the window is handed the room's
+    /// introduction.
+    chat: Arc<chat::ChatRuntime>,
 }
 
 impl PlannedOpen {
@@ -2769,6 +2774,7 @@ impl IpcServer {
             wake_command,
             bridge_scan,
             limits: launch.limits,
+            chat: Arc::clone(&self.chat),
         })
     }
 
@@ -5796,18 +5802,20 @@ async fn open_planned(
         planned.host_paths.take(),
     )
     .await;
+    let hooks_in_argv = injections
+        .iter()
+        .any(|injection| injection.kind == crate::window::InjectionKind::Hooks);
+    let launch_context = launch_context_injection_for(config, &planned, hooks_in_argv);
     injections.append(&mut planned.injections);
     planned.injections = injections;
+    if let Some(context) = launch_context {
+        // Before the launch prompt, which has to stay the CLI's last argument.
+        insert_before_launch_prompt(&mut planned.injections, context);
+    }
     if let Some(scan) = planned.bridge_scan.take()
         && let Some(disable) = mcp_registration::disable_other_bridges(config, scan).await
     {
-        // Before the launch prompt, which has to stay the CLI's last argument.
-        let at = planned
-            .injections
-            .iter()
-            .position(|injection| injection.kind == crate::window::InjectionKind::LaunchPrompt)
-            .unwrap_or(planned.injections.len());
-        planned.injections.insert(at, disable);
+        insert_before_launch_prompt(&mut planned.injections, disable);
     }
     let provenance = WindowProvenance {
         launch: Some(planned.launch),
@@ -5842,6 +5850,56 @@ async fn open_planned(
         }
     }
     Ok(opened)
+}
+
+/// Puts `injection` ahead of the launch prompt, which has to stay the CLI's
+/// last argument.
+fn insert_before_launch_prompt(injections: &mut Vec<CliInjection>, injection: CliInjection) {
+    let at = injections
+        .iter()
+        .position(|injection| injection.kind == crate::window::InjectionKind::LaunchPrompt)
+        .unwrap_or(injections.len());
+    injections.insert(at, injection);
+}
+
+/// The room's introduction as a launch argument, for a window that will take
+/// part in chat. `hooks_in_argv` is whether the launch's `[hooks]` injection
+/// survived rendering. A program that is a `.cmd` / `.bat` shim is opened
+/// without it ([`crate::profile::shim_limits`]).
+///
+/// The detection name is the one the window will be asked to load; a
+/// definition that then fails to load leaves the window a participant
+/// whatever the exclusion list says, so only the name is judged here.
+fn launch_context_injection_for(
+    config: &DaemonConfig,
+    planned: &PlannedOpen,
+    hooks_in_argv: bool,
+) -> Option<CliInjection> {
+    let delivery = planned.delivery.as_ref()?;
+    delivery.launch_context.as_ref()?;
+    let detection = planned
+        .request
+        .detection
+        .as_deref()
+        .unwrap_or(config.detection_name.as_str());
+    let intro =
+        planned
+            .chat
+            .launch_intro(true, planned.hooks.settle(hooks_in_argv), Some(detection));
+    if intro.is_empty() {
+        return None;
+    }
+    if planned
+        .limit(yagura_protocol::ProfileCapability::LaunchContext)
+        .is_some()
+    {
+        tracing::warn!(
+            profile = %planned.launch.profile,
+            "the room's introduction was left out of this launch: the program is a command              interpreter shim"
+        );
+        return None;
+    }
+    launch_context_injection(delivery, intro)
 }
 
 /// The answer to a request that opened a window.

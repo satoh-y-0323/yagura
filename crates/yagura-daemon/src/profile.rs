@@ -103,6 +103,9 @@ const REASON_WAKE_NEEDS_NATIVE_PROGRAM: &str =
 /// interpreter would reinterpret the request on the program's command line.
 const REASON_LAUNCH_PROMPT_THROUGH_SHIM: &str = "a request handed over at launch cannot pass \
      unchanged through this profile's program, a Windows .cmd / .bat file";
+/// Reason text for a [`ProfileCapability::LaunchContext`] limit: the command
+/// interpreter would reinterpret the introduction on the program's command line.
+const REASON_LAUNCH_CONTEXT_THROUGH_SHIM: &str = "the room's introduction handed over at launch      cannot pass unchanged through this profile's program, a Windows .cmd / .bat file";
 /// The refusal text for a profile its `enabled` key switches off: the
 /// `Display` of [`ProfileLaunchError::Disabled`] and the reason
 /// [`resolve_model_choices`] gives, so both read the same.
@@ -2002,10 +2005,10 @@ fn wake_command_unavailability(
 /// What `profile` cannot do on this host although it may be launchable,
 /// because its program resolves to a Windows `.cmd` / `.bat` file whose
 /// arguments the command interpreter reads as its own syntax: a `model` /
-/// `effort` template with a metacharacter outside `{value}`, and a launch
-/// prompt. The single source both a listing and the checks made before a
-/// launch is approved read, so they never disagree. Empty when the program is
-/// not a shim, cannot be resolved, or nothing is limited.
+/// `effort` template with a metacharacter outside `{value}`, a launch
+/// prompt, and a launch context. The single source both a listing and the
+/// checks made before a launch is approved read, so they never disagree. Empty
+/// when the program is not a shim, cannot be resolved, or nothing is limited.
 #[must_use]
 pub fn shim_limits(profile: &Profile, config: &DaemonConfig) -> Vec<ProfileLimit> {
     let Ok(argv) = launch_argv(profile, config) else {
@@ -2044,6 +2047,16 @@ pub fn shim_limits(profile: &Profile, config: &DaemonConfig) -> Vec<ProfileLimit
         limits.push(limit(
             ProfileCapability::LaunchPrompt,
             REASON_LAUNCH_PROMPT_THROUGH_SHIM,
+        ));
+    }
+    if profile
+        .delivery
+        .as_ref()
+        .is_some_and(|delivery| delivery.launch_context.is_some())
+    {
+        limits.push(limit(
+            ProfileCapability::LaunchContext,
+            REASON_LAUNCH_CONTEXT_THROUGH_SHIM,
         ));
     }
     limits

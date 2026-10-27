@@ -36,7 +36,7 @@ use crate::inbox::{Deposited, Inbox, Parcel, ParcelEnd, PushBudget};
 use crate::live_policy::{self, PolicyCell};
 use crate::room::{self, ChatLimits, DeliveryOutcome};
 use crate::store::StoreError;
-use crate::window::{WindowEntry, WindowParticipation, WindowRegistry};
+use crate::window::{HooksRoute, WindowEntry, WindowParticipation, WindowRegistry, takes_delivery};
 use crate::workspace::{self, WorkspaceKey, WorkspaceKind};
 
 use super::notice_queue;
@@ -151,13 +151,27 @@ impl ChatRuntime {
     /// intro` for a chat participant, nothing for any other window or when
     /// chat failed to come up.
     pub(super) fn intro_for(&self, entry: &WindowEntry) -> &str {
+        self.introduction(entry.delivers(), entry.detection_definition())
+    }
+
+    /// The intro a window is started with, decided before it is spawned from
+    /// the same facts [`Self::intro_for`] decides from afterwards: `has_delivery`
+    /// and the `hooks` route the launch settled on, and the detection
+    /// definition's name.
+    pub(crate) fn launch_intro(
+        &self,
+        has_delivery: bool,
+        hooks: HooksRoute,
+        detection: Option<&str>,
+    ) -> &str {
+        self.introduction(takes_delivery(has_delivery, hooks), detection)
+    }
+
+    /// The one rule for who is introduced to the room.
+    fn introduction(&self, delivers: bool, detection: Option<&str>) -> &str {
         let introduced = self.unwired
             || (self.store.is_enabled()
-                && is_participant(
-                    entry.delivers(),
-                    entry.detection_definition(),
-                    &self.exclude_detections,
-                ));
+                && is_participant(delivers, detection, &self.exclude_detections));
         if introduced { &self.intro } else { "" }
     }
 
