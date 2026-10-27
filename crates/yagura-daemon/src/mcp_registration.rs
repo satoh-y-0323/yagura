@@ -132,6 +132,10 @@ enum StatusFormat {
 struct StatusSpec {
     source: StatusSource,
     format: StatusFormat,
+    /// `json` only: the array the registration is picked out of by name.
+    /// When set, `command`, `args_pointer` and `toml_set.confirm` point into
+    /// the picked element instead of the document's root.
+    servers: Option<NamedItems>,
     /// `json`: a JSON Pointer (may contain `{server}`) to the registered
     /// executable. `lines`: the line prefix preceding it.
     command: String,
@@ -688,10 +692,18 @@ fn render_json(
 #[derive(Debug, Clone)]
 pub struct ListSpec {
     args: Vec<String>,
-    items: String,
-    name: ItemName,
+    servers: NamedItems,
     command: String,
     disable: Vec<String>,
+}
+
+/// Where a JSON document keeps its registered servers, and how each is named.
+/// Shared by `list` and a `json` `status` so both pick a server the same way.
+#[derive(Debug, Clone)]
+struct NamedItems {
+    /// JSON Pointer to the array (or table) of servers.
+    items: String,
+    name: ItemName,
 }
 
 /// Where a listed server's name is read from.
@@ -702,6 +714,26 @@ enum ItemName {
     Pointer(String),
     /// `items` is a table; each member is one server, named by its key.
     Key,
+}
+
+impl NamedItems {
+    /// Every server in `document` with its name, in document order. `None`
+    /// when `items` is missing or not an array (a table, for [`ItemName::Key`]).
+    fn named<'a>(&self, document: &'a JsonValue) -> Option<Vec<(&'a str, &'a JsonValue)>> {
+        let items = document.pointer(&self.items)?;
+        Some(match &self.name {
+            ItemName::Pointer(pointer) => items
+                .as_array()?
+                .iter()
+                .filter_map(|item| Some((item.pointer(pointer)?.as_str()?, item)))
+                .collect(),
+            ItemName::Key => items
+                .as_object()?
+                .iter()
+                .map(|(name, item)| (name.as_str(), item))
+                .collect(),
+        })
+    }
 }
 
 impl ListSpec {
@@ -730,19 +762,7 @@ impl ListSpec {
         keep: &str,
     ) -> Option<Vec<String>> {
         let document = parse_json_document(std::str::from_utf8(stdout).ok()?)?;
-        let items = document.pointer(&self.items)?;
-        let named: Vec<(&str, &JsonValue)> = match &self.name {
-            ItemName::Pointer(pointer) => items
-                .as_array()?
-                .iter()
-                .filter_map(|item| Some((item.pointer(pointer)?.as_str()?, item)))
-                .collect(),
-            ItemName::Key => items
-                .as_object()?
-                .iter()
-                .map(|(name, item)| (name.as_str(), item))
-                .collect(),
-        };
+        let named = self.servers.named(&document)?;
         Some(other_bridge_names(
             named.into_iter(),
             &self.command,
@@ -1305,6 +1325,21 @@ fn derive_from_output(
             let Some(document) = parse_json_document(text) else {
                 return unknown(REASON_UNREADABLE_OUTPUT);
             };
+            let document = match &status.servers {
+                None => document,
+                Some(servers) => match servers.named(&document) {
+                    None if is_file_source && document.pointer(&servers.items).is_none() => {
+                        return not_registered();
+                    }
+                    None => return unknown(REASON_COMMAND_UNREADABLE),
+                    Some(named) => {
+                        match named.into_iter().find(|(name, _)| *name == target.server()) {
+                            Some((_, item)) => item.clone(),
+                            None => return not_registered(),
+                        }
+                    }
+                },
+            };
             let pointer = status.command.replace("{server}", target.server());
             let actual = match document.pointer(&pointer) {
                 None if is_file_source => return not_registered(),
@@ -1577,6 +1612,10 @@ struct RawStatusTable {
     format: String,
     command: String,
     #[serde(default)]
+    items: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     args_pointer: Option<String>,
     #[serde(default)]
     require: Option<BTreeMap<String, String>>,
@@ -1776,8 +1815,10 @@ fn build_list(raw: RawList) -> Result<ListSpec, McpRegistrationError> {
     }
     Ok(ListSpec {
         args: raw.args,
-        items: raw.items,
-        name: raw.name.map_or(ItemName::Key, ItemName::Pointer),
+        servers: NamedItems {
+            items: raw.items,
+            name: raw.name.map_or(ItemName::Key, ItemName::Pointer),
+        },
         command: raw.command,
         disable: raw.disable,
     })
@@ -1985,12 +2026,30 @@ fn build_status(raw: RawStatusTable) -> Result<StatusSpec, McpRegistrationError>
         }
         _ => return Err(invalid()),
     };
+    let servers = match (format, raw.items, raw.name) {
+        (_, None, None) => None,
+        // Unlike `list`, a keyed table needs no `items`: `command` already
+        // reaches it through `{server}`.
+        (StatusFormat::Json, Some(items), Some(name)) => Some(NamedItems {
+            items,
+            name: ItemName::Pointer(name),
+        }),
+        _ => return Err(invalid()),
+    };
     if format == StatusFormat::Json {
-        if !profile::is_json_pointer(&raw.command) {
-            return Err(invalid());
-        }
-        if let Some(pointer) = &raw.args_pointer
-            && !profile::is_json_pointer(pointer)
+        let pointers = [
+            Some(&raw.command),
+            raw.args_pointer.as_ref(),
+            servers.as_ref().map(|servers| &servers.items),
+            match servers.as_ref().map(|servers| &servers.name) {
+                Some(ItemName::Pointer(name)) => Some(name),
+                _ => None,
+            },
+        ];
+        if !pointers
+            .iter()
+            .flatten()
+            .all(|pointer| profile::is_json_pointer(pointer))
         {
             return Err(invalid());
         }
@@ -1998,6 +2057,7 @@ fn build_status(raw: RawStatusTable) -> Result<StatusSpec, McpRegistrationError>
     Ok(StatusSpec {
         source,
         format,
+        servers,
         command: raw.command,
         args_pointer: raw.args_pointer,
         require: raw.require.unwrap_or_default(),
