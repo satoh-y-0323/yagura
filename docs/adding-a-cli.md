@@ -164,12 +164,13 @@ going to change, and when you are done restore it and compare it byte for byte w
   the CLI takes a hook as a program and its arguments, run `{daemon}` directly and let the door
   stay silent outside a window (see
   [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
-- A CLI can stop reading its input after one long write. Grok Build in WSL stopped responding,
-  Ctrl+C included, once a single write of 48 bytes or more arrived outside a bracketed paste, while
-  32 bytes and the same text inside a paste went through (Grok Build 1.0.70; Windows took 64 bytes
-  unwrapped). Its definition therefore sets `[input] bracketed_paste = true`. The daemon still
-  writes some text unwrapped -- a `send_message` text with no terminator, and a body holding an
-  `ESC` -- so measure the length such a CLI takes in one write before you rely on it.
+- A CLI can pay a cost per redraw that grows with the text typed outside a bracketed paste. Grok
+  Build looks `ffmpeg` up on `PATH` at every redraw while it is not found, and inside WSL the
+  Windows part of `PATH` makes each lookup take tens of milliseconds, so 320 unwrapped characters
+  took about 16 seconds to appear, with every later key waiting behind them; the same text inside a
+  paste is one redraw (Grok Build 1.0.70). Its definition sets `[input] bracketed_paste = true` so
+  the daemon's typed bodies arrive as one paste. A `send_message` text with no terminator is still
+  written unwrapped. Wait long enough before you read a stall like this as a CLI that stopped.
 
 ## 4. Turn the findings into a profile
 
