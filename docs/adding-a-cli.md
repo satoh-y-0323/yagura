@@ -138,6 +138,38 @@ going to change, and when you are done restore it and compare it byte for byte w
   profile's `[shim_guidance]` says what to use instead; the daemon then refuses the request before
   approval and shows the limit ahead of time (see
   [Shim guidance](../profiles/README.md#shim-guidance)).
+- A model flag can be saved as the user's default too: Grok Build's `-m` writes the model into
+  `~/.grok/config.toml`, and `--reasoning-effort` does not. Look for a variable that sets the value
+  for one launch (`GROK_DEFAULT_MODEL`) and give it with the launch option's `env` (see
+  [Launch options](../profiles/README.md#launch-options)), checking the settings file before and
+  after as above.
+- Whether a hook's output reaches the model is the CLI's decision, and its documentation and its
+  own session record are the places to read it, not the model's answer. Grok Build's record shows
+  the output of its tool-call hooks and none of its session-start and prompt-submit hooks, so its
+  profiles take the inbox after a tool call and pass the start-up text as an argument
+  (`launch_context`).
+- A hook placed in the user's own settings can change every session of that CLI: with any hook in
+  Grok Build's user settings, it asks about folder trust in every folder outside the home
+  directory. Say so on the registration's row with `notice` (see
+  [MCP registration](../profiles/README.md#mcp-registration)).
+- A CLI may draw its input line inside a box whose right border is drawn like text. The daemon then
+  reads text right of the cursor and cannot observe the composer; declare the border as
+  `right_border` (see [`[composer]`](../crates/yagura-daemon/detection/README.md#composer)).
+- A CLI may hand an MCP server its whole environment and offer no launch argument that leaves a
+  registered server out, so a window starts every instance's bridge. Look for a launch argument
+  that refuses a server's tools and put it in `[mcp_registration.list]`'s `disable` (Grok Build's
+  `--deny MCPTool(<name>__*)`), and write down what is still visible.
+- The shell a CLI runs a hook's command with can differ from machine to machine (Grok Build's on
+  Windows depends on what is installed), so no one check for the window works in every shell. When
+  the CLI takes a hook as a program and its arguments, run `{daemon}` directly and let the door
+  stay silent outside a window (see
+  [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
+- A CLI can stop reading its input after one long write. Grok Build in WSL stopped responding,
+  Ctrl+C included, once a single write of 48 bytes or more arrived outside a bracketed paste, while
+  32 bytes and the same text inside a paste went through (Grok Build 1.0.70; Windows took 64 bytes
+  unwrapped). Its definition therefore sets `[input] bracketed_paste = true`. The daemon still
+  writes some text unwrapped -- a `send_message` text with no terminator, and a body holding an
+  `ESC` -- so measure the length such a CLI takes in one write before you rely on it.
 
 ## 4. Turn the findings into a profile
 

@@ -30,6 +30,7 @@ Definitions in this directory:
 - `antigravity-cli` -- Antigravity CLI (`agy`).
 - `copilot-cli` -- GitHub Copilot CLI (`copilot`).
 - `muse-code` -- Muse Code (`muse`).
+- `grok-build` -- Grok Build (`grok`).
 - `generic-shell` -- a plain interactive shell, and the daemon's built-in
   default when nothing selects a definition. It declares no `[composer]`: a
   plain shell's screen alone cannot tell its prompt apart from a program's
@@ -210,6 +211,9 @@ blank_lines_in_body = false    # optional; a blank line above the cursor
                                # belongs to the body (default false)
 left_panel = '^[^│]*│'         # optional, no default; regex matching a
                                # panel drawn left of the composer
+right_border = '│\s*$'         # optional, no default; regex matching an
+                               # edge drawn at the right end of each
+                               # composer line
 placeholder = '^Ask anything$' # optional, no default; regex matching the
                                # whole hint an empty composer shows
 
@@ -347,6 +351,14 @@ other keys are matched with that column as the start of the line, and a
 cursor left of it is not in the composer. On any other screen the composer is
 read from the first column, as without the key. The column is counted in
 cells, a wide character taking two.
+
+When the CLI draws its composer inside a box whose right border is drawn
+like text, `right_border` is a regex matching that border. On the marker line
+and every continuation line, a match that ends at the line's last visible
+character is cut off before the line is read: the border is neither part of
+the body nor text right of the cursor, which would otherwise leave the
+composer unobserved. A line it does not match is read whole. The bundled
+`grok-build` definition uses it.
 
 When the CLI writes a hint into its empty composer and tells it apart from a
 draft by color alone, `placeholder` is a regex matching that hint. The
@@ -838,20 +850,28 @@ under an input line that looks idle, or an approval dialog too small to read
 judged by its screen alone.
 
 ```
-yagura-daemon --emit-status <status> [--source <name>]
+yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>]
 ```
 
-- `<status>`: one of the seven statuses above; anything else exits non-zero.
+- `<status>`: one of the seven statuses above; anything else is a command
+  line it cannot parse (see below).
 - `--source <name>`: who is reporting, matching `[a-z0-9_-]{1,64}`. Default:
   `cli`.
+- `--skip-if <pointer>`: a JSON Pointer starting with `/`. When the JSON the
+  CLI writes to the hook's standard input has a value other than `null`
+  there, nothing is sent and the command exits 0 -- for a CLI that runs the
+  same hooks in its sub-agents' sessions and marks their input (Grok Build's
+  `subagentType`).
 
 The command connects to the running daemon, sends one event and exits; it does
 not start a daemon. Inside a window it exits non-zero if no daemon is
-reachable. Outside one -- where `YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` is
-not set, for example in a CLI session you started in your own terminal -- it
-sends nothing, prints nothing and exits 0, so a hook that a CLI runs in every
-session stays quiet in the sessions yagura did not open. A command line it
-cannot parse is refused either way. `--detection` and `--detection-dir` are
+reachable, and refuses a command line it cannot parse. Outside one -- where
+`YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` is not set, for example in a CLI
+session you started in your own terminal -- it does not read its other
+arguments at all: it reads its standard input to the end, sends nothing,
+prints nothing and exits 0, so a hook that a CLI runs in every session stays
+quiet in the sessions yagura did not open, even one written for a newer
+daemon than the copy it starts. `--detection` and `--detection-dir` are
 ignored here -- they configure a daemon this invocation is not starting.
 
 For the event to authenticate and be attributed to the right window, the hook
@@ -914,7 +934,7 @@ debounced by `confirm_ms` like any other.
 ### Bundled profiles
 
 The bundled profiles for Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI and Muse Code, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
+Copilot CLI, Muse Code and Grok Build, and their WSL versions, give the CLI its hooks themselves, so nothing has to be written
 by hand. Each event maps to a report as follows, checked with the CLI version
 named:
 
@@ -926,6 +946,7 @@ named:
 | GitHub Copilot CLI 1.0.101 (`copilot-cli`, `wsl-copilot-cli`) | a plugin directory, `--plugin-dir` at every launch | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 | Muse Code 1.4.12 (`muse-code`) | a managed hooks file named in `~/.config/muse/settings.json`, written by registration | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | Muse Code 1.4.12 (`wsl-muse-code`) | a managed hooks file, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
+| Grok Build 1.0.70 (`grok-build`, `wsl-grok-build`) | `~/.grok/hooks/yagura.json` (`yagura-<instance>.json` for a named instance), written by registration | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `Notification` with `permission_prompt` | `Stop`, `StopFailure`, `StopCancelled` |
 
 How the hooks are placed, and what the profile tables look like, is in
 [profiles/README.md](../../../profiles/README.md#hooks-injection). The same hooks
@@ -995,13 +1016,31 @@ nothing. `PreToolUse` and `PostToolUse` are not used: Muse runs them for its
 own reviewing sub-sessions too, after the turn's `Stop`, so they would leave
 the window `running`.
 
+**Grok Build** reads hooks only from its own files, and its hooks file has
+no place to keep one instance's entries apart from another's, so registering
+yagura with it from Settings > Integrations writes a file of the
+registration's own in `~/.grok/hooks`; removing the registration takes the
+hooks out of it. Each hook runs the daemon's copy in the `bin` folder by its
+absolute path, with its arguments given apart, so Grok Build starts it
+without a shell -- the shell it would otherwise use differs from machine to
+machine -- and inside WSL starts the Windows executable through its
+`/mnt/...` path. Outside a window the daemon itself does nothing (see above).
+Grok Build runs the same hooks in a sub-agent's session, whose input carries
+`subagentType`, so every hook passes `--skip-if /subagentType` and a
+sub-agent neither reports for the window nor takes its inbox. The approval
+notification comes a few seconds after the tool's own `PreToolUse`, and the
+approval box is read from the screen too. While any hook is in your own Grok Build settings, Grok Build asks about
+folder trust in every folder outside your home directory (see
+[Configuring Grok Build](../../../docs/mcp-setup.md#configuring-grok-build)),
+and a window reports nothing before that prompt is answered.
+
 ### When reports are missing
 
 A window expects reports when its hooks were actually given to the CLI: a
 Claude Code or GitHub Copilot CLI window from a bundled profile, a Codex CLI
 window whose trust entries were in place when it opened, an Antigravity
-CLI or Muse Code (`muse-code`) window whose registration's entries were in
-place when it opened, and a `wsl-muse-code` window. If such a window's screen shows a
+CLI, Muse Code (`muse-code`) or Grok Build window whose registration's entries
+were in place when it opened, and a `wsl-muse-code` window. If such a window's screen shows a
 running turn and 10 seconds later no report has arrived at all, the window is
 marked:
 
@@ -1052,6 +1091,21 @@ single event (only `Stop`, say) is not.
   interrupted before any output.** Pressing Esc between a submit and the
   first output cancels the turn and refills the composer with what was sent,
   text the daemon typed included; send it again or clear it by hand.
+- **Grok Build's folder trust prompt is read from its last line.** The
+  question sits in the middle of the screen, out of the bottom rows the
+  rules see, so the `grok-build` definition reads the prompt by the version
+  line it ends with (`Grok Build 1.0.70 [stable]`), as `waiting_approval`. The
+  welcome screen's last line shows the channel without the version.
+- **After a cancelled turn, Grok Build's history holds the focus.** Once a
+  turn is cancelled with Ctrl+C, or Esc is pressed while a permission box is
+  shown, keys act on the history rather than the input line, and its footer
+  shows `Space:prompt`. The window reads as `unknown` (`declared_unknown`), so
+  nothing is typed into it and `interrupt_window` is refused, until the focus
+  is back in the input line on the window's screen.
+- **Grok Build's interrupt key also empties a draft.** `interrupt_window`
+  writes Ctrl+C, which cancels a running turn, but which, while the window
+  waits for input, erases whatever its input line holds, text typed by hand
+  included.
 
 ### Writing hooks by hand
 

@@ -87,7 +87,9 @@ launch profiles, and a `wsl-muse-code` window, needs no MCP registration.** The 
   (`agy`) reads MCP servers only from its own global registration, not from anything passed at
   launch, so a window opened from either of those two profiles needs the manual registration
   described in [Configuring Antigravity CLI](#configuring-antigravity-cli) below, the same as a
-  session yagura did not start. What the table may contain, and when the daemon drops the
+  session yagura did not start. `grok-build` and `wsl-grok-build` carry none either: Grok Build has
+  no launch argument that adds an MCP server, so its windows reach yagura through the registration
+  described in [Configuring Grok Build](#configuring-grok-build). What the table may contain, and when the daemon drops the
   injection instead, is in [profiles/README.md](../profiles/README.md#mcp-injection).
 
 This covers every launch from a profile: `open_window` with `profile`, a `send_handoff` that opens a
@@ -149,7 +151,8 @@ CLI, and Antigravity CLI reports only once yagura is registered with it -- both 
 [Registering from the GUI](#registering-from-the-gui). The GitHub Copilot CLI profiles give the CLI
 its hooks at every launch, which it loads once you have answered its folder trust prompt. The
 `wsl-muse-code` profile gives Muse Code its hooks at every launch; `muse-code` reports once yagura
-is registered with Muse Code. What the hooks report, and the mark a window
+is registered with Muse Code, and the Grok Build profiles once yagura is registered with Grok Build.
+What the hooks report, and the mark a window
 shows when its reports stop arriving, are in
 [Detection definitions](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status).
 
@@ -173,9 +176,9 @@ The GUI's Settings panel (the gear button in the navigation rail) has an **Integ
 registers the bridge beside the running daemon with each CLI, so a session you start yourself can
 reach yagura. It lists one row for every launch profile with a `[mcp_registration]` table (see
 [profiles/README.md](../profiles/README.md#mcp-registration)): the bundled `claude-code`,
-`codex-cli`, `antigravity-cli`, `copilot-cli` and `muse-code` under "This computer", and
-`wsl-claude-code`, `wsl-codex-cli`, `wsl-antigravity-cli` and `wsl-copilot-cli` under "WSL".
-`shell` and `wsl-muse-code` have no row.
+`codex-cli`, `antigravity-cli`, `copilot-cli`, `muse-code` and `grok-build` under "This computer",
+and `wsl-claude-code`, `wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli` and
+`wsl-grok-build` under "WSL". `shell` and `wsl-muse-code` have no row.
 
 Run the GUI and the daemon from the same release. A daemon of this release lists a row that has
 no command of its own (Muse Code), which a GUI from before it cannot read, so its Integrations tab
@@ -239,6 +242,14 @@ they were:
   nothing (see
   [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
   Every other entry of either file is kept byte for byte, and a missing file is created.
+- **Grok Build's `tool_timeout_sec` and hooks file**: right after `grok mcp add`, it sets
+  `tool_timeout_sec = 86400` in the `[mcp_servers.<name>]` table that `grok mcp add` wrote to
+  `~/.grok/config.toml`; and it writes a hooks file of the registration's own,
+  `~/.grok/hooks/<name>.json`, holding the hooks under `/hooks`. Each hook runs the daemon's copy
+  by its absolute path with its arguments apart, so no shell is started, and does nothing outside
+  a window (see
+  [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)). The row
+  shows the profile's notice about folder trust (see [Configuring Grok Build](#configuring-grok-build)).
 
 **Remove** takes the hook trust tables and the hooks entry out again, along with the CLI's own `mcp
 remove`; it leaves `tool_timeout_sec` alone. For Muse Code it takes out the instance's server
@@ -254,8 +265,9 @@ added to it yourself -- such as `env_vars` -- is gone afterwards; yagura writes 
 **Reading the state.** The rows are read when the tab opens and after each operation, never in the
 background: `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
 `copilot mcp get <name> --json` for GitHub Copilot CLI, `~/.gemini/config/mcp_config.json`
-(read, never written) for Antigravity CLI, and Muse Code's two files above, plus the hook
-settings above, read back from `~/.codex/config.toml` and `~/.gemini/config/hooks.json`. `claude mcp get`
+(read, never written) for Antigravity CLI, Muse Code's two files above, and `grok mcp list --json`
+for Grok Build, plus the hook settings above, read back from `~/.codex/config.toml`,
+`~/.gemini/config/hooks.json` and `~/.grok/hooks/<name>.json`. `claude mcp get`
 starts the bridge briefly to check that it connects; that connection is `External` and changes no
 window's `mcp_connected`.
 
@@ -501,6 +513,60 @@ which is why the server's `env` names them too.
 Run the GUI and the daemon from the same release (see
 [Registering from the GUI](#registering-from-the-gui)).
 
+## Configuring Grok Build
+
+Grok Build (`grok`, checked with 1.0.70 on Windows and in WSL) has no launch argument that adds an
+MCP server or a hook, so both bundled profiles -- `grok-build` (Windows, macOS and Linux) and
+`wsl-grok-build` (Windows, running Grok Build inside WSL) -- reach yagura through a registration.
+Register yagura with Grok Build once, from its row in
+[Registering from the GUI](#registering-from-the-gui): that runs `grok mcp add` with the bridge's
+absolute path, sets `tool_timeout_sec`, and writes the hooks file `~/.grok/hooks/<name>.json`. Until
+then a Grok Build window opens, but has no yagura MCP tools, reports nothing and takes no part in
+chat or handoffs. To register by hand instead, run `grok mcp add yagura -- <absolute path to
+yagura-mcp>` and write the entries the `grok-build` profile's `[mcp_registration]` lists.
+
+`grok` must be on the daemon's `PATH`; a daemon that was already running when it was installed does
+not see it, so restart yagura after installing. For `wsl-grok-build`, install the Linux build inside
+the distribution (see [docs/wsl.md](wsl.md)). Sign in once in a terminal of your own with `grok login
+--oauth` before opening a window.
+
+**What registering changes for every Grok Build session.** The row shows it before you press
+Register: while your own Grok Build settings hold a hook, as they do once yagura is registered,
+Grok Build asks whether to trust every folder it starts in, except your home directory and the root
+of a drive or file system, and that includes the sessions you start yourself. Answering yes trusts the whole folder, so its own hooks, MCP
+servers and instructions run too. yagura does not answer the prompt: a window that starts on it
+shows `waiting_approval` until you choose on its screen, and its hooks run only after that.
+
+1. **Claude Code's and Cursor's hooks and MCP servers are switched off in yagura's windows.** Grok
+   Build runs them as well as its own; the profiles set `GROK_CLAUDE_HOOKS_ENABLED`,
+   `GROK_CLAUDE_MCPS_ENABLED`, `GROK_CURSOR_HOOKS_ENABLED` and `GROK_CURSOR_MCPS_ENABLED` to `false`,
+   so a window runs only what is registered with Grok Build. Skills, rules and agents are still
+   read. A Grok Build you start yourself is unaffected.
+2. **A trusted folder's `.mcp.json` is read all the same.** Those variables do not turn it off, so an
+   MCP server it lists, a `yagura` one included, also runs in a window opened in that folder; Grok
+   Build's own registration of a name is used over one of the same name there. yagura does not
+   change a project's files.
+3. **Another instance's yagura is listed in a window but cannot be called.** Every Grok Build
+   session starts every registered server, and Grok Build has no launch argument that leaves one
+   out. A window therefore refuses the tools of every other instance's registration (`--deny
+   MCPTool(<name>__*)`); their names still show in Grok Build's tool search, and a call is refused
+   by its permission policy. This is to be changed once Grok Build has a way to choose a session's
+   MCP servers at launch.
+4. **The model is set for one launch through the environment.** `-m` would save it as your own
+   default, so the profiles pass `GROK_DEFAULT_MODEL` instead (see
+   [Launch options](../profiles/README.md#launch-options)). An `effort` level the model does not
+   take is not refused: Grok Build falls back to the model's default level without a word.
+5. **The room's introduction arrives with the launch.** Grok Build passes no session-start hook's
+   output to its model, so the profiles hand it the introduction with `--rules`, and the window takes
+   waiting texts after a tool call, or has them typed while it waits for input (see
+   [How the daemon delivers text](#how-the-daemon-delivers-text)).
+6. **Remove the registration before uninstalling yagura.** Uninstalling changes none of Grok Build's
+   files, so a hooks file left in `~/.grok/hooks` keeps naming a daemon copy that may be gone, and
+   keeps Grok Build asking about folder trust.
+7. **After an interrupt, Grok Build's history holds the focus** and the window reads as `unknown`
+   until the focus is back in the input line (see
+   [Limits](../crates/yagura-daemon/detection/README.md#limits)).
+
 ## How the daemon delivers text
 
 Two kinds of text reach a window's CLI, and they travel differently.
@@ -513,17 +579,17 @@ Two kinds of text reach a window's CLI, and they travel differently.
 | Command | Run by | What it does |
 | --- | --- | --- |
 | `yagura-daemon --deliver-context` | the CLI's session-start hook | prints the chat announcement and whatever waits in the inbox |
-| `yagura-daemon --deliver-take` | the hook that runs at the start of a turn (for Antigravity CLI, before a model call) | prints whatever waits and marks it taken |
+| `yagura-daemon --deliver-take` | the hook that runs at the start of a turn (for Antigravity CLI, before a model call; for Grok Build, after a tool call) | prints whatever waits and marks it taken |
 | `yagura-daemon --deliver-wait` | a hook the CLI runs in the background | waits until something arrives for an idle session, prints it, and ends with the exit code that wakes the CLI; only one such wait runs per window |
 | `yagura-daemon --report-session` | a hook that receives the CLI's session identifier | tells the daemon which session this window's CLI is, so it can be addressed later |
 
-Each answer is cut to the profile's `max_chars` between texts; a text is never cut in the middle.
+Each answer is cut to the profile's `max_chars` between texts; a text is never cut in the middle. Each door also takes `--skip-if <JSON Pointer>`, for a CLI that runs the same hooks in its sub-agents' sessions: when the hook's input has a value at that pointer, the door does nothing (see [Hooks injection](../profiles/README.md#hooks-injection)).
 
 **When each text arrives.**
 
 | The window is | How it arrives |
 | --- | --- |
-| just opened | the session-start door prints the chat announcement and anything waiting. A task window, and a window a handoff opens from a profile, are started with their text as the CLI's first request instead (the profile's `launch_prompt`): a request the parent actually made |
+| just opened | the session-start door prints the chat announcement and anything waiting; a CLI whose profile declares `launch_context` is given the announcement on its command line instead, and what waits stays in the inbox. A task window, and a window a handoff opens from a profile, are started with their text as the CLI's first request instead (the profile's `launch_prompt`): a request the parent actually made |
 | not yet at its first turn | it waits in the inbox; the first turn's door hands it over |
 | working | it waits; the next turn-start door hands it over |
 | waiting for input | the profile's `wake` decides: `wait` ends the wait the CLI left registered, `command` runs the CLI's own program to queue the text on its session (needs the session identifier a hook reported, so after the first turn), `none` types it into the composer |
@@ -540,10 +606,11 @@ A text counts as taken when a door printed it, the wake command succeeded, or --
 | `antigravity-cli`, `wsl-antigravity-cli` | `SessionStart` and `PreInvocation` hooks in `~/.gemini/config/hooks.json` | none: the daemon types the text into the composer while the window waits for input |
 | `copilot-cli`, `wsl-copilot-cli` | a `sessionStart` hook in a plugin directory, injected with `--plugin-dir`; it runs when the first prompt is sent, and Copilot has no turn-start door (it discards a command hook's output at the start of a turn) | none: the daemon types the text into the composer while the window waits for input |
 | `muse-code`, `wsl-muse-code` | `SessionStart` and `UserPromptSubmit` hooks in a managed hooks file, written by registration (`muse-code`) or injected with `-c` (`wsl-muse-code`); `SessionStart` runs when the first prompt is sent | none: the daemon types the text into the composer while the window waits for input |
+| `grok-build`, `wsl-grok-build` | no start-up door: the chat announcement is given with `--rules` when the window opens (`launch_context`). `PostToolUse` and `PostToolUseFailure` hooks in `~/.grok/hooks/<name>.json`, written by registration, take the inbox after each tool call; Grok Build passes a hook's output to its model only from the tool-call hooks | none: the daemon types the text into the composer while the window waits for input |
 
-Antigravity CLI, GitHub Copilot CLI and Muse Code are the places left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
+Antigravity CLI, GitHub Copilot CLI, Muse Code and Grok Build are the places left where text the daemon sends of its own accord is typed. That needs a composer and an `[input].probe` in the window's detection definition (see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)); without them the text waits in the inbox. What each profile declares is in [`[delivery]`](../profiles/README.md#delivery).
 
-**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a handoff addressed to it is `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded; a `muse-code` window, and an Antigravity CLI window, takes part only while the hooks its registration writes are in place.
+**Which windows take part.** A window is handed text this way only if it was opened from a profile that declares `[delivery]` and its hooks were put in place when it opened. A window that was not -- a plain shell, a window opened with a raw `command`, a profile with no `[delivery]` table -- is not a chat participant, gets no announcement, and a handoff addressed to it is `undelivered_no_delivery`. The bundled Codex profiles inject their hooks only once yagura is registered with Codex CLI (from [Registering from the GUI](#registering-from-the-gui)), because Codex runs a command-line hook only once its trust is recorded; a `muse-code` window, an Antigravity CLI window and a Grok Build window take part only while the hooks their registration writes are in place.
 
 **Bounds.** A window's inbox is bounded; past it a chat post is `undelivered_exhausted` and a handoff is `resource_exhausted`. The inbox lives in the daemon's memory: it is discarded when its window ends, and a chat post still waiting when the daemon stops reads back as `undelivered_restart`.
 

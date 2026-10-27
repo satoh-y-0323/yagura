@@ -40,13 +40,13 @@ input typed into the pane (for example `pwd`) is answered by that shell.
 A command typed this way is a raw argv: it gets no MCP injection (see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)). To run a CLI with yagura's MCP tools available,
 open it from the `WSL: Claude Code`, `WSL: Codex CLI`, `WSL: GitHub Copilot CLI` or
-`WSL: Muse Code` profile instead (`WSL: Antigravity CLI`
-opens a window the same way but needs its own manual MCP registration -- see
+`WSL: Muse Code` profile instead (`WSL: Antigravity CLI` and `WSL: Grok Build`
+open a window the same way but need their own MCP registration -- see
 [MCP from a WSL Window](#mcp-from-a-wsl-window)).
 
 ## The Launch Form of the Bundled WSL Profiles
 
-The five WSL profiles start their CLI with
+The six WSL profiles start their CLI with
 
 ```
 wsl -e bash -lic 'exec "$0" "$@"' <cli> <appended arguments...>
@@ -62,7 +62,7 @@ unexpanded. This needs `bash` in the distribution, and the **Linux** build of th
 inside it: the Windows build on the host is not what runs. See
 [profiles/README.md](../profiles/README.md#wsl-profiles).
 
-A Windows path is not readable from the Linux CLI as it is, so each of the five profiles also has
+A Windows path is not readable from the Linux CLI as it is, so each of the six profiles also has
 a top-level `[host_paths]` table that converts every path the daemon hands the CLI with
 `wsl -e wslpath -u` -- the bridge and the daemon a registration writes, and a settings file or
 directory a launch injection names. Their own launch injections name no path, so opening one of
@@ -78,7 +78,7 @@ itself as the window. See "Who this identifies" under
 [Requester Identification](mcp-setup.md#requester-identification) for why the token is on the whole
 tree.
 
-None of the five WSL profiles names a `[command]` key for macOS or Linux, so on either of those
+None of the six WSL profiles names a `[command]` key for macOS or Linux, so on either of those
 the daemon leaves them out of every profile listing --
 see profiles/README.md's schema section for the OS-specific `[command]` selection rule.
 
@@ -90,8 +90,8 @@ CLI -- for example `wsl -e bash -lic 'exec "$0" "$@"' codex debug models`. The l
 from the Linux build inside the distribution, found through the same `PATH` after the same
 `~/.profile` and `~/.bashrc` have run. The listing is not a window, so it gets none of the variables
 a window's child is given. A CLI missing from the distribution makes bash exit with status 127, which
-reads as `codex was not found` (the CLI's name, not `wsl`). `wsl-claude-code` and `wsl-muse-code`
-carry a fixed list and start nothing, and `wsl-copilot-cli` carries none. See [profiles/README.md](../profiles/README.md#model-choices).
+reads as `codex was not found` (the CLI's name, not `wsl`). `wsl-claude-code`, `wsl-muse-code`
+and `wsl-grok-build` carry a fixed list and start nothing, and `wsl-copilot-cli` carries none. See [profiles/README.md](../profiles/README.md#model-choices).
 
 A distribution that is not running yet -- or a WSL that has not started since the host booted --
 can make the first listing noticeably slower than later ones, because it waits for the distribution
@@ -140,6 +140,13 @@ from its own global registration, the same as its Windows-native counterpart (se
 yagura opens carries the same `YAGURA_MCP_BRIDGE` (translated by `/p`, as above), so the variable
 resolves there exactly as it does for the two profiles above.
 
+`wsl-grok-build` carries no `[mcp]` table either: Grok Build has no launch argument that adds an MCP
+server. Its row in Settings > Integrations registers the bridge inside the distribution by the
+`/mnt/c/...` path `wslpath` gives (see
+[Configuring Grok Build](mcp-setup.md#configuring-grok-build)). Grok Build hands an MCP server its
+whole environment, `WSLENV` included, so the Windows bridge receives the window's variables with no
+setting of its own.
+
 ## Delivery from a WSL Window
 
 Chat, handoffs and notices reach a WSL window's CLI the way they reach any other window's: through the
@@ -148,7 +155,9 @@ window's inbox and the CLI's own hooks (see
 `yagura-daemon.exe`, which a Linux shell finds through the Windows part of WSL's `PATH`; a
 distribution with `appendWindowsPath = false` cannot find it, so its hooks do nothing and nothing is
 delivered (see
-[How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)).
+[How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)). The
+`wsl-grok-build` hooks are the exception: they name the daemon's copy by the `/mnt/c/...` path
+`wslpath` gives, so they do not depend on `PATH`.
 
 `wsl-codex-cli` wakes a waiting Codex CLI with the profile's own launch form followed by
 `queue --thread <session> --message <text>`, the same way a model listing runs (see

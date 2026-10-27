@@ -90,6 +90,14 @@ A new version's shipped profiles take effect as soon as you run it: new
 tables, new aliases and changed defaults all arrive, except the values your
 own file sets.
 
+An older daemon does not know the keys a later release adds. A profile of
+your own that uses one -- for example `env` under `[model]` or `[effort]`,
+`launch_context` under `[delivery]`, `notice` under `[mcp_registration]`, or
+`items` and `name` under `[mcp_registration.status]` -- is left out of its
+listing with a
+warning. A `{server}` in a `json_entry` `file` is no placeholder to such a
+daemon: it is taken as part of the file's name.
+
 ## Schema
 
 ```toml
@@ -124,10 +132,12 @@ default = ["codex"]            # argv used when no operating-system-specific
 # API_KEY = ""                 # for the launched process
 
 [model]                        # optional table; a launch option this profile
-args = ["-m", "{value}"]       # accepts. `args` is required inside it and must
-                                # contain "{value}", which is replaced by the
-                                # value a caller asked for. See "Launch
+args = ["-m", "{value}"]       # accepts. `args`, `env` or both; "{value}"
+                                # must appear in one of them, and is replaced
+                                # by the value a caller asked for. See "Launch
                                 # options" below
+# env = { CLI_MODEL = "{value}" }
+                                # optional; variables set for the launch
 [model.aliases]                # optional; short name -> the value actually
 # fast = "gpt-5.6-luna"        # passed, kept in this file's own order
 
@@ -165,6 +175,7 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
                                 # See "Delivery" below
 # output = "plain"
 # wake = "none"
+# launch_context = ["--rules", "{context}"]
 # launch_prompt = ["{prompt}"]
 
 [host_paths]                   # optional table; how a path the daemon hands
@@ -507,7 +518,8 @@ Text the daemon hands a CLI on its command line is the same kind of argument,
 but it is arbitrary text, so it cannot be vetted for these characters ahead of
 time. A request that must be passed that way -- a `launch_prompt`, or a wake
 command's arguments (see [Delivery](#delivery)) -- is therefore never passed
-through a shim: a window that needs a `launch_prompt` is refused, and a profile
+through a shim: a window that needs a `launch_prompt` is refused, a
+`launch_context` is left out of the launch, and a profile
 that wakes its CLI by command is listed as unavailable (kind 5 under
 [Availability](#availability)). A `[model]` or `[effort]` template that itself
 holds one of those characters outside `{value}` cannot pass either, and is
@@ -537,7 +549,8 @@ profile cannot do on this host, judged from the profile itself:
 - `model` or `effort`, when an element of that option's `args` holds a
   character the command interpreter would act on outside `{value}`;
 - `launch_prompt`, whenever the profile declares one, since the request is
-  arbitrary text.
+  arbitrary text;
+- `launch_context`, whenever the profile declares one, for the same reason.
 
 Each is listed as one entry of the profile's `limits` -- a capability, the
 reason, and the guidance above -- in
@@ -547,7 +560,9 @@ any window is opened. A request that needs one of them is refused as
 the reason, which ends with the guidance as `text command (see url)`. Those
 requests are `open_window` with that `model` or `effort`, a `send_handoff`
 that opens a window from the profile, and an `open_task_window` for a task
-with an instruction. `limits` is not `available`: the profile stays
+with an instruction. No request asks for `launch_context`: a window is opened
+without it, so without the room's introduction, and the daemon logs one
+warning. `limits` is not `available`: the profile stays
 available, and a request that needs none of its limited capabilities opens a
 window as usual. A profile whose wake command cannot pass is unavailable instead
 (kind 5 under [Availability](#availability)), and its reason carries the same
@@ -585,11 +600,45 @@ strong = "gpt-6-astra"
 args = ["-c", "model_reasoning_effort={value}"]
 ```
 
-`args` is the argv this option appends, and the array as a whole must
-contain `{value}` at least once. Every occurrence of `{value}`, in every
-element, is replaced by the resolved value -- always *inside* an element, so
-a value can never add, split or reorder argv elements however it is written.
-`{value}` is the only placeholder there is, and there is no escaping syntax.
+`args` is the argv this option appends, and `env` the environment variables
+it sets for the launch. A table has `args`, `env` or both, and `{value}` must
+appear at least once among the `args` elements and the `env` values together.
+Every occurrence of `{value}`, in every element and every value, is replaced
+by the resolved value -- always *inside* an element, so a value can never
+add, split or reorder argv elements however it is written. `{value}` is the
+only placeholder there is, and there is no escaping syntax.
+
+```toml
+# A CLI whose model flag would save the model as the user's own default
+[model]
+env = { GROK_DEFAULT_MODEL = "{value}" }
+```
+
+`env` is for a CLI that takes a value for one launch only through its
+environment -- Grok Build's `-m` writes the model into the user's own
+settings, `GROK_DEFAULT_MODEL` does not (Grok Build 1.0.70). Its rules:
+
+- A key is a variable name: non-empty, without `=` or a NUL byte, not
+  starting with `YAGURA_` and not `WSLENV` (both case-insensitively). Such a
+  key excludes the profile instead of being dropped as it is under
+  [`[env]`](#env), since dropping it would leave the chosen value silently
+  without effect. `WSLENV` belongs to `[env]`: a WSL profile names a launch
+  option's variable in its own `[env]` `WSLENV` for the variable to reach the
+  CLI.
+- `[model]` and `[effort]` may not both set a variable of the same name
+  (case-insensitively), since which value took effect would be undecided.
+- The variables are laid over the profile's `[env]` only when the option is
+  asked for, a variable of the same name (case-insensitively) replaced. An
+  option the caller left out sets nothing, and whatever `[env]` holds,
+  including a value of your own for the same variable, applies.
+- The value rule below admits no `"` and no `\`, so `{value}` can sit inside
+  a JSON or TOML string in a value (`'{"model":"{value}"}'`) without ending
+  the string.
+- The variables travel in the window's environment, never on its command
+  line, so a `.cmd` / `.bat` program limits none of them.
+- A restored window reopened from its profile gets them again from the
+  recorded value; one that falls back to its saved argv does not (see
+  [Restoring a window opened from a profile](#restoring-a-window-opened-from-a-profile)).
 
 `aliases` is optional and maps a short name to the value actually passed.
 Alias keys use the same character set as a profile id (`[a-z0-9_-]{1,64}`);
@@ -603,11 +652,12 @@ looked up as an alias again. The table is reported -- by
 this file's own order, not sorted.
 
 A malformed `[model]` / `[effort]` table excludes the whole profile from the
-listing, with one warning line naming the file: when `args` is missing, when
-the `args` array contains no `{value}`, when an alias key or value breaks the
+listing, with one warning line naming the file: when both `args` and `env`
+are missing, when neither contains `{value}`, when an `env` key breaks the
+rules above, when an alias key or value breaks the
 rules above, when a `[model.choices]` table breaks one of the rules under
 [Model choices](#model-choices), or when the table carries any key other
-than `args`, `aliases` and -- under `[model]` only -- `choices` (so a
+than `args`, `env`, `aliases` and -- under `[model]` only -- `choices` (so a
 misspelt `aliases` cannot silently mean "no aliases"). An
 empty argv element, or one containing a NUL byte, is excluded exactly as it
 is under `[command]`.
@@ -689,6 +739,12 @@ there is no way to set it for one window (see
 Muse has no command that lists its models, so `[model.choices]` is a fixed
 list.
 
+The Grok Build profiles pass the model as `GROK_DEFAULT_MODEL` (see `env`
+above) rather than with `-m`, which saves it as the user's own default, and
+the level with `--reasoning-effort`, which is not saved. A level the chosen
+model does not take is not refused: Grok Build falls back to the model's
+default level without a word and starts as usual (Grok Build 1.0.70).
+
 ### Model choices
 
 A `[model]` table may carry a `[model.choices]` table saying where the
@@ -744,7 +800,10 @@ Of the profiles this repository ships, `claude-code` and `wsl-claude-code`
 carry a fixed `values` list, `codex-cli` and `wsl-codex-cli` ask Codex CLI
 (`codex debug models`, JSON), and `antigravity-cli` and
 `wsl-antigravity-cli` ask Antigravity CLI (`agy models`, one model per line,
-id and display name separated by a tab). `copilot-cli` and
+id and display name separated by a tab). `grok-build` and
+`wsl-grok-build` carry a fixed `values` list, since `grok models` prints no
+machine-readable form; once it prints JSON, the list can ask it instead.
+`copilot-cli` and
 `wsl-copilot-cli` carry none, since Copilot lists its models nowhere a
 profile can read (see [Recommended aliases](#recommended-aliases)). Codex
 CLI's `debug` command may change its output; if it does, edit the pointers
@@ -853,7 +912,10 @@ see [docs/mcp-setup.md's "Configuring Antigravity CLI"](../docs/mcp-setup.md#con
 `muse-code` has none either: Muse Code's Windows launcher cannot carry the
 JSON a launch would pass, so on every operating system that profile reaches
 yagura through its registration instead (see
-[MCP registration](#mcp-registration)).
+[MCP registration](#mcp-registration)). Nor do `grok-build` and
+`wsl-grok-build`: Grok Build takes MCP servers only from the settings files
+it reads, with no launch argument that adds one (see
+[Configuring Grok Build](../docs/mcp-setup.md#configuring-grok-build)).
 
 ```toml
 # Claude Code on Windows: the server definition goes into a settings file
@@ -1067,9 +1129,10 @@ one is in place. This is how the bundled Codex profiles work: Codex runs a
 hook given with `-c` only once its trust is recorded in `~/.codex/config.toml`,
 and the key that records it carries characters a shim refuses, so
 registration writes the trust and the launch injects the hooks. A profile with
-no `[hooks]` table but a `json_entry` -- Antigravity CLI, which reads hooks
-only from its own file, and `muse-code`, whose hooks live in the managed
-hooks file its registration writes -- injects nothing; the entry is the hook.
+no `[hooks]` table but a `json_entry` -- Antigravity CLI and Grok Build, which
+read hooks only from their own files, and `muse-code`, whose hooks live in
+the managed hooks file its registration writes -- injects nothing; the entry
+is the hook.
 
 **Which windows expect reports.** A window whose `[hooks]` elements were
 actually appended to its launch, and a window whose profile's `json_entry` was
@@ -1090,11 +1153,26 @@ were checked with):
 | `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
 | `copilot-cli`, `wsl-copilot-cli` (GitHub Copilot CLI 1.0.101) | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
 | `muse-code` (through `json_entry`), `wsl-muse-code` (Muse Code 1.4.12) | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
+| `grok-build`, `wsl-grok-build` (Grok Build 1.0.70, through `json_entry`) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `Notification` (`permission_prompt`) | `Stop`, `StopFailure`, `StopCancelled` |
 
 The bundled profiles also call the delivery doors from the hooks above: at
 session start, at the start of a turn and, for Claude Code, in a background
 wait. The `json_entry` of Antigravity CLI and of `muse-code` carries their
-doors the same way.
+doors the same way. Grok Build hands the model a hook's output only from the
+tool-call hooks, so the Grok Build entry takes the inbox after each tool call
+(`PostToolUse`, `PostToolUseFailure`) and has no session-start door; the
+room's introduction goes in at launch instead (`launch_context`, see
+[Delivery](#delivery)).
+
+Grok Build also runs these hooks in a sub-agent's session, whose input
+carries `subagentType`, so each of its hooks passes `--skip-if /subagentType`.
+Every door takes `--skip-if <JSON Pointer>` (starting with `/`): when the
+JSON the CLI writes to the hook's standard input has a value other than
+`null` there, the door does nothing and exits 0. The pointer is the
+profile's data; the daemon knows no CLI's field. Every door reads its
+standard input to the end, so the CLI's write to it does not fail; inside a
+window, a door that has answered waits at most 2 seconds more for a CLI that
+keeps its standard input open.
 
 Copilot CLI takes launch-time hooks only from a plugin directory
 (`--plugin-dir`), so the Copilot profiles write one with `config_dir`: a
@@ -1134,6 +1212,28 @@ window, which covers a hook written by hand without the check. The
 `wsl-muse-code` hooks file is passed with each launch and read only by that
 window's CLI, so its commands carry no check.
 
+A CLI whose hook can name a program and its arguments apart, with no shell
+in between, takes a second form: the hook runs `{daemon}`, the absolute path
+of the daemon's copy, directly. The bundled Grok Build hooks are written this
+way, since Grok Build runs a hook with `args` as one program and starts no
+shell, while the shell it would otherwise use differs from machine to
+machine:
+
+```toml
+UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+```
+
+Nothing in the hook checks for the window: the door does. Outside a window
+-- `YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` not set -- a door does not
+interpret its other arguments at all: it reads its standard input to the end
+and exits 0 without printing anything. So a copy of the daemon older than the
+hook, which does not know an argument such as `--skip-if`, stays silent there
+too. The path needs no `PATH` lookup and no search of the working folder,
+and under WSL `[host_paths]` turns it into the `/mnt/...` path the
+distribution starts the Windows executable from. The same rule as for any
+`{daemon}` applies: a path holding whitespace is written by its 8.3 short
+name on Windows, and is otherwise not written at all.
+
 ## Delivery
 
 A profile's optional `[delivery]` table says how the daemon hands the profile's CLI the text it sends of its own accord -- chat, handoffs and notices -- without typing it into the composer. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
@@ -1147,6 +1247,7 @@ max_chars = 10000               # the most characters one answer carries
 wake = "wait"                   # "none" (default), "wait" or "command"
 wake_stream = "stderr"          # "stderr" (default) or "stdout"
 wake_exit = 2                   # exit code of an answered wait (default 2)
+launch_context = ["--rules", "{context}"]
 launch_prompt = ["--", "{prompt}"]
 
 [delivery.output]               # or this table instead of the one string
@@ -1162,10 +1263,11 @@ take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalCon
 | `wake_args` | Required with `wake = "command"` and rejected otherwise. The arguments the program is run with; each is a non-empty argv element, at least one contains `{text}`, and `{session}` stands for the session identifier a hook reported with `--report-session`. The command runs once the CLI has reported its session, so not before its first turn |
 | `wake_stream`, `wake_exit` | For `wake = "wait"`: the stream an answered wait prints on and the exit code it ends with. The CLI's own hook documentation says which code wakes it |
 | `launch_prompt` | Arguments that hand the CLI a first request when it starts; `{prompt}` (required in at least one element) is replaced with the text. The elements are appended after the launch's other elements, after `[mcp]` and `[hooks]`. A task window with an instruction, and a window a `send_handoff` opens from this profile, are started this way. A profile without it cannot be used for either (`no_composer`) |
+| `launch_context` | Arguments that hand the CLI the room's introduction (the playbook's `[chat] intro`) when it starts, for a CLI with no session-start hook whose output reaches its model; `{context}` (required in at least one element) is replaced with the text. They are added only for a window that will take part in chat -- the profile's hooks are in place and its detection definition is not in `[chat] exclude_detections` -- and come after the launch's other elements, ahead of the `launch_prompt` elements. When the program is a Windows `.cmd` / `.bat` file they are left out, and the daemon logs one warning (see [Shim guidance](#shim-guidance)) |
 
-`wake_timeout_secs`, `session_pointer` and `shim_guidance` are not keys: writing any of them is an error (what to tell a user when the program is a `.cmd` / `.bat` file is the top-level [`[shim_guidance]`](#shim-guidance) table). An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
+`wake_timeout_secs`, `session_pointer` and `shim_guidance` are not keys: writing any of them is an error (what to tell a user when the program is a `.cmd` / `.bat` file is the top-level [`[shim_guidance]`](#shim-guidance) table). An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` / `{context}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
 
-**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI and Muse Code have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context` and `take` their own templates. Their start-up requests are given on each CLI's command line.
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml`, `grok-build.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI, Muse Code and Grok Build have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context` and `take` their own templates. Grok Build passes no session-start hook's output to its model, so its profiles hand it the room's introduction with `--rules` (`launch_context`), and take the inbox only after a tool call. Their start-up requests are given on each CLI's command line.
 
 **Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's [`[shim_guidance]`](#shim-guidance) gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [Shim guidance](#shim-guidance)).
 
@@ -1261,12 +1363,17 @@ env_forward = { name = "WSLENV", separator = ":" }
                                 # optional; names the variable a named
                                 # instance's environment must also be listed
                                 # in for `add`'s pairs to reach the process
+notice = "While this is registered, ..."
+                                # optional; one line the GUI shows on the row
 
 [mcp_registration.status]      # required; how a row's current state is read
 args = ["mcp", "get", "{server}", "--json"]  # exactly one of args / file
 format = "json"                 # "json" or "lines"
 command = "/transport/command"  # JSON Pointer ("json") or line prefix ("lines")
 args_pointer = "/transport/args"  # optional; "json" only
+# items = ""                    # optional, "json" only, together with `name`:
+# name = "/name"                # the array of servers, and the pointer to an
+                                # element's name; see "Reading a row's state"
 require = { "Scope:" = "User" }   # optional; "lines" only
 absent = "No MCP server named"    # optional; a substring meaning "not registered"
 
@@ -1306,7 +1413,7 @@ under = ["hooks", "state"]     # where they live; no placeholders
                                 # the registration owns. One table, or an
                                 # array [[mcp_registration.json_entry]] of
                                 # one per file
-file = ".gemini/config/hooks.json"  # home-relative
+file = ".gemini/config/hooks.json"  # home-relative; may carry {server}
 # claim = "/managed_hooks_path"  # optional; see "Shared entries and the claim"
 [mcp_registration.json_entry.entries."{server}"]
                                 # a top-level name, or a JSON Pointer such as
@@ -1358,7 +1465,13 @@ hooks only once something is written into its own files (see
   present. Missing tables on the path are created; a key on the path that
   holds something other than a table fails the step and nothing is written.
 - `json_entry` writes entries of a JSON object, one element per file: `file`
-  is home-relative and `entries` names each entry. A key that starts with
+  is home-relative and `entries` names each entry. `file` may carry
+  `{server}`, its only placeholder, for a CLI whose hooks file has no place
+  to keep one instance's entries apart from another's: each instance then
+  has a file of its own (the bundled Grok Build profiles write
+  `.grok/hooks/{server}.json`), every entry in it belongs to that instance
+  whatever its key says, and such a file cannot hold the `claim`. The path
+  must stay home-relative, with no `..`, once `{server}` is filled in. A key that starts with
   `/` is a JSON Pointer (RFC 6901) into nested objects, whose missing parents
   are created as objects; any other key names a top-level entry. A key may
   carry `{server}`. An optional `by_os` table adds the entries of one set,
@@ -1394,8 +1507,8 @@ For a named instance that entry must carry `{env_refs}`, or Register is
 refused as unable to carry the instance. The GUI shows such a row with the
 files it writes and their entries in place of a command.
 
-**Shared entries and the claim.** An entry whose key has no `{server}` is the
-same for every instance, so a CLI that has room for only one such value --
+**Shared entries and the claim.** An entry whose key has no `{server}`, in a
+file whose name has none either, is the same for every instance, so a CLI that has room for only one such value --
 Muse Code's `managed_hooks_path` -- can serve all of them. A registration with
 shared entries must name one of them as its `claim`: a shared entry holding a
 plain value, at most one per registration.
@@ -1455,13 +1568,31 @@ itself, or its `[host_paths]` conversion, could not be found or run), or
 (the output could not be read as the declared format -- never guessed as
 registered or not).
 
+A CLI with no command that shows one server (Grok Build has `grok mcp list
+--json`, an array, and no `get`) is read with `items` and `name` in a
+`"json"` `status`, the same two pointers `list` takes below, given together:
+the element whose name is the registration's is the record that `command`,
+`args_pointer` and `toml_set.confirm` then point into, and no such element
+means **not registered**. Output with no array at `items` is **unknown**.
+
+**A notice on the row.** `notice` is one line of visible text the GUI shows
+on the row, before and after registering, for an effect the user should know
+of before pressing Register -- the bundled Grok Build profiles use it to say
+that a registered hook makes Grok Build ask about folder trust in every
+session. It follows the rule a `[shim_guidance]` `text` follows; a value
+outside it fails the table. The daemon reads nothing in it.
+
 **Turning the other instances' registrations off.** A CLI that hands an MCP
 server only the variables its own configuration names starts a registered
 `yagura` without the window's identity, so a window of a named instance would
 reach the default instance's daemon as an outside client. A CLI that hands
 it the window's whole environment still starts every `yagura` registered
 with it, so the window would carry another instance's bridge beside its own;
-the bundled Copilot tables turn those off too. When a profile
+the bundled Copilot tables turn those off too. Grok Build has no launch
+argument that leaves a registered server out, so its tables refuse those
+servers' tools instead (`--deny MCPTool({server}__*)`): the servers still
+start, and their tools are still listed by name, but cannot be called
+(Grok Build 1.0.70). When a profile
 declares `list`, the daemon runs `args` after the profile's launch argv (with
 no model or effort added) each time it opens a window from the profile, and
 appends `disable` once per registered server that is yagura's bridge for some
@@ -1489,9 +1620,9 @@ alone.
 
 ## WSL profiles
 
-The five WSL profiles this repository ships (`wsl-claude-code`,
-`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`, `wsl-muse-code`)
-start the CLI with
+The six WSL profiles this repository ships (`wsl-claude-code`,
+`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-copilot-cli`, `wsl-muse-code`,
+`wsl-grok-build`) start the CLI with
 
 ```toml
 [command]
