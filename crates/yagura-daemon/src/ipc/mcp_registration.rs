@@ -367,7 +367,7 @@ fn entries_preview(
         bridge: bridge.map(str::to_string),
         remove_shared: false,
     };
-    SettingsEdit::of(spec)
+    SettingsEdit::of(spec, target)
         .iter()
         .flat_map(|edit| edit.preview(&context))
         .collect()
@@ -531,7 +531,7 @@ async fn read_entries(
     bridge: Option<&str>,
 ) -> EntriesRead {
     let os = config.host_os;
-    let edits: Vec<SettingsEdit> = SettingsEdit::of(spec)
+    let edits: Vec<SettingsEdit> = SettingsEdit::of(spec, target)
         .into_iter()
         .filter(|edit| edit.owns_entries_on(os))
         .collect();
@@ -1357,7 +1357,7 @@ fn unconfirmed_toml_set(
         .spec
         .toml_set()
         .map(mcp_registration::TomlSetSpec::values);
-    let labels: Vec<String> = SettingsEdit::of(&source.spec)
+    let labels: Vec<String> = SettingsEdit::of(&source.spec, &source.target)
         .iter()
         .filter_map(|edit| edit.entries_label(&source.target, os))
         .collect();
@@ -1434,7 +1434,10 @@ async fn run_operation(
             bridge: None,
             remove_shared: shared_entries_removable(config, source).await,
         };
-        let edits = ordered(SettingsEdit::of(&source.spec), EditChange::RemoveEntries);
+        let edits = ordered(
+            SettingsEdit::of(&source.spec, &source.target),
+            EditChange::RemoveEntries,
+        );
         for edit in edits.iter().filter(|edit| edit.owns_entries(os)) {
             match run_edit(config, source, edit, EditChange::RemoveEntries, &context).await {
                 EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
@@ -1474,7 +1477,10 @@ async fn run_operation(
         }
     }
 
-    let edits = ordered(SettingsEdit::of(&source.spec), EditChange::Set);
+    let edits = ordered(
+        SettingsEdit::of(&source.spec, &source.target),
+        EditChange::Set,
+    );
     let daemon = if edits.iter().any(|edit| edit.names_daemon(os)) {
         match resolve_operation_daemon(config, source, &mut steps).await {
             Ok(daemon) => daemon,
@@ -1615,7 +1621,9 @@ async fn shared_entries_removable(config: &DaemonConfig, source: &RowSource) -> 
     let Some(json_entry) = source.spec.json_entry() else {
         return false;
     };
-    let (Some(claim), Some(bridge_file)) = (json_entry.claim(), json_entry.bridge_file()) else {
+    let (Some(claim), Some(bridge_file)) =
+        (json_entry.claim(), json_entry.bridge_file(&source.target))
+    else {
         return false;
     };
     let Some(bridge_name) = config
@@ -1638,7 +1646,7 @@ async fn shared_entries_removable(config: &DaemonConfig, source: &RowSource) -> 
         claim_document
     } else {
         let JsonFile::Document(document) =
-            read_json_file(config, &source.spec, &source.env, bridge_file).await
+            read_json_file(config, &source.spec, &source.env, &bridge_file).await
         else {
             return false;
         };
@@ -1766,7 +1774,8 @@ enum EditOutcome {
 #[derive(Debug, Clone)]
 enum SettingsEdit {
     Toml(mcp_registration::TomlSetSpec),
-    Json(mcp_registration::JsonFileSpec),
+    /// The file spec and its path for the target, `{server}` replaced.
+    Json(mcp_registration::JsonFileSpec, String),
 }
 
 /// What a [`SettingsEdit`] renders its values with, beyond the file itself.
@@ -1839,15 +1848,23 @@ enum MissingFile {
 }
 
 impl SettingsEdit {
-    /// Every settings file `spec` edits, in the order the profile declares
-    /// them.
-    fn of(spec: &mcp_registration::McpRegistrationSpec) -> Vec<Self> {
+    /// Every settings file `spec` edits for `target`, in the order the profile
+    /// declares them.
+    fn of(
+        spec: &mcp_registration::McpRegistrationSpec,
+        target: &mcp_registration::RegistrationTarget,
+    ) -> Vec<Self> {
         let mut edits = Vec::new();
         if let Some(toml_set) = spec.toml_set() {
             edits.push(Self::Toml(toml_set.clone()));
         }
         if let Some(json_entry) = spec.json_entry() {
-            edits.extend(json_entry.files().iter().cloned().map(Self::Json));
+            edits.extend(
+                json_entry
+                    .files()
+                    .iter()
+                    .map(|file| Self::Json(file.clone(), file.file(target))),
+            );
         }
         edits
     }
@@ -1855,21 +1872,21 @@ impl SettingsEdit {
     fn file(&self) -> &str {
         match self {
             Self::Toml(toml_set) => toml_set.file(),
-            Self::Json(file) => file.file(),
+            Self::Json(_, file) => file,
         }
     }
 
     /// Whether the edit holds the claim: the file that names, or is read
     /// together with, the files written before it.
     fn holds_claim(&self) -> bool {
-        matches!(self, Self::Json(file) if file.claim().is_some())
+        matches!(self, Self::Json(file, _) if file.claim().is_some())
     }
 
     /// Whether the edit has anything to write on `os`.
     fn writes_on(&self, os: yagura_os::program::HostOs) -> bool {
         match self {
             Self::Toml(_) => true,
-            Self::Json(file) => file.owns_entries_on(os),
+            Self::Json(file, _) => file.owns_entries_on(os),
         }
     }
 
@@ -1877,7 +1894,7 @@ impl SettingsEdit {
     fn owns_entries(&self, os: yagura_os::program::HostOs) -> bool {
         match self {
             Self::Toml(toml_set) => toml_set.has_entries(),
-            Self::Json(file) => file.owns_entries_on(os),
+            Self::Json(file, _) => file.owns_entries_on(os),
         }
     }
 
@@ -1885,18 +1902,18 @@ impl SettingsEdit {
     fn owns_entries_on(&self, os: yagura_os::program::HostOs) -> bool {
         match self {
             Self::Toml(toml_set) => !toml_set.entry_edits(os).is_empty(),
-            Self::Json(file) => file.owns_entries_on(os),
+            Self::Json(file, _) => file.owns_entries_on(os),
         }
     }
 
     /// Whether the edit's values written on `os` name the daemon.
     fn names_daemon(&self, os: yagura_os::program::HostOs) -> bool {
-        matches!(self, Self::Json(file) if file.names_daemon(os))
+        matches!(self, Self::Json(file, _) if file.names_daemon(os))
     }
 
     /// Whether the edit's values written on `os` name the bridge.
     fn names_bridge(&self, os: yagura_os::program::HostOs) -> bool {
-        matches!(self, Self::Json(file) if file.names_bridge(os))
+        matches!(self, Self::Json(file, _) if file.names_bridge(os))
     }
 
     /// The name [`mcp_registration::DerivedStatus::differs_in`] gives the
@@ -1908,7 +1925,7 @@ impl SettingsEdit {
     ) -> Option<String> {
         match self {
             Self::Toml(toml_set) => toml_set.entries_label(),
-            Self::Json(file) => Some(file.label(target, os)),
+            Self::Json(file, _) => Some(file.label(target, os)),
         }
     }
 
@@ -1935,7 +1952,7 @@ impl SettingsEdit {
                     })
                 })
                 .collect(),
-            Self::Json(spec) => spec
+            Self::Json(spec, _) => spec
                 .preview(&context.vars())
                 .into_iter()
                 .map(|(name, value)| McpRegistrationEntry {
@@ -1967,11 +1984,11 @@ impl SettingsEdit {
                     .collect();
                 toml_set::remove_tables(content, &tables).map_err(EditError::Toml)?
             }
-            (Self::Json(file), EditChange::Set) => {
+            (Self::Json(file, _), EditChange::Set) => {
                 json_entry::set_entries(content, &Self::json_entries(file, context)?)
                     .map_err(EditError::Json)?
             }
-            (Self::Json(file), EditChange::RemoveEntries) => json_entry::remove_entries(
+            (Self::Json(file, _), EditChange::RemoveEntries) => json_entry::remove_entries(
                 content,
                 &file.removal_keys(&context.target, context.os, context.remove_shared),
             )
@@ -1988,7 +2005,7 @@ impl SettingsEdit {
                 toml_set::edits_hold(content, &toml_set.entry_edits(context.os))
                     .map_err(EditError::Toml)
             }
-            Self::Json(file) => {
+            Self::Json(file, _) => {
                 json_entry::entries_hold(content, &Self::json_entries(file, context)?)
                     .map_err(EditError::Json)
             }
@@ -2001,7 +2018,7 @@ impl SettingsEdit {
         match (self, change) {
             (_, EditChange::RemoveEntries) => MissingFile::Done,
             (Self::Toml(_), EditChange::Set) => MissingFile::Fail,
-            (Self::Json(_), EditChange::Set) => MissingFile::StartFrom("{}\n"),
+            (Self::Json(..), EditChange::Set) => MissingFile::StartFrom("{}\n"),
         }
     }
 
@@ -2028,7 +2045,7 @@ impl SettingsEdit {
                     ),
                 }
             }
-            Self::Json(spec) => match change {
+            Self::Json(spec, _) => match change {
                 EditChange::Set => format!(
                     "set its entries {} in {file}",
                     spec.label(target, context.os)
@@ -2069,7 +2086,7 @@ impl SettingsEdit {
             (_, Some(EditError::NoBridge)) => {
                 format!("no path to the bridge can be written into `{file}`")
             }
-            (Self::Json(_), _) => format!("`{file}` could not be read"),
+            (Self::Json(..), _) => format!("`{file}` could not be read"),
             (Self::Toml(_), _) => format!("the table was not found in `{file}`"),
         }
     }

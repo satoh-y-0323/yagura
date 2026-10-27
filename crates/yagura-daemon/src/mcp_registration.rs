@@ -379,10 +379,17 @@ pub struct JsonFileSpec {
 }
 
 impl JsonFileSpec {
-    /// The settings file's path, home-relative.
+    /// The settings file's path for `target`, home-relative, with `{server}`
+    /// replaced. The profile's raw value never leaves this type.
     #[must_use]
-    pub fn file(&self) -> &str {
-        &self.file
+    pub fn file(&self, target: &RegistrationTarget) -> String {
+        self.file.replace(SERVER_PLACEHOLDER, target.server())
+    }
+
+    /// Whether the file's name carries `{server}`: every entry in it then
+    /// belongs to one instance, whatever its key says.
+    fn is_per_instance(&self) -> bool {
+        self.file.contains(SERVER_PLACEHOLDER)
     }
 
     /// The entry this file claims, when it does.
@@ -453,7 +460,7 @@ impl JsonFileSpec {
         shared: bool,
     ) -> Vec<String> {
         self.selected(os)
-            .filter(|(key, _)| shared || key.contains(SERVER_PLACEHOLDER))
+            .filter(|(key, _)| shared || self.is_per_instance() || key.contains(SERVER_PLACEHOLDER))
             .map(|(key, _)| key.replace(SERVER_PLACEHOLDER, target.server()))
             .collect()
     }
@@ -504,9 +511,10 @@ impl JsonEntrySpec {
             .is_some_and(|entry| entry.carries_env)
     }
 
-    /// The file holding the bridge entries of every instance.
+    /// The file holding the bridge entries of every instance, as `target`
+    /// names it.
     #[must_use]
-    pub fn bridge_file(&self) -> Option<&str> {
+    pub fn bridge_file(&self, target: &RegistrationTarget) -> Option<String> {
         self.files
             .iter()
             .find(|file| {
@@ -514,7 +522,7 @@ impl JsonEntrySpec {
                     .iter()
                     .any(|(key, value)| is_bridge_entry(key, value))
             })
-            .map(JsonFileSpec::file)
+            .map(|file| file.file(target))
     }
 
     /// The names, in the order `document` holds them, of the registered
@@ -1813,6 +1821,7 @@ fn build_json_entry(raw: RawJsonEntries) -> Result<JsonEntrySpec, McpRegistratio
         });
     let shared = files
         .iter()
+        .filter(|file| !file.is_per_instance())
         .flat_map(|file| file.entries.iter().chain(file.by_os.all()))
         .any(|(key, _)| !key.contains(SERVER_PLACEHOLDER));
     if shared && (bridge_entry.is_none() || files.iter().all(|file| file.claim.is_none())) {
@@ -1827,7 +1836,11 @@ fn build_json_entry(raw: RawJsonEntries) -> Result<JsonEntrySpec, McpRegistratio
 /// Validates one `json_entry` element (see [`build_json_entry`]).
 fn build_json_file(raw: RawJsonEntry) -> Result<JsonFileSpec, McpRegistrationError> {
     let invalid = || McpRegistrationError::InvalidShape;
-    if !is_safe_relative_home_path(&raw.file) {
+    // Instance ids are restricted to `[a-z0-9-]`, so a template that is safe
+    // with the default server name stays safe for every instance.
+    if profile::contains_placeholder_outside(&raw.file, &[SERVER_PLACEHOLDER])
+        || !is_safe_relative_home_path(&raw.file.replace(SERVER_PLACEHOLDER, DEFAULT_SERVER))
+    {
         return Err(invalid());
     }
     let entries = build_json_entries(raw.entries)?;
@@ -1865,7 +1878,10 @@ fn build_json_file(raw: RawJsonEntry) -> Result<JsonFileSpec, McpRegistrationErr
                 .ok_or_else(invalid)?;
             // A shared entry holding a plain value: both sides must be able
             // to compare it without knowing an instance or a path.
-            if key.contains(SERVER_PLACEHOLDER) || !json_placeholders_allowed(value, &[]) {
+            if key.contains(SERVER_PLACEHOLDER)
+                || raw.file.contains(SERVER_PLACEHOLDER)
+                || !json_placeholders_allowed(value, &[])
+            {
                 return Err(invalid());
             }
             Ok(Claim {
