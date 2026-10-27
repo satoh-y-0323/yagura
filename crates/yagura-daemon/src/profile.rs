@@ -171,7 +171,12 @@ impl LaunchOptionAxis {
 #[derive(Debug, Clone)]
 pub struct LaunchOptionSpec {
     /// Argv elements appended for a launch; each `{value}` is replaced.
+    /// Empty when the table declares only `env`.
     pub args: Vec<String>,
+    /// Environment variables set for a launch, laid over the profile's
+    /// `[env]`; each `{value}` in a value is replaced. Empty when the table
+    /// declares only `args`.
+    pub env: BTreeMap<String, String>,
     /// Alias -> vendor-specific value, in the profile file's order.
     pub aliases: Vec<(String, String)>,
 }
@@ -419,7 +424,9 @@ pub struct ProfileLaunch {
     pub vendor: String,
     /// The profile's detection value, verbatim.
     pub detection: Option<String>,
-    /// The profile's environment, with reserved keys already dropped.
+    /// The profile's environment, with reserved keys already dropped, and
+    /// the `env` of every supplied launch option laid over it (a name equal
+    /// ASCII case-insensitively is replaced).
     pub env: BTreeMap<String, String>,
     /// The profile's `[mcp]` table, unrendered. `None` when the profile has
     /// none (see [`prepare_mcp_injection`] for rendering it).
@@ -594,12 +601,21 @@ pub enum ProfileParseError {
 /// the daemon's log without appearing in the fixed client-visible warning.
 #[derive(Debug, Clone, Error)]
 pub enum LaunchOptionError {
-    /// The table has no `args` key.
-    #[error("the table has no `args`")]
-    MissingArgs,
-    /// No element of `args` contains the `{value}` placeholder.
-    #[error("`args` does not contain the {{value}} placeholder")]
+    /// The table has neither an `args` nor an `env` key.
+    #[error("the table has neither `args` nor `env`")]
+    MissingArgsAndEnv,
+    /// Neither an element of `args` nor a value of `env` contains the
+    /// `{value}` placeholder.
+    #[error("neither `args` nor `env` contains the {{value}} placeholder")]
     MissingPlaceholder,
+    /// An `env` key is empty, contains `=` or NUL, starts with `YAGURA_`, or
+    /// is `WSLENV`.
+    #[error("an env key is not a name a launch option may set")]
+    EnvKey,
+    /// Two `env` keys of the `[model]` / `[effort]` tables are equal ASCII
+    /// case-insensitively, so which one takes effect would be undecided.
+    #[error("two launch option env keys name the same variable")]
+    EnvKeyClash,
     /// An alias key is not a valid identifier ([`validate_profile_id`]).
     #[error("an alias key is not a valid identifier")]
     AliasKey,
@@ -819,9 +835,9 @@ struct RawAbsentGuard {
     pointer: String,
 }
 
-/// A `[model]` / `[effort]` table before validation. `args` is `Option` so
-/// its absence is classified as a launch option rule
-/// ([`LaunchOptionError::MissingArgs`]) rather than a decode failure; an
+/// A `[model]` / `[effort]` table before validation. `args` and `env` are
+/// `Option` so their absence is classified as a launch option rule
+/// ([`LaunchOptionError::MissingArgsAndEnv`]) rather than a decode failure; an
 /// unknown key, by contrast, is refused while decoding
 /// ([`ProfileParseError::Toml`]) so a misspelt `aliases` cannot silently
 /// mean "no aliases".
@@ -830,6 +846,8 @@ struct RawAbsentGuard {
 struct RawLaunchOption {
     #[serde(default)]
     args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
     #[serde(default)]
     aliases: OrderedAliases,
 }
@@ -842,6 +860,8 @@ struct RawLaunchOption {
 struct RawModelOption {
     #[serde(default)]
     args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
     #[serde(default)]
     aliases: OrderedAliases,
     #[serde(default)]
@@ -941,9 +961,11 @@ struct RawCommand {
 /// display name that violates the window-label rule, an argv element (under
 /// `[command]` or in a launch option's `args`) that is empty or contains a
 /// NUL byte, a launch option table that breaks its rule
-/// ([`LaunchOptionError`]: no `args`, no `{value}` placeholder, an alias key
-/// outside the identifier rule, an alias value outside the launch option
-/// value rule, a `[model.choices]` table breaking its rule), or an `[mcp]` /
+/// ([`LaunchOptionError`]: neither `args` nor `env`, no `{value}`
+/// placeholder, an `env` key a launch option may not set, an `env` key both
+/// tables name, an alias key outside the identifier rule, an alias value
+/// outside the launch option value rule, a `[model.choices]` table breaking
+/// its rule), or an `[mcp]` /
 /// `[hooks]` table that breaks its rule ([`InjectionSpecError`]: no `args`, an
 /// unknown placeholder, the config-file placeholder used without a
 /// `config_file`). A relative or `~` working directory and a reserved
@@ -980,10 +1002,11 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     let (model, model_choices) = match raw.model {
         Some(RawModelOption {
             args,
+            env,
             aliases,
             choices,
         }) => (
-            parse_launch_option(Some(RawLaunchOption { args, aliases }))?,
+            parse_launch_option(Some(RawLaunchOption { args, env, aliases }))?,
             choices.map(parse_model_choices).transpose()?,
         ),
         None => (None, None),
@@ -993,6 +1016,11 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         effort: parse_launch_option(raw.effort)?,
         model_choices,
     };
+    if launch_option_env_keys_clash(&options) {
+        return Err(ProfileParseError::InvalidLaunchOption(
+            LaunchOptionError::EnvKeyClash,
+        ));
+    }
     let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp)?;
     let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks)?;
     let host_paths =
@@ -1057,8 +1085,9 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
 }
 
 /// Validates one `[model]` / `[effort]` table into its spec (`None` in,
-/// `None` out), in the order: `args` present, its elements under the argv
-/// rule, the `{value}` placeholder present, each alias key, each alias value.
+/// `None` out), in the order: `args` or `env` present, the `args` elements
+/// under the argv rule, the `{value}` placeholder present, each `env` key,
+/// each alias key, each alias value.
 fn parse_launch_option(
     raw: Option<RawLaunchOption>,
 ) -> Result<Option<LaunchOptionSpec>, ProfileParseError> {
@@ -1066,10 +1095,23 @@ fn parse_launch_option(
         return Ok(None);
     };
     let invalid = ProfileParseError::InvalidLaunchOption;
-    let args = raw.args.ok_or(invalid(LaunchOptionError::MissingArgs))?;
+    if raw.args.is_none() && raw.env.is_none() {
+        return Err(invalid(LaunchOptionError::MissingArgsAndEnv));
+    }
+    let args = raw.args.unwrap_or_default();
+    let env = raw.env.unwrap_or_default();
     yagura_protocol::validate_argv_elements(&args)?;
-    if !args.iter().any(|arg| arg.contains(VALUE_PLACEHOLDER)) {
+    if !args
+        .iter()
+        .chain(env.values())
+        .any(|text| text.contains(VALUE_PLACEHOLDER))
+    {
         return Err(invalid(LaunchOptionError::MissingPlaceholder));
+    }
+    // Refused rather than dropped as `[env]` does: dropping would leave the
+    // chosen value silently without effect.
+    if !env.keys().all(|key| is_launch_option_env_key(key)) {
+        return Err(invalid(LaunchOptionError::EnvKey));
     }
     let OrderedAliases(aliases) = raw.aliases;
     for (alias, value) in &aliases {
@@ -1079,7 +1121,37 @@ fn parse_launch_option(
         yagura_protocol::validate_launch_option_value(value)
             .map_err(|err| invalid(LaunchOptionError::AliasValue(err)))?;
     }
-    Ok(Some(LaunchOptionSpec { args, aliases }))
+    Ok(Some(LaunchOptionSpec { args, env, aliases }))
+}
+
+/// Whether a launch option may set the variable `key`: non-empty, free of
+/// `=` and NUL, not reserved for the daemon ([`is_reserved_env_name`]), and
+/// not `WSLENV`, whose list the profile's `[env]` owns. Compared ASCII
+/// case-insensitively, as a Windows environment compares names.
+fn is_launch_option_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.contains(['=', '\0'])
+        && !is_reserved_env_name(OsStr::new(key))
+        && !key.eq_ignore_ascii_case("WSLENV")
+}
+
+/// Whether two `env` keys across the `[model]` / `[effort]` tables (or
+/// within one) are equal ASCII case-insensitively: the same variable on
+/// Windows, so which value wins would be undecided.
+fn launch_option_env_keys_clash(options: &LaunchOptions) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    for spec in LaunchOptionAxis::ALL
+        .into_iter()
+        .filter_map(|axis| options.get(axis))
+    {
+        for key in spec.env.keys() {
+            if seen.iter().any(|other| other.eq_ignore_ascii_case(key)) {
+                return true;
+            }
+            seen.push(key);
+        }
+    }
+    false
 }
 
 /// Validates a `[model.choices]` table into its spec. Every rule it breaks
@@ -2426,7 +2498,8 @@ pub fn resolve_launch(
 ) -> Result<ProfileLaunch, ProfileLaunchError> {
     let profile = refuse_if_disabled(find_listed_profile(config, profile_id)?)?;
     let mut argv = launch_argv(&profile, config)?;
-    apply_launch_options(&mut argv, &profile.options, options)?;
+    let additions = launch_option_additions(&profile.options, options)?;
+    argv.extend(additions.args);
     let hooks_registration = profile
         .mcp_registration
         .clone()
@@ -2436,6 +2509,11 @@ pub fn resolve_launch(
         .as_ref()
         .and_then(|registration| registration.list().cloned());
     let limits = shim_limits(&profile, config);
+    let mut env = profile.env;
+    for (key, value) in additions.env {
+        env.retain(|existing, _| !existing.eq_ignore_ascii_case(&key));
+        env.insert(key, value);
+    }
 
     Ok(ProfileLaunch {
         argv,
@@ -2449,7 +2527,7 @@ pub fn resolve_launch(
         name: name.unwrap_or(profile.display_name),
         vendor: profile.id,
         detection: profile.detection,
-        env: profile.env,
+        env,
         mcp: profile.mcp,
         hooks: profile.hooks,
         hooks_registration,
@@ -2554,7 +2632,30 @@ pub fn apply_launch_options(
     specs: &LaunchOptions,
     values: &LaunchOptionValues,
 ) -> Result<(), ProfileLaunchError> {
-    let mut appended = Vec::new();
+    argv.extend(launch_option_additions(specs, values)?.args);
+    Ok(())
+}
+
+/// What the supplied launch options add to a launch.
+struct LaunchOptionAdditions {
+    /// Argv elements, in [`apply_launch_options`]'s order.
+    args: Vec<String>,
+    /// Environment variables; no two keys are equal case-insensitively
+    /// (refused at parse time by [`launch_option_env_keys_clash`]).
+    env: Vec<(String, String)>,
+}
+
+/// Resolves every supplied option against `specs`, each `{value}` in `args`
+/// and in `env` values replaced by the resolved value. Checks every supplied
+/// axis before returning anything.
+fn launch_option_additions(
+    specs: &LaunchOptions,
+    values: &LaunchOptionValues,
+) -> Result<LaunchOptionAdditions, ProfileLaunchError> {
+    let mut additions = LaunchOptionAdditions {
+        args: Vec::new(),
+        env: Vec::new(),
+    };
     for axis in LaunchOptionAxis::ALL {
         let Some(value) = values.get(axis) else {
             continue;
@@ -2563,14 +2664,18 @@ pub fn apply_launch_options(
             .get(axis)
             .ok_or(ProfileLaunchError::UnsupportedLaunchOption(axis))?;
         let resolved = resolve_option_value(spec, value);
-        appended.extend(
+        additions.args.extend(
             spec.args
                 .iter()
                 .map(|arg| arg.replace(VALUE_PLACEHOLDER, resolved)),
         );
+        additions.env.extend(
+            spec.env.iter().map(|(key, template)| {
+                (key.clone(), template.replace(VALUE_PLACEHOLDER, resolved))
+            }),
+        );
     }
-    argv.extend(appended);
-    Ok(())
+    Ok(additions)
 }
 
 /// The value a caller's `value` maps to under `spec`: the alias's target when

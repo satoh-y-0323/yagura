@@ -1845,6 +1845,7 @@ fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
 fn spec(args: &[&str], aliases: &[(&str, &str)]) -> LaunchOptionSpec {
     LaunchOptionSpec {
         args: strings(args),
+        env: BTreeMap::new(),
         aliases: pairs(aliases),
     }
 }
