@@ -175,6 +175,14 @@
 //! State, field and milestone names are opaque strings on the wire, since the
 //! user's settings define them. A caller establishes [`TICKETS_MIN_REVISION`]
 //! before sending any ticket request or a `create_plan` that names a ticket.
+//!
+//! Revision 30 lets a registration row carry a `notice`, a sentence the
+//! profile wants its user to read before registering ([`McpRegistrationRow`]),
+//! and adds `launch_context` to [`ProfileCapability`], the launch capability a
+//! profile's limits name when the room's introduction cannot be passed on the
+//! command line. Both are additive: a peer that predates them reads a row
+//! without a `notice` as having none, and reads `launch_context` as
+//! [`ProfileCapability::Unknown`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -186,7 +194,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 29;
+pub const PROTOCOL_REVISION: u32 = 30;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -1935,6 +1943,8 @@ pub enum ProfileCapability {
     Effort,
     /// Launching the CLI with a first prompt.
     LaunchPrompt,
+    /// Launching the CLI with the room's introduction.
+    LaunchContext,
     /// A capability this build does not know.
     #[serde(other)]
     Unknown,
@@ -4157,6 +4167,11 @@ pub struct McpRegistrationRow {
     /// field.
     #[serde(default)]
     pub entries: Vec<McpRegistrationEntry>,
+    /// One line the profile asks to be shown with the row, as the profile
+    /// wrote it. `None` when the profile writes none or the peer does not
+    /// carry the field.
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 /// One entry a registration writes into a CLI's file, for display.

@@ -76,6 +76,7 @@ fn sample_row() -> McpRegistrationRow {
         remove: Some(sample_command("remove")),
         toml_set: Some(sample_toml_set()),
         entries: Vec::new(),
+        notice: None,
     }
 }
 

@@ -826,6 +826,7 @@ fn json_placeholders_allowed(value: &JsonValue, allowed: &[&str]) -> bool {
 #[derive(Debug, Clone)]
 pub struct McpRegistrationSpec {
     group: Option<String>,
+    notice: Option<String>,
     commands: Option<RegistrationCommands>,
     env_arg: Option<Vec<String>>,
     env_forward: Option<EnvForward>,
@@ -853,6 +854,12 @@ impl McpRegistrationSpec {
     #[must_use]
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()
+    }
+
+    /// The one line the profile asks to be shown with this row.
+    #[must_use]
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// The `toml_set` table, when this row edits a settings file after
@@ -1556,6 +1563,8 @@ struct RawMcpRegistrationTable {
     #[serde(default)]
     group: Option<String>,
     #[serde(default)]
+    notice: Option<String>,
+    #[serde(default)]
     add: Option<Vec<String>>,
     #[serde(default)]
     remove: Option<Vec<String>>,
@@ -1711,6 +1720,11 @@ fn build_spec(
     if let Some(group) = &raw.group {
         yagura_protocol::validate_display_label(group).map_err(|_| invalid())?;
     }
+    if let Some(notice) = &raw.notice
+        && !crate::profile_delivery::is_visible_line(notice)
+    {
+        return Err(invalid());
+    }
 
     let commands = match (raw.add, raw.remove) {
         (Some(add), Some(remove)) => {
@@ -1780,6 +1794,7 @@ fn build_spec(
 
     Ok(McpRegistrationSpec {
         group: raw.group,
+        notice: raw.notice,
         commands,
         env_arg: raw.env_arg,
         env_forward: raw.env_forward.map(|forward| EnvForward {

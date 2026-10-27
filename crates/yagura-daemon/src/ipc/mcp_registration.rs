@@ -203,6 +203,7 @@ fn build_rows(
             remove,
             toml_set,
             entries,
+            notice: spec.notice().map(str::to_string),
         });
 
         sources.push(RowSource {

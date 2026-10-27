@@ -153,7 +153,7 @@ pub(crate) fn parse_guidance(raw: toml::Value) -> Option<ProfileGuidance> {
 }
 
 /// Some visible character, and no control character a reader would act on.
-fn is_visible_line(line: &str) -> bool {
+pub(crate) fn is_visible_line(line: &str) -> bool {
     !line.trim().is_empty() && !line.chars().any(char::is_control)
 }
 

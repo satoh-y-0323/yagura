@@ -487,6 +487,7 @@ wire_sample!(struct McpRegistrationRow {
     remove,
     toml_set,
     entries,
+    notice,
 });
 wire_sample!(struct McpRegistrationEntry {
     file,
@@ -1251,6 +1252,7 @@ fn profile_capability_wire_variants() -> BTreeSet<String> {
         ProfileCapability::Model,
         ProfileCapability::Effort,
         ProfileCapability::LaunchPrompt,
+        ProfileCapability::LaunchContext,
         ProfileCapability::Unknown,
     ]
     .into_iter()
@@ -1259,6 +1261,7 @@ fn profile_capability_wire_variants() -> BTreeSet<String> {
             ProfileCapability::Model => "model",
             ProfileCapability::Effort => "effort",
             ProfileCapability::LaunchPrompt => "launch_prompt",
+            ProfileCapability::LaunchContext => "launch_context",
             ProfileCapability::Unknown => "unknown",
         };
         serde_spelling(&capability, hand)

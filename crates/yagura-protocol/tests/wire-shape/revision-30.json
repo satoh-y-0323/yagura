@@ -1,0 +1,1602 @@
+{
+  "revision": 30,
+  "shapes": {
+    "client": {
+      "add_ticket_result": {
+        "text": "string",
+        "ticket": "number",
+        "type": "string"
+      },
+      "approval_decision": {
+        "approved": "boolean",
+        "request_id": "string",
+        "type": "string"
+      },
+      "approve_plan": {
+        "plan_id": "string",
+        "type": "string",
+        "version": "number"
+      },
+      "attach_view": {
+        "size": {
+          "cols": "number",
+          "rows": "number"
+        },
+        "type": "string",
+        "window_id": "string"
+      },
+      "broadcast_chat": {
+        "body": "string",
+        "room_id": "string",
+        "type": "string"
+      },
+      "clear_chat_room": {
+        "room_id": "string",
+        "type": "string"
+      },
+      "clear_selection": {
+        "type": "string"
+      },
+      "clear_task_assignment": {
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "close_window": {
+        "force": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "copy_selection": {
+        "type": "string"
+      },
+      "create_plan": {
+        "tasks": [
+          {
+            "depends_on": [
+              "string"
+            ],
+            "effort": "string",
+            "instruction": "string",
+            "model": "string",
+            "profile": "string",
+            "role": "string",
+            "task_id": "string",
+            "title": "string",
+            "writes": [
+              "string"
+            ]
+          }
+        ],
+        "ticket": "number",
+        "title": "string",
+        "type": "string"
+      },
+      "create_ticket": {
+        "body": "string",
+        "fields": {
+          "sample": "string"
+        },
+        "milestone": "string",
+        "state": "string",
+        "title": "string",
+        "type": "string"
+      },
+      "delete_chat_room": {
+        "room_id": "string",
+        "type": "string"
+      },
+      "delete_plan": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "deliver_context": {
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "deliver_take": {
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "deliver_wait": {
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "focus": {
+        "focused": "boolean",
+        "type": "string"
+      },
+      "frame_ack": {
+        "seq": "number",
+        "type": "string"
+      },
+      "get_approval_settings": {
+        "type": "string"
+      },
+      "get_daemon_health": {
+        "type": "string"
+      },
+      "get_plan": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "get_profile_detail": {
+        "profile": "string",
+        "type": "string"
+      },
+      "get_protocol_revision": {
+        "type": "string"
+      },
+      "get_ticket": {
+        "ticket": "number",
+        "type": "string",
+        "workspace_id": "number"
+      },
+      "get_window_status": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "identify": {
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "interrupt_window": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "key": {
+        "key": {
+          "named": "string"
+        },
+        "mods": {
+          "alt": "boolean",
+          "ctrl": "boolean",
+          "shift": "boolean"
+        },
+        "type": "string"
+      },
+      "list_chat_rooms": {
+        "type": "string"
+      },
+      "list_detections": {
+        "type": "string"
+      },
+      "list_mcp_registrations": {
+        "request_id": "number",
+        "type": "string"
+      },
+      "list_model_choices": {
+        "profile": "string",
+        "request_id": "number",
+        "type": "string"
+      },
+      "list_plans": {
+        "type": "string"
+      },
+      "list_profiles": {
+        "type": "string"
+      },
+      "list_restore_candidates": {
+        "type": "string"
+      },
+      "list_roles": {
+        "type": "string"
+      },
+      "list_ticket_workspaces": {
+        "type": "string"
+      },
+      "list_tickets": {
+        "limit": "number",
+        "milestone": "string",
+        "state": "string",
+        "type": "string",
+        "workspace_id": "number"
+      },
+      "list_windows": {
+        "type": "string"
+      },
+      "mark_plan_seen": {
+        "plan_id": "string",
+        "type": "string",
+        "version": "number"
+      },
+      "open_task_window": {
+        "name": "string",
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "open_window": {
+        "command": [
+          "string"
+        ],
+        "cwd": "string",
+        "detection": "string",
+        "name": "string",
+        "on_name_taken": "string",
+        "type": "string",
+        "vendor": "string"
+      },
+      "open_window_from_profile": {
+        "cwd": "string",
+        "effort": "string",
+        "model": "string",
+        "name": "string",
+        "on_name_taken": "string",
+        "profile": "string",
+        "type": "string"
+      },
+      "paste": {
+        "text": "string",
+        "type": "string"
+      },
+      "ping": {
+        "type": "string"
+      },
+      "pointer": {
+        "button": "string",
+        "cell": {
+          "col": "number",
+          "row": "number"
+        },
+        "clicks": "number",
+        "kind": "string",
+        "mods": {
+          "alt": "boolean",
+          "ctrl": "boolean",
+          "shift": "boolean"
+        },
+        "type": "string"
+      },
+      "read_chat": {
+        "after_seq": "number",
+        "limit": "number",
+        "room_id": "string",
+        "type": "string"
+      },
+      "read_output": {
+        "lines": "number",
+        "type": "string",
+        "window_id": "string"
+      },
+      "register_approver": {
+        "type": "string"
+      },
+      "rename_window": {
+        "name": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "report_session": {
+        "session": "string",
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "resize": {
+        "cols": "number",
+        "rows": "number",
+        "type": "string"
+      },
+      "run_mcp_registration": {
+        "action": "string",
+        "profile": "string",
+        "request_id": "number",
+        "type": "string"
+      },
+      "save_model_aliases": {
+        "aliases": [
+          {
+            "alias": "string",
+            "value": "string"
+          }
+        ],
+        "profile": "string",
+        "type": "string"
+      },
+      "save_roles": {
+        "default_role": "string",
+        "roles": [
+          {
+            "effort": "string",
+            "model": "string",
+            "name": "string",
+            "profile": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "scroll_view": {
+        "lines": "number",
+        "type": "string"
+      },
+      "send_chat": {
+        "body": "string",
+        "room_id": "string",
+        "type": "string"
+      },
+      "send_handoff": {
+        "cwd": "string",
+        "effort": "string",
+        "model": "string",
+        "name": "string",
+        "note": "string",
+        "profile": "string",
+        "reference": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "send_keys": {
+        "keys": [
+          "string"
+        ],
+        "type": "string",
+        "window_id": "string"
+      },
+      "send_report": {
+        "outcome": "string",
+        "path": "string",
+        "summary": "string",
+        "type": "string"
+      },
+      "send_text": {
+        "text": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "set_auto_approve": {
+        "auto_approve": "boolean",
+        "tool": "string",
+        "type": "string"
+      },
+      "set_default_palettes": {
+        "app": {
+          "ansi": [
+            [
+              "number"
+            ]
+          ],
+          "background": [
+            "number"
+          ],
+          "cursor": [
+            "number"
+          ],
+          "foreground": [
+            "number"
+          ]
+        },
+        "type": "string",
+        "vendors": {
+          "sample": {
+            "ansi": [
+              [
+                "number"
+              ]
+            ],
+            "background": [
+              "number"
+            ],
+            "cursor": [
+              "number"
+            ],
+            "foreground": [
+              "number"
+            ]
+          }
+        }
+      },
+      "set_milestone": {
+        "description": "string",
+        "name": "string",
+        "position": "number",
+        "title": "string",
+        "type": "string"
+      },
+      "set_palette": {
+        "ansi": [
+          [
+            "number"
+          ]
+        ],
+        "background": [
+          "number"
+        ],
+        "cursor": [
+          "number"
+        ],
+        "foreground": [
+          "number"
+        ],
+        "type": "string"
+      },
+      "set_plan_approval_required": {
+        "required": "boolean",
+        "type": "string"
+      },
+      "set_plan_owner": {
+        "plan_id": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "set_profile_command": {
+        "argv": [
+          "string"
+        ],
+        "profile": "string",
+        "type": "string"
+      },
+      "set_profile_enabled": {
+        "enabled": "boolean",
+        "profile": "string",
+        "type": "string"
+      },
+      "set_task_assignment": {
+        "assignment": {
+          "effort": "string",
+          "model": "string",
+          "profile": "string"
+        },
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string"
+      },
+      "set_visible": {
+        "type": "string",
+        "visible": "boolean"
+      },
+      "shutdown": {
+        "type": "string"
+      },
+      "status_event": {
+        "source": "string",
+        "status": "string",
+        "token": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "text": {
+        "text": "string",
+        "type": "string"
+      },
+      "update_plan": {
+        "plan_id": "string",
+        "tasks": [
+          {
+            "depends_on": [
+              "string"
+            ],
+            "effort": "string",
+            "instruction": "string",
+            "model": "string",
+            "profile": "string",
+            "role": "string",
+            "task_id": "string",
+            "title": "string",
+            "writes": [
+              "string"
+            ]
+          }
+        ],
+        "title": "string",
+        "type": "string"
+      },
+      "update_ticket": {
+        "body": "string",
+        "fields": {
+          "sample": "string"
+        },
+        "milestone": "string",
+        "state": "string",
+        "ticket": "number",
+        "title": "string",
+        "type": "string"
+      },
+      "update_window_layout": {
+        "layout_json": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "wait_for_report": {
+        "timeout_sec": "number",
+        "type": "string"
+      },
+      "wait_for_status": {
+        "target_status": "string",
+        "timeout_sec": "number",
+        "type": "string",
+        "window_id": "string"
+      },
+      "wheel": {
+        "cell": {
+          "col": "number",
+          "row": "number"
+        },
+        "delta": "number",
+        "mods": {
+          "alt": "boolean",
+          "ctrl": "boolean",
+          "shift": "boolean"
+        },
+        "type": "string"
+      }
+    },
+    "daemon": {
+      "approval_requested": {
+        "request": {
+          "request_id": "string",
+          "requester": {
+            "kind": "string",
+            "name": "string",
+            "window_id": "string"
+          },
+          "room": {
+            "name": "string",
+            "room_id": "string"
+          },
+          "target": {
+            "name": "string",
+            "status": "string",
+            "window_id": "string"
+          },
+          "text": "string",
+          "tool": "string"
+        },
+        "type": "string"
+      },
+      "approval_resolved": {
+        "request_id": "string",
+        "type": "string"
+      },
+      "approval_settings": {
+        "settings": {
+          "plans_require_approval": "boolean",
+          "playbook": "string",
+          "tools": [
+            {
+              "auto_approve": "boolean",
+              "tool": "string"
+            }
+          ]
+        },
+        "type": "string"
+      },
+      "approval_withdrawn": {
+        "reason": "string",
+        "request_id": "string",
+        "type": "string"
+      },
+      "approver_registered": {
+        "pending": [
+          {
+            "request_id": "string",
+            "requester": {
+              "kind": "string",
+              "name": "string",
+              "window_id": "string"
+            },
+            "room": {
+              "name": "string",
+              "room_id": "string"
+            },
+            "target": {
+              "name": "string",
+              "status": "string",
+              "window_id": "string"
+            },
+            "text": "string",
+            "tool": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "attached": {
+        "child_exited": "boolean",
+        "exit_code": "number",
+        "type": "string"
+      },
+      "auto_approve_set": {
+        "settings": {
+          "plans_require_approval": "boolean",
+          "playbook": "string",
+          "tools": [
+            {
+              "auto_approve": "boolean",
+              "tool": "string"
+            }
+          ]
+        },
+        "type": "string"
+      },
+      "chat_changed": {
+        "needs_user": "boolean",
+        "room_id": "string",
+        "seq": "number",
+        "type": "string"
+      },
+      "chat_history_cleared": {
+        "room_id": "string",
+        "type": "string"
+      },
+      "chat_messages": {
+        "halted": {
+          "reason": "string",
+          "since_ms": "number"
+        },
+        "messages": [
+          {
+            "at_ms": "number",
+            "body": "string",
+            "broadcast": "boolean",
+            "deliveries": [
+              {
+                "state": "string",
+                "unknown_reason": "string",
+                "window_id": "string"
+              }
+            ],
+            "from_kind": "string",
+            "from_name": "string",
+            "from_window_id": "string",
+            "mentions": [
+              "string"
+            ],
+            "seq": "number"
+          }
+        ],
+        "needs_user": "boolean",
+        "next_after_seq": "number",
+        "room_id": "string",
+        "roster": [
+          {
+            "name": "string",
+            "window_id": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "chat_participants_changed": {
+        "type": "string"
+      },
+      "chat_posted": {
+        "halted": "boolean",
+        "room_id": "string",
+        "seq": "number",
+        "targets": [
+          "string"
+        ],
+        "type": "string",
+        "unresolved": [
+          "string"
+        ],
+        "user": "boolean"
+      },
+      "chat_room_cleared": {
+        "room_id": "string",
+        "type": "string"
+      },
+      "chat_room_deleted": {
+        "room_id": "string",
+        "type": "string"
+      },
+      "chat_rooms": {
+        "rooms": [
+          {
+            "halted": {
+              "reason": "string",
+              "since_ms": "number"
+            },
+            "has_open_windows": "boolean",
+            "last_at_ms": "number",
+            "name": "string",
+            "needs_user": "boolean",
+            "participant_count": "number",
+            "room_id": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "daemon_health": {
+        "problems": [
+          {
+            "detail": "string",
+            "kind": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "delivery": {
+        "exit_code": "number",
+        "output": "string",
+        "stream": "string",
+        "type": "string"
+      },
+      "detection_list": {
+        "bundled_names": [
+          "string"
+        ],
+        "directory_names": [
+          "string"
+        ],
+        "names": [
+          "string"
+        ],
+        "type": "string",
+        "warning": "string"
+      },
+      "error": {
+        "code": "string",
+        "message": "string",
+        "rejected_argument": "string",
+        "type": "string"
+      },
+      "exit": {
+        "exit_code": "number",
+        "type": "string"
+      },
+      "frame": {
+        "attrs": [
+          {
+            "bg": {
+              "rgb": [
+                "number"
+              ]
+            },
+            "fg": {
+              "rgb": [
+                "number"
+              ]
+            },
+            "flags": [
+              "string"
+            ]
+          }
+        ],
+        "cols": "number",
+        "cursor": {
+          "col": "number",
+          "row": "number",
+          "shape": "string",
+          "visible": "boolean"
+        },
+        "last": "boolean",
+        "lines": [
+          {
+            "row": "number",
+            "runs": [
+              {
+                "attr": "number",
+                "cells": [
+                  "string"
+                ],
+                "wide": [
+                  "number"
+                ]
+              }
+            ],
+            "wrapped": "boolean"
+          }
+        ],
+        "overrides": [
+          {
+            "rgb": [
+              "number"
+            ],
+            "slot": {
+              "indexed": "number"
+            }
+          }
+        ],
+        "reset": "boolean",
+        "rows": "number",
+        "seq": "number",
+        "type": "string",
+        "view": {
+          "alt_screen": "boolean",
+          "display_offset": "number",
+          "history_rows": "number",
+          "mouse_reporting": "boolean"
+        }
+      },
+      "handoff_sent": {
+        "delivery": "string",
+        "name": "string",
+        "opened": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "identified": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "keys_sent": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "mcp_registration_requested": {
+        "action": "string",
+        "profile": "string",
+        "request_id": "number",
+        "type": "string"
+      },
+      "mcp_registration_result": {
+        "action": "string",
+        "error": "string",
+        "profile": "string",
+        "request_id": "number",
+        "status": {
+          "add": {
+            "argv": [
+              "string"
+            ],
+            "program_at": "number"
+          },
+          "differs_in": [
+            "string"
+          ],
+          "profile": "string",
+          "reason": "string",
+          "refused_by_claim": "string",
+          "remove": {
+            "argv": [
+              "string"
+            ],
+            "program_at": "number"
+          },
+          "state": "string"
+        },
+        "steps": [
+          {
+            "argv": [
+              "string"
+            ],
+            "exit_code": "number",
+            "output": "string",
+            "program_at": "number"
+          }
+        ],
+        "type": "string"
+      },
+      "mcp_registration_status": {
+        "request_id": "number",
+        "status": {
+          "add": {
+            "argv": [
+              "string"
+            ],
+            "program_at": "number"
+          },
+          "differs_in": [
+            "string"
+          ],
+          "profile": "string",
+          "reason": "string",
+          "refused_by_claim": "string",
+          "remove": {
+            "argv": [
+              "string"
+            ],
+            "program_at": "number"
+          },
+          "state": "string"
+        },
+        "type": "string"
+      },
+      "mcp_registrations_listed": {
+        "bridge": "string",
+        "request_id": "number",
+        "rows": [
+          {
+            "add": {
+              "argv": [
+                "string"
+              ],
+              "program_at": "number"
+            },
+            "display_name": "string",
+            "entries": [
+              {
+                "content": "string",
+                "file": "string",
+                "name": "string"
+              }
+            ],
+            "group": "string",
+            "notice": "string",
+            "profile": "string",
+            "remove": {
+              "argv": [
+                "string"
+              ],
+              "program_at": "number"
+            },
+            "toml_set": {
+              "file": "string",
+              "table": [
+                "string"
+              ],
+              "values": [
+                {
+                  "key": "string",
+                  "value": "string"
+                }
+              ]
+            }
+          }
+        ],
+        "type": "string"
+      },
+      "milestone_set": {
+        "milestone": {
+          "description": "string",
+          "name": "string",
+          "position": "number",
+          "title": "string"
+        },
+        "type": "string"
+      },
+      "model_aliases_saved": {
+        "aliases": [
+          {
+            "alias": "string",
+            "value": "string"
+          }
+        ],
+        "profile": "string",
+        "type": "string"
+      },
+      "model_choices": {
+        "choices": [
+          {
+            "id": "string",
+            "label": "string"
+          }
+        ],
+        "error": "string",
+        "profile": "string",
+        "request_id": "number",
+        "source": {
+          "argv": [
+            "string"
+          ],
+          "kind": "string"
+        },
+        "type": "string"
+      },
+      "model_choices_requested": {
+        "profile": "string",
+        "request_id": "number",
+        "type": "string"
+      },
+      "plan_approval_required_set": {
+        "settings": {
+          "plans_require_approval": "boolean",
+          "playbook": "string",
+          "tools": [
+            {
+              "auto_approve": "boolean",
+              "tool": "string"
+            }
+          ]
+        },
+        "type": "string"
+      },
+      "plan_changed": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "plan_deleted": {
+        "plan_id": "string",
+        "type": "string"
+      },
+      "plan_detail": {
+        "plan": {
+          "cwd": "string",
+          "owner_window": "string",
+          "plan_id": "string",
+          "review": "string",
+          "roles_warning": "string",
+          "tasks": [
+            {
+              "depends_on": [
+                "string"
+              ],
+              "instruction": "string",
+              "instruction_notice": {
+                "at": "number",
+                "state": "string"
+              },
+              "parent": {
+                "effort": "string",
+                "model": "string",
+                "profile": "string"
+              },
+              "report": {
+                "outcome": "string",
+                "path": "string",
+                "reported_at": "number",
+                "summary": "string"
+              },
+              "resolved": {
+                "assignment": {
+                  "effort": "string",
+                  "model": "string",
+                  "profile": "string"
+                },
+                "source": "string"
+              },
+              "review_mark": "string",
+              "role": "string",
+              "task_id": "string",
+              "title": "string",
+              "user": {
+                "effort": "string",
+                "model": "string",
+                "profile": "string"
+              },
+              "wave": "number",
+              "window_id": "string",
+              "writes": [
+                "string"
+              ]
+            }
+          ],
+          "ticket": "number",
+          "title": "string",
+          "version": "number",
+          "waves": [
+            [
+              "string"
+            ]
+          ]
+        },
+        "type": "string"
+      },
+      "plan_list": {
+        "plans": [
+          {
+            "owner_window": "string",
+            "plan_id": "string",
+            "review": "string",
+            "task_count": "number",
+            "title": "string",
+            "unseen_changes": "boolean"
+          }
+        ],
+        "type": "string"
+      },
+      "pong": {
+        "type": "string"
+      },
+      "profile_command_set": {
+        "command": {
+          "argv": [
+            "string"
+          ],
+          "changed": "boolean",
+          "shipped": [
+            "string"
+          ]
+        },
+        "profile": "string",
+        "type": "string"
+      },
+      "profile_detail": {
+        "command": {
+          "argv": [
+            "string"
+          ],
+          "changed": "boolean",
+          "shipped": [
+            "string"
+          ]
+        },
+        "entries": [
+          {
+            "changed": "boolean",
+            "path": [
+              "string"
+            ],
+            "shipped": "string",
+            "value": "string"
+          }
+        ],
+        "profile": "string",
+        "shipped_base": "boolean",
+        "type": "string"
+      },
+      "profile_enabled_set": {
+        "enabled": "boolean",
+        "profile": "string",
+        "type": "string"
+      },
+      "profile_list": {
+        "profiles": [
+          {
+            "available": "boolean",
+            "command": [
+              "string"
+            ],
+            "cwd": "string",
+            "detection": "string",
+            "detection_warning": "string",
+            "display_name": "string",
+            "effort": {
+              "aliases": [
+                {
+                  "alias": "string",
+                  "value": "string"
+                }
+              ]
+            },
+            "enabled": "boolean",
+            "id": "string",
+            "limits": [
+              {
+                "capability": "string",
+                "guidance": {
+                  "command": "string",
+                  "text": "string",
+                  "url": "string"
+                },
+                "reason": "string"
+              }
+            ],
+            "model": {
+              "aliases": [
+                {
+                  "alias": "string",
+                  "value": "string"
+                }
+              ]
+            },
+            "unavailable_guidance": {
+              "command": "string",
+              "text": "string",
+              "url": "string"
+            },
+            "unavailable_kind": "string",
+            "unavailable_reason": "string"
+          }
+        ],
+        "type": "string",
+        "warnings": [
+          "string"
+        ]
+      },
+      "protocol_revision": {
+        "revision": "number",
+        "type": "string"
+      },
+      "report_sent": {
+        "delivered_to": "string",
+        "task": {
+          "plan_id": "string",
+          "task_id": "string"
+        },
+        "type": "string"
+      },
+      "reports": {
+        "awaiting": [
+          {
+            "mcp_connected": "boolean",
+            "name": "string",
+            "status": "string",
+            "window_id": "string"
+          }
+        ],
+        "reports": [
+          {
+            "at_ms": "number",
+            "from_name": "string",
+            "from_window_id": "string",
+            "outcome": "string",
+            "path": "string",
+            "summary": "string",
+            "task": {
+              "plan_id": "string",
+              "task_id": "string"
+            }
+          }
+        ],
+        "type": "string"
+      },
+      "restore_candidate_list": {
+        "taken_at_epoch_s": "number",
+        "type": "string",
+        "windows": [
+          {
+            "command": [
+              "string"
+            ],
+            "cwd": "string",
+            "detection": "string",
+            "effort": "string",
+            "layout_json": "string",
+            "model": "string",
+            "name": "string",
+            "position": "number",
+            "profile": "string",
+            "vendor": "string"
+          }
+        ]
+      },
+      "role_list": {
+        "default_role": "string",
+        "roles": [
+          {
+            "effort": "string",
+            "model": "string",
+            "name": "string",
+            "profile": "string"
+          }
+        ],
+        "type": "string"
+      },
+      "selection_text": {
+        "text": "string",
+        "type": "string"
+      },
+      "session_recorded": {
+        "held": "boolean",
+        "type": "string"
+      },
+      "status_changed": {
+        "status": "string",
+        "status_rev": "number",
+        "type": "string",
+        "unknown_reason": "string",
+        "window_id": "string"
+      },
+      "task_window_opened": {
+        "assignment": {
+          "assignment": {
+            "effort": "string",
+            "model": "string",
+            "profile": "string"
+          },
+          "source": "string"
+        },
+        "name": "string",
+        "plan_id": "string",
+        "task_id": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "text_sent": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "ticket_changed": {
+        "type": "string",
+        "workspace_id": "number"
+      },
+      "ticket_detail": {
+        "ticket": {
+          "body": "string",
+          "created_at": "number",
+          "fields": {
+            "sample": "string"
+          },
+          "milestone": "string",
+          "number": "number",
+          "plans": [
+            "string"
+          ],
+          "results": [
+            {
+              "at": "number",
+              "seq": "number",
+              "text": "string"
+            }
+          ],
+          "state": "string",
+          "title": "string",
+          "updated_at": "number"
+        },
+        "type": "string"
+      },
+      "ticket_list": {
+        "config": {
+          "fields": [
+            {
+              "description": "string",
+              "name": "string"
+            }
+          ],
+          "guide": "string",
+          "states": [
+            {
+              "description": "string",
+              "name": "string",
+              "requires": [
+                "string"
+              ]
+            }
+          ]
+        },
+        "config_error": "string",
+        "milestones": [
+          {
+            "description": "string",
+            "name": "string",
+            "position": "number",
+            "title": "string"
+          }
+        ],
+        "tickets": [
+          {
+            "fields": {
+              "sample": "string"
+            },
+            "milestone": "string",
+            "number": "number",
+            "plan_count": "number",
+            "state": "string",
+            "title": "string",
+            "updated_at": "number"
+          }
+        ],
+        "truncated": "boolean",
+        "type": "string",
+        "workspace_id": "number"
+      },
+      "ticket_workspace_list": {
+        "type": "string",
+        "workspaces": [
+          {
+            "kind": "string",
+            "path": "string",
+            "workspace_id": "number"
+          }
+        ]
+      },
+      "wait_result": {
+        "outcome": "string",
+        "status": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_closed": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_interrupted": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_layout_updated": {
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_list": {
+        "type": "string",
+        "windows": [
+          {
+            "cwd": "string",
+            "detection_warning": "string",
+            "exit_code": "number",
+            "layout_json": "string",
+            "mcp_connected": "boolean",
+            "name": "string",
+            "room": {
+              "name": "string",
+              "room_id": "string"
+            },
+            "status": "string",
+            "status_reports_missing": "boolean",
+            "status_rev": "number",
+            "unknown_reason": "string",
+            "vendor": "string",
+            "window_id": "string"
+          }
+        ]
+      },
+      "window_opened": {
+        "detection_warning": "string",
+        "name": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_output": {
+        "text": "string",
+        "truncated": "boolean",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_renamed": {
+        "name": "string",
+        "type": "string",
+        "window_id": "string"
+      },
+      "window_status": {
+        "detection_warning": "string",
+        "exit_code": "number",
+        "last_output_summary": "string",
+        "mcp_connected": "boolean",
+        "since_ms": "number",
+        "status": "string",
+        "type": "string",
+        "unknown_reason": "string",
+        "window_id": "string"
+      }
+    }
+  },
+  "enums": {
+    "ApprovalRequesterKind": [
+      "external",
+      "unknown",
+      "window"
+    ],
+    "AssignmentSource": [
+      "default",
+      "parent",
+      "role",
+      "unassigned",
+      "user"
+    ],
+    "CellColor": [
+      "default",
+      "indexed",
+      "rgb"
+    ],
+    "CellFlag": [
+      "bold",
+      "dim",
+      "hidden",
+      "inverse",
+      "italic",
+      "selected",
+      "strikeout",
+      "underline"
+    ],
+    "CursorShape": [
+      "bar",
+      "block",
+      "hollow_block",
+      "underline"
+    ],
+    "DaemonProblemKind": [
+      "windows_unavailable"
+    ],
+    "DeliveryStream": [
+      "stderr",
+      "stdout"
+    ],
+    "HandoffDelivery": [
+      "taken",
+      "undelivered_no_delivery",
+      "undelivered_timeout"
+    ],
+    "InstructionNoticeState": [
+      "delivered",
+      "pending",
+      "window_closed"
+    ],
+    "Key": [
+      "char",
+      "named"
+    ],
+    "McpRegistrationAction": [
+      "register",
+      "remove",
+      "update"
+    ],
+    "McpRegistrationState": [
+      "differs",
+      "not_installed",
+      "not_registered",
+      "registered",
+      "unknown"
+    ],
+    "ModelChoiceSource": [
+      "command",
+      "values"
+    ],
+    "NamedKey": [
+      "arrow_down",
+      "arrow_left",
+      "arrow_right",
+      "arrow_up",
+      "backspace",
+      "delete",
+      "end",
+      "enter",
+      "escape",
+      "f1",
+      "f10",
+      "f11",
+      "f12",
+      "f2",
+      "f3",
+      "f4",
+      "f5",
+      "f6",
+      "f7",
+      "f8",
+      "f9",
+      "home",
+      "insert",
+      "page_down",
+      "page_up",
+      "tab"
+    ],
+    "PaletteSlot": [
+      "background",
+      "cursor",
+      "foreground",
+      "indexed"
+    ],
+    "PlanReview": [
+      "approved",
+      "pending"
+    ],
+    "PlaybookState": [
+      "failed",
+      "loaded",
+      "not_configured",
+      "unknown"
+    ],
+    "PointerButton": [
+      "left",
+      "middle",
+      "none",
+      "right"
+    ],
+    "PointerKind": [
+      "down",
+      "move",
+      "up"
+    ],
+    "ProfileCapability": [
+      "effort",
+      "launch_context",
+      "launch_prompt",
+      "model",
+      "unknown"
+    ],
+    "ProfileUnavailableKind": [
+      "metacharacter",
+      "needs_native_program",
+      "no_command",
+      "no_default_shell",
+      "not_found",
+      "unknown"
+    ],
+    "ReportOutcome": [
+      "failed",
+      "succeeded"
+    ],
+    "ReviewMark": [
+      "changed",
+      "new"
+    ],
+    "UnknownReason": [
+      "declared_unknown",
+      "detector_stopped",
+      "no_definition",
+      "no_rule_matched",
+      "not_yet_judged",
+      "screen_lost"
+    ],
+    "WindowStatus": [
+      "exited",
+      "idle",
+      "interrupted",
+      "running",
+      "unknown",
+      "waiting_approval",
+      "waiting_input"
+    ],
+    "WithdrawReason": [
+      "requester_disconnected",
+      "resolved",
+      "timeout",
+      "unknown"
+    ]
+  }
+}

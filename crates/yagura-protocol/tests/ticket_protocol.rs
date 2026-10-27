@@ -18,10 +18,9 @@
 
 use serde_json::{Value, json};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, PROTOCOL_REVISION, PROTOCOL_REVISION_BASELINE,
-    TASK_INSTRUCTION_MIN_REVISION, TICKETS_MIN_REVISION, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    ClientMessage, DaemonMessage, PROTOCOL_REVISION_BASELINE, TASK_INSTRUCTION_MIN_REVISION,
+    TICKETS_MIN_REVISION, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message, required_protocol_revision,
 };
 
 fn decode_client(frame: &Value) -> ClientMessage {
@@ -250,9 +249,8 @@ fn a_ticket_summary_carries_its_plan_count_and_required_field_values() {
 }
 
 #[test]
-fn the_tickets_revision_is_twenty_nine_and_is_the_current_revision() {
+fn the_tickets_revision_is_twenty_nine() {
     assert_eq!(TICKETS_MIN_REVISION, 29);
-    assert_eq!(PROTOCOL_REVISION, 29);
 }
 
 #[test]

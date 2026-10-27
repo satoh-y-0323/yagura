@@ -43,6 +43,7 @@ fn sample_rows() -> Vec<McpRegistrationRow> {
             )),
             toml_set: None,
             entries: Vec::new(),
+            notice: None,
         },
         McpRegistrationRow {
             profile: "sample-cli-wsl".to_owned(),
@@ -65,6 +66,7 @@ fn sample_rows() -> Vec<McpRegistrationRow> {
                 }],
             }),
             entries: Vec::new(),
+            notice: None,
         },
     ]
 }
