@@ -25,7 +25,10 @@ const FIXTURE_APPROVAL_HISTORY_FOCUS: &str =
     include_str!("fixtures/grok-build/100x30-approval-history-focus.txt");
 const FIXTURE_INTERRUPTED_HISTORY_FOCUS: &str =
     include_str!("fixtures/grok-build/100x30-interrupted-history-focus.txt");
-const FIXTURE_TRUST: &str = include_str!("fixtures/grok-build/100x30-trust.txt");
+const FIXTURE_DAEMON_IDLE_VERSION_FOOTER: &str =
+    include_str!("fixtures/grok-build/daemon-idle-version-footer.txt");
+const FIXTURE_DAEMON_TRUST_SCREEN: &str =
+    include_str!("fixtures/grok-build/daemon-trust-screen.txt");
 const FIXTURE_WSL_IDLE: &str = include_str!("fixtures/grok-build/100x30-wsl-idle.txt");
 const FIXTURE_WSL_RUNNING: &str = include_str!("fixtures/grok-build/100x30-wsl-running.txt");
 const FIXTURE_WSL_AFTER_TURN: &str = include_str!("fixtures/grok-build/100x30-wsl-after-turn.txt");
@@ -54,13 +57,31 @@ const CASES: &[(&str, &str, WindowStatus)] = &[
         FIXTURE_INTERRUPTED_HISTORY_FOCUS,
         WindowStatus::Unknown,
     ),
-    ("trust", FIXTURE_TRUST, WindowStatus::WaitingApproval),
     ("wsl-idle", FIXTURE_WSL_IDLE, WindowStatus::WaitingInput),
     ("wsl-running", FIXTURE_WSL_RUNNING, WindowStatus::Running),
     (
         "wsl-after-turn",
         FIXTURE_WSL_AFTER_TURN,
         WindowStatus::WaitingInput,
+    ),
+];
+
+/// The size of the window the daemon opened when the `daemon-*` fixtures were taken.
+const DAEMON_WINDOW: (u16, u16) = (88, 23);
+
+/// Screens read from a daemon-opened window, judged at that window's size.
+const DAEMON_CASES: &[(&str, &str, WindowStatus)] = &[
+    // After the trust question the start screen keeps the version-only footer under the
+    // composer box, so that footer alone does not mean the trust question.
+    (
+        "daemon-idle-version-footer",
+        FIXTURE_DAEMON_IDLE_VERSION_FOOTER,
+        WindowStatus::WaitingInput,
+    ),
+    (
+        "daemon-trust-screen",
+        FIXTURE_DAEMON_TRUST_SCREEN,
+        WindowStatus::WaitingApproval,
     ),
 ];
 
@@ -79,10 +100,14 @@ async fn grok_build_definition_classifies_captured_screens() {
     tokio::time::pause();
     let source = repo_definition_text(DEFINITION);
 
+    let sized_cases = CASES
+        .iter()
+        .map(|case| ((100, 30), case))
+        .chain(DAEMON_CASES.iter().map(|case| (DAEMON_WINDOW, case)));
     let mut mismatches = Vec::new();
-    for (name, fixture, expected) in CASES {
+    for ((cols, rows), (name, fixture, expected)) in sized_cases {
         let lines: Vec<&str> = fixture.lines().collect();
-        let status = judge(&source, 100, 30, &lines).await;
+        let status = judge(&source, cols, rows, &lines).await;
         if status != *expected {
             mismatches.push(format!("{name}: expected {expected:?}, got {status:?}"));
         }

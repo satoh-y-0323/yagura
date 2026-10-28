@@ -393,6 +393,17 @@ impl VtScreen {
         n: usize,
         section: &crate::detector::definition::ComposerSection,
     ) -> Vec<String> {
+        self.window_of(self.lines_without_composer(section), n)
+    }
+
+    /// Every row of the screen, top-to-bottom, with the composer's body taken
+    /// out the way [`VtScreen::bottom_lines_without_composer`] takes it out,
+    /// before any window is cut.
+    #[must_use]
+    pub(crate) fn lines_without_composer(
+        &self,
+        section: &crate::detector::definition::ComposerSection,
+    ) -> Vec<String> {
         let mut lines = self.screen_rows();
         let origin = self.composer_origin(section);
         if !self.cursor_hidden()
@@ -422,10 +433,33 @@ impl VtScreen {
                 lines.drain(marker_row + 1..=cursor_row);
             }
         }
-        self.window_of(lines, n)
+        lines
     }
 
-    fn window_of(&self, lines: Vec<String>, n: usize) -> Vec<String> {
+    /// Every row of the screen, top-to-bottom, as [`VtScreen::bottom_lines`]
+    /// reads them before cutting its window.
+    #[must_use]
+    pub(crate) fn all_lines(&self) -> Vec<String> {
+        self.screen_rows()
+    }
+
+    /// The window [`VtScreen::bottom_lines`] cuts from `lines`, copied out so
+    /// the caller keeps `lines` whole.
+    #[must_use]
+    pub(crate) fn bottom_window(&self, lines: &[String], n: usize) -> Vec<String> {
+        lines[self.window_range(lines, n)].to_vec()
+    }
+
+    /// The same window as [`VtScreen::bottom_window`], cut from `lines` in place.
+    #[must_use]
+    pub(crate) fn window_of(&self, mut lines: Vec<String>, n: usize) -> Vec<String> {
+        let range = self.window_range(&lines, n);
+        lines.truncate(range.end);
+        lines.drain(..range.start);
+        lines
+    }
+
+    fn window_range(&self, lines: &[String], n: usize) -> std::ops::Range<usize> {
         let (_cols, rows) = self.size();
         let take = n.min(usize::from(rows));
         let last_written = lines
@@ -433,7 +467,7 @@ impl VtScreen {
             .rposition(|line| line.chars().any(|c| !c.is_whitespace()))
             .unwrap_or(0);
         let skip = (last_written + 1).saturating_sub(take);
-        lines.into_iter().skip(skip).take(take).collect()
+        skip.min(lines.len())..(skip + take).min(lines.len())
     }
 
     /// Resizes the virtual screen, keeping its contents readable afterwards.

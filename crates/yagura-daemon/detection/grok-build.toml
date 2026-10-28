@@ -22,15 +22,6 @@ pattern = '\d+/\d+:select|Tab/Space:permission'
 priority = 30
 region = "bottom"
 
-# The folder trust prompt. Its question sits mid-screen; only the version line
-# it ends with reaches the bottom rows. The welcome screen's last row shows the
-# channel without the version (1.0.70).
-[[rules]]
-status = "waiting_approval"
-pattern = 'Grok Build\s+\d+\.\d+\.\d+\s+\[\w+\]\s*$'
-priority = 30
-region = "bottom"
-
 # The history holds the focus (after Ctrl+C or Esc): a key acts on the history
 # and never reaches the composer, so there is nothing to type into (1.0.70).
 [[rules]]
@@ -47,13 +38,22 @@ pattern = 'Ctrl\+c:cancel'
 priority = 20
 region = "bottom"
 
-# The composer box's lower rule. The box is drawn during a turn too, hence the
-# lowest priority; a permission box has no such corner (1.0.70).
+# The composer box's lower rule. The box is drawn during a turn too, hence below
+# running; a permission box has no such corner (1.0.70).
 [[rules]]
 status = "waiting_input"
 pattern = '^\s*╰─+.*─╯\s*$'
 priority = 10
 region = "bottom"
+
+# The folder trust question, alone on its row mid-screen; its distance from the
+# bottom changes with the window's height. Lowest priority: it decides only a
+# screen with no composer box, turn, history focus or permission box (1.0.70).
+[[rules]]
+status = "waiting_approval"
+pattern = '^\s*Do you trust the contents of this directory\?\s*$'
+priority = 5
+region = "screen"
 
 # The composer is a `│ > ` row (`│ ❯ ` under WSL; what picks the mark is not
 # known) inside a box whose right border is drawn like text, so it is removed

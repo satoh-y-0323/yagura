@@ -1,0 +1,22 @@
+
+  D:\yagura-build\t1043-untrusted
+
+
+
+                      Do you trust the contents of this directory?
+                             D:\yagura-build\t1043-untrusted
+
+                Grok Build may run or modify contents in this directory,
+                                 posing security risks.
+
+                             Yes, proceed                 y
+                             No, quit                     n
+
+
+
+
+
+
+
+
+                                                           Grok Build  1.0.70 [stable]

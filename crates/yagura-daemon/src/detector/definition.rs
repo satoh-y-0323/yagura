@@ -51,7 +51,7 @@ pub fn is_valid_detection_name(name: &str) -> bool {
 
 /// The region of the screen a [`Rule`] pattern is matched against.
 ///
-/// Only `"bottom"` is currently supported; any other TOML string (including
+/// `"bottom"` and `"screen"` are the values; any other TOML string (including
 /// `"full"`) is a rejected, unknown value rather than silently ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +59,10 @@ pub enum Region {
     /// Match against the window ending at the last line holding a visible
     /// (non-whitespace) character, `bottom_line_count` lines tall.
     Bottom,
+    /// Match against every row of the screen, one row at a time, with the
+    /// composer's body taken out as for `Bottom`: for text whose distance
+    /// from the bottom changes with the window's height.
+    Screen,
 }
 
 /// Debounce configuration: how long a raw judgement must hold before it is

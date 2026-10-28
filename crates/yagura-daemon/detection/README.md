@@ -188,7 +188,8 @@ confirm_ms = 300               # how long a raw judgement must hold before it
 status = "waiting_approval"    # one of the seven statuses below
 pattern = 'Do you want to proceed\?'
 priority = 30                  # larger wins when several rules match
-region = "bottom"              # only "bottom" is accepted today
+region = "bottom"              # "bottom" or "screen"; see What patterns
+                               # are matched against
 
 [quiescence]                   # optional; both keys required when present
 status = "idle"
@@ -618,10 +619,19 @@ line still inside the window counts toward its height. A rule that matches a
 whitespace-only line (for example `^\s*$`) therefore stops matching once that
 line sits below the window's tail.
 
+`region = "screen"` matches against every row of the screen, one row at a
+time, for text whose distance from the bottom changes with the window's
+height -- a question drawn in the middle of a full-screen dialog, for
+instance. Since every row is read, anchor such a pattern to the whole row
+(`^\s*...\s*$`) and give it a low `priority`, so the same text left in the
+conversation history does not outrank the rules that read the CLI's current
+state.
+
 For a definition with a `[composer]`, the composer's body is taken out
 first, while the cursor is visible and the composer can be located: the
 marker line keeps only the marker and its `separator`, and the continuation
-lines down to the cursor are dropped, before the bottom window is taken. A
+lines down to the cursor are dropped, before the bottom window is taken and
+before a `region = "screen"` rule reads the rows. A
 draft quoting a rule's text therefore does not match it, and a tall body
 does not push the CLI's own lines out of the window. When the cursor is
 hidden or the composer cannot be located -- a body taller than the screen,
@@ -737,8 +747,8 @@ Which reason a window carries says where to look. `no_rule_matched` is a
 statement about what is on the screen: read the window itself and compare it
 with the definition's patterns. The daemon also logs one `detector match
 window` line per evaluation at `debug` level, carrying the exact lines the
-rules were matched against -- the window `region` selected, not the whole
-screen -- and which status matched, which is what tells a wrong pattern apart
+rules were matched against -- the bottom window, and every row only when a
+rule reads `region = "screen"` -- and which status matched, which is what tells a wrong pattern apart
 from a rule looking at the wrong lines. `screen_lost`, `detector_stopped` and
 `no_definition` are statements about the daemon's own reading rather than about
 the screen, so the patterns are not the place to look for them at all.
@@ -1091,11 +1101,14 @@ single event (only `Stop`, say) is not.
   interrupted before any output.** Pressing Esc between a submit and the
   first output cancels the turn and refills the composer with what was sent,
   text the daemon typed included; send it again or clear it by hand.
-- **Grok Build's folder trust prompt is read from its last line.** The
-  question sits in the middle of the screen, out of the bottom rows the
-  rules see, so the `grok-build` definition reads the prompt by the version
-  line it ends with (`Grok Build 1.0.70 [stable]`), as `waiting_approval`. The
-  welcome screen's last line shows the channel without the version.
+- **Grok Build's folder trust prompt is read from its question.** The
+  question sits in the middle of the screen, at a distance from the bottom
+  that changes with the window's height, so the `grok-build` definition reads
+  it with a `region = "screen"` rule, as `waiting_approval`, only when no
+  other rule matches. Two screens read otherwise: when a popup covers the
+  bottom of the screen and hides the input box, the same question left alone
+  on a row of the history reads as `waiting_approval`; and in a window too
+  narrow for the question to fit on one row, the prompt reads as `unknown`.
 - **After a cancelled turn, Grok Build's history holds the focus.** Once a
   turn is cancelled with Ctrl+C, or Esc is pressed while a permission box is
   shown, keys act on the history rather than the input line, and its footer

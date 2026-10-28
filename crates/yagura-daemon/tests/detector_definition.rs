@@ -275,8 +275,25 @@ region = "full"
 
     assert!(
         parse_definition(toml).is_err(),
-        "\"full\" must be rejected: this unit only supports region = \"bottom\""
+        "\"full\" must be rejected: only region = \"bottom\" and region = \"screen\" exist"
     );
+}
+
+#[test]
+fn accepts_the_screen_region() {
+    let toml = r#"
+schema_version = 1
+name = "screen-region"
+
+[[rules]]
+status = "waiting_approval"
+pattern = 'x'
+priority = 1
+region = "screen"
+"#;
+
+    let definition = parse_definition(toml).expect("region = \"screen\" must load");
+    assert_eq!(definition.rules[0].region, Region::Screen);
 }
 
 #[test]

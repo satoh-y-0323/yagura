@@ -199,6 +199,15 @@ struct ScreenReading {
     composer: Option<ComposerReadout>,
 }
 
+/// The rows a reading's rules are matched against, composer body taken out.
+#[derive(Debug)]
+struct RuleLines {
+    /// The `region = "bottom"` window.
+    bottom: Vec<String>,
+    /// Every row, kept only when some rule reads `region = "screen"`.
+    screen: Option<Vec<String>>,
+}
+
 /// Synchronous state machine turning PTY output, child-exit facts and
 /// structured-source events into a confirmed [`WindowStatus`].
 ///
@@ -646,27 +655,40 @@ impl DetectionEngine {
             .definition
             .as_ref()
             .is_some_and(|definition| !definition.rules.is_empty());
+        let reads_screen = self.definition.as_ref().is_some_and(|definition| {
+            definition
+                .rules
+                .iter()
+                .any(|rule| rule.region == Region::Screen)
+        });
         let (read, generation) = {
             let mut model = self.screen.lock();
             let read = model.read_guarded(|screen| {
-                let bottom = has_rules.then(|| match composer {
-                    Some(section) => {
-                        screen.bottom_lines_without_composer(self.bottom_line_count, section)
+                let lines = has_rules.then(|| {
+                    let all = match composer {
+                        Some(section) => screen.lines_without_composer(section),
+                        None => screen.all_lines(),
+                    };
+                    if reads_screen {
+                        RuleLines {
+                            bottom: screen.bottom_window(&all, self.bottom_line_count),
+                            screen: Some(all),
+                        }
+                    } else {
+                        RuleLines {
+                            bottom: screen.window_of(all, self.bottom_line_count),
+                            screen: None,
+                        }
                     }
-                    None => screen.bottom_lines(self.bottom_line_count),
                 });
                 let readout = composer
                     .filter(|_| with_composer)
                     .map(|section| screen.read_composer(section));
-                (
-                    (screen.cursor_hidden(), screen.sync_open()),
-                    bottom,
-                    readout,
-                )
+                ((screen.cursor_hidden(), screen.sync_open()), lines, readout)
             });
             (read, model.generation())
         };
-        let ((cursor_hidden, sync_open), bottom, composer) = read.unwrap_or_default();
+        let ((cursor_hidden, sync_open), lines, composer) = read.unwrap_or_default();
         ScreenReading {
             // A read that panicked rebuilt the model, which moved its generation.
             rebuilt: generation != self.screen_generation,
@@ -675,7 +697,7 @@ impl DetectionEngine {
             sync_open,
             // Matched after the lock is released, so the reader thread does
             // not wait on the regular expressions.
-            rule: bottom.and_then(|bottom| self.match_rules(&bottom)),
+            rule: lines.and_then(|lines| self.match_rules(&lines)),
             composer,
         }
     }
@@ -984,22 +1006,31 @@ impl DetectionEngine {
         self.judge_by_time(definition, now)
     }
 
-    /// The highest-priority rule matching `bottom`, the bottom lines of the
-    /// screen with the composer's body taken out. Runs after the model's lock
-    /// is released.
-    fn match_rules(&self, bottom: &[String]) -> Option<WindowStatus> {
+    /// The highest-priority rule matching `lines`, the screen's rows with the
+    /// composer's body taken out. Runs after the model's lock is released.
+    fn match_rules(&self, lines: &RuleLines) -> Option<WindowStatus> {
         let definition = self.definition.as_ref()?;
+        let bottom = &lines.bottom;
         let matched = definition
             .rules
             .iter()
-            .find(|rule| match rule.region {
-                Region::Bottom => bottom.iter().any(|line| rule.pattern.is_match(line)),
+            .find(|rule| {
+                let rows = match rule.region {
+                    Region::Bottom => bottom.as_slice(),
+                    Region::Screen => lines.screen.as_deref().unwrap_or_default(),
+                };
+                rows.iter().any(|line| rule.pattern.is_match(line))
             })
             .map(|rule| rule.status);
         // Diagnostic aid for definition authors: at debug level the daemon
         // logs what the engine matched against, so a pattern mismatch can be
         // diagnosed from the log alone.
-        tracing::debug!(matched = ?matched, lines = ?bottom, "detector match window");
+        tracing::debug!(
+            matched = ?matched,
+            lines = ?bottom,
+            screen = ?lines.screen,
+            "detector match window"
+        );
         matched
     }
 

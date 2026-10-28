@@ -1309,6 +1309,80 @@ async fn bottom_line_count_from_the_definition_wins_over_the_config_default() {
     assert_eq!(engine.status(), WindowStatus::Unknown);
 }
 
+// --- region = "screen" ------------------------------------------------------
+
+/// The marker rule read over the whole screen while the bottom window is one row.
+const MARKER_SCREEN_DEF: &str = r#"
+schema_version = 1
+name = "test-marker-screen"
+bottom_line_count = 1
+
+[debounce]
+confirm_ms = 300
+
+[[rules]]
+status = "waiting_approval"
+pattern = 'MARKER'
+priority = 10
+region = "screen"
+"#;
+
+/// A screen rule next to a composer whose body is taken out before matching.
+const MARKER_SCREEN_COMPOSER_DEF: &str = r#"
+schema_version = 1
+name = "test-marker-screen-composer"
+
+[debounce]
+confirm_ms = 300
+
+[[rules]]
+status = "waiting_approval"
+pattern = 'MARKER'
+priority = 10
+region = "screen"
+
+[composer]
+marker = '^>'
+separator = " "
+continuation_prefix = "  "
+"#;
+
+#[tokio::test]
+async fn a_screen_rule_matches_a_row_above_the_bottom_window() {
+    tokio::time::pause();
+    let config = DaemonConfig::default();
+    let mut engine = new_engine(MARKER_SCREEN_DEF, &config);
+
+    engine.feed(marker_screen());
+    assert_eq!(
+        tick_after_ms(&mut engine, 300).await,
+        Some(DetectedStatus::WaitingApproval)
+    );
+}
+
+#[tokio::test]
+async fn a_screen_rule_does_not_match_the_composer_body() {
+    tokio::time::pause();
+    let config = DaemonConfig::default();
+    let draft = "header\r\n> MARKER";
+
+    // The cursor stays visible at the end of the draft, so the body is taken out.
+    let mut engine = new_engine(MARKER_SCREEN_COMPOSER_DEF, &config);
+    engine.feed(&repaint(draft));
+    tick_after_ms(&mut engine, 5_000).await;
+    tick_after_ms(&mut engine, 5_000).await;
+    assert_eq!(engine.status(), WindowStatus::Unknown);
+
+    // With the cursor hidden the composer is not located, so the same rows match once
+    // the hidden-cursor screen has settled and the verdict has been confirmed.
+    let mut hidden = new_engine(MARKER_SCREEN_COMPOSER_DEF, &config);
+    hidden.feed(&repaint(draft));
+    hidden.feed(b"\x1b[?25l");
+    tick_after_ms(&mut hidden, 5_000).await;
+    tick_after_ms(&mut hidden, 5_000).await;
+    assert_eq!(hidden.status(), WindowStatus::WaitingApproval);
+}
+
 // --- event emission --------------------------------------------------------
 
 #[tokio::test]

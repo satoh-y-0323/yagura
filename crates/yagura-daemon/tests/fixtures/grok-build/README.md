@@ -36,10 +36,25 @@ themselves.
 | 100x30-approval | Windows | WaitingApproval | a permission box for `rm`; the box's own footer `1/5:select` (PP-5 `approval`) |
 | 100x30-approval-history-focus | Windows | WaitingApproval | Esc after the permission box: the box stays, focus moved to the history, footer `Tab/Space:permission` and still `Ctrl+c:cancel` (PP-5 `afteresc`) |
 | 100x30-interrupted-history-focus | Windows | Unknown | after Ctrl+C cancelled the turn: the history holds the focus, footer `Space:prompt` (PP-5 `ctrlc`) |
-| 100x30-trust | Windows | WaitingApproval | the folder trust prompt; only its last line, `Grok Build  1.0.70 [stable]`, is within the bottom 16 lines (M2 `l15`) |
 | 100x30-wsl-idle | WSL | WaitingInput | the empty composer after start, mark `❯` (PP-10 B `l10`) |
 | 100x30-wsl-running | WSL | Running | 4 seconds into a turn, mark `❯` (PP-10 A `l4`) |
 | 100x30-wsl-after-turn | WSL | WaitingInput | after the turn ended, mark `❯` (PP-10 A `l30`) |
+
+The folder trust prompt has no `100x30-*` capture: the bottom 16 lines of it
+hold only the version line, not the question the definition reads, so such a
+cut does not stand for the screen.
+
+| daemon fixture | platform | cols x rows | expected | screen |
+|---|---|---|---|---|
+| daemon-idle-version-footer | Windows | 88x23 | WaitingInput | the start screen with the empty composer; its last line is the version line, `Grok Build  1.0.70 [stable]` |
+| daemon-trust-screen | Windows | 88x23 | WaitingApproval | the folder trust prompt in a folder not yet trusted, every row of the screen |
+
+The `daemon-*` files were read with `read_output` from a window the daemon
+opened with `open_window` (Grok Build 1.0.70, Windows). `read_output` returns
+text, not the window's size: 88 x 23 is estimated from the capture (the
+86-column composer box with two columns of margin on each side, and the 23
+rows `read_output` returned for the trust prompt). The tests judge them at that
+size.
 
 | composer fixture | cols x rows | expected | screen |
 |---|---|---|---|
