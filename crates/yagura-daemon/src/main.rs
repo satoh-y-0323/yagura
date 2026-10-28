@@ -27,9 +27,9 @@ use yagura_daemon::child_env::{
 };
 use yagura_daemon::cli::{self, CliCommand};
 use yagura_daemon::config::{
-    StartupParts, log_dir, prepare_report_dir, report_dir, resolve_close_settle_ms,
-    resolve_default_window_cwd, resolve_input_echo_window_ms, resolve_max_windows,
-    resolve_resize_redraw_window_ms, resolve_status_token_override,
+    StartupParts, log_dir, prepare_report_dir, registration_cwd, report_dir,
+    resolve_close_settle_ms, resolve_default_window_cwd, resolve_input_echo_window_ms,
+    resolve_max_windows, resolve_resize_redraw_window_ms, resolve_status_token_override,
 };
 use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
@@ -449,6 +449,8 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
     // it never overwrites, or reads as, the default instance's own.
     config.instance_id = namespace.id().map(str::to_string);
     config.home_dir = home_dir;
+    config.registration_cwd =
+        yagura_os::default_state_base_dir().map(|base| registration_cwd(&base, &namespace));
 
     let registry = Arc::new(WindowRegistry::new(config.clone()));
 

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, mcp_cli_stub_profile_with_table, read_response,
-    register_approver, send, unique_temp_dir, write_profile,
+    register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::{ProfileParseError, parse_profile};
@@ -48,6 +48,7 @@ async fn list_rows(profile_sources: &[(&str, String)]) -> Vec<McpRegistrationRow
     let config = DaemonConfig {
         profiles_dir: Some(profiles_dir),
         home_dir: Some(home_dir),
+        registration_cwd: registration_cwd_in(&root),
         instance_id: None,
         mcp_bridge: Some(root.join("bridge").join("yagura-mcp")),
         mcp_registration_timeout: Duration::from_secs(20),

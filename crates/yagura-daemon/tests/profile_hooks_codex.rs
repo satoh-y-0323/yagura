@@ -26,6 +26,7 @@ use common::{
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::config::OwnedEmptyDir;
 use yagura_daemon::mcp_registration::RegistrationTarget;
 use yagura_daemon::profile::{InjectedPaths, ProfileOs, parse_profile, render_hooks_args};
 use yagura_os::program::contains_cmd_metacharacter;
@@ -41,6 +42,10 @@ const HOST_PROFILE: &str = "codex-cli";
 const WSL_PROFILE: &str = "wsl-codex-cli";
 
 const CONFIG_FILE: &str = ".codex/config.toml";
+
+/// The project settings the stub reads from its working directory
+/// (`MCP_CLI_STUB_PROJECT_REGISTRY`).
+const PROJECT_REGISTRY_FILE: &str = ".stub-project.json";
 
 /// Codex event name, the snake_case form its trust keys use, and the status
 /// the hook reports.
@@ -359,6 +364,7 @@ fn the_injected_codex_arguments_pass_the_command_interpreters_metacharacter_gate
 // =============================================================================
 
 struct Layout {
+    root: PathBuf,
     profiles_dir: PathBuf,
     home_dir: PathBuf,
     state_dir: PathBuf,
@@ -371,6 +377,7 @@ impl Layout {
     fn new(tag: &str) -> Self {
         let root = unique_temp_dir(tag);
         let layout = Self {
+            root: root.clone(),
             profiles_dir: root.join("profiles"),
             home_dir: root.join("home"),
             state_dir: root.join("stub-state"),
@@ -468,6 +475,10 @@ fn fixture_profile(profile: &str, layout: &Layout) -> String {
         ),
         ("MCP_CLI_STUB_TOML_TABLE_PATH", CONFIG_FILE),
         ("MCP_CLI_STUB_LOG", layout.log.to_str().expect("UTF-8")),
+        ("MCP_CLI_STUB_PROJECT_REGISTRY", PROJECT_REGISTRY_FILE),
+        // The home the stub resolves `CONFIG_FILE` against, as the CLI would.
+        ("HOME", home),
+        ("USERPROFILE", home),
     ] {
         env.insert(key.into(), toml::Value::String(value.to_string()));
     }
@@ -492,6 +503,10 @@ async fn start_as(tag: &str, profile: &str, layout: &Layout, instance: Option<&s
     let config = DaemonConfig {
         profiles_dir: Some(layout.profiles_dir.clone()),
         home_dir: Some(layout.home_dir.clone()),
+        registration_cwd: Some(OwnedEmptyDir::new(
+            layout.root.clone(),
+            layout.root.join("state").join("empty"),
+        )),
         instance_id: instance.map(str::to_string),
         mcp_bridge: Some(layout.bridge.clone()),
         mcp_config_dir: Some(layout.mcp_config_dir.clone()),
@@ -804,11 +819,20 @@ async fn open_and_read_launch(
     layout: &Layout,
     expected_launches: usize,
 ) -> Vec<String> {
+    open_in_and_read_launch(client, layout, expected_launches, None).await
+}
+
+async fn open_in_and_read_launch(
+    client: &mut Connection,
+    layout: &Layout,
+    expected_launches: usize,
+    cwd: Option<&Path>,
+) -> Vec<String> {
     send(
         client,
         &ClientMessage::OpenWindowFromProfile {
             profile: "codex".to_string(),
-            cwd: None,
+            cwd: cwd.map(|cwd| cwd.to_str().expect("UTF-8").to_string()),
             name: None,
             model: None,
             effort: None,
@@ -1002,5 +1026,59 @@ async fn a_named_instance_window_disables_only_the_default_bridge_registration()
         disabled_servers(&launch),
         vec![default_name],
         "only the bridge registration of another instance is disabled: {launch:?}"
+    );
+}
+
+// =============================================================================
+// Where the registration commands and a window's listing run
+// =============================================================================
+
+/// Writes a project's registrations, in the stub's registry form, to `dir`.
+fn write_project_registry(dir: &Path, registry: &serde_json::Value) {
+    std::fs::write(dir.join(PROJECT_REGISTRY_FILE), registry.to_string())
+        .expect("write project registry");
+}
+
+#[tokio::test]
+async fn a_registration_status_is_not_read_from_project_settings_in_the_home_directory() {
+    let layout = Layout::new("codex-status-no-project");
+    let server = RegistrationTarget::for_instance(None).server().to_string();
+    let bridge = layout.bridge.to_str().unwrap().to_string();
+    write_project_registry(
+        &layout.home_dir,
+        &serde_json::json!({ server.as_str(): { "command": bridge, "args": [] } }),
+    );
+    let h = start("codex-status-no-project", HOST_PROFILE, &layout).await;
+    let mut approver = approver_connection(&h).await;
+
+    assert_eq!(
+        listed_state(&mut approver, 1).await,
+        McpRegistrationState::NotRegistered,
+        "a project's settings in the home directory are not the CLI's registration"
+    );
+}
+
+#[tokio::test]
+async fn a_window_turns_off_another_instances_bridge_registered_in_its_own_project() {
+    let layout = Layout::new("codex-disable-project");
+    let default_name = RegistrationTarget::for_instance(None).server().to_string();
+    let bridge_name = layout.bridge.file_name().unwrap().to_str().unwrap();
+    let project = layout.root.join("project");
+    std::fs::create_dir_all(&project).expect("create project dir");
+    write_project_registry(
+        &project,
+        &serde_json::json!({
+            default_name.as_str(): { "command": format!("/default/{bridge_name}"), "args": [] },
+        }),
+    );
+    let h = start_as("codex-disable-project", HOST_PROFILE, &layout, Some("work")).await;
+    let mut client = approver_connection(&h).await;
+
+    let launch = open_in_and_read_launch(&mut client, &layout, 1, Some(&project)).await;
+
+    assert_eq!(
+        disabled_servers(&launch),
+        vec![default_name],
+        "the registration the window's project carries is turned off too: {launch:?}"
     );
 }

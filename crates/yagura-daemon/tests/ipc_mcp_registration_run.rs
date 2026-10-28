@@ -18,8 +18,8 @@ use std::time::Duration;
 use common::{
     Harness, McpCliStubFixture, approver_base_config, echo_child_path, expect_error, identify,
     mcp_cli_stub_path, mcp_cli_stub_profile_source, mcp_cli_stub_profile_with_table,
-    mcp_cli_stub_toml_literal, read_response, register_approver, send, unique_temp_dir,
-    write_profile,
+    mcp_cli_stub_toml_literal, read_response, register_approver, registration_cwd_in, send,
+    unique_temp_dir, write_profile,
 };
 use serde_json::{Value, json};
 use tracing_test::traced_test;
@@ -104,6 +104,7 @@ fn registration_config(layout: &Layout, bridge: Option<PathBuf>) -> DaemonConfig
     DaemonConfig {
         profiles_dir: Some(layout.profiles_dir.clone()),
         home_dir: Some(layout.home_dir.clone()),
+        registration_cwd: registration_cwd_in(&layout.root),
         instance_id: None,
         mcp_bridge: bridge,
         mcp_registration_timeout: Duration::from_secs(20),
@@ -197,6 +198,7 @@ fn host_toml_set_profile(
         toml_table_path: Some(HOST_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let mut source = mcp_cli_stub_profile_source(display_name, &fixture);
     // `mcp_cli_stub_profile_source` already writes its own `[env]` table
@@ -625,6 +627,7 @@ async fn register_fails_without_writing_when_the_declared_table_is_never_found()
         toml_table_path: Some(HOST_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let mut source = mcp_cli_stub_profile_source("Charlie", &fixture);
     source = source.replacen(
@@ -879,6 +882,8 @@ async fn a_foreign_row_naming_no_daemon_probes_only_its_bridge_even_with_a_repor
             &[
                 (state_key, state_value.as_str()),
                 ("MCP_CLI_STUB_TOML_TABLE_PATH", WSL_TOML_FILE),
+                ("HOME", home.as_str()),
+                ("USERPROFILE", home.as_str()),
             ],
         ),
     );
@@ -975,6 +980,8 @@ async fn a_foreign_row_edits_its_settings_file_through_its_own_read_and_replace_
             &[
                 (state_key, state_value.as_str()),
                 ("MCP_CLI_STUB_TOML_TABLE_PATH", WSL_TOML_FILE),
+                ("HOME", home.as_str()),
+                ("USERPROFILE", home.as_str()),
             ],
         ),
     );
@@ -1434,6 +1441,7 @@ async fn register_fails_when_the_cli_does_not_report_the_value_that_was_written(
         toml_table_path: Some(HOST_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let source = mcp_cli_stub_profile_source("Oscar", &fixture).replacen(
         &format!("file = '{HOST_TOML_FILE}'\n"),

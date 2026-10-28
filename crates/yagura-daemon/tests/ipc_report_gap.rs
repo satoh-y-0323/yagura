@@ -17,7 +17,8 @@ use std::time::Duration;
 use common::docs::read_doc_verbatim;
 use common::{
     Harness, approver_base_config, call_list_windows, empty_lookup, mcp_cli_stub_path,
-    read_response, register_approver, send, unique_temp_dir, wait_until_status, write_profile,
+    read_response, register_approver, registration_cwd_in, send, unique_temp_dir,
+    wait_until_status, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::REPORT_GAP_GRACE;
@@ -215,6 +216,7 @@ async fn listed_rows(tag: &str, profiles: &[&str]) -> Vec<McpRegistrationRow> {
     let config = DaemonConfig {
         profiles_dir: Some(profiles_dir),
         home_dir: Some(home_dir),
+        registration_cwd: registration_cwd_in(&root),
         report_dir: Some(report_dir),
         mcp_bridge: Some(root.join("bridge").join("yagura-mcp")),
         host_os: ProfileOs::host(),

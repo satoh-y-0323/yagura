@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use common::{
     CONTROL_INPUT_TABLE, approver_base_config, composer_section_toml, detection_config,
-    empty_lookup, read_response, register_approver, send, unique_temp_dir, wait_until_status,
-    write_profile,
+    empty_lookup, read_response, register_approver, registration_cwd_in, send, unique_temp_dir,
+    wait_until_status, write_profile,
 };
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, WindowRegistry};
@@ -127,6 +127,7 @@ impl Scene {
         config.store_db_path_resolved = opts.chat_store.then(|| root.join("yagura.db"));
         config.profiles_dir = Some(root.join("profiles"));
         config.home_dir = Some(home.clone());
+        config.registration_cwd = registration_cwd_in(&root);
         config.host_os = ProfileOs::host();
         // No PATH of the machine's, but its own command interpreter, which a `.cmd` needs.
         config.program_lookup = yagura_os::program::ProgramLookup {

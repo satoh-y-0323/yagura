@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, mcp_cli_stub_profile_with_table, read_response,
-    register_approver, send, unique_temp_dir, write_profile,
+    register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use serde_json::{Value, json};
 use yagura_daemon::DaemonConfig;
@@ -79,6 +79,9 @@ impl Layout {
         DaemonConfig {
             profiles_dir: Some(self.profiles_dir.clone()),
             home_dir: Some(self.home_dir.clone()),
+            registration_cwd: registration_cwd_in(
+                self.home_dir.parent().expect("home has a parent"),
+            ),
             instance_id: instance_id.map(str::to_string),
             mcp_bridge: Some(self.bridge.clone()),
             mcp_registration_timeout: Duration::from_secs(20),

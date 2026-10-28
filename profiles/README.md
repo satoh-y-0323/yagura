@@ -1314,7 +1314,8 @@ absent_exit = 3
   `absent_exit` (below) is accepted in the table; either fails the table, and
   the profile is left out of the listing with a warning.
 - It runs as its own standalone command -- not after the profile's launch
-  argv -- with the profile's `[env]`, in the home directory. Its standard
+  argv -- with the profile's `[env]`, in the daemon's empty folder for
+  registration commands (see [MCP registration](#mcp-registration)). Its standard
   output must be exactly one line that starts with `/`, holds no control
   character and is at most 4 KiB; anything else counts as a failure.
 - At a window's launch it runs only when an injection names one of the paths
@@ -1564,6 +1565,15 @@ The [`[host_paths]`](#host-paths) conversion, `files.read` and
 `files.replace` are different: they run as their own standalone commands,
 because they have nothing to do with launching the CLI.
 
+Every one of these commands starts in an empty folder the daemon keeps for
+them (`empty`, under the instance's state folder, created again whenever it
+is missing), never in the home directory: a CLI reads the settings of the
+folder it starts in as a project's, and the home directory read that way
+would mix a project's registration into the row -- from WSL, the Windows
+CLI's own -- and point `remove` at it. When the folder cannot be made, or
+the daemon found no home directory, the command is refused. A WSL command
+whose folder `wsl` cannot translate starts in the distribution's home.
+
 **Reading a row's state.** `status` names either a command to run (`args`,
 read the same way a window's launch is) or a settings file to read (`file`,
 home-relative; inside another environment, through `files.read` instead of
@@ -1608,7 +1618,8 @@ servers' tools instead (`--deny MCPTool({server}__*)`): the servers still
 start, and their tools are still listed by name, but cannot be called
 (Grok Build 1.0.70). When a profile
 declares `list`, the daemon runs `args` after the profile's launch argv (with
-no model or effort added) each time it opens a window from the profile, and
+no model or effort added), in the window's own working directory so it sees
+what the window's CLI sees, each time it opens a window from the profile, and
 appends `disable` once per registered server that is yagura's bridge for some
 other instance: its name is `yagura` or `yagura-<instance>` with a valid
 instance identifier, **and** the file name of the command it runs is the

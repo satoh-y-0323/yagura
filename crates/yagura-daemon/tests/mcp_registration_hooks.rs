@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use common::docs::read_doc_verbatim;
 use common::{
     Harness, approver_base_config, empty_lookup, mcp_cli_stub_path, read_response,
-    register_approver, send, unique_temp_dir, write_profile,
+    register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use serde_json::{Value, json};
 use yagura_daemon::DaemonConfig;
@@ -247,6 +247,7 @@ fn hooks_config(layout: &Layout) -> DaemonConfig {
     DaemonConfig {
         profiles_dir: Some(layout.profiles_dir.clone()),
         home_dir: Some(layout.home_dir.clone()),
+        registration_cwd: registration_cwd_in(layout.home_dir.parent().expect("home has a parent")),
         instance_id: None,
         mcp_bridge: Some(layout.bridge.clone()),
         mcp_config_dir: Some(layout.mcp_config_dir.clone()),

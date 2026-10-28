@@ -22,7 +22,8 @@ use std::time::Duration;
 
 use common::{
     Harness, VALID_TOKEN, call_open_window, call_send_handoff_from_profile, detection_config,
-    empty_lookup, expect_handoff_sent, identify, policy, read_response, send, write_profile,
+    empty_lookup, expect_handoff_sent, identify, policy, read_response, registration_dirs, send,
+    write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::ProfileOs;
@@ -94,8 +95,11 @@ fn mcp_daemon_config(
     mcp_config_dir: &Path,
     bridge: Option<PathBuf>,
 ) -> DaemonConfig {
+    let (home, registration_cwd) = registration_dirs("mcp-injection");
     DaemonConfig {
         profiles_dir: Some(profiles_dir),
+        home_dir: Some(home),
+        registration_cwd,
         host_os: ProfileOs::host(),
         program_lookup: empty_lookup(),
         program_is_executable: probe_is_executable,

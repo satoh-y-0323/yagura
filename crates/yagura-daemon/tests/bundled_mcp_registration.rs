@@ -20,7 +20,7 @@ use std::time::Duration;
 use common::docs::read_doc_verbatim;
 use common::{
     Harness, approver_base_config, empty_lookup, mcp_cli_stub_path, read_response,
-    register_approver, send, unique_temp_dir, write_profile,
+    register_approver, registration_cwd_in, send, unique_temp_dir, write_profile,
 };
 use serde_json::json;
 use yagura_daemon::DaemonConfig;
@@ -852,6 +852,7 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
         profiles_dir: Some(profiles_dir),
         bundled_profiles: true,
         home_dir: Some(home_dir),
+        registration_cwd: registration_cwd_in(&root),
         instance_id: None,
         mcp_bridge: None,
         ..approver_base_config()
@@ -1006,6 +1007,7 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
             profiles_dir: Some(profiles_dir),
             bundled_profiles: true,
             home_dir: Some(home_dir.clone()),
+            registration_cwd: registration_cwd_in(&root),
             instance_id: None,
             mcp_bridge: Some(bridge),
             report_dir: Some(root.join("report")),
@@ -1246,6 +1248,7 @@ async fn grok_register_then_remove_case(profile: &str, tag: &str) {
     let config = DaemonConfig {
         profiles_dir: Some(profiles_dir),
         home_dir: Some(home.clone()),
+        registration_cwd: registration_cwd_in(&root),
         instance_id: None,
         mcp_bridge: Some(root.join("bridge").join("yagura-mcp.exe")),
         report_dir: Some(report_dir.clone()),

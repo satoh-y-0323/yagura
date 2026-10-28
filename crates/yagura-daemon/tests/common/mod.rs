@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use yagura_daemon::config::OwnedEmptyDir;
 use yagura_daemon::control::{ApprovalPolicy, ApprovalSection};
 use yagura_daemon::detector::definition::{
     ComposerSection, Definition, load_definition, parse_definition,
@@ -3214,6 +3215,35 @@ pub struct McpCliStubFixture<'a> {
     /// `MCP_CLI_STUB_LOG`: where each invocation appends its argv and
     /// timing, for a case that must observe call order or concurrency.
     pub log_path: Option<&'a Path>,
+    /// The home the fixture resolves a relative settings-file path against
+    /// ([`stub_home_env`]), when it should not be the test process's own.
+    pub home_dir: Option<&'a Path>,
+}
+
+/// A [`yagura_daemon::DaemonConfig::registration_cwd`] below `root`, for a
+/// case whose registration commands must run.
+pub fn registration_cwd_in(root: &Path) -> Option<OwnedEmptyDir> {
+    Some(OwnedEmptyDir::new(
+        root.to_path_buf(),
+        root.join("registration-cwd"),
+    ))
+}
+
+/// A home directory and [`registration_cwd_in`] below a fresh temporary
+/// root: what the daemon needs to run `[mcp_registration]` and
+/// `[host_paths]` commands at all.
+pub fn registration_dirs(tag: &str) -> (PathBuf, Option<OwnedEmptyDir>) {
+    let root = unique_temp_dir(tag);
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).expect("create home dir");
+    (home, registration_cwd_in(&root))
+}
+
+/// The variables that make `home` the home directory a `mcp_cli_stub`
+/// child resolves a relative settings-file path against, on every OS.
+pub fn stub_home_env(home: &Path) -> [(&'static str, String); 2] {
+    let home = home.to_str().expect("home is UTF-8").to_string();
+    [("HOME", home.clone()), ("USERPROFILE", home)]
 }
 
 /// A TOML literal string (`'...'`), the same way
@@ -3306,6 +3336,11 @@ pub fn mcp_cli_stub_profile_source(display_name: &str, fixture: &McpCliStubFixtu
     }
     if let Some(path) = fixture.log_path {
         env_table.push_str(&env_line("MCP_CLI_STUB_LOG", &path.to_string_lossy()));
+    }
+    if let Some(home) = fixture.home_dir {
+        for (key, value) in stub_home_env(home) {
+            env_table.push_str(&env_line(key, &value));
+        }
     }
     source.push_str(&env_table);
     source

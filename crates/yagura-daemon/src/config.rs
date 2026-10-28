@@ -382,14 +382,24 @@ pub struct DaemonConfig {
     /// `yagura_os::InstanceNamespace::id`. Defaults to `None`.
     pub instance_id: Option<String>,
 
-    /// The home directory a `[mcp_registration]` child is started in, and the
-    /// base a host-form `status.file` is resolved against. `None` means no
-    /// usable home was found: a host settings-file read then reports
+    /// The base a host-form `status.file` is resolved against. `None` means
+    /// no usable home was found: a host settings-file read then reports
     /// [`crate::mcp_registration::StatusObservation::Exited`] with no exit
-    /// code rather than falling back to the daemon's own current directory.
-    /// Resolved once by `main.rs` from `std::env::home_dir`. Defaults to
-    /// `None`.
+    /// code, and every `[mcp_registration]` command is refused, rather than
+    /// falling back to the daemon's own current directory. Resolved once by
+    /// `main.rs` from `std::env::home_dir`. Defaults to `None`.
     pub home_dir: Option<PathBuf>,
+
+    /// The directory every `[mcp_registration]` command (a status read, a
+    /// registration or removal, a `[host_paths]` conversion or file tool) is
+    /// started in. It holds nothing, so a CLI that reads a project's
+    /// settings from its working directory reads none there; the home
+    /// directory would be read as a project, and from WSL that project is
+    /// the Windows CLI's own settings. Checked, and created again when
+    /// missing, before every command. `None` refuses every such command.
+    /// Composed once by `main.rs` with [`registration_cwd`]. Defaults to
+    /// `None`.
+    pub registration_cwd: Option<OwnedEmptyDir>,
 
     /// How long one `[mcp_registration]` command (a probe, a status read, or
     /// a registration or removal) may run before its whole process tree is
@@ -695,6 +705,7 @@ impl Default for DaemonConfig {
             model_choices_max_output_bytes: DEFAULT_MODEL_CHOICES_MAX_OUTPUT_BYTES,
             instance_id: None,
             home_dir: None,
+            registration_cwd: None,
             mcp_registration_timeout: Duration::from_secs(DEFAULT_MCP_REGISTRATION_TIMEOUT_SECS),
             mcp_registration_max_output_bytes: DEFAULT_MCP_REGISTRATION_MAX_OUTPUT_BYTES,
             mcp_registration_status_max_concurrent: DEFAULT_MCP_REGISTRATION_STATUS_MAX_CONCURRENT,
@@ -720,6 +731,53 @@ pub fn log_dir(state_base: &Path, namespace: &InstanceNamespace) -> PathBuf {
 #[must_use]
 pub fn report_dir(report_base: &Path, namespace: &InstanceNamespace) -> PathBuf {
     yagura_os::instance_dir(report_base, namespace).join("bin")
+}
+
+/// An owner-only directory the daemon keeps empty, together with the base it
+/// is narrowed from (see [`yagura_os::secure_owned_dir`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedEmptyDir {
+    base: PathBuf,
+    dir: PathBuf,
+}
+
+impl OwnedEmptyDir {
+    /// `dir`, which must be below `base` for [`Self::ensure`] to succeed.
+    #[must_use]
+    pub fn new(base: PathBuf, dir: PathBuf) -> Self {
+        Self { base, dir }
+    }
+
+    /// The directory itself.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Blocking: creates the directory when it is missing and, on Unix,
+    /// narrows every directory from below the base down to it to owner-only.
+    /// Nothing is ever placed in it.
+    ///
+    /// # Errors
+    ///
+    /// A description of the step that failed: the directory is not below its
+    /// base, a component is a symlink (Unix), or it could not be created.
+    pub fn ensure(&self) -> Result<(), String> {
+        yagura_os::secure_owned_dir(&self.base, &self.dir)?;
+        // `secure_owned_dir` only creates directories on Unix.
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|err| format!("failed to create {}: {err}", self.dir.display()))
+    }
+}
+
+/// Composes [`DaemonConfig::registration_cwd`]:
+/// `<state_base>/<namespace>/empty`.
+#[must_use]
+pub fn registration_cwd(state_base: &Path, namespace: &InstanceNamespace) -> OwnedEmptyDir {
+    OwnedEmptyDir::new(
+        state_base.to_path_buf(),
+        yagura_os::instance_dir(state_base, namespace).join("empty"),
+    )
 }
 
 /// The fixed name a CLI's hook runs the daemon by.

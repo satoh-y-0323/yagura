@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common::{
     Harness, VALID_TOKEN, approver_base_config, call_open_window, empty_lookup, read_response,
-    send, write_profile,
+    registration_dirs, send, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::ProfileOs;
@@ -56,8 +56,11 @@ fn daemon_config(
     config_dir: Option<&Path>,
     bridge: Option<PathBuf>,
 ) -> DaemonConfig {
+    let (home, registration_cwd) = registration_dirs("hooks-injection");
     DaemonConfig {
         profiles_dir: Some(profiles_dir),
+        home_dir: Some(home),
+        registration_cwd,
         host_os: ProfileOs::host(),
         program_lookup: empty_lookup(),
         program_is_executable: probe_is_executable,

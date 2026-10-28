@@ -710,6 +710,7 @@ fn the_stub_profile_source_parses_and_renders_add_and_toml_set_against_the_fixtu
         toml_table_path: Some(".neutral/config.toml"),
         on_duplicate: None,
         log_path: None,
+        home_dir: None,
     };
     let source = common::mcp_cli_stub_profile_source("Stub Cli", &fixture);
     let profile = yagura_daemon::profile::parse_profile("stub", &source).expect("must parse");

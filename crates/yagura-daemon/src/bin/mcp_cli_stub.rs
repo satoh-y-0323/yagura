@@ -37,6 +37,12 @@
 //!   writes it to `<path>` (creating it, and its parent directories, when
 //!   absent), standing in for a `cat > <path>` replace tool.
 //!
+//! A relative settings-file path (`<path>` above, `MCP_CLI_STUB_TOML_TABLE_PATH`,
+//! `MCP_CLI_STUB_JSON_CONFIG_PATH`) is resolved against the home directory
+//! this process sees (`std::env::home_dir`: `HOME`, or `USERPROFILE` on
+//! Windows), as a real CLI's user settings are -- never against the current
+//! working directory, which only `MCP_CLI_STUB_PROJECT_REGISTRY` reads.
+//!
 //! Environment variables (all optional except where noted):
 //! - `MCP_CLI_STUB_STATE_DIR` (required for `mcp add` / `remove` / `get` / `list`): a
 //!   directory this process keeps its own registration record in
@@ -46,19 +52,23 @@
 //!   element shape `mcp list --json` writes.
 //! - `MCP_CLI_STUB_ON_DUPLICATE`: `"refuse"` (the default) or `"overwrite"`,
 //!   `mcp add`'s behavior when `<name>` is already registered.
-//! - `MCP_CLI_STUB_TOML_TABLE_PATH`: a path (resolved against the current
-//!   working directory) to a TOML settings file. When set, `mcp add`
+//! - `MCP_CLI_STUB_TOML_TABLE_PATH`: a path to a TOML settings file. When set, `mcp add`
 //!   rewrites `[mcp_servers.<name>]` there from scratch -- dropping any
 //!   hand-written sibling key, the way a real `mcp add` can -- `mcp remove`
 //!   deletes that whole table,
 //!   and `mcp get --json` reads `tool_timeout_sec` back from it when
 //!   present. Left unset, `add` never touches a TOML file at all: the state
 //!   a `toml_set` step with no table to edit needs.
-//! - `MCP_CLI_STUB_JSON_CONFIG_PATH`: a path (resolved against the current
-//!   working directory) to a JSON settings file
+//! - `MCP_CLI_STUB_JSON_CONFIG_PATH`: a path to a JSON settings file
 //!   (`{"mcpServers":{"<name>":{"command":..,"args":[..]}}}`), written by
 //!   `add` and pruned by `remove`, for a profile whose status is read
 //!   directly from a file rather than through this binary.
+//! - `MCP_CLI_STUB_PROJECT_REGISTRY`: a file name resolved against the
+//!   current working directory, in `registry.json`'s form. When that file
+//!   exists, `mcp get` and `mcp list` also report its registrations (the
+//!   private registry wins on a shared name), modelling a CLI that reads a
+//!   project's settings from the directory it is started in. `add` and
+//!   `remove` never touch it.
 //! - `MCP_CLI_STUB_FAIL_SUBCOMMAND` / `MCP_CLI_STUB_FAIL_EXIT_CODE` /
 //!   `MCP_CLI_STUB_FAIL_STDOUT` / `MCP_CLI_STUB_FAIL_STDERR`: when the
 //!   dispatched subcommand's name (`add` / `remove` / `get` / `list` / `probe` /
@@ -248,6 +258,24 @@ fn read_registry() -> io::Result<Registry> {
     }
 }
 
+/// The private registry, plus a project's registrations from
+/// `MCP_CLI_STUB_PROJECT_REGISTRY` in the current working directory.
+fn read_visible_registry() -> io::Result<Registry> {
+    let mut registry = read_registry()?;
+    let Some(name) = env::var_os("MCP_CLI_STUB_PROJECT_REGISTRY") else {
+        return Ok(registry);
+    };
+    let project: Registry = match fs::read(env::current_dir()?.join(name)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Registry::new(),
+        Err(err) => return Err(err),
+    };
+    for (name, registration) in project {
+        registry.entry(name).or_insert(registration);
+    }
+    Ok(registry)
+}
+
 fn write_registry(registry: &Registry) -> io::Result<()> {
     let dir = state_dir()?;
     fs::create_dir_all(&dir)?;
@@ -317,10 +345,10 @@ fn run_add(args: &[String]) -> io::Result<i32> {
     );
     write_registry(&registry)?;
     if let Some(path) = toml_table_path() {
-        rewrite_toml_table(&path, &name, &command, &rest)?;
+        rewrite_toml_table(&path?, &name, &command, &rest)?;
     }
     if let Some(path) = json_config_path() {
-        upsert_json_config(&path, &name, &command, &rest)?;
+        upsert_json_config(&path?, &name, &command, &rest)?;
     }
     // Real CLIs confirm a successful add on stdout, so a step's output is
     // never empty for a working add.
@@ -340,10 +368,10 @@ fn run_remove(args: &[String]) -> io::Result<i32> {
     }
     write_registry(&registry)?;
     if let Some(path) = toml_table_path() {
-        remove_toml_table(&path, name)?;
+        remove_toml_table(&path?, name)?;
     }
     if let Some(path) = json_config_path() {
-        remove_json_config(&path, name)?;
+        remove_json_config(&path?, name)?;
     }
     Ok(0)
 }
@@ -354,7 +382,7 @@ fn run_get(args: &[String]) -> io::Result<i32> {
         return Ok(2);
     };
     let json = args.get(1).map(String::as_str) == Some("--json");
-    let registry = read_registry()?;
+    let registry = read_visible_registry()?;
     let Some(registration) = registry.get(name) else {
         eprintln!("No MCP server named '{name}' found.");
         return Ok(1);
@@ -364,7 +392,7 @@ fn run_get(args: &[String]) -> io::Result<i32> {
             "transport": { "command": registration.command, "args": registration.args },
         });
         if let Some(path) = toml_table_path()
-            && let Some(tool_timeout_sec) = read_tool_timeout_sec(&path, name)?
+            && let Some(tool_timeout_sec) = read_tool_timeout_sec(&path?, name)?
         {
             body["tool_timeout_sec"] = serde_json::json!(tool_timeout_sec);
         }
@@ -378,7 +406,7 @@ fn run_get(args: &[String]) -> io::Result<i32> {
 }
 
 fn run_list() -> io::Result<i32> {
-    let registry = read_registry()?;
+    let registry = read_visible_registry()?;
     let flat = env::var("MCP_CLI_STUB_LIST_SHAPE").is_ok_and(|shape| shape == "flat");
     let entries: Vec<Value> = registry
         .iter()
@@ -406,8 +434,18 @@ fn run_list() -> io::Result<i32> {
 
 // --- TOML settings-file edit (mcp add / remove / get --json) ---------------
 
-fn toml_table_path() -> Option<PathBuf> {
-    env::var_os("MCP_CLI_STUB_TOML_TABLE_PATH").map(PathBuf::from)
+fn toml_table_path() -> Option<io::Result<PathBuf>> {
+    env::var_os("MCP_CLI_STUB_TOML_TABLE_PATH").map(|path| from_home(PathBuf::from(path)))
+}
+
+/// `path` as is when absolute, otherwise below the home directory.
+fn from_home(path: PathBuf) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    env::home_dir()
+        .map(|home| home.join(&path))
+        .ok_or_else(|| io::Error::other("no home directory to resolve a relative path against"))
 }
 
 fn load_or_empty_toml(path: &Path) -> io::Result<toml_edit::Document> {
@@ -499,8 +537,8 @@ fn toml_value_as_f64(value: &toml_edit::Value) -> Option<f64> {
 
 // --- JSON settings-file write (file-form status) ----------------------------
 
-fn json_config_path() -> Option<PathBuf> {
-    env::var_os("MCP_CLI_STUB_JSON_CONFIG_PATH").map(PathBuf::from)
+fn json_config_path() -> Option<io::Result<PathBuf>> {
+    env::var_os("MCP_CLI_STUB_JSON_CONFIG_PATH").map(|path| from_home(PathBuf::from(path)))
 }
 
 fn load_or_empty_json(path: &Path) -> io::Result<Value> {
@@ -589,7 +627,7 @@ fn run_file_read(args: &[String]) -> io::Result<i32> {
         eprintln!("usage: mcp_cli_stub file-read <path>");
         return Ok(2);
     };
-    match fs::read(path) {
+    match fs::read(from_home(PathBuf::from(path))?) {
         Ok(bytes) => {
             io::stdout().write_all(&bytes)?;
             Ok(0)
@@ -606,7 +644,8 @@ fn run_file_replace(args: &[String]) -> io::Result<i32> {
     };
     let mut body = Vec::new();
     io::stdin().read_to_end(&mut body)?;
-    ensure_parent_dir(Path::new(path))?;
+    let path = from_home(PathBuf::from(path))?;
+    ensure_parent_dir(&path)?;
     fs::write(path, body)?;
     Ok(0)
 }

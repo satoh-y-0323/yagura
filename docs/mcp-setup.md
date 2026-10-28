@@ -208,9 +208,16 @@ state:
 **What yagura runs and writes.** yagura runs each CLI's own `mcp add` and `mcp remove` -- through
 the profile's own launch command, so a WSL row reaches the CLI inside the distribution, with the
 bridge's path converted by `wslpath` (the profile's
-[`[host_paths]`](../profiles/README.md#host-paths)) -- in your home directory, so no project's
-`.mcp.json` is
-picked up. Claude Code is registered with `--scope user`. yagura writes these itself,
+[`[host_paths]`](../profiles/README.md#host-paths)). Every command a row runs -- `mcp add`,
+`mcp remove`, the state read, the path conversion and the file tools -- starts in an empty folder
+the daemon keeps for it (`empty`, under the instance's state folder, created again when it is
+missing), so no project's settings -- a `.mcp.json`, or the settings a CLI keeps in the folder it
+starts in -- are read as the CLI's registration. Your home folder would be such a project, and
+from WSL it is the Windows CLI's own settings. When that folder cannot be made, or the daemon found
+no home folder, the row's commands are refused. A WSL row whose folder `wsl` cannot translate
+starts in the distribution's home instead. When a window opens, the listing that turns off the
+other instances' registrations runs in the window's own working directory, so it sees what the
+window's CLI sees. Claude Code is registered with `--scope user`. yagura writes these itself,
 changing nothing else in the file and keeping a symlinked file a symlink and its permissions as
 they were:
 

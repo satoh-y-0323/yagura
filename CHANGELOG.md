@@ -30,6 +30,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - **The Plans panel has a Tickets tab**, now the first and the one it opens on. It shows a workspace's tickets in a column per state, and a ticket's description, fields, results and plans. It only shows: tickets are edited by agents through MCP. Opening the panel does not mark a plan as seen; showing the Board tab does.
 - Limits: 256 workspaces with tickets, 10,000 tickets per workspace, 256 results per ticket and 64 milestones per workspace.
 
+### Fixed
+
+- A WSL row in Settings > Integrations read the Windows CLI's own settings in your Windows home folder as its project's, so it could show as registered, or registered to a different bridge, when nothing was registered in WSL, and its Remove could take yagura out of the Windows CLI's settings (seen with Grok Build). Every command a registration row runs -- add, remove, the state read, the path conversion and the file tools -- now starts in an empty folder the daemon keeps under the instance's state folder rather than in your home folder, so no project's settings are read as the CLI's registration. The listing a window reads to turn off the other instances' registrations now runs in the window's own working directory, so a registration in that project is turned off too.
+
 ## [0.2.0] - 2026-10-24
 
 ### Changed

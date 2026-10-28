@@ -5403,22 +5403,7 @@ fn validate_open_request(
         });
     }
 
-    // A start-up default that has since disappeared is refused rather than
-    // swapped for the daemon's directory, so a window never opens somewhere
-    // nobody chose without a word.
-    let resolved_cwd = match (cwd.as_ref(), default_cwd) {
-        (Some(requested), _) => resolve_existing_dir(requested.path(), requested.origin())?,
-        (None, Some(default)) => resolve_existing_dir(default, CwdOrigin::DaemonDefault)?,
-        (None, None) => {
-            let current = std::env::current_dir().map_err(|err| {
-                WindowOpenError::invalid_cwd(
-                    CwdOrigin::DaemonCurrentDir,
-                    format!("failed to resolve the daemon's current directory: {err}"),
-                )
-            })?;
-            resolve_existing_dir(&current, CwdOrigin::DaemonCurrentDir)?
-        }
-    };
+    let resolved_cwd = resolve_window_cwd(cwd.as_ref(), default_cwd)?;
     let cwd_string = resolved_cwd.to_string_lossy().to_string();
 
     Ok(ValidatedRequest {
@@ -5427,6 +5412,38 @@ fn validate_open_request(
         resolved_cwd,
         cwd_string,
     })
+}
+
+/// The directory a window opened with `cwd` starts in: `cwd`, else
+/// `default_cwd` ([`DaemonConfig::default_window_cwd`]), else the daemon's
+/// own current directory, each held to [`resolve_existing_dir`].
+///
+/// A start-up default that has since disappeared is refused rather than
+/// swapped for the daemon's directory, so a window never opens somewhere
+/// nobody chose without a word.
+///
+/// # Errors
+///
+/// [`WindowOpenError::InvalidArgument`] when the chosen directory does not
+/// resolve to an existing one, or the daemon's current directory cannot be
+/// read.
+pub(crate) fn resolve_window_cwd(
+    cwd: Option<&RequestedCwd>,
+    default_cwd: Option<&Path>,
+) -> Result<PathBuf, WindowOpenError> {
+    match (cwd, default_cwd) {
+        (Some(requested), _) => resolve_existing_dir(requested.path(), requested.origin()),
+        (None, Some(default)) => resolve_existing_dir(default, CwdOrigin::DaemonDefault),
+        (None, None) => {
+            let current = std::env::current_dir().map_err(|err| {
+                WindowOpenError::invalid_cwd(
+                    CwdOrigin::DaemonCurrentDir,
+                    format!("failed to resolve the daemon's current directory: {err}"),
+                )
+            })?;
+            resolve_existing_dir(&current, CwdOrigin::DaemonCurrentDir)
+        }
+    }
 }
 
 /// Canonicalizes `path`, strips the Windows extended-length prefix and

@@ -20,8 +20,8 @@ use std::time::Duration;
 use common::{
     Harness, McpCliStubFixture, approver_base_config, echo_child_path, expect_error, identify,
     mcp_cli_stub_path, mcp_cli_stub_profile_source, mcp_cli_stub_profile_with_table,
-    mcp_cli_stub_toml_literal, read_response, register_approver, send, unique_temp_dir,
-    write_profile,
+    mcp_cli_stub_toml_literal, read_response, register_approver, registration_cwd_in, send,
+    unique_temp_dir, write_profile,
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
@@ -117,6 +117,7 @@ fn registration_config(layout: &Layout, bridge: Option<PathBuf>) -> DaemonConfig
     DaemonConfig {
         profiles_dir: Some(layout.profiles_dir.clone()),
         home_dir: Some(layout.home_dir.clone()),
+        registration_cwd: registration_cwd_in(&layout.root),
         instance_id: None,
         mcp_bridge: bridge,
         mcp_registration_timeout: Duration::from_secs(20),
@@ -454,6 +455,7 @@ async fn a_window_connection_and_an_unidentified_connection_are_refused_and_star
                 toml_table_path: Some(STUB_TOML_FILE),
                 on_duplicate: None,
                 log_path: Some(&log),
+                home_dir: Some(layout.home_dir.as_path()),
             },
         ),
     );
@@ -536,6 +538,7 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
                 toml_table_path: Some(STUB_TOML_FILE),
                 on_duplicate: None,
                 log_path: None,
+                home_dir: Some(layout.home_dir.as_path()),
             },
         )
         .replacen(
@@ -743,6 +746,7 @@ async fn a_settings_value_read_back_as_a_float_compares_by_number_and_a_differen
         toml_table_path: Some(STUB_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     write_profile(
         &layout.profiles_dir,
@@ -789,6 +793,7 @@ async fn owned_settings_entries_missing_from_the_file_differ_under_their_dotted_
         toml_table_path: Some(STUB_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let source = mcp_cli_stub_profile_source("Bravo", &fixture)
         .replace(CONFIRM_LINE, &format!("{CONFIRM_LINE}{OWNED_ENTRIES}"));
@@ -829,6 +834,7 @@ async fn owned_settings_entries_for_another_operating_system_are_not_read_back_o
         toml_table_path: Some(STUB_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let source = mcp_cli_stub_profile_source("Tango", &fixture)
         .replace(CONFIRM_LINE, &format!("{CONFIRM_LINE}{owned_entries}"));
@@ -941,6 +947,7 @@ async fn unreadable_output_and_a_timeout_are_unknown_with_a_fixed_reason() {
         toml_table_path: Some(STUB_TOML_FILE),
         on_duplicate: None,
         log_path: None,
+        home_dir: Some(layout.home_dir.as_path()),
     };
     let broken_source = format!(
         "{}MCP_CLI_STUB_FAIL_SUBCOMMAND = 'get'\nMCP_CLI_STUB_FAIL_EXIT_CODE = '0'\n\
@@ -1773,59 +1780,9 @@ fn captured_log_contains(needle: &str) -> bool {
 }
 
 // =============================================================================
-// A registration child runs in the home directory with the base environment
-// plus the profile's own `[env]`.
+// A registration child sees the base environment plus the profile's own
+// `[env]`.
 // =============================================================================
-
-#[tokio::test]
-async fn a_registration_child_runs_in_the_configured_home() {
-    let layout = Layout::new("mcpreg-cwd");
-    let bridge = layout.bridge_str();
-    // A relative state directory: the fixture resolves it against its own
-    // working directory, so only a child started in `home_dir` finds this
-    // registry.
-    seed_registry(
-        &layout.home_dir.join("relative-state"),
-        &[("yagura", &bridge, &[])],
-    );
-    write_profile(
-        &layout.profiles_dir,
-        "xray",
-        &mcp_cli_stub_profile_with_table(
-            "Xray",
-            "",
-            LINES_TABLE,
-            &[("MCP_CLI_STUB_STATE_DIR", "relative-state")],
-        ),
-    );
-    let h = Harness::start(
-        "mcpreg-cwd",
-        registration_config(&layout, Some(layout.bridge.clone())),
-    )
-    .await;
-    let mut approver = approver_connection(&h).await;
-    let (_, statuses) = list_and_collect(&mut approver, 91).await;
-    assert_eq!(
-        status_of(&statuses, "xray").state,
-        McpRegistrationState::Registered,
-        "the child must run in the configured home"
-    );
-
-    // Control: the same profiles against another, empty home.
-    let other_home = layout.root.join("other-home");
-    std::fs::create_dir_all(&other_home).expect("create other home");
-    let config = DaemonConfig {
-        home_dir: Some(other_home),
-        ..registration_config(&layout, Some(layout.bridge.clone()))
-    };
-    let other = Harness::start("mcpreg-cwd-control", config).await;
-    let mut control = approver_connection(&other).await;
-    let (_, statuses) = list_and_collect(&mut control, 92).await;
-    assert_eq!(
-        status_of(&statuses, "xray").state,
-        McpRegistrationState::NotRegistered
-    );
-}
 
 #[tokio::test]
 async fn a_registration_child_sees_the_base_environment_under_the_profile_env() {

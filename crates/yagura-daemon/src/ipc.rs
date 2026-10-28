@@ -5812,8 +5812,12 @@ async fn open_planned(
         // Before the launch prompt, which has to stay the CLI's last argument.
         insert_before_launch_prompt(&mut planned.injections, context);
     }
+    // A window whose directory cannot be resolved is refused by the open
+    // below, so its listing is skipped rather than run somewhere else.
     if let Some(scan) = planned.bridge_scan.take()
-        && let Some(disable) = mcp_registration::disable_other_bridges(config, scan).await
+        && let Some(window_cwd) = window_cwd_of(config, &planned.request).await
+        && let Some(disable) =
+            mcp_registration::disable_other_bridges(config, scan, window_cwd).await
     {
         insert_before_launch_prompt(&mut planned.injections, disable);
     }
@@ -5850,6 +5854,20 @@ async fn open_planned(
         }
     }
     Ok(opened)
+}
+
+/// The directory the window `request` opens will start in, by the same rule
+/// the open applies; `None` when the open is going to refuse it.
+async fn window_cwd_of(config: &DaemonConfig, request: &OpenWindowRequest) -> Option<PathBuf> {
+    let requested = request.cwd.clone();
+    let default_cwd = config.default_window_cwd.clone();
+    // Canonicalizing probes the filesystem, so it runs off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        crate::window::resolve_window_cwd(requested.as_ref(), default_cwd.as_deref()).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Puts `injection` ahead of the launch prompt, which has to stay the CLI's

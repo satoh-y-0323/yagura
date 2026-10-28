@@ -774,7 +774,7 @@ async fn run_conversion(
     env: &[(OsString, OsString)],
     timeout: std::time::Duration,
 ) -> ProbeOutcome {
-    match run_captured_within(config, argv, env, None, timeout).await {
+    match run_captured_within(config, argv, env, None, timeout, CommandCwd::Registration).await {
         SpawnOutcome::Refused(reason) => ProbeOutcome::Refused(reason),
         SpawnOutcome::SpawnFailed => ProbeOutcome::NotInstalled,
         SpawnOutcome::Exited { code, stdout, .. } => {
@@ -855,7 +855,8 @@ async fn read_file_with(
     let Some(argv) = tools.map(|tools| tools.render_read(file)) else {
         return Ok(read_host_file_observation(config, file).await);
     };
-    let outcome = run_captured_within(config, argv, env, None, timeout).await;
+    let outcome =
+        run_captured_within(config, argv, env, None, timeout, CommandCwd::Registration).await;
     Ok(match outcome {
         SpawnOutcome::Refused(reason) => return Err(reason),
         SpawnOutcome::SpawnFailed => mcp_registration::StatusObservation::NotInstalled,
@@ -927,8 +928,9 @@ enum SpawnOutcome {
     OutputTooLarge,
 }
 
-/// Runs `argv` as a `[mcp_registration]` command: `config.home_dir` as its
-/// working directory, `config.child_base_env` plus `env` as its environment,
+/// Runs `argv` as a `[mcp_registration]` command: in
+/// [`DaemonConfig::registration_cwd`], with `config.child_base_env` plus `env`
+/// as its environment,
 /// `stdin` written and closed on its own thread when given (a `files.replace`
 /// step's new file content), and `config`'s registration limits. `argv` is
 /// resolved the way a window's launch is ([`profile::resolve_spawn_argv`]).
@@ -938,32 +940,82 @@ async fn run_captured(
     env: &[(OsString, OsString)],
     stdin: Option<Vec<u8>>,
 ) -> SpawnOutcome {
-    run_captured_within(config, argv, env, stdin, config.mcp_registration_timeout).await
+    run_captured_within(
+        config,
+        argv,
+        env,
+        stdin,
+        config.mcp_registration_timeout,
+        CommandCwd::Registration,
+    )
+    .await
+}
+
+/// Where one command [`run_captured_within`] runs is started.
+enum CommandCwd {
+    /// [`DaemonConfig::registration_cwd`], so the CLI reads no project's
+    /// settings: every command that reads or changes the CLI's registration.
+    Registration,
+    /// A window's own working directory: a listing that has to see what the
+    /// window's CLI will see, a project's registrations included.
+    Window(PathBuf),
+}
+
+/// Refuses a [`CommandCwd::Registration`] command when the daemon resolved
+/// no home directory at start-up.
+const REASON_NO_HOME: &str = "no home directory was resolved when the daemon started";
+
+/// Refuses a [`CommandCwd::Registration`] command when its empty working
+/// directory cannot be had.
+const REASON_NO_REGISTRATION_CWD: &str =
+    "the empty directory registration commands start in could not be prepared";
+
+/// Blocking: the directory `cwd` names, preparing
+/// [`DaemonConfig::registration_cwd`] again first. `Err` carries the fixed
+/// reason the command is refused with; neither the home directory nor the
+/// daemon's own working directory ever stands in.
+fn command_cwd(config: &DaemonConfig, cwd: CommandCwd) -> Result<PathBuf, &'static str> {
+    let dir = match cwd {
+        CommandCwd::Window(path) => return Ok(path),
+        CommandCwd::Registration => config.registration_cwd.as_ref(),
+    };
+    if config.home_dir.is_none() {
+        return Err(REASON_NO_HOME);
+    }
+    let dir = dir.ok_or(REASON_NO_REGISTRATION_CWD)?;
+    dir.ensure().map_err(|reason| {
+        tracing::warn!("{reason}; the registration command is refused");
+        REASON_NO_REGISTRATION_CWD
+    })?;
+    Ok(dir.path().to_path_buf())
 }
 
 /// [`run_captured`] with its own time limit in place of
-/// `config.mcp_registration_timeout`.
+/// `config.mcp_registration_timeout`, started where `cwd` says.
 async fn run_captured_within(
     config: &DaemonConfig,
     argv: Vec<String>,
     env: &[(OsString, OsString)],
     stdin: Option<Vec<u8>>,
     timeout: std::time::Duration,
+    cwd: CommandCwd,
 ) -> SpawnOutcome {
-    // Resolution probes the filesystem, so it runs off the async runtime.
+    // Both probe the filesystem, so they run off the async runtime.
     let resolve_config = config.clone();
-    let resolved =
-        tokio::task::spawn_blocking(move || profile::resolve_spawn_argv(&resolve_config, &argv))
-            .await;
-    let spawn_argv = match resolved {
-        Ok(Ok(spawn_argv)) => spawn_argv,
+    let resolved = tokio::task::spawn_blocking(move || {
+        let spawn_argv = profile::resolve_spawn_argv(&resolve_config, &argv)?;
+        Ok::<_, &'static str>((spawn_argv, command_cwd(&resolve_config, cwd)?))
+    })
+    .await;
+    let (spawn_argv, cwd) = match resolved {
+        Ok(Ok(resolved)) => resolved,
         Ok(Err(reason)) => return SpawnOutcome::Refused(reason),
-        // Unreachable in practice (`resolve_spawn_argv` does not panic).
+        // Unreachable in practice (neither step panics).
         Err(_join_err) => return SpawnOutcome::SpawnFailed,
     };
     let captured = match pty::spawn_one_shot(
         spawn_argv,
-        config.home_dir.clone(),
+        Some(cwd),
         pty::CaptureChildEnv::Based {
             base: config.child_base_env.clone(),
             overlay: env.to_vec(),
@@ -1030,6 +1082,7 @@ pub(super) struct BridgeScan {
 pub(super) async fn disable_other_bridges(
     config: &DaemonConfig,
     scan: BridgeScan,
+    window_cwd: PathBuf,
 ) -> Option<CliInjection> {
     let deadline = Instant::now() + config.mcp_listing_timeout;
     let Ok(Ok(_slot)) = tokio::time::timeout_at(deadline, scan.permits.acquire()).await else {
@@ -1038,7 +1091,16 @@ pub(super) async fn disable_other_bridges(
     };
     let argv = full_argv(&scan.launch_argv, scan.list.args().to_vec());
     let within = deadline.saturating_duration_since(Instant::now());
-    let stdout = match run_captured_within(config, argv, &scan.env, None, within).await {
+    let listed = run_captured_within(
+        config,
+        argv,
+        &scan.env,
+        None,
+        within,
+        CommandCwd::Window(window_cwd),
+    )
+    .await;
+    let stdout = match listed {
         SpawnOutcome::Exited {
             code: Some(0),
             stdout,
