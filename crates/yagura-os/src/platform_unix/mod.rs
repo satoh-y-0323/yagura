@@ -240,7 +240,7 @@ fn is_secure_dir(path: &Path, owner_uid: u32) -> bool {
 /// # Errors
 ///
 /// Returns a description of the first failure (creating `base`, creating a
-/// missing component of `leaf`, restricting an already-existing one, or a
+/// missing component of `leaf`, inspecting or restricting an already-existing one, or a
 /// component that already exists as a symlink) rather than a typed error,
 /// matching [`crate::secure_owned_dir`]'s contract of never being treated as
 /// fatal by its callers.
@@ -258,24 +258,25 @@ pub fn secure_owned_dir(base: &Path, leaf: &Path) -> Result<(), String> {
     let mut cursor = base.to_path_buf();
     for component in relative.components() {
         cursor.push(component);
-        match std::fs::symlink_metadata(&cursor) {
-            Ok(meta) if meta.is_symlink() => {
+        // Create first and inspect only what already exists: checking before creating lets a
+        // concurrent caller create the component in between, and `mkdir` refuses a symlink too.
+        match std::fs::DirBuilder::new().mode(0o700).create(&cursor) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = std::fs::symlink_metadata(&cursor)
+                    .map_err(|err| format!("failed to inspect {}: {err}", cursor.display()))?;
+                if meta.is_symlink() {
+                    return Err(format!(
+                        "{} is a symlink; refusing to restrict or descend into it",
+                        cursor.display()
+                    ));
+                }
+            }
+            Err(err) => {
                 return Err(format!(
-                    "{} is a symlink; refusing to restrict or descend into it",
+                    "failed to create {} with mode 0700: {err}",
                     cursor.display()
                 ));
-            }
-            Ok(_) => {}
-            Err(_) => {
-                std::fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(&cursor)
-                    .map_err(|err| {
-                        format!(
-                            "failed to create {} with mode 0700: {err}",
-                            cursor.display()
-                        )
-                    })?;
             }
         }
         std::fs::set_permissions(&cursor, std::fs::Permissions::from_mode(0o700)).map_err(

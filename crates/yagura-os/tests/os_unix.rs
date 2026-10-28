@@ -1269,6 +1269,39 @@ fn secure_owned_dir_rejects_a_symlinked_leaf_without_chmod_ing_its_target() {
     );
 }
 
+/// The daemon reads several registration rows at once, each preparing the same directory, so
+/// a caller that loses the race to create a component must still succeed.
+#[test]
+fn concurrent_secure_owned_dir_calls_on_the_same_missing_leaf_all_succeed() {
+    const CALLERS: usize = 16;
+    let base = TempDir::new("os-unix", "secure-owned-race");
+    for round in 0..20 {
+        let leaf = base.path().join(format!("round-{round}")).join("empty");
+        let barrier = std::sync::Barrier::new(CALLERS);
+        let failures: Vec<String> = std::thread::scope(|scope| {
+            let callers: Vec<_> = (0..CALLERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        secure_owned_dir(base.path(), &leaf)
+                    })
+                })
+                .collect();
+            callers
+                .into_iter()
+                .filter_map(|caller| caller.join().expect("caller thread").err())
+                .collect()
+        });
+        assert!(failures.is_empty(), "round {round}: {failures:?}");
+        let mode = std::fs::symlink_metadata(&leaf)
+            .expect("the leaf must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "round {round}");
+    }
+}
+
 // =====================================================================
 // seed_config_file: an owner-only config root
 // =====================================================================
