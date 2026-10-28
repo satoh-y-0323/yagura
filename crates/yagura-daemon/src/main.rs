@@ -55,9 +55,9 @@ const UNKNOWN_LOG_FIELD: &str = "unknown";
 /// How long a hook waits for the daemon to answer a door that is not a wait.
 const DOOR_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The most a hook waits, after its answer is printed, for the rest of its
-/// stdin to be read. Bounds a CLI that leaves stdin open; a CLI that closes it
-/// is waited for until it has written everything.
+/// The most a hook waits for the rest of its stdin to be read, after its
+/// answer inside a window and in place of one outside. Bounds a CLI that
+/// leaves stdin open.
 const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 fn main() -> Result<ExitCode> {

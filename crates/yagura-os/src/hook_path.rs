@@ -22,7 +22,8 @@ pub enum SpacelessPathError {
     /// The path holds whitespace, and it has no 8.3 short name free of it.
     #[error(
         "the daemon's path holds whitespace, which a CLI cannot run in a hook command, and it \
-         has no 8.3 short name without whitespace (short names may be turned off on its volume, or          the path may not exist)"
+         has no 8.3 short name without whitespace (short names may be turned off on its volume, or \
+         the path may not exist)"
     )]
     NoShortName,
 }
