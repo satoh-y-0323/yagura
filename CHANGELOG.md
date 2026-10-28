@@ -34,6 +34,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - A WSL row in Settings > Integrations read the Windows CLI's own settings in your Windows home folder as its project's, so it could show as registered, or registered to a different bridge, when nothing was registered in WSL, and its Remove could take yagura out of the Windows CLI's settings (seen with Grok Build). Every command a registration row runs -- add, remove, the state read, the path conversion and the file tools -- now starts in an empty folder the daemon keeps under the instance's state folder rather than in your home folder, so no project's settings are read as the CLI's registration. The listing a window reads to turn off the other instances' registrations now runs in the window's own working directory, so a registration in that project is turned off too.
 
+### Security
+
+- `rustix` is updated to 1.1.6 for [GHSA-jh2m-fhpj-3vr7](https://github.com/bytecodealliance/rustix/security/advisories/GHSA-jh2m-fhpj-3vr7). The advisory is in its extended-attribute getters, which none of the crates yagura builds with call, so yagura was not exposed. `rustix` is built only on Linux and macOS.
+
 ## [0.2.0] - 2026-10-24
 
 ### Changed
