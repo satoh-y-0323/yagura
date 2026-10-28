@@ -5895,7 +5895,7 @@ fn launch_context_injection_for(
     {
         tracing::warn!(
             profile = %planned.launch.profile,
-            "the room's introduction was left out of this launch: the program is a command              interpreter shim"
+            "the room's introduction was left out of this launch: the program is a command interpreter shim"
         );
         return None;
     }

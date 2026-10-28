@@ -105,7 +105,7 @@ const REASON_LAUNCH_PROMPT_THROUGH_SHIM: &str = "a request handed over at launch
      unchanged through this profile's program, a Windows .cmd / .bat file";
 /// Reason text for a [`ProfileCapability::LaunchContext`] limit: the command
 /// interpreter would reinterpret the introduction on the program's command line.
-const REASON_LAUNCH_CONTEXT_THROUGH_SHIM: &str = "the room's introduction handed over at launch      cannot pass unchanged through this profile's program, a Windows .cmd / .bat file";
+const REASON_LAUNCH_CONTEXT_THROUGH_SHIM: &str = "the room's introduction handed over at launch cannot pass unchanged through this profile's program, a Windows .cmd / .bat file";
 /// The refusal text for a profile its `enabled` key switches off: the
 /// `Display` of [`ProfileLaunchError::Disabled`] and the reason
 /// [`resolve_model_choices`] gives, so both read the same.
