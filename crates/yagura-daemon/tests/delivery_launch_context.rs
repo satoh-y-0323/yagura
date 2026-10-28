@@ -24,7 +24,7 @@ use common::{
 };
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, WindowRegistry};
-use yagura_protocol::{ClientMessage, DaemonMessage, ProfileCapability, ProfileInfo, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, ProfileInfo, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
@@ -563,7 +563,7 @@ async fn a_participant_whose_program_is_a_cmd_shim_opens_without_a_launch_contex
         listed
             .limits
             .iter()
-            .any(|limit| limit.capability == ProfileCapability::LaunchContext),
+            .any(|limit| limit.capability == yagura_protocol::ProfileCapability::LaunchContext),
         "the listing says the intro cannot be handed over at launch: {:?}",
         listed.limits
     );
