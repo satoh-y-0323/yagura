@@ -332,3 +332,88 @@ fn a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon() {
         describe(&sent)
     );
 }
+
+// --- another instance's hook inside a window --------------------------------------
+
+/// The name `instance` registers under, which its hook files pass with `--for-instance`.
+fn server_of(instance: Option<&str>) -> String {
+    yagura_daemon::mcp_registration::RegistrationTarget::for_instance(instance)
+        .server()
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instance_takes_them() {
+    let setup = Setup::start().await;
+    setup
+        .entry()
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THIS-INSTANCE"));
+    let other = server_of(Some("other"));
+    let own = server_of(Some(&setup.instance));
+
+    let (skipped, written) = setup
+        .run(
+            &["--for-instance", &other, "--deliver-take"],
+            br#"{"session_id":"s-1"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert_silent_success(&skipped, "a take from another instance's hook");
+    assert_eq!(
+        setup.entry().inbox().pending_count(),
+        1,
+        "a take from another instance's hook must leave the parcel in the inbox"
+    );
+
+    let (taken, written) = setup
+        .run(
+            &["--for-instance", &own, "--deliver-take"],
+            br#"{"session_id":"s-1"}"#.to_vec(),
+        )
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert_eq!(taken.status.code(), Some(0), "{}", describe(&taken));
+    assert!(
+        String::from_utf8_lossy(&taken.stdout).contains("PARCEL-FOR-THIS-INSTANCE"),
+        "a take from this instance's hook must print the parcel; {}",
+        describe(&taken)
+    );
+    assert_eq!(setup.entry().inbox().pending_count(), 0);
+}
+
+/// Measured where sending fails, as in
+/// `a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon`.
+#[test]
+fn a_status_for_another_instance_sends_nothing_to_the_daemon() {
+    let instance = unique_instance();
+    let bases = TempDir::new("yagura-door", "bases");
+    let in_window = Some(("w-1", VALID_TOKEN));
+    let status = ["--emit-status", "waiting_input", "--source", "hook"];
+
+    let default_server = server_of(None);
+    let mut args = vec!["--for-instance", default_server.as_str()];
+    args.extend(status);
+    let (skipped, written) = run_with_input(
+        door_command(&args, &instance, &bases, in_window),
+        br#"{"session_id":"s-1"}"#.to_vec(),
+    );
+    assert!(written.is_ok(), "{written:?}");
+    assert_silent_success(&skipped, "a status from the default instance's hook");
+
+    let own = server_of(Some(&instance));
+    let mut args = vec!["--for-instance", own.as_str()];
+    args.extend(status);
+    let (sent, written) = run_with_input(
+        door_command(&args, &instance, &bases, in_window),
+        br#"{"session_id":"s-1"}"#.to_vec(),
+    );
+    assert!(written.is_ok(), "{written:?}");
+    let code = sent.status.code();
+    assert!(
+        code.is_some_and(|code| code != 0 && code != 2),
+        "a status from this instance's hook must be sent, and fail with no daemon \
+         listening; {}",
+        describe(&sent)
+    );
+}

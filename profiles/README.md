@@ -1220,7 +1220,7 @@ shell, while the shell it would otherwise use differs from machine to
 machine:
 
 ```toml
-UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
 ```
 
 Nothing in the hook checks for the window: the door does. Outside a window
@@ -1233,6 +1233,20 @@ and under WSL `[host_paths]` turns it into the `/mnt/...` path the
 distribution starts the Windows executable from. The same rule as for any
 `{daemon}` applies: a path holding whitespace is written by its 8.3 short
 name on Windows, and is otherwise not written at all.
+
+### Hooks of other instances
+
+A hook that registration writes into the CLI's own settings runs in every
+session of that CLI, once for each instance registered there -- including
+inside another instance's window, where it would reach that window's daemon.
+So a registration that writes hooks of its own for each instance (an entry
+keyed by `{server}`, or a file named by it) passes `--for-instance {server}`
+to every door it runs, right after `{daemon}`, as the bundled Antigravity CLI
+and Grok Build hooks do. Inside a window a door whose `--for-instance` is not
+the window's own instance does nothing, like a door outside a window (see
+[Structured sources](../crates/yagura-daemon/detection/README.md#structured-sources---emit-status)).
+Hooks passed with a launch, or one file all instances share, run only once
+and need no `--for-instance`.
 
 ## Delivery
 
@@ -1418,7 +1432,7 @@ file = ".gemini/config/hooks.json"  # home-relative; may carry {server}
 [mcp_registration.json_entry.entries."{server}"]
                                 # a top-level name, or a JSON Pointer such as
                                 # "/mcpServers/{server}"
-PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }]
+PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --emit-status running --source antigravity-cli", timeout = 10 }]
 # [mcp_registration.json_entry.by_os.windows]
                                 # optional; more entries for one OS: windows /
                                 # macos / linux override default

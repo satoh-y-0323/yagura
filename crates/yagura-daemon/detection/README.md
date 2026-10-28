@@ -860,7 +860,7 @@ under an input line that looks idle, or an approval dialog too small to read
 judged by its screen alone.
 
 ```
-yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>]
+yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--for-instance <server>]
 ```
 
 - `<status>`: one of the seven statuses above; anything else is a command
@@ -872,6 +872,11 @@ yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>]
   there, nothing is sent and the command exits 0 -- for a CLI that runs the
   same hooks in its sub-agents' sessions and marks their input (Grok Build's
   `subagentType`).
+- `--for-instance <server>`: the name of the registration the hook was
+  written for -- `yagura` for the default instance, `yagura-<instance>` for a
+  named one. Given at most once, and taken by every hook door
+  (`--emit-status`, `--deliver-context`, `--deliver-take`, `--deliver-wait`,
+  `--report-session`) and by no other command.
 
 The command connects to the running daemon, sends one event and exits; it does
 not start a daemon. Inside a window it exits non-zero if no daemon is
@@ -883,6 +888,16 @@ prints nothing and exits 0, so a hook that a CLI runs in every session stays
 quiet in the sessions yagura did not open, even one written for a newer
 daemon than the copy it starts. `--detection` and `--detection-dir` are
 ignored here -- they configure a daemon this invocation is not starting.
+
+A hook that registration writes into the CLI's own settings runs in every
+session of that CLI, once for each instance registered there, and inside a
+window each copy would reach the window's daemon. So inside a window a door
+whose `--for-instance` names a registration other than the window's own
+instance (read from `YAGURA_INSTANCE`) behaves as it does outside one: it
+reads its standard input to the end, sends nothing, prints nothing and exits
+0, before reading its other arguments. A `--for-instance` that is missing its
+value, repeated or not a registration name is left for the command line to
+refuse.
 
 For the event to authenticate and be attributed to the right window, the hook
 must run somewhere inside that window's child process tree: it inherits the
@@ -1005,7 +1020,8 @@ daemon by its 8.3 short name instead, and registration fails with a message
 saying so when there is none (8.3 names can be turned off on a volume).
 Every other entry in the file is left as it was. The entry applies to every
 `agy` session on the machine, but outside a window `--emit-status` does
-nothing (see above). An `agy` you start by hand inside a yagura shell window
+nothing, and each command passes `--for-instance` so that another instance's
+entry stays silent inside a window (see above). An `agy` you start by hand inside a yagura shell window
 does report, for that window -- what it reports is true of that window.
 
 **GitHub Copilot CLI** takes launch-time hooks only from a plugin directory,
@@ -1034,7 +1050,9 @@ hooks out of it. Each hook runs the daemon's copy in the `bin` folder by its
 absolute path, with its arguments given apart, so Grok Build starts it
 without a shell -- the shell it would otherwise use differs from machine to
 machine -- and inside WSL starts the Windows executable through its
-`/mnt/...` path. Outside a window the daemon itself does nothing (see above).
+`/mnt/...` path. Outside a window the daemon itself does nothing, and each
+hook passes `--for-instance` so that another instance's file stays silent
+inside a window (see above).
 Grok Build runs the same hooks in a sub-agent's session, whose input carries
 `subagentType`, so every hook passes `--skip-if /subagentType` and a
 sub-agent neither reports for the window nor takes its inbox. The approval

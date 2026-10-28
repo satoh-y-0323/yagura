@@ -1181,3 +1181,60 @@ fn resolve_resize_redraw_window_ms_does_not_clamp_a_large_override() {
         "a large override must pass through unclamped"
     );
 }
+
+#[test]
+fn parse_args_lets_every_hook_door_name_the_instance_it_was_registered_for() {
+    for door in [
+        &["--emit-status", "running", "--source", "hook"][..],
+        &["--deliver-context"],
+        &["--deliver-take", "--skip-if", "/subagentType"],
+        &["--deliver-wait"],
+        &["--report-session", "/session_id"],
+    ] {
+        let expected = parse_args(&args(door)).expect("the door alone parses");
+        for server in ["yagura", "yagura-dev"] {
+            let mut with = vec!["--for-instance", server];
+            with.extend(door);
+            assert_eq!(parse_args(&args(&with)), Ok(expected.clone()), "{with:?}");
+        }
+    }
+}
+
+#[test]
+fn parse_args_rejects_for_instance_off_a_door_with_an_invalid_value_or_given_twice() {
+    for command in [&[][..], &["--shutdown"]] {
+        let mut with = command.to_vec();
+        with.extend(["--for-instance", "yagura"]);
+        assert_eq!(
+            parse_args(&args(&with)),
+            Err(CliError::UnknownArgument("--for-instance".to_string())),
+            "{with:?}"
+        );
+    }
+    for value in ["other", "yagura-", "yagura-Dev", ""] {
+        assert_eq!(
+            parse_args(&args(&["--deliver-take", "--for-instance", value])),
+            Err(CliError::InvalidValue {
+                flag: "--for-instance".to_string(),
+                value: value.to_string(),
+            }),
+            "{value:?}"
+        );
+    }
+    assert_eq!(
+        parse_args(&args(&["--deliver-take", "--for-instance"])),
+        Err(CliError::MissingValue {
+            flag: "--for-instance".to_string(),
+        })
+    );
+    assert_eq!(
+        parse_args(&args(&[
+            "--deliver-take",
+            "--for-instance",
+            "yagura",
+            "--for-instance",
+            "yagura",
+        ])),
+        Err(CliError::RepeatedArgument("--for-instance".to_string()))
+    );
+}

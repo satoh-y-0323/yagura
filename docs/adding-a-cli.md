@@ -134,6 +134,10 @@ going to change, and when you are done restore it and compare it byte for byte w
   started, and on Windows have the same command stop `cmd` from searching the working folder for
   the daemon (see
   [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
+- Such a hook also runs once for each instance registered there, and inside a window every copy
+  would reach that window's daemon. When the registration writes hooks of its own for each
+  instance, pass `--for-instance {server}` to every door so another instance's hooks stay silent
+  (see [Hooks of other instances](../profiles/README.md#hooks-of-other-instances)).
 - When a CLI's launcher cannot carry a launch option or a start-up request on one host, the
   profile's `[shim_guidance]` says what to use instead; the daemon then refuses the request before
   approval and shows the limit ahead of time (see

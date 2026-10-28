@@ -39,6 +39,10 @@ const HOST_PROFILE: &str = "antigravity-cli";
 const WSL_PROFILE: &str = "wsl-antigravity-cli";
 
 const HOOKS_FILE: &str = ".gemini/config/hooks.json";
+
+/// What every door of the entry carries after the daemon path: the default instance's
+/// registration name, which the cases register under.
+const FOR_INSTANCE: &str = " --for-instance yagura";
 const MCP_FILE: &str = ".gemini/config/mcp_config.json";
 
 /// How long a stubbed CLI stays alive when a case needs a live window: a
@@ -133,7 +137,7 @@ impl Layout {
         } else {
             path.to_string()
         };
-        format!("{path} --emit-status running --source antigravity-cli")
+        format!("{path}{FOR_INSTANCE} --emit-status running --source antigravity-cli")
     }
 }
 
@@ -888,7 +892,7 @@ async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name
                 .to_string();
             assert_eq!(
                 command,
-                format!("{spaceless} --emit-status running --source antigravity-cli")
+                format!("{spaceless}{FOR_INSTANCE} --emit-status running --source antigravity-cli")
             );
             assert!(!spaceless.contains(' '), "{spaceless:?}");
             assert_eq!(

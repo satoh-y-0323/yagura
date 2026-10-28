@@ -80,6 +80,6 @@ command = "/mcpServers/{server}/command"
 file = ".gemini/config/hooks.json"
 
 [mcp_registration.json_entry.entries."{server}"]
-PreInvocation = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }, { type = "command", command = "{daemon} --deliver-take", timeout = 10 }]
-SessionStart = [{ type = "command", command = "{daemon} --deliver-context", timeout = 10 }]
-PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --emit-status running --source antigravity-cli", timeout = 10 }] }]
+PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --emit-status running --source antigravity-cli", timeout = 10 }, { type = "command", command = "{daemon} --for-instance {server} --deliver-take", timeout = 10 }]
+SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --deliver-context", timeout = 10 }]
+PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --emit-status running --source antigravity-cli", timeout = 10 }] }]

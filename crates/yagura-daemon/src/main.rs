@@ -65,8 +65,12 @@ fn main() -> Result<ExitCode> {
     // A hook also runs outside any window (a CLI started by hand) and may carry
     // arguments only a newer copy knows, so it is decided on the raw arguments,
     // before they are parsed and before logging is set up: such a hook stays
-    // silent and leaves no trace.
-    if cli::names_hook_door(&args) && !runs_inside_window() {
+    // silent and leaves no trace. So does another instance's hook inside a window:
+    // registered hooks run in every session of the CLI.
+    if cli::names_hook_door(&args)
+        && (!runs_inside_window()
+            || cli::names_another_instance(&args, std::env::var_os("YAGURA_INSTANCE")))
+    {
         // The CLI writes its input to the hook; a hook that leaves it unread
         // would make that write fail. Bounded like a door inside a window, for a
         // CLI that leaves stdin open.

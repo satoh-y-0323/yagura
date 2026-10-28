@@ -26,6 +26,7 @@ use yagura_os::{InstanceIdError, InstanceNamespace};
 use yagura_protocol::{WindowStatus, is_valid_source};
 
 use crate::detector::definition::is_valid_detection_name;
+use crate::mcp_registration::RegistrationTarget;
 
 /// `--source` value used when `--emit-status` is invoked without one.
 const DEFAULT_EMIT_STATUS_SOURCE: &str = "cli";
@@ -144,6 +145,34 @@ pub fn names_hook_door(args: &[String]) -> bool {
     })
 }
 
+/// The hook-door flag naming the registration a hook file was written for.
+const FOR_INSTANCE_FLAG: &str = "--for-instance";
+
+/// Whether a hook door's single `--for-instance` names a registration other
+/// than the one `instance_id` (the window's `YAGURA_INSTANCE`) registers under,
+/// following [`RegistrationTarget::for_instance`]. Every instance's registered
+/// hook runs in every session of the CLI, so this is decided on the raw
+/// arguments, before [`parse_args`]: a copy of the binary older than the hook
+/// file stays silent in another instance's window. A `YAGURA_INSTANCE` that
+/// names no valid instance matches nothing. A missing, repeated or invalid
+/// value is not decided here, so that [`parse_args`] rejects it.
+#[must_use]
+pub fn names_another_instance(args: &[String], instance_id: Option<OsString>) -> bool {
+    let mut values = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == FOR_INSTANCE_FLAG)
+        .map(|(at, _)| args.get(at + 1));
+    let (Some(Some(named)), None) = (values.next(), values.next()) else {
+        return false;
+    };
+    if !RegistrationTarget::is_bridge_server(named) {
+        return false;
+    }
+    !resolve_instance_id(instance_id)
+        .is_ok_and(|own| RegistrationTarget::for_instance(own.id()).server() == named)
+}
+
 /// Why a command line was rejected.
 ///
 /// Every rejection is fail-loud: no value is silently dropped, clamped or
@@ -167,6 +196,9 @@ pub enum CliError {
         /// The rejected value.
         value: String,
     },
+    /// A flag that may be given only once was repeated.
+    #[error("{0} may be given only once")]
+    RepeatedArgument(String),
     /// Two mutually exclusive commands were requested at once.
     #[error(
         "only one of --shutdown, --emit-status, --deliver-context, --deliver-take, \
@@ -181,18 +213,22 @@ pub enum CliError {
 /// Values are validated at parse time against the same rules the receiving
 /// side enforces -- `is_valid_detection_name` for `--detection`,
 /// [`is_valid_source`] for `--source` -- so an invalid command line never reaches the
-/// daemon. When a flag is repeated, the last occurrence wins.
+/// daemon. When a flag is repeated, the last occurrence wins, except
+/// `--for-instance`, which [`names_another_instance`] reads only when given
+/// once.
 ///
 /// # Errors
 ///
 /// Returns [`CliError`] for an unknown argument, a flag missing its value, a
-/// value that fails validation, or two of the client-side commands combined.
+/// value that fails validation, a repeated `--for-instance`, or two of the
+/// client-side commands combined.
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut shutdown = false;
     let mut emit_status: Option<WindowStatus> = None;
     let mut source: Option<String> = None;
     let mut hook_door: Option<CliCommand> = None;
     let mut skip_if: Option<String> = None;
+    let mut for_instance = false;
     let mut detection_name: Option<String> = None;
     let mut detection_dir_arg: Option<PathBuf> = None;
     let mut playbook_arg: Option<PathBuf> = None;
@@ -239,6 +275,18 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                 }
                 skip_if = Some(value.clone());
             }
+            // Already matched against the window by `names_another_instance`, so
+            // only validated here.
+            FOR_INSTANCE_FLAG => {
+                let value = next_value(&mut remaining, FOR_INSTANCE_FLAG)?;
+                if for_instance {
+                    return Err(CliError::RepeatedArgument(FOR_INSTANCE_FLAG.to_string()));
+                }
+                if !RegistrationTarget::is_bridge_server(value) {
+                    return Err(invalid(FOR_INSTANCE_FLAG, value));
+                }
+                for_instance = true;
+            }
             "--source" => {
                 let value = next_value(&mut remaining, "--source")?;
                 if !is_valid_source(value) {
@@ -278,8 +326,13 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     if let Some(door) = hook_door {
         return Ok(with_skip_if(door, skip_if));
     }
-    if skip_if.is_some() && emit_status.is_none() {
-        return Err(CliError::UnknownArgument("--skip-if".to_string()));
+    if emit_status.is_none() {
+        if skip_if.is_some() {
+            return Err(CliError::UnknownArgument("--skip-if".to_string()));
+        }
+        if for_instance {
+            return Err(CliError::UnknownArgument(FOR_INSTANCE_FLAG.to_string()));
+        }
     }
     match (shutdown, emit_status) {
         (true, _) => Ok(CliCommand::Shutdown),

@@ -149,7 +149,9 @@ fn the_wsl_profile_forwards_the_model_variable_into_wsl() {
 
 /// Every handler runs the daemon directly (no shell), the status each event reports follows
 /// the order measured on a real session, and a child session never reports or takes the
-/// inbox because every door call names the pointer that tells a sub-agent apart.
+/// inbox because every door call names the pointer that tells a sub-agent apart. Every
+/// call also names the instance it was registered for, so another instance's hook file
+/// stays silent in this instance's windows.
 #[test]
 fn the_registered_hooks_report_the_measured_states_and_skip_subagents() {
     const DAEMON: &str = r"C:\yagura\yagura-daemon.exe";
@@ -183,9 +185,14 @@ fn the_registered_hooks_report_the_measured_states_and_skip_subagents() {
             "{id}: each instance owns a hook file of its own"
         );
 
-        for os in [HostOs::Windows, HostOs::Linux] {
+        // Each OS renders for a different instance, so the name each door carries is
+        // the one its own registration was written for.
+        for (os, target) in [
+            (HostOs::Windows, &default_target),
+            (HostOs::Linux, &dev_target),
+        ] {
             let vars = EntryVars {
-                target: &default_target,
+                target,
                 os,
                 daemon: Some(DAEMON),
                 bridge: None,
@@ -210,6 +217,11 @@ fn the_registered_hooks_report_the_measured_states_and_skip_subagents() {
                             .iter()
                             .map(|arg| arg.as_str().unwrap())
                             .collect();
+                        assert_eq!(
+                            args[..2],
+                            ["--for-instance", target.server()],
+                            "{id}/{event}: another instance's hook must stay silent: {args:?}"
+                        );
                         let pointer_at = args.iter().position(|arg| *arg == "--skip-if");
                         assert_eq!(
                             pointer_at.map(|at| args[at + 1]),
