@@ -63,10 +63,14 @@ fn both_shipped_profiles_load_without_being_excluded() {
     for id in IDS {
         let placed = place(id);
         let listing = list_profiles(&placed.config);
+        // A WSL profile names a command for Windows only, and a listing leaves out a profile with
+        // no command for the host.
+        let has_command_here = id == "grok-build" || cfg!(windows);
 
-        assert!(
+        assert_eq!(
             listing.profiles.iter().any(|entry| entry.id == id),
-            "{id} must be listed, got {:?}",
+            has_command_here,
+            "{id} must be listed exactly where it has a command, got {:?}",
             listing
                 .profiles
                 .iter()
