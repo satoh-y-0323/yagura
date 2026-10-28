@@ -387,7 +387,7 @@ async fn report_session_keeps_nothing_for_input_without_a_usable_value() {
 }
 
 #[tokio::test]
-async fn report_session_reads_all_of_stdin_but_parses_only_the_first_64_kib() {
+async fn report_session_reads_all_of_a_large_stdin() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
     let padding = "p".repeat(1024 * 1024);
@@ -396,19 +396,6 @@ async fn report_session_reads_all_of_stdin_but_parses_only_the_first_64_kib() {
     let output = report(&setup, &id, "/session_id", early.into_bytes()).await;
     assert_eq!(output.status.code(), Some(0), "{}", err(&output));
     assert_eq!(setup.entry(&id).session_id().as_deref(), Some("early-1"));
-
-    // The value sits past the first 64 KiB: it is never seen.
-    let late = format!(
-        r#"{{"pad":"{}","session_id":"late-2"}}"#,
-        "p".repeat(100 * 1024)
-    );
-    let output = report(&setup, &id, "/session_id", late.into_bytes()).await;
-    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
-    assert_eq!(
-        setup.entry(&id).session_id().as_deref(),
-        Some("early-1"),
-        "a value beyond the parsed prefix is not kept"
-    );
 }
 
 #[tokio::test]

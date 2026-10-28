@@ -44,47 +44,72 @@ pub fn is_session_id(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
 }
 
-/// The string at `pointer` (a JSON pointer, RFC 6901) in `input`, a hook's
-/// stdin or the start of it.
-///
-/// `input` may stop in the middle of the document: whatever precedes the cut is
-/// still read, so a value that sits within the first bytes is found however long
-/// the rest is. `None` when `input` is not JSON up to the value, nothing is
-/// at the pointer, or what is there is not a string.
-#[must_use]
-pub fn session_at_pointer(input: &[u8], pointer: &str) -> Option<String> {
-    match value_at_pointer(input, pointer) {
-        Some(PointerValue::Text(text)) => Some(text),
-        Some(PointerValue::Other) | None => None,
-    }
-}
-
-/// Whether `input` has a value other than `null` at `pointer`, of any type.
-/// Reads the way [`session_at_pointer`] does.
-#[must_use]
-pub fn has_value_at_pointer(input: &[u8], pointer: &str) -> bool {
-    value_at_pointer(input, pointer).is_some()
-}
-
 /// What a JSON pointer ends at, short of `null`.
-enum PointerValue {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PointerValue {
+    /// A string.
     Text(String),
+    /// A number, a boolean, an object or an array.
     Other,
 }
 
-fn value_at_pointer(input: &[u8], pointer: &str) -> Option<PointerValue> {
-    let path: Vec<String> = pointer
-        .strip_prefix('/')?
-        .split('/')
-        .map(|token| token.replace("~1", "/").replace("~0", "~"))
+impl PointerValue {
+    /// The string, when the value is one.
+    #[must_use]
+    pub fn into_text(self) -> Option<String> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Other => None,
+        }
+    }
+}
+
+/// The values at `pointers` (JSON pointers, RFC 6901) in the JSON document
+/// `input` yields, a hook's stdin, one per pointer in the same order; `None`
+/// where nothing other than `null` is at the pointer, the pointer does not
+/// start with `/`, or `input` is not JSON up to the value.
+///
+/// The document is read once, as a stream and never held whole, only as far
+/// as the last value found (the end of the document when one is missing), so
+/// a value is found wherever it sits and `input` is left right after what was
+/// read. A document that is cut off is read up to the cut. Where a key appears
+/// twice in an object, the first one is read.
+#[must_use]
+pub fn values_at_pointers(
+    input: impl std::io::Read,
+    pointers: &[&str],
+) -> Vec<Option<PointerValue>> {
+    let paths: Vec<Option<Vec<String>>> = pointers
+        .iter()
+        .map(|pointer| {
+            let tokens = pointer.strip_prefix('/')?.split('/');
+            Some(
+                tokens
+                    .map(|token| token.replace("~1", "/").replace("~0", "~"))
+                    .collect(),
+            )
+        })
         .collect();
-    let mut found = None;
-    let mut deserializer = serde_json::Deserializer::from_slice(input);
-    // Reading stops at the value, or fails at the cut; either way the answer
-    // is what `found` holds.
+    let mut found = vec![None; pointers.len()];
+    let targets: Vec<Target<'_>> = paths
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, path)| {
+            Some(Target {
+                slot,
+                path: path.as_deref()?,
+            })
+        })
+        .collect();
+    if targets.is_empty() {
+        return found;
+    }
+    let mut deserializer = serde_json::Deserializer::from_reader(input);
+    // Reading stops once every value is found, at the end of the document, or
+    // fails at the cut; either way the answer is what `found` holds.
     let _ = serde::de::DeserializeSeed::deserialize(
         PointerSeek {
-            path: &path,
+            targets,
             found: &mut found,
         },
         &mut deserializer,
@@ -92,22 +117,48 @@ fn value_at_pointer(input: &[u8], pointer: &str) -> Option<PointerValue> {
     found
 }
 
-/// Walks a JSON document along a pointer, recording the string it ends at.
-struct PointerSeek<'a> {
+/// A pointer's remaining tokens below the value being read, and where its
+/// value is recorded.
+struct Target<'a> {
+    slot: usize,
     path: &'a [String],
-    found: &'a mut Option<PointerValue>,
 }
 
-impl PointerSeek<'_> {
-    /// Records a value that is not a string, when the pointer ends here.
-    fn mark_other(self) {
-        if self.path.is_empty() {
-            *self.found = Some(PointerValue::Other);
+/// Walks a JSON document along several pointers at once, recording the values
+/// they end at.
+struct PointerSeek<'s, 'a> {
+    targets: Vec<Target<'a>>,
+    found: &'s mut [Option<PointerValue>],
+}
+
+impl<'a> PointerSeek<'_, 'a> {
+    /// Records `value` for every pointer that ends here; returns the pointers
+    /// that go further.
+    fn record_here(&mut self, value: &PointerValue) -> Vec<Target<'a>> {
+        let mut deeper = Vec::new();
+        for target in &self.targets {
+            if target.path.is_empty() {
+                self.found[target.slot] = Some(value.clone());
+            } else {
+                deeper.push(Target {
+                    slot: target.slot,
+                    path: target.path,
+                });
+            }
         }
+        deeper
+    }
+
+    fn record_scalar(mut self, value: &PointerValue) {
+        let _ = self.record_here(value);
+    }
+
+    fn all_found(&self) -> bool {
+        self.found.iter().all(Option::is_some)
     }
 }
 
-impl<'de> serde::de::DeserializeSeed<'de> for PointerSeek<'_> {
+impl<'de> serde::de::DeserializeSeed<'de> for PointerSeek<'_, '_> {
     type Value = ();
 
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
@@ -115,7 +166,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for PointerSeek<'_> {
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for PointerSeek<'_> {
+impl<'de> serde::de::Visitor<'de> for PointerSeek<'_, '_> {
     type Value = ();
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -123,71 +174,98 @@ impl<'de> serde::de::Visitor<'de> for PointerSeek<'_> {
     }
 
     fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<(), E> {
-        if self.path.is_empty() {
-            *self.found = Some(PointerValue::Text(value.to_string()));
-        }
+        self.record_scalar(&PointerValue::Text(value.to_string()));
+        Ok(())
+    }
+
+    // `null` is no value; reading goes on for the other pointers.
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
         Ok(())
     }
 
     fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-        self.mark_other();
+        self.record_scalar(&PointerValue::Other);
         Ok(())
     }
 
     fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-        self.mark_other();
+        self.record_scalar(&PointerValue::Other);
         Ok(())
     }
 
     fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-        self.mark_other();
+        self.record_scalar(&PointerValue::Other);
         Ok(())
     }
 
     fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-        self.mark_other();
+        self.record_scalar(&PointerValue::Other);
         Ok(())
     }
 
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+    fn visit_map<A: serde::de::MapAccess<'de>>(mut self, mut map: A) -> Result<(), A::Error> {
         use serde::de::{Error, IgnoredAny};
-        let Some((token, rest)) = self.path.split_first() else {
-            self.mark_other();
-            return Ok(());
-        };
+        let mut open: Vec<(usize, &str, &[String])> = self
+            .record_here(&PointerValue::Other)
+            .into_iter()
+            .filter_map(|target| {
+                let (token, rest) = target.path.split_first()?;
+                Some((target.slot, token.as_str(), rest))
+            })
+            .collect();
         while let Some(key) = map.next_key::<String>()? {
-            if key == *token {
-                map.next_value_seed(PointerSeek {
-                    path: rest,
-                    found: self.found,
-                })?;
-                // Looked at: the rest of the document is not read.
-                return Err(A::Error::custom("pointer reached"));
+            let (matched, rest): (Vec<_>, Vec<_>) =
+                open.into_iter().partition(|(_, token, _)| *token == key);
+            open = rest;
+            if matched.is_empty() {
+                map.next_value::<IgnoredAny>()?;
+                continue;
             }
-            map.next_value::<IgnoredAny>()?;
+            map.next_value_seed(PointerSeek {
+                targets: matched
+                    .into_iter()
+                    .map(|(slot, _, path)| Target { slot, path })
+                    .collect(),
+                found: &mut *self.found,
+            })?;
+            if self.all_found() {
+                return Err(A::Error::custom("every pointer reached"));
+            }
         }
         Ok(())
     }
 
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(mut self, mut seq: A) -> Result<(), A::Error> {
         use serde::de::{Error, IgnoredAny};
-        let Some((token, rest)) = self.path.split_first() else {
-            self.mark_other();
-            return Ok(());
-        };
-        let Ok(index) = token.parse::<usize>() else {
-            return Ok(());
-        };
+        let mut open: Vec<(usize, usize, &[String])> = self
+            .record_here(&PointerValue::Other)
+            .into_iter()
+            .filter_map(|target| {
+                let (token, rest) = target.path.split_first()?;
+                Some((target.slot, token.parse::<usize>().ok()?, rest))
+            })
+            .collect();
         for position in 0.. {
-            if position == index {
+            let (matched, rest): (Vec<_>, Vec<_>) = open
+                .into_iter()
+                .partition(|(_, index, _)| *index == position);
+            open = rest;
+            let element = if matched.is_empty() {
+                seq.next_element::<IgnoredAny>()?.map(drop)
+            } else {
                 seq.next_element_seed(PointerSeek {
-                    path: rest,
-                    found: self.found,
-                })?;
-                return Err(A::Error::custom("pointer reached"));
-            }
-            if seq.next_element::<IgnoredAny>()?.is_none() {
+                    targets: matched
+                        .into_iter()
+                        .map(|(slot, _, path)| Target { slot, path })
+                        .collect(),
+                    found: &mut *self.found,
+                })?
+            };
+            if element.is_none() {
                 break;
+            }
+            if self.all_found() {
+                return Err(A::Error::custom("every pointer reached"));
             }
         }
         Ok(())

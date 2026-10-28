@@ -260,6 +260,47 @@ async fn a_take_whose_input_has_the_skip_pointer_leaves_the_parcels_for_the_next
     assert_eq!(setup.entry().inbox().pending_count(), 0);
 }
 
+/// Grok Build writes `subagentType` after a tool input of up to 128 KiB.
+#[tokio::test]
+async fn a_take_finds_the_skip_pointer_after_a_large_tool_input() {
+    let setup = Setup::start().await;
+    setup
+        .entry()
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THE-MAIN-SESSION"));
+    let mut take = vec!["--deliver-take"];
+    take.extend(SKIP_IF_SUBAGENT);
+    let input = format!(
+        r#"{{"toolInput":"{}","subagentType":"explore"}}"#,
+        "x".repeat(128 * 1024)
+    );
+
+    let (skipped, written) = setup.run(&take, input.into_bytes()).await;
+    assert!(written.is_ok(), "{written:?}");
+    assert_silent_success(&skipped, "a take from a subagent's hook");
+    assert_eq!(
+        setup.entry().inbox().pending_count(),
+        1,
+        "a take from a subagent's hook must leave the parcel in the inbox"
+    );
+}
+
+#[tokio::test]
+async fn a_session_report_finds_the_session_after_a_large_field() {
+    let setup = Setup::start().await;
+    let input = format!(
+        r#"{{"pad":"{}","session_id":"late-2"}}"#,
+        "p".repeat(128 * 1024)
+    );
+
+    let (output, written) = setup
+        .run(&["--report-session", "/session_id"], input.into_bytes())
+        .await;
+    assert!(written.is_ok(), "{written:?}");
+    assert_eq!(output.status.code(), Some(0), "{}", describe(&output));
+    assert_eq!(setup.entry().session_id().as_deref(), Some("late-2"));
+}
+
 /// A status report has no answer to wait for, so whether the door sent one is measured
 /// where sending fails: inside a window whose daemon is not listening, a report that is
 /// sent ends with an error and one that is skipped ends silently with 0.

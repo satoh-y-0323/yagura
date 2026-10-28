@@ -12,7 +12,7 @@
 //! collected with its whole process tree before the endpoint is bound, not a
 //! window's shell.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use yagura_daemon::config::{
 use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
-use yagura_daemon::inbox::{has_value_at_pointer, is_session_id, session_at_pointer};
+use yagura_daemon::inbox::{PointerValue, is_session_id, values_at_pointers};
 use yagura_daemon::ipc::{chat, plan, ticket};
 use yagura_daemon::palette_store::PaletteStore;
 use yagura_daemon::profile::ProfileOs;
@@ -55,9 +55,6 @@ const UNKNOWN_LOG_FIELD: &str = "unknown";
 /// How long a hook waits for the daemon to answer a door that is not a wait.
 const DOOR_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How much of a hook's stdin is looked at for the session it names.
-const HOOK_STDIN_PARSED_BYTES: usize = 64 * 1024;
-
 /// The most a hook waits, after its answer is printed, for the rest of its
 /// stdin to be read. Bounds a CLI that leaves stdin open; a CLI that closes it
 /// is waited for until it has written everything.
@@ -71,8 +68,9 @@ fn main() -> Result<ExitCode> {
     // silent and leaves no trace.
     if cli::names_hook_door(&args) && !runs_inside_window() {
         // The CLI writes its input to the hook; a hook that leaves it unread
-        // would make that write fail.
-        read_hook_stdin();
+        // would make that write fail. Bounded like a door inside a window, for a
+        // CLI that leaves stdin open.
+        let _ = drain_hook_stdin().recv_timeout(HOOK_STDIN_DRAIN_GRACE);
         return Ok(ExitCode::SUCCESS);
     }
     let command = cli::parse_args(&args).context("invalid command line")?;
@@ -705,49 +703,49 @@ fn runs_inside_window() -> bool {
 /// Runs a hook door from inside a window (see [`runs_inside_window`]).
 ///
 /// The door always reads the CLI's stdin to the end, so the CLI's write never
-/// fails. It reads it in full first only when the door needs it (`--skip-if`,
-/// `--report-session`); otherwise the reading runs beside the request, so an
-/// answer is never held back by a CLI that leaves stdin open.
+/// fails. The values the door needs (`--skip-if`, `--report-session`) are
+/// looked for as stdin is read, and the door goes on as soon as they are found
+/// or the document has ended, so an answer is not held back by a CLI that
+/// leaves stdin open after its input.
 async fn run_hook(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Result<ExitCode> {
-    let needs_input =
-        command.skip_if().is_some() || matches!(command, CliCommand::ReportSession { .. });
-    let (input, drained) = if needs_input {
-        let input = tokio::task::spawn_blocking(read_hook_stdin)
-            .await
-            .context("reading the hook input panicked")?;
-        (input, None)
+    let session_pointer = match &command {
+        CliCommand::ReportSession { pointer, .. } => Some(pointer.clone()),
+        _ => None,
+    };
+    let skip_pointer = command.skip_if().map(str::to_string);
+    let pointers: Vec<String> = skip_pointer
+        .iter()
+        .chain(&session_pointer)
+        .cloned()
+        .collect();
+    let (found, drained) = read_hook_stdin(pointers);
+    let mut values = found
+        .await
+        .context("reading the hook input failed")?
+        .into_iter();
+    let skips = skip_pointer.is_some() && values.next().flatten().is_some();
+    let session = values.next().flatten().and_then(PointerValue::into_text);
+    let result = if skips {
+        Ok(ExitCode::SUCCESS)
     } else {
-        (Vec::new(), Some(drain_hook_stdin()))
-    };
-    if let Some(pointer) = command.skip_if()
-        && has_value_at_pointer(&input, pointer)
-    {
-        return Ok(ExitCode::SUCCESS);
-    }
-    let result = match command {
-        CliCommand::EmitStatus { status, source, .. } => {
-            send_status_event(ipc, endpoint, status, source)
-                .await
-                .map(succeeded)
+        match command {
+            CliCommand::EmitStatus { status, source, .. } => {
+                send_status_event(ipc, endpoint, status, source)
+                    .await
+                    .map(succeeded)
+            }
+            door => run_hook_door(ipc, endpoint, door, session).await,
         }
-        door => run_hook_door(ipc, endpoint, door, &input).await,
     };
-    if let Some(drained) = drained {
-        // Only the end of stdin is waited for; what was read is of no use.
-        let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
-    }
+    // Only the end of stdin is waited for; the rest of it is of no use.
+    let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
     result
 }
 
-/// Reads stdin to its end on a thread of its own; the receiver gets one value
-/// when it has ended.
+/// Reads stdin to its end on a thread of its own (see [`read_hook_stdin`]);
+/// the receiver gets one value when it has ended.
 fn drain_hook_stdin() -> std::sync::mpsc::Receiver<()> {
-    let (done, drained) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        read_hook_stdin();
-        let _ = done.send(());
-    });
-    drained
+    read_hook_stdin(Vec::new()).1
 }
 
 /// Connects to `endpoint` and sends one `StatusEvent` (the `--emit-status`
@@ -788,8 +786,8 @@ async fn send_status_event(
 
 /// Runs one of the commands a CLI's hook uses to reach its window's inbox,
 /// only reached from inside a window (see [`runs_inside_window`]): the token and
-/// window id are the ones the window's child inherited. `input` is the hook's
-/// stdin when the door read it first.
+/// window id are the ones the window's child inherited. `session` is the
+/// string at the `--report-session` pointer in the hook's stdin.
 ///
 /// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
 /// with the exit code the window's profile declares. A refusal prints nothing
@@ -798,7 +796,7 @@ async fn run_hook_door(
     ipc: &PlatformIpc,
     endpoint: &str,
     command: CliCommand,
-    input: &[u8],
+    session: Option<String>,
 ) -> Result<ExitCode> {
     let token = std::env::var(STATUS_TOKEN_ENV)
         .with_context(|| format!("{STATUS_TOKEN_ENV} is not valid Unicode"))?;
@@ -809,9 +807,8 @@ async fn run_hook_door(
         CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext { window_id, token },
         CliCommand::DeliverTake { .. } => ClientMessage::DeliverTake { window_id, token },
         CliCommand::DeliverWait { .. } => ClientMessage::DeliverWait { window_id, token },
-        CliCommand::ReportSession { pointer, .. } => {
-            let Some(session) = session_at_pointer(input, &pointer).filter(|s| is_session_id(s))
-            else {
+        CliCommand::ReportSession { .. } => {
+            let Some(session) = session.filter(|s| is_session_id(s)) else {
                 return Ok(ExitCode::SUCCESS);
             };
             ClientMessage::ReportSession {
@@ -881,22 +878,26 @@ fn write_hook_output(stream: DeliveryStream, output: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reads the whole of stdin, so the CLI that wrote it never sees its write
-/// fail, and keeps only the first [`HOOK_STDIN_PARSED_BYTES`] of it.
-fn read_hook_stdin() -> Vec<u8> {
-    let mut kept = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut stdin = std::io::stdin().lock();
-    loop {
-        match stdin.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let room = HOOK_STDIN_PARSED_BYTES.saturating_sub(kept.len());
-                kept.extend_from_slice(&chunk[..n.min(room)]);
-            }
-        }
-    }
-    kept
+/// Reads the whole of stdin on a thread of its own, so the CLI that wrote it
+/// never sees its write fail. The first receiver gets the values at `pointers`
+/// (see [`values_at_pointers`]) as soon as they are found; the second gets one
+/// value when stdin has ended.
+fn read_hook_stdin(
+    pointers: Vec<String>,
+) -> (
+    tokio::sync::oneshot::Receiver<Vec<Option<PointerValue>>>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let (values, found) = tokio::sync::oneshot::channel();
+    let (done, drained) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let pointers: Vec<&str> = pointers.iter().map(String::as_str).collect();
+        let _ = values.send(values_at_pointers(&mut stdin, &pointers));
+        let _ = std::io::copy(&mut stdin, &mut std::io::sink());
+        let _ = done.send(());
+    });
+    (found, drained)
 }
 
 /// Reads a single length-prefixed frame from `client` and decodes it as a
