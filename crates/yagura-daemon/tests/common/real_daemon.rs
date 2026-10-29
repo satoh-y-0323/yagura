@@ -216,6 +216,12 @@ impl Sandbox {
             .await
     }
 
+    /// [`Sandbox::start`] with `args` added to the daemon's command line.
+    pub async fn start_with_args(&self, args: &[&str]) -> RunningDaemon {
+        self.connect_to(self.spawn_daemon(&daemon_bin(), &[], true, args))
+            .await
+    }
+
     /// [`Sandbox::start`] with no `--profiles-dir`, so profiles come from the config root.
     pub async fn start_on_config_root(&self) -> RunningDaemon {
         self.connect_to(self.spawn_daemon(&daemon_bin(), &[], false, &[]))

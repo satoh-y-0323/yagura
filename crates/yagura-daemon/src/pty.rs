@@ -666,16 +666,20 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         config: &DaemonConfig,
     ) -> PtyResult<Self> {
-        Self::spawn_with_palette(argv, cwd, extra_env, None, config).await
+        Self::spawn_with_palette(argv, cwd, extra_env, &[], None, config).await
     }
 
     /// [`PtySession::spawn_with_command_in_env`], with the window's terminal
     /// answering color queries with `palette` from the child's first output
     /// on. With `None` it leaves them unanswered until a palette is set.
+    /// Each of `removed_env` (compared without regard to case) is taken out of
+    /// the child's environment last, whether the daemon's own environment or
+    /// the base environment carried it.
     pub async fn spawn_with_palette(
         argv: &[&str],
         cwd: Option<&Path>,
         extra_env: &[(&str, &str)],
+        removed_env: &[&str],
         palette: Option<yagura_protocol::Palette>,
         config: &DaemonConfig,
     ) -> PtyResult<Self> {
@@ -690,6 +694,7 @@ impl PtySession {
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
                 .collect();
+            let removed_env: Vec<String> = removed_env.iter().map(|s| s.to_string()).collect();
             let child_base_env = config.child_base_env.clone();
             move || {
                 use yagura_os::pty::EnvOp;
@@ -725,6 +730,22 @@ impl PtySession {
                         .iter()
                         .map(|(key, value)| EnvOp::Set(OsString::from(key), OsString::from(value))),
                 );
+                let is_removed = |name: &std::ffi::OsStr| {
+                    removed_env
+                        .iter()
+                        .any(|removed| name.eq_ignore_ascii_case(removed))
+                };
+                let mut taken_out: Vec<OsString> = removed_env.iter().map(OsString::from).collect();
+                for name in inherited
+                    .iter()
+                    .map(OsString::as_os_str)
+                    .chain(child_base_env.iter().map(|(name, _)| name))
+                {
+                    if is_removed(name) && !taken_out.iter().any(|seen| seen == name) {
+                        taken_out.push(name.to_os_string());
+                    }
+                }
+                env.extend(taken_out.into_iter().map(EnvOp::Remove));
 
                 yagura_os::pty::spawn(
                     &yagura_os::pty::PtyCommand { argv, cwd, env },

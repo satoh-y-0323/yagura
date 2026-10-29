@@ -44,6 +44,7 @@ use crate::input::{
     ComposerLine, InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack,
     plan_submit_line,
 };
+use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
     GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix, TakeBackRegistration,
@@ -258,6 +259,9 @@ pub struct WindowProvenance {
     /// The profile's own program, run to wake the window's CLI when its
     /// `[delivery]` table wakes by command.
     pub wake_command: Option<WakeCommand>,
+    /// How the window's credentials reach its CLI. Given by the caller as
+    /// planned; with `Launch` the child's environment holds none of them.
+    pub credentials: CredentialsMode,
 }
 
 /// How a window's CLI comes to run the daemon's hooks: the one fact both
@@ -4231,6 +4235,10 @@ impl WindowRegistry {
         let workspace = resolve_key_blocking(resolved_cwd.clone()).await;
         drop(walk_permit);
 
+        // Owns the window's credentials folder from here on: every return
+        // below drops it, and a spawned window hands it to its exit watcher.
+        let credentials_folder = self.create_credentials_folder(provenance.credentials).await;
+
         // Written outside `open_lock`, after the early rejection: a request
         // over the limit never touches the disk, and one slow write never
         // stalls another connection's open.
@@ -4266,9 +4274,14 @@ impl WindowRegistry {
                 extra_profile_env,
                 &prepared,
                 palette,
+                provenance.credentials,
+                credentials_folder.as_ref(),
             )
             .await?;
         let session = Arc::new(session);
+        if let Some(folder) = credentials_folder {
+            remove_credentials_when_exited(&session, folder);
+        }
 
         let DetectionSetup {
             handle: detector_handle,
@@ -4486,9 +4499,68 @@ impl WindowRegistry {
         }
     }
 
+    /// Creates the folder a `launch` window's credentials file goes in, or
+    /// `None` when the window is not one or the folder cannot be made (the
+    /// spawn then leaves the hooks and the bridge out).
+    async fn create_credentials_folder(&self, mode: CredentialsMode) -> Option<CredentialsFolder> {
+        if mode != CredentialsMode::Launch {
+            return None;
+        }
+        let Some(config_dir) = self.config.mcp_config_dir.clone() else {
+            tracing::warn!(
+                "no state directory to keep the window's credentials in; the window opens \
+                 without hooks and the MCP bridge"
+            );
+            return None;
+        };
+        match tokio::task::spawn_blocking(move || CredentialsFolder::create(&config_dir)).await {
+            Ok(Ok(folder)) => Some(folder),
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    error = %err,
+                    "could not create the window's credentials folder; the window opens \
+                     without hooks and the MCP bridge"
+                );
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Writes the credentials of the window `window_id` into `folder` and
+    /// returns the path to hand its hooks and bridge. `None` when the token
+    /// cannot be verified or the file cannot be written.
+    async fn write_credentials_file(
+        folder: Option<&CredentialsFolder>,
+        window_id: &str,
+        status_token: &StatusToken,
+    ) -> Option<String> {
+        let folder = folder?;
+        let Some(token) = status_token.as_hex().map(str::to_string) else {
+            tracing::warn!("the window's token cannot be verified; it gets no credentials file");
+            return None;
+        };
+        let path = folder.file_path();
+        let written = tokio::task::spawn_blocking({
+            let path = path.clone();
+            let window_id = window_id.to_string();
+            move || write_credentials(&path, &window_id, &token)
+        })
+        .await
+        .unwrap_or_else(|err| Err(std::io::Error::other(err.to_string())));
+        match written {
+            Ok(()) => Some(folder.file_argument()),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not write the window's credentials file");
+                None
+            }
+        }
+    }
+
     /// Spawns a PTY session with the given command in the resolved working
     /// directory, injecting `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` into
-    /// the child environment if the token is verifiable, the MCP bridge path
+    /// the child environment if the token is verifiable (and the window's
+    /// credentials are not `launch`ed in a file instead), the MCP bridge path
     /// when one was resolved, plus `extra_profile_env` (a launch profile's
     /// own `[env]` table; empty for an `OpenWindow` request). `injections`
     /// are appended to `argv` in order for this spawn only. The window's
@@ -4512,6 +4584,8 @@ impl WindowRegistry {
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
         palette: Palette,
+        credentials: CredentialsMode,
+        credentials_folder: Option<&CredentialsFolder>,
     ) -> Result<(PtySession, bool), WindowOpenError> {
         let platform = self.config.host_os.platform();
         let predicate = crate::profile::is_executable_predicate(&self.config);
@@ -4521,12 +4595,35 @@ impl WindowRegistry {
                     reason: rejected.0,
                     argument: None,
                 })?;
-        let mut child_env =
-            child_environment(&self.config, status_token, window_id, extra_profile_env);
-        let env_refs = env_refs_names(&self.config, status_token, &child_env);
+        let launched = credentials == CredentialsMode::Launch;
+        let credentials_file = if launched {
+            Self::write_credentials_file(credentials_folder, window_id, status_token).await
+        } else {
+            None
+        };
+        let mut child_env = child_environment(
+            &self.config,
+            status_token,
+            window_id,
+            extra_profile_env,
+            !launched,
+        );
+        let env_refs = env_refs_names(&self.config, status_token, &child_env, !launched);
         let mut full_argv = argv.to_vec();
         let mut hooks_injected = false;
         for injection in injections {
+            // Without its credentials file a `launch` window's hooks and bridge
+            // could not claim the window, and its environment holds nothing.
+            if launched
+                && credentials_file.is_none()
+                && matches!(injection.kind, InjectionKind::Hooks | InjectionKind::Mcp)
+            {
+                tracing::warn!(
+                    "dropped the {} injection: the window has no credentials file",
+                    injection.kind.label()
+                );
+                continue;
+            }
             // Filled before the shim check, which judges the argument as spawned.
             let filled = PreparedInjection {
                 kind: injection.kind,
@@ -4534,6 +4631,10 @@ impl WindowRegistry {
                     .args
                     .iter()
                     .map(|arg| crate::profile::fill_env_refs(arg, &env_refs))
+                    .map(|arg| match credentials_file.as_deref() {
+                        Some(file) => crate::profile::fill_credentials_file(&arg, file),
+                        None => arg,
+                    })
                     .collect(),
             };
             let args = injection_args_for(&resolution, &filled);
@@ -4562,10 +4663,16 @@ impl WindowRegistry {
         let spawn_argv = program::into_spawn_argv(&resolution, &full_argv, platform);
         let spawn_argv: Vec<&str> = spawn_argv.iter().map(String::as_str).collect();
 
+        let removed_env: &[&str] = if launched {
+            &[WINDOW_ID_ENV, STATUS_TOKEN_ENV]
+        } else {
+            &[]
+        };
         let session = PtySession::spawn_with_palette(
             &spawn_argv,
             Some(resolved_cwd),
             &extra_env,
+            removed_env,
             Some(palette),
             &self.config,
         )
@@ -5125,13 +5232,14 @@ fn child_environment(
     status_token: &StatusToken,
     window_id: &str,
     extra_profile_env: &[(String, String)],
+    carries_credentials: bool,
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
-    let mut forwarded: Vec<String> = channel_env_names(status_token)
+    let mut forwarded: Vec<String> = channel_env_names(status_token, carries_credentials)
         .into_iter()
         .map(str::to_string)
         .collect();
-    if let Some(hex) = status_token.as_hex() {
+    if let Some(hex) = status_token.as_hex().filter(|_| carries_credentials) {
         env.push((STATUS_TOKEN_ENV.to_string(), hex.to_string()));
         env.push((WINDOW_ID_ENV.to_string(), window_id.to_string()));
     }
@@ -5174,15 +5282,16 @@ fn child_environment(
 }
 
 /// The MCP channel variables a window's child receives: its identity pair
-/// when its token is verifiable, and the instance name when the daemon has
-/// one (inherited, never set). The one source for the `WSLENV` forwarding
-/// and for `{env_refs}`.
-fn channel_env_names(status_token: &StatusToken) -> Vec<&'static str> {
+/// when its token is verifiable and the window carries its credentials in the
+/// environment, and the instance name when the daemon has one (inherited,
+/// never set). The one source for the `WSLENV` forwarding and for
+/// `{env_refs}`.
+fn channel_env_names(status_token: &StatusToken, carries_credentials: bool) -> Vec<&'static str> {
     yagura_protocol::MCP_CHANNEL_ENV_VARS
         .into_iter()
         .filter(|name| match *name {
             INSTANCE_ENV => std::env::var_os(INSTANCE_ENV).is_some(),
-            _ => status_token.as_hex().is_some(),
+            _ => carries_credentials && status_token.as_hex().is_some(),
         })
         .collect()
 }
@@ -5194,8 +5303,9 @@ fn env_refs_names(
     config: &DaemonConfig,
     status_token: &StatusToken,
     child_env: &[(String, String)],
+    carries_credentials: bool,
 ) -> Vec<&'static str> {
-    let mut names = channel_env_names(status_token);
+    let mut names = channel_env_names(status_token, carries_credentials);
     let has_wslenv = child_env
         .iter()
         .any(|(key, _)| key.eq_ignore_ascii_case(WSLENV))
@@ -5239,6 +5349,111 @@ fn path_led_by(dir: &Path, inherited: &Option<std::ffi::OsString>) -> Option<Str
         path.push(inherited);
     }
     path.into_string().ok()
+}
+
+/// The name a window's credentials file has inside its folder.
+const CREDENTIALS_FILE_NAME: &str = "credentials.json";
+
+/// What a window's credentials folder is named after, followed by a random
+/// part; the start-up sweep removes the folders that carry it.
+const CREDENTIALS_FOLDER_PREFIX: &str = "credentials-";
+
+/// A `launch` window's own folder under the MCP config directory, holding the
+/// file only its hooks and bridge are told of. Dropping it removes the folder
+/// with everything in it, so every way a window's open or life ends clears it.
+struct CredentialsFolder {
+    dir: PathBuf,
+}
+
+impl CredentialsFolder {
+    /// Blocking: makes the folder under `config_dir`, owner-only, with a
+    /// random name that does not depend on the window id (not yet allocated).
+    fn create(config_dir: &Path) -> std::io::Result<Self> {
+        let mut random = [0u8; 16];
+        yagura_os::fill_random(&mut random)
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        // Owns the path before anything exists, so a partial creation is cleared.
+        let folder = Self {
+            dir: config_dir.join(format!("{CREDENTIALS_FOLDER_PREFIX}{name}")),
+        };
+        let base = config_dir.parent().unwrap_or(config_dir);
+        yagura_os::secure_owned_dir(base, &folder.dir).map_err(std::io::Error::other)?;
+        std::fs::create_dir_all(&folder.dir)?;
+        Ok(folder)
+    }
+
+    fn file_path(&self) -> PathBuf {
+        self.dir.join(CREDENTIALS_FILE_NAME)
+    }
+
+    /// The file's path as a hook or bridge argument: absolute, and on Windows
+    /// with `/` separators, which both Windows and Git Bash read.
+    fn file_argument(&self) -> String {
+        let path = self.file_path().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            path.replace('\\', "/")
+        } else {
+            path
+        }
+    }
+}
+
+impl Drop for CredentialsFolder {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_dir_all(&self.dir)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %err, "could not remove a window's credentials folder");
+        }
+    }
+}
+
+/// Blocking: writes `{"window_id", "token"}` to `path`, readable by its owner
+/// only (the folder it is in is owner-only too).
+fn write_credentials(path: &Path, window_id: &str, token: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let body = serde_json::json!({ "window_id": window_id, "token": token }).to_string();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(body.as_bytes())?;
+    let _ = yagura_os::secure_owned_file(path);
+    Ok(())
+}
+
+/// Removes `folder` once the child of `session` has exited, however it ended.
+fn remove_credentials_when_exited(session: &PtySession, folder: CredentialsFolder) {
+    let mut exited = session.exit_notified();
+    tokio::spawn(async move {
+        // Also returns when the session is gone without having reported an exit.
+        let _ = exited.wait_for(|exited| *exited).await;
+        drop(folder);
+    });
+}
+
+/// Blocking: removes what earlier daemon runs of this instance left in
+/// `config_dir`. Run once the instance's endpoint is held, so no live window
+/// of another daemon can own what is removed.
+pub fn remove_stale_credentials(config_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(config_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_credentials_folder = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(CREDENTIALS_FOLDER_PREFIX));
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if is_credentials_folder
+            && is_dir
+            && let Err(err) = std::fs::remove_dir_all(entry.path())
+        {
+            tracing::warn!(error = %err, "could not remove a stale credentials folder");
+        }
+    }
 }
 
 /// An injection whose settings file is on disk, ready to append to the spawn
@@ -6242,7 +6457,7 @@ mod tests {
         let token = StatusToken::from_override("0123456789abcdef0123456789abcdef")
             .expect("the override is a well-formed token");
 
-        let env = child_environment(&config, &token, "w1-test", &[]);
+        let env = child_environment(&config, &token, "w1-test", &[], true);
 
         let wslenv = env
             .iter()

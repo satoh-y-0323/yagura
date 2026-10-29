@@ -561,6 +561,17 @@ impl InjectionSpec {
             .chain(self.config_dir.iter().flat_map(BTreeMap::values))
             .any(|text| text.contains(MCP_SERVER_PLACEHOLDER))
     }
+
+    /// Whether the table hands the window's credentials file to its CLI: it
+    /// spells `{credentials_file}` in `args`, `config_file` or `config_dir`.
+    #[must_use]
+    pub fn spells_credentials_file(&self) -> bool {
+        self.args
+            .iter()
+            .chain(self.config_file.as_ref())
+            .chain(self.config_dir.iter().flat_map(BTreeMap::values))
+            .any(|text| text.contains(CREDENTIALS_FILE_PLACEHOLDER))
+    }
 }
 
 /// Where the settings an injection names were placed for one launch: what
@@ -1646,6 +1657,12 @@ pub(crate) fn fill_env_refs(arg: &str, names: &[&str]) -> String {
         MCP_ENV_REFS_PLACEHOLDER,
         &env_refs_object(names.iter().copied()).to_string(),
     )
+}
+
+/// `arg` with `{credentials_file}` replaced by `file`, the path of the
+/// window's credentials file.
+pub(crate) fn fill_credentials_file(arg: &str, file: &str) -> String {
+    arg.replace(CREDENTIALS_FILE_PLACEHOLDER, file)
 }
 
 /// A JSON object naming each of `names` as a reference to itself

@@ -28,6 +28,16 @@
 //!   at the start of every turn.
 //! - `--emit`: report `running` / `waiting_input` through `--emit-status` at
 //!   the start and the end of every turn.
+//! - `--credentials <path>`: hand `--credentials <path>` to every door the CLI
+//!   itself runs, as a profile's hook commands do for a window whose
+//!   credentials are not in its environment.
+//! - `--nested-emit <status>`: at start-up, report `<status>` through a door
+//!   that is never given `--credentials`, as a CLI started by a tool of this
+//!   window would (it inherits only this process's environment).
+//! - `--gate <path>`: after the nested report, wait until `<path>` exists.
+//! - `--emit-start <status>`: then report `<status>` through a door of the CLI
+//!   itself (with `--credentials` when given).
+//! - `--exit-on <path>`: end the process as soon as `<path>` exists.
 //! - `--prompt <text>`: a first request handed over at launch; logged.
 //! - `--woken <session> <text>`: the wake command a profile declares. Writes
 //!   both values to `woken.jsonl` and exits; nothing else runs.
@@ -81,6 +91,11 @@ struct Options {
     wait: bool,
     session: Option<String>,
     emit: bool,
+    credentials: Option<PathBuf>,
+    nested_emit: Option<String>,
+    gate: Option<PathBuf>,
+    emit_start: Option<String>,
+    exit_on: Option<PathBuf>,
     prompt: Option<String>,
     woken: Option<(String, String)>,
     woken_hold: Option<PathBuf>,
@@ -102,6 +117,11 @@ fn parse(args: &[String]) -> Options {
             "--wait" => options.wait = true,
             "--session" => options.session = rest.next().cloned(),
             "--emit" => options.emit = true,
+            "--credentials" => options.credentials = rest.next().map(PathBuf::from),
+            "--nested-emit" => options.nested_emit = rest.next().cloned(),
+            "--gate" => options.gate = rest.next().map(PathBuf::from),
+            "--emit-start" => options.emit_start = rest.next().cloned(),
+            "--exit-on" => options.exit_on = rest.next().map(PathBuf::from),
             "--prompt" => options.prompt = rest.next().cloned(),
             "--woken-hold" => options.woken_hold = rest.next().map(PathBuf::from),
             "--woken-fail" => options.woken_fail = true,
@@ -174,6 +194,12 @@ impl DoorRun {
 /// Runs `yagura-daemon <args>` the way a hook does: inside the window's own
 /// environment (its token and window id), with `stdin` written to it.
 fn run_door(options: &Options, args: &[&str], stdin: Option<&[u8]>) -> DoorRun {
+    run_door_as(options, args, stdin, true)
+}
+
+/// [`run_door`], where `own` says whether the door is the CLI's own hook (it is
+/// handed `--credentials`) or a nested CLI's (it never is).
+fn run_door_as(options: &Options, args: &[&str], stdin: Option<&[u8]>, own: bool) -> DoorRun {
     let Some(daemon) = options.daemon.as_ref() else {
         return DoorRun {
             code: None,
@@ -182,6 +208,9 @@ fn run_door(options: &Options, args: &[&str], stdin: Option<&[u8]>) -> DoorRun {
         };
     };
     let mut command = Command::new(daemon);
+    if let Some(path) = options.credentials.as_ref().filter(|_| own) {
+        command.arg("--credentials").arg(path);
+    }
     command
         .args(args)
         .env_remove("YAGURA_STORE_DB")
@@ -328,6 +357,29 @@ fn main() -> io::Result<()> {
     status_line(&output, WAITING_LINE)?;
     if options.wait {
         spawn_wait(Arc::clone(&options), Arc::clone(&events));
+    }
+    if let Some(path) = options.exit_on.clone() {
+        std::thread::spawn(move || {
+            while !path.exists() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::process::exit(0);
+        });
+    }
+    if let Some(status) = options.nested_emit.as_deref() {
+        let args = ["--emit-status", status, "--source", "hook-child"];
+        let run = run_door_as(&options, &args, None, false);
+        events.write(&run.to_json("nested_emit"));
+    }
+    if let Some(gate) = options.gate.as_ref() {
+        while !gate.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    if let Some(status) = options.emit_start.as_deref() {
+        let args = ["--emit-status", status, "--source", "hook-child"];
+        let run = run_door(&options, &args, None);
+        events.write(&run.to_json("emit_start"));
     }
 
     let stdin = io::stdin();

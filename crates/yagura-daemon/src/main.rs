@@ -444,6 +444,14 @@ async fn async_main(
     config.mcp_bridge = resolve_mcp_bridge(config.host_os.platform());
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));
+    // The endpoint is held by now, so no other daemon of this instance owns a
+    // window whose credentials are left in there.
+    if let Some(dir) = config.mcp_config_dir.clone() {
+        let _ = tokio::task::spawn_blocking(move || {
+            yagura_daemon::window::remove_stale_credentials(&dir);
+        })
+        .await;
+    }
     config.report_dir = tokio::task::spawn_blocking({
         let namespace = namespace.clone();
         move || resolve_report_dir(&namespace)

@@ -394,6 +394,8 @@ struct PlannedOpen {
     /// How the profile arranges hooks for its CLI, before the gate is read
     /// and the argv is spawned.
     hooks: HooksRoute,
+    /// How the window's credentials reach its CLI.
+    credentials: crate::profile::CredentialsMode,
     /// Recorded on the window, so a restore can launch it through the same
     /// profile again.
     launch: LaunchIdentity,
@@ -2672,6 +2674,7 @@ impl IpcServer {
         } else {
             HooksRoute::Unarranged
         };
+        let credentials = credentials_mode_for(&self.config, &launch);
         // The program alone, without this launch's options: a wake command
         // runs the profile's own program for a session that already exists.
         let wakes_by_command = matches!(
@@ -2770,6 +2773,7 @@ impl IpcServer {
             injections: Vec::new(),
             hooks_gate,
             hooks,
+            credentials,
             delivery: launch.delivery,
             wake_command,
             bridge_scan,
@@ -5826,6 +5830,7 @@ async fn open_planned(
         delivery: planned.delivery,
         hooks: planned.hooks,
         wake_command: planned.wake_command,
+        credentials: planned.credentials,
         ..provenance
     };
     let opened = registry
@@ -5878,6 +5883,35 @@ fn insert_before_launch_prompt(injections: &mut Vec<CliInjection>, injection: Cl
         .position(|injection| injection.kind == crate::window::InjectionKind::LaunchPrompt)
         .unwrap_or(injections.len());
     injections.insert(at, injection);
+}
+
+/// How `launch`'s window gets its credentials: in a file only when the profile
+/// asks for it and every setting the window really uses ([`DaemonConfig::mcp_bridge`]
+/// decides whether `[mcp]` is used) hands that file to its CLI. Otherwise the
+/// window's hooks or bridge would never learn its credentials and would go
+/// silent, so it opens with them in its environment.
+fn credentials_mode_for(
+    config: &DaemonConfig,
+    launch: &crate::profile::ProfileLaunch,
+) -> crate::profile::CredentialsMode {
+    use crate::profile::CredentialsMode;
+
+    if launch.credentials.mode != CredentialsMode::Launch {
+        return CredentialsMode::Env;
+    }
+    let used: Vec<&crate::profile::InjectionSpec> = launch
+        .hooks
+        .iter()
+        .chain(launch.mcp.iter().filter(|_| config.mcp_bridge.is_some()))
+        .collect();
+    if !used.is_empty() && used.iter().all(|spec| spec.spells_credentials_file()) {
+        return CredentialsMode::Launch;
+    }
+    tracing::info!(
+        profile = %launch.vendor,
+        "the profile asks for launch credentials but a setting it uses does not name the          credentials file; the window opens with its credentials in the environment"
+    );
+    CredentialsMode::Env
 }
 
 /// The room's introduction as a launch argument, for a window that will take
