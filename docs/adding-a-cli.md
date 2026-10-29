@@ -104,7 +104,8 @@ going to change, and when you are done restore it and compare it byte for byte w
 - A CLI may clear a hook's environment, and an MCP server's, down to a fixed list, so
   `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN` never reach them. Look for a setting that names the
   variables to keep (Muse Code's `managed_hooks_env_vars`, or a server's `env`), and print the
-  hook's environment once to confirm it.
+  hook's environment once to confirm it. A profile in `mode = "launch"` avoids the question: its
+  hooks and bridge are handed the credentials file's path in their arguments.
 - A CLI's own launcher can lose arguments: Muse Code's Windows `muse.cmd` runs PowerShell 5.1,
   which drops `"` and `--`. Check what reaches the CLI itself, not what you passed, and record the
   result as a limit with guidance rather than leave the option to fail at launch (see the last
@@ -189,6 +190,18 @@ going to change, and when you are done restore it and compare it byte for byte w
 - The hooks that call the doors go into the profile's `[hooks]` table, or a `json_entry` for a CLI
   that reads hooks only from its own files (see [Hooks injection](../profiles/README.md#hooks-injection)).
   If the CLI asks the user to trust hooks, the profile's `[mcp_registration]` has to record that trust.
+- Choose how the window's identity reaches the hooks and the MCP bridge (see
+  [Credentials](../profiles/README.md#credentials)) by what the CLI lets a launch set:
+  - If a launch-time setting (a flag, a settings file, a plugin directory) can carry both the hook
+    commands and the MCP server definition, use `mode = "launch"` and write
+    `--credentials '{credentials_file}'` into the hook commands and `--credentials` with
+    `{credentials_file}` into the server's arguments. The window's environment then holds no
+    credentials, so a CLI that one of its tools starts cannot report as the window.
+  - If the hooks must stay as the CLI recorded them (a trust hash over the command, or hooks that
+    only a registration can write) but the CLI can set the environment of the tools it runs, keep
+    `mode = "env"` and withhold the two variables from the tools with `launch_args`.
+  - If neither is possible, keep `mode = "env"` and write down that a nested CLI inherits the
+    window's identity, with the condition under which to move to one of the above.
 
 ## 5. Where to keep the results
 

@@ -860,7 +860,7 @@ under an input line that looks idle, or an approval dialog too small to read
 judged by its screen alone.
 
 ```
-yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--for-instance <server>]
+yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--for-instance <server>] [--credentials <path>]
 ```
 
 - `<status>`: one of the seven statuses above; anything else is a command
@@ -877,12 +877,19 @@ yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--
   named one. Given at most once, and taken by every hook door
   (`--emit-status`, `--deliver-context`, `--deliver-take`, `--deliver-wait`,
   `--report-session`) and by no other command.
+- `--credentials <path>`: the file that names the window, for a window whose
+  profile keeps its credentials out of the environment (see
+  [Credentials](../../../profiles/README.md#credentials)). Given at most once,
+  with the same doors and no other command. It is read only when the
+  environment does not hold both `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN`,
+  each non-empty.
 
 The command connects to the running daemon, sends one event and exits; it does
 not start a daemon. Inside a window it exits non-zero if no daemon is
 reachable, and refuses a command line it cannot parse. Outside one -- where
-`YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` is not set, for example in a CLI
-session you started in your own terminal -- it does not read its other
+`YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` is not set or is empty and no
+`--credentials` file names a window, for example in a CLI session you started
+in your own terminal, or one a tool of a window started -- it does not read its other
 arguments at all: it reads its standard input to the end, sends nothing,
 prints nothing and exits 0, so a hook that a CLI runs in every session stays
 quiet in the sessions yagura did not open, even one written for a newer
@@ -900,9 +907,10 @@ value, repeated or not a registration name is left for the command line to
 refuse.
 
 For the event to authenticate and be attributed to the right window, the hook
-must run somewhere inside that window's child process tree: it inherits the
-`YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` environment variables the daemon
-injected when it spawned that window, and `--emit-status` forwards both along
+must either run somewhere inside that window's child process tree, where it
+inherits the `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` environment variables
+the daemon injected when it spawned that window, or be handed the window's
+credentials file with `--credentials`; `--emit-status` forwards the pair along
 with the report (see [StatusEvent Authentication](../../../docs/mcp-setup.md#statusevent-authentication)).
 
 ### What a report means
@@ -1144,6 +1152,9 @@ A window opened from a bundled profile needs none of this. For a CLI started
 inside a window from a raw command line, or from a profile of your own without
 a `[hooks]` table, the CLI's own settings can run the same commands. Such a
 window does not expect reports, so it is never marked when they are missing.
+These commands find the window through its environment, which a window opened
+from a profile with the `launch` credentials mode does not have; they report
+nothing there.
 
 **Claude Code**, in `.claude/settings.json` (or `~/.claude/settings.json`),
 the same hooks the bundled profiles pass:

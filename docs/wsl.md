@@ -73,8 +73,10 @@ file Muse Code takes only by their paths; those are converted at each launch. Se
 
 Because the shell is both a login and an interactive one, `~/.profile` and `~/.bashrc` run inside
 the window's process tree before the CLI replaces bash, and that tree's environment already carries
-the window's identity token (`YAGURA_STATUS_TOKEN`), so anything those files start can identify
-itself as the window. See "Who this identifies" under
+the window's identity token (`YAGURA_STATUS_TOKEN`) when the profile keeps its credentials in the
+environment (`wsl-codex-cli`, `wsl-antigravity-cli`, `wsl-grok-build`), so anything those files start can
+identify itself as the window. The `wsl-claude-code`, `wsl-copilot-cli` and `wsl-muse-code` windows hold
+none (see [Credentials](../profiles/README.md#credentials)). See "Who this identifies" under
 [Requester Identification](mcp-setup.md#requester-identification) for why the token is on the whole
 tree.
 
@@ -108,6 +110,11 @@ and `YAGURA_INSTANCE` when the daemon itself runs under a named instance (the ch
 variable rather than being given it). These are added after whatever `WSLENV` already held -- the
 launch profile's own `[env]` value, or else the daemon's -- without repeating a name already there.
 
+A window whose profile hands its credentials over in a file (`wsl-claude-code`, `wsl-copilot-cli`,
+`wsl-muse-code`) has neither `YAGURA_WINDOW_ID` nor `YAGURA_STATUS_TOKEN` set, and its `WSLENV` does not
+name them. The file is read by the Windows `yagura-daemon.exe` and `yagura-mcp.exe`, which WSL runs
+through interoperability, so its path stays a Windows path (with `/` separators) and is not converted.
+
 The `/p` flag has WSL translate the bridge's Windows path at the boundary, so inside the
 distribution `YAGURA_MCP_BRIDGE` reads as its `/mnt/c/...` form. yagura does no translation of its
 own.
@@ -130,6 +137,9 @@ names:
   included, since Muse hands a server only the variables its definition names. See
   [Configuring Muse Code CLI](mcp-setup.md#configuring-muse-code-cli) for what this profile does
   not do.
+
+The `wsl-claude-code`, `wsl-copilot-cli` and `wsl-muse-code` definitions also pass the bridge
+`--credentials <path>`, the window's credentials file, instead of the two identity variables.
 
 The bridge then reaches the daemon over the same Windows named pipe as any other window's bridge.
 

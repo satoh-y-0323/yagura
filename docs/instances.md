@@ -22,7 +22,9 @@ Set the environment variable `YAGURA_INSTANCE` before starting `yagura-daemon`, 
 GUI. There is no command-line flag for this: an instance is carried by the process's environment
 alone, so every descendant a daemon spawns (a window's shell, and anything `yagura-mcp` that shell
 in turn starts) inherits the same value without yagura injecting anything -- the same mechanism that
-already carries `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` to a window's `yagura-mcp`.
+carries `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` to the `yagura-mcp` of a window whose profile keeps
+its credentials in the environment (a window that hands them over in a file does not use it for those two;
+see [Credentials](../profiles/README.md#credentials)).
 
 An identifier is accepted when it is **1 to 16 bytes of lowercase ASCII letters (`a`-`z`), ASCII
 digits (`0`-`9`) and hyphens (`-`), and starts and ends with a letter or a digit** (a hyphen at

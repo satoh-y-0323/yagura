@@ -92,8 +92,9 @@ own file sets.
 
 An older daemon does not know the keys a later release adds. A profile of
 your own that uses one -- for example `env` under `[model]` or `[effort]`,
-`launch_context` under `[delivery]`, `notice` under `[mcp_registration]`, or
-`items` and `name` under `[mcp_registration.status]` -- is left out of its
+`launch_context` under `[delivery]`, `notice` under `[mcp_registration]`,
+`items` and `name` under `[mcp_registration.status]`, or the `[credentials]`
+table -- is left out of its
 listing with a
 warning. A `{server}` in a `json_entry` `file` is no placeholder to such a
 daemon: it is taken as part of the file's name.
@@ -169,6 +170,12 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 # config_dir = { "hooks.json" = '...' }
                                 # optional; files of a settings directory the
                                 # daemon writes for `{hooks_config_dir}`
+
+[credentials]                  # optional table; how the window's identity
+                                # reaches the CLI's hooks and MCP bridge.
+                                # See "Credentials" below
+# mode = "launch"              # "env" (the default) or "launch"
+# launch_args = ["-c", "..."]  # argv added to the spawn only
 
 [delivery]                     # optional table; how the daemon hands the
                                 # CLI the text it sends of its own accord.
@@ -263,10 +270,11 @@ daemon's own injection.
 On a Windows host, a `WSLENV` key is not passed as written. The daemon uses
 its value (or, when the profile sets none, the daemon's own `WSLENV`) as the
 start of the child's `WSLENV` and adds the names of the variables it
-injects into that window -- `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN`,
-`YAGURA_MCP_BRIDGE/p` when a bridge was resolved, and `YAGURA_INSTANCE` when
-the daemon itself was started with it -- so they
-also reach a process inside a WSL distribution. Items already in the value
+injects into that window -- `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN`
+(unless the profile hands them over in a file; see
+[Credentials](#credentials)), `YAGURA_MCP_BRIDGE/p` when a bridge was
+resolved, and `YAGURA_INSTANCE` when the daemon itself was started with it --
+so they also reach a process inside a WSL distribution. Items already in the value
 are kept in their order and never added twice (compared ignoring ASCII case
 and any `/flags` suffix). See [docs/wsl.md](../docs/wsl.md#environment-variables).
 
@@ -314,7 +322,11 @@ with an earlier one:
 5. the profile's `[env]`.
 
 The layers only add or replace variables: nothing in them removes a
-variable the daemon itself inherited.
+variable the daemon itself inherited. The one exception is a window whose
+profile hands its credentials over in a file (see
+[Credentials](#credentials)): `YAGURA_WINDOW_ID` and `YAGURA_STATUS_TOKEN` are
+taken out of its child's environment last, after `[env]`, whether the daemon
+or the profile carried them.
 
 The base environment is decided once, when the daemon starts, and is the
 same for every child until the daemon exits. On Windows it is always empty,
@@ -894,6 +906,74 @@ A saved value applies from the next window opened from that profile; a
 window already open keeps what it was started with. Against a daemon whose
 wire revision is older than `10`, the tab is read-only.
 
+## Credentials
+
+A window's hooks and MCP bridge must tell the daemon which window they belong
+to. They do so with the window's id and its status token (`YAGURA_WINDOW_ID`,
+`YAGURA_STATUS_TOKEN`). The optional `[credentials]` table says how they get
+them:
+
+```toml
+[credentials]
+mode = "launch"
+```
+
+- `mode = "env"` (the default, and what a profile without the table gets): both
+  values are in the child's environment. Every process the CLI starts inherits
+  them, so a CLI started by one of the window's tools reports as that window.
+- `mode = "launch"`: the daemon writes a file for the window, readable by its
+  owner only, holding the id and the token, and the profile's `[mcp]` and
+  `[hooks]` hand its path to the hooks and the bridge as `--credentials <path>`
+  (see `{credentials_file}` below). The child's environment holds neither
+  value, and `WSLENV` does not forward them, so a CLI started by one of the
+  window's tools cannot claim the window: its hook doors do nothing and its
+  bridge connects without a window.
+- `launch_args`: argv elements appended to the spawn only, after the profile's
+  other injections. They are for a CLI that has to keep the credentials in its
+  environment but can be told to withhold them from the tools it runs. They are
+  not recorded with the window, so a restored window gets them again from the
+  profile. Each element must be a non-empty string without a NUL.
+
+A `[credentials]` table with another key, or a `mode` other than `"env"` and
+`"launch"`, or `{credentials_file}` in a profile whose mode is not `"launch"`,
+excludes the profile with a warning.
+
+**`{credentials_file}`** is the absolute path of the window's credentials file
+(with `/` separators on Windows). It can be written in the `args`,
+`config_file` and `config_dir` contents of `[mcp]` and `[hooks]`. Inside a
+hook command, which a shell reads, write it in single quotes
+(`yagura-daemon --credentials '{credentials_file}' --emit-status ...`); in a
+JSON or TOML string it needs no escaping. A window's settings files are written
+in a folder of that window's own, next to its credentials file, instead of the
+shared `mcp/` folder, because their content names the path.
+
+The file lives as long as the window's child: it is removed when the child
+exits, and what an earlier run left behind is removed when the daemon starts.
+The window still opens, without its hooks and its MCP injection and with a
+warning in the daemon log, when the file or its folder cannot be made, or when
+the location holds a `'`, a `"`, a `\` or a control character. A window whose
+profile asks for `"launch"` but whose hooks or bridge do not all spell
+`{credentials_file}` opens with its credentials in the environment instead, so
+that they do not go silent.
+
+**How a door or the bridge decides which window it belongs to.** In order: both
+environment variables, when neither is empty; otherwise the file named by a
+single `--credentials <path>`; otherwise it is outside any window. An empty
+value counts as unset, because a CLI can only spell "unset" as empty. A file
+that cannot be read, is larger than 4 KiB, is not the expected JSON object
+(`window_id` and `token`) or has an empty field names no window either.
+
+**The bundled profiles.** `claude-code`, `copilot-cli` and `wsl-muse-code`,
+and the WSL variants of the first two, use `"launch"`. `codex-cli` and
+`wsl-codex-cli` stay on `"env"`: Codex runs a hook only while the hash of its
+command is the one it has recorded as trusted, so the command cannot carry a
+per-window path. Their `launch_args` set both variables to the empty string in
+`shell_environment_policy`, which keeps the real values out of the environment
+of the tools Codex runs. `grok-build`, `antigravity-cli`, `muse-code` and
+`shell` (and the WSL variants of the first two) keep `"env"` too: their hooks are
+written into the CLI's own settings by a registration, once for all windows,
+which has no place for a per-window path.
+
 ## MCP injection
 
 A profile's optional `[mcp]` table tells the daemon how to point the CLI it
@@ -980,6 +1060,7 @@ element, so they can never add, split or reorder argv elements:
 | `{wslenv_toml}` | the TOML literal string `'YAGURA_WINDOW_ID:YAGURA_STATUS_TOKEN:YAGURA_INSTANCE'`, a `WSLENV` value naming the variables the bridge reads (the bundled `wsl-codex-cli` sets it as its server's `env.WSLENV`, because Codex does not pass `WSLENV` on to an MCP server, and without it the Windows bridge started from WSL sees none of them) |
 | `{bridge_json}` | the bridge's absolute path as a JSON string, for a CLI that takes its server definition as JSON on the command line |
 | `{env_refs}` | a JSON object naming, each as a reference to itself (`{"YAGURA_WINDOW_ID":"${YAGURA_WINDOW_ID}",...}`), the variables among `YAGURA_WINDOW_ID`, `YAGURA_STATUS_TOKEN`, `YAGURA_INSTANCE` and `WSLENV` that this window's child actually has; built when the window opens, so a variable the child lacks is never named. For a CLI that passes an MCP server only the variables its definition names and refuses a reference to one that is unset. Values never appear, only names |
+| `{credentials_file}` | the path of the window's credentials file, for the hooks and the bridge to read the window's identity from; usable only in a profile whose `[credentials]` mode is `"launch"` (see [Credentials](#credentials)) |
 | `{mcp_config_file}` | the path of the file the daemon wrote from `config_file`; usable only when the table has `config_file` |
 | `{mcp_config_dir}` | the path of the directory the daemon wrote from `config_dir`; usable only when the table has `config_dir` |
 
@@ -1000,8 +1081,9 @@ What the daemon provides around the table:
   usable, it logs a warning and no window gets an injection.
 - **The environment.** Every window's child gets `YAGURA_MCP_BRIDGE`, the
   bridge's absolute path, next to `YAGURA_WINDOW_ID` and
-  `YAGURA_STATUS_TOKEN`. The token only ever travels in the environment:
-  neither the injected argv nor a settings file carries it.
+  `YAGURA_STATUS_TOKEN` (the last two unless the profile's credentials mode is
+  `"launch"`). The token never appears in the injected argv or in a settings
+  file: it is in the environment or in the window's credentials file.
 - **The settings file.** `config_file` is written under the instance's
   state directory, in `mcp/`, as `mcp-<SHA-256 of the content>.json`. A file
   already there under that name is not written again.
@@ -1082,6 +1164,8 @@ with three differences:
   Nothing is substituted inside either: `{server}` belongs to `[mcp]`.
 - It needs no bridge: a profile's hooks are injected whether or not
   `yagura-mcp` was found.
+- In a profile whose credentials mode is `"launch"`, each door's command
+  carries `--credentials '{credentials_file}'` (see [Credentials](#credentials)).
 - Its elements are appended after the `[mcp]` ones. When `argv[0]` resolves
   to a `.cmd` / `.bat` shim, each table is judged on its own: a `[hooks]`
   element with a character the command interpreter would act on drops only
@@ -1202,7 +1286,7 @@ nothing outside one:
 | Windows (`by_os.windows`) | `if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --emit-status running --source muse-code)` |
 | macOS, Linux (`by_os.default`) | `[ -z "$YAGURA_WINDOW_ID" ] \|\| exec yagura-daemon --emit-status running --source muse-code` |
 
-The check only tests whether the variable is set; its value is not expanded
+The check only tests whether the variable is set and non-empty; its value is not expanded
 into the command. On Windows the same command also sets
 `NoDefaultCurrentDirectoryInExePath` before `yagura-daemon` is looked up, so
 `cmd` does not run a `yagura-daemon.bat` or `.exe` from the session's working
@@ -1224,8 +1308,8 @@ UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = 
 ```
 
 Nothing in the hook checks for the window: the door does. Outside a window
--- `YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` not set -- a door does not
-interpret its other arguments at all: it reads its standard input to the end
+-- neither the environment pair nor a `--credentials` file naming a window --
+a door does not interpret its other arguments at all: it reads its standard input to the end
 and exits 0 without printing anything. So a copy of the daemon older than the
 hook, which does not know an argument such as `--skip-if`, stays silent there
 too. The path needs no `PATH` lookup and no search of the working folder,
@@ -1674,7 +1758,9 @@ convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 ```
 
 Their `[mcp]` and `[hooks]` tables, where they have them, are written inline
-and name no path, so opening one of their windows runs no conversion -- except
+and name no path of a Linux file (the credentials file of a `"launch"` profile
+is named by its Windows path, since the Windows `yagura-daemon.exe` and
+`yagura-mcp.exe` read it), so opening one of their windows runs no conversion -- except
 `wsl-copilot-cli`'s `[hooks]`, a plugin directory Copilot takes only by its
 path, and `wsl-muse-code`'s `[mcp]` (`{bridge_json}`) and `[hooks]` (a
 managed hooks file Muse takes only by its path), which are converted at each
