@@ -5618,14 +5618,14 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "yagura-build-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "yagura-protocol",
 ]
 
 [[package]]
 name = "yagura-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -5653,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "yagura-gui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5672,7 +5672,7 @@ dependencies = [
 
 [[package]]
 name = "yagura-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -5688,7 +5688,7 @@ dependencies = [
 
 [[package]]
 name = "yagura-os"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "core-foundation-sys",
  "getrandom 0.4.3",
@@ -5706,7 +5706,7 @@ dependencies = [
 
 [[package]]
 name = "yagura-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5715,7 +5715,7 @@ dependencies = [
 
 [[package]]
 name = "yagura-test-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "tokio",

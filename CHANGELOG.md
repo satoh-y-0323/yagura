@@ -5,6 +5,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-29
+
 ### Changed
 
 - **The IPC protocol is now revision 29.** The ticket requests (`list_ticket_workspaces`, `list_tickets`, `get_ticket`, `create_ticket`, `update_ticket`, `add_ticket_result`, `set_milestone`) and their replies are new, as is the push `ticket_changed`, which the daemon sends to every approver after a ticket is written. `create_plan` takes an optional `ticket` and `PlanInfo` carries it; both are left out when absent. A client sending a ticket request checks the daemon's revision first.
@@ -281,6 +283,7 @@ window's status, and lets agents in those windows work with each other through a
 - Pasted text cannot end a program's bracketed paste early: yagura removes the paste markers from it before writing.
 - A window's status is advisory: another process of the same user can forge it, so do not base security decisions on it alone.
 
-[Unreleased]: https://github.com/satoh-y-0323/yagura/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/satoh-y-0323/yagura/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/satoh-y-0323/yagura/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/satoh-y-0323/yagura/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/satoh-y-0323/yagura/releases/tag/v0.1.0
