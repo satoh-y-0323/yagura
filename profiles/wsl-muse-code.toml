@@ -30,23 +30,29 @@ values = ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
 # unless the user's settings already hold that key (Muse Code 1.4.12). Measure
 # again with each Muse release; once `-c` takes effect on its own, map it here.
 
+# The window's identity reaches the hooks and the MCP bridge as the credentials
+# file's path in their arguments, not through the environment, so the CLIs
+# the window's tools start do not inherit it.
+[credentials]
+mode = "launch"
+
 # Muse hands its MCP server only the variables named in `env` and refuses the
 # whole launch over a `${VAR}` that is unset, so `{env_refs}` names only what
 # the window really has. `tool_timeout_sec` is not a key `-c` accepts here. A
 # server of the same name in the user's settings also makes Muse refuse the
 # launch, so `absent` drops this injection in that case.
 [mcp]
-args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[],\"env\":{env_refs},\"mode\":\"optional\"}"]
+args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_json},\"args\":[\"--credentials\",\"{credentials_file}\"],\"env\":{env_refs},\"mode\":\"optional\"}"]
 absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}" }
 
 # This file is read only through this launch's -c, so its commands need no
 # check for being inside a window. It replaces the user's own
 # `managed_hooks_path` for this window only.
 [hooks]
-config_file = '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --deliver-context","timeout":10}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source muse-code","timeout":10},{"type":"command","command":"yagura-daemon.exe --deliver-take","timeout":10}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_approval --source muse-code","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source muse-code","timeout":10}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source muse-code","timeout":10}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source muse-code","timeout":10,"async":true}]}]}}'
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":10}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":10},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":10}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10,"async":true}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
-  "-c", "managed_hooks_env_vars=[\"YAGURA_WINDOW_ID\",\"YAGURA_STATUS_TOKEN\",\"YAGURA_INSTANCE\"]",
+  "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
 ]
 
 # SessionStart runs on the first prompt, not at start-up. Muse takes plain

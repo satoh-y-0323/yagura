@@ -6,8 +6,9 @@
 //! An invalid table takes its profile out of the listing with one warning,
 //! the same rule `[mcp]` follows. The shipped Claude Code profiles must map
 //! Claude Code's hook events to status reports as the CLI's settings format
-//! expects: that is an external contract, so the shipped files are read as
-//! data and their JSON is decoded.
+//! expects, each door handed the window's credentials file: that is an
+//! external contract, so the shipped files are read as data and their JSON is
+//! decoded.
 
 mod common;
 
@@ -16,13 +17,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
-use common::{Harness, empty_lookup, read_response, send, write_profile};
+use common::{Harness, empty_lookup, launch_args_logged_in, read_response, send, write_profile};
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::{ProfileOs, parse_profile};
 use yagura_protocol::{ClientMessage, DaemonMessage, ProfileInfo};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::argv_probe_profile_source;
+use yagura_test_support::process::{
+    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
+};
 
 fn is_file(path: &Path) -> bool {
     path.is_file()
@@ -109,15 +112,28 @@ async fn an_invalid_hooks_table_takes_its_profile_out_of_the_listing_with_one_wa
 // The shipped Claude Code profiles
 // =============================================================================
 
-fn shipped_hooks_table(id: &str) -> toml::Table {
+fn shipped_table(id: &str, name: &str) -> toml::Table {
     let source = read_doc_verbatim(&format!("../../profiles/{id}.toml"));
     parse_profile(id, &source)
         .unwrap_or_else(|err| panic!("bundled profile {id} must still parse: {err}"));
     let mut root: toml::Table = source.parse().expect("bundled profile is TOML");
-    match root.remove("hooks") {
+    match root.remove(name) {
         Some(toml::Value::Table(table)) => table,
-        other => panic!("{id} must ship a [hooks] table, got {other:?}"),
+        other => panic!("{id} must ship a [{name}] table, got {other:?}"),
     }
+}
+
+fn shipped_hooks_table(id: &str) -> toml::Table {
+    shipped_table(id, "hooks")
+}
+
+/// The placeholder the shipped hook commands carry for the window's credentials file.
+const CREDENTIALS_FILE: &str = "{credentials_file}";
+
+/// A hook command running `program` with `door`, handed the credentials file
+/// single-quoted, since the CLI runs the command through a shell.
+fn hook_command(program: &str, credentials: &str, door: &str) -> String {
+    format!("{program} --credentials '{credentials}' {door}")
 }
 
 /// Every hook of an event in a Claude Code `hooks` settings document, across all of its
@@ -170,9 +186,15 @@ fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
 /// The hooks the shipped profiles inject: the status reports, and the three doors a window's
 /// CLI reads its inbox through (start-up context, the start of a turn, and a wait that the
 /// daemon answers when something arrives for a waiting CLI).
-fn expected_commands(program: &str) -> BTreeMap<String, Vec<String>> {
-    let report = |status: &str| format!("{program} --emit-status {status} --source claude-code");
-    let door = |name: &str| format!("{program} --deliver-{name}");
+fn expected_commands(program: &str, credentials: &str) -> BTreeMap<String, Vec<String>> {
+    let report = |status: &str| {
+        hook_command(
+            program,
+            credentials,
+            &format!("--emit-status {status} --source claude-code"),
+        )
+    };
+    let door = |name: &str| hook_command(program, credentials, &format!("--deliver-{name}"));
     let mut expected: BTreeMap<String, Vec<String>> = [
         ("PreToolUse", vec![report("running")]),
         ("PostToolUse", vec![report("running")]),
@@ -204,7 +226,7 @@ fn claude_code_ships_hooks_that_report_turn_start_approval_and_end() {
     let document = hooks["config_file"].as_str().expect("config_file");
     assert_eq!(
         commands_by_event(document),
-        expected_commands("yagura-daemon")
+        expected_commands("yagura-daemon", CREDENTIALS_FILE)
     );
 }
 
@@ -225,7 +247,7 @@ fn wsl_claude_code_ships_the_same_mapping_calling_the_windows_executable() {
     assert_eq!(args[0], "--settings");
     assert_eq!(
         commands_by_event(args[1]),
-        expected_commands("yagura-daemon.exe")
+        expected_commands("yagura-daemon.exe", CREDENTIALS_FILE)
     );
 }
 
@@ -260,7 +282,7 @@ const WAKE_TIMEOUT_SECS: u64 = 86_400;
 #[test]
 fn the_hook_that_waits_for_the_daemon_is_asynchronous_and_outlives_a_long_idle() {
     for (id, program, document) in shipped_documents() {
-        let wait = format!("{program} --deliver-wait");
+        let wait = hook_command(program, CREDENTIALS_FILE, "--deliver-wait");
         let by_event = hooks_by_event(&document);
         for event in ["SessionStart", "Stop"] {
             let waits: Vec<_> = by_event[event]
@@ -291,10 +313,10 @@ fn the_hook_that_waits_for_the_daemon_is_asynchronous_and_outlives_a_long_idle()
 #[test]
 fn the_hooks_that_answer_at_once_are_not_asynchronous() {
     for (id, program, document) in shipped_documents() {
-        let wait = format!("{program} --deliver-wait");
+        let wait = hook_command(program, CREDENTIALS_FILE, "--deliver-wait");
         let doors = [
-            format!("{program} --deliver-context"),
-            format!("{program} --deliver-take"),
+            hook_command(program, CREDENTIALS_FILE, "--deliver-context"),
+            hook_command(program, CREDENTIALS_FILE, "--deliver-take"),
         ];
         let mut doors_seen = 0;
         for (event, hooks) in hooks_by_event(&document) {
@@ -320,21 +342,58 @@ fn the_hooks_that_answer_at_once_are_not_asynchronous() {
     }
 }
 
+/// A profile running `hook_child`, which logs its argv under `logs` and stays alive (a
+/// launch window's settings go with its child), followed by `tables`.
+fn hook_child_profile_source(logs: &Path, tables: &str) -> String {
+    let command = [
+        env!("CARGO_BIN_EXE_hook_child").to_string(),
+        COMPOSER_MARKER.to_string(),
+        COMPOSER_SEPARATOR.to_string(),
+        COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ]
+    .iter()
+    .map(|element| format!("'{element}'"))
+    .collect::<Vec<_>>()
+    .join(", ");
+    format!(
+        "schema = 1\ndisplay_name = \"Hook Child\"\n\n[command]\ndefault = [{command}]\n{tables}"
+    )
+}
+
+/// The credentials file `command` hands its door, single-quoted after the program.
+fn quoted_credentials_file(command: &str) -> &str {
+    command
+        .strip_prefix("yagura-daemon --credentials '")
+        .and_then(|rest| rest.split_once('\''))
+        .map(|(location, _)| location)
+        .unwrap_or_else(|| {
+            panic!("the command must hand a single-quoted credentials file: {command}")
+        })
+}
+
 #[tokio::test]
 async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens() {
     let tree = TempDir::new("yagura-cli-test", "profile-hooks-shipped-live");
     let profiles_dir = tree.make_dir("profiles");
     let config_dir = tree.make_dir("mcp");
-    let hooks = shipped_hooks_table("claude-code");
+    let logs = tree.make_dir("logs");
     let mut root = toml::Table::new();
-    root.insert("hooks".to_string(), toml::Value::Table(hooks));
+    root.insert(
+        "credentials".to_string(),
+        toml::Value::Table(shipped_table("claude-code", "credentials")),
+    );
+    root.insert(
+        "hooks".to_string(),
+        toml::Value::Table(shipped_hooks_table("claude-code")),
+    );
     write_profile(
         &profiles_dir,
-        "argv-probe",
-        &argv_probe_profile_source(
-            "Argv Probe",
-            &format!("\n{}", toml::to_string(&root).unwrap()),
-        ),
+        "hook-child",
+        &hook_child_profile_source(&logs, &format!("\n{}", toml::to_string(&root).unwrap())),
     );
     let h = Harness::start(
         "profile-hooks-shipped-live",
@@ -345,7 +404,7 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
     send(
         &mut client,
         &ClientMessage::OpenWindowFromProfile {
-            profile: "argv-probe".to_string(),
+            profile: "hook-child".to_string(),
             cwd: None,
             name: None,
             model: None,
@@ -354,22 +413,38 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
         },
     )
     .await;
-    let window_id = match read_response(&mut client, Duration::from_secs(5)).await {
-        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+    match read_response(&mut client, Duration::from_secs(5)).await {
+        DaemonMessage::WindowOpened { .. } => {}
         other => panic!("expected window_opened, got {other:?}"),
-    };
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
-    let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
-    assert!(text.contains("<<argv[1]=--settings>>"), "{text:?}");
-    let start = text.rfind("<<argv[2]=").unwrap() + "<<argv[2]=".len();
-    let end = text[start..].find(">>").unwrap() + start;
-    let written = std::fs::read_to_string(&text[start..end])
+    }
+    let args = launch_args_logged_in(&logs).await;
+    let at = args
+        .iter()
+        .position(|arg| arg == "--settings")
+        .unwrap_or_else(|| panic!("the window was not handed --settings; argv: {args:?}"));
+    let written = std::fs::read_to_string(&args[at + 1])
         .unwrap_or_else(|err| panic!("the settings file must exist: {err}"));
+
+    let by_event = commands_by_event(&written);
+    let mut locations: Vec<&str> = by_event
+        .values()
+        .flatten()
+        .map(|command| quoted_credentials_file(command))
+        .collect();
+    locations.sort_unstable();
+    locations.dedup();
     assert_eq!(
-        commands_by_event(&written),
-        expected_commands("yagura-daemon")
+        locations.len(),
+        1,
+        "every command must name the window's one credentials file: {locations:?}"
     );
+    assert!(
+        Path::new(locations[0]).is_file(),
+        "the credentials file the commands name must exist: {}",
+        locations[0]
+    );
+    assert_eq!(by_event, expected_commands("yagura-daemon", locations[0]));
+    h.registry.terminate_all().await;
 }
 
 #[test]

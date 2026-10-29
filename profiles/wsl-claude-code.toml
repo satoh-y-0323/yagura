@@ -35,17 +35,23 @@ values = ["haiku", "sonnet", "opus", "fable"]
 [effort]
 args = ["--effort", "{value}"]
 
+# The window's identity reaches the hooks and the MCP bridge as the credentials
+# file's path in their arguments, not through the environment, so the CLIs
+# the window's tools start do not inherit it.
+[credentials]
+mode = "launch"
+
 [mcp]
-args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}']
+args = ["--mcp-config", '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--credentials","{credentials_file}"]}}}']
 
 # Each hook event reports the turn's start, a permission prompt, or its end to
-# the daemon through the window's own environment (verified with Claude Code
+# the daemon, each door handed the credentials file (verified with Claude Code
 # 2.1.285).
 # The JSON is inline so the launch hands the WSL CLI no path to convert, and
 # the Windows executable is called by name because a Linux shell does not
 # resolve the bare name.
 [hooks]
-args = ["--settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --deliver-context"},{"type":"command","command":"yagura-daemon.exe --deliver-wait","asyncRewake":true,"timeout":86400}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"},{"type":"command","command":"yagura-daemon.exe --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"},{"type":"command","command":"yagura-daemon.exe --deliver-wait","asyncRewake":true,"timeout":86400}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --emit-status waiting_input --source claude-code"}]}]}}']
+args = ["--settings", '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":86400}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source claude-code"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source claude-code"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code"},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":86400}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source claude-code"}]}]}}''']
 
 # How the daemon hands text to this CLI without typing it into the composer
 # (see claude-code.toml).

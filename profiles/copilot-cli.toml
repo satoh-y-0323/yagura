@@ -21,10 +21,16 @@ default = "auto"
 [effort]
 args = ["--reasoning-effort", "{value}"]
 
+# The window's identity reaches the hooks and the MCP bridge as the credentials
+# file's path in their arguments, not through the environment, so the CLIs
+# the window's tools start do not inherit it.
+[credentials]
+mode = "launch"
+
 # `timeout` is in milliseconds (one day): Copilot cuts a tool call off after
 # 180 seconds by default, which is shorter than the waits the tools allow.
 [mcp]
-config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":[],"tools":["*"],"timeout":86400000}}}'
+config_file = '{"mcpServers":{"{server}":{"type":"local","command":"${YAGURA_MCP_BRIDGE}","args":["--credentials","{credentials_file}"],"tools":["*"],"timeout":86400000}}}'
 args = ["--additional-mcp-config", "@{mcp_config_file}"]
 
 # Copilot takes launch-time hooks only from a plugin directory: a
@@ -37,7 +43,7 @@ args = ["--plugin-dir", "{hooks_config_dir}"]
 
 [hooks.config_dir]
 "plugin.json" = '{"name":"yagura"}'
-"hooks.json" = '{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon --deliver-context","powershell":"yagura-daemon --deliver-context"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"preToolUse":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"postToolUse":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon --emit-status running --source copilot-cli","powershell":"yagura-daemon --emit-status running --source copilot-cli"}],"agentStop":[{"type":"command","bash":"yagura-daemon --emit-status waiting_input --source copilot-cli","powershell":"yagura-daemon --emit-status waiting_input --source copilot-cli"}]}}'
+"hooks.json" = '''{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --deliver-context","powershell":"yagura-daemon --credentials '{credentials_file}' --deliver-context"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"preToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"postToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"agentStop":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source copilot-cli"}]}}'''
 
 # How the daemon hands text to this CLI without typing it into the composer.
 # Copilot has no hook that fires on an idle session, so `wake` stays `none`.
