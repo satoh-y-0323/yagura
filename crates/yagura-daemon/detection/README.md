@@ -876,7 +876,7 @@ yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--
   written for -- `yagura` for the default instance, `yagura-<instance>` for a
   named one. Given at most once, and taken by every hook door
   (`--emit-status`, `--deliver-context`, `--deliver-take`, `--deliver-wait`,
-  `--report-session`) and by no other command.
+  `--report-session`, `--hook`) and by no other command.
 - `--credentials <path>`: the file that names the window, for a window whose
   profile keeps its credentials out of the environment (see
   [Credentials](../../../profiles/README.md#credentials)). Given at most once,
@@ -886,7 +886,11 @@ yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--
 
 The command connects to the running daemon, sends one event and exits; it does
 not start a daemon. Inside a window it exits non-zero if no daemon is
-reachable, and refuses a command line it cannot parse. Outside one -- where
+reachable. A command line it cannot parse there -- one written for a newer
+daemon than the copy it starts, say -- is not refused: the command reads its
+standard input to the end, sends nothing and exits 0, and logs one warning in
+the instance's log naming the flag it could not read, never a value, so the
+CLI does not report a failed hook. Outside one -- where
 `YAGURA_STATUS_TOKEN` or `YAGURA_WINDOW_ID` is not set or is empty and no
 `--credentials` file names a window, for example in a CLI session you started
 in your own terminal, or one a tool of a window started -- it does not read its other
@@ -903,8 +907,8 @@ whose `--for-instance` names a registration other than the window's own
 instance (read from `YAGURA_INSTANCE`) behaves as it does outside one: it
 reads its standard input to the end, sends nothing, prints nothing and exits
 0, before reading its other arguments. A `--for-instance` that is missing its
-value, repeated or not a registration name is left for the command line to
-refuse.
+value, repeated or not a registration name is left to the command line, as
+one it cannot parse.
 
 For the event to authenticate and be attributed to the right window, the hook
 must either run somewhere inside that window's child process tree, where it
@@ -912,6 +916,22 @@ inherits the `YAGURA_STATUS_TOKEN` and `YAGURA_WINDOW_ID` environment variables
 the daemon injected when it spawned that window, or be handed the window's
 credentials file with `--credentials`; `--emit-status` forwards the pair along
 with the report (see [StatusEvent Authentication](../../../docs/mcp-setup.md#statusevent-authentication)).
+
+```
+yagura-daemon --hook <profile-id> <Event> [--for-instance <server>] [--credentials <path>]
+```
+
+`--hook` names a profile and one of its events instead of a status. What the
+event does -- the status it reports, the session identifier it records, the
+inbox it prints, the pointer that makes it skip -- comes from that profile's
+`[hook_events]` table, which the daemon reads each time the hook runs (see
+[Hook events](../../../profiles/README.md#hook-events)). A status reported
+this way means what a `--emit-status` report means. `<profile-id>` follows the
+profile id rule and `<Event>` matches `[A-Za-z0-9_-]{1,64}`. Its pointers
+come from the profile, so it refuses `--skip-if`. A profile or event the daemon does not find
+reports nothing, and the daemon logs a warning. A hook a registration writes
+into a CLI's own settings uses this form, so its text stays the same from
+release to release.
 
 ### What a report means
 
@@ -1015,7 +1035,12 @@ hash, into `~/.codex/config.toml` -- the same place Codex records your own
 "Trust all" -- and removing the registration takes them out. The daemon reads
 that file each time a window opens and injects the hooks only while all the
 entries are in place, so an unregistered Codex CLI gets no hooks and shows no
-"Hooks need review" prompt.
+"Hooks need review" prompt. Each hook runs `yagura-daemon --hook codex-cli
+<Event>` (`--hook wsl-codex-cli <Event>` in WSL), so its hash does not change
+with a release; entries that are out of
+date are written again when the window opens, while yagura is still
+registered with Codex CLI (see
+[Out-of-date hook entries](../../../docs/mcp-setup.md#out-of-date-hook-entries)).
 
 **Antigravity CLI** reads hooks only from its own files, not from anything
 passed at launch. Registering yagura with it from Settings > Integrations also
@@ -1027,7 +1052,7 @@ a path holding whitespace cannot be written: on Windows the entry names the
 daemon by its 8.3 short name instead, and registration fails with a message
 saying so when there is none (8.3 names can be turned off on a volume).
 Every other entry in the file is left as it was. The entry applies to every
-`agy` session on the machine, but outside a window `--emit-status` does
+`agy` session on the machine, but outside a window the door does
 nothing, and each command passes `--for-instance` so that another instance's
 entry stays silent inside a window (see above). An `agy` you start by hand inside a yagura shell window
 does report, for that window -- what it reports is true of that window.
@@ -1062,8 +1087,9 @@ machine -- and inside WSL starts the Windows executable through its
 hook passes `--for-instance` so that another instance's file stays silent
 inside a window (see above).
 Grok Build runs the same hooks in a sub-agent's session, whose input carries
-`subagentType`, so every hook passes `--skip-if /subagentType` and a
-sub-agent neither reports for the window nor takes its inbox. The approval
+`subagentType`, so every event of the profile's `[hook_events]` has
+`skip_if = "/subagentType"` and a sub-agent neither reports for the window
+nor takes its inbox. The approval
 notification comes a few seconds after the tool's own `PreToolUse`, and the
 approval box is read from the screen too. While any hook is in your own Grok Build settings, Grok Build asks about
 folder trust in every folder outside your home directory (see

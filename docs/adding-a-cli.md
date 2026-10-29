@@ -190,6 +190,14 @@ going to change, and when you are done restore it and compare it byte for byte w
 - The hooks that call the doors go into the profile's `[hooks]` table, or a `json_entry` for a CLI
   that reads hooks only from its own files (see [Hooks injection](../profiles/README.md#hooks-injection)).
   If the CLI asks the user to trust hooks, the profile's `[mcp_registration]` has to record that trust.
+- A hook that stays in the CLI's settings after a window ends -- one a registration writes, or one
+  the CLI trusts by a hash over its command -- calls `--for-instance {server} --hook <profile-id>
+  <Event>` (the `--for-instance` only for a registration that writes hooks of each instance's own),
+  and what each event does goes into the profile's [`[hook_events]`](../profiles/README.md#hook-events)
+  table: its status, whether it prints the context or takes what waits, the pointer to the session
+  identifier, and the pointer that makes it skip. The hook's text then stays the same from release
+  to release, so an update changes what it does without leaving the registered entry out of date.
+  Write one handler per event. The profile's id is part of that text, so choose it before the first registration.
 - Choose how the window's identity reaches the hooks and the MCP bridge (see
   [Credentials](../profiles/README.md#credentials)) by what the CLI lets a launch set:
   - If a launch-time setting (a flag, a settings file, a plugin directory) can carry both the hook

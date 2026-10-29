@@ -111,9 +111,10 @@ daemon could refuse to start based on one rule while a value that rule considere
 adopted by the other, letting the very conflict this rejection exists to prevent through anyway.
 
 This rejection applies only to `yagura-daemon`'s `Run` command and to the GUI (which starts a `Run`
-daemon on your behalf). **`--shutdown` and `--emit-status` are never subject to it**, because
-neither opens the session store -- the check exists to protect a resource those commands never
-touch. Without this exception, a terminal with both `YAGURA_INSTANCE` and `YAGURA_STORE_DB` set
+daemon on your behalf). **`--shutdown` and the hook doors (`--emit-status`, `--deliver-context`,
+`--deliver-take`, `--deliver-wait`, `--report-session` and `--hook`) are never subject to it**,
+because none of them opens the session store -- the check exists to protect a resource those
+commands never touch. Without this exception, a terminal with both `YAGURA_INSTANCE` and `YAGURA_STORE_DB` set
 could start a development instance's daemon (as an accident) but then be unable to stop it again,
 since `--shutdown` would refuse for the same reason `Run` did. The rejection's own remedy is
 simple either way: unset `YAGURA_STORE_DB` in that terminal and start yagura again.

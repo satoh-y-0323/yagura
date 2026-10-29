@@ -198,7 +198,10 @@ state:
 - **Registered to a different bridge**, or **Registered with a different** followed by what
   differs (`tool_timeout_sec`, `hooks.state` for Codex CLI's hook trust, `yagura` for
   Antigravity CLI's hooks entry, or the entries of Muse Code's files): **Update** runs `mcp
-  remove`, then the same steps as Register. **Remove** is offered too. When Muse Code's settings
+  remove`, then the same steps as Register. **Remove** is offered too. Hook entries that are
+  only out of date are written again as the tab reads them (see
+  [Out-of-date hook entries](#out-of-date-hook-entries) below), so they show here only when that
+  could not be done. When Muse Code's settings
   already hold a `managed_hooks_path` of your own, the row says so and Register and Update cannot
   be pressed: yagura does not overwrite it (see
   [Configuring Muse Code CLI](#configuring-muse-code-cli)).
@@ -232,7 +235,10 @@ they were:
 - **Codex CLI's hook trust**: in the same write, one `[hooks.state."<key>"]` table per hook the
   bundled Codex profile gives a window, holding the `trusted_hash` Codex checks before it runs that
   hook -- the same place Codex records your own "Trust all". Codex runs yagura's hooks in a window
-  only while these are in place.
+  only while these are in place. Codex hashes each hook's command and attributes, and the hooks
+  run `yagura-daemon --hook codex-cli <Event>` (`--hook wsl-codex-cli <Event>` in WSL), which a
+  release does not change, so the hashes stay valid across updates. The same write takes out the
+  trust of hooks the bundled profile no longer has (its `retired` keys).
 - **Antigravity CLI's hooks entry**: an entry named after the registration (`yagura`, or
   `yagura-<instance>`) in `~/.gemini/config/hooks.json`, which runs the daemon at session start, on
   each model call and after each tool. The file is created when it is missing; one that is not valid JSON is left
@@ -260,8 +266,8 @@ they were:
   [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)). The row
   shows the profile's notice about folder trust (see [Configuring Grok Build](#configuring-grok-build)).
 
-**Remove** takes the hook trust tables and the hooks entry out again, along with the CLI's own `mcp
-remove`; it leaves `tool_timeout_sec` alone. For Muse Code it takes out the instance's server
+**Remove** takes the hook trust tables (the `retired` ones included) and the hooks entry out again,
+along with the CLI's own `mcp remove`; it leaves `tool_timeout_sec` alone. For Muse Code it takes out the instance's server
 entry, and the shared hooks entries only with the last instance's registration (see
 [Shared entries and the claim](../profiles/README.md#mcp-registration)); the files stay. Any failed step stops the operation there. The output
 of `add` and `remove` is shown in the row; what a state read returns is neither shown nor logged.
@@ -272,7 +278,8 @@ added to it yourself -- such as `env_vars` -- is gone afterwards; yagura writes 
 `tool_timeout_sec`. Add such keys again after an Update.
 
 **Reading the state.** The rows are read when the tab opens and after each operation, never in the
-background: `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
+background, and a row's out-of-date hook entries are written again as it is read (see
+[Out-of-date hook entries](#out-of-date-hook-entries)): `claude mcp get <name>` for Claude Code, `codex mcp get <name> --json` for Codex CLI,
 `copilot mcp get <name> --json` for GitHub Copilot CLI, `~/.gemini/config/mcp_config.json`
 (read, never written) for Antigravity CLI, Muse Code's two files above, and `grok mcp list --json`
 for Grok Build, plus the hook settings above, read back from `~/.codex/config.toml`,
@@ -288,6 +295,46 @@ window's `mcp_connected`.
 Only the GUI can do this: the daemon accepts these requests from a registered approver alone (see
 [Approver Registration](#approver-registration)), and there is no MCP tool for them. When the
 daemon has no bridge beside it, the tab says so and reads no row.
+
+### Out-of-date hook entries
+
+The hooks a registration writes -- Antigravity CLI's hooks entry, Grok Build's hooks file, Muse
+Code's managed hooks, and Codex CLI's hook trust -- stay in the CLI's settings after an update. They
+run `yagura-daemon --hook <profile-id> <Event>`, and what each event does is read from the profile
+when the hook runs (see [Hook events](../profiles/README.md#hook-events)), so an update rarely
+changes them. When it does, or when they were written by 0.3.0 or earlier, yagura writes them
+again itself; there is no need to press Update.
+
+- **When**: each time a window opens from the profile, and each time the Integrations tab reads
+  the rows -- for a row the CLI lists as registered, or registered with a difference. A row that
+  reads **Not registered** (for example after `agy mcp remove` by hand) is left as it is, and its
+  hook entries are written again when its next window opens. The row then still reads **Not
+  registered**: yagura does not run `mcp add` for you.
+- **Only with your consent**: only while this instance is still registered there, judged by what
+  this instance's **Remove** would take out -- the registration's own hooks entry for Antigravity
+  CLI, `/mcpServers/<name>` for Muse Code, the hooks in `~/.grok/hooks/<name>.json` for Grok Build,
+  and `[mcp_servers.<name>]` in `~/.codex/config.toml` for Codex CLI. After a Remove nothing is
+  written, and an instance you never registered gets nothing. Checking this uses only the reads
+  of these files that opening a window or reading the row already makes, and starts no other
+  process.
+- **What**: only the entries the registration owns, written where Register writes them, and Codex
+  CLI's retired trust taken out. It does not run `mcp add` or `mcp remove`, does not set
+  `tool_timeout_sec`, and changes nothing else in the file. For Muse Code the server entry is
+  among those entries, so it is written again too. Nothing is written while Muse Code's settings
+  hold a `managed_hooks_path` of your own.
+- **What you see**: the daemon's log has one line for each rewrite, and the row reads
+  **Registered** -- or still shows what differs outside the hooks, such as a different bridge.
+- **When it cannot be done** (a file that cannot be read or written, or a Register, Update or
+  Remove of yours that is still running past the listing's time limit): the window opens without
+  its hooks, as before, and the daemon's log says why, with "register the CLI again to restore
+  them"; the row shows what differs, and **Update** puts it right.
+
+**Running an instance of 0.3.0 or earlier beside this release, as the same user.** Muse Code's
+managed hooks and Codex CLI's hook trust are shared by every instance. Once this release writes them
+in the `--hook` form, the older instance's daemon cannot read them: its `muse-code` windows report a
+failed hook, and it opens its Codex CLI windows without hooks. Update the older instance to put it
+right. Antigravity CLI and Grok Build keep the entries of each instance apart, and are not
+affected.
 
 ## Configuring Claude Code
 
@@ -594,8 +641,9 @@ Two kinds of text reach a window's CLI, and they travel differently.
 | `yagura-daemon --deliver-take` | the hook that runs at the start of a turn (for Antigravity CLI, before a model call; for Grok Build, after a tool call) | prints whatever waits and marks it taken |
 | `yagura-daemon --deliver-wait` | a hook the CLI runs in the background | waits until something arrives for an idle session, prints it, and ends with the exit code that wakes the CLI; only one such wait runs per window |
 | `yagura-daemon --report-session` | a hook that receives the CLI's session identifier | tells the daemon which session this window's CLI is, so it can be addressed later |
+| `yagura-daemon --hook <profile-id> <Event>` | any hook of a profile with a `[hook_events]` table: the bundled Antigravity CLI, Grok Build, `muse-code` and Codex CLI profiles call only this one | does what the named profile's `[hook_events]` says for the event -- report a status, record the session, print the context or take what waits -- reading the profile each time it runs (see [Hook events](../profiles/README.md#hook-events)) |
 
-Each answer is cut to the profile's `max_chars` between texts; a text is never cut in the middle. Each door also takes `--skip-if <JSON Pointer>`, for a CLI that runs the same hooks in its sub-agents' sessions: when the hook's input has a value at that pointer, the door does nothing (see [Hooks injection](../profiles/README.md#hooks-injection)).
+Each answer is cut to the profile's `max_chars` between texts; a text is never cut in the middle. Each door other than `--hook` also takes `--skip-if <JSON Pointer>`, for a CLI that runs the same hooks in its sub-agents' sessions: when the hook's input has a value at that pointer, the door does nothing (see [Hooks injection](../profiles/README.md#hooks-injection)); for `--hook` the pointer is the event's `skip_if`.
 
 **When each text arrives.**
 
