@@ -262,6 +262,10 @@ pub struct WindowProvenance {
     /// How the window's credentials reach its CLI. Given by the caller as
     /// planned; with `Launch` the child's environment holds none of them.
     pub credentials: CredentialsMode,
+    /// The folder planned for a `launch` window's credentials and settings
+    /// ([`plan_credentials_folder`]); the open creates it there. `None` when
+    /// the window has no usable place for one.
+    pub credentials_dir: Option<PathBuf>,
 }
 
 /// How a window's CLI comes to run the daemon's hooks: the one fact both
@@ -357,6 +361,9 @@ pub enum InjectionKind {
     Mcp,
     /// The `[hooks]` table: makes the CLI report its turn boundaries.
     Hooks,
+    /// The `[credentials]` table's `launch_args`: arguments the CLI needs for
+    /// its window credentials to stay out of what its tools run.
+    LaunchArgs,
     /// The `[delivery]` table's `launch_prompt`: hands the CLI a first
     /// request at start-up.
     LaunchPrompt,
@@ -372,6 +379,7 @@ impl InjectionKind {
         match self {
             Self::Mcp => "MCP",
             Self::Hooks => "hooks",
+            Self::LaunchArgs => "launch arguments",
             Self::LaunchPrompt => "launch prompt",
             Self::LaunchContext => "launch context",
         }
@@ -4237,13 +4245,23 @@ impl WindowRegistry {
 
         // Owns the window's credentials folder from here on: every return
         // below drops it, and a spawned window hands it to its exit watcher.
-        let credentials_folder = self.create_credentials_folder(provenance.credentials).await;
+        let credentials_folder = self
+            .create_credentials_folder(provenance.credentials, provenance.credentials_dir.clone())
+            .await;
 
         // Written outside `open_lock`, after the early rejection: a request
         // over the limit never touches the disk, and one slow write never
         // stalls another connection's open.
         let mut prepared = Vec::with_capacity(injections.len());
         for injection in injections {
+            // Their settings live in the credentials folder, which this
+            // window does not have.
+            if provenance.credentials == CredentialsMode::Launch
+                && credentials_folder.is_none()
+                && matches!(injection.kind, InjectionKind::Hooks | InjectionKind::Mcp)
+            {
+                continue;
+            }
             prepared.push(self.prepare_injection(injection).await);
         }
 
@@ -4499,21 +4517,25 @@ impl WindowRegistry {
         }
     }
 
-    /// Creates the folder a `launch` window's credentials file goes in, or
-    /// `None` when the window is not one or the folder cannot be made (the
-    /// spawn then leaves the hooks and the bridge out).
-    async fn create_credentials_folder(&self, mode: CredentialsMode) -> Option<CredentialsFolder> {
+    /// Creates the planned folder `dir` for a `launch` window's credentials
+    /// file and settings, or `None` when the window is not one or the folder
+    /// cannot be made (the window then opens without hooks and the bridge).
+    async fn create_credentials_folder(
+        &self,
+        mode: CredentialsMode,
+        dir: Option<PathBuf>,
+    ) -> Option<CredentialsFolder> {
         if mode != CredentialsMode::Launch {
             return None;
         }
-        let Some(config_dir) = self.config.mcp_config_dir.clone() else {
+        let Some(dir) = dir else {
             tracing::warn!(
-                "no state directory to keep the window's credentials in; the window opens \
-                 without hooks and the MCP bridge"
+                "the window has no usable place to keep its credentials in; it opens without \
+                 hooks and the MCP bridge"
             );
             return None;
         };
-        match tokio::task::spawn_blocking(move || CredentialsFolder::create(&config_dir)).await {
+        match tokio::task::spawn_blocking(move || CredentialsFolder::create_at(dir)).await {
             Ok(Ok(folder)) => Some(folder),
             Ok(Err(err)) => {
                 tracing::warn!(
@@ -4527,18 +4549,20 @@ impl WindowRegistry {
         }
     }
 
-    /// Writes the credentials of the window `window_id` into `folder` and
-    /// returns the path to hand its hooks and bridge. `None` when the token
-    /// cannot be verified or the file cannot be written.
+    /// Writes the credentials of the window `window_id` into `folder`.
+    /// Whether it is there: not when the token cannot be verified or the file
+    /// cannot be written.
     async fn write_credentials_file(
         folder: Option<&CredentialsFolder>,
         window_id: &str,
         status_token: &StatusToken,
-    ) -> Option<String> {
-        let folder = folder?;
+    ) -> bool {
+        let Some(folder) = folder else {
+            return false;
+        };
         let Some(token) = status_token.as_hex().map(str::to_string) else {
             tracing::warn!("the window's token cannot be verified; it gets no credentials file");
-            return None;
+            return false;
         };
         let path = folder.file_path();
         let written = tokio::task::spawn_blocking({
@@ -4549,10 +4573,10 @@ impl WindowRegistry {
         .await
         .unwrap_or_else(|err| Err(std::io::Error::other(err.to_string())));
         match written {
-            Ok(()) => Some(folder.file_argument()),
+            Ok(()) => true,
             Err(err) => {
                 tracing::warn!(error = %err, "could not write the window's credentials file");
-                None
+                false
             }
         }
     }
@@ -4596,11 +4620,8 @@ impl WindowRegistry {
                     argument: None,
                 })?;
         let launched = credentials == CredentialsMode::Launch;
-        let credentials_file = if launched {
-            Self::write_credentials_file(credentials_folder, window_id, status_token).await
-        } else {
-            None
-        };
+        let has_credentials_file = launched
+            && Self::write_credentials_file(credentials_folder, window_id, status_token).await;
         let mut child_env = child_environment(
             &self.config,
             status_token,
@@ -4615,7 +4636,7 @@ impl WindowRegistry {
             // Without its credentials file a `launch` window's hooks and bridge
             // could not claim the window, and its environment holds nothing.
             if launched
-                && credentials_file.is_none()
+                && !has_credentials_file
                 && matches!(injection.kind, InjectionKind::Hooks | InjectionKind::Mcp)
             {
                 tracing::warn!(
@@ -4631,10 +4652,6 @@ impl WindowRegistry {
                     .args
                     .iter()
                     .map(|arg| crate::profile::fill_env_refs(arg, &env_refs))
-                    .map(|arg| match credentials_file.as_deref() {
-                        Some(file) => crate::profile::fill_credentials_file(&arg, file),
-                        None => arg,
-                    })
                     .collect(),
             };
             let args = injection_args_for(&resolution, &filled);
@@ -5366,19 +5383,14 @@ struct CredentialsFolder {
 }
 
 impl CredentialsFolder {
-    /// Blocking: makes the folder under `config_dir`, owner-only, with a
-    /// random name that does not depend on the window id (not yet allocated).
-    fn create(config_dir: &Path) -> std::io::Result<Self> {
-        let mut random = [0u8; 16];
-        yagura_os::fill_random(&mut random)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    /// Blocking: makes the folder `dir` (from [`plan_credentials_folder`]),
+    /// owner-only.
+    fn create_at(dir: PathBuf) -> std::io::Result<Self> {
         // Owns the path before anything exists, so a partial creation is cleared.
-        let folder = Self {
-            dir: config_dir.join(format!("{CREDENTIALS_FOLDER_PREFIX}{name}")),
-        };
-        let base = config_dir.parent().unwrap_or(config_dir);
-        yagura_os::secure_owned_dir(base, &folder.dir).map_err(std::io::Error::other)?;
+        let folder = Self { dir };
+        let base = folder.dir.parent().and_then(Path::parent);
+        yagura_os::secure_owned_dir(base.unwrap_or(&folder.dir), &folder.dir)
+            .map_err(std::io::Error::other)?;
         std::fs::create_dir_all(&folder.dir)?;
         Ok(folder)
     }
@@ -5386,17 +5398,34 @@ impl CredentialsFolder {
     fn file_path(&self) -> PathBuf {
         self.dir.join(CREDENTIALS_FILE_NAME)
     }
+}
 
-    /// The file's path as a hook or bridge argument: absolute, and on Windows
-    /// with `/` separators, which both Windows and Git Bash read.
-    fn file_argument(&self) -> String {
-        let path = self.file_path().to_string_lossy().into_owned();
-        if cfg!(windows) {
-            path.replace('\\', "/")
-        } else {
-            path
-        }
-    }
+/// Where the next `launch` window's folder goes under `config_dir`: a random
+/// name that does not depend on the window id (not yet allocated). Nothing is
+/// created.
+///
+/// # Errors
+///
+/// The system's random source failing.
+pub(crate) fn plan_credentials_folder(config_dir: &Path) -> std::io::Result<PathBuf> {
+    let mut random = [0u8; 16];
+    yagura_os::fill_random(&mut random).map_err(|err| std::io::Error::other(err.to_string()))?;
+    let name: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(config_dir.join(format!("{CREDENTIALS_FOLDER_PREFIX}{name}")))
+}
+
+/// The path of the credentials file in the folder `dir` as a hook, bridge or
+/// settings file names it: absolute, and on Windows with `/` separators, which
+/// both Windows and Git Bash read. `None` when it holds a character that would
+/// break out of a JSON string, a TOML string or a single-quoted shell word.
+pub(crate) fn credentials_file_argument(dir: &Path) -> Option<String> {
+    let path = dir.join(CREDENTIALS_FILE_NAME).to_str()?.to_string();
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path
+    };
+    (!path.contains(['\'', '"', '\\']) && !path.chars().any(char::is_control)).then_some(path)
 }
 
 impl Drop for CredentialsFolder {

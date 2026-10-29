@@ -1852,6 +1852,42 @@ impl UnrenderedInjection {
         paths
     }
 
+    /// Moves this injection's settings into `dir`, the folder of one `launch`
+    /// window, and writes that window's credentials file `file` in place of
+    /// `{credentials_file}` in them and in the `args`. The settings are named
+    /// after the filled content, so two windows never share one.
+    #[must_use]
+    pub fn for_window_folder(mut self, dir: &Path, file: &str) -> Self {
+        let kind = self.kind;
+        self.spec.args = self
+            .spec
+            .args
+            .iter()
+            .map(|arg| fill_credentials_file(arg, file))
+            .collect();
+        self.config_file = self.config_file.map(|settings| {
+            let content = fill_credentials_file(&settings.content, file);
+            InjectedConfigFile {
+                dir: dir.to_path_buf(),
+                file_name: config_file_name(kind, &content),
+                content,
+            }
+        });
+        self.config_dir = self.config_dir.map(|settings| {
+            let files: BTreeMap<String, String> = settings
+                .files
+                .iter()
+                .map(|(name, content)| (name.clone(), fill_credentials_file(content, file)))
+                .collect();
+            InjectedConfigDir {
+                parent: dir.to_path_buf(),
+                dir_name: config_dir_name(kind, &files),
+                files,
+            }
+        });
+        self
+    }
+
     /// Renders the `args`, naming each daemon-side path as `seen_as` turns
     /// it. `None` -- with a warning -- when an `[mcp]` table's bridge path
     /// cannot be rendered.

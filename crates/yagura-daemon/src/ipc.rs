@@ -396,6 +396,8 @@ struct PlannedOpen {
     hooks: HooksRoute,
     /// How the window's credentials reach its CLI.
     credentials: crate::profile::CredentialsMode,
+    /// The profile's `[credentials] launch_args`, for the spawn's argv only.
+    launch_args: Vec<String>,
     /// Recorded on the window, so a restore can launch it through the same
     /// profile again.
     launch: LaunchIdentity,
@@ -2774,6 +2776,7 @@ impl IpcServer {
             hooks_gate,
             hooks,
             credentials,
+            launch_args: launch.credentials.launch_args.clone(),
             delivery: launch.delivery,
             wake_command,
             bridge_scan,
@@ -5798,6 +5801,7 @@ async fn open_planned(
             "the MCP bridge was left out of this launch; the window opens without it"
         );
     }
+    let credentials_dir = plan_window_credentials(config, &mut planned);
     // A table whose path cannot be converted is left out here; a `[hooks]`
     // table left out this way settles as left out at spawn.
     let mut injections = mcp_registration::render_profile_injections(
@@ -5806,6 +5810,15 @@ async fn open_planned(
         planned.host_paths.take(),
     )
     .await;
+    // Whether or not the injections above survived.
+    if !planned.launch_args.is_empty() {
+        injections.push(CliInjection {
+            kind: crate::window::InjectionKind::LaunchArgs,
+            args: std::mem::take(&mut planned.launch_args),
+            config_file: None,
+            config_dir: None,
+        });
+    }
     let hooks_in_argv = injections
         .iter()
         .any(|injection| injection.kind == crate::window::InjectionKind::Hooks);
@@ -5831,6 +5844,7 @@ async fn open_planned(
         hooks: planned.hooks,
         wake_command: planned.wake_command,
         credentials: planned.credentials,
+        credentials_dir,
         ..provenance
     };
     let opened = registry
@@ -5859,6 +5873,41 @@ async fn open_planned(
         }
     }
     Ok(opened)
+}
+
+/// For a `launch` window: plans its credentials folder and points its
+/// `[hooks]` and `[mcp]` settings at it, returning the folder. A window that
+/// cannot be given a usable place for the credentials file (none configured,
+/// or a location whose characters could break out of the settings) keeps
+/// neither injection and gets no folder.
+fn plan_window_credentials(config: &DaemonConfig, planned: &mut PlannedOpen) -> Option<PathBuf> {
+    use crate::profile::CredentialsMode;
+    use crate::window::{InjectionKind, credentials_file_argument, plan_credentials_folder};
+
+    if planned.credentials != CredentialsMode::Launch {
+        return None;
+    }
+    let dir = config
+        .mcp_config_dir
+        .as_deref()
+        .and_then(|config_dir| plan_credentials_folder(config_dir).ok());
+    let usable = dir.and_then(|dir| credentials_file_argument(&dir).map(|file| (dir, file)));
+    let Some((dir, file)) = usable else {
+        tracing::warn!(
+            profile = %planned.launch.profile,
+            "no usable place for the window's credentials file; the window opens without hooks \
+             and the MCP bridge"
+        );
+        planned.profile_injections.retain(|injection| {
+            !matches!(injection.kind(), InjectionKind::Hooks | InjectionKind::Mcp)
+        });
+        return None;
+    };
+    planned.profile_injections = std::mem::take(&mut planned.profile_injections)
+        .into_iter()
+        .map(|injection| injection.for_window_folder(&dir, &file))
+        .collect();
+    Some(dir)
 }
 
 /// The directory the window `request` opens will start in, by the same rule
