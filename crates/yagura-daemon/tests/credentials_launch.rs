@@ -412,6 +412,7 @@ auto_approve = [\"open_window\", \"close_window\"]
 }
 
 /// A file the platform will not run: a program the profile resolves but the spawn refuses.
+/// On Unix it has no execute bit, since `execvp` would hand an executable text file to `/bin/sh`.
 fn write_unrunnable_program(sandbox: &Sandbox) -> PathBuf {
     let name = if cfg!(windows) {
         "broken.exe"
@@ -420,11 +421,6 @@ fn write_unrunnable_program(sandbox: &Sandbox) -> PathBuf {
     };
     let path = sandbox.tree.make_dir("broken").join(name);
     std::fs::write(&path, b"this is not an executable image\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
     path
 }
 
