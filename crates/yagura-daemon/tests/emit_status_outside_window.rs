@@ -92,6 +92,25 @@ fn emit_status_with_only_the_token_does_nothing_and_succeeds() {
     assert_silent_success(&output, "only the status token");
 }
 
+// An empty value is how a CLI clears a variable for its tools' children, so it is no claim.
+#[test]
+fn emit_status_with_both_window_variables_empty_does_nothing_and_succeeds() {
+    let output = emit_status(Some(""), Some(""));
+    assert_silent_success(&output, "both window variables empty");
+}
+
+#[test]
+fn emit_status_with_one_window_variable_empty_does_nothing_and_succeeds() {
+    let token = "00112233445566778899aabbccddeeff";
+    for (window_id, token, situation) in [
+        ("", token, "an empty window id beside a token"),
+        ("w-1", "", "an empty token beside a window id"),
+    ] {
+        let output = emit_status(Some(window_id), Some(token));
+        assert_silent_success(&output, situation);
+    }
+}
+
 #[test]
 fn emit_status_inside_a_window_fails_when_the_daemon_is_unreachable() {
     let output = emit_status(Some("w-1"), Some("00112233445566778899aabbccddeeff"));

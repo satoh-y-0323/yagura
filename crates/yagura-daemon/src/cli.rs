@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde::de::IntoDeserializer;
 use thiserror::Error;
 use yagura_os::{InstanceIdError, InstanceNamespace};
-use yagura_protocol::{WindowStatus, is_valid_source};
+use yagura_protocol::{CREDENTIALS_FLAG, WindowStatus, is_valid_source};
 
 use crate::detector::definition::is_valid_detection_name;
 use crate::mcp_registration::RegistrationTarget;
@@ -214,13 +214,12 @@ pub enum CliError {
 /// side enforces -- `is_valid_detection_name` for `--detection`,
 /// [`is_valid_source`] for `--source` -- so an invalid command line never reaches the
 /// daemon. When a flag is repeated, the last occurrence wins, except
-/// `--for-instance`, which [`names_another_instance`] reads only when given
-/// once.
+/// `--for-instance` and `--credentials`, which are read only when given once.
 ///
 /// # Errors
 ///
 /// Returns [`CliError`] for an unknown argument, a flag missing its value, a
-/// value that fails validation, a repeated `--for-instance`, or two of the
+/// value that fails validation, a repeated `--for-instance` or `--credentials`, or two of the
 /// client-side commands combined.
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut shutdown = false;
@@ -229,6 +228,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut hook_door: Option<CliCommand> = None;
     let mut skip_if: Option<String> = None;
     let mut for_instance = false;
+    let mut credentials = false;
     let mut detection_name: Option<String> = None;
     let mut detection_dir_arg: Option<PathBuf> = None;
     let mut playbook_arg: Option<PathBuf> = None;
@@ -287,6 +287,15 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                 }
                 for_instance = true;
             }
+            // Read from the raw arguments by `yagura_protocol::credentials_path_arg`,
+            // so only validated here.
+            CREDENTIALS_FLAG => {
+                next_path(&mut remaining, CREDENTIALS_FLAG)?;
+                if credentials {
+                    return Err(CliError::RepeatedArgument(CREDENTIALS_FLAG.to_string()));
+                }
+                credentials = true;
+            }
             "--source" => {
                 let value = next_value(&mut remaining, "--source")?;
                 if !is_valid_source(value) {
@@ -332,6 +341,9 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         }
         if for_instance {
             return Err(CliError::UnknownArgument(FOR_INSTANCE_FLAG.to_string()));
+        }
+        if credentials {
+            return Err(CliError::UnknownArgument(CREDENTIALS_FLAG.to_string()));
         }
     }
     match (shutdown, emit_status) {
@@ -565,18 +577,6 @@ fn resolve_config_file(
     Some(yagura_os::instance_dir(&config_base?, namespace).join(file_name))
 }
 
-/// Resolves a window ID from the `YAGURA_WINDOW_ID` environment variable.
-///
-/// Unlike [`resolve_playbook`], which treats an empty value as unset, this
-/// function returns `Some("")` for empty strings to fail-closed: an empty
-/// window_id will not resolve to any window and will cause window_not_found on
-/// the daemon side, the same as any other id naming no window.
-/// Non-UTF-8 values are converted with `to_string_lossy`, which also produces
-/// an invalid id that will not match any window (fail-closed).
-pub fn resolve_emit_window_id(env: Option<std::ffi::OsString>) -> Option<String> {
-    env.map(|value| value.to_string_lossy().into_owned())
-}
-
 /// Parses a `WindowStatus` from its wire spelling.
 ///
 /// Deserialization is used rather than a second `match` table so that the
@@ -623,8 +623,7 @@ fn invalid(flag: &str, value: &str) -> CliError {
 ///
 /// Deliberately asymmetric with [`resolve_playbook`], which treats an empty environment
 /// value as unset: an empty `YAGURA_INSTANCE` must not round silently to the default
-/// instance, the same asymmetry [`resolve_emit_window_id`] already
-/// documents relative to `resolve_playbook`. This function holds no rule of its own -- it
+/// instance. This function holds no rule of its own -- it
 /// forwards straight to `yagura_os::resolve_instance_from`, which is what closes that class
 /// (an empty string fails validation there rather than being special-cased here).
 ///

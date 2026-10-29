@@ -12,7 +12,7 @@ use rmcp::service::RequestContext;
 use rmcp::{RoleServer, serve_server, tool, tool_router, transport::io::stdio};
 use serde_json::{Map, Value, json};
 use yagura_os::{PeerAuth, PlatformIpc, default_endpoint, resolve_instance_from};
-use yagura_protocol::{INSTANCE_ENV, STATUS_TOKEN_ENV, WINDOW_ID_ENV};
+use yagura_protocol::{INSTANCE_ENV, WindowCredentials, process_window_credentials};
 
 use yagura_mcp::plan_tools::{
     self, CreatePlanArgs, DeletePlanArgs, GetPlanArgs, OpenTaskWindowArgs, UpdatePlanArgs,
@@ -1409,20 +1409,11 @@ async fn main() -> anyhow::Result<()> {
     // The bridge is a client, so it never creates the Unix runtime directory;
     // only the daemon does.
     let endpoint = default_endpoint(&user_id, &namespace);
-    // Both must be present: a window's own agent CLI inherits this pair from
-    // the daemon, so a partial set (e.g. the token stripped by an
-    // intermediate launcher) is treated as no claim at all rather than a
-    // malformed one. An empty value is absent too: a CLI's registered entry
-    // can only spell "unset" as empty outside a window.
-    let identity = match (
-        std::env::var(WINDOW_ID_ENV),
-        std::env::var(STATUS_TOKEN_ENV),
-    ) {
-        (Ok(window_id), Ok(token)) if !window_id.is_empty() && !token.is_empty() => {
-            Some(WindowIdentity { window_id, token })
-        }
-        _ => None,
-    };
+    // The same decision the hook doors make: a partial or empty environment
+    // pair is no claim, and `--credentials <path>` names the window otherwise.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let identity = process_window_credentials(&args)
+        .map(|WindowCredentials { window_id, token }| WindowIdentity { window_id, token });
     let transport = EndpointTransport::new(endpoint, identity);
     // Identify before serving so the daemon reports this window as connected
     // from the start, not only after the agent's first tool call. A failure

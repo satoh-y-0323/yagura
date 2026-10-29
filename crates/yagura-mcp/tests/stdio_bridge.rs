@@ -21,6 +21,7 @@ use yagura_protocol::{
     ClientMessage, DaemonMessage, INSTANCE_ENV, PROTOCOL_REVISION, STATUS_TOKEN_ENV, WINDOW_ID_ENV,
     decode_client_message, encode_daemon_message, frame_decode, frame_encode,
 };
+use yagura_test_support::paths::TempDir;
 
 mod common;
 
@@ -300,6 +301,52 @@ async fn a_bridge_started_with_empty_identity_variables_claims_no_window() {
         (WINDOW_ID_ENV, ""),
         (STATUS_TOKEN_ENV, ""),
     ]);
+    assert_claims_no_window(&mut daemon, &mut bridge, "empty identity variables").await;
+}
+
+#[tokio::test]
+async fn a_bridge_given_a_credentials_file_claims_that_window_before_any_call() {
+    const INSTANCE: &str = "mcpbridgecred";
+    const TOKEN: &str = "fedcba9876543210fedcba9876543210";
+    let files = TempDir::new("yagura-mcp-credentials", "files");
+    let path = files.path().join("credentials.json");
+    std::fs::write(
+        &path,
+        json!({ "window_id": "w-file", "token": TOKEN }).to_string(),
+    )
+    .expect("write the credentials file");
+    let mut daemon = ScriptedDaemon::bind(INSTANCE).await;
+    let mut bridge = McpChild::spawn_with_args(
+        &[(INSTANCE_ENV, INSTANCE)],
+        &[OsStr::new("--credentials"), path.as_os_str()],
+    );
+
+    let identify = daemon.next_of_type("identify").await;
+    assert_eq!(identify.get("window_id"), Some(&json!("w-file")));
+    assert_eq!(identify.get("token"), Some(&json!(TOKEN)));
+
+    bridge.kill().await;
+}
+
+#[tokio::test]
+async fn a_bridge_given_a_missing_credentials_file_claims_no_window() {
+    const INSTANCE: &str = "mcpbridgenocred";
+    let files = TempDir::new("yagura-mcp-credentials", "files");
+    let path = files.path().join("absent.json");
+    let mut daemon = ScriptedDaemon::bind(INSTANCE).await;
+    let mut bridge = McpChild::spawn_with_args(
+        &[(INSTANCE_ENV, INSTANCE)],
+        &[OsStr::new("--credentials"), path.as_os_str()],
+    );
+    assert_claims_no_window(&mut daemon, &mut bridge, "a missing credentials file").await;
+}
+
+/// Serves one call and requires the daemon to have seen no `identify` before it.
+async fn assert_claims_no_window(
+    daemon: &mut ScriptedDaemon,
+    bridge: &mut McpChild,
+    situation: &str,
+) {
     bridge.initialize().await;
     bridge.call_tool("list_windows", json!({})).await;
 
@@ -322,7 +369,7 @@ async fn a_bridge_started_with_empty_identity_variables_claims_no_window() {
     .unwrap_or_else(|_| panic!("the daemon never received list_windows: {seen:?}"));
     assert!(
         !seen.iter().any(|wire_type| wire_type == "identify"),
-        "empty identity variables must not be claimed as a window: {seen:?}"
+        "{situation} must not be claimed as a window: {seen:?}"
     );
 
     bridge.kill().await;

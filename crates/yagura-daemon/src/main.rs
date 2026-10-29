@@ -41,8 +41,8 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, DeliveryStream, STATUS_TOKEN_ENV, WINDOW_ID_ENV, WindowStatus,
-    decode_daemon_message, encode_client_message, frame_encode,
+    ClientMessage, DaemonMessage, DeliveryStream, WindowCredentials, WindowStatus,
+    decode_daemon_message, encode_client_message, frame_encode, process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -67,8 +67,9 @@ fn main() -> Result<ExitCode> {
     // before they are parsed and before logging is set up: such a hook stays
     // silent and leaves no trace. So does another instance's hook inside a window:
     // registered hooks run in every session of the CLI.
+    let credentials = process_window_credentials(&args);
     if cli::names_hook_door(&args)
-        && (!runs_inside_window()
+        && (credentials.is_none()
             || cli::names_another_instance(&args, std::env::var_os("YAGURA_INSTANCE")))
     {
         // The CLI writes its input to the hook; a hook that leaves it unread
@@ -84,10 +85,13 @@ fn main() -> Result<ExitCode> {
         .build()
         .context("failed to build the tokio runtime")?;
 
-    runtime.block_on(async_main(command))
+    runtime.block_on(async_main(command, credentials))
 }
 
-async fn async_main(command: CliCommand) -> Result<ExitCode> {
+async fn async_main(
+    command: CliCommand,
+    credentials: Option<WindowCredentials>,
+) -> Result<ExitCode> {
     // Resolved before anything else that derives from it (the log directory,
     // the endpoint name): every command needs a namespace, and the logger is
     // not yet installed, so a rejection here reaches stderr through this
@@ -126,7 +130,9 @@ async fn async_main(command: CliCommand) -> Result<ExitCode> {
         | CliCommand::DeliverContext { .. }
         | CliCommand::DeliverTake { .. }
         | CliCommand::DeliverWait { .. }
-        | CliCommand::ReportSession { .. }) => return run_hook(&ipc, &endpoint, door).await,
+        | CliCommand::ReportSession { .. }) => {
+            return run_hook(&ipc, &endpoint, door, credentials).await;
+        }
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
         // configure the daemon this process is about to start, and are
@@ -698,22 +704,21 @@ async fn send_shutdown(ipc: &PlatformIpc, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether this process runs inside a window this daemon spawned, i.e. both
-/// variables a window's child inherits from `WindowRegistry::open` are set.
-fn runs_inside_window() -> bool {
-    [STATUS_TOKEN_ENV, WINDOW_ID_ENV]
-        .iter()
-        .all(|name| std::env::var_os(name).is_some())
-}
-
-/// Runs a hook door from inside a window (see [`runs_inside_window`]).
+/// Runs a hook door that has the credentials of its window
+/// (`yagura_protocol::window_credentials`).
 ///
 /// The door always reads the CLI's stdin to the end, so the CLI's write never
 /// fails. The values the door needs (`--skip-if`, `--report-session`) are
 /// looked for as stdin is read, and the door goes on as soon as they are found
 /// or the document has ended, so an answer is not held back by a CLI that
 /// leaves stdin open after its input.
-async fn run_hook(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Result<ExitCode> {
+async fn run_hook(
+    ipc: &PlatformIpc,
+    endpoint: &str,
+    command: CliCommand,
+    credentials: Option<WindowCredentials>,
+) -> Result<ExitCode> {
+    let credentials = credentials.context("a hook door runs only with its window's credentials")?;
     let session_pointer = match &command {
         CliCommand::ReportSession { pointer, .. } => Some(pointer.clone()),
         _ => None,
@@ -736,11 +741,11 @@ async fn run_hook(ipc: &PlatformIpc, endpoint: &str, command: CliCommand) -> Res
     } else {
         match command {
             CliCommand::EmitStatus { status, source, .. } => {
-                send_status_event(ipc, endpoint, status, source)
+                send_status_event(ipc, endpoint, status, source, credentials)
                     .await
                     .map(succeeded)
             }
-            door => run_hook_door(ipc, endpoint, door, session).await,
+            door => run_hook_door(ipc, endpoint, door, session, credentials).await,
         }
     };
     // Only the end of stdin is waited for; the rest of it is of no use.
@@ -758,25 +763,22 @@ fn drain_hook_stdin() -> std::sync::mpsc::Receiver<()> {
 /// helper). No reply is expected; failing to reach a daemon is an error, so a
 /// hook that reports into nothing does not look successful.
 ///
-/// Only reached from inside a window (see [`runs_inside_window`]): the token
-/// and window id are the ones the window's child inherited, so a child CLI's
-/// hooks authenticate as that window.
+/// The event authenticates as the window `credentials` name.
 async fn send_status_event(
     ipc: &PlatformIpc,
     endpoint: &str,
     status: WindowStatus,
     source: String,
+    credentials: WindowCredentials,
 ) -> Result<()> {
-    let token = std::env::var(STATUS_TOKEN_ENV)
-        .with_context(|| format!("{STATUS_TOKEN_ENV} is not valid Unicode"))?;
-    let window_id = cli::resolve_emit_window_id(std::env::var_os(WINDOW_ID_ENV));
+    let WindowCredentials { window_id, token } = credentials;
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --emit-status")
     })?;
     let frame = frame_encode(&encode_client_message(&ClientMessage::StatusEvent {
         source,
         status,
-        window_id,
+        window_id: Some(window_id),
         token,
     }));
     client
@@ -791,9 +793,8 @@ async fn send_status_event(
 }
 
 /// Runs one of the commands a CLI's hook uses to reach its window's inbox,
-/// only reached from inside a window (see [`runs_inside_window`]): the token and
-/// window id are the ones the window's child inherited. `session` is the
-/// string at the `--report-session` pointer in the hook's stdin.
+/// authenticating as the window `credentials` name. `session` is the string at
+/// the `--report-session` pointer in the hook's stdin.
 ///
 /// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
 /// with the exit code the window's profile declares. A refusal prints nothing
@@ -803,11 +804,9 @@ async fn run_hook_door(
     endpoint: &str,
     command: CliCommand,
     session: Option<String>,
+    credentials: WindowCredentials,
 ) -> Result<ExitCode> {
-    let token = std::env::var(STATUS_TOKEN_ENV)
-        .with_context(|| format!("{STATUS_TOKEN_ENV} is not valid Unicode"))?;
-    let window_id = std::env::var(WINDOW_ID_ENV)
-        .with_context(|| format!("{WINDOW_ID_ENV} is not valid Unicode"))?;
+    let WindowCredentials { window_id, token } = credentials;
     let waits = matches!(command, CliCommand::DeliverWait { .. });
     let message = match command {
         CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext { window_id, token },

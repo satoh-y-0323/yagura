@@ -344,8 +344,8 @@ pub const FRAME_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 pub const WINDOW_ID_ENV: &str = "YAGURA_WINDOW_ID";
 
 /// The environment variable carrying a window's status token to the process
-/// it runs. Its value is a credential and must never appear in an argv, a
-/// file, or a log.
+/// it runs. Its value is a credential and must never appear in an argv or a
+/// log; the only file that holds it is a window's credentials file.
 pub const STATUS_TOKEN_ENV: &str = "YAGURA_STATUS_TOKEN";
 
 /// The environment variable naming the yagura instance a process belongs to.
@@ -359,6 +359,107 @@ pub const MCP_BRIDGE_ENV: &str = "YAGURA_MCP_BRIDGE";
 /// The environment variables the MCP bridge reads to reach its window's
 /// daemon and identify itself as that window, in this order.
 pub const MCP_CHANNEL_ENV_VARS: [&str; 3] = [WINDOW_ID_ENV, STATUS_TOKEN_ENV, INSTANCE_ENV];
+
+/// The argument of a hook door and of the MCP bridge that names a credentials
+/// file (see [`window_credentials`]).
+pub const CREDENTIALS_FLAG: &str = "--credentials";
+
+/// The most bytes of a credentials file that are read; a larger file names no
+/// window. A window id and a token fit in a small fraction of it.
+pub const CREDENTIALS_FILE_MAX_BYTES: u64 = 4096;
+
+/// The window a process claims to belong to: its id and the token that proves it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WindowCredentials {
+    /// The id of the window.
+    pub window_id: String,
+    /// The window's status token. A credential: never logged or printed.
+    pub token: String,
+}
+
+impl std::fmt::Debug for WindowCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WindowCredentials")
+            .field("window_id", &self.window_id)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The value of `--credentials` in `args` (the command line without the program
+/// name); `None` when it is absent, empty, repeated or missing its value.
+#[must_use]
+pub fn credentials_path_arg(args: &[String]) -> Option<std::path::PathBuf> {
+    let mut values = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == CREDENTIALS_FLAG)
+        .map(|(at, _)| args.get(at + 1));
+    match (values.next(), values.next()) {
+        (Some(Some(path)), None) if !path.is_empty() => Some(path.into()),
+        _ => None,
+    }
+}
+
+/// The one decision of which window a process belongs to, shared by the hook
+/// doors and the MCP bridge. In order: both environment values when neither is
+/// empty (or invalid Unicode); otherwise the JSON object
+/// `{"window_id":"<id>","token":"<hex>"}` in `file`, when it can be read within
+/// [`CREDENTIALS_FILE_MAX_BYTES`] and neither field is empty; otherwise `None`,
+/// i.e. outside any window. An empty value is no value, since a CLI can only
+/// spell "unset" as empty.
+#[must_use]
+pub fn window_credentials(
+    env_window_id: Option<std::ffi::OsString>,
+    env_token: Option<std::ffi::OsString>,
+    file: Option<&std::path::Path>,
+) -> Option<WindowCredentials> {
+    let from_env = |value: Option<std::ffi::OsString>| {
+        value
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.is_empty())
+    };
+    if let (Some(window_id), Some(token)) = (from_env(env_window_id), from_env(env_token)) {
+        return Some(WindowCredentials { window_id, token });
+    }
+    read_credentials_file(file?)
+}
+
+/// [`window_credentials`] over this process's environment and the
+/// `--credentials` argument of `args`.
+#[must_use]
+pub fn process_window_credentials(args: &[String]) -> Option<WindowCredentials> {
+    window_credentials(
+        std::env::var_os(WINDOW_ID_ENV),
+        std::env::var_os(STATUS_TOKEN_ENV),
+        credentials_path_arg(args).as_deref(),
+    )
+}
+
+fn read_credentials_file(path: &std::path::Path) -> Option<WindowCredentials> {
+    use std::io::Read;
+
+    #[derive(Deserialize)]
+    struct CredentialsFile {
+        window_id: String,
+        token: String,
+    }
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(CREDENTIALS_FILE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).ok()? > CREDENTIALS_FILE_MAX_BYTES {
+        return None;
+    }
+    let parsed: CredentialsFile = serde_json::from_slice(&bytes).ok()?;
+    (!parsed.window_id.is_empty() && !parsed.token.is_empty()).then_some(WindowCredentials {
+        window_id: parsed.window_id,
+        token: parsed.token,
+    })
+}
 
 /// The fixed enumeration of a child process window's runtime states.
 ///
@@ -5081,4 +5182,90 @@ pub fn decode_client_message(body: &[u8]) -> Result<ClientMessage, MessageError>
 /// See [`decode_client_message`] for the type-checking behavior.
 pub fn decode_daemon_message(body: &[u8]) -> Result<DaemonMessage, MessageError> {
     decode_message(body, DAEMON_MESSAGE_TYPES)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod credentials_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn os(value: &str) -> Option<OsString> {
+        Some(OsString::from(value))
+    }
+
+    fn file_with(name: &str, contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("yagura-protocol-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, contents).expect("write the file");
+        path
+    }
+
+    #[test]
+    fn the_environment_pair_wins_and_an_empty_value_is_no_value() {
+        let file = file_with("env-wins.json", r#"{"window_id":"f","token":"ft"}"#);
+        let from_env = window_credentials(os("w"), os("t"), Some(&file)).expect("claim");
+        assert_eq!(
+            (from_env.window_id.as_str(), from_env.token.as_str()),
+            ("w", "t")
+        );
+        for (id, token) in [
+            (os(""), os("t")),
+            (os("w"), os("")),
+            (os(""), os("")),
+            (None, os("t")),
+        ] {
+            let claim = window_credentials(id, token, Some(&file)).expect("falls to the file");
+            assert_eq!(claim.window_id, "f");
+        }
+        assert_eq!(window_credentials(os(""), os(""), None), None);
+        assert_eq!(window_credentials(None, None, None), None);
+    }
+
+    #[test]
+    fn a_file_that_is_missing_large_malformed_or_has_an_empty_field_names_no_window() {
+        let huge = format!(
+            r#"{{"window_id":"w","token":"{}"}}"#,
+            "a".repeat(usize::try_from(CREDENTIALS_FILE_MAX_BYTES).unwrap())
+        );
+        let cases = [
+            file_with("huge.json", &huge),
+            file_with("garbled.json", "not json"),
+            file_with("no-token.json", r#"{"window_id":"w"}"#),
+            file_with("empty-id.json", r#"{"window_id":"","token":"t"}"#),
+            file_with("empty-token.json", r#"{"window_id":"w","token":""}"#),
+            std::env::temp_dir().join("yagura-protocol-cred-absent.json"),
+        ];
+        for path in cases {
+            assert_eq!(
+                window_credentials(None, None, Some(&path)),
+                None,
+                "{path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_token_does_not_appear_in_debug_output() {
+        let claim = WindowCredentials {
+            window_id: "w".to_string(),
+            token: "SECRET".to_string(),
+        };
+        assert!(!format!("{claim:?}").contains("SECRET"));
+    }
+
+    #[test]
+    fn the_credentials_path_is_the_single_non_empty_value_after_the_flag() {
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert!(credentials_path_arg(&args(&["--credentials", "p", "--x"])).is_some());
+        for bad in [
+            &["--credentials"][..],
+            &["--credentials", ""],
+            &["--credentials", "a", "--credentials", "b"],
+            &[],
+        ] {
+            assert_eq!(credentials_path_arg(&args(bad)), None);
+        }
+    }
 }

@@ -45,7 +45,14 @@ impl McpChild {
     /// Starts the binary cargo built for this test run with [`CLEARED_ENV`]
     /// removed and then `env` applied.
     pub fn spawn(env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_args(env, &[])
+    }
+
+    /// [`McpChild::spawn`] with `args` passed on the command line, the way an MCP
+    /// client's server entry passes them.
+    pub fn spawn_with_args(env: &[(&str, &str)], args: &[&std::ffi::OsStr]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_yagura-mcp"));
+        command.args(args);
         for name in CLEARED_ENV {
             command.env_remove(name);
         }

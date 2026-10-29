@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use yagura_daemon::cli::{
     CliCommand, CliError, DetectionDirResolution, parse_args, resolve_detection_dir,
-    resolve_emit_window_id, resolve_playbook, resolve_roles_path,
+    resolve_playbook, resolve_roles_path,
 };
 use yagura_daemon::detector::layers::DetectionLayers;
 use yagura_os::InstanceNamespace;
@@ -937,63 +937,6 @@ fn resolve_playbook_returns_none_when_nothing_resolves() {
     );
 }
 
-// resolve_emit_window_id: unlike resolve_playbook, an empty `YAGURA_WINDOW_ID`
-// stays `Some("")` so a misconfigured hook's event names no window
-// (`window_not_found`) rather than omitting one.
-
-#[test]
-fn resolve_emit_window_id_returns_some_when_the_env_var_is_set() {
-    let result = resolve_emit_window_id(Some(std::ffi::OsString::from("w1-abc123")));
-    assert_eq!(result, Some("w1-abc123".to_string()));
-}
-
-#[test]
-fn resolve_emit_window_id_returns_none_when_the_env_var_is_absent() {
-    let result = resolve_emit_window_id(None);
-    assert_eq!(
-        result, None,
-        "an absent YAGURA_WINDOW_ID must stay None: the event then omits window_id, \
-         which the daemon refuses as such rather than as window_not_found"
-    );
-}
-
-#[test]
-fn resolve_emit_window_id_keeps_an_empty_value_as_some_empty_string() {
-    let result = resolve_emit_window_id(Some(std::ffi::OsString::from("")));
-    assert_eq!(
-        result,
-        Some(String::new()),
-        "an empty YAGURA_WINDOW_ID must not be rounded to None (unlike resolve_playbook): \
-         folding it to None would send an event that omits window_id instead of one naming \
-         no window (window_not_found)"
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn resolve_emit_window_id_lossily_converts_a_non_utf8_value_instead_of_returning_none() {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-
-    // 0x0041 is 'A'; 0xD800 is an unpaired UTF-16 surrogate, making the whole
-    // value non-UTF-8.
-    let non_utf8 = OsString::from_wide(&[0x0041, 0xD800]);
-
-    let result = resolve_emit_window_id(Some(non_utf8));
-
-    let Some(value) = result else {
-        panic!(
-            "a non-UTF-8 YAGURA_WINDOW_ID must not become None: that would send an event \
-             that omits window_id instead of one naming no window (window_not_found)"
-        );
-    };
-    assert!(
-        value.contains('\u{FFFD}'),
-        "a non-UTF-8 value must be converted lossily (to_string_lossy), replacing the invalid \
-         portion with U+FFFD rather than being silently dropped; got {value:?}"
-    );
-}
-
 #[test]
 fn resolve_max_windows_returns_default_when_env_not_set() {
     let result = yagura_daemon::config::resolve_max_windows(None, 32);
@@ -1236,5 +1179,59 @@ fn parse_args_rejects_for_instance_off_a_door_with_an_invalid_value_or_given_twi
             "yagura",
         ])),
         Err(CliError::RepeatedArgument("--for-instance".to_string()))
+    );
+}
+
+#[test]
+fn parse_args_accepts_credentials_beside_a_hook_door_and_rejects_it_elsewhere() {
+    for door in ["--deliver-take", "--deliver-context", "--deliver-wait"] {
+        assert!(
+            parse_args(&args(&["--credentials", "/tmp/c.json", door])).is_ok(),
+            "{door} must take --credentials"
+        );
+    }
+    assert!(
+        parse_args(&args(&[
+            "--credentials",
+            "/tmp/c.json",
+            "--emit-status",
+            "idle"
+        ]))
+        .is_ok()
+    );
+    for command in [vec![], vec!["--shutdown"]] {
+        let mut with = vec!["--credentials", "/tmp/c.json"];
+        with.extend(command);
+        assert_eq!(
+            parse_args(&args(&with)),
+            Err(CliError::UnknownArgument("--credentials".to_string()))
+        );
+    }
+}
+
+#[test]
+fn parse_args_rejects_an_empty_missing_or_repeated_credentials_path() {
+    assert_eq!(
+        parse_args(&args(&["--deliver-take", "--credentials", ""])),
+        Err(CliError::InvalidValue {
+            flag: "--credentials".to_string(),
+            value: String::new(),
+        })
+    );
+    assert_eq!(
+        parse_args(&args(&["--deliver-take", "--credentials"])),
+        Err(CliError::MissingValue {
+            flag: "--credentials".to_string(),
+        })
+    );
+    assert_eq!(
+        parse_args(&args(&[
+            "--deliver-take",
+            "--credentials",
+            "a",
+            "--credentials",
+            "b"
+        ])),
+        Err(CliError::RepeatedArgument("--credentials".to_string()))
     );
 }

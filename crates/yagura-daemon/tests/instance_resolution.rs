@@ -59,9 +59,8 @@ fn resolve_instance_id_defaults_rejects_empty_and_names_a_valid_identifier() {
     assert!(
         empty_result.is_err(),
         "an empty YAGURA_INSTANCE must be rejected, not rounded to the default instance \
-         (deliberately asymmetric with resolve_playbook's \"empty counts as unset\": \
-         the same asymmetry resolve_emit_window_id already documents relative to \
-         resolve_playbook); got {empty_result:?}"
+         (deliberately asymmetric with resolve_playbook's \"empty counts as unset\"); \
+         got {empty_result:?}"
     );
 
     let dev_result = cli::resolve_instance_id(Some(OsString::from("dev")))
