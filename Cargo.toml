@@ -56,7 +56,7 @@ regex = "1.10"
 # system SQLite being present on the user's machine.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Workspace-key room ids are derived from a `.git` path via sha256.
-sha2 = "0.10"
+sha2 = "0.11"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
