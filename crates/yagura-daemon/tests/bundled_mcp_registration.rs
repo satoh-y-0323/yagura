@@ -1329,6 +1329,251 @@ async fn registering_wsl_grok_build_reads_back_registered_and_removing_reads_bac
 }
 
 // =============================================================================
+// Grok Build: without this instance's own key nothing is rewritten
+// =============================================================================
+
+/// Marks the status read's argv, so its runs are told apart from the listing scan's.
+const STATUS_READ_MARK: &str = "--status-read";
+
+struct GrokScene {
+    home: PathBuf,
+    bridge: PathBuf,
+    state: PathBuf,
+    log: PathBuf,
+    h: Harness,
+}
+
+/// The host Grok Build fixture, with its status read marked and every stub call logged.
+async fn grok_scene(tag: &str) -> GrokScene {
+    let root = unique_temp_dir(tag);
+    let profiles_dir = root.join("profiles");
+    let home = root.join("home");
+    let state = root.join("stub-state");
+    let log = root.join("stub.log");
+    let bridge = root.join("bridge").join("yagura-mcp.exe");
+    for dir in [&profiles_dir, &home, &state] {
+        std::fs::create_dir_all(dir).expect("create fixture dir");
+    }
+    std::fs::write(state.join("registry.json"), "{}").expect("seed registry");
+    let mut profile: toml::Table = grok_fixture_profile("grok-build", &home, &state)
+        .parse()
+        .expect("the fixture profile is TOML");
+    let registration = profile
+        .get_mut("mcp_registration")
+        .and_then(toml::Value::as_table_mut)
+        .expect("a registration table");
+    let status = registration
+        .get_mut("status")
+        .and_then(toml::Value::as_table_mut)
+        .expect("a status table");
+    status.insert(
+        "args".into(),
+        string_array(&["mcp", "list", "--json", STATUS_READ_MARK]),
+    );
+    let listing_args = registration
+        .get("list")
+        .and_then(|list| list.get("args"))
+        .cloned()
+        .expect("a listing scan");
+    assert_ne!(
+        listing_args,
+        string_array(&["mcp", "list", "--json", STATUS_READ_MARK]),
+        "the listing scan must run another argv than the status read"
+    );
+    profile
+        .get_mut("env")
+        .and_then(toml::Value::as_table_mut)
+        .expect("an env table")
+        .insert(
+            "MCP_CLI_STUB_LOG".into(),
+            toml::Value::String(log.to_str().expect("UTF-8").to_string()),
+        );
+    write_profile(
+        &profiles_dir,
+        GROK_PLACED_ID,
+        &toml::to_string(&profile).expect("serialize the fixture profile"),
+    );
+
+    let config = DaemonConfig {
+        profiles_dir: Some(profiles_dir),
+        home_dir: Some(home.clone()),
+        registration_cwd: registration_cwd_in(&root),
+        instance_id: None,
+        mcp_bridge: Some(bridge.clone()),
+        report_dir: Some(root.join("state").join("bin")),
+        mcp_registration_timeout: REPLY_TIMEOUT,
+        host_os: yagura_daemon::profile::ProfileOs::host(),
+        program_lookup: empty_lookup(),
+        program_is_executable: is_file,
+        default_shell: None,
+        ..approver_base_config()
+    };
+    let h = Harness::start(tag, config).await;
+    GrokScene {
+        home,
+        bridge,
+        state,
+        log,
+        h,
+    }
+}
+
+/// How many times the stub ran with the status read's argv.
+fn status_reads(log: &Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(STATUS_READ_MARK))
+        .count()
+}
+
+/// Opens a window from the fixture and tells whether its hooks reach it.
+async fn grok_window_keeps_hooks(
+    scene: &GrokScene,
+    client: &mut yagura_test_support::ipc::Connection,
+) -> bool {
+    send(
+        client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: GROK_PLACED_ID.to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    let window_id = match read_response(client, REPLY_TIMEOUT).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    };
+    scene
+        .h
+        .registry
+        .get(&window_id)
+        .expect("the window is listed")
+        .delivers()
+}
+
+/// Lists the rows and waits for the fixture row's status.
+async fn grok_listed_state(
+    client: &mut yagura_test_support::ipc::Connection,
+    request_id: u64,
+) -> McpRegistrationState {
+    send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
+    match read_response(client, REPLY_TIMEOUT).await {
+        DaemonMessage::McpRegistrationsListed { .. } => {}
+        other => panic!("expected mcp_registrations_listed, got {other:?}"),
+    }
+    loop {
+        match read_response(client, REPLY_TIMEOUT).await {
+            DaemonMessage::McpRegistrationStatus { status, .. }
+                if status.profile == GROK_PLACED_ID =>
+            {
+                return status.state;
+            }
+            DaemonMessage::McpRegistrationStatus { .. } => {}
+            other => panic!("expected mcp_registration_status, got {other:?}"),
+        }
+    }
+}
+
+fn file_bytes(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+#[tokio::test]
+async fn without_this_instances_key_neither_a_window_nor_the_listing_writes_or_reads_the_status() {
+    let scene = grok_scene("bundled-mcpreg-grok-no-key").await;
+    // The CLI holds the bridge, but this instance's hooks file has none of its keys.
+    let bridge = scene.bridge.to_str().expect("UTF-8");
+    std::fs::write(
+        scene.state.join("registry.json"),
+        json!({ "yagura": { "command": bridge, "args": [], "env": {} } }).to_string(),
+    )
+    .expect("seed registry");
+    let hooks_dir = scene.home.join(".grok/hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+    let own = hooks_dir.join("yagura.json");
+    let other = hooks_dir.join("dev.json");
+    let settings = scene.home.join(GROK_SETTINGS_FILE);
+    std::fs::write(&own, "{\n  \"mine\": {\"kept\": true}\n}\n").expect("seed own file");
+    std::fs::write(&other, "{\"hooks\": {\"Stop\": []}}\n").expect("seed other file");
+    std::fs::write(&settings, "# mine\nmodel = \"x\"\n").expect("seed settings");
+    let before: Vec<_> = [&own, &other, &settings]
+        .iter()
+        .map(|path| file_bytes(path))
+        .collect();
+    let mut client = scene.h.connect().await;
+    register_approver(&mut client).await;
+
+    assert!(
+        !grok_window_keeps_hooks(&scene, &mut client).await,
+        "the window opens without hooks"
+    );
+    assert_eq!(
+        status_reads(&scene.log),
+        0,
+        "opening a window starts no status read"
+    );
+    let after_open: Vec<_> = [&own, &other, &settings]
+        .iter()
+        .map(|path| file_bytes(path))
+        .collect();
+    assert_eq!(after_open, before, "opening a window writes nothing");
+
+    grok_listed_state(&mut client, 1).await;
+    let after_listing: Vec<_> = [&own, &other, &settings]
+        .iter()
+        .map(|path| file_bytes(path))
+        .collect();
+    assert_eq!(after_listing, before, "listing writes nothing");
+    assert!(
+        status_reads(&scene.log) > 0,
+        "the listing's own status read is logged, so the count above can see one"
+    );
+
+    scene.h.registry.terminate_all().await;
+}
+
+#[tokio::test]
+async fn after_register_then_remove_neither_a_window_nor_the_listing_writes_the_files() {
+    let scene = grok_scene("bundled-mcpreg-grok-removed").await;
+    let mut client = scene.h.connect().await;
+    register_approver(&mut client).await;
+    assert_eq!(
+        run_grok_action(&mut client, McpRegistrationAction::Register, 1).await,
+        McpRegistrationState::Registered
+    );
+    assert_eq!(
+        run_grok_action(&mut client, McpRegistrationAction::Remove, 2).await,
+        McpRegistrationState::NotRegistered
+    );
+    let hooks = scene.home.join(GROK_HOOKS_FILE);
+    let settings = scene.home.join(GROK_SETTINGS_FILE);
+    let before = (file_bytes(&hooks), file_bytes(&settings));
+
+    assert!(
+        !grok_window_keeps_hooks(&scene, &mut client).await,
+        "the window opens without hooks"
+    );
+    assert_eq!(
+        (file_bytes(&hooks), file_bytes(&settings)),
+        before,
+        "opening a window writes nothing"
+    );
+    grok_listed_state(&mut client, 3).await;
+    assert_eq!(
+        (file_bytes(&hooks), file_bytes(&settings)),
+        before,
+        "listing writes nothing"
+    );
+
+    scene.h.registry.terminate_all().await;
+}
+
+// =============================================================================
 // The WSL file tools themselves: run on a Unix host with the leading `wsl`
 // invocation dropped, against a temporary home.
 // =============================================================================

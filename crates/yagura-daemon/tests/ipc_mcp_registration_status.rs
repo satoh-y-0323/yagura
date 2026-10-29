@@ -779,7 +779,8 @@ async fn a_settings_value_read_back_as_a_float_compares_by_number_and_a_differen
 }
 
 #[tokio::test]
-async fn owned_settings_entries_missing_from_the_file_differ_under_their_dotted_path() {
+async fn owned_entries_differ_under_their_dotted_path_until_the_servers_table_lets_them_be_rewritten()
+ {
     const CONFIRM_LINE: &str = "confirm = { tool_timeout_sec = \"/tool_timeout_sec\" }\n";
     const OWNED_ENTRIES: &str = "\n[mcp_registration.toml_set.entries]\n\
                                  under = [\"hooks\", \"state\"]\n\n\
@@ -809,12 +810,39 @@ async fn owned_settings_entries_missing_from_the_file_differ_under_their_dotted_
     .await;
     let mut approver = approver_connection(&h).await;
 
-    // The CLI's own key holds; only the entries the row owns are absent.
-    seed_toml_settings(&layout.home_dir, "yagura", &bridge, "86400");
+    // No server's table, so nothing the user agreed to have rewritten: the entries differ.
     let (_, statuses) = list_and_collect(&mut approver, 15).await;
     let status = status_of(&statuses, "bravo");
     assert_eq!(status.state, McpRegistrationState::Differs, "{status:?}");
-    assert_eq!(status.differs_in, vec!["hooks.state".to_string()]);
+    assert_eq!(
+        status.differs_in,
+        vec!["tool_timeout_sec".to_string(), "hooks.state".to_string()]
+    );
+    assert!(
+        !layout.home_dir.join(STUB_TOML_FILE).exists(),
+        "a settings file is not created"
+    );
+
+    // The CLI's own key holds, so the listing writes the entries the row owns.
+    seed_toml_settings(&layout.home_dir, "yagura", &bridge, "86400");
+    let (_, statuses) = list_and_collect(&mut approver, 16).await;
+    let status = status_of(&statuses, "bravo");
+    let settings: toml::Table = std::fs::read_to_string(layout.home_dir.join(STUB_TOML_FILE))
+        .expect("read the settings file")
+        .parse()
+        .expect("the settings file stays TOML");
+    assert_eq!(
+        settings
+            .get("hooks")
+            .and_then(|hooks| hooks.get("state"))
+            .and_then(|state| state.get("yagura-hook"))
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(toml::Value::as_str),
+        Some("sha256:0"),
+        "{settings}"
+    );
+    assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
+    assert!(status.differs_in.is_empty(), "{status:?}");
 }
 
 #[tokio::test]

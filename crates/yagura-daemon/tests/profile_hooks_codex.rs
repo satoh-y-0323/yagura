@@ -765,29 +765,65 @@ async fn state_follows_trust_case(profile: &str, tag: &str) {
             }),
         ),
     ];
+    // The server's own table is this instance's key, so incomplete trust is rewritten.
     for (round, (what, edit)) in (3u64..).zip(edits) {
         set_state(&layout, |state| edit(state));
-        assert_ne!(
-            listed_state(&mut approver, round * 10).await,
+        let state = listed_state(&mut approver, round * 10).await;
+        assert_eq!(
+            hooks_state(&layout.read_config()),
+            with_user_key(expected_trust(profile)),
+            "{what}: the listing rewrites yagura's trust and keeps the user's own"
+        );
+        assert_eq!(
+            state,
             McpRegistrationState::Registered,
-            "{what}: the trust is incomplete, so the row is not registered"
+            "{what}: the rewritten trust holds, so the row is registered"
         );
         layout.write_config(&registered);
-        assert_eq!(
-            listed_state(&mut approver, round * 10 + 1).await,
-            McpRegistrationState::Registered,
-            "{what}: restoring the file restores the state"
-        );
     }
+
+    // Without that table there is nothing the user agreed to have rewritten.
+    without_server_table_and_one_trust_key(&layout);
+    let unagreed = layout.read_config();
+    assert_ne!(
+        listed_state(&mut approver, 100).await,
+        McpRegistrationState::Registered,
+        "the trust is incomplete, so the row is not registered"
+    );
+    assert_eq!(
+        layout.read_config(),
+        unagreed,
+        "a file without this instance's key is not written"
+    );
+}
+
+/// Takes away the server's own table (what `codex mcp remove` takes) and one of yagura's
+/// trust keys, leaving the rest of the trust as it was.
+fn without_server_table_and_one_trust_key(layout: &Layout) {
+    let mut document = parse(&layout.read_config());
+    document
+        .get_mut("mcp_servers")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|servers| servers.remove("yagura"))
+        .expect("the registration wrote the server's table");
+    layout.write_config(&toml::to_string(&document).expect("serialize"));
+    set_state(layout, |state| {
+        let key = state
+            .keys()
+            .find(|key| key.contains("<session-flags>"))
+            .cloned()
+            .expect("a yagura trust key");
+        state.remove(&key);
+    });
 }
 
 #[tokio::test]
-async fn the_host_codex_row_is_registered_only_while_all_of_its_trust_keys_hold() {
+async fn the_host_codex_row_is_registered_while_its_trust_holds_or_the_listing_rewrites_it() {
     state_follows_trust_case(HOST_PROFILE, "codex-state-host").await;
 }
 
 #[tokio::test]
-async fn the_wsl_codex_row_is_registered_only_while_all_of_its_trust_keys_hold() {
+async fn the_wsl_codex_row_is_registered_while_its_trust_holds_or_the_listing_rewrites_it() {
     state_follows_trust_case(WSL_PROFILE, "codex-state-wsl").await;
 }
 
@@ -912,15 +948,34 @@ async fn gating_case(profile: &str, tag: &str) {
             .expect("a yagura trust key");
         state.remove(&key);
     });
-    let broken = open_and_read_launch(&mut client, &layout, 3).await;
+    let rewritten = open_and_read_launch(&mut client, &layout, 3).await;
+    assert_eq!(
+        hooks_state(&layout.read_config()),
+        with_user_key(expected_trust(profile)),
+        "the launch rewrites the incomplete trust of this instance"
+    );
+    assert_eq!(
+        hook_commands(&hook_overrides(&rewritten)),
+        expected_commands(profile),
+        "a row whose incomplete trust was rewritten keeps every hook"
+    );
+
+    without_server_table_and_one_trust_key(&layout);
+    let unagreed = layout.read_config();
+    let broken = open_and_read_launch(&mut client, &layout, 4).await;
     assert_eq!(
         hook_overrides(&broken),
         Vec::<String>::new(),
-        "a row whose trust is incomplete gets no hooks"
+        "a row whose trust is incomplete and cannot be rewritten gets no hooks"
+    );
+    assert_eq!(
+        layout.read_config(),
+        unagreed,
+        "a file without this instance's key is not written"
     );
 
     layout.write_config(&registered_text);
-    let restored = open_and_read_launch(&mut client, &layout, 4).await;
+    let restored = open_and_read_launch(&mut client, &layout, 5).await;
     assert_eq!(
         hook_commands(&hook_overrides(&restored)),
         expected_commands(profile),
@@ -929,12 +984,12 @@ async fn gating_case(profile: &str, tag: &str) {
 }
 
 #[tokio::test]
-async fn a_host_codex_window_gets_its_hooks_only_while_the_registration_holds() {
+async fn a_host_codex_window_gets_its_hooks_while_the_registration_holds_or_is_rewritten() {
     gating_case(HOST_PROFILE, "codex-gate-host").await;
 }
 
 #[tokio::test]
-async fn a_wsl_codex_window_gets_its_hooks_only_while_the_registration_holds() {
+async fn a_wsl_codex_window_gets_its_hooks_while_the_registration_holds_or_is_rewritten() {
     gating_case(WSL_PROFILE, "codex-gate-wsl").await;
 }
 
@@ -946,7 +1001,7 @@ fn left_out_lines(lines: &[&str]) -> usize {
 
 #[traced_test]
 #[tokio::test]
-async fn a_launch_that_loses_its_hooks_to_stale_trust_says_so_once_with_the_reason() {
+async fn a_launch_says_once_with_the_reason_only_when_it_loses_its_hooks_to_stale_trust() {
     let layout = Layout::new("codex-gate-warn");
     layout.write_config(SEED_CONFIG);
     let h = start("codex-gate-warn", HOST_PROFILE, &layout).await;
@@ -961,6 +1016,7 @@ async fn a_launch_that_loses_its_hooks_to_stale_trust_says_so_once_with_the_reas
         n => Err(format!("a complete registration logged {n} lines")),
     });
 
+    // Stale trust of this instance is rewritten, so the launch loses nothing.
     set_state(&layout, |state| {
         let key = state
             .keys()
@@ -970,16 +1026,23 @@ async fn a_launch_that_loses_its_hooks_to_stale_trust_says_so_once_with_the_reas
         state.remove(&key);
     });
     open_and_read_launch(&mut client, &layout, 2).await;
+    logs_assert(|lines: &[&str]| match left_out_lines(lines) {
+        0 => Ok(()),
+        n => Err(format!("a rewritten registration logged {n} lines")),
+    });
+
+    without_server_table_and_one_trust_key(&layout);
+    open_and_read_launch(&mut client, &layout, 3).await;
     logs_assert(|lines: &[&str]| {
         let found: Vec<&&str> = lines.iter().filter(|l| l.contains(LEFT_OUT)).collect();
         match found.as_slice() {
-            [line] if line.contains("out of date") && line.contains("profile=\"codex\"") => Ok(()),
+            [line] if line.contains("reason=") && line.contains("profile=\"codex\"") => Ok(()),
             other => Err(format!("expected one line naming the reason: {other:?}")),
         }
     });
 
     layout.write_config(&registered_text);
-    open_and_read_launch(&mut client, &layout, 3).await;
+    open_and_read_launch(&mut client, &layout, 4).await;
     logs_assert(|lines: &[&str]| match left_out_lines(lines) {
         1 => Ok(()),
         n => Err(format!("restoring the trust must add no line, found {n}")),

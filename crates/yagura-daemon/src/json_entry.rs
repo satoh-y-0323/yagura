@@ -93,6 +93,27 @@ pub fn entries_hold(source: &str, entries: &[(String, Value)]) -> Result<bool, J
     Ok(true)
 }
 
+/// Whether any key of `names` is an entry of `source`, whatever it holds.
+///
+/// # Errors
+///
+/// As [`entries_hold`].
+pub fn any_present(source: &str, names: &[String]) -> Result<bool, JsonEntryError> {
+    let document: Value = serde_json::from_str(source).map_err(|_| JsonEntryError::Unparsable)?;
+    if !document.is_object() {
+        return Err(JsonEntryError::NotAnObject);
+    }
+    for key in names {
+        let found = path_of(key)?
+            .iter()
+            .try_fold(&document, |node, name| node.as_object()?.get(name));
+        if found.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The names a key walks through: a pointer's unescaped tokens, or the key
 /// itself as a single top-level name.
 fn path_of(key: &str) -> Result<Vec<String>, JsonEntryError> {

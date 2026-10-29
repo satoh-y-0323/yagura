@@ -5,8 +5,8 @@
 //!
 //! The CLI takes no hooks at launch, so the registration owns one top-level
 //! entry, `yagura`, of that file: it is added by `Register`, taken out by
-//! `Remove`, read back by the status check, and a window is expected to
-//! report only while the entry is complete. Every case runs the shipped
+//! `Remove`, read back by the status check, and rewritten to the current form
+//! when a window opens or the rows are listed while the key is there. Every case runs the shipped
 //! profile with its launch command swapped for the `mcp_cli_stub` fixture and
 //! `home_dir` at a temporary directory, so the user's own `~/.gemini` is never
 //! read or written.
@@ -702,13 +702,30 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
         McpRegistrationState::Registered
     );
 
+    // Without this instance's own key there is nothing the user agreed to have rewritten.
+    let mut gone = parse(&registered_text);
+    gone.as_object_mut().unwrap().remove("yagura");
+    write_value(&layout, &gone);
+    let gone_text = layout.read_hooks();
+    assert_ne!(
+        listed_state(&mut approver, 3).await,
+        McpRegistrationState::Registered,
+        "the yagura entry is gone, so the row is not registered"
+    );
+    assert_eq!(
+        layout.read_hooks(),
+        gone_text,
+        "a file without this instance's key is not written"
+    );
+    layout.write_hooks(&registered_text);
+    assert_eq!(
+        listed_state(&mut approver, 4).await,
+        McpRegistrationState::Registered,
+        "restoring the file restores the state"
+    );
+
+    // The key is there, so whatever its entry holds is rewritten to the current form.
     let tampers: Vec<(&str, Tamper)> = vec![
-        (
-            "the yagura entry is gone",
-            Box::new(|_, file| {
-                file.as_object_mut().unwrap().remove("yagura");
-            }),
-        ),
         (
             "the command points at another daemon",
             Box::new(|_, file| {
@@ -768,20 +785,22 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
             }),
         ),
     ];
-    for (round, (what, tamper)) in (3u64..).zip(tampers) {
+    for (round, (what, tamper)) in (5u64..).zip(tampers) {
         let mut file = parse(&registered_text);
         tamper(&layout, &mut file);
         write_value(&layout, &file);
-        assert_ne!(
-            listed_state(&mut approver, round * 10).await,
-            McpRegistrationState::Registered,
-            "{what}: the entry is incomplete, so the row is not registered"
-        );
-        layout.write_hooks(&registered_text);
+        let status = listed_status(&mut approver, round * 10).await;
+        let rewritten = layout.hooks_value();
+        assert_yagura_entry(&rewritten, &layout.expected_command(profile));
         assert_eq!(
-            listed_state(&mut approver, round * 10 + 1).await,
+            object_without_yagura(&rewritten),
+            parse(SEED_HOOKS),
+            "{what}: the user's own entries are left as they were"
+        );
+        assert_eq!(
+            status.state,
             McpRegistrationState::Registered,
-            "{what}: restoring the file restores the state"
+            "{what}: the listing rewrote the entry, so the row is registered: {status:?}"
         );
     }
 
@@ -801,12 +820,12 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
 }
 
 #[tokio::test]
-async fn the_host_row_is_registered_only_while_its_hooks_entry_holds() {
+async fn the_host_row_is_registered_while_its_hooks_entry_holds_or_the_listing_rewrites_it() {
     state_follows_entry_case(HOST_PROFILE, "agy-state-host").await;
 }
 
 #[tokio::test]
-async fn the_wsl_row_is_registered_only_while_its_hooks_entry_holds() {
+async fn the_wsl_row_is_registered_while_its_hooks_entry_holds_or_the_listing_rewrites_it() {
     state_follows_entry_case(WSL_PROFILE, "agy-state-wsl").await;
 }
 
@@ -943,7 +962,7 @@ async fn removing_fails_when_the_hooks_file_exists_but_cannot_be_read() {
 }
 
 // =============================================================================
-// A window is expected to report exactly while the entry is complete
+// A window is expected to report while the entry is complete or can be rewritten
 // =============================================================================
 
 async fn open_window(client: &mut Connection) -> String {
@@ -1023,9 +1042,10 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
         .remove("PostToolUse");
     write_value(&layout, &incomplete);
     assert!(
-        !window_expects_reports(&h, &mut client, profile, &layout, false).await,
-        "an incomplete entry is not one to expect reports from"
+        window_keeps_hooks(&h, &mut client).await,
+        "this instance's incomplete entry is rewritten at launch, so the window keeps its hooks"
     );
+    assert_yagura_entry(&layout.hooks_value(), &layout.expected_command(profile));
 
     layout.write_hooks(&registered_text);
     assert!(
@@ -1049,11 +1069,95 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
 }
 
 #[tokio::test]
-async fn a_host_agy_window_is_expected_to_report_only_while_the_entry_is_complete() {
+async fn a_host_agy_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
     expectation_follows_entry_case(HOST_PROFILE, "agy-expect-host").await;
 }
 
 #[tokio::test]
-async fn a_wsl_agy_window_is_expected_to_report_only_while_the_entry_is_complete() {
+async fn a_wsl_agy_window_is_expected_to_report_only_while_its_entry_is_complete_or_rewritten() {
     expectation_follows_entry_case(WSL_PROFILE, "agy-expect-wsl").await;
+}
+
+/// Opens a window from the profile as placed now and tells whether its hooks reach it, from
+/// the route settled at launch: unlike a live detector, it outlasts a CLI that exits at once.
+async fn window_keeps_hooks(h: &Harness, client: &mut Connection) -> bool {
+    let window_id = open_window(client).await;
+    h.registry
+        .get(&window_id)
+        .expect("the window is listed")
+        .delivers()
+}
+
+// =============================================================================
+// An out-of-date entry of this instance is rewritten without the user's Update
+// =============================================================================
+
+/// The registered file as an older yagura wrote it: the same events, naming no instance.
+fn older_form(registered_text: &str) -> String {
+    let older = registered_text.replace(FOR_INSTANCE, "");
+    assert_ne!(older, registered_text, "the older form must differ");
+    older
+}
+
+#[tokio::test]
+async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_window_keeps_its_hooks()
+{
+    let tag = "agy-rewrite-open";
+    let layout = Layout::new(tag);
+    layout.write_hooks(SEED_HOOKS);
+    let h = start(tag, HOST_PROFILE, &layout).await;
+    let mut client = approver_connection(&h).await;
+    let (error, _) = run_action(&mut client, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None);
+    layout.write_hooks(&older_form(&layout.read_hooks()));
+
+    place_profile(HOST_PROFILE, &layout, Some(WINDOW_ALIVE_MS));
+    let window_id = open_window(&mut client).await;
+
+    let rewritten = layout.hooks_value();
+    assert_yagura_entry(&rewritten, &layout.expected_command(HOST_PROFILE));
+    assert_eq!(
+        object_without_yagura(&rewritten),
+        parse(SEED_HOOKS),
+        "the user's own entries are left as they were"
+    );
+    let entry = h.registry.get(&window_id).expect("the window is listed");
+    assert!(entry.delivers(), "the window takes delivery");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !entry.reports_expected() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(entry.reports_expected(), "the window is expected to report");
+}
+
+#[tokio::test]
+async fn listing_rewrites_this_instances_out_of_date_entry_and_still_shows_a_bridge_that_differs() {
+    let tag = "agy-rewrite-list";
+    let layout = Layout::new(tag);
+    layout.write_hooks(SEED_HOOKS);
+    let h = start(tag, HOST_PROFILE, &layout).await;
+    let mut approver = approver_connection(&h).await;
+    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None);
+    let older = older_form(&layout.read_hooks());
+
+    layout.write_hooks(&older);
+    let status = listed_status(&mut approver, 2).await;
+    let rewritten = layout.hooks_value();
+    assert_yagura_entry(&rewritten, &layout.expected_command(HOST_PROFILE));
+    assert_eq!(object_without_yagura(&rewritten), parse(SEED_HOOKS));
+    assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
+
+    // Rewriting the hooks does not hide that the MCP registration points elsewhere.
+    let mut mcp: Value = parse(&std::fs::read_to_string(layout.mcp_path()).expect("read"));
+    mcp["mcpServers"]["yagura"]["command"] = json!("/elsewhere/yagura-mcp");
+    std::fs::write(layout.mcp_path(), mcp.to_string()).expect("write the MCP settings");
+    layout.write_hooks(&older);
+    let status = listed_status(&mut approver, 3).await;
+    assert_yagura_entry(
+        &layout.hooks_value(),
+        &layout.expected_command(HOST_PROFILE),
+    );
+    assert_eq!(status.state, McpRegistrationState::Differs, "{status:?}");
+    assert_eq!(status.differs_in, vec!["command".to_string()], "{status:?}");
 }

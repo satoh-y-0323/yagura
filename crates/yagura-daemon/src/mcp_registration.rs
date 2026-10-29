@@ -211,6 +211,17 @@ impl TomlSetSpec {
         substitute_all(&self.table, "{server}", target.server())
     }
 
+    /// [`TomlSetSpec::table`] when it names `{server}`: a table of this
+    /// instance's own, which the CLI's own removal takes out. `None` when the
+    /// table is shared by every instance.
+    #[must_use]
+    pub fn instance_table(&self, target: &RegistrationTarget) -> Option<Vec<String>> {
+        self.table
+            .iter()
+            .any(|segment| segment.contains(SERVER_PLACEHOLDER))
+            .then(|| self.table(target))
+    }
+
     /// The keys and values to set, exactly as the profile declared them.
     #[must_use]
     pub fn values(&self) -> &toml::Table {

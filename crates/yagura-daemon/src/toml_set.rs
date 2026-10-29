@@ -139,6 +139,19 @@ pub fn edits_hold(source: &str, edits: &[TableEdit<'_>]) -> Result<bool, TomlSet
     }))
 }
 
+/// Whether `source` holds a table at `table` (each segment one literal key).
+///
+/// # Errors
+///
+/// Returns [`TomlSetError::Unparsable`] when `source` does not parse.
+pub fn table_exists(source: &str, table: &[String]) -> Result<bool, TomlSetError> {
+    let document: toml::Table = source.parse().map_err(|_| TomlSetError::Unparsable)?;
+    Ok(table
+        .iter()
+        .try_fold(&document, |table, segment| table.get(segment)?.as_table())
+        .is_some())
+}
+
 /// Walks `path` through nested tables starting at `root`: each segment is
 /// looked up as one literal key (never split on `.`), so a quoted key holding
 /// a literal dot (`"a.b"`) is a different table than two nested keys

@@ -63,11 +63,16 @@ struct ListingBuilt {
 /// this listing's own row reads take, so at most one listing runs across the
 /// whole daemon at a time; a row read is separately admitted by
 /// `row_permits` (sized by [`DaemonConfig::mcp_registration_status_max_concurrent`]).
+/// A row whose out-of-date entries are rewritten waits for `writes` the way
+/// a window launch does ([`reconcile_entries`]).
+// One argument per slot the listing takes, plus the connection that asked.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_list_mcp_registrations(
     config: &DaemonConfig,
     role_and_profile_reads: &Semaphore,
     listing_permits: &Arc<Semaphore>,
     row_permits: &Arc<Semaphore>,
+    writes: &Arc<Semaphore>,
     outbound: &Arc<Outbound>,
     state: &ConnectionState,
     request_id: u64,
@@ -106,6 +111,7 @@ pub(super) async fn handle_list_mcp_registrations(
     let config = config.clone();
     let outbound = Arc::clone(outbound);
     let row_permits = Arc::clone(row_permits);
+    let writes = Arc::clone(writes);
     tokio::spawn(async move {
         // Held until every row of this listing has been read.
         let _permit = permit;
@@ -115,6 +121,7 @@ pub(super) async fn handle_list_mcp_registrations(
             let config = config.clone();
             let outbound = Arc::clone(&outbound);
             let bridge = bridge.clone();
+            let writes = Arc::clone(&writes);
             tasks.spawn(async move {
                 // A row read waits for a slot rather than being dropped: a
                 // listing with more rows than the limit still pushes every
@@ -122,7 +129,7 @@ pub(super) async fn handle_list_mcp_registrations(
                 let Ok(_row_permit) = row_permits.acquire_owned().await else {
                     return;
                 };
-                let status = compute_status(&config, &source, &bridge).await;
+                let status = compute_status(&config, &source, &bridge, Some(&writes)).await;
                 outbound.reply(&DaemonMessage::McpRegistrationStatus { request_id, status });
             });
         }
@@ -388,12 +395,16 @@ fn to_wire_state(state: mcp_registration::RegistrationState) -> McpRegistrationS
 /// Reads one row's registration state from its own CLI: a probe first (when
 /// the row has one), then the status itself, both under `config`'s limits.
 /// A registration another value holds the claim of is marked as refused.
+///
+/// With `writes` (a listing), out-of-date entries this instance consented to
+/// are rewritten first; a Register / Update reads its own result without.
 async fn compute_status(
     config: &DaemonConfig,
     source: &RowSource,
     bridge: &str,
+    writes: Option<&Semaphore>,
 ) -> McpRegistrationStatusInfo {
-    let mut status = compute_state(config, source, bridge).await;
+    let mut status = compute_state(config, source, bridge, writes).await;
     if let ClaimCheck::Held(pointer) = check_claim(config, source).await {
         status.refused_by_claim = Some(pointer);
     }
@@ -404,6 +415,7 @@ async fn compute_state(
     config: &DaemonConfig,
     source: &RowSource,
     bridge: &str,
+    writes: Option<&Semaphore>,
 ) -> McpRegistrationStatusInfo {
     match resolve_probe(config, source, bridge).await {
         ProbeOutcome::NoProbe => {
@@ -411,7 +423,7 @@ async fn compute_state(
                 Ok(observation) => derive(source, &observation, bridge),
                 Err(reason) => refused_status(reason),
             };
-            let derived = with_entries_status(config, source, derived, bridge).await;
+            let derived = with_entries_status(config, source, derived, bridge, writes).await;
             build_status_info(source, derived, bridge)
         }
         ProbeOutcome::Bridge(probed) => {
@@ -419,7 +431,7 @@ async fn compute_state(
                 Ok(observation) => derive(source, &observation, &probed),
                 Err(reason) => refused_status(reason),
             };
-            let derived = with_entries_status(config, source, derived, &probed).await;
+            let derived = with_entries_status(config, source, derived, &probed, writes).await;
             build_status_info(source, derived, &probed)
         }
         ProbeOutcome::Refused(reason) => build_status_info(source, refused_status(reason), bridge),
@@ -461,11 +473,16 @@ async fn compute_state(
 /// as registered (or differing) also differs while one of them is missing or
 /// changed, and is unknown when a file cannot be read. Any other state is
 /// left as it is.
+///
+/// With `writes`, out-of-date entries this instance's registration consented
+/// to are rewritten first ([`reconcile_entries`]), and what is read back
+/// afterwards is merged the same way: a bridge that differs still shows.
 async fn with_entries_status(
     config: &DaemonConfig,
     source: &RowSource,
     mut derived: mcp_registration::DerivedStatus,
     bridge: &str,
+    writes: Option<&Semaphore>,
 ) -> mcp_registration::DerivedStatus {
     if !source.spec.owns_entries() {
         return derived;
@@ -477,15 +494,35 @@ async fn with_entries_status(
     ) {
         return derived;
     }
-    match read_entries(
-        config,
-        &source.spec,
-        &source.target,
-        &source.env,
-        Some(bridge),
-    )
-    .await
-    {
+    let row = RowFiles::of(source);
+    let read = match writes {
+        Some(writes) => {
+            let reconciled = reconcile_entries(
+                config,
+                writes,
+                &source.profile,
+                row,
+                &source.target,
+                Some(bridge),
+            )
+            .await;
+            if let Rewrite::Failed(reason) = reconciled.rewrite {
+                tracing::warn!(
+                    profile = %source.profile,
+                    reason,
+                    "could not rewrite this instance's out-of-date registration entries; register \
+                     the CLI again to restore them"
+                );
+            }
+            reconciled.read
+        }
+        None => {
+            read_entries(config, row, &source.target, Some(bridge))
+                .await
+                .read
+        }
+    };
+    match read {
         EntriesRead::Hold => {}
         EntriesRead::Differ(labels) => {
             derived.state = mcp_registration::RegistrationState::Differs;
@@ -499,18 +536,29 @@ async fn with_entries_status(
 }
 
 /// Reads the entries `spec` owns from their settings files the way a status
-/// reads them. A launch counts on the CLI running yagura's hooks only while
-/// they all hold: the entries are either the
-/// hooks themselves or what the CLI needs before it runs injected ones.
-/// Reading the files -- not the CLI's own status command -- keeps the check
-/// to one file read per owned file on the host.
-pub(super) async fn read_registration_entries(
+/// reads them, rewriting them first when they are out of date and this
+/// instance's registration is there ([`reconcile_entries`]). A launch counts
+/// on the CLI running yagura's hooks only while they all hold: the entries
+/// are either the hooks themselves or what the CLI needs before it runs
+/// injected ones. Reading the files -- not the CLI's own status command --
+/// keeps the check to one file read per owned file on the host.
+pub(super) async fn read_launch_entries(
     config: &DaemonConfig,
+    writes: &Semaphore,
+    profile: &str,
     spec: &mcp_registration::McpRegistrationSpec,
     env: &[(OsString, OsString)],
-) -> EntriesRead {
+) -> Reconciled {
     let target = mcp_registration::RegistrationTarget::for_instance(config.instance_id.as_deref());
-    read_entries(config, spec, &target, env, None).await
+    reconcile_entries(
+        config,
+        writes,
+        profile,
+        RowFiles { spec, env },
+        &target,
+        None,
+    )
+    .await
 }
 
 /// What reading a row's owned entries back found.
@@ -522,84 +570,283 @@ pub(super) enum EntriesRead {
     Unreadable,
 }
 
+/// What [`reconcile_entries`] ended with: the entries as last read, and
+/// whether they were rewritten.
+pub(super) struct Reconciled {
+    pub(super) read: EntriesRead,
+    pub(super) rewrite: Rewrite,
+}
+
+/// Whether out-of-date entries were written back as current.
+pub(super) enum Rewrite {
+    /// Nothing differed, or nothing could be read.
+    NotNeeded,
+    /// No key of this instance's is in the files: the user never registered
+    /// it, or removed it, so nothing is written.
+    NotConsented,
+    Done,
+    /// They were not written, or do not read back as written: the fixed
+    /// reason.
+    Failed(&'static str),
+}
+
+const REASON_CLAIM_HELD: &str = "the claimed entry holds another value";
+const REASON_CLAIM_UNREAD: &str = "the file holding the claim was not read";
+const REASON_TARGET_NOT_CARRIED: &str = "the registration cannot carry this instance";
+const REASON_NO_WRITE_SLOT: &str = "no slot to write them in";
+const REASON_NOT_WRITTEN: &str = "the entries could not be written";
+const REASON_DOES_NOT_HOLD: &str = "the rewritten entries do not read back as written";
+
+/// Reads the row's owned entries and, when they are out of date, rewrites
+/// them as Register would -- the owned entries alone ([`SetScope::OwnedEntries`]),
+/// no `add` or `remove` -- then reads them back. Written only with consent:
+/// a key this instance's Remove takes out is in the files
+/// ([`SettingsEdit::holds_instance_key`]), and the claim, if any, is free.
+///
+/// The write waits for `writes` (the slot a user's Register / Update / Remove
+/// also takes) for `config.mcp_listing_timeout` at most, and reads the files
+/// again once it has it. Starts no process beyond the file reads and path
+/// conversions a status read already makes.
+async fn reconcile_entries(
+    config: &DaemonConfig,
+    writes: &Semaphore,
+    profile: &str,
+    row: RowFiles<'_>,
+    target: &mcp_registration::RegistrationTarget,
+    bridge: Option<&str>,
+) -> Reconciled {
+    let first = read_entries(config, row, target, bridge).await;
+    if let Some(rewrite) = unwritten(&first) {
+        return first.ended(rewrite);
+    }
+    let labels = match &first.read {
+        EntriesRead::Differ(labels) => labels.join(","),
+        _ => String::new(),
+    };
+    let Some(context) = first.context.clone() else {
+        return first.ended(Rewrite::Failed(REASON_NOT_WRITTEN));
+    };
+    if row.spec.check_target(target).is_err() {
+        return first.ended(Rewrite::Failed(REASON_TARGET_NOT_CARRIED));
+    }
+    let Ok(Ok(_slot)) = tokio::time::timeout(config.mcp_listing_timeout, writes.acquire()).await
+    else {
+        return first.ended(Rewrite::Failed(REASON_NO_WRITE_SLOT));
+    };
+    // Another launch, or the user's own change, may have written them meanwhile.
+    let again = read_entries_with(config, row, context.clone()).await;
+    if let Some(rewrite) = unwritten(&again) {
+        return again.ended(rewrite);
+    }
+    let mut steps = Vec::new();
+    let written = set_edits(config, row, &context, SetScope::OwnedEntries, &mut steps).await;
+    let after = read_entries_with(config, row, context).await;
+    match (written, &after.read) {
+        (Ok(()), EntriesRead::Hold) => {
+            tracing::info!(
+                profile,
+                entries = %labels,
+                "rewrote this instance's out-of-date registration entries"
+            );
+            after.ended(Rewrite::Done)
+        }
+        (Ok(()), _) => after.ended(Rewrite::Failed(REASON_DOES_NOT_HOLD)),
+        (Err(_), _) => after.ended(Rewrite::Failed(REASON_NOT_WRITTEN)),
+    }
+}
+
+/// The one rule deciding whether a reading's entries are rewritten: `None`
+/// to write them, otherwise what is reported instead.
+fn unwritten(reading: &EntriesReading) -> Option<Rewrite> {
+    if !matches!(reading.read, EntriesRead::Differ(_)) {
+        return Some(Rewrite::NotNeeded);
+    }
+    if !reading.consented {
+        return Some(Rewrite::NotConsented);
+    }
+    match reading.claim {
+        ClaimRead::Free => None,
+        ClaimRead::Held => Some(Rewrite::Failed(REASON_CLAIM_HELD)),
+        ClaimRead::Unread => Some(Rewrite::Failed(REASON_CLAIM_UNREAD)),
+    }
+}
+
+/// One read of a row's owned entries, with what deciding a rewrite needs
+/// from the same contents.
+struct EntriesReading {
+    read: EntriesRead,
+    /// Whether a file holds a key this instance's Remove takes out.
+    consented: bool,
+    claim: ClaimRead,
+    /// What the entries were compared against: what writing them renders
+    /// with. `None` when nothing was compared.
+    context: Option<EditContext>,
+}
+
+/// The claim as the reading found it.
+#[derive(Debug, Clone, Copy)]
+enum ClaimRead {
+    /// There is no claim, or its entry is absent or holds this value.
+    Free,
+    Held,
+    /// The file holding the claim is not among the files read; nothing is
+    /// written rather than writing without knowing.
+    Unread,
+}
+
+impl EntriesReading {
+    fn settled(read: EntriesRead) -> Self {
+        Self {
+            read,
+            consented: false,
+            claim: ClaimRead::Unread,
+            context: None,
+        }
+    }
+
+    fn ended(self, rewrite: Rewrite) -> Reconciled {
+        Reconciled {
+            read: self.read,
+            rewrite,
+        }
+    }
+}
+
 /// `bridge` is the path to the bridge the entries are compared against, as
 /// the row's environment sees it; `None` resolves the configured one.
 async fn read_entries(
     config: &DaemonConfig,
-    spec: &mcp_registration::McpRegistrationSpec,
+    row: RowFiles<'_>,
     target: &mcp_registration::RegistrationTarget,
-    env: &[(OsString, OsString)],
     bridge: Option<&str>,
-) -> EntriesRead {
+) -> EntriesReading {
+    match entries_context(config, row, target, bridge).await {
+        Ok(Some(context)) => read_entries_with(config, row, context).await,
+        Ok(None) => EntriesReading::settled(EntriesRead::Hold),
+        Err(()) => EntriesReading::settled(EntriesRead::Unreadable),
+    }
+}
+
+/// What the row's owned entries on this host are rendered with: `Ok(None)`
+/// when it owns none here, `Err` when a path they name cannot be converted.
+async fn entries_context(
+    config: &DaemonConfig,
+    row: RowFiles<'_>,
+    target: &mcp_registration::RegistrationTarget,
+    bridge: Option<&str>,
+) -> Result<Option<EditContext>, ()> {
     let os = config.host_os;
-    let edits: Vec<SettingsEdit> = SettingsEdit::of(spec, target)
+    let edits: Vec<SettingsEdit> = SettingsEdit::of(row.spec, target)
         .into_iter()
         .filter(|edit| edit.owns_entries_on(os))
         .collect();
     if edits.is_empty() {
-        return EntriesRead::Hold;
+        return Ok(None);
     }
     let daemon = if edits.iter().any(|edit| edit.names_daemon(os)) {
-        match resolve_status_daemon(config, spec, env).await {
-            Ok(daemon) => daemon,
-            Err(()) => return EntriesRead::Unreadable,
-        }
+        resolve_status_daemon(config, row.spec, row.env).await?
     } else {
         None
     };
     let bridge = match bridge {
         Some(bridge) => Some(bridge.to_string()),
         None if edits.iter().any(|edit| edit.names_bridge(os)) => {
-            match resolve_status_bridge(config, spec, env).await {
-                Ok(bridge) => bridge,
-                Err(()) => return EntriesRead::Unreadable,
-            }
+            resolve_status_bridge(config, row.spec, row.env).await?
         }
         None => None,
     };
-    let context = EditContext {
+    Ok(Some(EditContext {
         target: target.clone(),
         os,
         daemon,
         bridge,
         remove_shared: false,
+    }))
+}
+
+/// Reads each file holding the row's owned entries once, and decides from
+/// those contents alone whether the entries hold, whether this instance's
+/// key is there, and whether the claim is free.
+async fn read_entries_with(
+    config: &DaemonConfig,
+    row: RowFiles<'_>,
+    context: EditContext,
+) -> EntriesReading {
+    let os = context.os;
+    let target = &context.target;
+    let edits: Vec<SettingsEdit> = SettingsEdit::of(row.spec, target)
+        .into_iter()
+        .filter(|edit| edit.owns_entries_on(os))
+        .collect();
+    let absent_exit = row.spec.files_absent_exit();
+    let has_claim = row
+        .spec
+        .json_entry()
+        .and_then(mcp_registration::JsonEntrySpec::claim)
+        .is_some();
+    let mut claim = if has_claim {
+        ClaimRead::Unread
+    } else {
+        ClaimRead::Free
     };
-    let absent_exit = spec.files_absent_exit();
+    let mut consented = false;
     let mut differ = Vec::new();
     for edit in &edits {
-        let Ok(observation) = read_file_observation(config, spec, env, edit.file()).await else {
-            return EntriesRead::Unreadable;
+        let Ok(observation) = read_file_observation(config, row.spec, row.env, edit.file()).await
+        else {
+            return EntriesReading::settled(EntriesRead::Unreadable);
         };
-        let holds = match observation {
-            mcp_registration::StatusObservation::FileMissing => false,
+        let content = match observation {
+            mcp_registration::StatusObservation::FileMissing => None,
             mcp_registration::StatusObservation::Exited { code, .. }
                 if absent_exit.is_some() && code == absent_exit =>
             {
-                false
+                None
             }
             mcp_registration::StatusObservation::Exited {
                 code: Some(0),
                 stdout,
                 ..
-            } => match std::str::from_utf8(&stdout)
-                .ok()
-                .map(|text| edit.entries_hold(&context, text))
-            {
-                Some(Ok(holds)) => holds,
-                // No daemon path the entries could name: they cannot hold.
-                Some(Err(EditError::NoDaemon | EditError::NoBridge)) => false,
-                _ => return EntriesRead::Unreadable,
+            } => match String::from_utf8(stdout) {
+                Ok(text) => Some(text),
+                Err(_) => return EntriesReading::settled(EntriesRead::Unreadable),
             },
-            _ => return EntriesRead::Unreadable,
+            _ => return EntriesReading::settled(EntriesRead::Unreadable),
         };
+        let holds = match content
+            .as_deref()
+            .map(|text| edit.entries_hold(&context, text))
+        {
+            None => false,
+            Some(Ok(holds)) => holds,
+            // No daemon path the entries could name: they cannot hold.
+            Some(Err(EditError::NoDaemon | EditError::NoBridge)) => false,
+            Some(Err(_)) => return EntriesReading::settled(EntriesRead::Unreadable),
+        };
+        if let Some(text) = content.as_deref() {
+            consented |= edit.holds_instance_key(target, os, text);
+        }
+        if let Some(file_claim) = edit.claim() {
+            claim = match content.as_deref().map(parse_json_document) {
+                None => ClaimRead::Free,
+                Some(Some(document)) if file_claim.is_held_by_another(&document) => ClaimRead::Held,
+                Some(Some(_)) => ClaimRead::Free,
+                Some(None) => return EntriesReading::settled(EntriesRead::Unreadable),
+            };
+        }
         if !holds {
             differ.push(edit.entries_label(target, os).unwrap_or_default());
         }
     }
-    if differ.is_empty() {
-        EntriesRead::Hold
-    } else {
-        EntriesRead::Differ(differ)
+    EntriesReading {
+        read: if differ.is_empty() {
+            EntriesRead::Hold
+        } else {
+            EntriesRead::Differ(differ)
+        },
+        consented,
+        claim,
+        context: Some(context),
     }
 }
 
@@ -1325,10 +1572,15 @@ pub(super) struct RunRequest {
 /// a caller reading its own connection is never blocked on another
 /// connection's operation. The operation's outcome follows as one
 /// [`DaemonMessage::McpRegistrationResult`] push.
+///
+/// `change_permits` only refuses a second user operation; the operation's
+/// writes wait, without a time limit, for `writes`, which a launch or listing
+/// rewriting out-of-date entries holds for one bounded write at a time.
 pub(super) async fn handle_run_mcp_registration(
     config: &DaemonConfig,
     role_and_profile_reads: &Semaphore,
     change_permits: &Arc<Semaphore>,
+    writes: &Arc<Semaphore>,
     outbound: &Arc<Outbound>,
     state: &ConnectionState,
     request: RunRequest,
@@ -1376,17 +1628,22 @@ pub(super) async fn handle_run_mcp_registration(
 
     let config = config.clone();
     let outbound = Arc::clone(outbound);
+    let writes = Arc::clone(writes);
     tokio::spawn(async move {
         // Held until the operation below, and the status re-read that
         // follows it, both finish.
         let _permit = permit;
-        let (steps, error) = run_operation(&config, &source, action).await;
+        let (steps, error) = match writes.acquire().await {
+            Ok(_slot) => run_operation(&config, &source, action).await,
+            // Unreachable in practice: the semaphore is never closed.
+            Err(_closed) => (Vec::new(), Some(REASON_NO_WRITE_SLOT.to_string())),
+        };
         let bridge = config
             .mcp_bridge
             .as_ref()
             .and_then(|path| path.to_str())
             .unwrap_or_default();
-        let status = compute_status(&config, &source, bridge).await;
+        let status = compute_status(&config, &source, bridge, None).await;
         let error =
             error.or_else(|| unconfirmed_toml_set(&source, config.host_os, action, &status));
         outbound.reply(&DaemonMessage::McpRegistrationResult {
@@ -1502,7 +1759,15 @@ async fn run_operation(
             EditChange::RemoveEntries,
         );
         for edit in edits.iter().filter(|edit| edit.owns_entries(os)) {
-            match run_edit(config, source, edit, EditChange::RemoveEntries, &context).await {
+            match run_edit(
+                config,
+                RowFiles::of(source),
+                edit,
+                EditChange::RemoveEntries,
+                &context,
+            )
+            .await
+            {
                 EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
                 EditOutcome::Failed(mut edit_steps, reason) => {
                     steps.append(&mut edit_steps);
@@ -1540,11 +1805,10 @@ async fn run_operation(
         }
     }
 
-    let edits = ordered(
-        SettingsEdit::of(&source.spec, &source.target),
-        EditChange::Set,
-    );
-    let daemon = if edits.iter().any(|edit| edit.names_daemon(os)) {
+    let names_daemon = SettingsEdit::of(&source.spec, &source.target)
+        .iter()
+        .any(|edit| edit.names_daemon(os));
+    let daemon = if names_daemon {
         match resolve_operation_daemon(config, source, &mut steps).await {
             Ok(daemon) => daemon,
             Err(reason) => return (steps, Some(reason)),
@@ -1559,24 +1823,72 @@ async fn run_operation(
         bridge: Some(bridge),
         remove_shared: false,
     };
-    for edit in edits.iter().filter(|edit| edit.writes_on(os)) {
-        match run_edit(config, source, edit, EditChange::Set, &context).await {
-            EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
-            EditOutcome::Failed(mut edit_steps, reason) => {
-                steps.append(&mut edit_steps);
-                return (steps, Some(reason));
-            }
+    let set = set_edits(
+        config,
+        RowFiles::of(source),
+        &context,
+        SetScope::Everything,
+        &mut steps,
+    )
+    .await;
+    (steps, set.err())
+}
+
+/// Which of a row's edits [`set_edits`] writes, and how.
+#[derive(Debug, Clone, Copy)]
+enum SetScope {
+    /// Register / Update: every edit with something to write, values included.
+    Everything,
+    /// A rewrite: the owned entries alone, selected the way removal selects
+    /// them.
+    OwnedEntries,
+}
+
+impl SetScope {
+    fn selects(self, edit: &SettingsEdit, os: yagura_os::program::HostOs) -> bool {
+        match self {
+            Self::Everything => edit.writes_on(os),
+            Self::OwnedEntries => edit.owns_entries(os),
         }
     }
 
-    (steps, None)
+    fn change(self) -> EditChange {
+        match self {
+            Self::Everything => EditChange::Set,
+            Self::OwnedEntries => EditChange::SetEntries,
+        }
+    }
+}
+
+/// Writes `scope`'s edits of `row` rendered with `context`, the file holding
+/// the claim last: the one Set both a Register / Update and a rewrite run.
+/// `Err` carries the fixed reason of the first edit that failed; no later
+/// edit runs.
+async fn set_edits(
+    config: &DaemonConfig,
+    row: RowFiles<'_>,
+    context: &EditContext,
+    scope: SetScope,
+    steps: &mut Vec<McpRegistrationStep>,
+) -> Result<(), String> {
+    let edits = ordered(SettingsEdit::of(row.spec, &context.target), EditChange::Set);
+    for edit in edits.iter().filter(|edit| scope.selects(edit, context.os)) {
+        match run_edit(config, row, edit, scope.change(), context).await {
+            EditOutcome::Applied(mut edit_steps) => steps.append(&mut edit_steps),
+            EditOutcome::Failed(mut edit_steps, reason) => {
+                steps.append(&mut edit_steps);
+                return Err(reason);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `edits` in the order `change` makes them: the edit holding the claim last
 /// when setting, first when removing; the rest keep the profile's order.
 fn ordered(mut edits: Vec<SettingsEdit>, change: EditChange) -> Vec<SettingsEdit> {
     match change {
-        EditChange::Set => edits.sort_by_key(SettingsEdit::holds_claim),
+        EditChange::Set | EditChange::SetEntries => edits.sort_by_key(SettingsEdit::holds_claim),
         EditChange::RemoveEntries => edits.sort_by_key(|edit| !edit.holds_claim()),
     }
     edits
@@ -1895,6 +2207,9 @@ impl From<mcp_registration::MissingPath> for EditError {
 enum EditChange {
     /// Sets the edit's values and adds the entries it owns.
     Set,
+    /// Adds the entries the edit owns, leaving its values alone: what an
+    /// out-of-date registration is rewritten with.
+    SetEntries,
     /// Takes out the entries the edit owns.
     RemoveEntries,
 }
@@ -1939,6 +2254,14 @@ impl SettingsEdit {
         }
     }
 
+    /// The claim the edit's file holds, when it does.
+    fn claim(&self) -> Option<&mcp_registration::Claim> {
+        match self {
+            Self::Toml(_) => None,
+            Self::Json(file, _) => file.claim(),
+        }
+    }
+
     /// Whether the edit holds the claim: the file that names, or is read
     /// together with, the files written before it.
     fn holds_claim(&self) -> bool {
@@ -1977,6 +2300,28 @@ impl SettingsEdit {
     /// Whether the edit's values written on `os` name the bridge.
     fn names_bridge(&self, os: yagura_os::program::HostOs) -> bool {
         matches!(self, Self::Json(file, _) if file.names_bridge(os))
+    }
+
+    /// Whether `content` holds a key this instance's Remove takes out: one of
+    /// the JSON file's own entries, or -- for a TOML file owning entries --
+    /// the instance's own table, which the CLI's own removal takes out.
+    fn holds_instance_key(
+        &self,
+        target: &mcp_registration::RegistrationTarget,
+        os: yagura_os::program::HostOs,
+        content: &str,
+    ) -> bool {
+        match self {
+            Self::Toml(toml_set) => {
+                toml_set.has_entries()
+                    && toml_set
+                        .instance_table(target)
+                        .is_some_and(|table| toml_set::table_exists(content, &table) == Ok(true))
+            }
+            Self::Json(file, _) => {
+                json_entry::any_present(content, &file.removal_keys(target, os, false)) == Ok(true)
+            }
+        }
     }
 
     /// The name [`mcp_registration::DerivedStatus::differs_in`] gives the
@@ -2035,7 +2380,7 @@ impl SettingsEdit {
         content: &str,
     ) -> Result<Option<String>, EditError> {
         let updated = match (self, change) {
-            (Self::Toml(toml_set), EditChange::Set) => {
+            (Self::Toml(toml_set), EditChange::Set | EditChange::SetEntries) => {
                 // Retired keys go first so a key both retired and current ends up written.
                 let retired = toml_set.retired_tables(context.os);
                 let cleared = if retired.is_empty() {
@@ -2043,8 +2388,12 @@ impl SettingsEdit {
                 } else {
                     toml_set::remove_tables(content, &retired).map_err(EditError::Toml)?
                 };
-                toml_set::apply_edits(&cleared, &toml_set.edits(&context.target, context.os))
-                    .map_err(EditError::Toml)?
+                let edits = if matches!(change, EditChange::Set) {
+                    toml_set.edits(&context.target, context.os)
+                } else {
+                    toml_set.entry_edits(context.os)
+                };
+                toml_set::apply_edits(&cleared, &edits).map_err(EditError::Toml)?
             }
             (Self::Toml(toml_set), EditChange::RemoveEntries) => {
                 let mut tables: Vec<Vec<String>> = toml_set
@@ -2055,7 +2404,7 @@ impl SettingsEdit {
                 tables.extend(toml_set.retired_tables(context.os));
                 toml_set::remove_tables(content, &tables).map_err(EditError::Toml)?
             }
-            (Self::Json(file, _), EditChange::Set) => {
+            (Self::Json(file, _), EditChange::Set | EditChange::SetEntries) => {
                 json_entry::set_entries(content, &Self::json_entries(file, context)?)
                     .map_err(EditError::Json)?
             }
@@ -2088,8 +2437,10 @@ impl SettingsEdit {
     fn missing_file(&self, change: EditChange) -> MissingFile {
         match (self, change) {
             (_, EditChange::RemoveEntries) => MissingFile::Done,
-            (Self::Toml(_), EditChange::Set) => MissingFile::Fail,
-            (Self::Json(..), EditChange::Set) => MissingFile::StartFrom("{}\n"),
+            (Self::Toml(_), EditChange::Set | EditChange::SetEntries) => MissingFile::Fail,
+            (Self::Json(..), EditChange::Set | EditChange::SetEntries) => {
+                MissingFile::StartFrom("{}\n")
+            }
         }
     }
 
@@ -2110,6 +2461,10 @@ impl SettingsEdit {
                             .unwrap_or_default();
                         format!("set {} in [{table}]{owned} of {file}", keys.join(", "))
                     }
+                    EditChange::SetEntries => format!(
+                        "set its entries under [{}] of {file}",
+                        entries.unwrap_or_default()
+                    ),
                     EditChange::RemoveEntries => format!(
                         "removed its entries under [{}] of {file}",
                         entries.unwrap_or_default()
@@ -2117,7 +2472,7 @@ impl SettingsEdit {
                 }
             }
             Self::Json(spec, _) => match change {
-                EditChange::Set => format!(
+                EditChange::Set | EditChange::SetEntries => format!(
                     "set its entries {} in {file}",
                     spec.label(target, context.os)
                 ),
@@ -2169,15 +2524,30 @@ impl SettingsEdit {
 /// [`read_file_observation`] uses for reading status).
 async fn run_edit(
     config: &DaemonConfig,
-    source: &RowSource,
+    row: RowFiles<'_>,
     edit: &SettingsEdit,
     change: EditChange,
     context: &EditContext,
 ) -> EditOutcome {
-    match source.spec.render_file_read(edit.file()) {
+    match row.spec.render_file_read(edit.file()) {
         None => run_edit_host(config, edit, change, context).await,
-        Some(read_argv) => {
-            run_edit_via_files(config, source, edit, change, context, read_argv).await
+        Some(read_argv) => run_edit_via_files(config, row, edit, change, context, read_argv).await,
+    }
+}
+
+/// What editing a row's settings files needs of the row: its registration
+/// table and the environment its file tools run under.
+#[derive(Clone, Copy)]
+struct RowFiles<'a> {
+    spec: &'a mcp_registration::McpRegistrationSpec,
+    env: &'a [(OsString, OsString)],
+}
+
+impl<'a> RowFiles<'a> {
+    fn of(source: &'a RowSource) -> Self {
+        Self {
+            spec: &source.spec,
+            env: &source.env,
         }
     }
 }
@@ -2288,19 +2658,19 @@ fn create_host_file(path: &Path, content: &str) -> std::io::Result<()> {
 /// argv but never its content (design: a file step's output is never shown).
 async fn run_edit_via_files(
     config: &DaemonConfig,
-    source: &RowSource,
+    row: RowFiles<'_>,
     edit: &SettingsEdit,
     change: EditChange,
     context: &EditContext,
     read_argv: Vec<String>,
 ) -> EditOutcome {
     let mut steps = Vec::new();
-    let read = run_step(config, &source.env, read_argv, 0, false, None).await;
+    let read = run_step(config, row.env, read_argv, 0, false, None).await;
     let read_code = read.exit_code;
     let read_stdout = read.stdout.clone();
     let read_failure = read.failure_reason(&edit.failed(None));
     steps.push(read.step);
-    let absent_exit = source.spec.files_absent_exit();
+    let absent_exit = row.spec.files_absent_exit();
     let absent = absent_exit.is_some() && read_code == absent_exit;
     let content = if absent {
         match edit.missing_file(change) {
@@ -2323,12 +2693,12 @@ async fn run_edit_via_files(
         Ok(None) => content,
         Err(err) => return EditOutcome::Failed(steps, edit.failed(Some(err))),
     };
-    let Some(replace_argv) = source.spec.render_file_replace(edit.file()) else {
+    let Some(replace_argv) = row.spec.render_file_replace(edit.file()) else {
         return EditOutcome::Failed(steps, edit.failed(None));
     };
     let replace = run_step(
         config,
-        &source.env,
+        row.env,
         replace_argv,
         0,
         false,

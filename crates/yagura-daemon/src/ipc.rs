@@ -437,6 +437,17 @@ struct HooksGate {
     profile: String,
     registration: crate::mcp_registration::McpRegistrationSpec,
     env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// The slot an out-of-date registration is rewritten under.
+    writes: Arc<Semaphore>,
+}
+
+/// Why a launch's `[hooks]` are left out by its [`HooksGate`].
+enum HooksLeftOut {
+    /// No entry of this instance is in the CLI's settings.
+    NotRegistered,
+    /// The entries are there but out of date, and could not be rewritten
+    /// (or read): the fixed reason.
+    NotRewritten(&'static str),
 }
 
 /// What [`IpcServer::handle_open_task_window`] learns while it still holds
@@ -960,6 +971,10 @@ pub struct IpcServer {
     /// as that operation's own steps and status re-read take (see
     /// [`mcp_registration::handle_run_mcp_registration`]).
     mcp_registration_changes: Arc<Semaphore>,
+    /// Serializes every write of the registrations' settings files: a user's
+    /// operation waits for it, a rewrite at launch or listing gives up after
+    /// [`DaemonConfig::mcp_listing_timeout`].
+    mcp_registration_writes: Arc<Semaphore>,
     /// Admits the profile reads of `run_hook`, each on a blocking thread, sized
     /// like `role_and_profile_reads`.
     hook_profile_reads: Semaphore,
@@ -1028,6 +1043,7 @@ impl IpcServer {
             config.mcp_registration_status_max_concurrent,
         ));
         let mcp_registration_changes = Arc::new(Semaphore::new(1));
+        let mcp_registration_writes = Arc::new(Semaphore::new(1));
         let reports = Arc::new(report::ReportInboxes::new(Arc::clone(&registry)));
         let ledger = Arc::new(plan::PlanRuntime::disabled());
         let notice_agents = notice_queue::NoticeAgents::install(&registry, Arc::clone(&reports));
@@ -1053,6 +1069,7 @@ impl IpcServer {
             mcp_registration_row_reads,
             mcp_launch_listings,
             mcp_registration_changes,
+            mcp_registration_writes,
             hook_profile_reads,
             reports,
             health_checks: Semaphore::new(1),
@@ -2117,6 +2134,7 @@ impl IpcServer {
                     &self.role_and_profile_reads,
                     &self.mcp_registration_listing,
                     &self.mcp_registration_row_reads,
+                    &self.mcp_registration_writes,
                     outbound,
                     state,
                     request_id,
@@ -2133,6 +2151,7 @@ impl IpcServer {
                     &self.config,
                     &self.role_and_profile_reads,
                     &self.mcp_registration_changes,
+                    &self.mcp_registration_writes,
                     outbound,
                     state,
                     mcp_registration::RunRequest {
@@ -2769,6 +2788,7 @@ impl IpcServer {
                     .iter()
                     .map(|(key, value)| (key.into(), value.into()))
                     .collect(),
+                writes: Arc::clone(&self.mcp_registration_writes),
             });
 
         Ok(PlannedOpen {
@@ -5781,13 +5801,18 @@ async fn open_planned(
     let mut planned = planned;
     let mut hooks_left_out = None;
     // Read at each launch so a registration changed outside the daemon
-    // is seen by the next window.
+    // is seen by the next window, and rewritten when out of date.
     if let Some(gate) = planned.hooks_gate.take() {
-        let reading =
-            mcp_registration::read_registration_entries(config, &gate.registration, &gate.env)
-                .await;
-        let reason = match reading {
-            mcp_registration::EntriesRead::Hold => {
+        let reconciled = mcp_registration::read_launch_entries(
+            config,
+            &gate.writes,
+            &gate.profile,
+            &gate.registration,
+            &gate.env,
+        )
+        .await;
+        let left_out = match (reconciled.read, reconciled.rewrite) {
+            (mcp_registration::EntriesRead::Hold, _) => {
                 // Without hooks of its own, the profile's CLI runs the
                 // registered entries as its hooks.
                 if planned.hooks == HooksRoute::Unarranged {
@@ -5795,22 +5820,21 @@ async fn open_planned(
                 }
                 None
             }
-            // Missing entries are the normal state of a CLI the user chose
-            // not to register; an out-of-date one already shows as such on
-            // its registration row. Only an unreadable file is abnormal.
-            mcp_registration::EntriesRead::Differ(_) => {
-                Some(("the entries are not registered or are out of date", false))
+            (_, mcp_registration::Rewrite::Failed(reason)) => {
+                Some(HooksLeftOut::NotRewritten(reason))
             }
-            mcp_registration::EntriesRead::Unreadable => {
-                Some(("the settings could not be read", true))
+            (mcp_registration::EntriesRead::Unreadable, _) => {
+                Some(HooksLeftOut::NotRewritten("the settings could not be read"))
             }
+            // The normal state of a CLI the user chose not to register.
+            (mcp_registration::EntriesRead::Differ(_), _) => Some(HooksLeftOut::NotRegistered),
         };
-        if let Some(reason) = reason {
+        if let Some(left_out) = left_out {
             planned
                 .profile_injections
                 .retain(|injection| injection.kind() != crate::window::InjectionKind::Hooks);
             planned.hooks = HooksRoute::LeftOut;
-            hooks_left_out = Some((gate.profile, reason));
+            hooks_left_out = Some((gate.profile, left_out));
         }
     }
     if let Some(read) = planned.mcp_absent.take()
@@ -5879,22 +5903,20 @@ async fn open_planned(
             provenance,
         )
         .await?;
-    if let Some((profile, (reason, abnormal))) = hooks_left_out {
-        if abnormal {
-            tracing::warn!(
-                window_id = %opened.window_id,
-                profile,
-                reason,
-                "hooks were left out of this launch; register the CLI again to restore them"
-            );
-        } else {
-            tracing::info!(
-                window_id = %opened.window_id,
-                profile,
-                reason,
-                "hooks were left out of this launch; register the CLI again to restore them"
-            );
-        }
+    match hooks_left_out {
+        Some((profile, HooksLeftOut::NotRewritten(reason))) => tracing::warn!(
+            window_id = %opened.window_id,
+            profile,
+            reason,
+            "hooks were left out of this launch; register the CLI again to restore them"
+        ),
+        Some((profile, HooksLeftOut::NotRegistered)) => tracing::info!(
+            window_id = %opened.window_id,
+            profile,
+            reason = "this instance is not registered in the CLI's settings",
+            "hooks were left out of this launch"
+        ),
+        None => {}
     }
     Ok(opened)
 }
