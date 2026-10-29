@@ -76,6 +76,10 @@ const MCP_SERVER_PLACEHOLDER: &str = "{server}";
 /// The placeholders a `[hooks]` table's `args` may spell.
 const HOOKS_CONFIG_FILE_PLACEHOLDER: &str = "{hooks_config_file}";
 const HOOKS_CONFIG_DIR_PLACEHOLDER: &str = "{hooks_config_dir}";
+/// Where a `launch` window's credentials file is; spellable in `[mcp]` and
+/// `[hooks]` (args, `config_file` and `config_dir` content) only by a profile
+/// whose `[credentials]` mode is `launch`.
+const CREDENTIALS_FILE_PLACEHOLDER: &str = "{credentials_file}";
 
 /// Reason text for [`ProfileUnavailableKind::NotFound`]: the selected argv's
 /// executable could not be found by the injected resolution environment.
@@ -323,6 +327,9 @@ pub struct Profile {
     /// no such table at all -- a window opened from this profile carries no
     /// status-report hooks.
     pub hooks: Option<InjectionSpec>,
+    /// The `[credentials]` table, already validated; the default when the
+    /// document has none.
+    pub credentials: ProfileCredentials,
     /// The top-level `[mcp_registration]` table, already validated. `None`
     /// means the document has no such table. This never affects opening a
     /// window from this profile: it only describes how the daemon can
@@ -343,6 +350,27 @@ pub struct Profile {
     /// (a relative/`~` `cwd`, a reserved environment key). Empty when
     /// nothing needed to be reported.
     pub warnings: Vec<String>,
+}
+
+/// How a window's credentials reach its CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CredentialsMode {
+    /// In the child's environment.
+    #[default]
+    Env,
+    /// In a per-window file whose path the profile's `{credentials_file}`
+    /// placeholders carry; the child's environment holds none.
+    Launch,
+}
+
+/// A profile's validated `[credentials]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileCredentials {
+    /// How the credentials reach the CLI.
+    pub mode: CredentialsMode,
+    /// Argv elements added to the spawn only. They never enter
+    /// [`ProfileLaunch::argv`], which a restored window replays.
+    pub launch_args: Vec<String>,
 }
 
 /// One profile as [`list_profiles`] reports it.
@@ -437,6 +465,9 @@ pub struct ProfileLaunch {
     /// The profile's `[hooks]` table, unrendered. `None` when the profile has
     /// none (see [`prepare_hooks_injection`] for rendering it).
     pub hooks: Option<InjectionSpec>,
+    /// The profile's `[credentials]` table: how the window's credentials reach
+    /// its CLI, and the argv added to the spawn alone.
+    pub credentials: ProfileCredentials,
     /// The profile's registration table, resolved alongside `hooks`: the settings
     /// file entries it owns decide whether a launch may inject them, or --
     /// for a `json_entry`, which writes the CLI's hooks into its own settings
@@ -597,6 +628,32 @@ pub enum ProfileParseError {
     /// key nothing reads.
     #[error("invalid shim guidance table")]
     InvalidShimGuidance,
+    /// A `[credentials]` table breaks its rule, or `{credentials_file}` is
+    /// spelt by a profile that is not in `launch` mode ([`CredentialsError`]).
+    #[error("invalid credentials table")]
+    InvalidCredentials(#[source] CredentialsError),
+}
+
+/// Why a `[credentials]` table, or a `{credentials_file}` placeholder, was
+/// rejected. Carried only as the `source()` of
+/// [`ProfileParseError::InvalidCredentials`].
+#[derive(Debug, Clone, Error)]
+pub enum CredentialsError {
+    /// `[credentials]` is not a table.
+    #[error("the credentials entry is not a table")]
+    NotATable,
+    /// The table has a key other than `mode` and `launch_args`.
+    #[error("the credentials table has an unknown key")]
+    UnknownKey,
+    /// `mode` is not the string `env` or `launch`.
+    #[error("mode is neither \"env\" nor \"launch\"")]
+    InvalidMode,
+    /// `launch_args` is not an array of non-empty, NUL-free strings.
+    #[error("launch_args is not an array of argv elements")]
+    InvalidLaunchArgs,
+    /// `{credentials_file}` is spelt in a profile that is not in `launch` mode.
+    #[error("{{credentials_file}} needs the launch credentials mode")]
+    FileNeedsLaunch,
 }
 
 /// Why a `[model]` / `[effort]` table was rejected. Carried only as the
@@ -811,6 +868,10 @@ struct RawProfile {
     /// [`ProfileParseError::InvalidShimGuidance`].
     #[serde(default)]
     shim_guidance: Option<toml::Value>,
+    /// Untyped so every rule it breaks is
+    /// [`ProfileParseError::InvalidCredentials`].
+    #[serde(default)]
+    credentials: Option<toml::Value>,
 }
 
 /// A `[mcp]` or `[hooks]` table before validation. `args` is `Option` for the
@@ -1024,8 +1085,21 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
             LaunchOptionError::EnvKeyClash,
         ));
     }
-    let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp)?;
-    let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks)?;
+    let credentials =
+        parse_credentials(raw.credentials).map_err(ProfileParseError::InvalidCredentials)?;
+    let launch = credentials.mode == CredentialsMode::Launch;
+    if !launch
+        && [&raw.mcp, &raw.hooks]
+            .into_iter()
+            .flatten()
+            .any(spells_credentials_file)
+    {
+        return Err(ProfileParseError::InvalidCredentials(
+            CredentialsError::FileNeedsLaunch,
+        ));
+    }
+    let mcp = parse_injection_spec(raw.mcp, TableKind::Mcp, launch)?;
+    let hooks = parse_injection_spec(raw.hooks, TableKind::Hooks, launch)?;
     let host_paths =
         parse_host_paths(raw.host_paths).map_err(ProfileParseError::InvalidHostPaths)?;
     let mcp_registration =
@@ -1079,12 +1153,58 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         options,
         mcp,
         hooks,
+        credentials,
         mcp_registration,
         delivery,
         host_paths,
         shim_guidance,
         warnings,
     })
+}
+
+/// Validates the `[credentials]` table (`None` in, the default out).
+fn parse_credentials(raw: Option<toml::Value>) -> Result<ProfileCredentials, CredentialsError> {
+    let Some(raw) = raw else {
+        return Ok(ProfileCredentials::default());
+    };
+    let toml::Value::Table(table) = raw else {
+        return Err(CredentialsError::NotATable);
+    };
+    if table
+        .keys()
+        .any(|key| key != "mode" && key != "launch_args")
+    {
+        return Err(CredentialsError::UnknownKey);
+    }
+    let mode = match table.get("mode") {
+        None => CredentialsMode::Env,
+        Some(toml::Value::String(mode)) if mode == "env" => CredentialsMode::Env,
+        Some(toml::Value::String(mode)) if mode == "launch" => CredentialsMode::Launch,
+        Some(_) => return Err(CredentialsError::InvalidMode),
+    };
+    let launch_args = match table.get("launch_args") {
+        None => Vec::new(),
+        Some(toml::Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(CredentialsError::InvalidLaunchArgs)?,
+        Some(_) => return Err(CredentialsError::InvalidLaunchArgs),
+    };
+    yagura_protocol::validate_argv_elements(&launch_args)
+        .map_err(|_| CredentialsError::InvalidLaunchArgs)?;
+    Ok(ProfileCredentials { mode, launch_args })
+}
+
+/// Whether an `[mcp]` / `[hooks]` table spells `{credentials_file}` in its
+/// `args`, `config_file` or `config_dir` content.
+fn spells_credentials_file(raw: &RawInjection) -> bool {
+    raw.args
+        .iter()
+        .flatten()
+        .chain(raw.config_file.iter())
+        .chain(raw.config_dir.iter().flat_map(BTreeMap::values))
+        .any(|text| text.contains(CREDENTIALS_FILE_PLACEHOLDER))
 }
 
 /// Validates one `[model]` / `[effort]` table into its spec (`None` in,
@@ -1335,6 +1455,7 @@ pub fn is_config_dir_file_name(name: &str) -> bool {
 fn parse_injection_spec(
     raw: Option<RawInjection>,
     kind: TableKind,
+    credentials_file_known: bool,
 ) -> Result<Option<InjectionSpec>, ProfileParseError> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -1344,9 +1465,13 @@ fn parse_injection_spec(
         TableKind::Hooks => ProfileParseError::InvalidHooks,
     };
     let args = raw.args.ok_or(invalid(InjectionSpecError::MissingArgs))?;
+    let mut known = known_placeholders(kind).to_vec();
+    if credentials_file_known {
+        known.push(CREDENTIALS_FILE_PLACEHOLDER);
+    }
     if args
         .iter()
-        .any(|arg| contains_placeholder_outside(arg, known_placeholders(kind)))
+        .any(|arg| contains_placeholder_outside(arg, &known))
     {
         return Err(invalid(InjectionSpecError::UnknownPlaceholder));
     }
@@ -2543,6 +2668,7 @@ pub fn resolve_launch(
         env,
         mcp: profile.mcp,
         hooks: profile.hooks,
+        credentials: profile.credentials,
         hooks_registration,
         bridge_listing,
         host_paths: profile.host_paths,

@@ -920,6 +920,7 @@ fn expected_wording(err: &ProfileParseError) -> &'static str {
         ProfileParseError::InvalidShimGuidance => "invalid shim guidance table",
         ProfileParseError::InvalidMcpRegistration(_) => "invalid mcp registration table",
         ProfileParseError::InvalidHostPaths(_) => "invalid host paths table",
+        ProfileParseError::InvalidCredentials(_) => "invalid credentials table",
     }
 }
 
