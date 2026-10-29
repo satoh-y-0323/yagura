@@ -2041,3 +2041,187 @@ async fn a_hook_file_that_cannot_be_written_leaves_the_file_referring_to_it_unch
     );
     assert_ne!(result.status.state, McpRegistrationState::Registered);
 }
+
+// =============================================================================
+// Keys a profile has retired from its owned settings entries are taken out
+// by Register and by Remove; the user's own tables and keys stay.
+// =============================================================================
+
+/// The line of [`host_toml_set_profile`]'s `toml_set` after which the owned
+/// entries are inserted.
+const HOST_CONFIRM_LINE: &str = "confirm = { tool_timeout_sec = \"/tool_timeout_sec\" }\n";
+
+/// Owned entries under `hooks.state`: one key the profile writes now, and two
+/// keys an earlier version wrote that this one lists as `retired`.
+const ENTRIES_WITH_RETIRED: &str = "\n[mcp_registration.toml_set.entries]\n\
+under = [\"hooks\", \"state\"]\n\n\
+[mcp_registration.toml_set.entries.default]\n\
+'layer:stop:0:0' = { trusted_hash = \"sha256:current\" }\n\n\
+[mcp_registration.toml_set.entries.retired]\n\
+default = ['layer:stop:0:1', 'layer:stop:0:2']\n";
+
+const CURRENT_KEY: &str = "layer:stop:0:0";
+const RETIRED_KEYS: [&str; 2] = ["layer:stop:0:1", "layer:stop:0:2"];
+const USER_KEY: &str = "user:own:0:0";
+
+/// The user's own content of the settings file, which no registration owns.
+const USER_SETTINGS_TOML: &str = "top_level_user_key = \"kept\"\n\n\
+[user_settings]\n\
+theme = \"dark\"\n\n\
+[hooks.state.'user:own:0:0']\n\
+trusted_hash = \"sha256:user\"\n";
+
+/// The tables an earlier version's Register left under `hooks.state`: the
+/// current key with a stale value, and both retired keys.
+const EARLIER_REGISTRATION_TOML: &str = "\n[hooks.state.'layer:stop:0:0']\n\
+trusted_hash = \"sha256:stale\"\n\n\
+[hooks.state.'layer:stop:0:1']\n\
+trusted_hash = \"sha256:retired-one\"\n\n\
+[hooks.state.'layer:stop:0:2']\n\
+trusted_hash = \"sha256:retired-two\"\n";
+
+fn retired_entries_profile(layout: &Layout, display_name: &str) -> String {
+    let source = host_toml_set_profile(layout, display_name, &[]).replace(
+        HOST_CONFIRM_LINE,
+        &format!("{HOST_CONFIRM_LINE}{ENTRIES_WITH_RETIRED}"),
+    );
+    assert!(
+        source.contains(ENTRIES_WITH_RETIRED),
+        "the fixture must carry the owned entries and their retired keys: {source}"
+    );
+    source
+}
+
+fn seed_host_settings(layout: &Layout, content: &str) {
+    let path = layout.home_dir.join(HOST_TOML_FILE);
+    std::fs::create_dir_all(path.parent().expect("settings has a parent"))
+        .expect("create settings dir");
+    std::fs::write(&path, content).expect("seed the settings file");
+}
+
+fn read_host_settings(layout: &Layout) -> toml::Value {
+    std::fs::read_to_string(layout.home_dir.join(HOST_TOML_FILE))
+        .expect("read the settings file")
+        .parse()
+        .expect("the settings file parses as TOML")
+}
+
+fn hooks_state(document: &toml::Value) -> &toml::Table {
+    document
+        .get("hooks")
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+        .expect("hooks.state is a table")
+}
+
+fn assert_user_content_kept(document: &toml::Value) {
+    assert_eq!(
+        document
+            .get("top_level_user_key")
+            .and_then(toml::Value::as_str),
+        Some("kept"),
+        "{document}"
+    );
+    assert_eq!(
+        document
+            .get("user_settings")
+            .and_then(|table| table.get("theme"))
+            .and_then(toml::Value::as_str),
+        Some("dark"),
+        "{document}"
+    );
+    assert_eq!(
+        hooks_state(document)
+            .get(USER_KEY)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(toml::Value::as_str),
+        Some("sha256:user"),
+        "a key the user wrote under the same table stays: {document}"
+    );
+}
+
+#[tokio::test]
+async fn register_takes_out_the_retired_keys_and_writes_the_current_ones() {
+    let layout = Layout::new("mcpreg-run-retired-register");
+    seed_registry(&layout.state_dir, &[]);
+    seed_host_settings(
+        &layout,
+        &format!("{USER_SETTINGS_TOML}{EARLIER_REGISTRATION_TOML}"),
+    );
+    write_profile(
+        &layout.profiles_dir,
+        "romeo",
+        &retired_entries_profile(&layout, "Romeo"),
+    );
+    let h = Harness::start(
+        "mcpreg-run-retired-register",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let mut approver = approver_connection(&h).await;
+
+    let (_, result) =
+        run_and_collect(&mut approver, "romeo", McpRegistrationAction::Register, 1).await;
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.status.state, McpRegistrationState::Registered);
+
+    let document = read_host_settings(&layout);
+    let state = hooks_state(&document);
+    for retired in RETIRED_KEYS {
+        assert!(
+            !state.contains_key(retired),
+            "a retired key's table is taken out: {document}"
+        );
+    }
+    assert_eq!(
+        state
+            .get(CURRENT_KEY)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(toml::Value::as_str),
+        Some("sha256:current"),
+        "the current key holds the value the profile declares now: {document}"
+    );
+    assert_user_content_kept(&document);
+}
+
+#[tokio::test]
+async fn remove_takes_out_the_retired_keys_with_the_current_ones() {
+    let layout = Layout::new("mcpreg-run-retired-remove");
+    let bridge = layout.bridge_str();
+    seed_registry(&layout.state_dir, &[("yagura", &bridge, &[])]);
+    let registered = format!(
+        "{USER_SETTINGS_TOML}{EARLIER_REGISTRATION_TOML}\n\
+         [mcp_servers.yagura]\n\
+         command = {}\n\
+         args = []\n\
+         tool_timeout_sec = 86400\n",
+        toml::Value::String(bridge.clone())
+    );
+    seed_host_settings(&layout, &registered);
+    write_profile(
+        &layout.profiles_dir,
+        "sierra",
+        &retired_entries_profile(&layout, "Sierra"),
+    );
+    let h = Harness::start(
+        "mcpreg-run-retired-remove",
+        registration_config(&layout, Some(layout.bridge.clone())),
+    )
+    .await;
+    let mut approver = approver_connection(&h).await;
+
+    let (_, result) =
+        run_and_collect(&mut approver, "sierra", McpRegistrationAction::Remove, 1).await;
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.status.state, McpRegistrationState::NotRegistered);
+
+    let document = read_host_settings(&layout);
+    let state = hooks_state(&document);
+    for owned in std::iter::once(CURRENT_KEY).chain(RETIRED_KEYS) {
+        assert!(
+            !state.contains_key(owned),
+            "Remove takes out every key the registration wrote, retired ones too: {document}"
+        );
+    }
+    assert_user_content_kept(&document);
+}

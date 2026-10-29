@@ -2036,15 +2036,23 @@ impl SettingsEdit {
     ) -> Result<Option<String>, EditError> {
         let updated = match (self, change) {
             (Self::Toml(toml_set), EditChange::Set) => {
-                toml_set::apply_edits(content, &toml_set.edits(&context.target, context.os))
+                // Retired keys go first so a key both retired and current ends up written.
+                let retired = toml_set.retired_tables(context.os);
+                let cleared = if retired.is_empty() {
+                    content.to_string()
+                } else {
+                    toml_set::remove_tables(content, &retired).map_err(EditError::Toml)?
+                };
+                toml_set::apply_edits(&cleared, &toml_set.edits(&context.target, context.os))
                     .map_err(EditError::Toml)?
             }
             (Self::Toml(toml_set), EditChange::RemoveEntries) => {
-                let tables: Vec<Vec<String>> = toml_set
+                let mut tables: Vec<Vec<String>> = toml_set
                     .entry_edits(context.os)
                     .into_iter()
                     .map(|edit| edit.table)
                     .collect();
+                tables.extend(toml_set.retired_tables(context.os));
                 toml_set::remove_tables(content, &tables).map_err(EditError::Toml)?
             }
             (Self::Json(file, _), EditChange::Set) => {

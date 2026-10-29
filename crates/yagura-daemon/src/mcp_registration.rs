@@ -179,6 +179,23 @@ struct EntriesSpec {
     windows: Option<toml::Table>,
     macos: Option<toml::Table>,
     linux: Option<toml::Table>,
+    retired: Option<RetiredKeys>,
+}
+
+/// Keys under `toml_set.entries.under` that an earlier version wrote and this
+/// one no longer does, chosen per operating system like the entries. Opaque
+/// names: the daemon never reads meaning into their shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredKeys {
+    #[serde(default)]
+    default: Option<Vec<String>>,
+    #[serde(default)]
+    windows: Option<Vec<String>>,
+    #[serde(default)]
+    macos: Option<Vec<String>>,
+    #[serde(default)]
+    linux: Option<Vec<String>>,
 }
 
 impl TomlSetSpec {
@@ -258,6 +275,36 @@ impl TomlSetSpec {
                     values: value.as_table()?,
                     create: true,
                 })
+            })
+            .collect()
+    }
+
+    /// The tables of the keys retired on `os`, which both writing and removal
+    /// take out. Empty when there are none. Not part of the status read: a
+    /// leftover retired table does not make the entries differ.
+    #[must_use]
+    pub fn retired_tables(&self, os: HostOs) -> Vec<Vec<String>> {
+        let Some(entries) = &self.entries else {
+            return Vec::new();
+        };
+        let Some(retired) = &entries.retired else {
+            return Vec::new();
+        };
+        let Some(selected) = program::select_for_os(
+            os,
+            retired.windows.as_deref(),
+            retired.macos.as_deref(),
+            retired.linux.as_deref(),
+            retired.default.as_deref(),
+        ) else {
+            return Vec::new();
+        };
+        selected
+            .iter()
+            .map(|key| {
+                let mut table = entries.under.clone();
+                table.push(key.clone());
+                table
             })
             .collect()
     }
@@ -1688,6 +1735,8 @@ struct RawEntries {
     macos: Option<toml::Table>,
     #[serde(default)]
     linux: Option<toml::Table>,
+    #[serde(default)]
+    retired: Option<RetiredKeys>,
 }
 
 /// Parses `raw` (the profile's own `[mcp_registration]` table, still
@@ -2012,12 +2061,28 @@ fn build_entries(raw: RawEntries) -> Result<EntriesSpec, McpRegistrationError> {
     if !well_formed {
         return Err(invalid());
     }
+    let retired_named = raw.retired.as_ref().is_none_or(|retired| {
+        [
+            &retired.default,
+            &retired.windows,
+            &retired.macos,
+            &retired.linux,
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .all(|key| !key.is_empty())
+    });
+    if !retired_named {
+        return Err(invalid());
+    }
     Ok(EntriesSpec {
         under: raw.under,
         default: raw.default,
         windows: raw.windows,
         macos: raw.macos,
         linux: raw.linux,
+        retired: raw.retired,
     })
 }
 
