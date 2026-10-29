@@ -267,7 +267,7 @@ async fn the_antigravity_row_previews_the_hooks_entry_it_will_add() {
     assert!(
         entry
             .content
-            .contains("--emit-status running --source antigravity-cli"),
+            .contains("--hook antigravity-cli PreInvocation"),
         "the preview must show the command the hook runs: {}",
         entry.content
     );
@@ -314,8 +314,6 @@ async fn the_codex_row_previews_the_trust_entries_next_to_its_settings_preview()
             "pre_tool_use",
             "session_start",
             "stop",
-            "user_prompt_submit",
-            "user_prompt_submit",
             "user_prompt_submit",
         ],
         "one trust entry per hook the profile injects"

@@ -57,17 +57,17 @@ args = [
 # config (the `entries` of `[mcp_registration.toml_set]` below), so the
 # daemon injects these only while that registration holds. Checked with
 # codex 0.159.2 on Windows.
-# The `--deliver-*` handlers read the window's inbox; `additionalContextLimit`
-# is the delivery table's `max_chars`.
+# Each hook calls `--hook codex-cli <Event>`; `additionalContextLimit` is the
+# delivery table's `max_chars`.
 [hooks]
 args = [
-  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon --deliver-context',additionalContextLimit=10000}]}]",
-  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'},{type='command',command='yagura-daemon --deliver-take',additionalContextLimit=10000},{type='command',command='yagura-daemon --report-session /session_id'}]}]",
-  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
-  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon --emit-status running --source codex-cli'}]}]",
-  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_approval --source codex-cli'}]}]",
-  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
-  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon --emit-status waiting_input --source codex-cli'}]}]",
+  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli SessionStart',additionalContextLimit=10000}]}]",
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli UserPromptSubmit',additionalContextLimit=10000}]}]",
+  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli PreToolUse'}]}]",
+  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli PostToolUse'}]}]",
+  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli PermissionRequest'}]}]",
+  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli Stop'}]}]",
+  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli Interrupt'}]}]",
 ]
 
 # How the daemon hands text to this CLI without typing it into the composer.
@@ -122,31 +122,47 @@ confirm = { tool_timeout_sec = "/tool_timeout_sec" }
 
 # The trust Codex needs before it runs the `[hooks]` above: one
 # `hooks.state` key per hook, holding the hash Codex itself reports for
-# it (`codex app-server`, request `hooks/list`). Any change to a hook's
-# command changes its hash, so take the values again after one. The key
+# it (`codex app-server`, request `hooks/list`). The `--hook` command does
+# not change between releases; take the values again only when a hook's
+# attributes change. `retired` keys are ones an earlier version wrote. The key
 # names the command-line layer, whose path depends on the operating
 # system Codex runs on.
 [mcp_registration.toml_set.entries]
 under = ["hooks", "state"]
 
 [mcp_registration.toml_set.entries.windows]
-'C:\<session-flags>\config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2" }
-'C:\<session-flags>\config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379" }
-'C:\<session-flags>\config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f" }
-'C:\<session-flags>\config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
-'C:\<session-flags>\config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
-'C:\<session-flags>\config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }
-'C:\<session-flags>\config.toml:session_start:0:0' = { trusted_hash = "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4" }
-'C:\<session-flags>\config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f" }
-'C:\<session-flags>\config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a" }
+'C:\<session-flags>\config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:02032e0879a2fbddb9f0e2690072eceeb3b16c73f658405259f457079129f2e7" }
+'C:\<session-flags>\config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:31260d38950fe330199fa666df200a3f53c54d4e4da1a0d1b9d84053b7f42466" }
+'C:\<session-flags>\config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:1be9973fde53b9993f850a41917392dbd9bb2402c950fccf16794427600925ee" }
+'C:\<session-flags>\config.toml:permission_request:0:0' = { trusted_hash = "sha256:3fb04fe1cc776d675b8e4a998207258698706caa29c9cd303df61a060c9b1983" }
+'C:\<session-flags>\config.toml:stop:0:0' = { trusted_hash = "sha256:eedecbdbf094978df724e83fa53dead35ccd572bf17413bd4d22a3dcb908870e" }
+'C:\<session-flags>\config.toml:interrupt:0:0' = { trusted_hash = "sha256:a3859bc8069fc031b1f0565f704b051613089fa979fb50c20779080ac9ca4489" }
+'C:\<session-flags>\config.toml:session_start:0:0' = { trusted_hash = "sha256:24fdd95ac846f2f040eb9080e25cf31fffec6f98ab4203fec6fa7142bf825446" }
 
 [mcp_registration.toml_set.entries.default]
-'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2" }
-'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379" }
-'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f" }
-'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7" }
-'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807" }
-'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9" }
-'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4" }
-'/<session-flags>/config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f" }
-'/<session-flags>/config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a" }
+'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:02032e0879a2fbddb9f0e2690072eceeb3b16c73f658405259f457079129f2e7" }
+'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:31260d38950fe330199fa666df200a3f53c54d4e4da1a0d1b9d84053b7f42466" }
+'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:1be9973fde53b9993f850a41917392dbd9bb2402c950fccf16794427600925ee" }
+'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:3fb04fe1cc776d675b8e4a998207258698706caa29c9cd303df61a060c9b1983" }
+'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:eedecbdbf094978df724e83fa53dead35ccd572bf17413bd4d22a3dcb908870e" }
+'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:a3859bc8069fc031b1f0565f704b051613089fa979fb50c20779080ac9ca4489" }
+'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:24fdd95ac846f2f040eb9080e25cf31fffec6f98ab4203fec6fa7142bf825446" }
+
+[mcp_registration.toml_set.entries.retired]
+windows = [
+  'C:\<session-flags>\config.toml:user_prompt_submit:0:1',
+  'C:\<session-flags>\config.toml:user_prompt_submit:0:2',
+]
+default = [
+  '/<session-flags>/config.toml:user_prompt_submit:0:1',
+  '/<session-flags>/config.toml:user_prompt_submit:0:2',
+]
+
+[hook_events]
+SessionStart = { deliver = "context" }
+UserPromptSubmit = { status = "running", deliver = "take", session = "/session_id" }
+PreToolUse = { status = "running" }
+PostToolUse = { status = "running" }
+PermissionRequest = { status = "waiting_approval" }
+Stop = { status = "waiting_input" }
+Interrupt = { status = "waiting_input" }

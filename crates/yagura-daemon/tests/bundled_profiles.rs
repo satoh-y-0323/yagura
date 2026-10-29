@@ -15,10 +15,14 @@
 mod common;
 
 use common::docs::read_doc_verbatim;
+use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
 use yagura_daemon::profile::{
-    JsonFilter, ModelChoicesSpec, OutputFormat, Profile, ProfileCommand, ProfileOs, argv_for_os,
-    parse_profile,
+    InjectedPaths, JsonFilter, ModelChoicesSpec, OutputFormat, Profile, ProfileCommand, ProfileOs,
+    argv_for_os, parse_profile, render_hooks_args,
 };
+use yagura_daemon::profile_hook_events::{HookDeliver, HookEvent};
+use yagura_os::program::HostOs;
+use yagura_protocol::WindowStatus;
 
 /// Reads and parses one of the repository's own shipped profiles by id
 /// (`profiles/<id>.toml`, relative to this crate's manifest directory).
@@ -411,5 +415,269 @@ fn the_codex_cli_family_lists_models_as_json_filtered_to_the_listed_ones() {
             }
             other => panic!("{id} lists models through a json command, got {other:?}"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Hooks that outlive a launch call `--hook <profile-id> <Event>`
+// ---------------------------------------------------------------------
+
+/// The profiles whose hook text stays in a CLI's settings (a registration's
+/// `json_entry`, or Codex's trust record) and so must not change with a version.
+const HOOK_DOOR_PROFILES: [&str; 7] = [
+    "antigravity-cli",
+    "wsl-antigravity-cli",
+    "grok-build",
+    "wsl-grok-build",
+    "muse-code",
+    "codex-cli",
+    "wsl-codex-cli",
+];
+
+/// Flags of the doors that each named one handling, before `--hook` replaced them.
+const OLD_DOOR_FLAGS: [&str; 5] = [
+    "--emit-status",
+    "--deliver-",
+    "--report-session",
+    "--skip-if",
+    "--source",
+];
+
+/// One hook command line with the event it runs for.
+type HookLine = (String, String);
+
+/// Every hook a profile ships, as one list of command lines per way it is written: the
+/// registration's `json_entry` rendered for each OS, and the `[hooks]` arguments.
+fn shipped_hook_commands(profile: &Profile) -> Vec<Vec<HookLine>> {
+    let mut renderings = Vec::new();
+    if let Some(spec) = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|spec| spec.json_entry())
+    {
+        let target = RegistrationTarget::for_instance(None);
+        for os in [HostOs::Windows, HostOs::MacOs, HostOs::Linux] {
+            let vars = EntryVars {
+                target: &target,
+                os,
+                daemon: Some("/yagura/yagura-daemon"),
+                bridge: Some("/yagura/yagura-mcp"),
+            };
+            let mut lines = Vec::new();
+            for file in spec.files() {
+                for (_, value) in file.entries(&vars).expect("the entries render") {
+                    // An entry that maps events to handlers; the MCP server entry does not.
+                    let Some(events) = value
+                        .as_object()
+                        .filter(|map| map.values().all(serde_json::Value::is_array))
+                    else {
+                        continue;
+                    };
+                    for (event, groups) in events {
+                        collect_command_lines(event, groups, &mut lines);
+                    }
+                }
+            }
+            renderings.push(lines);
+        }
+    }
+    if let Some(spec) = &profile.hooks {
+        let mut lines = Vec::new();
+        for arg in render_hooks_args(spec, InjectedPaths::default()) {
+            if !arg.starts_with("hooks.") {
+                continue;
+            }
+            let document: toml::Table = arg
+                .parse()
+                .unwrap_or_else(|err| panic!("{arg} must decode as TOML: {err}"));
+            for (event, groups) in document["hooks"].as_table().expect("a hooks table") {
+                let groups = serde_json::to_value(groups).expect("groups are data");
+                collect_command_lines(event, &groups, &mut lines);
+            }
+        }
+        renderings.push(lines);
+    }
+    renderings
+}
+
+/// Adds the command line (command, then `args`) of every handler under `value`.
+fn collect_command_lines(event: &str, value: &serde_json::Value, out: &mut Vec<HookLine>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_command_lines(event, item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(command) = map.get("command").and_then(serde_json::Value::as_str) {
+                let mut words = vec![command];
+                if let Some(args) = map.get("args").and_then(serde_json::Value::as_array) {
+                    words.extend(args.iter().filter_map(serde_json::Value::as_str));
+                }
+                out.push((event.to_string(), words.join(" ")));
+            }
+            if let Some(inner) = map.get("hooks") {
+                collect_command_lines(event, inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_hook_a_cli_keeps_calls_the_hook_door_of_its_own_profile_with_one_handler_per_event() {
+    for id in HOOK_DOOR_PROFILES {
+        let profile = parse_repo_profile(id);
+        let events = profile
+            .hook_events
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} must ship a [hook_events] table"));
+        let renderings = shipped_hook_commands(&profile);
+        assert!(!renderings.is_empty(), "{id} ships hook commands");
+        for lines in &renderings {
+            assert!(!lines.is_empty(), "{id}: a rendering with no hook commands");
+            let mut per_event = std::collections::BTreeMap::<&str, usize>::new();
+            for (event, line) in lines {
+                *per_event.entry(event.as_str()).or_default() += 1;
+                assert!(
+                    events.get(event).is_some(),
+                    "{id}: {event} is hooked but has no [hook_events] entry"
+                );
+                let tokens: Vec<&str> = line
+                    .split(|c: char| c.is_whitespace() || c == ')')
+                    .filter(|token| !token.is_empty())
+                    .collect();
+                let at = tokens
+                    .iter()
+                    .position(|token| *token == "--hook")
+                    .unwrap_or_else(|| panic!("{id}/{event}: no --hook door in {line:?}"));
+                assert_eq!(
+                    tokens[at + 1..],
+                    [id, event.as_str()],
+                    "{id}/{event}: the door names this profile and this event: {line:?}"
+                );
+                for flag in OLD_DOOR_FLAGS {
+                    assert!(
+                        !line.contains(flag),
+                        "{id}/{event}: {flag} belongs to the older doors: {line:?}"
+                    );
+                }
+            }
+            assert!(
+                per_event.values().all(|count| *count == 1),
+                "{id}: an event's handlings are one handler, got {per_event:?}"
+            );
+        }
+    }
+}
+
+fn event(
+    status: Option<WindowStatus>,
+    deliver: Option<HookDeliver>,
+    session: Option<&str>,
+    skip_if: Option<&str>,
+) -> HookEvent {
+    HookEvent {
+        status,
+        deliver,
+        session: session.map(str::to_string),
+        skip_if: skip_if.map(str::to_string),
+    }
+}
+
+/// Each event's handling, summed from the flags of the handlers that ran for it:
+/// `--emit-status X` is `status`, `--deliver-take` / `--deliver-context` is `deliver`,
+/// `--report-session P` is `session`, `--skip-if P` is `skip_if`.
+fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
+    use HookDeliver::{Context, Take};
+    use WindowStatus::{Running, WaitingApproval, WaitingInput};
+    match id {
+        "antigravity-cli" | "wsl-antigravity-cli" => vec![
+            (
+                "PreInvocation",
+                event(Some(Running), Some(Take), None, None),
+            ),
+            ("SessionStart", event(None, Some(Context), None, None)),
+            ("PostToolUse", event(Some(Running), None, None, None)),
+        ],
+        "grok-build" | "wsl-grok-build" => {
+            let skip = Some("/subagentType");
+            vec![
+                ("UserPromptSubmit", event(Some(Running), None, None, skip)),
+                ("PreToolUse", event(Some(Running), None, None, skip)),
+                ("PostToolUse", event(Some(Running), Some(Take), None, skip)),
+                (
+                    "PostToolUseFailure",
+                    event(Some(Running), Some(Take), None, skip),
+                ),
+                (
+                    "Notification",
+                    event(Some(WaitingApproval), None, None, skip),
+                ),
+                ("Stop", event(Some(WaitingInput), None, None, skip)),
+                ("StopFailure", event(Some(WaitingInput), None, None, skip)),
+                ("StopCancelled", event(Some(WaitingInput), None, None, skip)),
+            ]
+        }
+        "muse-code" => vec![
+            ("SessionStart", event(None, Some(Context), None, None)),
+            (
+                "UserPromptSubmit",
+                event(Some(Running), Some(Take), None, None),
+            ),
+            (
+                "PermissionRequest",
+                event(Some(WaitingApproval), None, None, None),
+            ),
+            ("Stop", event(Some(WaitingInput), None, None, None)),
+            ("StopFailure", event(Some(WaitingInput), None, None, None)),
+            ("Interrupt", event(Some(WaitingInput), None, None, None)),
+        ],
+        "codex-cli" | "wsl-codex-cli" => vec![
+            ("SessionStart", event(None, Some(Context), None, None)),
+            (
+                "UserPromptSubmit",
+                event(Some(Running), Some(Take), Some("/session_id"), None),
+            ),
+            ("PreToolUse", event(Some(Running), None, None, None)),
+            ("PostToolUse", event(Some(Running), None, None, None)),
+            (
+                "PermissionRequest",
+                event(Some(WaitingApproval), None, None, None),
+            ),
+            ("Stop", event(Some(WaitingInput), None, None, None)),
+            ("Interrupt", event(Some(WaitingInput), None, None, None)),
+        ],
+        other => panic!("{other} is not one of the profiles that moved to the hook door"),
+    }
+}
+
+#[test]
+fn each_hook_events_table_is_the_sum_of_what_the_handlers_of_that_event_did() {
+    for id in HOOK_DOOR_PROFILES {
+        let profile = parse_repo_profile(id);
+        let table = profile
+            .hook_events
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} must ship a [hook_events] table"));
+        let expected = expected_hook_events(id);
+        for (name, handling) in &expected {
+            assert_eq!(table.get(name), Some(handling), "{id}/{name}");
+        }
+        // No event beyond these: the raw table's keys are exactly the expected names.
+        let raw: toml::Table = read_doc_verbatim(&format!("../../profiles/{id}.toml"))
+            .parse()
+            .expect("a shipped profile is TOML");
+        let mut names: Vec<&str> = raw
+            .get("hook_events")
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("{id} must ship a [hook_events] table"))
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        let mut wanted: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
+        wanted.sort_unstable();
+        assert_eq!(names, wanted, "{id}: the events the table names");
     }
 }

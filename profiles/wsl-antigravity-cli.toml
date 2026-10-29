@@ -75,11 +75,17 @@ command = "/mcpServers/{server}/command"
 # registration adds yagura's entry there and removal takes it out (checked
 # with agy 1.2.14). PreToolUse and Stop are not used: agy requires a
 # `decision` in their output, which a status report does not give.
-# `--deliver-take` and `--deliver-context` read the window's inbox.
+# Each hook calls `--hook wsl-antigravity-cli <Event>`; what an event does is the
+# [hook_events] table below, so a daemon update never leaves this file stale.
 [mcp_registration.json_entry]
 file = ".gemini/config/hooks.json"
 
 [mcp_registration.json_entry.entries."{server}"]
-PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --emit-status running --source antigravity-cli", timeout = 10 }, { type = "command", command = "{daemon} --for-instance {server} --deliver-take", timeout = 10 }]
-SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --deliver-context", timeout = 10 }]
-PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --emit-status running --source antigravity-cli", timeout = 10 }] }]
+PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PreInvocation", timeout = 10 }]
+SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli SessionStart", timeout = 10 }]
+PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PostToolUse", timeout = 10 }] }]
+
+[hook_events]
+PreInvocation = { status = "running", deliver = "take" }
+SessionStart = { deliver = "context" }
+PostToolUse = { status = "running" }

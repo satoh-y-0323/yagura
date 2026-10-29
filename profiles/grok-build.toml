@@ -84,18 +84,28 @@ confirm = {}
 # One hooks file per instance, so removing one registration leaves the others.
 # The handlers run the daemon directly with `args` (no shell), so outside a
 # window the daemon itself does nothing. A sub-agent's session runs these hooks
-# too and its payload carries `subagentType`, so each call skips it. The order
-# of events and the approval notification follow a real session (1.0.70).
+# too; [hook_events] skips it by its `subagentType` payload key. The order of
+# events and the approval notification follow a real session (1.0.70).
 # The inbox is taken once a call has run, where its output reaches the model.
 [mcp_registration.json_entry]
 file = ".grok/hooks/{server}.json"
 
 [mcp_registration.json_entry.entries."/hooks"]
-UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
-PreToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
-PostToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }, { type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--deliver-take", "--skip-if", "/subagentType"], timeout = 10 }] }]
-PostToolUseFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "running", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }, { type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--deliver-take", "--skip-if", "/subagentType"], timeout = 10 }] }]
-Notification = [{ matcher = "permission_prompt", hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "waiting_approval", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
-Stop = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
-StopFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
-StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--emit-status", "waiting_input", "--source", "grok-build", "--skip-if", "/subagentType"], timeout = 10 }] }]
+UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "UserPromptSubmit"], timeout = 10 }] }]
+PreToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PreToolUse"], timeout = 10 }] }]
+PostToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUse"], timeout = 10 }] }]
+PostToolUseFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUseFailure"], timeout = 10 }] }]
+Notification = [{ matcher = "permission_prompt", hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Notification"], timeout = 10 }] }]
+Stop = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Stop"], timeout = 10 }] }]
+StopFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopFailure"], timeout = 10 }] }]
+StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopCancelled"], timeout = 10 }] }]
+
+[hook_events]
+UserPromptSubmit = { status = "running", skip_if = "/subagentType" }
+PreToolUse = { status = "running", skip_if = "/subagentType" }
+PostToolUse = { status = "running", deliver = "take", skip_if = "/subagentType" }
+PostToolUseFailure = { status = "running", deliver = "take", skip_if = "/subagentType" }
+Notification = { status = "waiting_approval", skip_if = "/subagentType" }
+Stop = { status = "waiting_input", skip_if = "/subagentType" }
+StopFailure = { status = "waiting_input", skip_if = "/subagentType" }
+StopCancelled = { status = "waiting_input", skip_if = "/subagentType" }

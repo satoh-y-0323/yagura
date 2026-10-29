@@ -147,30 +147,33 @@ fn the_wsl_profile_forwards_the_model_variable_into_wsl() {
     );
 }
 
-/// Every handler runs the daemon directly (no shell), the status each event reports follows
-/// the order measured on a real session, and a child session never reports or takes the
-/// inbox because every door call names the pointer that tells a sub-agent apart. Every
-/// call also names the instance it was registered for, so another instance's hook file
-/// stays silent in this instance's windows.
+/// Every handler runs the daemon directly (no shell) through the `--hook` door of its own
+/// profile, one handler per event, and what each event does (its status, the inbox, skipping
+/// a sub-agent) is the profile's `[hook_events]` table, not the registered text. Every call
+/// also names the instance it was registered for, so another instance's hook file stays
+/// silent in this instance's windows.
 #[test]
-fn the_registered_hooks_report_the_measured_states_and_skip_subagents() {
+fn the_registered_hooks_call_the_profiles_hook_door_for_the_instance() {
     const DAEMON: &str = r"C:\yagura\yagura-daemon.exe";
-    let expected_status: BTreeMap<&str, &str> = [
-        ("UserPromptSubmit", "running"),
-        ("PreToolUse", "running"),
-        ("PostToolUse", "running"),
-        ("PostToolUseFailure", "running"),
-        ("Notification", "waiting_approval"),
-        ("Stop", "waiting_input"),
-        ("StopFailure", "waiting_input"),
-        ("StopCancelled", "waiting_input"),
-    ]
-    .into_iter()
-    .collect();
+    let events = [
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Notification",
+        "Stop",
+        "StopFailure",
+        "StopCancelled",
+    ];
 
     for id in IDS {
-        let spec = parse_profile(id, &shipped_source(id))
-            .unwrap_or_else(|err| panic!("{id} must parse: {err}"))
+        let profile = parse_profile(id, &shipped_source(id))
+            .unwrap_or_else(|err| panic!("{id} must parse: {err}"));
+        let table = profile
+            .hook_events
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} must carry a [hook_events] table"));
+        let spec = profile
             .mcp_registration
             .unwrap_or_else(|| panic!("{id} must carry a [mcp_registration] table"));
         let files = spec.json_entry().expect("a json_entry").files();
@@ -201,59 +204,48 @@ fn the_registered_hooks_report_the_measured_states_and_skip_subagents() {
             let (key, hooks) = entries.first().expect("an entry");
             assert_eq!(key, "/hooks");
 
-            let mut statuses = BTreeMap::new();
-            let mut takers = Vec::new();
+            let mut seen = BTreeMap::new();
             for (event, groups) in hooks.as_object().expect("hooks is an object") {
-                for group in groups.as_array().expect("an event holds a list") {
-                    let handlers = match group.get("hooks") {
-                        Some(inner) => inner.as_array().expect("hooks list").clone(),
-                        None => vec![group.clone()],
-                    };
-                    for handler in &handlers {
-                        assert_eq!(handler["command"], DAEMON, "{id}/{event}: no shell");
-                        let args: Vec<&str> = handler["args"]
-                            .as_array()
-                            .unwrap_or_else(|| panic!("{id}/{event}: args form"))
-                            .iter()
-                            .map(|arg| arg.as_str().unwrap())
-                            .collect();
-                        assert_eq!(
-                            args[..2],
-                            ["--for-instance", target.server()],
-                            "{id}/{event}: another instance's hook must stay silent: {args:?}"
-                        );
-                        let pointer_at = args.iter().position(|arg| *arg == "--skip-if");
-                        assert_eq!(
-                            pointer_at.map(|at| args[at + 1]),
-                            Some("/subagentType"),
-                            "{id}/{event}: a sub-agent's call must be skipped: {args:?}"
-                        );
-                        if let Some(at) = args.iter().position(|arg| *arg == "--emit-status") {
-                            statuses.insert(event.clone(), args[at + 1].to_string());
-                            assert!(
-                                args.windows(2).any(|w| w == ["--source", "grok-build"]),
-                                "{id}/{event}: {args:?}"
-                            );
-                            if event == "Notification" {
-                                assert_eq!(group["matcher"], "permission_prompt");
-                            }
-                        }
-                        if args.contains(&"--deliver-take") {
-                            takers.push(event.clone());
-                        }
-                    }
+                let groups = groups.as_array().expect("an event holds a list");
+                assert_eq!(groups.len(), 1, "{id}/{event}: one group");
+                let handlers = groups[0]["hooks"].as_array().expect("hooks list");
+                assert_eq!(handlers.len(), 1, "{id}/{event}: one handler per event");
+                let handler = &handlers[0];
+                assert_eq!(handler["command"], DAEMON, "{id}/{event}: no shell");
+                let args: Vec<&str> = handler["args"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{id}/{event}: args form"))
+                    .iter()
+                    .map(|arg| arg.as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    args,
+                    [
+                        "--for-instance",
+                        target.server(),
+                        "--hook",
+                        id,
+                        event.as_str()
+                    ],
+                    "{id}/{event}: another instance's hook must stay silent"
+                );
+                if event == "Notification" {
+                    assert_eq!(groups[0]["matcher"], "permission_prompt");
                 }
+                seen.insert(event.clone(), table.get(event).cloned());
             }
-            let expected: BTreeMap<String, String> = expected_status
-                .iter()
-                .map(|(event, status)| ((*event).to_string(), (*status).to_string()))
-                .collect();
-            assert_eq!(statuses, expected, "{id} on {os:?}");
-            takers.sort();
             assert_eq!(
-                takers,
-                ["PostToolUse", "PostToolUseFailure"],
-                "{id}: the inbox is taken only where grok hands the model hook output"
+                seen.keys().map(String::as_str).collect::<Vec<_>>(),
+                {
+                    let mut sorted = events.to_vec();
+                    sorted.sort_unstable();
+                    sorted
+                },
+                "{id} on {os:?}: the events grok runs"
+            );
+            assert!(
+                seen.values().all(Option::is_some),
+                "{id}: every hooked event has a [hook_events] entry: {seen:?}"
             );
         }
     }

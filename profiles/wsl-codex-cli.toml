@@ -63,17 +63,17 @@ args = [
 # config (the `entries` of `[mcp_registration.toml_set]` below), so the
 # daemon injects these only while that registration holds. Checked with
 # codex 0.158.0 inside WSL.
-# The `--deliver-*` handlers read the window's inbox; `additionalContextLimit`
-# is the delivery table's `max_chars`.
+# Each hook calls `--hook wsl-codex-cli <Event>`; `additionalContextLimit` is the
+# delivery table's `max_chars`.
 [hooks]
 args = [
-  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon.exe --deliver-context',additionalContextLimit=10000}]}]",
-  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'},{type='command',command='yagura-daemon.exe --deliver-take',additionalContextLimit=10000},{type='command',command='yagura-daemon.exe --report-session /session_id'}]}]",
-  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
-  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status running --source codex-cli'}]}]",
-  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_approval --source codex-cli'}]}]",
-  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
-  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon.exe --emit-status waiting_input --source codex-cli'}]}]",
+  "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli SessionStart',additionalContextLimit=10000}]}]",
+  "-c", "hooks.UserPromptSubmit=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli UserPromptSubmit',additionalContextLimit=10000}]}]",
+  "-c", "hooks.PreToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli PreToolUse'}]}]",
+  "-c", "hooks.PostToolUse=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli PostToolUse'}]}]",
+  "-c", "hooks.PermissionRequest=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli PermissionRequest'}]}]",
+  "-c", "hooks.Stop=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli Stop'}]}]",
+  "-c", "hooks.Interrupt=[{hooks=[{type='command',command='yagura-daemon.exe --hook wsl-codex-cli Interrupt'}]}]",
 ]
 
 # How the daemon hands text to this CLI without typing it into the composer.
@@ -144,20 +144,34 @@ confirm = { tool_timeout_sec = "/tool_timeout_sec" }
 
 # The trust Codex needs before it runs the `[hooks]` above: one
 # `hooks.state` key per hook, holding the hash Codex itself reports for
-# it (`codex app-server`, request `hooks/list`). Any change to a hook's
-# command changes its hash, so take the values again after one. The key
+# it (`codex app-server`, request `hooks/list`). The `--hook` command does
+# not change between releases; take the values again only when a hook's
+# attributes change. `retired` keys are ones an earlier version wrote. The key
 # names the command-line layer, whose path depends on the operating
 # system Codex runs on.
 [mcp_registration.toml_set.entries]
 under = ["hooks", "state"]
 
 [mcp_registration.toml_set.entries.default]
-'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:83f84d8a25f526a1ada8a56b0bf9fc47f4994145ed7427c23932aa675dd79aa4" }
-'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:98dabe6d33c4c6d7ab045cd4bd62f35293a7bc6d2dfbd925ead971024f6feb25" }
-'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:eaa6e89082c12ced1b86bb9d2a230c3918e7943c03cf54f2ad713ed0b1edea91" }
-'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:44f1ce78ae1ed855ad7b9bf53ef66a9a9b12d6b3a03c1eb63c9ac361e9a577a2" }
-'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:8918ebfbb7a4fd5c7aae8798514ca10d115b5ef648ef3704a11afcfc7840f666" }
-'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:19a4ee2712cd73414b2c13f19a8183731238195ddd118946ee8fb9d210193f2b" }
-'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:4797ec0bdc9f2dd9beb2dc55e20215a4609c6f6d15ff49f8c2f2e493e6bb6dc5" }
-'/<session-flags>/config.toml:user_prompt_submit:0:1' = { trusted_hash = "sha256:5be51c65610812ad8b436954dbec8df94f5845db00dfbd5baa17ec8b8092dd00" }
-'/<session-flags>/config.toml:user_prompt_submit:0:2' = { trusted_hash = "sha256:dab1ea0140be7aef663bdd6dc37130d16134a4b43755295d4d043eaf78b1f4b4" }
+'/<session-flags>/config.toml:user_prompt_submit:0:0' = { trusted_hash = "sha256:e08ce961764ed6b0c8da9f54e00e60f6f1ab0d7d97b6dc7a8a8eb1abb3e721cd" }
+'/<session-flags>/config.toml:pre_tool_use:0:0' = { trusted_hash = "sha256:91b667eb99eb41cedd5915bda9bd464b3818125b37599aee2b081687770da216" }
+'/<session-flags>/config.toml:post_tool_use:0:0' = { trusted_hash = "sha256:284a3acc9795611b0649fe54fc08ba6b1d1bc2a671fa08986cdd5639a0f8fac9" }
+'/<session-flags>/config.toml:permission_request:0:0' = { trusted_hash = "sha256:aca0c79a6f0619696a82f59c4742cee11bddb16d9a6852cf339bc57cae946889" }
+'/<session-flags>/config.toml:stop:0:0' = { trusted_hash = "sha256:b597adc0cd753aa5905f72cc77136b041b7f37d82b385f22c446db0f63371794" }
+'/<session-flags>/config.toml:interrupt:0:0' = { trusted_hash = "sha256:aff135859be7c027a03d207700edc6580980129e7b7585cefe226a0210660bc0" }
+'/<session-flags>/config.toml:session_start:0:0' = { trusted_hash = "sha256:a115dbf2b1fe741824096dce087ed090c8feb2348a8ec2876302e9249a15d649" }
+
+[mcp_registration.toml_set.entries.retired]
+default = [
+  '/<session-flags>/config.toml:user_prompt_submit:0:1',
+  '/<session-flags>/config.toml:user_prompt_submit:0:2',
+]
+
+[hook_events]
+SessionStart = { deliver = "context" }
+UserPromptSubmit = { status = "running", deliver = "take", session = "/session_id" }
+PreToolUse = { status = "running" }
+PostToolUse = { status = "running" }
+PermissionRequest = { status = "waiting_approval" }
+Stop = { status = "waiting_input" }
+Interrupt = { status = "waiting_input" }

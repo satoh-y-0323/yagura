@@ -43,6 +43,12 @@ const HOOKS_FILE: &str = ".gemini/config/hooks.json";
 /// What every door of the entry carries after the daemon path: the default instance's
 /// registration name, which the cases register under.
 const FOR_INSTANCE: &str = " --for-instance yagura";
+
+/// The command an entry runs for `event` after the daemon path and instance: the `--hook`
+/// door of the profile the entry was registered from.
+fn hook_call(profile: &str, event: &str) -> String {
+    format!("{FOR_INSTANCE} --hook {profile} {event}")
+}
 const MCP_FILE: &str = ".gemini/config/mcp_config.json";
 
 /// How long a stubbed CLI stays alive when a case needs a live window: a
@@ -126,28 +132,27 @@ impl Layout {
         parse(&self.read_hooks())
     }
 
-    /// The command the daemon is expected to write for `profile`: the report
+    /// The daemon path the entry is expected to run for `profile`: the report
     /// folder's daemon, as the CLI's own operating system sees the path.
-    fn expected_command(&self, profile: &str) -> String {
+    fn expected_daemon(&self, profile: &str) -> String {
         let path = self.report_dir.join(REPORT_EXE_NAME);
         let path = path.to_str().expect("report path is UTF-8");
-        let path = if profile == WSL_PROFILE {
+        if profile == WSL_PROFILE {
             // The stub's `probe` stands in for `wslpath -u`.
             format!("/probed{}", path.replace('\\', "/"))
         } else {
             path.to_string()
-        };
-        format!("{path}{FOR_INSTANCE} --emit-status running --source antigravity-cli")
+        }
     }
-}
 
-/// The daemon path `command` (a running report) starts, to build the commands of the doors
-/// the same entry reads the inbox through.
-fn door_command(command: &str, door: &str) -> String {
-    let program = command
-        .strip_suffix(" --emit-status running --source antigravity-cli")
-        .unwrap_or_else(|| panic!("{command:?} is the running report"));
-    format!("{program} --deliver-{door}")
+    /// The command the entry is expected to run for `event`.
+    fn expected_command(&self, profile: &str, event: &str) -> String {
+        format!(
+            "{}{}",
+            self.expected_daemon(profile),
+            hook_call(profile, event)
+        )
+    }
 }
 
 fn str_array(items: &[&str]) -> toml::Value {
@@ -402,11 +407,11 @@ fn assert_handler(handler: &Value, command: &str, context: &str) {
     );
 }
 
-/// The shape agy's file takes: a running report on a new call and after each tool, and the
-/// doors the CLI reads its inbox through -- the start-up context when a session starts, and the
-/// start of a turn beside the report on each new call. Nothing else is written, and not the
-/// events whose empty output agy may treat as a decision.
-fn assert_yagura_entry(file: &Value, command: &str) {
+/// The shape agy's file takes: one call of the profile's `--hook` door per event -- the
+/// running report and the inbox on a new call, the start-up context when a session starts, and
+/// a running report after each tool. Nothing else is written, and not the events whose empty
+/// output agy may treat as a decision.
+fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
     let entry = file
         .get("yagura")
         .unwrap_or_else(|| panic!("the file has a yagura entry: {file}"));
@@ -415,14 +420,14 @@ fn assert_yagura_entry(file: &Value, command: &str) {
         set_of(&["PreInvocation", "PostToolUse", "SessionStart"]),
         "the running events and the start-up door are used: {entry}"
     );
+    let call = |event: &str| format!("{daemon}{}", hook_call(profile, event));
     let pre = entry["PreInvocation"].as_array().expect("an array");
-    assert_eq!(pre.len(), 2, "{entry}");
-    assert_handler(&pre[0], command, "PreInvocation");
-    assert_handler(&pre[1], &door_command(command, "take"), "PreInvocation");
+    assert_eq!(pre.len(), 1, "{entry}");
+    assert_handler(&pre[0], &call("PreInvocation"), "PreInvocation");
 
     let start = entry["SessionStart"].as_array().expect("an array");
     assert_eq!(start.len(), 1, "{entry}");
-    assert_handler(&start[0], &door_command(command, "context"), "SessionStart");
+    assert_handler(&start[0], &call("SessionStart"), "SessionStart");
 
     let post = entry["PostToolUse"].as_array().expect("an array");
     assert_eq!(post.len(), 1, "{entry}");
@@ -434,7 +439,7 @@ fn assert_yagura_entry(file: &Value, command: &str) {
     assert_eq!(post[0]["matcher"], "*", "{entry}");
     let handlers = post[0]["hooks"].as_array().expect("an array");
     assert_eq!(handlers.len(), 1, "{entry}");
-    assert_handler(&handlers[0], command, "PostToolUse");
+    assert_handler(&handlers[0], &call("PostToolUse"), "PostToolUse");
 }
 
 fn write_value(layout: &Layout, value: &Value) {
@@ -459,7 +464,7 @@ async fn register_then_remove_case(profile: &str, tag: &str) {
 
     let registered_text = layout.read_hooks();
     let registered = parse(&registered_text);
-    assert_yagura_entry(&registered, &layout.expected_command(profile));
+    assert_yagura_entry(&registered, profile, &layout.expected_daemon(profile));
     assert_eq!(
         object_without_yagura(&registered),
         original,
@@ -517,7 +522,7 @@ async fn creates_the_file_case(profile: &str, tag: &str) {
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let created = layout.hooks_value();
     assert_eq!(keys_of(&created), set_of(&["yagura"]));
-    assert_yagura_entry(&created, &layout.expected_command(profile));
+    assert_yagura_entry(&created, profile, &layout.expected_daemon(profile));
 
     let (error, _) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
     assert_eq!(error, None);
@@ -577,7 +582,7 @@ async fn replaces_a_stale_entry_case(profile: &str, tag: &str) {
     assert_eq!(error, None);
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let registered = layout.hooks_value();
-    assert_yagura_entry(&registered, &layout.expected_command(profile));
+    assert_yagura_entry(&registered, profile, &layout.expected_daemon(profile));
     assert_eq!(object_without_yagura(&registered), parse(SEED_HOOKS));
 }
 
@@ -643,20 +648,20 @@ async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_sh
             .as_str()
             .expect("a command string")
             .to_string();
-        assert_eq!(command, layout.expected_command(profile), "{profile}");
-        let doors = [
-            file["yagura"]["PreInvocation"][1]["command"].clone(),
-            file["yagura"]["SessionStart"][0]["command"].clone(),
-        ];
-        for door in doors {
-            let door = door.as_str().expect("a command string");
-            assert!(
-                door.starts_with(command.split(" --").next().unwrap())
-                    && !contains_cmd_metacharacter(door)
-                    && !door.contains('"'),
-                "{profile}: {door:?} runs the same daemon and needs no quoting"
-            );
-        }
+        assert_eq!(
+            command,
+            layout.expected_command(profile, "PreInvocation"),
+            "{profile}"
+        );
+        let door = file["yagura"]["SessionStart"][0]["command"]
+            .as_str()
+            .expect("a command string");
+        assert!(
+            door.starts_with(command.split(" --").next().unwrap())
+                && !contains_cmd_metacharacter(door)
+                && !door.contains('"'),
+            "{profile}: {door:?} runs the same daemon and needs no quoting"
+        );
         assert!(
             !contains_cmd_metacharacter(&command) && !command.contains('"'),
             "{profile}: {command:?} must not need quoting"
@@ -762,12 +767,13 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
             }),
         ),
         (
-            "the inbox door beside the running report is gone",
+            "PreInvocation still holds the two handlers of the older form",
             Box::new(|_, file| {
+                let older = file["yagura"]["PreInvocation"][0].clone();
                 file["yagura"]["PreInvocation"]
                     .as_array_mut()
                     .unwrap()
-                    .remove(1);
+                    .push(older);
             }),
         ),
         (
@@ -791,7 +797,7 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
         write_value(&layout, &file);
         let status = listed_status(&mut approver, round * 10).await;
         let rewritten = layout.hooks_value();
-        assert_yagura_entry(&rewritten, &layout.expected_command(profile));
+        assert_yagura_entry(&rewritten, profile, &layout.expected_daemon(profile));
         assert_eq!(
             object_without_yagura(&rewritten),
             parse(SEED_HOOKS),
@@ -912,7 +918,7 @@ async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name
                 .to_string();
             assert_eq!(
                 command,
-                format!("{spaceless}{FOR_INSTANCE} --emit-status running --source antigravity-cli")
+                format!("{spaceless}{}", hook_call(HOST_PROFILE, "PreInvocation"))
             );
             assert!(!spaceless.contains(' '), "{spaceless:?}");
             assert_eq!(
@@ -1045,7 +1051,11 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
         window_keeps_hooks(&h, &mut client).await,
         "this instance's incomplete entry is rewritten at launch, so the window keeps its hooks"
     );
-    assert_yagura_entry(&layout.hooks_value(), &layout.expected_command(profile));
+    assert_yagura_entry(
+        &layout.hooks_value(),
+        profile,
+        &layout.expected_daemon(profile),
+    );
 
     layout.write_hooks(&registered_text);
     assert!(
@@ -1115,7 +1125,11 @@ async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_wind
     let window_id = open_window(&mut client).await;
 
     let rewritten = layout.hooks_value();
-    assert_yagura_entry(&rewritten, &layout.expected_command(HOST_PROFILE));
+    assert_yagura_entry(
+        &rewritten,
+        HOST_PROFILE,
+        &layout.expected_daemon(HOST_PROFILE),
+    );
     assert_eq!(
         object_without_yagura(&rewritten),
         parse(SEED_HOOKS),
@@ -1144,7 +1158,11 @@ async fn listing_rewrites_this_instances_out_of_date_entry_and_still_shows_a_bri
     layout.write_hooks(&older);
     let status = listed_status(&mut approver, 2).await;
     let rewritten = layout.hooks_value();
-    assert_yagura_entry(&rewritten, &layout.expected_command(HOST_PROFILE));
+    assert_yagura_entry(
+        &rewritten,
+        HOST_PROFILE,
+        &layout.expected_daemon(HOST_PROFILE),
+    );
     assert_eq!(object_without_yagura(&rewritten), parse(SEED_HOOKS));
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
 
@@ -1156,7 +1174,8 @@ async fn listing_rewrites_this_instances_out_of_date_entry_and_still_shows_a_bri
     let status = listed_status(&mut approver, 3).await;
     assert_yagura_entry(
         &layout.hooks_value(),
-        &layout.expected_command(HOST_PROFILE),
+        HOST_PROFILE,
+        &layout.expected_daemon(HOST_PROFILE),
     );
     assert_eq!(status.state, McpRegistrationState::Differs, "{status:?}");
     assert_eq!(status.differs_in, vec!["command".to_string()], "{status:?}");

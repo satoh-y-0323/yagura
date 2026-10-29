@@ -63,88 +63,75 @@ const EVENTS: [(&str, &str, &str); 6] = [
 ];
 
 /// `trusted_hash` per hook, keyed by the part of its trust key after the layer path
-/// (`<event>:<group>:<handler>`), for the commands
-/// `yagura-daemon --emit-status <status> --source codex-cli` and the three doors a window's CLI
-/// reads its inbox through. The first handler of `UserPromptSubmit` is the status report; the
-/// doors are the handlers added next to it and the new `SessionStart` event.
-const HOST_HASHES: [(&str, &str); 9] = [
+/// (`<event>:<group>:<handler>`), for the commands `yagura-daemon --hook codex-cli <Event>`.
+/// Every event is one group with one handler, so each key ends in `:0:0`.
+const HOST_HASHES: [(&str, &str); 7] = [
     (
         "user_prompt_submit:0:0",
-        "sha256:bcdd1a4e04c2adf8d261c27dd14730f9096c08fe0345e1eb69aa716bbdc78ec2",
+        "sha256:02032e0879a2fbddb9f0e2690072eceeb3b16c73f658405259f457079129f2e7",
     ),
     (
         "pre_tool_use:0:0",
-        "sha256:6af0ccec70ae43c3185b536b05b462d419e571eabb1d4b94b1a2edaea259e379",
+        "sha256:31260d38950fe330199fa666df200a3f53c54d4e4da1a0d1b9d84053b7f42466",
     ),
     (
         "post_tool_use:0:0",
-        "sha256:5efd19a45a144926108b1fc429a7263dc6ac6b0b75a8e207d2560ce5e98d544f",
+        "sha256:1be9973fde53b9993f850a41917392dbd9bb2402c950fccf16794427600925ee",
     ),
     (
         "permission_request:0:0",
-        "sha256:5efe27044d7f6270223f101a93a3888d13b9357a16b8ab0e9873479b8b34e4a7",
+        "sha256:3fb04fe1cc776d675b8e4a998207258698706caa29c9cd303df61a060c9b1983",
     ),
     (
         "stop:0:0",
-        "sha256:4c2cb00ead159dc4581d064a3b1e5773e87ba45b1cd2f52000e3eac60af0e807",
+        "sha256:eedecbdbf094978df724e83fa53dead35ccd572bf17413bd4d22a3dcb908870e",
     ),
     (
         "interrupt:0:0",
-        "sha256:f922670c2371572c137477fd40f9c9d860e4e25a06d5130bd52f39344c928ac9",
+        "sha256:a3859bc8069fc031b1f0565f704b051613089fa979fb50c20779080ac9ca4489",
     ),
     (
         "session_start:0:0",
-        "sha256:cf21a391f2cb6943a687fb780e9176839d9f98dd552d3c4a73aeceee2bb128b4",
-    ),
-    (
-        "user_prompt_submit:0:1",
-        "sha256:fef1c207b9b998e56af2f77afef068a25d39d76b097dcfbbc339f5caafc3105f",
-    ),
-    (
-        "user_prompt_submit:0:2",
-        "sha256:15779906e60d795a1816f8cbb6360e2c807012f52098613d09e4d72fb089319a",
+        "sha256:24fdd95ac846f2f040eb9080e25cf31fffec6f98ab4203fec6fa7142bf825446",
     ),
 ];
 
-/// The same, for `yagura-daemon.exe ...` (the WSL profile calls the Windows executable).
-const WSL_HASHES: [(&str, &str); 9] = [
+/// The same, for `yagura-daemon.exe --hook wsl-codex-cli <Event>` (the WSL profile calls the
+/// Windows executable).
+const WSL_HASHES: [(&str, &str); 7] = [
     (
         "user_prompt_submit:0:0",
-        "sha256:83f84d8a25f526a1ada8a56b0bf9fc47f4994145ed7427c23932aa675dd79aa4",
+        "sha256:e08ce961764ed6b0c8da9f54e00e60f6f1ab0d7d97b6dc7a8a8eb1abb3e721cd",
     ),
     (
         "pre_tool_use:0:0",
-        "sha256:98dabe6d33c4c6d7ab045cd4bd62f35293a7bc6d2dfbd925ead971024f6feb25",
+        "sha256:91b667eb99eb41cedd5915bda9bd464b3818125b37599aee2b081687770da216",
     ),
     (
         "post_tool_use:0:0",
-        "sha256:eaa6e89082c12ced1b86bb9d2a230c3918e7943c03cf54f2ad713ed0b1edea91",
+        "sha256:284a3acc9795611b0649fe54fc08ba6b1d1bc2a671fa08986cdd5639a0f8fac9",
     ),
     (
         "permission_request:0:0",
-        "sha256:44f1ce78ae1ed855ad7b9bf53ef66a9a9b12d6b3a03c1eb63c9ac361e9a577a2",
+        "sha256:aca0c79a6f0619696a82f59c4742cee11bddb16d9a6852cf339bc57cae946889",
     ),
     (
         "stop:0:0",
-        "sha256:8918ebfbb7a4fd5c7aae8798514ca10d115b5ef648ef3704a11afcfc7840f666",
+        "sha256:b597adc0cd753aa5905f72cc77136b041b7f37d82b385f22c446db0f63371794",
     ),
     (
         "interrupt:0:0",
-        "sha256:19a4ee2712cd73414b2c13f19a8183731238195ddd118946ee8fb9d210193f2b",
+        "sha256:aff135859be7c027a03d207700edc6580980129e7b7585cefe226a0210660bc0",
     ),
     (
         "session_start:0:0",
-        "sha256:4797ec0bdc9f2dd9beb2dc55e20215a4609c6f6d15ff49f8c2f2e493e6bb6dc5",
-    ),
-    (
-        "user_prompt_submit:0:1",
-        "sha256:5be51c65610812ad8b436954dbec8df94f5845db00dfbd5baa17ec8b8092dd00",
-    ),
-    (
-        "user_prompt_submit:0:2",
-        "sha256:dab1ea0140be7aef663bdd6dc37130d16134a4b43755295d4d043eaf78b1f4b4",
+        "sha256:a115dbf2b1fe741824096dce087ed090c8feb2348a8ec2876302e9249a15d649",
     ),
 ];
+
+/// The keys an older yagura wrote for the handlers `UserPromptSubmit` no longer has. A
+/// registration takes them away; they are not part of the trust a window needs.
+const RETIRED_SUFFIXES: [&str; 2] = ["user_prompt_submit:0:1", "user_prompt_submit:0:2"];
 
 /// What a hook's `additionalContextLimit` must be: the profile's `max_chars`.
 const CONTEXT_LIMIT: i64 = 10_000;
@@ -160,12 +147,16 @@ fn program_of(profile: &str) -> &'static str {
 /// The trust keys Codex derives for `profile`'s hooks: the synthetic layer
 /// path of the command-line flags depends on the operating system of the
 /// Codex process, which is Linux inside WSL and the host otherwise.
-fn expected_trust(profile: &str) -> BTreeMap<String, String> {
-    let root = if profile == WSL_PROFILE || !cfg!(windows) {
+fn trust_root(profile: &str) -> &'static str {
+    if profile == WSL_PROFILE || !cfg!(windows) {
         "/<session-flags>/config.toml"
     } else {
         "C:\\<session-flags>\\config.toml"
-    };
+    }
+}
+
+fn expected_trust(profile: &str) -> BTreeMap<String, String> {
+    let root = trust_root(profile);
     let hashes = if profile == WSL_PROFILE {
         WSL_HASHES
     } else {
@@ -242,35 +233,23 @@ fn hook_commands(args: &[String]) -> BTreeMap<String, Vec<Handler>> {
     out
 }
 
-/// The handlers each event carries: the status report alone for the events that only report,
-/// and for `UserPromptSubmit` the report first, then the door that reads the inbox and the one
-/// that tells the daemon the session; `SessionStart` is the door for the start-up context.
+/// The handlers each event carries: one call of the profile's own `--hook` door, and the
+/// context limit on the two events whose output reaches the model.
 fn expected_commands(profile: &str) -> BTreeMap<String, Vec<Handler>> {
     let program = program_of(profile);
-    let mut expected: BTreeMap<String, Vec<Handler>> = EVENTS
-        .iter()
-        .map(|(event, _, status)| {
+    let mut events: Vec<&str> = EVENTS.iter().map(|(event, _, _)| *event).collect();
+    events.push("SessionStart");
+    events
+        .into_iter()
+        .map(|event| {
+            let limit =
+                matches!(event, "SessionStart" | "UserPromptSubmit").then_some(CONTEXT_LIMIT);
             (
-                (*event).to_string(),
-                vec![(
-                    format!("{program} --emit-status {status} --source codex-cli"),
-                    None,
-                )],
+                event.to_string(),
+                vec![(format!("{program} --hook {profile} {event}"), limit)],
             )
         })
-        .collect();
-    expected
-        .get_mut("UserPromptSubmit")
-        .expect("the status events include UserPromptSubmit")
-        .extend([
-            (format!("{program} --deliver-take"), Some(CONTEXT_LIMIT)),
-            (format!("{program} --report-session /session_id"), None),
-        ]);
-    expected.insert(
-        "SessionStart".to_string(),
-        vec![(format!("{program} --deliver-context"), Some(CONTEXT_LIMIT))],
-    );
-    expected
+        .collect()
 }
 
 #[test]
@@ -299,45 +278,36 @@ fn the_shipped_codex_profiles_inject_their_hooks_as_plain_overrides_one_event_ea
     }
 }
 
+/// The `-c` value each event is injected with. Codex derives its trust hash from this text,
+/// so the hashes above are only right while it is exactly this.
+fn injected_text(profile: &str, event: &str) -> String {
+    let program = program_of(profile);
+    let limit = if matches!(event, "SessionStart" | "UserPromptSubmit") {
+        ",additionalContextLimit=10000"
+    } else {
+        ""
+    };
+    format!(
+        "hooks.{event}=[{{hooks=[{{type='command',command='{program} --hook {profile} {event}'{limit}}}]}}]"
+    )
+}
+
 #[test]
-fn the_doors_are_added_to_the_user_prompt_group_without_dropping_the_status_report() {
+fn the_injected_hook_text_is_the_fixed_text_the_trust_hashes_were_taken_from() {
     for profile in [HOST_PROFILE, WSL_PROFILE] {
-        let program = program_of(profile);
         let spec = parse_profile(profile, &shipped_source(profile))
             .unwrap_or_else(|err| panic!("{profile} must parse: {err}"))
             .hooks
             .unwrap_or_else(|| panic!("{profile} must ship a [hooks] table"));
         let assignments = hook_assignments(&render_hooks_args(&spec, InjectedPaths::default()));
-
-        let submit = &assignments["UserPromptSubmit"];
-        let running = format!(
-            "{{type='command',command='{program} --emit-status running --source codex-cli'}}"
-        );
-        let take = format!(
-            "{{type='command',command='{program} --deliver-take',additionalContextLimit=10000}}"
-        );
-        let report = format!("{{type='command',command='{program} --report-session /session_id'}}");
-        let positions: Vec<usize> = [&running, &take, &report]
-            .iter()
-            .map(|handler| {
-                submit
-                    .find(handler.as_str())
-                    .unwrap_or_else(|| panic!("{profile}: {handler} is missing from {submit}"))
+        let expected: BTreeMap<String, String> = expected_commands(profile)
+            .into_keys()
+            .map(|event| {
+                let text = injected_text(profile, &event);
+                (event, text)
             })
             .collect();
-        assert!(
-            positions.windows(2).all(|pair| pair[0] < pair[1]),
-            "{profile}: the handlers keep their indexes (status report 0, inbox 1, session 2), \
-             which the trust keys name: {submit}"
-        );
-        let start = format!(
-            "{{type='command',command='{program} --deliver-context',additionalContextLimit=10000}}"
-        );
-        assert!(
-            assignments["SessionStart"].contains(&start),
-            "{profile}: {}",
-            assignments["SessionStart"]
-        );
+        assert_eq!(assignments, expected, "{profile}");
     }
 }
 
@@ -681,6 +651,70 @@ async fn registering_the_host_codex_row_adds_its_trust_keys_and_removing_takes_t
 #[tokio::test]
 async fn registering_the_wsl_codex_row_adds_its_trust_keys_and_removing_takes_them_away() {
     register_then_remove_case(WSL_PROFILE, "codex-trust-wsl").await;
+}
+
+/// The retired keys of `profile`, in the layer its trust keys use.
+fn retired_keys(profile: &str) -> Vec<String> {
+    RETIRED_SUFFIXES
+        .iter()
+        .map(|suffix| format!("{}:{suffix}", trust_root(profile)))
+        .collect()
+}
+
+async fn retired_keys_case(profile: &str, tag: &str) {
+    let layout = Layout::new(tag);
+    let retired = retired_keys(profile);
+    let mut seed = String::from(SEED_CONFIG);
+    for key in &retired {
+        seed.push_str(&format!(
+            "\n[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:old\"\n",
+            key.replace('\\', "\\\\")
+        ));
+    }
+    layout.write_config(&seed);
+    let h = start(tag, profile, &layout).await;
+    let mut approver = approver_connection(&h).await;
+    assert!(
+        retired
+            .iter()
+            .all(|key| hooks_state(&layout.read_config()).contains_key(key)),
+        "the seed holds the retired keys"
+    );
+
+    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None);
+    assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
+    assert_eq!(
+        hooks_state(&layout.read_config()),
+        with_user_key(expected_trust(profile)),
+        "registering takes the retired keys away and writes the current ones"
+    );
+
+    let mut readded = layout.read_config();
+    for key in &retired {
+        readded.push_str(&format!(
+            "\n[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:old\"\n",
+            key.replace('\\', "\\\\")
+        ));
+    }
+    layout.write_config(&readded);
+    let (error, _) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
+    assert_eq!(error, None);
+    assert_eq!(
+        hooks_state(&layout.read_config()),
+        with_user_key(BTreeMap::new()),
+        "removing takes the retired keys as well, and only yagura's"
+    );
+}
+
+#[tokio::test]
+async fn registering_and_removing_the_host_codex_row_take_the_retired_trust_keys_away() {
+    retired_keys_case(HOST_PROFILE, "codex-retired-host").await;
+}
+
+#[tokio::test]
+async fn registering_and_removing_the_wsl_codex_row_take_the_retired_trust_keys_away() {
+    retired_keys_case(WSL_PROFILE, "codex-retired-wsl").await;
 }
 
 #[tokio::test]
