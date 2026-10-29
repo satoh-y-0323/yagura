@@ -44,6 +44,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - **A CLI started by a tool of a window can no longer report as that window** in the bundled profiles listed under Changed: its environment holds no window id or token, so its hook doors and MCP bridge are outside any window. In `codex-cli` and `wsl-codex-cli` the tools Codex runs see the two variables empty. Still open: `grok-build`, `antigravity-cli`, the native `muse-code` (every operating system), `shell` and the WSL variants of the first two keep the credentials in the environment: the hooks of the others are written once into the CLI's own settings by a registration, which has no place for a per-window path, and `shell` has no hooks to hand a file to. They move to a file once their CLI can take its hooks and MCP server at launch, or can set the environment of the tools it runs.
 - `rustix` is updated to 1.1.6 for [GHSA-jh2m-fhpj-3vr7](https://github.com/bytecodealliance/rustix/security/advisories/GHSA-jh2m-fhpj-3vr7). The advisory is in its extended-attribute getters, which none of the crates yagura builds with call, so yagura was not exposed. `rustix` is built only on Linux and macOS.
+- `sha2` is updated to 0.11, so the daemon and `yagura-os` no longer use `block-buffer` 0.10, which [GHSA-qwgh-2vcv-g2f7](https://github.com/advisories/GHSA-qwgh-2vcv-g2f7) affects. Tauri's build-time code generation still uses it while building the GUI; it is not part of the installed app.
 
 ## [0.2.0] - 2026-10-24
 

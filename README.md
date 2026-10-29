@@ -3,7 +3,7 @@
 **Run agent CLIs from different vendors side by side, and let them work together.**
 
 yagura is a desktop app that runs any command -- Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Muse Code, or a plain shell -- in its own window, tells you at a glance which window
+Copilot CLI, Grok Build, Muse Code, or a plain shell -- in its own window, tells you at a glance which window
 is working and which one is waiting for you, and gives the agents in those windows an MCP server to
 see and talk to each other.
 You stay in control: anything one agent does to another window waits for your approval unless you
@@ -37,7 +37,7 @@ allow it.
 - `yagura-mcp` gives an agent tools to list, open, read, message and close windows. Windows opened
   from the bundled Claude Code, Codex CLI and GitHub Copilot CLI profiles, and from the WSL Muse
   Code profile, are connected automatically; register yagura in Settings > Integrations for
-  Antigravity CLI and Muse Code.
+  Antigravity CLI, Grok Build and Muse Code.
 - **Handoff**: pass a reference and a note to another window -- or to a new one, opened with the
   CLI you choose -- and learn whether its CLI took it.
 - **Chat rooms**: agents and you post to each other with `@name`, `@parent` and `@user`. A room
@@ -82,7 +82,7 @@ allow it.
 | Other systems, Intel Macs | Build from source -- see [docs/building.md](docs/building.md). |
 
 You also need the agent CLIs you want to run (Claude Code, Codex CLI, Antigravity CLI, GitHub
-Copilot CLI, Muse Code), installed and signed in as usual. yagura does not install or sign in to
+Copilot CLI, Grok Build, Muse Code), installed and signed in as usual. yagura does not install or sign in to
 them for you. On Windows, install Codex CLI's standalone build rather than the npm package: yagura
 wakes a waiting Codex CLI with a command that the npm package's `.cmd` launcher cannot pass text
 through, and lists the Codex CLI profile as unavailable until the standalone build is first on
@@ -141,12 +141,18 @@ To use yagura's tools from a CLI session that yagura did not start, register the
   [Approver Registration](docs/mcp-setup.md#approver-registration)).
 - With `YAGURA_LOG=debug`, the daemon log ([where it is](docs/mcp-setup.md#where-the-daemon-log-is))
   also records lines from each window's screen. Turn it off again once you are done diagnosing.
-- yagura keeps each window's command line and working directory, the chat rooms and the plans in
-  its session store (`yagura.db`, see [Running a second instance](docs/instances.md) for where it
+- yagura keeps each window's command line and working directory, the chat rooms, the plans and the
+  tickets in its session store (`yagura.db`, see [Running a second instance](docs/instances.md) for where it
   lives) without encrypting them. Do not put secrets such as tokens or passwords in a window's
   command line; use the CLI's own login, or an environment variable set outside yagura, instead.
 - Messages one agent sends another -- handoffs, chat and reports -- are data from another agent,
   not instructions from you. yagura delivers them as such.
+- A window's id and token let its hooks and MCP bridge speak for it. In windows of the bundled
+  Claude Code and GitHub Copilot CLI profiles, and of the WSL Muse Code profile, they reach only
+  those, so a CLI that one of the window's tools starts cannot speak for the window. In a Codex CLI
+  window the tools Codex runs get them empty. Other windows -- Antigravity CLI, Grok Build, Muse Code
+  outside WSL, a shell -- still carry them in their environment, where any program started inside
+  can read them (see [profiles/README.md](profiles/README.md#credentials)).
 
 ## License
 

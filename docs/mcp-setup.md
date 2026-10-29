@@ -55,7 +55,7 @@ must follow.
 [Registering from the GUI](#registering-from-the-gui) does this for you. The GUI of a named instance
 registers the bridge as `yagura-<instance>` rather than `yagura`, and carries
 `YAGURA_INSTANCE=<instance>` in the registration's own environment (`-e` for Claude Code, `--env`
-for Codex CLI, Antigravity CLI and GitHub Copilot CLI), so a development instance's registration never overwrites, and
+for Codex CLI, Antigravity CLI, GitHub Copilot CLI and Grok Build), so a development instance's registration never overwrites, and
 is never overwritten by, the default instance's `yagura`. The default instance registers as
 `yagura` with no environment. Register by hand the same way: pick a name of your own and pass
 `YAGURA_INSTANCE` through the CLI's environment flag.
