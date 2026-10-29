@@ -50,12 +50,12 @@ use serde_json::Value;
 use yagura_protocol::{
     APPROVAL_SETTINGS_MIN_REVISION, CHAT_ROOM_REMOVAL_MIN_REVISION, CellPosition, ClientMessage,
     ControlKey, DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes,
-    FRAME_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION, MCP_REGISTRATION_MIN_REVISION,
-    MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers, NamedKey,
-    PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
-    PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton, PointerInput, PointerKind,
-    ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment, WheelInput, WindowStatus,
-    required_protocol_revision,
+    FRAME_MIN_REVISION, HOOK_EVENTS_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION,
+    MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers,
+    NamedKey, PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
+    PROTOCOL_REVISION, PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton,
+    PointerInput, PointerKind, ReportOutcome, TASK_INSTRUCTION_MIN_REVISION, TaskAssignment,
+    WheelInput, WindowStatus, required_protocol_revision,
 };
 
 fn wire_tag_of(msg: &ClientMessage) -> String {
@@ -359,6 +359,13 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             description: None,
             position: 0,
         },
+        ClientMessage::RunHook {
+            window_id: "w1".to_string(),
+            token: "t".to_string(),
+            profile: "p".to_string(),
+            name: "Stop".to_string(),
+            input: None,
+        },
     ]
 }
 
@@ -511,6 +518,7 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::UpdateTicket { .. }
                         | ClientMessage::AddTicketResult { .. }
                         | ClientMessage::SetMilestone { .. }
+                        | ClientMessage::RunHook { .. }
                 )
         })
     {
@@ -918,4 +926,21 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
         );
     }
     assert_eq!(FRAME_MIN_REVISION, 19);
+}
+
+#[test]
+fn run_hook_requires_revision_thirty_one_and_that_is_the_current_revision() {
+    let message = ClientMessage::RunHook {
+        window_id: "w1".to_string(),
+        token: "t".to_string(),
+        profile: "p".to_string(),
+        name: "Stop".to_string(),
+        input: None,
+    };
+    assert_eq!(
+        required_protocol_revision(&message),
+        HOOK_EVENTS_MIN_REVISION
+    );
+    assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
+    assert_eq!(PROTOCOL_REVISION, 31);
 }

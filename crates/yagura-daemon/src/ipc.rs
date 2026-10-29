@@ -35,6 +35,7 @@ use yagura_protocol::{
 
 mod approval_settings;
 pub mod chat;
+mod hook;
 mod inbox;
 mod mcp_registration;
 mod model;
@@ -959,6 +960,9 @@ pub struct IpcServer {
     /// as that operation's own steps and status re-read take (see
     /// [`mcp_registration::handle_run_mcp_registration`]).
     mcp_registration_changes: Arc<Semaphore>,
+    /// Admits the profile reads of `run_hook`, each on a blocking thread, sized
+    /// like `role_and_profile_reads`.
+    hook_profile_reads: Semaphore,
     /// Every window's inbox of reports from the windows it opened or owns
     /// tasks for. Memory only, and always enabled.
     reports: Arc<report::ReportInboxes>,
@@ -1014,6 +1018,7 @@ impl IpcServer {
         let policy = Arc::new(PolicyCell::from_config(&config));
         let role_and_profile_reads = Semaphore::new(config.max_windows);
         let window_text_reads = Semaphore::new(config.max_windows);
+        let hook_profile_reads = Semaphore::new(config.max_windows);
         let model_choices_listing = Arc::new(Semaphore::new(config.model_choices_max_concurrent));
         let mcp_registration_listing = Arc::new(Semaphore::new(1));
         let mcp_registration_row_reads = Arc::new(Semaphore::new(
@@ -1048,6 +1053,7 @@ impl IpcServer {
             mcp_registration_row_reads,
             mcp_launch_listings,
             mcp_registration_changes,
+            hook_profile_reads,
             reports,
             health_checks: Semaphore::new(1),
             palette_store: store_gate::StoreGate::disabled(),
@@ -1786,6 +1792,17 @@ impl IpcServer {
                 {
                     inbox::handle_report_session(&entry, outbound, &session);
                 }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::RunHook {
+                window_id,
+                token,
+                profile,
+                name,
+                input,
+            }) => {
+                self.handle_run_hook(outbound, &window_id, &token, &profile, &name, input)
+                    .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::CreatePlan {
@@ -3874,32 +3891,39 @@ impl IpcServer {
         else {
             return;
         };
+        if let Some(refusal) = self.apply_status_event(&entry, Some(source), status) {
+            outbound.reply(&refusal);
+        }
+    }
 
+    /// Charges the event budget, checks `source` (a request that carries none
+    /// passes `None`) and records `status` on the authenticated `entry`.
+    /// Returns the refusal to answer with, or `None` when the status was
+    /// recorded.
+    fn apply_status_event(
+        &self,
+        entry: &WindowEntry,
+        source: Option<&str>,
+        status: WindowStatus,
+    ) -> Option<DaemonMessage> {
         if !self.charge_status_event_budget() {
-            outbound.reply(&error_msg(
+            return Some(error_msg(
                 "rate_limited",
                 "status_event rate limit exceeded; the event was discarded",
             ));
-            return;
         }
-
-        if !is_valid_source(source) {
-            outbound.reply(&error_msg(
+        if source.is_some_and(|source| !is_valid_source(source)) {
+            return Some(error_msg(
                 "invalid_argument",
                 "source must match [a-z0-9_-]{1,64}",
             ));
-            return;
         }
-
-        if is_confirmed_exited(&entry) {
-            outbound.reply(&child_exited_msg());
-            return;
+        if is_confirmed_exited(entry) {
+            return Some(child_exited_msg());
         }
-        if !entry.record_status_event(status) {
-            // The detector is torn down on `Exited`, so losing it is the same
-            // condition as the state check above, observed one step later.
-            outbound.reply(&child_exited_msg());
-        }
+        // The detector is torn down on `Exited`, so losing it is the same
+        // condition as the state check above, observed one step later.
+        (!entry.record_status_event(status)).then(child_exited_msg)
     }
 
     /// Resolves the window a hook's request (`door` names it) speaks for,

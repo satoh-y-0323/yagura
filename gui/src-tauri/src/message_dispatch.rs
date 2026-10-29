@@ -415,7 +415,9 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         | DaemonMessage::Delivery { .. }
         | DaemonMessage::SessionRecorded { .. }
         // MilestoneSet is never received: the GUI only reads tickets.
-        | DaemonMessage::MilestoneSet { .. } => None,
+        | DaemonMessage::MilestoneSet { .. }
+        // HookInputWanted answers a hook's request, which the GUI never sends.
+        | DaemonMessage::HookInputWanted { .. } => None,
     }
 }
 

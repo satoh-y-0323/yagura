@@ -11,19 +11,41 @@ use std::sync::Arc;
 
 use yagura_protocol::DaemonMessage;
 
-use crate::inbox::{Wait, silence};
+use crate::inbox::{DeliverySpec, Wait, silence};
 use crate::window::WindowEntry;
 
 use super::{ConnectionState, Outbound, pending_waits_exhausted_msg};
 
-/// Answers `deliver_context`: the intro and what is waiting behind it.
-pub(super) fn handle_context(entry: &WindowEntry, outbound: &Outbound, intro: &str) {
-    outbound.reply(&entry.inbox().context(intro));
+/// The answer to `deliver_context`: the intro and what is waiting behind it,
+/// printed as `spec` says, or as the window's own delivery says when `None`.
+pub(super) fn context_message(
+    entry: &WindowEntry,
+    intro: &str,
+    spec: Option<&DeliverySpec>,
+) -> DaemonMessage {
+    match spec {
+        Some(spec) => entry.inbox().context_by(intro, spec),
+        None => entry.inbox().context(intro),
+    }
 }
 
-/// Answers `deliver_take`: what is waiting.
+/// The answer to `deliver_take`: what is waiting, printed as in
+/// [`context_message`].
+pub(super) fn take_message(entry: &WindowEntry, spec: Option<&DeliverySpec>) -> DaemonMessage {
+    match spec {
+        Some(spec) => entry.inbox().take_by(spec),
+        None => entry.inbox().take(),
+    }
+}
+
+/// Answers `deliver_context`.
+pub(super) fn handle_context(entry: &WindowEntry, outbound: &Outbound, intro: &str) {
+    outbound.reply(&context_message(entry, intro, None));
+}
+
+/// Answers `deliver_take`.
 pub(super) fn handle_take(entry: &WindowEntry, outbound: &Outbound) {
-    outbound.reply(&entry.inbox().take());
+    outbound.reply(&take_message(entry, None));
 }
 
 /// Answers `deliver_wait` at once when a parcel can be pushed, and otherwise

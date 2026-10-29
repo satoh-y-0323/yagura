@@ -76,6 +76,7 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::TicketDetail { .. } => "TicketDetail",
         DaemonMessage::MilestoneSet { .. } => "MilestoneSet",
         DaemonMessage::TicketChanged { .. } => "TicketChanged",
+        DaemonMessage::HookInputWanted { .. } => "HookInputWanted",
     }
 }
 

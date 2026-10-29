@@ -41,8 +41,9 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, DeliveryStream, WindowCredentials, WindowStatus,
-    decode_daemon_message, encode_client_message, frame_encode, process_window_credentials,
+    ClientMessage, DaemonMessage, DeliveryStream, HookInputValue, HookPointerKind,
+    WindowCredentials, WindowStatus, decode_daemon_message, encode_client_message, frame_encode,
+    process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -78,7 +79,18 @@ fn main() -> Result<ExitCode> {
         let _ = drain_hook_stdin().recv_timeout(HOOK_STDIN_DRAIN_GRACE);
         return Ok(ExitCode::SUCCESS);
     }
-    let command = cli::parse_args(&args).context("invalid command line")?;
+    let command = match cli::parse_args(&args) {
+        Ok(command) => command,
+        // A hook written by a newer copy may carry an argument this copy does not
+        // know; refusing it would fail the CLI's hook, so inside a window it is
+        // read to its end and left unanswered. Only a window's own process has
+        // credentials, so a mistyped daemon start outside one still fails.
+        Err(error) if credentials.is_some() => {
+            ignore_unreadable_hook(&error);
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(error) => return Err(error).context("invalid command line"),
+    };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -86,6 +98,20 @@ fn main() -> Result<ExitCode> {
         .context("failed to build the tokio runtime")?;
 
     runtime.block_on(async_main(command, credentials))
+}
+
+/// Leaves a command line this copy cannot read unanswered: one warning in the
+/// instance's log (no argument value), then stdin read to its end, bounded.
+fn ignore_unreadable_hook(error: &cli::CliError) {
+    // No instance means no log to put the warning in.
+    if let Ok(namespace) = cli::resolve_instance_id(std::env::var_os("YAGURA_INSTANCE")) {
+        init_logging(&namespace);
+        tracing::warn!(
+            "a window's command line was ignored and its input read to the end: {}",
+            error.without_values()
+        );
+    }
+    let _ = drain_hook_stdin().recv_timeout(HOOK_STDIN_DRAIN_GRACE);
 }
 
 async fn async_main(
@@ -132,6 +158,9 @@ async fn async_main(
         | CliCommand::DeliverWait { .. }
         | CliCommand::ReportSession { .. }) => {
             return run_hook(&ipc, &endpoint, door, credentials).await;
+        }
+        CliCommand::Hook { profile, event } => {
+            return run_hook_event(&ipc, &endpoint, &profile, &event, credentials).await;
         }
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
@@ -836,14 +865,7 @@ async fn run_hook_door(
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for a hook door")
     })?;
-    client
-        .write_all(&frame_encode(&encode_client_message(&message)))
-        .await
-        .context("failed to send the request")?;
-    client
-        .flush()
-        .await
-        .context("failed to flush the request")?;
+    send_hook_request(&mut client, &message).await?;
 
     let answer = if waits {
         read_one_daemon_message(&mut client).await
@@ -853,6 +875,26 @@ async fn run_hook_door(
             .context("the daemon did not answer")?
     };
     match answer {
+        Some(DaemonMessage::SessionRecorded { .. }) => Ok(ExitCode::SUCCESS),
+        // The daemon went away while a wait was registered: nothing to wake for.
+        None if waits => Ok(ExitCode::SUCCESS),
+        answer => finish_with_answer(answer),
+    }
+}
+
+/// Sends one request of a hook door on `client`.
+async fn send_hook_request(client: &mut ClientConnection, message: &ClientMessage) -> Result<()> {
+    client
+        .write_all(&frame_encode(&encode_client_message(message)))
+        .await
+        .context("failed to send the request")?;
+    client.flush().await.context("failed to flush the request")
+}
+
+/// Ends a hook door with the daemon's `answer`: a delivery is printed and its
+/// exit code returned, anything else is a failure.
+fn finish_with_answer(answer: Option<DaemonMessage>) -> Result<ExitCode> {
+    match answer {
         Some(DaemonMessage::Delivery {
             output,
             stream,
@@ -861,13 +903,95 @@ async fn run_hook_door(
             write_hook_output(stream, &output)?;
             Ok(ExitCode::from(exit_code))
         }
-        Some(DaemonMessage::SessionRecorded { .. }) => Ok(ExitCode::SUCCESS),
         Some(DaemonMessage::Error { code, .. }) => {
             anyhow::bail!("the daemon refused the request: {code}")
         }
-        // The daemon went away while a wait was registered: nothing to wake for.
-        None if waits => Ok(ExitCode::SUCCESS),
         _ => anyhow::bail!("the daemon sent no usable answer"),
+    }
+}
+
+/// Runs `--hook <profile> <event>`: the daemon does what the profile's
+/// `[hook_events]` says for the event, asking for the values of the hook's stdin
+/// it needs. `credentials` name the window the hook runs in.
+///
+/// Stdin is read to its end whichever way this ends: the reader is let go with
+/// no pointers once the exchange is over, and its end is waited for, bounded.
+async fn run_hook_event(
+    ipc: &PlatformIpc,
+    endpoint: &str,
+    profile: &str,
+    event: &str,
+    credentials: Option<WindowCredentials>,
+) -> Result<ExitCode> {
+    let (pointers, values, drained) = read_hook_stdin_on_request();
+    let result = match credentials {
+        Some(credentials) => {
+            exchange_hook_event(ipc, endpoint, profile, event, credentials, pointers, values).await
+        }
+        None => Err(anyhow::anyhow!(
+            "a hook door runs only with its window's credentials"
+        )),
+    };
+    let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
+    result
+}
+
+/// The requests of [`run_hook_event`]. Owns the reader's `pointers` sender, so
+/// it is dropped, and the reader let go, on every way out.
+async fn exchange_hook_event(
+    ipc: &PlatformIpc,
+    endpoint: &str,
+    profile: &str,
+    event: &str,
+    credentials: WindowCredentials,
+    pointers: std::sync::mpsc::Sender<Vec<String>>,
+    values: FoundValues,
+) -> Result<ExitCode> {
+    let WindowCredentials { window_id, token } = credentials;
+    let request = |input| ClientMessage::RunHook {
+        window_id: window_id.clone(),
+        token: token.clone(),
+        profile: profile.to_string(),
+        name: event.to_string(),
+        input,
+    };
+    let mut client = ipc.connect(endpoint).await.with_context(|| {
+        format!("failed to connect to the daemon endpoint {endpoint} for --hook")
+    })?;
+    send_hook_request(&mut client, &request(None)).await?;
+    let mut answer =
+        tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(&mut client))
+            .await
+            .context("the daemon did not answer")?;
+    if let Some(DaemonMessage::HookInputWanted { pointers: wanted }) = answer {
+        pointers
+            .send(wanted.iter().map(|p| p.pointer.clone()).collect())
+            .map_err(|_| anyhow::anyhow!("the hook input reader has stopped"))?;
+        let found = values.await.context("reading the hook input failed")?;
+        let input = wanted
+            .iter()
+            .zip(found)
+            .map(|(wanted, value)| hook_input_value(wanted.kind, value))
+            .collect();
+        send_hook_request(&mut client, &request(Some(input))).await?;
+        answer = tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(&mut client))
+            .await
+            .context("the daemon did not answer")?;
+    }
+    finish_with_answer(answer)
+}
+
+/// What the daemon asked about one pointer, answered from the `value` found
+/// there. Only a session identifier is sent as text: a longer or odd string
+/// stays out of the request.
+fn hook_input_value(kind: HookPointerKind, value: Option<PointerValue>) -> HookInputValue {
+    match (kind, value) {
+        (_, None) => HookInputValue::Absent,
+        (HookPointerKind::Presence, Some(_)) => HookInputValue::Present,
+        (HookPointerKind::Session, Some(value)) => value
+            .into_text()
+            .filter(|text| is_session_id(text))
+            .map_or(HookInputValue::Absent, HookInputValue::Session),
     }
 }
 
@@ -911,6 +1035,31 @@ fn read_hook_stdin(
         let _ = done.send(());
     });
     (found, drained)
+}
+
+/// What a stdin reader found at the pointers it was given.
+type FoundValues = tokio::sync::oneshot::Receiver<Vec<Option<PointerValue>>>;
+
+/// Like [`read_hook_stdin`], for a door that learns its pointers from the
+/// daemon: the reader waits for them on the returned sender. A sender dropped
+/// without sending them means there are none, and stdin is read to its end.
+fn read_hook_stdin_on_request() -> (
+    std::sync::mpsc::Sender<Vec<String>>,
+    FoundValues,
+    std::sync::mpsc::Receiver<()>,
+) {
+    let (pointers, wanted) = std::sync::mpsc::channel::<Vec<String>>();
+    let (values, found) = tokio::sync::oneshot::channel();
+    let (done, drained) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let wanted = wanted.recv().unwrap_or_default();
+        let mut stdin = std::io::stdin().lock();
+        let wanted: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        let _ = values.send(values_at_pointers(&mut stdin, &wanted));
+        let _ = std::io::copy(&mut stdin, &mut std::io::sink());
+        let _ = done.send(());
+    });
+    (pointers, found, drained)
 }
 
 /// Reads a single length-prefixed frame from `client` and decodes it as a

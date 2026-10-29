@@ -29,6 +29,7 @@ pub mod profile_command;
 pub mod profile_delivery;
 pub mod profile_detail;
 pub mod profile_enabled;
+pub mod profile_hook_events;
 mod profile_layers;
 pub mod profile_rewrite;
 pub mod pty;

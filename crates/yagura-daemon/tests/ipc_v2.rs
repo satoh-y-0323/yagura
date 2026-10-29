@@ -317,6 +317,7 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::TicketDetail { .. } => "TicketDetail".to_string(),
         DaemonMessage::MilestoneSet { .. } => "MilestoneSet".to_string(),
         DaemonMessage::TicketChanged { .. } => "TicketChanged".to_string(),
+        DaemonMessage::HookInputWanted { .. } => "HookInputWanted".to_string(),
     }
 }
 

@@ -7,7 +7,7 @@
 //! what is measured is what a peer on the wire observes.
 
 use serde_json::{Value, json};
-use yagura_protocol::{DaemonMessage, PROTOCOL_REVISION, ProfileCapability, decode_daemon_message};
+use yagura_protocol::{DaemonMessage, ProfileCapability, decode_daemon_message};
 
 fn listed_frame(row_extra: Value) -> Vec<u8> {
     let mut row = json!({
@@ -54,11 +54,6 @@ fn a_row_from_an_older_daemon_without_a_notice_reads_as_none() {
         row.get("notice").is_some_and(Value::is_null),
         "an absent notice must be carried as an explicit None, got: {row}"
     );
-}
-
-#[test]
-fn the_protocol_revision_is_thirty() {
-    assert_eq!(PROTOCOL_REVISION, 30);
 }
 
 #[test]

@@ -917,6 +917,7 @@ fn expected_wording(err: &ProfileParseError) -> &'static str {
         ProfileParseError::InvalidMcp(_) => "invalid mcp table",
         ProfileParseError::InvalidHooks(_) => "invalid hooks table",
         ProfileParseError::InvalidDelivery(_) => "invalid delivery table",
+        ProfileParseError::InvalidHookEvents(_) => "invalid hook events table",
         ProfileParseError::InvalidShimGuidance => "invalid shim guidance table",
         ProfileParseError::InvalidMcpRegistration(_) => "invalid mcp registration table",
         ProfileParseError::InvalidHostPaths(_) => "invalid host paths table",

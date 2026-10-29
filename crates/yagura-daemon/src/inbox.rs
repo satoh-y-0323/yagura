@@ -505,7 +505,16 @@ impl Shared {
     /// when there is one. A parcel is never cut: the first one that does not
     /// fit stays for the next answer.
     fn take_within(&self, state: &mut State, intro: &str) -> (Vec<Held>, String) {
-        let limit = self.spec.max_chars;
+        self.take_within_limit(state, intro, self.spec.max_chars)
+    }
+
+    /// [`Shared::take_within`] with the answer's limit given by the caller.
+    fn take_within_limit(
+        &self,
+        state: &mut State,
+        intro: &str,
+        limit: usize,
+    ) -> (Vec<Held>, String) {
         // An intro longer than the limit cannot be carried whole by any answer.
         let mut text: String = intro.chars().take(limit).collect();
         let mut used = text.chars().count();
@@ -800,12 +809,17 @@ impl Inbox {
     /// The answer for a CLI's start-up: `intro`, then the parcels that fit
     /// behind it. The parcels it carries are taken.
     pub fn context(&self, intro: &str) -> DaemonMessage {
-        self.read(intro, &self.shared.spec.output.context)
+        self.context_by(intro, &self.shared.spec)
     }
 
-    fn read(&self, intro: &str, form: &OutputForm) -> DaemonMessage {
+    /// [`Inbox::context`] answering by `spec` instead of the inbox's own.
+    pub fn context_by(&self, intro: &str, spec: &DeliverySpec) -> DaemonMessage {
+        self.read(intro, &spec.output.context, spec.max_chars)
+    }
+
+    fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DaemonMessage {
         let mut state = self.shared.lock();
-        let (taken, text) = self.shared.take_within(&mut state, intro);
+        let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
@@ -815,7 +829,12 @@ impl Inbox {
     /// The answer for the start of a turn: the parcels that fit in one
     /// answer, which are taken.
     pub fn take(&self) -> DaemonMessage {
-        self.read("", &self.shared.spec.output.take)
+        self.take_by(&self.shared.spec)
+    }
+
+    /// [`Inbox::take`] answering by `spec` instead of the inbox's own.
+    pub fn take_by(&self, spec: &DeliverySpec) -> DaemonMessage {
+        self.read("", &spec.output.take, spec.max_chars)
     }
 
     /// Registers a wait for the window, replacing the one registered before:

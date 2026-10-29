@@ -12,21 +12,21 @@
 //! Flags are scoped to one command: `--detection` / `--detection-dir` /
 //! `--playbook` / `--profiles-dir` / `--approver-exe` / `--roles` /
 //! `--tickets` configure the daemon itself and are ignored on the client-side paths -- `--emit-status`,
-//! `--deliver-context`, `--deliver-take`, `--deliver-wait`, `--report-session` and
-//! `--shutdown` -- none of which starts a detection engine or an approval gate,
+//! `--deliver-context`, `--deliver-take`, `--deliver-wait`, `--report-session`,
+//! `--hook` and `--shutdown` -- none of which starts a detection engine or an approval gate,
 //! just as `--source` qualifies `--emit-status` only.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use serde::Deserialize;
-use serde::de::IntoDeserializer;
 use thiserror::Error;
 use yagura_os::{InstanceIdError, InstanceNamespace};
 use yagura_protocol::{CREDENTIALS_FLAG, WindowStatus, is_valid_source};
 
 use crate::detector::definition::is_valid_detection_name;
 use crate::mcp_registration::RegistrationTarget;
+use crate::profile::validate_profile_id;
+use crate::profile_hook_events::{is_hook_event_name, parse_window_status};
 
 /// `--source` value used when `--emit-status` is invoked without one.
 const DEFAULT_EMIT_STATUS_SOURCE: &str = "cli";
@@ -108,6 +108,14 @@ pub enum CliCommand {
         /// `--skip-if`: see [`CliCommand::skip_if`].
         skip_if: Option<String>,
     },
+    /// Do what the named profile's `[hook_events]` says for one event
+    /// (`--hook <profile-id> <Event>`).
+    Hook {
+        /// The profile that declared the hook.
+        profile: String,
+        /// The event name, a key of that profile's `[hook_events]`.
+        event: String,
+    },
 }
 
 impl CliCommand {
@@ -122,15 +130,17 @@ impl CliCommand {
             | Self::DeliverTake { skip_if }
             | Self::DeliverWait { skip_if }
             | Self::ReportSession { skip_if, .. } => skip_if.as_deref(),
-            Self::Run { .. } | Self::Shutdown => None,
+            // The pointer of a `--hook` door is profile data, never an argument.
+            Self::Run { .. } | Self::Shutdown | Self::Hook { .. } => None,
         }
     }
 }
 
 /// Whether `args` name a hook door (`--emit-status`, `--deliver-*`,
-/// `--report-session`). Decided on the raw arguments, before [`parse_args`], so
-/// that a hook outside a window stays silent even when a copy of the binary
-/// older than the hook file does not know one of its other arguments.
+/// `--report-session`, `--hook`). Decided on the raw arguments, before
+/// [`parse_args`], so that a hook outside a window stays silent even when a copy
+/// of the binary older than the hook file does not know one of its other
+/// arguments.
 #[must_use]
 pub fn names_hook_door(args: &[String]) -> bool {
     args.iter().any(|arg| {
@@ -141,6 +151,7 @@ pub fn names_hook_door(args: &[String]) -> bool {
                 | "--deliver-take"
                 | "--deliver-wait"
                 | "--report-session"
+                | "--hook"
         )
     })
 }
@@ -202,9 +213,29 @@ pub enum CliError {
     /// Two mutually exclusive commands were requested at once.
     #[error(
         "only one of --shutdown, --emit-status, --deliver-context, --deliver-take, \
-         --deliver-wait and --report-session may be given"
+         --deliver-wait, --report-session and --hook may be given"
     )]
     ConflictingCommands,
+}
+
+impl CliError {
+    /// The rejection described without any argument value, for a log that must
+    /// not hold what a hook was given: only a flag's name (an argument that is
+    /// not a flag is not named at all).
+    #[must_use]
+    pub fn without_values(&self) -> String {
+        match self {
+            Self::UnknownArgument(arg) if arg.starts_with("--") => {
+                let flag = arg.split('=').next().unwrap_or(arg);
+                format!("unknown argument {flag}")
+            }
+            Self::UnknownArgument(_) => "unknown argument".to_string(),
+            Self::MissingValue { flag } => format!("missing value for {flag}"),
+            Self::InvalidValue { flag, .. } => format!("invalid value for {flag}"),
+            Self::RepeatedArgument(flag) => format!("{flag} repeated"),
+            Self::ConflictingCommands => "conflicting commands".to_string(),
+        }
+    }
 }
 
 /// Resolves `args` (the command line *without* the program name) into the
@@ -243,8 +274,26 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             "--shutdown" => shutdown = true,
             "--emit-status" => {
                 let value = next_value(&mut remaining, "--emit-status")?;
-                emit_status =
-                    Some(parse_status(value).ok_or_else(|| invalid("--emit-status", value))?);
+                emit_status = Some(
+                    parse_window_status(value).ok_or_else(|| invalid("--emit-status", value))?,
+                );
+            }
+            "--hook" => {
+                let profile = next_value(&mut remaining, "--hook")?;
+                if !validate_profile_id(profile) {
+                    return Err(invalid("--hook", profile));
+                }
+                let event = next_value(&mut remaining, "--hook")?;
+                if !is_hook_event_name(event) {
+                    return Err(invalid("--hook", event));
+                }
+                set_hook_door(
+                    &mut hook_door,
+                    CliCommand::Hook {
+                        profile: profile.clone(),
+                        event: event.clone(),
+                    },
+                )?;
             }
             "--deliver-context" => {
                 set_hook_door(&mut hook_door, CliCommand::DeliverContext { skip_if: None })?
@@ -333,6 +382,10 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
         return Err(CliError::ConflictingCommands);
     }
     if let Some(door) = hook_door {
+        // The pointers of a `--hook` door come from its profile alone.
+        if matches!(door, CliCommand::Hook { .. }) && skip_if.is_some() {
+            return Err(CliError::UnknownArgument("--skip-if".to_string()));
+        }
         return Ok(with_skip_if(door, skip_if));
     }
     if emit_status.is_none() {
@@ -575,17 +628,6 @@ fn resolve_config_file(
         return Some(PathBuf::from(env));
     }
     Some(yagura_os::instance_dir(&config_base?, namespace).join(file_name))
-}
-
-/// Parses a `WindowStatus` from its wire spelling.
-///
-/// Deserialization is used rather than a second `match` table so that the
-/// accepted spellings stay defined once, by `WindowStatus`'s own serde
-/// representation in `yagura-protocol`.
-fn parse_status(value: &str) -> Option<WindowStatus> {
-    let deserializer: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
-        value.into_deserializer();
-    WindowStatus::deserialize(deserializer).ok()
 }
 
 fn next_value<'a>(

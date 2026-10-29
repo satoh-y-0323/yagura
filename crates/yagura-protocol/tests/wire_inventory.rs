@@ -80,19 +80,19 @@ use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
     DaemonProblemKind, DefaultPalettes, DeliveryStream, Frame, FrameLine, FrameRun,
-    HandoffDelivery, InstructionNotice, InstructionNoticeState, Key, KeyInput, LaunchOptionAlias,
-    LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry,
-    McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
-    McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo, ModelChoice,
-    ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot, PlanInfo,
-    PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState, PointerButton,
-    PointerInput, PointerKind, ProfileCapability, ProfileCommandDetail, ProfileDetailEntry,
-    ProfileGuidance, ProfileInfo, ProfileLimit, ProfileUnavailableKind, ReceivedReport,
-    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
-    RoomRef, TaskAssignment, TaskReport, TerminalSize, TicketConfigInfo, TicketFieldInfo,
-    TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
-    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
-    WindowStatus as WireWindowStatus, WithdrawReason,
+    HandoffDelivery, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
+    InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
+    McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
+    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
+    McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
+    OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
+    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
+    ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
+    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
+    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
+    TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
+    TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState, WheelInput,
+    WindowInfo, WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -255,6 +255,16 @@ wire_sample!(enum OnNameTaken => Number);
 wire_sample!(enum PointerButton => Left);
 wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
+wire_sample!(enum HookPointerKind => Presence);
+wire_sample!(struct HookPointer { pointer, kind });
+
+/// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
+/// in one variant.
+impl Sample for HookInputValue {
+    fn sample() -> Self {
+        HookInputValue::Session(Sample::sample())
+    }
+}
 
 /// Hand-written for the same reason as `Key`'s: `CellColor` carries data.
 impl Sample for CellColor {
@@ -795,6 +805,13 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             description,
             position,
         }),
+        wire_sample!(ClientMessage::RunHook {
+            window_id,
+            token,
+            profile,
+            name,
+            input,
+        }),
     ]
 }
 
@@ -980,6 +997,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::TicketDetail { ticket }),
         wire_sample!(DaemonMessage::MilestoneSet { milestone }),
         wire_sample!(DaemonMessage::TicketChanged { workspace_id }),
+        wire_sample!(DaemonMessage::HookInputWanted { pointers }),
     ]
 }
 
@@ -1556,6 +1574,38 @@ fn delivery_stream_wire_variants() -> BTreeSet<String> {
         .collect()
 }
 
+fn hook_pointer_kind_wire_variants() -> BTreeSet<String> {
+    [HookPointerKind::Presence, HookPointerKind::Session]
+        .into_iter()
+        .map(|kind| {
+            let hand = match &kind {
+                HookPointerKind::Presence => "presence",
+                HookPointerKind::Session => "session",
+            };
+            serde_spelling(&kind, hand)
+        })
+        .collect()
+}
+
+/// `HookInputValue`'s variant set, keyed by its external tag.
+fn hook_input_value_wire_variants() -> BTreeSet<String> {
+    [
+        HookInputValue::Absent,
+        HookInputValue::Present,
+        HookInputValue::Session(String::new()),
+    ]
+    .into_iter()
+    .map(|value| {
+        let hand = match &value {
+            HookInputValue::Absent => "absent",
+            HookInputValue::Present => "present",
+            HookInputValue::Session(_) => "session",
+        };
+        serde_spelling(&value, hand)
+    })
+    .collect()
+}
+
 fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
     BTreeMap::from([
         ("WindowStatus".to_string(), window_status_wire_variants()),
@@ -1620,6 +1670,14 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         ("CellColor".to_string(), cell_color_wire_variants()),
         ("CursorShape".to_string(), cursor_shape_wire_variants()),
         ("PaletteSlot".to_string(), palette_slot_wire_variants()),
+        (
+            "HookPointerKind".to_string(),
+            hook_pointer_kind_wire_variants(),
+        ),
+        (
+            "HookInputValue".to_string(),
+            hook_input_value_wire_variants(),
+        ),
     ])
 }
 

@@ -183,6 +183,12 @@
 //! command line. Both are additive: a peer that predates them reads a row
 //! without a `notice` as having none, and reads `launch_context` as
 //! [`ProfileCapability::Unknown`].
+//!
+//! Revision 31 adds `run_hook`, the one request a `--hook <profile-id> <Event>`
+//! door sends: the daemon looks the event up in the named profile's
+//! `[hook_events]` and answers with `delivery`, or with `hook_input_wanted`
+//! when the event reads values from the hook's input. A caller establishes
+//! [`HOOK_EVENTS_MIN_REVISION`] before sending it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -194,7 +200,7 @@ use serde::{Deserialize, Serialize};
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 30;
+pub const PROTOCOL_REVISION: u32 = 31;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -330,6 +336,12 @@ pub const DEFAULT_PALETTES_MIN_REVISION: u32 = 27;
 /// An older daemon refuses the requests by name and silently drops a plan's
 /// `ticket`, so a caller establishes this revision before sending either.
 pub const TICKETS_MIN_REVISION: u32 = 29;
+
+/// The first wire revision that understands [`ClientMessage::RunHook`].
+///
+/// An older daemon refuses it by name, so a hook command built for this
+/// revision does nothing useful against it.
+pub const HOOK_EVENTS_MIN_REVISION: u32 = 31;
 
 /// The most vendors one [`DefaultPalettes`] may assign a palette to; the
 /// daemon refuses a larger one as `invalid_argument`.
@@ -3284,6 +3296,59 @@ pub enum ClientMessage {
         /// Where the milestone sorts; equal positions sort by name.
         position: i64,
     },
+    /// A CLI's hook runs one event of a profile's `[hook_events]`; answered
+    /// with [`DaemonMessage::Delivery`], or with
+    /// [`DaemonMessage::HookInputWanted`] when `input` is `None` and the event
+    /// reads values from the hook's input. Authenticated like a status event.
+    RunHook {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+        /// The id of the profile whose `[hook_events]` names the event.
+        profile: String,
+        /// The event's name.
+        name: String,
+        /// What the hook read at the pointers the daemon asked for, in order;
+        /// `None` on the first request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Vec<HookInputValue>>,
+    },
+}
+
+/// What a hook's input holds at one pointer, as [`ClientMessage::RunHook`]
+/// reports it. Carries no catch-all variant: the daemon asked for a kind and
+/// gets exactly that kind back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookInputValue {
+    /// There is no value at the pointer.
+    Absent,
+    /// There is a value at the pointer; its content is not sent.
+    Present,
+    /// The value at the pointer is a string of the shape of a session
+    /// identifier.
+    Session(String),
+}
+
+/// What the daemon wants to know about a hook's input at one pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookPointerKind {
+    /// Whether a value exists.
+    Presence,
+    /// The value, when it is a session identifier.
+    Session,
+}
+
+/// One value of a hook's input the daemon asks for in
+/// [`DaemonMessage::HookInputWanted`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookPointer {
+    /// A JSON pointer into the hook's input.
+    pub pointer: String,
+    /// What to report about the value there.
+    pub kind: HookPointerKind,
 }
 
 /// The wire revision a peer must implement before `msg` may be sent to it.
@@ -3387,6 +3452,7 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         | ClientMessage::DeliverWait { .. }
         | ClientMessage::ReportSession { .. } => INBOX_MIN_REVISION,
         ClientMessage::SetDefaultPalettes(_) => DEFAULT_PALETTES_MIN_REVISION,
+        ClientMessage::RunHook { .. } => HOOK_EVENTS_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -3757,8 +3823,8 @@ pub enum DaemonMessage {
         problems: Vec<DaemonProblem>,
     },
     /// Response to [`ClientMessage::DeliverContext`],
-    /// [`ClientMessage::DeliverTake`] and [`ClientMessage::DeliverWait`]: what
-    /// the hook prints and how it ends.
+    /// [`ClientMessage::DeliverTake`], [`ClientMessage::DeliverWait`] and
+    /// [`ClientMessage::RunHook`]: what the hook prints and how it ends.
     Delivery {
         /// The text for the hook to print; empty when there is nothing to
         /// say.
@@ -4017,6 +4083,12 @@ pub enum DaemonMessage {
     TicketChanged {
         /// The workspace whose tickets changed.
         workspace_id: i64,
+    },
+    /// Response to [`ClientMessage::RunHook`] without `input`, for an event
+    /// that reads values from the hook's input: what to report, in order.
+    HookInputWanted {
+        /// The values to read, in the order `input` must answer them.
+        pointers: Vec<HookPointer>,
     },
 }
 
@@ -5061,6 +5133,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "update_ticket",
     "add_ticket_result",
     "set_milestone",
+    "run_hook",
 ];
 
 /// The `type` values recognized by [`DaemonMessage`].
@@ -5130,6 +5203,7 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "ticket_detail",
     "milestone_set",
     "ticket_changed",
+    "hook_input_wanted",
 ];
 
 /// Every `type` value [`decode_client_message`] accepts.

@@ -45,6 +45,7 @@ use crate::host_paths::{HostPaths, HostPathsError, RawHostPaths, parse_host_path
 use crate::profile_delivery::{
     DeliveryError, ProfileDelivery, WakeMode, parse_delivery, parse_guidance,
 };
+use crate::profile_hook_events::{HookEventsError, ProfileHookEvents, parse_hook_events};
 use crate::window::{
     CliInjection, InjectedConfigDir, InjectedConfigFile, InjectionKind, RequestedCwd,
 };
@@ -339,6 +340,9 @@ pub struct Profile {
     /// has no such table: the daemon hands this profile's windows nothing
     /// without typing it into the composer.
     pub delivery: Option<ProfileDelivery>,
+    /// The `[hook_events]` table, already validated: what the daemon does when
+    /// a hook calls `--hook` with this profile's id. `None` means no such table.
+    pub hook_events: Option<ProfileHookEvents>,
     /// The top-level `[host_paths]` table, already validated: how a
     /// daemon-side path becomes the path this profile's CLI sees. `None`
     /// means paths are handed over unchanged.
@@ -625,6 +629,9 @@ pub enum ProfileParseError {
     /// A `[delivery]` table breaks its rule ([`DeliveryError`]).
     #[error("invalid delivery table")]
     InvalidDelivery(#[source] DeliveryError),
+    /// A `[hook_events]` table breaks its rule ([`HookEventsError`]).
+    #[error("invalid hook events table")]
+    InvalidHookEvents(#[source] HookEventsError),
     /// A `[mcp_registration]` table breaks its rule
     /// ([`crate::mcp_registration::McpRegistrationError`]). A valid table
     /// never changes how a window launches, but a broken one still excludes
@@ -873,6 +880,10 @@ struct RawProfile {
     /// `Display`.
     #[serde(default)]
     delivery: Option<toml::Value>,
+    /// Untyped so every rule it breaks is
+    /// [`ProfileParseError::InvalidHookEvents`].
+    #[serde(default)]
+    hook_events: Option<toml::Value>,
     #[serde(default)]
     host_paths: Option<RawHostPaths>,
     /// Untyped so every rule it breaks is
@@ -1117,6 +1128,8 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         crate::mcp_registration::parse_mcp_registration(raw.mcp_registration, host_paths.as_ref())
             .map_err(ProfileParseError::InvalidMcpRegistration)?;
     let delivery = parse_delivery(raw.delivery).map_err(ProfileParseError::InvalidDelivery)?;
+    let hook_events =
+        parse_hook_events(raw.hook_events).map_err(ProfileParseError::InvalidHookEvents)?;
     let shim_guidance = raw
         .shim_guidance
         .map(|raw| parse_guidance(raw).ok_or(ProfileParseError::InvalidShimGuidance))
@@ -1167,6 +1180,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         credentials,
         mcp_registration,
         delivery,
+        hook_events,
         host_paths,
         shim_guidance,
         warnings,
