@@ -1738,8 +1738,8 @@ pub fn prepare_mcp_injection(
 
 /// Renders a `[hooks]` table into the injection one launch carries, the same
 /// way [`prepare_mcp_injection`] does for `[mcp]` but without a bridge: the
-/// hooks reach the daemon through the window's own environment, so nothing
-/// else has to be resolved first.
+/// hooks carry their own credentials (a file or the window's environment, by
+/// the profile's mode), so nothing else has to be resolved first.
 ///
 /// Returns `None` -- no injection for this launch, with a warning -- when
 /// the table needs a settings file but no `config_dir` was configured.

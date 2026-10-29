@@ -3618,10 +3618,11 @@ impl WindowEntry {
     /// both a `StatusEvent` about this window and an `Identify` claiming it
     /// are proven with.
     ///
-    /// The token this returns `true` for is the one injected into this
-    /// window's own child environment, so a child that reads its
-    /// `YAGURA_STATUS_TOKEN` can only speak for itself; the value never
-    /// authenticates a request aimed at a different window.
+    /// The token this returns `true` for is the one handed to this window's
+    /// own hooks and bridge (in its credentials file, or in its child
+    /// environment for a profile in `env` mode), so a process holding it can
+    /// only speak for itself; the value never authenticates a
+    /// request aimed at a different window.
     ///
     /// One case still returns `false` for every candidate: the token is
     /// unverifiable (the OS RNG could not be read when the window was opened),
@@ -5234,7 +5235,8 @@ impl std::fmt::Debug for WindowRegistry {
 
 /// The environment a window's child is given on top of what it inherits:
 /// its own identity (only when its token is verifiable -- a window id
-/// without auth cannot authenticate status events), the MCP bridge path when
+/// without auth cannot authenticate status events -- and only when
+/// `carries_credentials`: a `launch` window gets them in a file instead), the MCP bridge path when
 /// one was resolved, the report directory in front of `PATH` when one was
 /// prepared, and the profile's own `[env]` table (whose `PATH` wins).
 ///

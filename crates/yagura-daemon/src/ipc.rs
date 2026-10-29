@@ -2653,8 +2653,8 @@ impl IpcServer {
                     permits: Arc::clone(&self.mcp_launch_listings),
                 });
         }
-        // Independent of the bridge: the hooks reach the daemon through the
-        // window's own environment.
+        // Independent of the bridge: the hooks carry their own credentials
+        // (a file or the window's environment, by the profile's mode).
         if let Some(spec) = launch.hooks.as_ref() {
             injections.extend(crate::profile::plan_hooks_injection(spec, config_dir));
         }
@@ -5956,9 +5956,9 @@ fn credentials_mode_for(
     if !used.is_empty() && used.iter().all(|spec| spec.spells_credentials_file()) {
         return CredentialsMode::Launch;
     }
-    tracing::info!(
+    tracing::warn!(
         profile = %launch.vendor,
-        "the profile asks for launch credentials but a setting it uses does not name the          credentials file; the window opens with its credentials in the environment"
+        "the profile asks for launch credentials but a setting it uses does not name the credentials file; the window opens with its credentials in the environment"
     );
     CredentialsMode::Env
 }

@@ -186,6 +186,14 @@ fn the_env_profiles_keep_their_credentials_and_codex_blanks_them_for_its_tools()
             blanked, expected,
             "{id}: its tools must get both credentials blank, and nothing else"
         );
+        // An npm-installed codex is a `.cmd` shim; an argument cmd.exe would
+        // interpret is dropped there, which would leave the credentials in the tools.
+        for arg in &credentials.launch_args {
+            assert!(
+                !yagura_os::program::contains_cmd_metacharacter(arg),
+                "{id}: a launch arg must survive a cmd shim: {arg}"
+            );
+        }
     }
     for id in [
         "muse-code",

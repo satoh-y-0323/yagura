@@ -37,12 +37,13 @@ args = ["-c", "model_reasoning_effort={value}"]
 
 # Codex keeps the credentials in its environment because a changed hook command
 # would void the recorded trust hashes. The blank `set` values keep them out of
-# the environment of the tools it runs.
+# the environment of the tools it runs. The values avoid `"` so the arguments
+# also pass through a Windows `.cmd` shim.
 [credentials]
 mode = "env"
 launch_args = [
-  "-c", "shell_environment_policy.set.YAGURA_WINDOW_ID=\"\"",
-  "-c", "shell_environment_policy.set.YAGURA_STATUS_TOKEN=\"\"",
+  "-c", "shell_environment_policy.set.YAGURA_WINDOW_ID=''",
+  "-c", "shell_environment_policy.set.YAGURA_STATUS_TOKEN=''",
 ]
 
 [mcp]
