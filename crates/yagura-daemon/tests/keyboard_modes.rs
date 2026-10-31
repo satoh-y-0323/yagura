@@ -67,6 +67,7 @@ fn the_kitty_stack_is_bounded_and_drops_its_oldest_entries() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn decset_9001_sets_win32_input_and_decrst_9001_clears_it() {
     let mut s = screen();
@@ -77,6 +78,17 @@ fn decset_9001_sets_win32_input_and_decrst_9001_clears_it() {
     assert!(!s.input_modes().win32_input);
 }
 
+#[cfg(unix)]
+#[test]
+fn decset_9001_is_ignored_where_the_pty_host_is_not_conpty() {
+    let mut s = screen();
+    feed(&mut s, b"[?9001h");
+    assert!(
+        !s.input_modes().win32_input,
+        "9001 is ConPTY's own request, so a child's output must not turn it on"
+    );
+}
+
 #[test]
 fn a_full_reset_clears_the_kitty_flags_but_keeps_win32_input() {
     let mut s = screen();
@@ -84,8 +96,11 @@ fn a_full_reset_clears_the_kitty_flags_but_keeps_win32_input() {
     assert_eq!(s.input_modes().kitty_flags, 1);
     feed(&mut s, b"\x1bc");
     assert_eq!(s.input_modes().kitty_flags, 0);
+    #[cfg(windows)]
     assert!(
         s.input_modes().win32_input,
         "9001 is the PTY host's own request, so a child's reset must not drop it"
     );
+    #[cfg(unix)]
+    assert!(!s.input_modes().win32_input);
 }

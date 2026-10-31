@@ -58,8 +58,8 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
 Programs running in a window can ask the terminal for a richer key format than the traditional one,
 which cannot tell `Ctrl+Tab` from `Tab` or `Ctrl+Shift+a` from `Ctrl+a`.
 
-- **Windows:** yagura answers a program that turned on ConPTY's Win32 Input Mode. It uses that mode
-  only for a key press whose modifiers the traditional format cannot express; every other key is
+- **Windows:** ConPTY, the PTY host, requests Win32 Input Mode when a window starts, and yagura
+  answers it. yagura uses that mode only for a key press whose modifiers the traditional format cannot express; every other key is
   sent in the traditional format.
 - **macOS and Linux:** when a program asks for the Kitty keyboard protocol, yagura supports two of
   its flags, disambiguate and report-all-keys. Everything else is sent in the traditional format.

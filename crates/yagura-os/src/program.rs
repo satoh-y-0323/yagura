@@ -112,6 +112,13 @@ impl HostOs {
         }
     }
 
+    /// Whether the PTY host on this OS asks for Win32 Input Mode (DECSET
+    /// 9001) itself: only ConPTY does, so only Windows windows honor it.
+    #[must_use]
+    pub fn pty_host_requests_win32_input(self) -> bool {
+        matches!(self, Self::Windows)
+    }
+
     /// Maps onto the coarser [`Platform`] distinction executable resolution
     /// draws: Windows stays Windows, while both `MacOs` and `Linux` collapse
     /// onto [`Platform::Unix`].

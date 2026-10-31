@@ -840,7 +840,11 @@ impl Handler for BoundedHandler<'_> {
                 }
             }
             PrivateMode::Unknown(45) => self.extras.reverse_wrap = true,
-            PrivateMode::Unknown(WIN32_INPUT_MODE) => self.extras.win32_input = true,
+            // Only ConPTY requests 9001; on Unix a child's ESC[?9001h is ignored.
+            PrivateMode::Unknown(WIN32_INPUT_MODE) => {
+                self.extras.win32_input =
+                    yagura_os::program::HostOs::host().pty_host_requests_win32_input();
+            }
             // DECNKM is the keypad mode `ESC =` sets.
             PrivateMode::Unknown(66) => self.term.set_keypad_application_mode(),
             PrivateMode::Named(NamedPrivateMode::SyncUpdate) => {

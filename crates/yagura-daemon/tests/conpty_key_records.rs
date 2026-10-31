@@ -56,6 +56,7 @@ fn key_record_child() {
         std::thread::sleep(Duration::from_secs(60));
         std::process::exit(2);
     });
+    // SAFETY: GetStdHandle only reads this process's standard handle table.
     let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("console input handle");
     let mut out = std::io::stdout().lock();
     write!(out, "{READY}\r\n").unwrap();
@@ -63,6 +64,7 @@ fn key_record_child() {
     let mut records = [INPUT_RECORD::default(); 16];
     loop {
         let mut read = 0u32;
+        // SAFETY: `input` is the console input handle and `records` is a valid buffer.
         unsafe { ReadConsoleInputW(input, &mut records, &mut read) }.expect("ReadConsoleInputW");
         for record in &records[..read as usize] {
             if u32::from(record.EventType) != KEY_EVENT {

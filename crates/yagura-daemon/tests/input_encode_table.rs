@@ -1117,3 +1117,34 @@ fn win32_input_wins_over_kitty_flags_and_the_rest_stays_legacy() {
         "Shift+Enter with both",
     );
 }
+
+#[test]
+fn extended_protocol_branches_beyond_the_common_chords_keep_their_forms() {
+    let kitty_cases: [(Key, Modifiers, &[u8]); 2] = [
+        (Key::Named(NamedKey::Escape), NONE, b"[27u"),
+        (Key::Char('a'), ALT, b"[97;3u"),
+    ];
+    for (k, mods, expected) in kitty_cases {
+        assert_bytes(
+            key(k, mods, kitty(1)),
+            expected,
+            &format!("kitty {k:?} {mods:?}"),
+        );
+    }
+    assert_bytes(
+        key(Key::Named(NamedKey::PageUp), CTRL, kitty(1)),
+        b"[5;5~",
+        "kitty Ctrl+PageUp",
+    );
+    // Shift+Insert writes nothing in the legacy form; its record carries ENHANCED_KEY.
+    assert_bytes(
+        key(Key::Named(NamedKey::Insert), SHIFT, win32(0)),
+        &win32_press(45, 82, 0, 0x0110),
+        "win32 Shift+Insert",
+    );
+    assert_bytes(
+        key(Key::Char(','), CTRL, win32(0)),
+        &win32_press(188, 51, 44, 0x0008),
+        "win32 Ctrl+,",
+    );
+}

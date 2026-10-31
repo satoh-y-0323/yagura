@@ -97,11 +97,15 @@ fn control_origin_is_always_may_start_work() {
 
 #[test]
 fn an_enter_in_an_extended_keyboard_protocol_may_start_work() {
-    let enters: [&[u8]; 3] = [
-        b"[13u",
-        b"[13;2u",
+    let enters: [&[u8]; 5] = [
+        b"\x1b[13u",
+        b"\x1b[13;2u",
         // A Win32 Input Mode press of VK_RETURN (Vk;Sc;Uc;Kd;Cs;Rc).
-        b"[13;28;13;1;0;1_",
+        b"\x1b[13;28;13;1;0;1_",
+        // An Enter that follows a non-Enter key: a scan must not stop at the first key.
+        b"\x1b[9;15;9;1;8;1_\x1b[13u",
+        // Ctrl+M as a Win32 press: Vk 77 with Uc 13.
+        b"\x1b[77;50;13;1;8;1_",
     ];
     for bytes in enters {
         assert_eq!(
@@ -111,7 +115,12 @@ fn an_enter_in_an_extended_keyboard_protocol_may_start_work() {
             String::from_utf8_lossy(bytes)
         );
     }
-    let others: [&[u8]; 2] = [b"[105;6u", b"[9;15;9;1;8;1_[9;15;9;0;8;1_"];
+    let others: [&[u8]; 3] = [
+        b"\x1b[105;6u",
+        b"\x1b[9;15;9;1;8;1_\x1b[9;15;9;0;8;1_",
+        // A key release (Kd=0) of VK_RETURN alone submits nothing.
+        b"\x1b[13;28;13;0;0;1_",
+    ];
     for bytes in others {
         assert_eq!(
             classify_input_echo(bytes, InputOrigin::Interactive),

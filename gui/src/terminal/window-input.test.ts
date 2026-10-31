@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { KeyDownFacts } from './key-input';
-import * as windowInput from './window-input';
-import { keyDownEffect, pasteInput, textInput, wheelInput } from './window-input';
+import { keyDownEffect, pasteEventInput, pasteInput, textInput, wheelInput } from './window-input';
 
 const NO_MODS = { shift: false, alt: false, ctrl: false };
 
@@ -46,13 +45,6 @@ describe('a paste', () => {
 });
 
 describe('a paste event', () => {
-  const pasteEventInput = (text: string, platform: 'windows' | 'mac' | 'linux') =>
-    (
-      windowInput as unknown as {
-        pasteEventInput: (text: string, platform: string) => unknown;
-      }
-    ).pasteEventInput(text, platform);
-
   it.each(['windows', 'mac', 'linux'] as const)('sends the text pasted on %s', (platform) => {
     expect(pasteEventInput('a\nb', platform)).toEqual({ type: 'paste', text: 'a\nb' });
   });
