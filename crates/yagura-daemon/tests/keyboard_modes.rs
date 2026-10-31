@@ -82,7 +82,7 @@ fn decset_9001_sets_win32_input_and_decrst_9001_clears_it() {
 #[test]
 fn decset_9001_is_ignored_where_the_pty_host_is_not_conpty() {
     let mut s = screen();
-    feed(&mut s, b"[?9001h");
+    feed(&mut s, b"\x1b[?9001h");
     assert!(
         !s.input_modes().win32_input,
         "9001 is ConPTY's own request, so a child's output must not turn it on"
