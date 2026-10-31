@@ -95,6 +95,33 @@ fn control_origin_is_always_may_start_work() {
     );
 }
 
+#[test]
+fn an_enter_in_an_extended_keyboard_protocol_may_start_work() {
+    let enters: [&[u8]; 3] = [
+        b"[13u",
+        b"[13;2u",
+        // A Win32 Input Mode press of VK_RETURN (Vk;Sc;Uc;Kd;Cs;Rc).
+        b"[13;28;13;1;0;1_",
+    ];
+    for bytes in enters {
+        assert_eq!(
+            classify_input_echo(bytes, InputOrigin::Interactive),
+            InputEcho::MayStartWork,
+            "{:?} is an Enter, so it can submit a line",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    let others: [&[u8]; 2] = [b"[105;6u", b"[9;15;9;1;8;1_[9;15;9;0;8;1_"];
+    for bytes in others {
+        assert_eq!(
+            classify_input_echo(bytes, InputOrigin::Interactive),
+            InputEcho::EchoOnly,
+            "{:?} is not an Enter",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+}
+
 // Fixture time values are deliberately short, so every test in this file finishes in
 // well under a second of real waiting.
 

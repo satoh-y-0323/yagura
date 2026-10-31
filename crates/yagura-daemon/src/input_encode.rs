@@ -7,7 +7,9 @@
 //!
 //! The sequences follow xterm.js 6.0.0
 //! (`Keyboard.ts` `evaluateKeyboardEvent`, `Clipboard.ts`, the mouse
-//! encoders of `CoreMouseService.ts`), plus Shift+Enter as `ESC CR`.
+//! encoders of `CoreMouseService.ts`), plus Shift+Enter as `ESC CR`. Key
+//! presses also take Win32 Input Mode's or the Kitty keyboard protocol's form
+//! while the child asks for it (see [`encode_key`]).
 
 use yagura_protocol::{
     CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
@@ -51,7 +53,22 @@ pub struct InputModes {
     pub alt_screen: bool,
     /// Focus reports (`?1004`).
     pub focus_reports: bool,
+    /// Win32 Input Mode (`?9001`), which the PTY host asks for to read keys
+    /// as console key records.
+    pub win32_input: bool,
+    /// The Kitty keyboard protocol flags in effect: the child's request
+    /// narrowed to the ones supported ([`KITTY_SUPPORTED_FLAGS`]).
+    pub kitty_flags: u8,
 }
+
+/// Kitty keyboard flag 1: disambiguate escape codes.
+pub const KITTY_DISAMBIGUATE: u8 = 0b0001;
+/// Kitty keyboard flag 8: report all keys as escape codes.
+pub const KITTY_REPORT_ALL_KEYS: u8 = 0b1000;
+/// The Kitty keyboard flags the daemon honours. Event types (2) are left out
+/// because clients send presses only; alternate keys (4) and associated text
+/// (16) because a key press carries neither.
+pub const KITTY_SUPPORTED_FLAGS: u8 = KITTY_DISAMBIGUATE | KITTY_REPORT_ALL_KEYS;
 
 impl InputModes {
     /// The modes packed into the low bits of a word, for publishing them
@@ -71,6 +88,9 @@ impl InputModes {
             | u16::from(self.alt_screen) << 4
             | u16::from(self.focus_reports) << 5
             | mouse << 6
+            | u16::from(self.win32_input) << 9
+            | u16::from(self.kitty_flags & KITTY_DISAMBIGUATE != 0) << 10
+            | u16::from(self.kitty_flags & KITTY_REPORT_ALL_KEYS != 0) << 11
     }
 
     /// The inverse of [`InputModes::to_bits`].
@@ -90,6 +110,9 @@ impl InputModes {
             alt_screen: bits & (1 << 4) != 0,
             focus_reports: bits & (1 << 5) != 0,
             mouse,
+            win32_input: bits & (1 << 9) != 0,
+            kitty_flags: bit_flag(bits, 10, KITTY_DISAMBIGUATE)
+                | bit_flag(bits, 11, KITTY_REPORT_ALL_KEYS),
         }
     }
 }
@@ -118,12 +141,296 @@ pub enum WheelOutcome {
     },
 }
 
+fn bit_flag(bits: u16, bit: u32, flag: u8) -> u8 {
+    if bits & (1 << bit) != 0 { flag } else { 0 }
+}
+
 /// The bytes a key press writes; empty when it writes nothing.
+///
+/// Under Win32 Input Mode, a press whose legacy bytes lose what was pressed
+/// (they are empty, or equal those of the same key with fewer modifiers or
+/// of a plain Enter, Tab, Escape or Backspace) is written as console key
+/// records when its key has a fixed virtual-key code, and
+/// every other press keeps its legacy bytes; the Kitty flags are not used,
+/// since the PTY host does not read them. Otherwise, with Kitty flags in
+/// effect, the press takes the Kitty keyboard protocol's form. With neither,
+/// the legacy (xterm) bytes.
 #[must_use]
 pub fn encode_key(input: &KeyInput, modes: InputModes) -> Vec<u8> {
+    if view_page(input).is_some() {
+        return Vec::new();
+    }
+    if modes.win32_input {
+        if legacy_loses_the_press(input, modes)
+            && let Some(records) = win32_records(input)
+        {
+            return records;
+        }
+        return encode_legacy(input, modes);
+    }
+    if modes.kitty_flags & KITTY_SUPPORTED_FLAGS != 0 {
+        return encode_kitty(input, modes);
+    }
+    encode_legacy(input, modes)
+}
+
+fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     match input.key {
         Key::Named(key) => encode_named(key, input.mods, modes),
         Key::Char(c) => encode_char(c, input.mods),
+    }
+}
+
+/// Whether some bytes a press is written as identify an Enter: a CR or LF,
+/// a Kitty `CSI 13 … u`, or a Win32 Input Mode key-down record of VK_RETURN
+/// or of the CR character.
+#[must_use]
+pub fn contains_enter(bytes: &[u8]) -> bool {
+    if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
+        return true;
+    }
+    let mut rest = bytes;
+    while let Some(start) = rest.windows(2).position(|pair| pair == [ESC, b'[']) {
+        let body = &rest[start + 2..];
+        let Some(end) = body
+            .iter()
+            .position(|&b| !(b.is_ascii_digit() || b == b';' || b == b':'))
+        else {
+            return false;
+        };
+        if is_enter_sequence(&body[..end], body[end]) {
+            return true;
+        }
+        rest = &body[end..];
+    }
+    false
+}
+
+fn is_enter_sequence(params: &[u8], terminator: u8) -> bool {
+    let fields: Vec<Option<u32>> = params
+        .split(|&b| b == b';')
+        .map(|field| {
+            let first = field.split(|&b| b == b':').next().unwrap_or_default();
+            std::str::from_utf8(first).ok()?.parse().ok()
+        })
+        .collect();
+    let field = |i: usize| fields.get(i).copied().flatten();
+    match terminator {
+        b'u' => field(0) == Some(13),
+        // Vk;Sc;Uc;Kd;Cs;Rc. A key-down whose character is CR (Ctrl+M) is read
+        // as Enter by a console reader, as the CR it replaces would be.
+        b'_' => field(3) == Some(1) && (field(0) == Some(0x0D) || field(2) == Some(13)),
+        _ => false,
+    }
+}
+
+// --- Win32 Input Mode ---------------------------------------------------------------
+
+/// Whether a press's legacy bytes lose what was pressed: they are empty, or
+/// they equal the legacy bytes of another press -- the same key with some of
+/// Ctrl, Alt and (for a letter) Shift released, or a plain Enter, Tab, Escape
+/// or Backspace. Shift is not released from other characters, which the
+/// client already sends shifted.
+fn legacy_loses_the_press(input: &KeyInput, modes: InputModes) -> bool {
+    let own = encode_legacy(input, modes);
+    if own.is_empty() {
+        return true;
+    }
+    let plain = Modifiers::default();
+    let plain_keys = [
+        NamedKey::Enter,
+        NamedKey::Tab,
+        NamedKey::Escape,
+        NamedKey::Backspace,
+    ]
+    .map(|key| KeyInput {
+        key: Key::Named(key),
+        mods: plain,
+    });
+    released_modifier_presses(input)
+        .chain(plain_keys.into_iter().filter(|other| other != input))
+        .any(|other| encode_legacy(&other, modes) == own)
+}
+
+/// `input` with every non-empty subset of its releasable modifiers released.
+fn released_modifier_presses(input: &KeyInput) -> impl Iterator<Item = KeyInput> + '_ {
+    let letter = matches!(input.key, Key::Char(c) if c.is_ascii_alphabetic());
+    let Modifiers { shift, alt, ctrl } = input.mods;
+    (1u8..8).filter_map(move |release| {
+        let (drop_ctrl, drop_alt, drop_shift) =
+            (release & 1 != 0, release & 2 != 0, release & 4 != 0);
+        if (drop_ctrl && !ctrl) || (drop_alt && !alt) || (drop_shift && !(shift && letter)) {
+            return None;
+        }
+        let key = match input.key {
+            Key::Char(c) if drop_shift => Key::Char(c.to_ascii_lowercase()),
+            key => key,
+        };
+        Some(KeyInput {
+            key,
+            mods: Modifiers {
+                shift: shift && !drop_shift,
+                alt: alt && !drop_alt,
+                ctrl: ctrl && !drop_ctrl,
+            },
+        })
+    })
+}
+
+const WIN32_LEFT_ALT: u32 = 0x0002;
+const WIN32_LEFT_CTRL: u32 = 0x0008;
+const WIN32_SHIFT: u32 = 0x0010;
+const WIN32_ENHANCED_KEY: u32 = 0x0100;
+
+/// A key's virtual-key code, set 1 scan code and whether it is an enhanced
+/// key, from a fixed table: no OS call and no keyboard layout, so the client
+/// and the daemon never disagree on a layout. `None` for keys off the table.
+fn win32_key(key: Key) -> Option<(u16, u16, bool)> {
+    let named = |vk, sc| Some((vk, sc, false));
+    let enhanced = |vk, sc| Some((vk, sc, true));
+    match key {
+        Key::Named(named_key) => match named_key {
+            NamedKey::Enter => named(0x0D, 0x1C),
+            NamedKey::Tab => named(0x09, 0x0F),
+            NamedKey::Escape => named(0x1B, 0x01),
+            NamedKey::Backspace => named(0x08, 0x0E),
+            NamedKey::Insert => enhanced(0x2D, 0x52),
+            NamedKey::Delete => enhanced(0x2E, 0x53),
+            NamedKey::Home => enhanced(0x24, 0x47),
+            NamedKey::End => enhanced(0x23, 0x4F),
+            NamedKey::PageUp => enhanced(0x21, 0x49),
+            NamedKey::PageDown => enhanced(0x22, 0x51),
+            NamedKey::ArrowUp => enhanced(0x26, 0x48),
+            NamedKey::ArrowDown => enhanced(0x28, 0x50),
+            NamedKey::ArrowLeft => enhanced(0x25, 0x4B),
+            NamedKey::ArrowRight => enhanced(0x27, 0x4D),
+            NamedKey::F1 => named(0x70, 0x3B),
+            NamedKey::F2 => named(0x71, 0x3C),
+            NamedKey::F3 => named(0x72, 0x3D),
+            NamedKey::F4 => named(0x73, 0x3E),
+            NamedKey::F5 => named(0x74, 0x3F),
+            NamedKey::F6 => named(0x75, 0x40),
+            NamedKey::F7 => named(0x76, 0x41),
+            NamedKey::F8 => named(0x77, 0x42),
+            NamedKey::F9 => named(0x78, 0x43),
+            NamedKey::F10 => named(0x79, 0x44),
+            NamedKey::F11 => named(0x7A, 0x57),
+            NamedKey::F12 => named(0x7B, 0x58),
+        },
+        Key::Char(c) => {
+            let sc = match c.to_ascii_lowercase() {
+                'a' => 0x1E,
+                'b' => 0x30,
+                'c' => 0x2E,
+                'd' => 0x20,
+                'e' => 0x12,
+                'f' => 0x21,
+                'g' => 0x22,
+                'h' => 0x23,
+                'i' => 0x17,
+                'j' => 0x24,
+                'k' => 0x25,
+                'l' => 0x26,
+                'm' => 0x32,
+                'n' => 0x31,
+                'o' => 0x18,
+                'p' => 0x19,
+                'q' => 0x10,
+                'r' => 0x13,
+                's' => 0x1F,
+                't' => 0x14,
+                'u' => 0x16,
+                'v' => 0x2F,
+                'w' => 0x11,
+                'x' => 0x2D,
+                'y' => 0x15,
+                'z' => 0x2C,
+                '1'..='9' => u16::from(c as u8 - b'1') + 0x02,
+                '0' => 0x0B,
+                ',' => return named(0xBC, 0x33),
+                '-' => return named(0xBD, 0x0C),
+                '.' => return named(0xBE, 0x34),
+                '=' => return named(0xBB, 0x0D),
+                _ => return None,
+            };
+            named(u16::from(c.to_ascii_uppercase() as u8), sc)
+        }
+    }
+}
+
+/// The character a key record carries: a C0 control for Ctrl with a letter,
+/// as the console reports it; the character itself for other characters.
+fn win32_unicode(key: Key, mods: Modifiers) -> u32 {
+    match key {
+        Key::Char(c) if mods.ctrl && c.is_ascii_alphabetic() => {
+            u32::from(c.to_ascii_uppercase()) - 0x40
+        }
+        Key::Char(c) => u32::from(c),
+        Key::Named(NamedKey::Enter) => 13,
+        Key::Named(NamedKey::Tab) => 9,
+        Key::Named(NamedKey::Escape) => 27,
+        Key::Named(NamedKey::Backspace) => 8,
+        Key::Named(_) => 0,
+    }
+}
+
+/// A press as a key-down and a key-up record (`CSI Vk;Sc;Uc;Kd;Cs;Rc _`);
+/// `None` for a key off the table of [`win32_key`].
+fn win32_records(input: &KeyInput) -> Option<Vec<u8>> {
+    let (vk, sc, enhanced) = win32_key(input.key)?;
+    let uc = win32_unicode(input.key, input.mods);
+    let mods = input.mods;
+    let state = u32::from(mods.ctrl) * WIN32_LEFT_CTRL
+        + u32::from(mods.shift) * WIN32_SHIFT
+        + u32::from(mods.alt) * WIN32_LEFT_ALT
+        + u32::from(enhanced) * WIN32_ENHANCED_KEY;
+    Some(format!("\x1b[{vk};{sc};{uc};1;{state};1_\x1b[{vk};{sc};{uc};0;{state};1_").into_bytes())
+}
+
+// --- Kitty keyboard protocol --------------------------------------------------------
+
+/// A press in the Kitty keyboard protocol's form for the flags in effect
+/// (<https://sw.kovidgoyal.net/kitty/keyboard-protocol/>). Disambiguation
+/// reports Escape, and any key with Ctrl or Alt or a modified Enter, Tab or
+/// Backspace, as an escape code; reporting all keys adds the plain Enter,
+/// Tab and Backspace and characters without Ctrl or Alt.
+fn encode_kitty(input: &KeyInput, modes: InputModes) -> Vec<u8> {
+    let all_keys = modes.kitty_flags & KITTY_REPORT_ALL_KEYS != 0;
+    let mods = input.mods;
+    let modified = mods.shift || mods.alt || mods.ctrl;
+    let param = modifier_param(mods);
+    match input.key {
+        Key::Char(c) if all_keys || mods.ctrl || mods.alt => {
+            // The code is the unshifted key; only a letter's is known here.
+            csi_u(u32::from(c.to_ascii_lowercase()), param)
+        }
+        Key::Char(c) => encode_char(c, mods),
+        Key::Named(key) => match key {
+            NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace if all_keys || modified => {
+                let code = match key {
+                    NamedKey::Enter => 13,
+                    NamedKey::Tab => 9,
+                    _ => 127,
+                };
+                csi_u(code, param)
+            }
+            NamedKey::Escape => csi_u(27, param),
+            // Kitty moves F3 off `CSI 1;m R`, which a cursor position report shares.
+            NamedKey::F3 if modified => tilde_key(13, param),
+            NamedKey::PageUp if modified => tilde_key(5, param),
+            NamedKey::PageDown if modified => tilde_key(6, param),
+            NamedKey::Insert if modified => tilde_key(2, param),
+            _ => encode_named(key, mods, modes),
+        },
+    }
+}
+
+/// `CSI code u`, with `;m` when a modifier is held.
+fn csi_u(code: u32, param: u8) -> Vec<u8> {
+    if param > 1 {
+        format!("\x1b[{code};{param}u").into_bytes()
+    } else {
+        format!("\x1b[{code}u").into_bytes()
     }
 }
 
@@ -499,6 +806,9 @@ mod tests {
                     alt_screen: flags & 16 != 0,
                     focus_reports: flags & 32 != 0,
                     mouse,
+                    win32_input: flags & 1 != 0,
+                    kitty_flags: [0, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, 9]
+                        [usize::from((flags >> 4) & 3)],
                 };
                 assert_eq!(InputModes::from_bits(modes.to_bits()), modes);
             }

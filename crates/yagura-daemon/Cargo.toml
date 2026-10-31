@@ -100,6 +100,7 @@ yagura-test-support = { path = "../yagura-test-support" }
 # mechanism it verifies, not a second production dependency on `windows`.
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = [
+    "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
 ] }

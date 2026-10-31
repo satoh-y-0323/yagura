@@ -230,7 +230,8 @@ impl VtScreen {
             Ok(value) => Some(value),
             Err(_) => {
                 let (cols, rows) = self.size();
-                self.rebuild(cols, rows);
+                let win32_input = self.model.extras().win32_input;
+                self.rebuild(cols, rows, win32_input);
                 self.rebuilt_by_read = true;
                 None
             }
@@ -331,7 +332,7 @@ impl VtScreen {
     /// Takes the replies to the child's terminal queries that the feeds so
     /// far queued, to be written back to the child, and how many replies were
     /// dropped because the queue was full.
-    pub(crate) fn take_replies(&mut self) -> (Vec<u8>, usize) {
+    pub fn take_replies(&mut self) -> (Vec<u8>, usize) {
         self.model.take_replies()
     }
 
@@ -524,6 +525,11 @@ impl VtScreen {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
             alt_screen: mode.contains(TermMode::ALT_SCREEN),
             focus_reports: mode.contains(TermMode::FOCUS_IN_OUT),
+            win32_input: self.model.extras().win32_input,
+            kitty_flags: self
+                .model
+                .extras()
+                .kitty_flags(mode.contains(TermMode::ALT_SCREEN)),
         }
     }
 
@@ -917,6 +923,7 @@ impl VtScreen {
     fn guard_call(&mut self, cols: u16, rows: u16, op: impl FnOnce(&mut Model)) -> ScreenIntegrity {
         #[cfg(any(test, feature = "fault-injection"))]
         let poisoned = self.poison_is_due();
+        let win32_input = self.model.extras().win32_input;
 
         let model = &mut self.model;
         // `AssertUnwindSafe`: the only state this closure reaches is `model`,
@@ -934,16 +941,18 @@ impl VtScreen {
             Ok(()) if std::mem::take(&mut self.rebuilt_by_read) => ScreenIntegrity::Rebuilt,
             Ok(()) => ScreenIntegrity::Intact,
             Err(_) => {
-                self.rebuild(cols, rows);
+                self.rebuild(cols, rows, win32_input);
                 self.rebuilt_by_read = false;
                 ScreenIntegrity::Rebuilt
             }
         }
     }
 
-    /// Replaces the model with a blank one after a panic.
-    fn rebuild(&mut self, cols: u16, rows: u16) {
+    /// Replaces the model with a blank one after a panic, keeping Win32
+    /// Input Mode as it was before the call (see [`Model::keep_win32_input`]).
+    fn rebuild(&mut self, cols: u16, rows: u16, win32_input: bool) {
         self.model = Model::new(cols, rows, self.history_rows);
+        self.model.keep_win32_input(win32_input);
         self.generation = self.generation.wrapping_add(1);
         tracing::warn!(
             cols,

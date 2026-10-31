@@ -17,11 +17,15 @@ use alacritty_terminal::index::Column;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, MIN_COLUMNS, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
-    Attr, CharsetIndex, ClearMode, CursorStyle, Handler, LineClearMode, Mode, NamedMode,
-    NamedPrivateMode, PrivateMode, Processor, Rgb, StandardCharset, TabulationClearMode, Timeout,
+    Attr, CharsetIndex, ClearMode, CursorStyle, Handler, KeyboardModes, KeyboardModesApplyBehavior,
+    LineClearMode, Mode, NamedMode, NamedPrivateMode, PrivateMode, Processor, Rgb, StandardCharset,
+    TabulationClearMode, Timeout,
 };
+use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use yagura_protocol::Palette;
+
+use crate::input_encode::KITTY_SUPPORTED_FLAGS;
 
 /// Column count substituted when a caller passes `cols == 0`.
 pub(super) const DEFAULT_COLS: u16 = 80;
@@ -60,6 +64,13 @@ const SYNC_HOLD_BYTES_PER_CELL: usize = 64;
 
 /// Palette entries kept from a client's palette; OSC 4 names no more.
 const MAX_PALETTE_ENTRIES: usize = 256;
+
+/// Entries one Kitty keyboard flag stack holds; a push past it drops the
+/// oldest entry, as the protocol allows.
+const MAX_KITTY_STACK_DEPTH: usize = 16;
+
+/// Win32 Input Mode, which the PTY host asks for (DECSET 9001).
+const WIN32_INPUT_MODE: u16 = 9001;
 
 /// The primary device attributes answered to a query, as xterm.js answers
 /// them: a VT100 with advanced video.
@@ -140,6 +151,44 @@ pub(super) struct SyncHold {
     released: bool,
 }
 
+/// One screen's Kitty keyboard flag stack, holding supported flags only. The
+/// engine's own stack is not used: it panics when a push overflows it.
+#[derive(Default)]
+struct KittyStack(VecDeque<u8>);
+
+impl KittyStack {
+    /// The flags in effect: the top entry, or none.
+    fn current(&self) -> u8 {
+        self.0.back().copied().unwrap_or(0)
+    }
+
+    fn push(&mut self, flags: u8) {
+        if self.0.len() >= MAX_KITTY_STACK_DEPTH {
+            self.0.pop_front();
+        }
+        self.0.push_back(flags & KITTY_SUPPORTED_FLAGS);
+    }
+
+    fn pop(&mut self, count: usize) {
+        self.0.truncate(self.0.len().saturating_sub(count));
+    }
+
+    /// Changes the flags in effect; with an empty stack they become its
+    /// first entry.
+    fn set(&mut self, flags: u8, behavior: KeyboardModesApplyBehavior) {
+        let current = self.current();
+        let flags = match behavior {
+            KeyboardModesApplyBehavior::Replace => flags,
+            KeyboardModesApplyBehavior::Union => current | flags,
+            KeyboardModesApplyBehavior::Difference => current & !flags,
+        } & KITTY_SUPPORTED_FLAGS;
+        match self.0.back_mut() {
+            Some(top) => *top = flags,
+            None => self.0.push_back(flags),
+        }
+    }
+}
+
 /// What the model keeps because the engine hides it or does not model it.
 pub(super) struct Extras {
     /// Mouse mode 9 (X10 reporting), which the engine does not know. It is
@@ -162,6 +211,13 @@ pub(super) struct Extras {
     /// answered from; `None` until a client sent them. Kept across a reset:
     /// they are the client's, not the program's.
     palette: Option<Palette>,
+    /// Win32 Input Mode (DECSET 9001). Only DECRST 9001 clears it: the PTY
+    /// host, not the program, asks for it, so a program's reset keeps it.
+    pub(super) win32_input: bool,
+    /// The Kitty keyboard flag stacks of the main and the alternate screen,
+    /// which the protocol keeps apart.
+    kitty_main: KittyStack,
+    kitty_alt: KittyStack,
 }
 
 impl Extras {
@@ -175,6 +231,26 @@ impl Extras {
             dropped_replies: 0,
             sync: None,
             palette: None,
+            win32_input: false,
+            kitty_main: KittyStack::default(),
+            kitty_alt: KittyStack::default(),
+        }
+    }
+
+    /// The Kitty keyboard flags in effect on the main or the alternate screen.
+    pub(super) fn kitty_flags(&self, alt_screen: bool) -> u8 {
+        if alt_screen {
+            self.kitty_alt.current()
+        } else {
+            self.kitty_main.current()
+        }
+    }
+
+    fn kitty_stack(&mut self, alt_screen: bool) -> &mut KittyStack {
+        if alt_screen {
+            &mut self.kitty_alt
+        } else {
+            &mut self.kitty_main
         }
     }
 
@@ -364,7 +440,8 @@ fn capped<T: Copy + Into<usize> + TryFrom<usize>>(count: T, reach: usize) -> T {
 /// child's queries itself from the engine's modes and [`Extras`], and queues
 /// the replies; the engine's own events are discarded. Anything neither
 /// forwarded nor answered is something the model has no use for (titles,
-/// clipboard, hyperlinks, keyboard protocols).
+/// clipboard, hyperlinks). The keyboard protocols the daemon encodes keys
+/// for are kept in [`Extras`].
 struct BoundedHandler<'a> {
     term: &'a mut Term<VoidListener>,
     /// The window's count of input writes, for a synchronized update opened
@@ -602,10 +679,38 @@ impl Handler for BoundedHandler<'_> {
             let replies = std::mem::take(&mut self.extras.replies);
             let dropped = self.extras.dropped_replies;
             let palette = self.extras.palette.take();
+            let win32_input = self.extras.win32_input;
             *self.extras = Extras::new(self.extras.history_rows);
             self.extras.replies = replies;
             self.extras.dropped_replies = dropped;
             self.extras.palette = palette;
+            self.extras.win32_input = win32_input;
+        }
+    }
+
+    fn report_keyboard_mode(&mut self) {
+        let flags = self.extras.kitty_flags(self.in_alt_screen());
+        self.reply(format!("\x1b[?{flags}u").as_bytes());
+    }
+
+    fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
+        if self.spend(1) {
+            let alt = self.in_alt_screen();
+            self.extras.kitty_stack(alt).push(mode.bits());
+        }
+    }
+
+    fn pop_keyboard_modes(&mut self, to_pop: u16) {
+        if self.spend(1) {
+            let alt = self.in_alt_screen();
+            self.extras.kitty_stack(alt).pop(usize::from(to_pop));
+        }
+    }
+
+    fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior) {
+        if self.spend(1) {
+            let alt = self.in_alt_screen();
+            self.extras.kitty_stack(alt).set(mode.bits(), behavior);
         }
     }
 
@@ -735,6 +840,7 @@ impl Handler for BoundedHandler<'_> {
                 }
             }
             PrivateMode::Unknown(45) => self.extras.reverse_wrap = true,
+            PrivateMode::Unknown(WIN32_INPUT_MODE) => self.extras.win32_input = true,
             // DECNKM is the keypad mode `ESC =` sets.
             PrivateMode::Unknown(66) => self.term.set_keypad_application_mode(),
             PrivateMode::Named(NamedPrivateMode::SyncUpdate) => {
@@ -764,6 +870,7 @@ impl Handler for BoundedHandler<'_> {
             | PrivateMode::Unknown(47 | 1047) => self.leave_alt_screen(),
             PrivateMode::Unknown(9) => self.extras.x10_mouse = false,
             PrivateMode::Unknown(45) => self.extras.reverse_wrap = false,
+            PrivateMode::Unknown(WIN32_INPUT_MODE) => self.extras.win32_input = false,
             PrivateMode::Unknown(66) => self.term.unset_keypad_application_mode(),
             PrivateMode::Named(NamedPrivateMode::SyncUpdate) => self.extras.sync = None,
             PrivateMode::Named(named) => {
@@ -886,6 +993,12 @@ impl Model {
 
     pub(super) fn extras(&self) -> &Extras {
         &self.extras
+    }
+
+    /// Carries Win32 Input Mode over to a model rebuilt blank: the PTY host
+    /// asked for it once, at start, and does not ask again.
+    pub(super) fn keep_win32_input(&mut self, on: bool) {
+        self.extras.win32_input = on;
     }
 
     /// Takes the replies queued for the child so far, and how many were

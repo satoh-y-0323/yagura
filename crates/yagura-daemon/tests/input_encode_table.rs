@@ -993,3 +993,127 @@ fn control_keys_encode_like_the_matching_keys() {
 fn an_unknown_control_key_encodes_to_nothing() {
     assert_eq!(encode_control_key(ControlKey::Unknown, plain()), None);
 }
+
+// --- extended keyboard protocols ----------------------------------------------------
+
+fn kitty(flags: u8) -> InputModes {
+    InputModes {
+        kitty_flags: flags,
+        win32_input: false,
+        ..InputModes::default()
+    }
+}
+
+fn win32(kitty_flags: u8) -> InputModes {
+    InputModes {
+        kitty_flags,
+        win32_input: true,
+        ..InputModes::default()
+    }
+}
+
+fn key(key: Key, mods: Modifiers, modes: InputModes) -> Vec<u8> {
+    encode_key(&KeyInput { key, mods }, modes)
+}
+
+/// A Win32 Input Mode press followed by its release: `CSI Vk;Sc;Uc;Kd;Cs;Rc _`.
+fn win32_press(vk: u16, sc: u16, uc: u16, cs: u32) -> Vec<u8> {
+    format!("\x1b[{vk};{sc};{uc};1;{cs};1_\x1b[{vk};{sc};{uc};0;{cs};1_").into_bytes()
+}
+
+#[test]
+fn kitty_flag_one_disambiguates_chords_the_legacy_form_folds_together() {
+    let cases: [(Key, Modifiers, &[u8]); 5] = [
+        (Key::Named(NamedKey::Tab), CTRL, b"\x1b[9;5u"),
+        // The GUI sends Ctrl+Shift+letter as the shifted (upper-case) letter.
+        (Key::Char('I'), CTRL_SHIFT, b"\x1b[105;6u"),
+        (Key::Char('v'), CTRL, b"\x1b[118;5u"),
+        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b[13;2u"),
+        (Key::Named(NamedKey::Enter), NONE, b"\r"),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(key(k, mods, kitty(1)), expected, &format!("{k:?} {mods:?}"));
+    }
+}
+
+#[test]
+fn kitty_flag_eight_reports_a_plain_enter_as_an_escape_code() {
+    for flags in [8, 1 | 8] {
+        assert_bytes(
+            key(Key::Named(NamedKey::Enter), NONE, kitty(flags)),
+            b"\x1b[13u",
+            &format!("plain Enter, flags {flags}"),
+        );
+        assert_bytes(
+            key(Key::Named(NamedKey::Tab), CTRL, kitty(flags)),
+            b"\x1b[9;5u",
+            &format!("Ctrl+Tab, flags {flags}"),
+        );
+    }
+}
+
+#[test]
+fn without_kitty_flags_or_win32_input_keys_keep_their_legacy_bytes() {
+    let cases: [(Key, Modifiers, &[u8]); 3] = [
+        (Key::Named(NamedKey::Tab), CTRL, b"\t"),
+        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b\r"),
+        (Key::Char('v'), CTRL, b"\x16"),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(key(k, mods, kitty(0)), expected, &format!("{k:?} {mods:?}"));
+    }
+}
+
+#[test]
+fn win32_input_sends_a_press_and_release_record_for_chords_the_legacy_form_loses() {
+    let cases: [(Key, Modifiers, Vec<u8>); 3] = [
+        // Ctrl+Tab would be the same 0x09 as Tab.
+        (
+            Key::Named(NamedKey::Tab),
+            CTRL,
+            win32_press(0x09, 0x0F, 9, 0x0008),
+        ),
+        // Ctrl+Shift+I writes nothing in the legacy form.
+        (
+            Key::Char('I'),
+            CTRL_SHIFT,
+            win32_press(0x49, 0x17, 9, 0x0018),
+        ),
+        // Ctrl+M would be the same CR as Enter.
+        (Key::Char('m'), CTRL, win32_press(0x4D, 0x32, 13, 0x0008)),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(
+            key(k, mods, win32(0)),
+            &expected,
+            &format!("{k:?} {mods:?}"),
+        );
+    }
+}
+
+#[test]
+fn win32_input_keeps_the_legacy_bytes_of_chords_the_legacy_form_carries() {
+    let cases: [(Key, Modifiers, &[u8]); 4] = [
+        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b\r"),
+        (Key::Char('v'), CTRL, b"\x16"),
+        (Key::Named(NamedKey::Tab), NONE, b"\t"),
+        (Key::Char('A'), ALT_SHIFT, b"\x1bA"),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(key(k, mods, win32(0)), expected, &format!("{k:?} {mods:?}"));
+    }
+}
+
+#[test]
+fn win32_input_wins_over_kitty_flags_and_the_rest_stays_legacy() {
+    assert_bytes(
+        key(Key::Named(NamedKey::Tab), CTRL, win32(1 | 8)),
+        &win32_press(0x09, 0x0F, 9, 0x0008),
+        "Ctrl+Tab with both",
+    );
+    assert_bytes(
+        key(Key::Named(NamedKey::Enter), SHIFT, win32(1 | 8)),
+        b"\x1b\r",
+        "Shift+Enter with both",
+    );
+}

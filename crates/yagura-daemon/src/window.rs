@@ -628,8 +628,10 @@ pub enum InputOrigin {
 /// logged or forwarded anywhere else.
 ///
 /// Who wrote the bytes does not change what they do: a payload carrying no
-/// line terminator submits nothing, so the output that follows it is its own
-/// echo, regardless of whether it came from an attached client or a message
+/// Enter in any keyboard protocol's form (see
+/// [`crate::input_encode::contains_enter`]) submits nothing, so the output
+/// that follows it is its own echo, regardless of whether it came from an
+/// attached client or a message
 /// the daemon wrote on an agent's behalf. A control byte sequence carries no
 /// terminator but is never line editing, so it is always classified as
 /// possibly starting work.
@@ -659,7 +661,7 @@ pub enum InputOrigin {
 pub fn classify_input_echo(data: &[u8], origin: InputOrigin) -> InputEcho {
     match origin {
         InputOrigin::Interactive | InputOrigin::Message => {
-            if data.contains(&b'\r') || data.contains(&b'\n') {
+            if crate::input_encode::contains_enter(data) {
                 InputEcho::MayStartWork
             } else {
                 InputEcho::EchoOnly
