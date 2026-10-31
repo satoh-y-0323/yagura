@@ -258,6 +258,10 @@ pub struct InputSection {
     pub probe: Option<String>,
     /// The key that erases one character (1..=8 bytes; default DEL).
     pub erase: Option<String>,
+    /// Characters the receiver's editor takes as a key rather than as text
+    /// when one is the first non-blank character of its input (a shell mode,
+    /// a help view). Each entry is exactly one printable, non-blank character.
+    pub leading_keys: Option<Vec<String>>,
 }
 
 /// A single compiled pattern rule.
@@ -565,12 +569,7 @@ fn validate_input_section(
         ));
     }
     if let Some(probe) = section.probe.as_deref() {
-        let mut chars = probe.chars();
-        let one_printable = match (chars.next(), chars.next()) {
-            (Some(c), None) => !c.is_control() && !c.is_whitespace(),
-            _ => false,
-        };
-        if !one_printable {
+        if !is_one_visible_char(probe) {
             return Err(invalid_input(
                 "probe",
                 "must be exactly one printable, non-blank character",
@@ -587,6 +586,14 @@ fn validate_input_section(
                 ),
             ));
         }
+    }
+    if let Some(keys) = section.leading_keys.as_deref()
+        && !keys.iter().all(|key| is_one_visible_char(key))
+    {
+        return Err(invalid_input(
+            "leading_keys",
+            "entries must each be exactly one printable, non-blank character",
+        ));
     }
     if let Some(erase) = section.erase.as_deref()
         && (erase.is_empty() || erase.len() > MAX_INPUT_SEQUENCE_BYTES)
@@ -647,6 +654,16 @@ fn validate_input_section(
     }
 
     Ok(())
+}
+
+/// Whether `value` is exactly one character that is neither a control nor a
+/// blank character.
+fn is_one_visible_char(value: &str) -> bool {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => !c.is_control() && !c.is_whitespace(),
+        _ => false,
+    }
 }
 
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {

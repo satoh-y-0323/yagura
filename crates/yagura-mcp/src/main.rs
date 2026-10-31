@@ -267,7 +267,10 @@ impl YaguraMcpServer {
                         position, or any other control character (for example ESC), is \
                         rejected as invalid_argument before any approval decision is made: \
                         send a multi-line request through a plan task's instruction instead, \
-                        delivered by open_task_window and read back with get_plan. When the \
+                        delivered by open_task_window and read back with get_plan. Text whose \
+                        first non-blank character the window's CLI takes as a key at the start \
+                        of its input (for example ! or ?) is rejected the same way: start it \
+                        with another character, or run a command with open_window. When the \
                         call needs a decision, a body over 2048 bytes is also rejected as \
                         invalid_argument.",
                 },

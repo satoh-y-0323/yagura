@@ -1585,3 +1585,36 @@ fn rejects_an_abandoned_at_turn_end_that_is_not_a_boolean() {
         );
     }
 }
+
+#[test]
+fn leading_keys_of_single_visible_characters_load() {
+    let source = definition_with_input(
+        "input-leading-keys",
+        "[input]\nleading_keys = [\"!\", \"?\"]",
+    );
+
+    if let Err(err) = parse_definition(&source) {
+        panic!("leading_keys of single visible characters must load, got: {err}");
+    }
+}
+
+/// Each leading key is compared with one character of a body, so anything but a
+/// single visible character could never match or would match a blank.
+#[test]
+fn leading_keys_outside_a_single_visible_character_fail_the_definition() {
+    for entry in [r#""!!""#, r#""""#, r#"" ""#, r#""\u0007""#] {
+        let source = definition_with_input(
+            "input-leading-keys-bad",
+            &format!("[input]\nleading_keys = [\"!\", {entry}]"),
+        );
+        match parse_definition(&source) {
+            Err(yagura_daemon::detector::definition::DefinitionError::InvalidInput {
+                key, ..
+            }) => assert_eq!(key, "leading_keys", "leading_keys entry {entry}"),
+            other => panic!(
+                "leading_keys entry {entry} must be rejected as InvalidInput, got: {:?}",
+                other.map(|definition| definition.name)
+            ),
+        }
+    }
+}

@@ -253,6 +253,12 @@ delivery_confirm_ms = 8000     # how long to wait, after the submit bytes,
                                # for either". Default: 8000
 resend_max = 0                 # how many times an unconfirmed submit may be
                                # written again. 0..=4. Default: 0
+leading_keys = ["!", "?"]      # characters the CLI takes as a key, not as
+                               # text, when one is the first non-blank
+                               # character of its composer; a send_message
+                               # starting with one is refused. Each entry is
+                               # one printable, non-blank character.
+                               # Default: none
 
 [requests]                     # optional; every key optional
 abandoned_at_turn_end = false  # this CLI drops a tool call still out when
@@ -588,6 +594,33 @@ resolved:
   definition that writes no `[debounce]` table of its own runs on the
   daemon's `confirm_ms` instead, which the loader never sees, so no such
   definition is checked at all.
+
+#### Choosing `leading_keys` for a CLI
+
+Most CLIs read the first character of their composer as a key when it is one
+of a few symbols: `!` switches to a shell, `?` opens the help. The daemon
+writes a body into an empty composer, so a body starting with such a
+character would switch the CLI's mode instead of being typed: the daemon
+could never read its own text back, and the body would be changed or run as a
+shell command without passing the CLI's own permission prompt. So
+`send_message` refuses, as `invalid_argument` and before any approval is
+asked for, a text whose first non-blank character is in `leading_keys`.
+Blanks are skipped because a CLI may trim them before it reads its first
+character. Only `send_message` is checked: the lines the daemon writes on its
+own start with `[`, and `send_keys` sends named keys only.
+
+To fill it for a CLI, read its documentation for the symbols its composer
+treats specially at the start, type `?` into an empty composer to see its
+help, and then type each candidate followed by a word into an empty composer:
+a character belongs in the list when the composer does not show it as typed
+(it switched a mode or opened a view). A character the composer keeps as text
+and the daemon can read back (`/` and `@` on the bundled CLIs) does not
+belong. Keep a character the CLI treats as a key only under one of its
+settings, since the daemon cannot see that setting.
+
+A copy of a bundled definition placed in your own detection directory before
+this key existed has no `leading_keys`, so nothing is refused for windows
+running it; add the line from the bundled definition to your copy.
 
 ### `[requests]`
 

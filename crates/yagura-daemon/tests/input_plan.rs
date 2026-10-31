@@ -37,6 +37,7 @@ fn profile(
         resend_max: 0,
         probe: None,
         erase: b"\x7f".to_vec(),
+        leading_keys: Vec::new(),
     }
 }
 

@@ -5523,3 +5523,153 @@ async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the
         "the submit key must never be pressed over someone else's body"
     );
 }
+
+// =====================================================================
+// send_message: a body whose first non-blank character the window's CLI
+// consumes as a key in an empty composer (`[input].leading_keys`).
+// =====================================================================
+
+/// [`detection_config`] whose detection directory also holds
+/// [`common::leading_keys_definition`].
+fn leading_keys_config(dir: &Path, base: DaemonConfig) -> DaemonConfig {
+    let config = common::detection_config(dir, base);
+    common::write_leading_keys_definition(dir);
+    config
+}
+
+/// Sends `text` as `send_message` to `window_id` and returns the reply.
+async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> DaemonMessage {
+    send(
+        client,
+        &ClientMessage::SendText {
+            window_id: window_id.to_string(),
+            text: text.to_string(),
+        },
+    )
+    .await;
+    read_response(client, Duration::from_secs(10)).await
+}
+
+#[tokio::test]
+async fn send_message_starting_with_a_leading_key_is_invalid_argument_and_writes_nothing() {
+    let dir = unique_temp_dir("send-message-leading-key");
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["send_message"])),
+        ..leading_keys_config(&dir, base_config())
+    };
+    let h = Harness::start("send-message-leading-key", config).await;
+    let mut client = h.connect().await;
+    let window_id = h
+        .open_idle_window_with_composer_detected_by(
+            &mut client,
+            common::LEADING_KEYS_DETECTION_NAME,
+        )
+        .await;
+
+    let msg = send_text(&mut client, &window_id, "!send-message-leading-key-mark\n").await;
+    expect_error(msg, "invalid_argument");
+
+    assert_eq!(
+        count_marker(&h, &window_id, "send-message-leading-key-mark"),
+        0,
+        "a body the CLI would take as a key must never reach the PTY"
+    );
+}
+
+#[tokio::test]
+async fn send_message_raw_body_with_a_leading_key_after_blanks_is_invalid_argument_and_writes_nothing()
+ {
+    // No terminator: the raw-write path. The blank is skipped because a CLI
+    // may trim the composer before it reads its first character.
+    let dir = unique_temp_dir("send-message-leading-key-raw");
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["send_message"])),
+        ..leading_keys_config(&dir, base_config())
+    };
+    let h = Harness::start("send-message-leading-key-raw", config).await;
+    let mut client = h.connect().await;
+    let window_id = h
+        .open_idle_window_with_composer_detected_by(
+            &mut client,
+            common::LEADING_KEYS_DETECTION_NAME,
+        )
+        .await;
+
+    let msg = send_text(
+        &mut client,
+        &window_id,
+        " ?send-message-leading-key-raw-mark",
+    )
+    .await;
+    expect_error(msg, "invalid_argument");
+
+    assert_eq!(
+        count_marker(&h, &window_id, "send-message-leading-key-raw-mark"),
+        0,
+        "a body the CLI would take as a key must never reach the PTY"
+    );
+}
+
+#[tokio::test]
+async fn send_message_with_a_leading_key_character_elsewhere_is_still_written() {
+    let dir = unique_temp_dir("send-message-inner-key");
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["send_message"])),
+        ..leading_keys_config(&dir, base_config())
+    };
+    let h = Harness::start("send-message-inner-key", config).await;
+    let mut client = h.connect().await;
+    let window_id = h
+        .open_idle_window_with_composer_detected_by(
+            &mut client,
+            common::LEADING_KEYS_DETECTION_NAME,
+        )
+        .await;
+
+    match send_text(&mut client, &window_id, "send-message-inner-key-mark!\n").await {
+        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        other => panic!("expected text_sent, got {other:?}"),
+    }
+    h.wait_for_scrollback_occurrences(
+        &window_id,
+        "send-message-inner-key-mark!",
+        1,
+        Duration::from_secs(10),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn send_message_starting_with_a_leading_key_is_refused_before_the_approval_gate() {
+    // No auto-approve and no approver: a check placed behind the gate would
+    // answer approval_required instead.
+    let dir = unique_temp_dir("send-message-leading-key-gate");
+    let config = DaemonConfig {
+        playbook: None,
+        approval_policy: None,
+        approval_timeout_secs: 30,
+        ..leading_keys_config(&dir, base_config())
+    };
+    let h = Harness::start("send-message-leading-key-gate", config).await;
+    let mut client = h.connect().await;
+    let window_id = h
+        .open_idle_window_with_composer_detected_by(
+            &mut client,
+            common::LEADING_KEYS_DETECTION_NAME,
+        )
+        .await;
+
+    let msg = send_text(
+        &mut client,
+        &window_id,
+        "!send-message-leading-key-gate-mark\n",
+    )
+    .await;
+    expect_error(msg, "invalid_argument");
+
+    assert_eq!(
+        count_marker(&h, &window_id, "send-message-leading-key-gate-mark"),
+        0,
+        "a body refused before the gate must never reach the PTY"
+    );
+}

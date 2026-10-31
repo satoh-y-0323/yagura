@@ -187,6 +187,10 @@ going to change, and when you are done restore it and compare it byte for byte w
   waiting text into its composer while the window waits for input, so its detection definition needs
   a composer and an `[input].probe` (see [Choosing `probe` for a CLI](../crates/yagura-daemon/detection/README.md#choosing-probe-for-a-cli)).
   Write down why, and what would let you drop the workaround (a documented way to wake the CLI).
+- Find the characters the CLI's composer takes as a key when one comes first (a shell mode, a help
+  view): read the CLI's documentation, type `?` into an empty composer for its help, and try each
+  candidate there. List them as `[input].leading_keys` so `send_message` refuses a text starting with
+  one instead of switching the CLI's mode (see [Choosing `leading_keys` for a CLI](../crates/yagura-daemon/detection/README.md#choosing-leading_keys-for-a-cli)).
 - The hooks that call the doors go into the profile's `[hooks]` table, or a `json_entry` for a CLI
   that reads hooks only from its own files (see [Hooks injection](../profiles/README.md#hooks-injection)).
   If the CLI asks the user to trust hooks, the profile's `[mcp_registration]` has to record that trust.

@@ -82,6 +82,9 @@ delivery_confirm_ms = 8000  # reaction latency not separately measured; kept at 
 # composer, so a take-back repeats it once per line the body may occupy.
 clear = "\u0015"
 probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+# First character taken as a key: `!` runs a shell command, `?` opens the help
+# (docs: antigravity.google/docs/cli/using; checked on this CLI).
+leading_keys = ["!", "?"]
 
 [requests]
 abandoned_at_turn_end = false  # cancels the call when the user presses Esc and when its own call timeout ends it

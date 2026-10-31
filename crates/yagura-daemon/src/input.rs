@@ -89,6 +89,9 @@ pub struct InputProfile {
     pub probe: Option<char>,
     /// The key that erases one character, used to take the probe back out.
     pub erase: Vec<u8>,
+    /// Characters the receiver's editor takes as a key, not as text, when one
+    /// is the first non-blank character of its input. Empty means none.
+    pub leading_keys: Vec<char>,
 }
 
 impl Default for InputProfile {
@@ -106,6 +109,7 @@ impl Default for InputProfile {
             resend_max: 0,
             probe: None,
             erase: b"\x7f".to_vec(),
+            leading_keys: Vec::new(),
         }
     }
 }
@@ -162,7 +166,37 @@ impl InputProfile {
                 .erase
                 .as_ref()
                 .map_or(defaults.erase, |value| value.as_bytes().to_vec()),
+            leading_keys: section
+                .leading_keys
+                .as_ref()
+                .map_or(defaults.leading_keys, |keys| {
+                    keys.iter().filter_map(|key| key.chars().next()).collect()
+                }),
         }
+    }
+
+    /// The leading key `text` would start with in this receiver's input: its
+    /// first non-blank character, when that is one of
+    /// [`InputProfile::leading_keys`]. Blanks are skipped because a receiver
+    /// may trim them before it reads its first character.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use yagura_daemon::input::InputProfile;
+    ///
+    /// let profile = InputProfile {
+    ///     leading_keys: vec!['!'],
+    ///     ..InputProfile::default()
+    /// };
+    /// assert_eq!(profile.leading_key_of("  !ls"), Some('!'));
+    /// assert_eq!(profile.leading_key_of("ls !"), None);
+    /// ```
+    #[must_use]
+    pub fn leading_key_of(&self, text: &str) -> Option<char> {
+        text.chars()
+            .find(|c| !c.is_whitespace())
+            .filter(|c| self.leading_keys.contains(c))
     }
 
     /// Whether this profile may re-submit at all.

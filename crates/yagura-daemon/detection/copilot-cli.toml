@@ -91,3 +91,6 @@ ready_hold_ms = 1500
 submit_delay_ms = 800
 delivery_confirm_ms = 8000
 probe = "x"
+# First character taken as a key: `!` runs a shell command, `?` on an empty
+# composer shows the help, a lone `$` opens a shell (docs: cli-command-reference; checked).
+leading_keys = ["!", "?", "$"]

@@ -3214,6 +3214,12 @@ impl IpcServer {
             outbound.reply(&error_msg("invalid_argument", &err.to_string()));
             return;
         }
+        // The receiver would consume this character as a mode key, so the body
+        // would never show as written: refuse it before anyone is asked to approve.
+        if let Some(key) = entry.input_profile().leading_key_of(text) {
+            outbound.reply(&error_msg("invalid_argument", &leading_key_message(key)));
+            return;
+        }
         let Some(slot) = state.try_take_send_slot(self.config.max_waiters_per_conn) else {
             outbound.reply(&pending_waits_exhausted_msg());
             return;
@@ -4476,6 +4482,17 @@ fn window_not_found_msg() -> DaemonMessage {
 /// already exited.
 fn child_exited_msg() -> DaemonMessage {
     error_msg("child_exited", "child process has exited")
+}
+
+/// Why `send_message` refuses a text whose first non-blank character is one of
+/// the window's `[input].leading_keys`.
+fn leading_key_message(key: char) -> String {
+    format!(
+        "text starts with {key:?} (U+{:04X}), which this window's CLI takes as a key, not as \
+         text, at the start of its input; start the text with another character, or run a \
+         command with open_window",
+        u32::from(key)
+    )
 }
 
 /// The one wording of "this window takes no daemon-composed text", shared by

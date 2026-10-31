@@ -69,6 +69,9 @@ ready_hold_ms = 3000        # startup phase: prompt and work line alternate; mea
 submit_delay_ms = 800       # PASTE_ENTER_SUPPRESS_WINDOW=120ms; 800ms verified for long bodies
 clear = "\u0015"            # erases one display line per press, harmless on an empty composer (repeated by the daemon)
 probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+# First non-blank character taken as a key: `!` starts a shell command, `?` on
+# an empty composer opens the shortcuts (chat_composer.rs; checked on this CLI).
+leading_keys = ["!", "?"]
 delivery_confirm_ms = 9000
 resend_max = 4              # re-sends after codex drains input while starting up (discard_pending_input_before_interactive_screen)
 

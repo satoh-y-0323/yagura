@@ -985,6 +985,31 @@ pub fn control_definition(bottom_line_count: Option<u16>) -> String {
     )
 }
 
+/// File stem of [`leading_keys_definition`] under a detection directory.
+pub const LEADING_KEYS_DETECTION_NAME: &str = "leading-keys-control";
+
+/// [`control_definition`] whose CLI consumes a leading `!` or `?` in an empty
+/// composer as a key rather than typing it.
+pub fn leading_keys_definition() -> String {
+    yagura_test_support::detection::idle_definition_toml(
+        LEADING_KEYS_DETECTION_NAME,
+        "",
+        &format!(
+            "{CONTROL_INPUT_TABLE}leading_keys = [\"!\", \"?\"]\n{}",
+            composer_section_toml()
+        ),
+    )
+}
+
+/// Writes [`leading_keys_definition`] under `dir` as `{LEADING_KEYS_DETECTION_NAME}.toml`.
+pub fn write_leading_keys_definition(dir: &Path) {
+    std::fs::write(
+        dir.join(format!("{LEADING_KEYS_DETECTION_NAME}.toml")),
+        leading_keys_definition(),
+    )
+    .expect("write leading-keys detection definition file");
+}
+
 /// Written into a window's PTY input to trigger the `idle` rule of [`control_definition`].
 pub const READY_MARKER: &[u8] = yagura_test_support::detection::CONTROL_READY_LINE.as_bytes();
 
@@ -1159,14 +1184,37 @@ impl Harness {
         .await
     }
 
+    /// [`Harness::open_idle_window_with_composer`] bound to `detection`, which must
+    /// share [`control_definition`]'s ready rule (e.g. [`leading_keys_definition`]).
+    pub async fn open_idle_window_with_composer_detected_by(
+        &self,
+        client: &mut Connection,
+        detection: &str,
+    ) -> String {
+        self.open_idle_window_detected_by(
+            client,
+            yagura_test_support::process::echo_child_command_with_composer(0),
+            detection,
+        )
+        .await
+    }
+
     async fn open_idle_window_running(
         &self,
         client: &mut Connection,
         command: Vec<String>,
     ) -> String {
-        let window_id = self
-            .open_delivering(command, Some(CONTROL_DETECTION_NAME))
-            .await;
+        self.open_idle_window_detected_by(client, command, CONTROL_DETECTION_NAME)
+            .await
+    }
+
+    async fn open_idle_window_detected_by(
+        &self,
+        client: &mut Connection,
+        command: Vec<String>,
+        detection: &str,
+    ) -> String {
+        let window_id = self.open_delivering(command, Some(detection)).await;
         self.write_input(&window_id, READY_MARKER).await;
         wait_until_status(
             client,

@@ -59,6 +59,9 @@ submit = "\r"
 submit_delay_ms = 800       # an Enter about 0.1s after the text added a row instead of sending (1.4.12)
 clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.4.12)
 probe = "x"                 # shows as typed, erased by DEL, triggers nothing, and replaces the hint (1.4.12)
+# First character taken as a key: `!` runs a shell command, `?` opens the help
+# (in-app help; checked on 1.4.12, no public docs).
+leading_keys = ["!", "?"]
 ready_hold_ms = 0           # the composer, once drawn, was never swapped back for a startup screen (1.4.12)
 delivery_confirm_ms = 8000
 
