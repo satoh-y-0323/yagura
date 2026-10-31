@@ -552,7 +552,7 @@ which is why the server's `env` names them too.
    inside the distribution.
 6. **In WSL the MCP call time limit cannot be raised.** Muse's `-c` refuses `tool_timeout_sec`, so a
    `wsl-muse-code` window runs a long `wait_for_status`, `wait_for_report` or `send_message` under
-   Muse's own default limit, 5 minutes in Muse Code 1.4.12: ask for a shorter `timeout_sec`, or wait
+   Muse's own default limit, 5 minutes in Muse Code 1.4.12 to 1.4.14: ask for a shorter `timeout_sec`, or wait
    again. A call Muse gives up on ends when its turn ends: a wait answers as if its time had run
    out, and a `wait_for_report` takes no report, so one that arrives later waits for the next call.
    A registration sets `tool_timeout_sec = 86400` for `muse-code`.
@@ -565,7 +565,7 @@ which is why the server's `env` names them too.
    screen.
 10. **Neither Muse profile takes an effort level.** `--reasoning-effort` is saved as your own
     default in Muse's settings, and the one-launch override `-c reasoning_effort=...` is ignored
-    unless your settings already hold `reasoning_effort` (Muse Code 1.4.12), so yagura has no way
+    unless your settings already hold `reasoning_effort` (Muse Code 1.4.12 to 1.4.14), so yagura has no way
     to set it for one window and refuses `effort` for both profiles. Set it in Muse itself. This
     is to be measured again with each Muse release.
 

@@ -24,7 +24,7 @@ values = ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
 
 # No [effort]: Muse has no way to set it for one launch. `--reasoning-effort`
 # is saved as the user's own default, and `-c reasoning_effort=...` is ignored
-# unless the user's settings already hold that key (Muse Code 1.4.12). Measure
+# unless the user's settings already hold that key (Muse Code 1.4.12 to 1.4.14). Measure
 # again with each Muse release; once `-c` takes effect on its own, map it here.
 
 # On Windows `muse.cmd` wraps PowerShell 5.1, which drops `"` and `--` from
