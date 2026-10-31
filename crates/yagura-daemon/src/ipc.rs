@@ -3178,7 +3178,8 @@ impl IpcServer {
     /// the interactive terminal.
     ///
     /// Decision order: window resolution -> pre-validation (an exited window,
-    /// then the payload size, then its characters) -> the status, composer
+    /// then the payload size, then its characters, then a first character the
+    /// window's CLI takes as a key) -> the status, composer
     /// and approval gates -> the write. Pre-validation comes first so that its
     /// refusals do not depend on who is asking. The character
     /// check runs over the whole payload before it is judged single-line or

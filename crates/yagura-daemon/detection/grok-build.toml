@@ -73,5 +73,5 @@ submit_delay_ms = 800       # the text and the Enter written together were sent 
 clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.0.70)
 probe = "x"                 # shows as typed and is erased by DEL, with or without a conversation (1.0.70)
 # On an empty composer `!` enters Bash mode and `#` may enter Remember mode
-# (remember_mode setting, so kept on the safe side) (prompt.rs; checked on 1.0.70).
+# (remember_mode setting, so kept on the safe side) (source: prompt.rs). `?` stays as text (1.0.70).
 leading_keys = ["!", "#"]
