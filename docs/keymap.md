@@ -11,9 +11,9 @@ is the `Meta` modifier in the file (see [Writing a Key](#writing-a-key)).
 
 | Action id                | Operation                               | Windows / Linux     | macOS         |
 | ------------------------ | --------------------------------------- | ------------------- | ------------- |
-| `focus-next-window`      | Next window (in sidebar order)          | `Ctrl+Tab`          | `Ctrl+Tab`    |
-| `focus-previous-window`  | Previous window                         | `Ctrl+Shift+Tab`    | `Ctrl+Shift+Tab` |
-| `focus-next-attention`   | Next window needing you                 | `Ctrl+Shift+a`      | `Shift+Meta+a` |
+| `focus-next-window`      | Next window (in sidebar order)          | `Ctrl+Shift+f`      | `Shift+Meta+}` |
+| `focus-previous-window`  | Previous window                         | `Ctrl+Shift+b`      | `Shift+Meta+{` |
+| `focus-next-attention`   | Next window needing you                 | `Ctrl+Shift+j`      | `Shift+Meta+a` |
 | `open-window-form`       | New window                              | `Ctrl+Shift+n`      | `Meta+n`      |
 | `close-window`           | Close the current window                | `Ctrl+Shift+w`      | `Shift+Meta+w` |
 | `interrupt-window`       | Interrupt the current window            | `Ctrl+Shift+k`      | `Meta+.`      |
@@ -22,7 +22,7 @@ is the `Meta` modifier in the file (see [Writing a Key](#writing-a-key)).
 | `toggle-sidebar-focus`   | Move to the sidebar / back to a window  | `Ctrl+Shift+e`      | `Shift+Meta+e` |
 | `toggle-chat`            | Chat panel                              | `Ctrl+Shift+l`      | `Shift+Meta+l` |
 | `toggle-plans`           | Plans panel                             | `Ctrl+Shift+p`      | `Shift+Meta+p` |
-| `toggle-settings`        | Settings panel                          | `Ctrl+,`            | `Meta+,`      |
+| `toggle-settings`        | Settings panel                          | `Ctrl+Shift+s`      | `Meta+,`      |
 
 "The current window" is the window shown on screen. Next and previous follow the order of the
 sidebar, top to bottom, and wrap around at both ends; a window inside a collapsed room opens the
@@ -52,6 +52,21 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
   panel that is still open, or the window or sidebar row. A panel opened from the rail returns
   focus to the open panel you used most recently, so closing the upper of two stacked panels lands
   in the lower one; with no other panel open, focus goes to the current window.
+
+### How Keys Reach the Program
+
+Programs running in a window can ask the terminal for a richer key format than the traditional one,
+which cannot tell `Ctrl+Tab` from `Tab` or `Ctrl+Shift+a` from `Ctrl+a`.
+
+- **Windows:** yagura answers a program that turned on ConPTY's Win32 Input Mode. It uses that mode
+  only for a key press whose modifiers the traditional format cannot express; every other key is
+  sent in the traditional format.
+- **macOS and Linux:** when a program asks for the Kitty keyboard protocol, yagura supports two of
+  its flags, disambiguate and report-all-keys. Everything else is sent in the traditional format.
+- **Ctrl+V on Windows:** when the clipboard holds text, yagura pastes it. When it holds something
+  else (an image, for example), yagura passes `Ctrl+V` to the program, which reads the clipboard
+  itself.
+- **WSL windows:** the keys follow whatever `wsl.exe` does with them on the way in.
 
 ## Changing a Key from Settings
 

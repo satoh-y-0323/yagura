@@ -17,6 +17,20 @@ export function pasteInput(text: string): WindowInput | null {
   return text === '' ? null : { type: 'paste', text };
 }
 
+/**
+ * What a paste event sends. On Windows an event with no text (an image) hands
+ * Ctrl+V to the program so it reads the clipboard itself; elsewhere it sends nothing.
+ */
+export function pasteEventInput(text: string, platform: KeyboardPlatform): WindowInput | null {
+  if (text !== '') return { type: 'paste', text };
+  if (platform !== 'windows') return null;
+  return {
+    type: 'key',
+    key: { char: 'v' },
+    mods: { shift: false, alt: false, ctrl: true },
+  };
+}
+
 /** A wheel turn; a turn with no direction sends nothing, and the cell is not looked up. */
 export function wheelInput(
   event: { deltaY: number },

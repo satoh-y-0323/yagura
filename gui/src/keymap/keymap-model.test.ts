@@ -202,7 +202,7 @@ describe('effectiveKeys: an override that cannot be used is discarded and counte
       'windows'
     );
     expect(result.keys['close-window']).toBe('Ctrl+Shift+q');
-    expect(result.keys['focus-next-window']).toBe('Ctrl+Tab');
+    expect(result.keys['focus-next-window']).toBe('Ctrl+Shift+f');
     expect(result.keys['toggle-chat']).toBe('Ctrl+Shift+l');
     expect(result.discarded).toBe(3);
   });

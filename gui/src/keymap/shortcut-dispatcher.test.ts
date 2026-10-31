@@ -122,9 +122,9 @@ describe('a matching keydown', () => {
 
   it('runs the action the binding names, not a fixed one', () => {
     const h = harness();
-    h.handle({ key: 'Tab', code: 'Tab', ctrlKey: true, keyCode: 9 });
-    h.handle({ key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true, keyCode: 9 });
-    h.handle({ key: ',', code: 'Comma', ctrlKey: true, keyCode: 188 });
+    h.handle({ key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true, keyCode: 70 });
+    h.handle({ key: 'B', code: 'KeyB', ctrlKey: true, shiftKey: true, keyCode: 66 });
+    h.handle({ key: 'S', code: 'KeyS', ctrlKey: true, shiftKey: true, keyCode: 83 });
     const expected: ActionId[] = ['focus-next-window', 'focus-previous-window', 'toggle-settings'];
     expect(h.runs).toEqual(expected);
   });
@@ -188,11 +188,11 @@ describe('input method composition', () => {
     expect(h.runs).toEqual(expected);
   });
 
-  it('matches keyCode 229 with Ctrl by the physical key, so the default Ctrl+Shift+A works with the input method on', () => {
+  it('matches keyCode 229 with Ctrl by the physical key, so the default Ctrl+Shift+J works with the input method on', () => {
     const h = harness();
     const counted = h.handle({
       key: 'Process',
-      code: 'KeyA',
+      code: 'KeyJ',
       ctrlKey: true,
       shiftKey: true,
       keyCode: 229,
@@ -275,7 +275,8 @@ describe('keys the input method owns (measured on Windows and macOS, 2026-09-29)
 
 describe('a key the engine gave no name (Linux WebKitGTK)', () => {
   it('runs focus-previous-window for Ctrl+Shift+Tab reported as Unidentified with code Tab', () => {
-    const h = harness(WINDOWS_BINDINGS, 'linux');
+    const bound: KeyMap = new Map<string, ActionId>([['Ctrl+Shift+Tab', 'focus-previous-window']]);
+    const h = harness(bound, 'linux');
     const counted = h.handle({
       key: 'Unidentified',
       code: 'Tab',

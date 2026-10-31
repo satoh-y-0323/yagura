@@ -17,7 +17,7 @@ import { cellsThatFit, inputPlacement } from './pane-fit';
 import { cellAtPoint, type CellPosition } from './pointer-input';
 import { PointerTracker, isMousePointer } from './pointer-tracker';
 import { TextFlow } from './text-flow';
-import { keyDownEffect, pasteInput, textInput, wheelInput } from './window-input';
+import { keyDownEffect, pasteEventInput, pasteInput, textInput, wheelInput } from './window-input';
 
 /** What the view needs from the pane around it. */
 export interface TerminalViewOptions {
@@ -82,7 +82,7 @@ export class TerminalView {
     this.listen(input, 'paste', (event) => {
       event.preventDefault();
       const text = event.clipboardData?.getData('text/plain') ?? '';
-      this.paste(text);
+      this.send(pasteEventInput(text, this.options.platform));
     });
     // macOS copies through its app menu, whose copy event lands here.
     this.listen(input, 'copy', (event) => {

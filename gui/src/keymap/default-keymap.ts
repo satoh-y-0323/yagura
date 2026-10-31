@@ -9,9 +9,9 @@ import type { ActionId } from './key-binding';
 type DefaultKeys = Readonly<Record<ActionId, string>>;
 
 const WINDOWS_AND_LINUX: DefaultKeys = Object.freeze({
-  'focus-next-window': 'Ctrl+Tab',
-  'focus-previous-window': 'Ctrl+Shift+Tab',
-  'focus-next-attention': 'Ctrl+Shift+a',
+  'focus-next-window': 'Ctrl+Shift+f',
+  'focus-previous-window': 'Ctrl+Shift+b',
+  'focus-next-attention': 'Ctrl+Shift+j',
   'open-window-form': 'Ctrl+Shift+n',
   'close-window': 'Ctrl+Shift+w',
   'interrupt-window': 'Ctrl+Shift+k',
@@ -20,13 +20,13 @@ const WINDOWS_AND_LINUX: DefaultKeys = Object.freeze({
   'toggle-sidebar-focus': 'Ctrl+Shift+e',
   'toggle-chat': 'Ctrl+Shift+l',
   'toggle-plans': 'Ctrl+Shift+p',
-  'toggle-settings': 'Ctrl+,',
+  'toggle-settings': 'Ctrl+Shift+s',
 });
 
 // Cmd is the mac convention; the app menu owns Cmd+Q/W/H/M and the edit chords.
 const MAC: DefaultKeys = Object.freeze({
-  'focus-next-window': 'Ctrl+Tab',
-  'focus-previous-window': 'Ctrl+Shift+Tab',
+  'focus-next-window': 'Shift+Meta+}',
+  'focus-previous-window': 'Shift+Meta+{',
   'focus-next-attention': 'Shift+Meta+a',
   'open-window-form': 'Meta+n',
   'close-window': 'Shift+Meta+w',

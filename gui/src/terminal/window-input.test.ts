@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { KeyDownFacts } from './key-input';
+import * as windowInput from './window-input';
 import { keyDownEffect, pasteInput, textInput, wheelInput } from './window-input';
 
 const NO_MODS = { shift: false, alt: false, ctrl: false };
@@ -41,6 +42,31 @@ describe('a paste', () => {
 
   it('sends a paste that is only blank', () => {
     expect(pasteInput(' ')).toEqual({ type: 'paste', text: ' ' });
+  });
+});
+
+describe('a paste event', () => {
+  const pasteEventInput = (text: string, platform: 'windows' | 'mac' | 'linux') =>
+    (
+      windowInput as unknown as {
+        pasteEventInput: (text: string, platform: string) => unknown;
+      }
+    ).pasteEventInput(text, platform);
+
+  it.each(['windows', 'mac', 'linux'] as const)('sends the text pasted on %s', (platform) => {
+    expect(pasteEventInput('a\nb', platform)).toEqual({ type: 'paste', text: 'a\nb' });
+  });
+
+  it('hands Ctrl+V to the program on Windows when no text came with the event', () => {
+    expect(pasteEventInput('', 'windows')).toEqual({
+      type: 'key',
+      key: { char: 'v' },
+      mods: { shift: false, alt: false, ctrl: true },
+    });
+  });
+
+  it.each(['mac', 'linux'] as const)('sends nothing on %s when no text came', (platform) => {
+    expect(pasteEventInput('', platform)).toBeNull();
   });
 });
 

@@ -19,7 +19,7 @@ type SaveFn = (overrides: Record<string, string>) => Promise<SaveResult>;
 
 const PLATFORM: KeyboardPlatform = 'windows';
 const DEFAULTS = defaultKeysFor(PLATFORM);
-const CHORD_A = 'Ctrl+Shift+j';
+const CHORD_A = 'Ctrl+Shift+o';
 const CHORD_B = 'Ctrl+Shift+u';
 const ACTION_A: ActionId = 'toggle-chat';
 const ACTION_B: ActionId = 'toggle-plans';
@@ -74,7 +74,7 @@ describe('load', () => {
     'makes the keys and bindings the effective combination of the defaults and the file on %s',
     (platform) => {
       const defaults = defaultKeysFor(platform);
-      const overrides = { 'toggle-chat': 'Ctrl+Shift+j', 'close-window': '' };
+      const overrides = { 'toggle-chat': 'Ctrl+Shift+o', 'close-window': '' };
       const store = createKeymapStore({ platform, save: () => Promise.resolve({ ok: true }) });
 
       store.load(loaded(overrides));
@@ -87,7 +87,7 @@ describe('load', () => {
 
   it('returns the discarded overrides plus the legacy entries as one count', () => {
     const store = storeWith(() => Promise.resolve({ ok: true }));
-    const overrides = { 'no-such-action': 'Ctrl+Shift+j', 'toggle-chat': 'Ctrl+Shift+u' };
+    const overrides = { 'no-such-action': 'Ctrl+Shift+o', 'toggle-chat': 'Ctrl+Shift+u' };
     const discarded = effectiveKeys(DEFAULTS, overrides, PLATFORM).discarded;
     expect(discarded).toBeGreaterThan(0);
 
