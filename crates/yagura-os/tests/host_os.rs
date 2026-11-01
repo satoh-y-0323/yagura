@@ -115,6 +115,40 @@ fn host_os_platform_maps_linux_to_the_unix_platform() {
 }
 
 // ---------------------------------------------------------------------
+// launches_wsl / HostOs::flattens_key_records
+// ---------------------------------------------------------------------
+
+#[test]
+fn launches_wsl_recognises_wsl_by_its_file_name_on_every_os() {
+    for program in [
+        "wsl",
+        "wsl.exe",
+        "WSL.EXE",
+        r"C:\Windows\System32\wsl.exe",
+        "/mnt/c/Windows/System32/wsl.exe",
+    ] {
+        assert!(yagura_os::program::launches_wsl(program), "{program}");
+    }
+    for program in [
+        "powershell.exe",
+        "cmd.exe",
+        "bash",
+        "wslg.exe",
+        r"C:\tools\wsl\bash.exe",
+    ] {
+        assert!(!yagura_os::program::launches_wsl(program), "{program}");
+    }
+}
+
+#[test]
+fn only_windows_flattens_key_records_and_only_for_wsl() {
+    assert!(HostOs::Windows.flattens_key_records("wsl.exe"));
+    assert!(!HostOs::Windows.flattens_key_records("powershell.exe"));
+    assert!(!HostOs::Linux.flattens_key_records("wsl"));
+    assert!(!HostOs::MacOs.flattens_key_records("wsl"));
+}
+
+// ---------------------------------------------------------------------
 // Platform::host and HostOs::host agree
 // ---------------------------------------------------------------------
 

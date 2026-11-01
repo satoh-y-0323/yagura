@@ -530,6 +530,8 @@ impl VtScreen {
                 .model
                 .extras()
                 .kitty_flags(mode.contains(TermMode::ALT_SCREEN)),
+            // Set from the window's program by `PtySession::input_state` (`pty.rs`).
+            key_records_flattened: false,
         }
     }
 

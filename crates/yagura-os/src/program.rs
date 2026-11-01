@@ -119,6 +119,16 @@ impl HostOs {
         matches!(self, Self::Windows)
     }
 
+    /// Whether a window started from `program` (its `argv[0]`) turns the
+    /// console's key records back into legacy terminal bytes before its own
+    /// child reads them: only `wsl.exe` on Windows does, so a modifier sent
+    /// in Win32 Input Mode is dropped there and arrives as a different press.
+    /// Other OSes never host a console, so this is `false` for them.
+    #[must_use]
+    pub fn flattens_key_records(self, program: &str) -> bool {
+        matches!(self, Self::Windows) && launches_wsl(program)
+    }
+
     /// Maps onto the coarser [`Platform`] distinction executable resolution
     /// draws: Windows stays Windows, while both `MacOs` and `Linux` collapse
     /// onto [`Platform::Unix`].
@@ -129,6 +139,26 @@ impl HostOs {
             Self::MacOs | Self::Linux => Platform::Unix,
         }
     }
+}
+
+/// Whether `program` (an `argv[0]`) names `wsl.exe`: its last path element,
+/// split on both `/` and `\`, equals `wsl` case-insensitively once a trailing
+/// `.exe` (any case) is removed.
+///
+/// Splits by hand instead of through [`Path`] so the answer is the same on
+/// every host: `wsl.exe` translates the console's key records into legacy
+/// terminal bytes for the Linux side whichever OS the caller is built for.
+#[must_use]
+pub fn launches_wsl(program: &str) -> bool {
+    let file_name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = file_name
+        .len()
+        .checked_sub(".exe".len())
+        .filter(|&cut| {
+            file_name.is_char_boundary(cut) && file_name[cut..].eq_ignore_ascii_case(".exe")
+        })
+        .map_or(file_name, |cut| &file_name[..cut]);
+    stem.eq_ignore_ascii_case("wsl")
 }
 
 /// Selects the value that belongs to `os` among four candidates keyed by

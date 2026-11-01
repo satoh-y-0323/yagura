@@ -547,6 +547,12 @@ pub struct PtySession {
     /// `screen`'s input state, readable without its lock.
     input: Arc<PublishedInput>,
 
+    /// Whether the window's program flattens console key records, decided
+    /// from its `argv[0]` when it opens (see
+    /// [`InputModes::key_records_flattened`]). The child's output never
+    /// changes it, so it lives here rather than in `input`'s bits.
+    key_records_flattened: bool,
+
     /// Orders resizes, so the model and the PTY always end at the size of the
     /// same request. Held across the PTY call, which readers never wait on.
     resize_order: tokio::sync::Mutex<()>,
@@ -683,9 +689,11 @@ impl PtySession {
         palette: Option<yagura_protocol::Palette>,
         config: &DaemonConfig,
     ) -> PtyResult<Self> {
-        if argv.is_empty() {
+        let Some(program) = argv.first() else {
             return Err(PtyError::SpawnFailed);
-        }
+        };
+        let key_records_flattened =
+            yagura_os::program::HostOs::host().flattens_key_records(program);
 
         let spawned = tokio::task::spawn_blocking({
             let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
@@ -865,6 +873,7 @@ impl PtySession {
             screen,
             model_access: Arc::new(Semaphore::new(MODEL_ACCESS_PER_WINDOW)),
             input,
+            key_records_flattened,
             resize_order: tokio::sync::Mutex::new(()),
             output_arrivals,
             input_writes: Arc::new(input_writes),
@@ -1300,7 +1309,9 @@ impl PtySession {
     /// model last published them. Never waits on the model's lock.
     #[must_use]
     pub fn input_state(&self) -> InputState {
-        self.input.load()
+        let mut state = self.input.load();
+        state.modes.key_records_flattened = self.key_records_flattened;
+        state
     }
 
     /// The window's size as `(cols, rows)`, as its terminal model has it.

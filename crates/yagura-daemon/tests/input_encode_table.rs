@@ -1104,17 +1104,56 @@ fn win32_input_keeps_the_legacy_bytes_of_chords_the_legacy_form_carries() {
     }
 }
 
+/// A ConPTY window whose child is `wsl.exe`: Win32 records are flattened to VT bytes.
+fn wsl_window(kitty_flags: u8) -> InputModes {
+    InputModes {
+        kitty_flags,
+        win32_input: true,
+        key_records_flattened: true,
+        ..InputModes::default()
+    }
+}
+
 #[test]
-fn win32_input_wins_over_kitty_flags_and_the_rest_stays_legacy() {
+fn lossy_presses_take_the_kitty_form_and_the_rest_stays_legacy() {
     assert_bytes(
         key(Key::Named(NamedKey::Tab), CTRL, win32(1 | 8)),
-        &win32_press(0x09, 0x0F, 9, 0x0008),
+        b"\x1b[9;5u",
         "Ctrl+Tab with both",
     );
     assert_bytes(
         key(Key::Named(NamedKey::Enter), SHIFT, win32(1 | 8)),
         b"\x1b\r",
         "Shift+Enter with both",
+    );
+    assert_bytes(
+        key(Key::Named(NamedKey::Escape), NONE, win32(1 | 8)),
+        b"\x1b",
+        "Esc with both",
+    );
+    assert_bytes(
+        key(Key::Char('c'), CTRL, win32(1 | 8)),
+        b"\x03",
+        "Ctrl+C with both",
+    );
+}
+
+#[test]
+fn a_window_whose_records_are_flattened_never_gets_win32_records() {
+    assert_bytes(
+        key(Key::Char('A'), CTRL_SHIFT, wsl_window(0)),
+        b"",
+        "WSL Ctrl+Shift+A",
+    );
+    assert_bytes(
+        key(Key::Named(NamedKey::Tab), CTRL, wsl_window(0)),
+        b"\t",
+        "WSL Ctrl+Tab",
+    );
+    assert_bytes(
+        key(Key::Named(NamedKey::Tab), CTRL, wsl_window(1 | 8)),
+        b"\x1b[9;5u",
+        "WSL Ctrl+Tab with Kitty flags",
     );
 }
 

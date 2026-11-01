@@ -59,6 +59,11 @@ pub struct InputModes {
     /// The Kitty keyboard protocol flags in effect: the child's request
     /// narrowed to the ones supported ([`KITTY_SUPPORTED_FLAGS`]).
     pub kitty_flags: u8,
+    /// The window's program turns console key records back into legacy
+    /// bytes before its child reads them (`wsl.exe`), so a press sent as
+    /// Win32 records arrives with its modifiers dropped. Fixed when the
+    /// window opens, so it is not part of [`InputModes::to_bits`].
+    pub key_records_flattened: bool,
 }
 
 /// Kitty keyboard flag 1: disambiguate escape codes.
@@ -113,6 +118,7 @@ impl InputModes {
             win32_input: bits & (1 << 9) != 0,
             kitty_flags: bit_flag(bits, 10, KITTY_DISAMBIGUATE)
                 | bit_flag(bits, 11, KITTY_REPORT_ALL_KEYS),
+            key_records_flattened: false,
         }
     }
 }
@@ -147,24 +153,34 @@ fn bit_flag(bits: u16, bit: u32, flag: u8) -> u8 {
 
 /// The bytes a key press writes; empty when it writes nothing.
 ///
-/// Under Win32 Input Mode, a press whose legacy bytes lose what was pressed
-/// (they are empty, or equal those of the same key with fewer modifiers or
-/// of a plain Enter, Tab, Escape or Backspace) is written as console key
-/// records when its key has a fixed virtual-key code, and
-/// every other press keeps its legacy bytes; the Kitty flags are not used,
-/// since the PTY host does not read them. Otherwise, with Kitty flags in
-/// effect, the press takes the Kitty keyboard protocol's form. With neither,
-/// the legacy (xterm) bytes.
+/// Under Win32 Input Mode (a ConPTY window), only a press whose legacy bytes
+/// lose what was pressed (they are empty, or equal those of the same key with
+/// fewer modifiers or of a plain Enter, Tab, Escape or Backspace) picks
+/// another form: the Kitty keyboard protocol's while Kitty flags are in
+/// effect, else console key records when the window does not flatten them
+/// ([`InputModes::key_records_flattened`]) and the key has a fixed
+/// virtual-key code, else its legacy bytes. Every other press keeps its
+/// legacy bytes. Key records reach a press intact only for a child that reads
+/// them; Kitty flags are the child's own claim that it reads the Kitty form,
+/// which ConPTY and `wsl.exe` pass through untouched.
+///
+/// Without Win32 Input Mode, every press takes the Kitty form while Kitty
+/// flags are in effect, and the legacy (xterm) bytes otherwise.
 #[must_use]
 pub fn encode_key(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     if view_page(input).is_some() {
         return Vec::new();
     }
     if modes.win32_input {
-        if legacy_loses_the_press(input, modes)
-            && let Some(records) = win32_records(input)
-        {
-            return records;
+        if legacy_loses_the_press(input, modes) {
+            if modes.kitty_flags & KITTY_SUPPORTED_FLAGS != 0 {
+                return encode_kitty(input, modes);
+            }
+            if !modes.key_records_flattened
+                && let Some(records) = win32_records(input)
+            {
+                return records;
+            }
         }
         return encode_legacy(input, modes);
     }
@@ -809,6 +825,7 @@ mod tests {
                     win32_input: flags & 1 != 0,
                     kitty_flags: [0, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, 9]
                         [usize::from((flags >> 4) & 3)],
+                    key_records_flattened: false,
                 };
                 assert_eq!(InputModes::from_bits(modes.to_bits()), modes);
             }

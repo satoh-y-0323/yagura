@@ -58,15 +58,21 @@ list in Chat), and an `Esc` typed inside a window still goes to the program runn
 Programs running in a window can ask the terminal for a richer key format than the traditional one,
 which cannot tell `Ctrl+Tab` from `Tab` or `Ctrl+Shift+a` from `Ctrl+a`.
 
-- **Windows:** ConPTY, the PTY host, requests Win32 Input Mode when a window starts, and yagura
-  answers it. yagura uses that mode only for a key press whose modifiers the traditional format cannot express; every other key is
-  sent in the traditional format.
+- **Windows:** only a key press whose modifiers the traditional format cannot express takes another
+  format. If the program asked for the Kitty keyboard protocol, the press is sent in the Kitty
+  format; otherwise it is sent in Win32 Input Mode, which ConPTY, the PTY host, requests when a
+  window starts. Every other key is sent in the traditional format.
 - **macOS and Linux:** when a program asks for the Kitty keyboard protocol, yagura supports two of
-  its flags, disambiguate and report-all-keys. Everything else is sent in the traditional format.
+  its flags, disambiguate and report-all-keys, and sends every key in the Kitty format. Otherwise
+  keys are sent in the traditional format.
 - **Ctrl+V on Windows:** when the clipboard holds text, yagura pastes it. When it holds something
   else (an image, for example), yagura passes `Ctrl+V` to the program, which reads the clipboard
   itself.
-- **WSL windows:** the keys follow whatever `wsl.exe` does with them on the way in.
+- **WSL windows** (a window whose program is `wsl`): `wsl.exe` turns Win32 Input Mode back into
+  the traditional format, so a press the traditional format cannot express would arrive as a
+  different key. Such a press is sent in the Kitty format if the program asked for it, and in the
+  traditional format otherwise. A window whose command is a shell in which you run `wsl` yourself
+  is treated as a Windows window.
 
 ## Changing a Key from Settings
 
