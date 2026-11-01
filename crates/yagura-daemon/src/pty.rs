@@ -692,8 +692,7 @@ impl PtySession {
         let Some(program) = argv.first() else {
             return Err(PtyError::SpawnFailed);
         };
-        let key_records_flattened =
-            yagura_os::program::HostOs::host().flattens_key_records(program);
+        let key_records_flattened = config.host_os.flattens_key_records(program);
 
         let spawned = tokio::task::spawn_blocking({
             let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
