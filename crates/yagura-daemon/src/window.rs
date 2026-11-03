@@ -1649,9 +1649,8 @@ impl WindowEntry {
     /// A [`WindowEntry::submit_message`] call's own unsent text goes in front
     /// of `data`, taken back (see [`PtySession::write_input_with`]), unless
     /// `data` is exactly this window's configured interrupt bytes, as
-    /// [`crate::control::interrupt_window`] writes them. Key presses are
-    /// judged before they are encoded instead
-    /// ([`WindowEntry::write_pty_input_presses`]).
+    /// [`crate::control::interrupt_window`] writes them. GUI and MCP input
+    /// goes through [`WindowEntry::write_client_input`] instead.
     ///
     /// # Errors
     ///
@@ -1666,36 +1665,22 @@ impl WindowEntry {
         self.write_pty_bytes(data, origin, interrupt_keys).await
     }
 
-    /// [`WindowEntry::write_pty_input`] for key presses encoded by
-    /// [`crate::input_encode::encode_presses`]: the encoded bytes (key
-    /// records, the Kitty form) need not equal the configured interrupt
-    /// bytes, so the press decides whether they are the interrupt keys.
+    /// Writes GUI or MCP input to this window's PTY, as
+    /// [`WindowEntry::write_pty_input`] does, judging the interrupt keys by
+    /// [`crate::input_encode::ClientWrite::is_interrupt_key`]: a key press by
+    /// the press, since its written bytes (key records, the Kitty form) need
+    /// not equal the configured interrupt bytes; any other input never.
     ///
     /// # Errors
     ///
     /// As [`WindowEntry::write_pty_input`].
-    pub async fn write_pty_input_presses(
+    pub async fn write_client_input(
         &self,
-        presses: &crate::input_encode::EncodedPresses,
+        write: &crate::input_encode::ClientWrite,
         origin: InputOrigin,
     ) -> crate::pty::PtyResult<()> {
-        self.write_pty_bytes(&presses.bytes, origin, presses.is_interrupt_key)
+        self.write_pty_bytes(write.bytes(), origin, write.is_interrupt_key())
             .await
-    }
-
-    /// [`WindowEntry::write_pty_input`] for structured input that is not a key
-    /// press (text, a paste, a pointer or wheel report): never judged as the
-    /// interrupt keys.
-    ///
-    /// # Errors
-    ///
-    /// As [`WindowEntry::write_pty_input`].
-    pub async fn write_pty_report(
-        &self,
-        data: &[u8],
-        origin: InputOrigin,
-    ) -> crate::pty::PtyResult<()> {
-        self.write_pty_bytes(data, origin, false).await
     }
 
     async fn write_pty_bytes(

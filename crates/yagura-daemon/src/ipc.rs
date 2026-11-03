@@ -66,7 +66,7 @@ use crate::handoff::{
 use crate::health;
 use crate::inbox::{Parcel, ParcelEnd, PushBudget, Withdrawal};
 use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
-use crate::input_encode::{self, PointerOutcome, ViewPage, WheelOutcome};
+use crate::input_encode::{self, ClientWrite, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::palette_store::{self, PaletteStore};
 use crate::plan_permit::{self, ChangeKind, PermitError};
@@ -4058,30 +4058,14 @@ impl IpcServer {
             entry.session().set_view_focus(*focused);
             return;
         }
-        let key_presses = match msg {
-            ClientMessage::Key(key) => Some(input_encode::encode_presses(
-                std::slice::from_ref(key),
-                input.modes,
-                entry.interrupt_bytes(),
-            )),
-            _ => None,
-        };
-        let other_bytes;
-        let bytes: &[u8] = match &key_presses {
-            Some(presses) => &presses.bytes,
-            None => {
-                other_bytes = encode_structured_input(msg, input);
-                &other_bytes
-            }
-        };
-        if bytes.is_empty() {
+        let Some(write) = ClientWrite::from_message(msg, input, entry.interrupt_bytes()) else {
             return;
-        }
+        };
         // A move with no button held carries no key or button, so it cannot
         // change the composer and does not count as another writer to a
         // delivery waiting on the window.
         if is_report_without_input(msg) {
-            entry.session().send_report(bytes.to_vec());
+            entry.session().send_report(write.bytes().to_vec());
             return;
         }
         // As with xterm.js `scrollOnUserInput`, typing or pasting brings the view
@@ -4097,18 +4081,9 @@ impl IpcServer {
         {
             state.view.note_change();
         }
-        let written = match &key_presses {
-            Some(presses) => {
-                entry
-                    .write_pty_input_presses(presses, InputOrigin::Interactive)
-                    .await
-            }
-            None => {
-                entry
-                    .write_pty_report(bytes, InputOrigin::Interactive)
-                    .await
-            }
-        };
+        let written = entry
+            .write_client_input(&write, InputOrigin::Interactive)
+            .await;
         if written.is_err() {
             outbound.reply(&error_msg("internal", "failed to write input to the PTY"));
         }
@@ -4295,34 +4270,6 @@ fn within_reply_budget(candidates: Vec<RestoreCandidate>) -> Vec<RestoreCandidat
 /// source of truth.
 fn is_confirmed_exited(entry: &WindowEntry) -> bool {
     entry.current_status() == WindowStatus::Exited
-}
-
-/// The bytes structured input other than a key press becomes for a window in
-/// `input` (a press goes through `input_encode::encode_presses`); empty when it
-/// writes nothing. A pointer or wheel event off the screen is dropped, since
-/// no report could name its cell. Selection and moving the view are not the
-/// child's to see, so they write nothing here.
-fn encode_structured_input(msg: &ClientMessage, input: InputState) -> Vec<u8> {
-    let modes = input.modes;
-    match msg {
-        ClientMessage::Text { text } => input_encode::encode_text(text),
-        ClientMessage::Paste { text } => input_encode::encode_paste(text, modes),
-        ClientMessage::Pointer(pointer)
-            if input.contains_cell(pointer.cell.col, pointer.cell.row) =>
-        {
-            match input_encode::encode_pointer(pointer, modes) {
-                PointerOutcome::Report(bytes) => bytes,
-                PointerOutcome::Select | PointerOutcome::Ignore => Vec::new(),
-            }
-        }
-        ClientMessage::Wheel(wheel) if input.contains_cell(wheel.cell.col, wheel.cell.row) => {
-            match input_encode::encode_wheel(wheel, modes) {
-                WheelOutcome::Write(bytes) => bytes,
-                WheelOutcome::ScrollView { .. } => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    }
 }
 
 fn is_report_without_input(msg: &ClientMessage) -> bool {
@@ -4769,16 +4716,13 @@ async fn execute_send_keys(
         .iter()
         .filter_map(|key| input_encode::control_key_press(*key))
         .collect();
-    let encoded = input_encode::encode_presses(&presses, modes, entry.interrupt_bytes());
+    let write = ClientWrite::from_presses(&presses, modes, entry.interrupt_bytes());
     tracing::info!(
         window_id = %entry.window_id(),
-        key_bytes = encoded.bytes.len(),
+        key_bytes = write.bytes().len(),
         "accepted send_keys"
     );
-    match entry
-        .write_pty_input_presses(&encoded, InputOrigin::Message)
-        .await
-    {
+    match entry.write_client_input(&write, InputOrigin::Message).await {
         Ok(()) => outbound.reply(&DaemonMessage::KeysSent {
             window_id: entry.window_id().to_string(),
         }),

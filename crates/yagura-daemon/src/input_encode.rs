@@ -12,9 +12,11 @@
 //! while the child asks for it (see `encode_key`).
 
 use yagura_protocol::{
-    CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
-    PointerKind, WheelInput,
+    CellPosition, ClientMessage, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton,
+    PointerInput, PointerKind, WheelInput,
 };
+
+use crate::pty::InputState;
 
 const ESC: u8 = 0x1b;
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -156,7 +158,7 @@ fn bit_flag(bits: u16, bit: u32, flag: u8) -> u8 {
 /// Under Win32 Input Mode (a ConPTY window), every press takes the Kitty
 /// keyboard protocol's form while Kitty flags are in effect, else console key
 /// records, as Windows Terminal's `TerminalInput::HandleKey` sends them. A
-/// key off the fixed virtual-key table (`win32_records`) keeps its legacy
+/// key off the fixed virtual-key table keeps its legacy
 /// bytes, since the client sends no virtual-key code. A window whose program
 /// turns key records back into legacy bytes
 /// ([`InputModes::key_records_flattened`], `wsl.exe`) gets the legacy bytes
@@ -195,33 +197,90 @@ fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     }
 }
 
-/// A run of key presses encoded for one write.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedPresses {
-    /// The bytes to write: each press as [`encode_key`] encodes it, joined.
-    pub bytes: Vec<u8>,
-    /// Whether the presses are the window's interrupt keys: their legacy
-    /// bytes, joined, are exactly the configured interrupt bytes. Judged on
-    /// the presses, since `bytes` (key records, the Kitty form) differ from
-    /// the configured ones.
-    pub is_interrupt_key: bool,
+/// One write of GUI or MCP input to a window: the bytes, and whether they are
+/// the window's interrupt keys. Built only from key presses or a client
+/// message, so client input never reaches a window as bare bytes.
+#[derive(Debug)]
+pub struct ClientWrite {
+    bytes: Vec<u8>,
+    is_interrupt_key: bool,
 }
 
-/// Encodes key presses written together, and judges them against
-/// `interrupt_bytes`. The only way a press reaches a write.
-#[must_use]
-pub fn encode_presses(
-    presses: &[KeyInput],
-    modes: InputModes,
-    interrupt_bytes: &[u8],
-) -> EncodedPresses {
-    let bytes = presses
-        .iter()
-        .flat_map(|press| encode_key(press, modes))
-        .collect();
-    EncodedPresses {
-        bytes,
-        is_interrupt_key: presses_match_interrupt(presses, interrupt_bytes),
+impl ClientWrite {
+    /// Key presses written together, each as [`encode_key`] encodes it.
+    /// They are the interrupt keys when their legacy bytes, joined, are
+    /// exactly `interrupt_bytes`: judged on the presses, since the written
+    /// bytes (key records, the Kitty form) differ from the configured ones.
+    #[must_use]
+    pub fn from_presses(presses: &[KeyInput], modes: InputModes, interrupt_bytes: &[u8]) -> Self {
+        let bytes = presses
+            .iter()
+            .flat_map(|press| encode_key(press, modes))
+            .collect();
+        Self {
+            bytes,
+            is_interrupt_key: presses_match_interrupt(presses, interrupt_bytes),
+        }
+    }
+
+    /// What a client message writes to a window in `input`; `None` when it
+    /// writes nothing. A key press is judged as in [`ClientWrite::from_presses`];
+    /// text, a paste, a pointer or wheel report is never the interrupt keys. A
+    /// pointer or wheel event off the screen is dropped, since no report could
+    /// name its cell. Selection and moving the view are not the child's to
+    /// see, so they write nothing.
+    #[must_use]
+    pub fn from_message(
+        msg: &ClientMessage,
+        input: InputState,
+        interrupt_bytes: &[u8],
+    ) -> Option<Self> {
+        let modes = input.modes;
+        let bytes = match msg {
+            ClientMessage::Key(key) => {
+                return Self::from_presses(std::slice::from_ref(key), modes, interrupt_bytes)
+                    .non_empty();
+            }
+            ClientMessage::Text { text } => encode_text(text),
+            ClientMessage::Paste { text } => encode_paste(text, modes),
+            ClientMessage::Pointer(pointer)
+                if input.contains_cell(pointer.cell.col, pointer.cell.row) =>
+            {
+                match encode_pointer(pointer, modes) {
+                    PointerOutcome::Report(bytes) => bytes,
+                    PointerOutcome::Select | PointerOutcome::Ignore => Vec::new(),
+                }
+            }
+            ClientMessage::Wheel(wheel) if input.contains_cell(wheel.cell.col, wheel.cell.row) => {
+                match encode_wheel(wheel, modes) {
+                    WheelOutcome::Write(bytes) => bytes,
+                    WheelOutcome::ScrollView { .. } => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        Self {
+            bytes,
+            is_interrupt_key: false,
+        }
+        .non_empty()
+    }
+
+    /// The bytes to write.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Whether the write is the window's interrupt keys, so no take-back of a
+    /// delivery's unsent text goes in front of it.
+    #[must_use]
+    pub fn is_interrupt_key(&self) -> bool {
+        self.is_interrupt_key
+    }
+
+    fn non_empty(self) -> Option<Self> {
+        (!self.bytes.is_empty()).then_some(self)
     }
 }
 
@@ -564,13 +623,6 @@ pub fn encode_focus(focused: bool, modes: InputModes) -> Vec<u8> {
         (true, true) => b"\x1b[I".to_vec(),
         (true, false) => b"\x1b[O".to_vec(),
     }
-}
-
-/// The bytes a `send_keys` key writes, the same as the matching key press;
-/// `None` for [`ControlKey::Unknown`].
-#[must_use]
-pub fn encode_control_key(key: ControlKey, modes: InputModes) -> Option<Vec<u8>> {
-    control_key_press(key).map(|press| encode_key(&press, modes))
 }
 
 /// The key press a `send_keys` key stands for; `None` for

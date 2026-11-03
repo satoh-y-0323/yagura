@@ -6,12 +6,13 @@
 //! mouse encoders), plus yagura's own Shift+Enter.
 
 use yagura_daemon::input_encode::{
-    InputModes, MouseTracking, PointerOutcome, WheelOutcome, encode_control_key, encode_focus,
-    encode_key, encode_paste, encode_pointer, encode_presses, encode_text, encode_wheel,
+    ClientWrite, InputModes, MouseTracking, PointerOutcome, WheelOutcome, control_key_press,
+    encode_focus, encode_key, encode_paste, encode_pointer, encode_text, encode_wheel,
 };
+use yagura_daemon::pty::InputState;
 use yagura_protocol::{
-    CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
-    PointerKind, WheelInput,
+    CellPosition, ClientMessage, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton,
+    PointerInput, PointerKind, WheelInput,
 };
 
 const NONE: Modifiers = Modifiers {
@@ -84,6 +85,15 @@ fn chr(c: char, mods: Modifiers) -> Vec<u8> {
         },
         plain(),
     )
+}
+
+/// What `send_keys` writes for a key: the press, encoded through `ClientWrite`.
+fn send_keys_bytes(key: ControlKey, modes: InputModes) -> Option<Vec<u8>> {
+    control_key_press(key).map(|press| {
+        ClientWrite::from_presses(&[press], modes, &[])
+            .bytes()
+            .to_vec()
+    })
 }
 
 #[track_caller]
@@ -977,12 +987,12 @@ fn control_keys_encode_like_the_matching_keys() {
     ];
     for (key, normal, application) in table {
         assert_eq!(
-            encode_control_key(key, plain()).as_deref(),
+            send_keys_bytes(key, plain()).as_deref(),
             Some(normal),
             "{key:?}"
         );
         assert_eq!(
-            encode_control_key(key, app_cursor()).as_deref(),
+            send_keys_bytes(key, app_cursor()).as_deref(),
             Some(application),
             "{key:?} application"
         );
@@ -991,7 +1001,7 @@ fn control_keys_encode_like_the_matching_keys() {
 
 #[test]
 fn an_unknown_control_key_encodes_to_nothing() {
-    assert_eq!(encode_control_key(ControlKey::Unknown, plain()), None);
+    assert_eq!(send_keys_bytes(ControlKey::Unknown, plain()), None);
 }
 
 // --- extended keyboard protocols ----------------------------------------------------
@@ -1218,17 +1228,17 @@ fn a_window_whose_records_are_flattened_never_gets_win32_records() {
 #[test]
 fn control_keys_on_a_conpty_window_follow_the_key_press_rule() {
     assert_eq!(
-        encode_control_key(ControlKey::Escape, win32(0)),
+        send_keys_bytes(ControlKey::Escape, win32(0)),
         Some(win32_press(0x1B, 0x01, 27, 0)),
         "Escape, records"
     );
     assert_eq!(
-        encode_control_key(ControlKey::Up, win32(0)),
+        send_keys_bytes(ControlKey::Up, win32(0)),
         Some(win32_press(0x26, 0x48, 0, 0x0100)),
         "Up, records"
     );
     assert_eq!(
-        encode_control_key(ControlKey::Escape, win32(1 | 8)).as_deref(),
+        send_keys_bytes(ControlKey::Escape, win32(1 | 8)).as_deref(),
         Some(b"\x1b[27u".as_slice()),
         "Escape, Kitty flags"
     );
@@ -1243,31 +1253,64 @@ fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
     let up = press(Key::Named(NamedKey::ArrowUp), NONE);
 
     // A native ConPTY window writes Ctrl+C as a key record, yet it is still the interrupt key.
-    let encoded = encode_presses(std::slice::from_ref(&ctrl_c), win32(0), b"\x03");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), win32(0), b"");
     assert_bytes(
-        encoded.bytes,
+        write.bytes().to_vec(),
         &win32_press(0x43, 0x2E, 3, 0x0008),
         "Ctrl+C, records",
     );
-    assert!(encoded.is_interrupt_key, "Ctrl+C on a ConPTY window");
+    assert!(write.is_interrupt_key(), "Ctrl+C on a ConPTY window");
 
-    let encoded = encode_presses(std::slice::from_ref(&ctrl_d), win32(0), b"\x03");
-    assert!(!encoded.is_interrupt_key, "Ctrl+D on a ConPTY window");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_d), win32(0), b"");
+    assert!(!write.is_interrupt_key(), "Ctrl+D on a ConPTY window");
 
     // A run of presses is the interrupt key only when the whole run is.
-    let encoded = encode_presses(&[esc, up], win32(0), b"\x1b");
+    let write = ClientWrite::from_presses(&[esc, up], win32(0), b"");
     let mut joined = win32_press(0x1B, 0x01, 27, 0);
     joined.extend(win32_press(0x26, 0x48, 0, 0x0100));
-    assert_bytes(encoded.bytes, &joined, "Esc then Up, records");
-    assert!(!encoded.is_interrupt_key, "Esc then Up on a ConPTY window");
+    assert_bytes(write.bytes().to_vec(), &joined, "Esc then Up, records");
+    assert!(!write.is_interrupt_key(), "Esc then Up on a ConPTY window");
 
-    let encoded = encode_presses(std::slice::from_ref(&esc), win32(0), b"\x1b");
-    assert!(encoded.is_interrupt_key, "Esc on a ConPTY window");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&esc), win32(0), b"");
+    assert!(write.is_interrupt_key(), "Esc on a ConPTY window");
 
     // macOS and Linux windows write the legacy bytes.
-    let encoded = encode_presses(std::slice::from_ref(&ctrl_c), kitty(0), b"\x03");
-    assert_bytes(encoded.bytes, b"\x03", "Ctrl+C, legacy");
-    assert!(encoded.is_interrupt_key, "Ctrl+C on a Unix window");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), kitty(0), b"");
+    assert_bytes(write.bytes().to_vec(), b"", "Ctrl+C, legacy");
+    assert!(write.is_interrupt_key(), "Ctrl+C on a Unix window");
+}
+
+fn input_state() -> InputState {
+    InputState {
+        modes: plain(),
+        cols: 80,
+        rows: 24,
+    }
+}
+
+#[test]
+fn text_from_the_gui_is_never_the_interrupt_key() {
+    let write = ClientWrite::from_message(
+        &ClientMessage::Text { text: "abc".into() },
+        input_state(),
+        b"",
+    )
+    .expect("text writes");
+    assert_bytes(write.bytes().to_vec(), b"abc", "text");
+    assert!(!write.is_interrupt_key(), "abc");
+
+    // Only a key press is the interrupt key; text that happens to equal its bytes is not.
+    let write = ClientWrite::from_message(
+        &ClientMessage::Text { text: "".into() },
+        input_state(),
+        b"",
+    )
+    .expect("text writes");
+    assert_bytes(write.bytes().to_vec(), b"", "text ETX");
+    assert!(
+        !write.is_interrupt_key(),
+        "text equal to the interrupt bytes"
+    );
 }
 
 #[test]
