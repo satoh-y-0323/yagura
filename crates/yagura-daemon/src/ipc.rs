@@ -4058,7 +4058,22 @@ impl IpcServer {
             entry.session().set_view_focus(*focused);
             return;
         }
-        let bytes = encode_structured_input(msg, input);
+        let key_presses = match msg {
+            ClientMessage::Key(key) => Some(input_encode::encode_presses(
+                std::slice::from_ref(key),
+                input.modes,
+                entry.interrupt_bytes(),
+            )),
+            _ => None,
+        };
+        let other_bytes;
+        let bytes: &[u8] = match &key_presses {
+            Some(presses) => &presses.bytes,
+            None => {
+                other_bytes = encode_structured_input(msg, input);
+                &other_bytes
+            }
+        };
         if bytes.is_empty() {
             return;
         }
@@ -4066,7 +4081,7 @@ impl IpcServer {
         // change the composer and does not count as another writer to a
         // delivery waiting on the window.
         if is_report_without_input(msg) {
-            entry.session().send_report(bytes);
+            entry.session().send_report(bytes.to_vec());
             return;
         }
         // As with xterm.js `scrollOnUserInput`, typing or pasting brings the view
@@ -4082,17 +4097,19 @@ impl IpcServer {
         {
             state.view.note_change();
         }
-        let interrupt_keys = match msg {
-            ClientMessage::Key(key) => {
-                input_encode::press_matches_interrupt(key, entry.interrupt_bytes())
+        let written = match &key_presses {
+            Some(presses) => {
+                entry
+                    .write_pty_input_presses(presses, InputOrigin::Interactive)
+                    .await
             }
-            _ => false,
+            None => {
+                entry
+                    .write_pty_report(bytes, InputOrigin::Interactive)
+                    .await
+            }
         };
-        if entry
-            .write_pty_input_judged(&bytes, InputOrigin::Interactive, interrupt_keys)
-            .await
-            .is_err()
-        {
+        if written.is_err() {
             outbound.reply(&error_msg("internal", "failed to write input to the PTY"));
         }
     }
@@ -4280,14 +4297,14 @@ fn is_confirmed_exited(entry: &WindowEntry) -> bool {
     entry.current_status() == WindowStatus::Exited
 }
 
-/// The bytes structured input becomes for a window in `input`; empty when it
+/// The bytes structured input other than a key press becomes for a window in
+/// `input` (a press goes through `input_encode::encode_presses`); empty when it
 /// writes nothing. A pointer or wheel event off the screen is dropped, since
 /// no report could name its cell. Selection and moving the view are not the
 /// child's to see, so they write nothing here.
 fn encode_structured_input(msg: &ClientMessage, input: InputState) -> Vec<u8> {
     let modes = input.modes;
     match msg {
-        ClientMessage::Key(key) => input_encode::encode_key(key, modes),
         ClientMessage::Text { text } => input_encode::encode_text(text),
         ClientMessage::Paste { text } => input_encode::encode_paste(text, modes),
         ClientMessage::Pointer(pointer)
@@ -4748,23 +4765,18 @@ async fn execute_send_keys(
 ) {
     let modes = entry.session().input_state().modes;
     // Validated before the gate, so no key is unknown here.
-    let bytes: Vec<u8> = keys
-        .iter()
-        .filter_map(|key| input_encode::encode_control_key(*key, modes))
-        .flatten()
-        .collect();
     let presses: Vec<_> = keys
         .iter()
         .filter_map(|key| input_encode::control_key_press(*key))
         .collect();
-    let interrupt_keys = input_encode::presses_match_interrupt(&presses, entry.interrupt_bytes());
+    let encoded = input_encode::encode_presses(&presses, modes, entry.interrupt_bytes());
     tracing::info!(
         window_id = %entry.window_id(),
-        key_bytes = bytes.len(),
+        key_bytes = encoded.bytes.len(),
         "accepted send_keys"
     );
     match entry
-        .write_pty_input_judged(&bytes, InputOrigin::Message, interrupt_keys)
+        .write_pty_input_presses(&encoded, InputOrigin::Message)
         .await
     {
         Ok(()) => outbound.reply(&DaemonMessage::KeysSent {

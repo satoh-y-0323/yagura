@@ -467,8 +467,10 @@ writes `probe` only if its own text is still all that shows; the probe then
 tells whether the take-back got through (it is taken back again if not), and is
 erased. When the composer shows anything else, nothing is written and the text
 is reported as possibly left behind. The one write nothing is put in front of
-is the interrupt key sequence (`interrupt_window`'s bytes): it reaches the CLI
-as sent, and the daemon takes its text back after it.
+is the interrupt key sequence: it reaches the CLI as sent, and the daemon
+takes its text back after it. A key press (a GUI key or `send_keys`) is that
+sequence when the press's traditional bytes are the configured interrupt bytes;
+a raw byte write (`interrupt_window`) is when the bytes are.
 
 An empty composer right after the take-back proves nothing: a CLI that has
 not read the body yet shows exactly that. So the daemon types `probe` behind

@@ -7,7 +7,7 @@
 
 use yagura_daemon::input_encode::{
     InputModes, MouseTracking, PointerOutcome, WheelOutcome, encode_control_key, encode_focus,
-    encode_key, encode_paste, encode_pointer, encode_text, encode_wheel, press_matches_interrupt,
+    encode_key, encode_paste, encode_pointer, encode_presses, encode_text, encode_wheel,
 };
 use yagura_protocol::{
     CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
@@ -1237,18 +1237,37 @@ fn control_keys_on_a_conpty_window_follow_the_key_press_rule() {
 #[test]
 fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
     let press = |key, mods| KeyInput { key, mods };
-    assert!(press_matches_interrupt(
-        &press(Key::Char('c'), CTRL),
-        b"\x03"
-    ));
-    assert!(!press_matches_interrupt(
-        &press(Key::Char('d'), CTRL),
-        b"\x03"
-    ));
-    assert!(press_matches_interrupt(
-        &press(Key::Named(NamedKey::Escape), NONE),
-        b"\x1b"
-    ));
+    let ctrl_c = press(Key::Char('c'), CTRL);
+    let ctrl_d = press(Key::Char('d'), CTRL);
+    let esc = press(Key::Named(NamedKey::Escape), NONE);
+    let up = press(Key::Named(NamedKey::ArrowUp), NONE);
+
+    // A native ConPTY window writes Ctrl+C as a key record, yet it is still the interrupt key.
+    let encoded = encode_presses(std::slice::from_ref(&ctrl_c), win32(0), b"\x03");
+    assert_bytes(
+        encoded.bytes,
+        &win32_press(0x43, 0x2E, 3, 0x0008),
+        "Ctrl+C, records",
+    );
+    assert!(encoded.is_interrupt_key, "Ctrl+C on a ConPTY window");
+
+    let encoded = encode_presses(std::slice::from_ref(&ctrl_d), win32(0), b"\x03");
+    assert!(!encoded.is_interrupt_key, "Ctrl+D on a ConPTY window");
+
+    // A run of presses is the interrupt key only when the whole run is.
+    let encoded = encode_presses(&[esc, up], win32(0), b"\x1b");
+    let mut joined = win32_press(0x1B, 0x01, 27, 0);
+    joined.extend(win32_press(0x26, 0x48, 0, 0x0100));
+    assert_bytes(encoded.bytes, &joined, "Esc then Up, records");
+    assert!(!encoded.is_interrupt_key, "Esc then Up on a ConPTY window");
+
+    let encoded = encode_presses(std::slice::from_ref(&esc), win32(0), b"\x1b");
+    assert!(encoded.is_interrupt_key, "Esc on a ConPTY window");
+
+    // macOS and Linux windows write the legacy bytes.
+    let encoded = encode_presses(std::slice::from_ref(&ctrl_c), kitty(0), b"\x03");
+    assert_bytes(encoded.bytes, b"\x03", "Ctrl+C, legacy");
+    assert!(encoded.is_interrupt_key, "Ctrl+C on a Unix window");
 }
 
 #[test]

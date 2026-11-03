@@ -1651,7 +1651,7 @@ impl WindowEntry {
     /// `data` is exactly this window's configured interrupt bytes, as
     /// [`crate::control::interrupt_window`] writes them. Key presses are
     /// judged before they are encoded instead
-    /// ([`WindowEntry::write_pty_input_judged`]).
+    /// ([`WindowEntry::write_pty_input_presses`]).
     ///
     /// # Errors
     ///
@@ -1663,20 +1663,42 @@ impl WindowEntry {
         origin: InputOrigin,
     ) -> crate::pty::PtyResult<()> {
         let interrupt_keys = !data.is_empty() && data == self.interrupt_bytes.as_slice();
-        self.write_pty_input_judged(data, origin, interrupt_keys)
-            .await
+        self.write_pty_bytes(data, origin, interrupt_keys).await
     }
 
-    /// [`WindowEntry::write_pty_input`] for bytes whose caller already judged
-    /// whether they are this window's interrupt keys: a key press's encoded
-    /// bytes (key records, the Kitty form) need not equal the configured
-    /// ones, so the press decides (see
-    /// [`crate::input_encode::press_matches_interrupt`]).
+    /// [`WindowEntry::write_pty_input`] for key presses encoded by
+    /// [`crate::input_encode::encode_presses`]: the encoded bytes (key
+    /// records, the Kitty form) need not equal the configured interrupt
+    /// bytes, so the press decides whether they are the interrupt keys.
     ///
     /// # Errors
     ///
     /// As [`WindowEntry::write_pty_input`].
-    pub async fn write_pty_input_judged(
+    pub async fn write_pty_input_presses(
+        &self,
+        presses: &crate::input_encode::EncodedPresses,
+        origin: InputOrigin,
+    ) -> crate::pty::PtyResult<()> {
+        self.write_pty_bytes(&presses.bytes, origin, presses.is_interrupt_key)
+            .await
+    }
+
+    /// [`WindowEntry::write_pty_input`] for structured input that is not a key
+    /// press (text, a paste, a pointer or wheel report): never judged as the
+    /// interrupt keys.
+    ///
+    /// # Errors
+    ///
+    /// As [`WindowEntry::write_pty_input`].
+    pub async fn write_pty_report(
+        &self,
+        data: &[u8],
+        origin: InputOrigin,
+    ) -> crate::pty::PtyResult<()> {
+        self.write_pty_bytes(data, origin, false).await
+    }
+
+    async fn write_pty_bytes(
         &self,
         data: &[u8],
         origin: InputOrigin,

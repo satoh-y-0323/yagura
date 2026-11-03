@@ -9,7 +9,7 @@
 //! (`Keyboard.ts` `evaluateKeyboardEvent`, `Clipboard.ts`, the mouse
 //! encoders of `CoreMouseService.ts`), plus Shift+Enter as `ESC CR`. Key
 //! presses also take Win32 Input Mode's or the Kitty keyboard protocol's form
-//! while the child asks for it (see [`encode_key`]).
+//! while the child asks for it (see `encode_key`).
 
 use yagura_protocol::{
     CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
@@ -156,7 +156,7 @@ fn bit_flag(bits: u16, bit: u32, flag: u8) -> u8 {
 /// Under Win32 Input Mode (a ConPTY window), every press takes the Kitty
 /// keyboard protocol's form while Kitty flags are in effect, else console key
 /// records, as Windows Terminal's `TerminalInput::HandleKey` sends them. A
-/// key off the fixed virtual-key table of [`win32_records`] keeps its legacy
+/// key off the fixed virtual-key table (`win32_records`) keeps its legacy
 /// bytes, since the client sends no virtual-key code. A window whose program
 /// turns key records back into legacy bytes
 /// ([`InputModes::key_records_flattened`], `wsl.exe`) gets the legacy bytes
@@ -195,18 +195,37 @@ fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     }
 }
 
-/// Whether a key press is the window's interrupt keys: its legacy bytes are
-/// exactly `interrupt_bytes`. Judged on the press, since the bytes it is
-/// written as (key records, the Kitty form) differ from the configured ones.
-#[must_use]
-pub fn press_matches_interrupt(input: &KeyInput, interrupt_bytes: &[u8]) -> bool {
-    presses_match_interrupt(std::slice::from_ref(input), interrupt_bytes)
+/// A run of key presses encoded for one write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPresses {
+    /// The bytes to write: each press as [`encode_key`] encodes it, joined.
+    pub bytes: Vec<u8>,
+    /// Whether the presses are the window's interrupt keys: their legacy
+    /// bytes, joined, are exactly the configured interrupt bytes. Judged on
+    /// the presses, since `bytes` (key records, the Kitty form) differ from
+    /// the configured ones.
+    pub is_interrupt_key: bool,
 }
 
-/// [`press_matches_interrupt`] for a run of presses written together: their
-/// legacy bytes, joined, are exactly `interrupt_bytes`.
+/// Encodes key presses written together, and judges them against
+/// `interrupt_bytes`. The only way a press reaches a write.
 #[must_use]
-pub fn presses_match_interrupt(presses: &[KeyInput], interrupt_bytes: &[u8]) -> bool {
+pub fn encode_presses(
+    presses: &[KeyInput],
+    modes: InputModes,
+    interrupt_bytes: &[u8],
+) -> EncodedPresses {
+    let bytes = presses
+        .iter()
+        .flat_map(|press| encode_key(press, modes))
+        .collect();
+    EncodedPresses {
+        bytes,
+        is_interrupt_key: presses_match_interrupt(presses, interrupt_bytes),
+    }
+}
+
+fn presses_match_interrupt(presses: &[KeyInput], interrupt_bytes: &[u8]) -> bool {
     let modes = InputModes::default();
     let legacy: Vec<u8> = presses
         .iter()
