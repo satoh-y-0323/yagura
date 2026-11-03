@@ -77,8 +77,6 @@ fault-injection = []
 
 [build-dependencies]
 yagura-build-support = { path = "../yagura-build-support" }
-# Hash check of the vendored pseudoconsole (the pins are shared with yagura-os).
-sha2.workspace = true
 
 [dev-dependencies]
 yagura-daemon = { path = ".", features = ["fault-injection"] }

@@ -2,8 +2,8 @@
 //! the one check of a directory against it.
 //!
 //! This file is the only place the hashes are written. `yagura-os` uses it for
-//! the run-time check and the daemon's build script includes it by path, so the
-//! build-time and run-time checks cannot drift apart. It depends on `std` and
+//! the run-time check and `yagura-build-support` includes it by path for the
+//! build-time check, so the two cannot drift apart. It depends on `std` and
 //! `sha2` only, for that reason.
 
 use std::fmt;

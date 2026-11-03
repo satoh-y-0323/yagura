@@ -1,0 +1,34 @@
+[package]
+name = "yagura-holder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A part of the yagura app, shipped in its installers rather than released to crates.io.
+publish = false
+
+[[bin]]
+name = "yagura-holder"
+path = "src/main.rs"
+
+[[bin]]
+name = "holder_child"
+path = "src/bin/holder_child.rs"
+
+[dependencies]
+yagura-os = { path = "../yagura-os" }
+
+# `holder_child` only: the test fixture reads its terminal's size directly, so
+# a test can see a resize reach the child. The holder itself reaches the OS
+# through `yagura-os`; a `[[bin]]` cannot use dev-dependencies, hence these.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Console"] }
+
+[build-dependencies]
+yagura-build-support = { path = "../yagura-build-support" }
+
+[lints]
+workspace = true

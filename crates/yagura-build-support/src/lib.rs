@@ -3,8 +3,14 @@
 //!
 //! Build scripts cannot import each other, so the one embedding routine lives
 //! here and every caller gets the same name rule, ordering and failure modes.
+//! The same holds for placing the bundled pseudoconsole beside the binaries.
 
 use std::path::{Path, PathBuf};
+
+// The pinned hashes live in one file shared with `yagura-os`, so the build-time
+// and run-time checks cannot disagree.
+#[path = "../../yagura-os/src/bundled_conpty_pins.rs"]
+mod bundled_conpty_pins;
 
 /// An optional `&[&str]` constant listing the keys of the pair constant in
 /// the same order, generated from the same directory scan.
@@ -128,6 +134,90 @@ fn collect_toml_files(source_dir: &Path) -> Result<Vec<(String, PathBuf)>, Strin
         files.push((stem.to_owned(), path.clone()));
     }
     Ok(files)
+}
+
+/// On a Windows x86_64 target, checks the vendored pseudoconsole in
+/// `vendored_dir` (relative to the calling crate's manifest) against the pinned
+/// hashes and places it in the profile directory (beside the executables) and
+/// its `deps/` (beside the test executables). Other targets are left alone.
+///
+/// Safe to run from several build scripts at once: each file is copied to a
+/// temporary name and renamed into place, and a destination that already has
+/// the pinned contents counts as placed (a running process may hold it open).
+///
+/// # Errors
+/// Fails on a Windows target that is not x86_64, when `CARGO_MANIFEST_DIR` or
+/// `OUT_DIR` is unset or `OUT_DIR` is not inside a profile directory, when the
+/// vendored files do not match the pins, or when a destination can neither be
+/// written nor already holds the pinned contents.
+pub fn place_bundled_conpty(vendored_dir: &str) -> Result<(), String> {
+    println!("cargo:rerun-if-changed={vendored_dir}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return Ok(());
+    }
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64") {
+        return Err("the bundled ConPTY is vendored for x86_64 only".to_string());
+    }
+    let source = PathBuf::from(env_var("CARGO_MANIFEST_DIR")?).join(vendored_dir);
+    bundled_conpty_pins::check_dir(&source).map_err(|fault| {
+        format!(
+            "{} does not match the pinned build: {fault}",
+            source.display()
+        )
+    })?;
+
+    // OUT_DIR is <profile>/build/<package>-<hash>/out.
+    let out_dir = PathBuf::from(env_var("OUT_DIR")?);
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or("OUT_DIR is not inside a profile directory")?;
+    for target in [profile_dir.to_path_buf(), profile_dir.join("deps")] {
+        place_pinned_files(&source, &target)?;
+    }
+    Ok(())
+}
+
+/// Places every pinned file of `source` into `target`.
+fn place_pinned_files(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("cannot create {}: {error}", target.display()))?;
+    for pinned in &bundled_conpty_pins::PINNED_FILES {
+        place_pinned_file(source, target, pinned)?;
+    }
+    Ok(())
+}
+
+fn place_pinned_file(
+    source: &Path,
+    target: &Path,
+    pinned: &bundled_conpty_pins::PinnedFile,
+) -> Result<(), String> {
+    let destination = target.join(pinned.name);
+    if has_pinned_contents(&destination, pinned) {
+        return Ok(());
+    }
+    let temporary = target.join(format!("{}.{}.tmp", pinned.name, std::process::id()));
+    let placed = std::fs::copy(source.join(pinned.name), &temporary)
+        .and_then(|_| std::fs::rename(&temporary, &destination));
+    let Err(error) = placed else {
+        return Ok(());
+    };
+    let _ = std::fs::remove_file(&temporary);
+    // Another build script may have placed it meanwhile, or a running process
+    // holds a copy that is already the pinned one.
+    if has_pinned_contents(&destination, pinned) {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot place {} into {}: {error}",
+        pinned.name,
+        target.display()
+    ))
+}
+
+fn has_pinned_contents(path: &Path, pinned: &bundled_conpty_pins::PinnedFile) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| bundled_conpty_pins::sha256_hex(&bytes) == pinned.sha256)
 }
 
 /// One build-time environment variable cargo is expected to set.

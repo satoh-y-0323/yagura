@@ -5620,6 +5620,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 name = "yagura-build-support"
 version = "0.3.0"
 dependencies = [
+ "sha2 0.11.1",
  "yagura-protocol",
 ]
 
@@ -5668,6 +5669,16 @@ dependencies = [
  "yagura-os",
  "yagura-protocol",
  "yagura-test-support",
+]
+
+[[package]]
+name = "yagura-holder"
+version = "0.3.0"
+dependencies = [
+ "libc",
+ "windows 0.52.0",
+ "yagura-build-support",
+ "yagura-os",
 ]
 
 [[package]]
