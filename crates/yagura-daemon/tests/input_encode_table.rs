@@ -1253,7 +1253,7 @@ fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
     let up = press(Key::Named(NamedKey::ArrowUp), NONE);
 
     // A native ConPTY window writes Ctrl+C as a key record, yet it is still the interrupt key.
-    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), win32(0), b"");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), win32(0), b"\x03");
     assert_bytes(
         write.bytes().to_vec(),
         &win32_press(0x43, 0x2E, 3, 0x0008),
@@ -1261,7 +1261,7 @@ fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
     );
     assert!(write.is_interrupt_key(), "Ctrl+C on a ConPTY window");
 
-    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_d), win32(0), b"");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_d), win32(0), b"\x03");
     assert!(!write.is_interrupt_key(), "Ctrl+D on a ConPTY window");
 
     // A run of presses is the interrupt key only when the whole run is.
@@ -1275,8 +1275,8 @@ fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
     assert!(write.is_interrupt_key(), "Esc on a ConPTY window");
 
     // macOS and Linux windows write the legacy bytes.
-    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), kitty(0), b"");
-    assert_bytes(write.bytes().to_vec(), b"", "Ctrl+C, legacy");
+    let write = ClientWrite::from_presses(std::slice::from_ref(&ctrl_c), kitty(0), b"\x03");
+    assert_bytes(write.bytes().to_vec(), b"\x03", "Ctrl+C, legacy");
     assert!(write.is_interrupt_key(), "Ctrl+C on a Unix window");
 }
 
@@ -1293,7 +1293,7 @@ fn text_from_the_gui_is_never_the_interrupt_key() {
     let write = ClientWrite::from_message(
         &ClientMessage::Text { text: "abc".into() },
         input_state(),
-        b"",
+        b"\x03",
     )
     .expect("text writes");
     assert_bytes(write.bytes().to_vec(), b"abc", "text");
@@ -1301,16 +1301,31 @@ fn text_from_the_gui_is_never_the_interrupt_key() {
 
     // Only a key press is the interrupt key; text that happens to equal its bytes is not.
     let write = ClientWrite::from_message(
-        &ClientMessage::Text { text: "".into() },
+        &ClientMessage::Text {
+            text: "\x03".into(),
+        },
         input_state(),
-        b"",
+        b"\x03",
     )
     .expect("text writes");
-    assert_bytes(write.bytes().to_vec(), b"", "text ETX");
+    assert_bytes(write.bytes().to_vec(), b"\x03", "text ETX");
     assert!(
         !write.is_interrupt_key(),
         "text equal to the interrupt bytes"
     );
+}
+
+#[test]
+fn a_key_press_from_the_gui_is_judged_as_the_interrupt_key() {
+    let message = |key| ClientMessage::Key(KeyInput { key, mods: CTRL });
+    let write = ClientWrite::from_message(&message(Key::Char('c')), input_state(), b"\x03")
+        .expect("Ctrl+C writes");
+    assert_bytes(write.bytes().to_vec(), b"\x03", "GUI Ctrl+C");
+    assert!(write.is_interrupt_key(), "GUI Ctrl+C");
+
+    let write = ClientWrite::from_message(&message(Key::Char('d')), input_state(), b"\x03")
+        .expect("Ctrl+D writes");
+    assert!(!write.is_interrupt_key(), "GUI Ctrl+D");
 }
 
 #[test]
