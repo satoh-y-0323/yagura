@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { validateBinding } from './binding-rules';
 import { defaultKeysFor } from './default-keymap';
+import { chordOfEvent } from './key-chord';
 import type { KeyboardPlatform } from './keyboard-platform';
 import { ACTION_IDS, type ActionId } from './key-binding';
 
@@ -27,8 +28,8 @@ const WINDOWS_AND_LINUX: Readonly<Record<ActionId, string>> = {
 };
 
 const MAC: Readonly<Record<ActionId, string>> = {
-  'focus-next-window': 'Shift+Meta+}',
-  'focus-previous-window': 'Shift+Meta+{',
+  'focus-next-window': 'Shift+Meta+]',
+  'focus-previous-window': 'Shift+Meta+[',
   'focus-next-attention': 'Shift+Meta+a',
   'open-window-form': 'Meta+n',
   'close-window': 'Shift+Meta+w',
@@ -79,5 +80,23 @@ describe('the default tables of different platforms', () => {
     expect(others.filter((chord) => chord.includes('Meta'))).toEqual([]);
     const mac = Object.values(defaultKeysFor('mac'));
     expect(mac.filter((chord) => chord.includes('Meta')).length).toBeGreaterThan(0);
+  });
+});
+
+describe('the mac window-switch defaults', () => {
+  // Shape WebKit reports on macOS: with Cmd held, key ignores Shift.
+  const webkitEvent = (key: string, code: string) => ({
+    key,
+    code,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: true,
+    metaKey: true,
+  });
+
+  it('match the chords the events of Cmd+Shift+] and Cmd+Shift+[ build', () => {
+    const mac = defaultKeysFor('mac');
+    expect(chordOfEvent(webkitEvent(']', 'BracketRight'))).toBe(mac['focus-next-window']);
+    expect(chordOfEvent(webkitEvent('[', 'BracketLeft'))).toBe(mac['focus-previous-window']);
   });
 });

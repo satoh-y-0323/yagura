@@ -25,8 +25,8 @@ const WINDOWS_AND_LINUX: DefaultKeys = Object.freeze({
 
 // Cmd is the mac convention; the app menu owns Cmd+Q/W/H/M and the edit chords.
 const MAC: DefaultKeys = Object.freeze({
-  'focus-next-window': 'Shift+Meta+}',
-  'focus-previous-window': 'Shift+Meta+{',
+  'focus-next-window': 'Shift+Meta+]',
+  'focus-previous-window': 'Shift+Meta+[',
   'focus-next-attention': 'Shift+Meta+a',
   'open-window-form': 'Meta+n',
   'close-window': 'Shift+Meta+w',

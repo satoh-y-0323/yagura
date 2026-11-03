@@ -11,8 +11,8 @@ is the `Meta` modifier in the file (see [Writing a Key](#writing-a-key)).
 
 | Action id                | Operation                               | Windows / Linux     | macOS         |
 | ------------------------ | --------------------------------------- | ------------------- | ------------- |
-| `focus-next-window`      | Next window (in sidebar order)          | `Ctrl+Shift+f`      | `Shift+Meta+}` |
-| `focus-previous-window`  | Previous window                         | `Ctrl+Shift+b`      | `Shift+Meta+{` |
+| `focus-next-window`      | Next window (in sidebar order)          | `Ctrl+Shift+f`      | `Shift+Meta+]` |
+| `focus-previous-window`  | Previous window                         | `Ctrl+Shift+b`      | `Shift+Meta+[` |
 | `focus-next-attention`   | Next window needing you                 | `Ctrl+Shift+j`      | `Shift+Meta+a` |
 | `open-window-form`       | New window                              | `Ctrl+Shift+n`      | `Meta+n`      |
 | `close-window`           | Close the current window                | `Ctrl+Shift+w`      | `Shift+Meta+w` |
