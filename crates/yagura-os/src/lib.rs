@@ -103,6 +103,10 @@ pub trait PeerAuth: Send + Sync + 'static {
     /// when it cannot be determined.
     fn peer_id(&self, conn: &Self::Connection) -> Option<String>;
 
+    /// Returns the process id the operating system recorded for the peer of
+    /// `conn` when it connected, or `None` when it cannot be determined.
+    fn peer_process_id(&self, conn: &Self::Connection) -> Option<u32>;
+
     /// Returns the path of the executable image backing the peer of `conn`,
     /// or `None` when it cannot be determined.
     ///
@@ -205,6 +209,11 @@ pub trait IpcTransport: PeerAuth + Default {
         &self,
         endpoint: &str,
     ) -> impl Future<Output = Result<Self::ClientConnection, OsError>> + Send;
+
+    /// Returns the process id of the process serving the endpoint `conn` is
+    /// connected to, as the operating system reports it, or `None` when it
+    /// cannot be determined.
+    fn server_process_id(&self, conn: &Self::ClientConnection) -> Option<u32>;
 }
 
 /// Outcome of a detached daemon spawn.
@@ -398,6 +407,50 @@ pub fn default_endpoint_owning(user_id: &str, namespace: &InstanceNamespace) -> 
         platform_unix::EndpointCreation::CreateIfMissing,
         namespace,
     )
+}
+
+/// The endpoint the holder of window `window_id` listens on, for `user_id` in
+/// `namespace`: `\\.\pipe\{namespace}-{user_id}-holder-{window_id}` on
+/// Windows (`holders_dir` unused), and `{holders_dir}/{window_id}.sock` on Unix,
+/// moved to a short owner-only directory under the OS temp directory when it
+/// would not fit in `sockaddr_un.sun_path`.
+///
+/// # Errors
+///
+/// Returns [`OsError::Security`] when `window_id` is not exactly one path
+/// component (empty, `.`, `..`, or holding a separator or NUL), and on Unix
+/// the errors of the fallback directory. Which ids are valid is the caller's
+/// rule; this only keeps the endpoint inside its directory or pipe namespace.
+pub fn holder_endpoint(
+    user_id: &str,
+    namespace: &InstanceNamespace,
+    holders_dir: &Path,
+    window_id: &str,
+) -> Result<String, OsError> {
+    // A NUL would cut the name short where the OS reads it, aliasing another one.
+    if !is_single_component(window_id) || window_id.contains('\0') {
+        return Err(OsError::Security(
+            "a window id is not a single path component".to_owned(),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        let _ = holders_dir;
+        Ok(format!(
+            r"\\.\pipe\{}-{user_id}-holder-{window_id}",
+            namespace.name()
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        platform_unix::holder_socket_path(
+            user_id,
+            namespace,
+            holders_dir,
+            &std::env::temp_dir(),
+            window_id,
+        )
+    }
 }
 
 #[cfg(not(windows))]
@@ -817,14 +870,14 @@ pub fn replace_config_file(
     base_dir: &Path,
     leaf_dir: &Path,
     file_name: &str,
-    content: &str,
+    content: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
     secure_owned_dir(base_dir, leaf_dir).map_err(std::io::Error::other)?;
     std::fs::create_dir_all(leaf_dir)?;
     let target = leaf_dir.join(file_name);
     let temp_path = leaf_dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
 
-    if let Err(err) = std::fs::write(&temp_path, content.as_bytes()) {
+    if let Err(err) = std::fs::write(&temp_path, content.as_ref()) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }

@@ -281,6 +281,10 @@ impl PeerAuth for WindowsIpc {
         process_user_sid(client_process_id(conn)?).ok()
     }
 
+    fn peer_process_id(&self, conn: &Self::Connection) -> Option<u32> {
+        client_process_id(conn)
+    }
+
     fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
         process_image_path(client_process_id(conn)?)
     }
@@ -367,6 +371,10 @@ impl IpcTransport for WindowsIpc {
                 }
             }
         }
+    }
+
+    fn server_process_id(&self, conn: &Self::ClientConnection) -> Option<u32> {
+        server_process_id(conn)
     }
 
     /// A pipe whose every instance is taken (`ERROR_PIPE_BUSY`) has a server that has not yet

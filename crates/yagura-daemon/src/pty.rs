@@ -76,14 +76,6 @@ const MODEL_LOCK_HOLD: Duration = Duration::from_millis(2);
 /// one of them waits on the same lock, so more would only queue there.
 const MODEL_ACCESS_PER_WINDOW: usize = 1;
 
-/// Whether `cols` x `rows` is a size a window takes (see
-/// [`yagura_protocol::MAX_WINDOW_DIMENSION`]).
-pub(crate) fn size_within_limit(cols: u16, rows: u16) -> bool {
-    use yagura_protocol::{MAX_WINDOW_DIMENSION, MIN_WINDOW_COLS, MIN_WINDOW_ROWS};
-    (MIN_WINDOW_COLS..=MAX_WINDOW_DIMENSION).contains(&cols)
-        && (MIN_WINDOW_ROWS..=MAX_WINDOW_DIMENSION).contains(&rows)
-}
-
 /// The raw bytes a window's child wrote, kept only for tests that must see
 /// what was written rather than what the terminal shows (an echo and the
 /// child's own print of the same line are two writes but one screen line).
@@ -1264,7 +1256,7 @@ impl PtySession {
     /// [`PtyError::ResizeFailed`] when the PTY refuses the size, in which case
     /// the model is put back to its previous size.
     pub async fn resize(&self, cols: u16, rows: u16) -> PtyResult<()> {
-        if !size_within_limit(cols, rows) {
+        if !yagura_protocol::window_size_within_limit(cols, rows) {
             return Err(PtyError::SizeOutOfRange);
         }
         if self.is_exited.load(Ordering::SeqCst) {

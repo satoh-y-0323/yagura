@@ -19,6 +19,10 @@
 //!   grandchild.
 //! - `exit <code> [<gate_file>]`: prints `EXITING <code>\r\n` and exits with
 //!   `code`; with `gate_file`, first waits until that file exists.
+//! - `ignore-end`: ignores every request to end that can be ignored (SIGTERM
+//!   and SIGHUP on Unix; console control events, the console close included,
+//!   on Windows), prints [`IGNORING_MARKER`] and stays alive, past stdin's end
+//!   too. Only a kill that cannot be refused ends it.
 
 // Test-only fixture binary, not the holder's production spawn path: it spawns
 // its own descendant to observe tree teardown.
@@ -32,6 +36,7 @@ use std::time::Duration;
 const READY_MARKER: &[u8] = b"HOLDER-CHILD-READY\r\n";
 const FLOODED_MARKER: &[u8] = b"\r\nHOLDER-CHILD-FLOODED\r\n";
 const TREE_MARKER: &[u8] = b"HOLDER-CHILD-TREE\r\n";
+const IGNORING_MARKER: &[u8] = b"HOLDER-CHILD-IGNORING\r\n";
 const HEX: &[u8; 16] = b"0123456789abcdef";
 const FLOOD_BLOCK: usize = 8192;
 /// How often `size` and `exit` look again. The fixture has no event for either
@@ -48,10 +53,11 @@ fn main() -> io::Result<()> {
         "flood" => flood(Path::new(arg(1)), arg(2).parse().ok()),
         "tree" => tree(Path::new(arg(1))),
         "exit" => exit_with(arg(1), args.get(2).map(Path::new)),
+        "ignore-end" => ignore_end(),
         _ => {
             eprintln!(
                 "usage: holder_child size | hex | flood <count_file> [<total_bytes>] \
-                 | tree <pid_file> | exit <code> [<gate_file>]"
+                 | tree <pid_file> | exit <code> [<gate_file>] | ignore-end"
             );
             std::process::exit(2);
         }
@@ -160,6 +166,49 @@ fn exit_with(code: &str, gate_file: Option<&Path>) -> io::Result<()> {
     stdout.write_all(format!("EXITING {code}\r\n").as_bytes())?;
     stdout.flush()?;
     std::process::exit(code)
+}
+
+fn ignore_end() -> io::Result<()> {
+    ignore_end_requests()?;
+    let mut stdout = io::stdout();
+    stdout.write_all(IGNORING_MARKER)?;
+    stdout.flush()?;
+    idle()
+}
+
+#[cfg(unix)]
+fn ignore_end_requests() -> io::Result<()> {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: `signal` only changes this process's disposition of the
+        // signal; no handler function is installed.
+        if unsafe { libc::signal(signal, libc::SIG_IGN) } == libc::SIG_ERR {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// A console close cannot be refused outright: the system ends the process
+/// once the handler returns or times out, so the handler never returns.
+#[cfg(windows)]
+fn ignore_end_requests() -> io::Result<()> {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::Console::{
+        CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, SetConsoleCtrlHandler,
+    };
+
+    unsafe extern "system" fn handler(event: u32) -> BOOL {
+        if matches!(
+            event,
+            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT
+        ) {
+            idle();
+        }
+        true.into()
+    }
+    // SAFETY: `handler` lives as long as the process and only parks its
+    // thread or returns.
+    unsafe { SetConsoleCtrlHandler(Some(handler), true) }.map_err(io::Error::other)
 }
 
 fn grandchild_command() -> io::Result<Command> {

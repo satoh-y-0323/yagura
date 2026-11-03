@@ -5676,9 +5676,12 @@ name = "yagura-holder"
 version = "0.3.0"
 dependencies = [
  "libc",
+ "tokio",
  "windows 0.52.0",
  "yagura-build-support",
  "yagura-os",
+ "yagura-protocol",
+ "yagura-test-support",
 ]
 
 [[package]]

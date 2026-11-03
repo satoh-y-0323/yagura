@@ -2417,7 +2417,7 @@ impl IpcServer {
             return;
         };
         if let Some(size) = size
-            && !crate::pty::size_within_limit(size.cols, size.rows)
+            && !yagura_protocol::window_size_within_limit(size.cols, size.rows)
         {
             outbound.reply(&size_out_of_range_msg());
             return;
@@ -4121,7 +4121,7 @@ impl IpcServer {
         }
         // Out-of-range is invalid_argument, not a disconnect, and is never
         // clamped.
-        if !crate::pty::size_within_limit(cols, rows) {
+        if !yagura_protocol::window_size_within_limit(cols, rows) {
             outbound.reply(&size_out_of_range_msg());
             return;
         }

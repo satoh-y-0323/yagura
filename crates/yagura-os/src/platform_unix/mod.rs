@@ -126,10 +126,8 @@ pub fn resolve_endpoint_with(
     }
 
     let dir = stage3_dir(tmp_root, user_id, namespace);
-    if create_missing == EndpointCreation::CreateIfMissing
-        && std::fs::symlink_metadata(&dir).is_err()
-    {
-        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    if create_missing == EndpointCreation::CreateIfMissing {
+        create_private_dir(&dir)?;
     }
     if is_secure_dir(&dir, owner_uid) {
         let endpoint = build_endpoint(&dir, STAGE3_SOCKET_NAME)?;
@@ -172,6 +170,47 @@ pub(crate) fn stage3_candidate_path(
 /// instance, so the name does not repeat it: macOS's long `TMPDIR` leaves no room for the
 /// identifier twice within `sockaddr_un.sun_path`.
 const STAGE3_SOCKET_NAME: &str = "ipc.sock";
+
+/// Unix branch of [`crate::holder_endpoint`]: `{holders_dir}/{window_id}.sock`,
+/// or, when that does not fit in `sockaddr_un.sun_path`, the same name in an
+/// owner-only `{tmp_root}/{namespace}-{user_id}-holders` created on demand.
+///
+/// # Errors
+///
+/// Returns [`OsError::Security`] when neither path fits or the fallback
+/// directory is not private to this user, and [`OsError::Io`] when it cannot
+/// be created.
+pub fn holder_socket_path(
+    user_id: &str,
+    namespace: &InstanceNamespace,
+    holders_dir: &Path,
+    tmp_root: &Path,
+    window_id: &str,
+) -> Result<String, OsError> {
+    let file_name = format!("{window_id}.sock");
+    if let Ok(endpoint) = build_endpoint(holders_dir, &file_name) {
+        return Ok(endpoint);
+    }
+    let dir = tmp_root.join(format!("{}-{user_id}-holders", namespace.name()));
+    create_private_dir(&dir)?;
+    if !is_secure_dir(&dir, current_uid()) {
+        return Err(OsError::Security(format!(
+            "{} is not a private, owned, 0700 directory",
+            dir.display()
+        )));
+    }
+    build_endpoint(&dir, &file_name)
+}
+
+/// Creates `dir` owner-only (`0700`) unless something is already there, which
+/// the caller then inspects. Create first: checking first lets a concurrent
+/// caller create it in between, failing this create.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
 
 /// The socket's name in a runtime directory every instance shares (stages 1 and 2).
 fn shared_dir_socket_name(namespace: &InstanceNamespace) -> String {
@@ -348,6 +387,10 @@ impl PeerAuth for UnixIpc {
         peer_credential_uid(conn).map(|uid| uid.to_string())
     }
 
+    fn peer_process_id(&self, conn: &Self::Connection) -> Option<u32> {
+        peer_pid(conn)
+    }
+
     fn peer_executable(&self, conn: &Self::Connection) -> Option<PathBuf> {
         peer_executable_path(conn)
     }
@@ -437,6 +480,10 @@ impl IpcTransport for UnixIpc {
         let server = peer_credential_uid(&client).map(|uid| uid.to_string());
         crate::require_own_server(endpoint, server.as_deref(), &self.current_user_id()?)?;
         Ok(client)
+    }
+
+    fn server_process_id(&self, conn: &Self::ClientConnection) -> Option<u32> {
+        peer_pid(conn)
     }
 }
 
@@ -574,19 +621,18 @@ fn peer_credential_uid(_conn: &UnixStream) -> Option<u32> {
     None
 }
 
-/// Reads the peer's executable through the pid the kernel recorded for the
-/// connection, so an unrelated process cannot answer for it by reusing a pid
-/// the peer merely named.
+/// The pid the kernel recorded for the peer of `conn`, so an unrelated
+/// process cannot answer for the peer by reusing a pid the peer merely named.
 #[cfg(target_os = "linux")]
-fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
-    let pid = peer_credentials(conn)?.pid;
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+fn peer_pid(conn: &UnixStream) -> Option<u32> {
+    // SO_PEERCRED reports 0 for a peer outside this pid namespace: unknown.
+    u32::try_from(peer_credentials(conn)?.pid)
+        .ok()
+        .filter(|&pid| pid != 0)
 }
 
 #[cfg(target_os = "macos")]
-fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-
+fn peer_pid(conn: &UnixStream) -> Option<u32> {
     let fd = conn.as_raw_fd();
     let mut pid: libc::pid_t = 0;
     let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
@@ -605,7 +651,29 @@ fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
     if result != 0 {
         return None;
     }
+    u32::try_from(pid).ok().filter(|&pid| pid != 0)
+}
 
+/// Neither peer-pid source is portable across Unix: `SO_PEERCRED` is
+/// Linux-specific and `LOCAL_PEERPID` is macOS-specific, so every other Unix
+/// target fails closed here rather than failing to compile.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peer_pid(_conn: &UnixStream) -> Option<u32> {
+    None
+}
+
+/// Reads the peer's executable through [`peer_pid`].
+#[cfg(target_os = "linux")]
+fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
+    let pid = peer_pid(conn)?;
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let pid = libc::pid_t::try_from(peer_pid(conn)?).ok()?;
     let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: `buffer` is a live allocation of the length passed as
     // `buffersize`, which is the contract proc_pidpath(3) documents; it
@@ -621,9 +689,6 @@ fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_vec(buffer)))
 }
 
-/// Neither peer-pid source is portable across Unix: `SO_PEERCRED` is
-/// Linux-specific and `LOCAL_PEERPID` is macOS-specific, so every other Unix
-/// target fails closed here rather than failing to compile.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_executable_path(_conn: &UnixStream) -> Option<PathBuf> {
     None
@@ -1018,5 +1083,36 @@ mod tests {
         let daemon_endpoint = resolve(EndpointCreation::CreateIfMissing).unwrap();
 
         assert_eq!(client_endpoint, daemon_endpoint);
+    }
+
+    // The fallback directory may already exist (a concurrent creator won the
+    // race); only an owner-only directory of ours may then be used.
+    #[test]
+    fn an_existing_fallback_directory_is_used_only_when_it_is_ours_and_owner_only() {
+        let root = yagura_test_support::paths::short_tmp_dir("os-unix", "holders-fallback");
+        let namespace = crate::resolve_instance_from(None).unwrap();
+        let too_long = PathBuf::from(format!("/{}", "a".repeat(200)));
+        let fallback = root
+            .path()
+            .join(format!("{}-1000-holders", namespace.name()));
+        let resolve = || holder_socket_path("1000", &namespace, &too_long, root.path(), "w1");
+
+        std::fs::create_dir(&fallback).unwrap();
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(resolve().is_ok(), "an existing 0700 directory of ours");
+
+        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(resolve().is_err(), "a directory open to group and others");
+
+        let target = root.path().join("target");
+        std::fs::remove_dir(&fallback).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&target, &fallback).unwrap();
+        assert!(resolve().is_err(), "a symlink");
+
+        std::fs::remove_file(&fallback).unwrap();
+        std::fs::write(&fallback, b"x").unwrap();
+        assert!(resolve().is_err(), "a regular file");
     }
 }

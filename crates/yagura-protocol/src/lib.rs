@@ -1,11 +1,13 @@
 //! `yagura-protocol`: the wire protocol shared between the yagura GUI (client)
 //! and the yagura daemon.
 //!
-//! This crate has no I/O of its own. It only defines:
+//! This crate has no I/O of its own beyond reading the files a window's holder
+//! leaves ([`holder`]). It only defines:
 //! - the length-prefixed JSON framing (LPJF) used on top of the IPC transport
-//!   (Windows named pipe / Unix domain socket), and
+//!   (Windows named pipe / Unix domain socket),
 //! - the two message enums (`ClientMessage` for client-to-daemon, `DaemonMessage`
-//!   for daemon-to-client) with their internally-tagged JSON representation.
+//!   for daemon-to-client) with their internally-tagged JSON representation, and
+//! - the frames between the daemon and a window's holder ([`holder`]).
 //!
 //! # How this wire may be extended
 //!
@@ -194,6 +196,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+pub mod holder;
+
 /// The wire revision this build implements.
 ///
 /// The value is a whole number that only ever increases, by one per change to
@@ -216,6 +220,17 @@ pub const MIN_WINDOW_COLS: u16 = 2;
 
 /// The fewest rows a window takes.
 pub const MIN_WINDOW_ROWS: u16 = 1;
+
+/// Whether `cols` x `rows` is a size a window takes: `cols` within
+/// [`MIN_WINDOW_COLS`]`..=`[`MAX_WINDOW_DIMENSION`] and `rows` within
+/// [`MIN_WINDOW_ROWS`]`..=`[`MAX_WINDOW_DIMENSION`].
+#[must_use]
+pub const fn window_size_within_limit(cols: u16, rows: u16) -> bool {
+    cols >= MIN_WINDOW_COLS
+        && cols <= MAX_WINDOW_DIMENSION
+        && rows >= MIN_WINDOW_ROWS
+        && rows <= MAX_WINDOW_DIMENSION
+}
 
 /// The first wire revision that understands [`ClientMessage::ClearChatRoom`]
 /// and [`ClientMessage::DeleteChatRoom`].

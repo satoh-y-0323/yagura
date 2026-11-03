@@ -17,6 +17,8 @@ path = "src/bin/holder_child.rs"
 
 [dependencies]
 yagura-os = { path = "../yagura-os" }
+yagura-protocol = { path = "../yagura-protocol" }
+tokio.workspace = true
 
 # `holder_child` only: the test fixture reads its terminal's size directly, so
 # a test can see a resize reach the child. The holder itself reaches the OS
@@ -26,6 +28,10 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+tokio.workspace = true
+yagura-test-support = { path = "../yagura-test-support" }
 
 [build-dependencies]
 yagura-build-support = { path = "../yagura-build-support" }

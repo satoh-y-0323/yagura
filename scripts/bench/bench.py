@@ -214,54 +214,185 @@ def endpoint_for(instance: str) -> str:
     return "\\\\.\\pipe\\yagura-" + instance + "-" + current_user_sid()
 
 
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+OPEN_EXISTING = 3
+FILE_FLAG_OVERLAPPED = 0x40000000
+ERROR_BROKEN_PIPE = 109
+ERROR_IO_PENDING = 997
+WAIT_OBJECT_0 = 0
+INFINITE = 0xFFFFFFFF
+
+
+class OVERLAPPED(ctypes.Structure):
+    _fields_ = [
+        ("Internal", ctypes.c_void_p),
+        ("InternalHigh", ctypes.c_void_p),
+        ("Offset", wintypes.DWORD),
+        ("OffsetHigh", wintypes.DWORD),
+        ("hEvent", wintypes.HANDLE),
+    ]
+
+
+if kernel32 is not None:
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateEventW.restype = wintypes.HANDLE
+    kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    for _transfer_fn in (kernel32.ReadFile, kernel32.WriteFile):
+        _transfer_fn.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(OVERLAPPED),
+        ]
+    kernel32.GetOverlappedResult.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(OVERLAPPED),
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.BOOL,
+    ]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(OVERLAPPED)]
+
+
+class BenchTimeout(BenchError):
+    pass
+
+
 class Connection:
-    """One length-prefixed JSON connection. Reads and writes must not overlap:
-    a synchronous pipe handle serializes them, so each connection is driven by
-    one thread."""
+    """One length-prefixed JSON connection. The pipe is opened for overlapped
+    I/O so a read gives up at its deadline even when the daemon goes silent;
+    each connection is still driven by one thread."""
 
     def __init__(self, endpoint: str, timeout: float = 10.0):
         deadline = time.monotonic() + timeout
         while True:
-            try:
-                self.pipe = open(endpoint, "r+b", buffering=0)
-                return
-            except OSError as error:
-                if time.monotonic() > deadline:
-                    raise BenchError(f"cannot connect to {endpoint}: {error}") from error
-                time.sleep(0.05)
+            handle = kernel32.CreateFileW(
+                endpoint,
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                None,
+            )
+            if handle not in (None, INVALID_HANDLE_VALUE):
+                break
+            error = ctypes.get_last_error()
+            if time.monotonic() > deadline:
+                raise BenchError(f"cannot connect to {endpoint}: {ctypes.FormatError(error)}")
+            time.sleep(0.05)
+        self.handle = handle
+        self._consumed = 0
+        self.event = kernel32.CreateEventW(None, True, False, None)
+        if not self.event:
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(self.handle)
+            self.handle = None
+            raise BenchError(f"CreateEventW failed: {ctypes.FormatError(error)}")
 
-    def send(self, message: dict) -> None:
+    def _transfer(self, operation, buffer, count: int, deadline: Optional[float]) -> int:
+        """Runs one overlapped read or write; raises BenchTimeout at `deadline`."""
+        if self.handle is None:
+            raise BenchError("connection is closed")
+        overlapped = OVERLAPPED()
+        overlapped.hEvent = self.event
+        done = wintypes.DWORD(0)
+        if not operation(self.handle, buffer, count, ctypes.byref(done), ctypes.byref(overlapped)):
+            error = ctypes.get_last_error()
+            if error != ERROR_IO_PENDING:
+                raise self._io_error(error)
+            if deadline is None:
+                wait = INFINITE
+            else:
+                wait = max(0, int((deadline - time.monotonic()) * 1000))
+            if kernel32.WaitForSingleObject(self.event, wait) != WAIT_OBJECT_0:
+                kernel32.CancelIoEx(self.handle, ctypes.byref(overlapped))
+                # The operation may have completed before the cancel; keep what it moved.
+                if kernel32.GetOverlappedResult(
+                    self.handle, ctypes.byref(overlapped), ctypes.byref(done), True
+                ):
+                    return done.value
+                raise BenchTimeout("timed out waiting for the daemon")
+        if not kernel32.GetOverlappedResult(
+            self.handle, ctypes.byref(overlapped), ctypes.byref(done), True
+        ):
+            raise self._io_error(ctypes.get_last_error())
+        return done.value
+
+    @staticmethod
+    def _io_error(error: int) -> BenchError:
+        if error == ERROR_BROKEN_PIPE:
+            return BenchError("daemon closed the connection")
+        return BenchError(f"pipe I/O failed: {ctypes.FormatError(error)}")
+
+    def send(self, message: dict, timeout: float = 30.0) -> None:
+        """Writes one message; a timeout leaves a partial message on the wire, so the
+        connection is dropped."""
         body = json.dumps(message).encode("utf-8")
-        self.pipe.write(struct.pack("<I", len(body)) + body)
+        data = struct.pack("<I", len(body)) + body
+        deadline = time.monotonic() + timeout
+        try:
+            while data:
+                buffer = ctypes.create_string_buffer(data, len(data))
+                written = self._transfer(kernel32.WriteFile, buffer, len(data), deadline)
+                data = data[written:]
+        except BenchTimeout:
+            self.close()
+            raise BenchError("timed out sending to the daemon; connection dropped")
 
-    def _read_exact(self, count: int) -> bytes:
+    def _read_exact(self, count: int, deadline: Optional[float]) -> bytes:
         chunks = []
         while count:
-            chunk = self.pipe.read(count)
-            if not chunk:
+            buffer = ctypes.create_string_buffer(count)
+            read = self._transfer(kernel32.ReadFile, buffer, count, deadline)
+            if not read:
                 raise BenchError("daemon closed the connection")
-            chunks.append(chunk)
-            count -= len(chunk)
+            chunks.append(buffer.raw[:read])
+            self._consumed += read
+            count -= read
         return b"".join(chunks)
 
-    def receive(self) -> dict:
-        (length,) = struct.unpack("<I", self._read_exact(4))
-        return json.loads(self._read_exact(length))
+    def receive(self, deadline: Optional[float] = None) -> dict:
+        """Reads one message; raises BenchTimeout when no byte of one arrived by `deadline`.
+        A timeout inside a message loses its start, so the connection is dropped."""
+        before = self._consumed
+        try:
+            (length,) = struct.unpack("<I", self._read_exact(4, deadline))
+            return json.loads(self._read_exact(length, deadline))
+        except BenchTimeout:
+            if self._consumed == before:
+                raise
+            self.close()
+            raise BenchError("timed out inside a message; connection dropped")
 
-    def request(self, message: dict, answer_type: str) -> dict:
+    def request(self, message: dict, answer_type: str, timeout: float = 30.0) -> dict:
+        deadline = time.monotonic() + timeout
         self.send(message)
         while True:
-            reply = self.receive()
+            reply = self.receive(deadline)
             if reply.get("type") == answer_type:
                 return reply
             if reply.get("type") == "error":
                 raise BenchError(f"{message['type']} refused: {reply}")
 
     def close(self) -> None:
-        try:
-            self.pipe.close()
-        except OSError:
-            pass
+        for name in ("handle", "event"):
+            handle = getattr(self, name, None)
+            if handle:
+                kernel32.CloseHandle(handle)
+                setattr(self, name, None)
 
 
 class ScreenView:
@@ -293,7 +424,10 @@ class ScreenView:
     def wait_for(self, needle: str, deadline: float) -> float:
         """Reads frames until `needle` is on screen; returns the time it was seen."""
         while time.monotonic() < deadline:
-            message = self.conn.receive()
+            try:
+                message = self.conn.receive(deadline)
+            except BenchTimeout:
+                break
             received = time.perf_counter()
             if message.get("type") != "frame":
                 continue
