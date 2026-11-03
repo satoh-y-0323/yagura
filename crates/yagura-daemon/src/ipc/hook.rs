@@ -49,7 +49,9 @@ impl IpcServer {
         name: &str,
         input: Option<Vec<HookInputValue>>,
     ) {
-        let Some(entry) = self.authenticate_window(outbound, "run_hook", token, Some(window_id))
+        let Some(entry) = self
+            .authenticate_window(outbound, "run_hook", token, Some(window_id))
+            .await
         else {
             return;
         };

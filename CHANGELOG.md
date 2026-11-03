@@ -27,6 +27,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - **Launch profiles take a `[hook_events]` table**, one entry per event with `status`, `deliver` (`context` or `take`), `session` and `skip_if`. See [`profiles/README.md`](profiles/README.md#hook-events).
 - **`[mcp_registration.toml_set.entries]` takes `retired`**, the keys under `under` an earlier version wrote and this one no longer does, chosen per operating system like the entries. Register, Update and Remove take them out. See [`profiles/README.md`](profiles/README.md#mcp-registration).
 
+### Fixed
+
+- **A CLI's hook that reports right after the window starts is no longer refused while the window is still opening.** Its status report, and its requests for the window's messages, now wait for the window to finish opening, as the CLI's own connection already did.
+
 ## [0.3.0] - 2026-10-29
 
 ### Changed

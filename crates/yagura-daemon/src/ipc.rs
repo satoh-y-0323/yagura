@@ -1776,24 +1776,27 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::DeliverContext { window_id, token }) => {
-                if let Some(entry) =
-                    self.authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
+                if let Some(entry) = self
+                    .authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
+                    .await
                 {
                     inbox::handle_context(&entry, outbound, self.chat.intro_for(&entry));
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::DeliverTake { window_id, token }) => {
-                if let Some(entry) =
-                    self.authenticate_window(outbound, "deliver_take", &token, Some(&window_id))
+                if let Some(entry) = self
+                    .authenticate_window(outbound, "deliver_take", &token, Some(&window_id))
+                    .await
                 {
                     inbox::handle_take(&entry, outbound);
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::DeliverWait { window_id, token }) => {
-                if let Some(entry) =
-                    self.authenticate_window(outbound, "deliver_wait", &token, Some(&window_id))
+                if let Some(entry) = self
+                    .authenticate_window(outbound, "deliver_wait", &token, Some(&window_id))
+                    .await
                 {
                     inbox::handle_wait(&entry, outbound, state, self.config.max_waiters_per_conn);
                 }
@@ -1804,8 +1807,9 @@ impl IpcServer {
                 token,
                 session,
             }) => {
-                if let Some(entry) =
-                    self.authenticate_window(outbound, "report_session", &token, Some(&window_id))
+                if let Some(entry) = self
+                    .authenticate_window(outbound, "report_session", &token, Some(&window_id))
+                    .await
                 {
                     inbox::handle_report_session(&entry, outbound, &session);
                 }
@@ -3914,7 +3918,9 @@ impl IpcServer {
         status: WindowStatus,
         window_id: Option<&str>,
     ) {
-        let Some(entry) = self.authenticate_window(outbound, "status_event", token, window_id)
+        let Some(entry) = self
+            .authenticate_window(outbound, "status_event", token, window_id)
+            .await
         else {
             return;
         };
@@ -3958,7 +3964,11 @@ impl IpcServer {
     /// checked first, then the window is resolved, then the candidate is
     /// compared against that window's own token. See
     /// [`IpcServer::handle_status_event`] for why this order.
-    fn authenticate_window(
+    ///
+    /// A child may speak as soon as it is spawned, before its open has
+    /// registered it, so the window is resolved the same way `identify` does:
+    /// by waiting for an open in progress to finish.
+    async fn authenticate_window(
         &self,
         outbound: &Outbound,
         door: &str,
@@ -3983,7 +3993,7 @@ impl IpcServer {
             ));
             return None;
         };
-        let Some(entry) = self.registry.get(target) else {
+        let Some(entry) = self.registry.get_after_open(target).await else {
             outbound.reply(&window_not_found_msg());
             return None;
         };
@@ -6619,6 +6629,38 @@ mod tests {
         drop(opening);
         let outcome = identify.await;
         assert!(matches!(outcome, FrameOutcome::Continue));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(encode_frame(&window_not_found_msg()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hook_status_event_waits_for_an_open_in_progress_before_answering() {
+        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+        let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
+        let (tx, mut rx) = mpsc::channel(8);
+        let outbound = Outbound::new(tx);
+        let opening = registry.begin_opening("w-pending");
+
+        let event = server.handle_status_event(
+            &outbound,
+            TOKEN,
+            "hook-child",
+            WindowStatus::WaitingApproval,
+            Some("w-pending"),
+        );
+        tokio::pin!(event);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut event)
+                .await
+                .is_err(),
+            "a hook must not be refused while the window's open is in progress"
+        );
+        assert!(rx.try_recv().is_err());
+
+        drop(opening);
+        event.await;
         assert_eq!(
             rx.try_recv().ok(),
             Some(encode_frame(&window_not_found_msg()))

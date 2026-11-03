@@ -617,5 +617,6 @@ async fn a_launch_profile_with_settings_that_ignore_the_credentials_file_still_r
     )
     .await;
     let emitted = logged(&logs, "emit_start").expect("the report was made");
+    // `--emit-status` does not read the daemon's reply, so code 0 only says the report was sent.
     assert_eq!(emitted["code"], 0, "{emitted}");
 }
