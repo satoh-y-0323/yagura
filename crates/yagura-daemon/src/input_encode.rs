@@ -153,16 +153,16 @@ fn bit_flag(bits: u16, bit: u32, flag: u8) -> u8 {
 
 /// The bytes a key press writes; empty when it writes nothing.
 ///
-/// Under Win32 Input Mode (a ConPTY window), only a press whose legacy bytes
-/// lose what was pressed (they are empty, or equal those of the same key with
-/// fewer modifiers or of a plain Enter, Tab, Escape or Backspace) picks
-/// another form: the Kitty keyboard protocol's while Kitty flags are in
-/// effect, else console key records when the window does not flatten them
-/// ([`InputModes::key_records_flattened`]) and the key has a fixed
-/// virtual-key code, else its legacy bytes. Every other press keeps its
-/// legacy bytes. Key records reach a press intact only for a child that reads
-/// them; Kitty flags are the child's own claim that it reads the Kitty form,
-/// which ConPTY and `wsl.exe` pass through untouched.
+/// Under Win32 Input Mode (a ConPTY window), every press takes the Kitty
+/// keyboard protocol's form while Kitty flags are in effect, else console key
+/// records, as Windows Terminal's `TerminalInput::HandleKey` sends them. A
+/// key off the fixed virtual-key table of [`win32_records`] keeps its legacy
+/// bytes, since the client sends no virtual-key code. A window whose program
+/// turns key records back into legacy bytes
+/// ([`InputModes::key_records_flattened`], `wsl.exe`) gets the legacy bytes
+/// instead of records: its conversion drops more of a press than the legacy
+/// form does. Kitty flags are the child's own claim that it reads the Kitty
+/// form, which ConPTY and `wsl.exe` pass through untouched.
 ///
 /// Without Win32 Input Mode, every press takes the Kitty form while Kitty
 /// flags are in effect, and the legacy (xterm) bytes otherwise.
@@ -172,15 +172,13 @@ pub fn encode_key(input: &KeyInput, modes: InputModes) -> Vec<u8> {
         return Vec::new();
     }
     if modes.win32_input {
-        if legacy_loses_the_press(input, modes) {
-            if modes.kitty_flags & KITTY_SUPPORTED_FLAGS != 0 {
-                return encode_kitty(input, modes);
-            }
-            if !modes.key_records_flattened
-                && let Some(records) = win32_records(input)
-            {
-                return records;
-            }
+        if modes.kitty_flags & KITTY_SUPPORTED_FLAGS != 0 {
+            return encode_kitty(input, modes);
+        }
+        if !modes.key_records_flattened
+            && let Some(records) = win32_records(input)
+        {
+            return records;
         }
         return encode_legacy(input, modes);
     }
@@ -197,9 +195,29 @@ fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     }
 }
 
+/// Whether a key press is the window's interrupt keys: its legacy bytes are
+/// exactly `interrupt_bytes`. Judged on the press, since the bytes it is
+/// written as (key records, the Kitty form) differ from the configured ones.
+#[must_use]
+pub fn press_matches_interrupt(input: &KeyInput, interrupt_bytes: &[u8]) -> bool {
+    presses_match_interrupt(std::slice::from_ref(input), interrupt_bytes)
+}
+
+/// [`press_matches_interrupt`] for a run of presses written together: their
+/// legacy bytes, joined, are exactly `interrupt_bytes`.
+#[must_use]
+pub fn presses_match_interrupt(presses: &[KeyInput], interrupt_bytes: &[u8]) -> bool {
+    let modes = InputModes::default();
+    let legacy: Vec<u8> = presses
+        .iter()
+        .flat_map(|press| encode_legacy(press, modes))
+        .collect();
+    !legacy.is_empty() && legacy == interrupt_bytes
+}
+
 /// Whether some bytes a press is written as identify an Enter: a CR or LF,
 /// a Kitty `CSI 13 … u`, or a Win32 Input Mode key-down record of VK_RETURN
-/// or of the CR character.
+/// or of the CR or LF character.
 #[must_use]
 pub fn contains_enter(bytes: &[u8]) -> bool {
     if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
@@ -233,65 +251,16 @@ fn is_enter_sequence(params: &[u8], terminator: u8) -> bool {
     let field = |i: usize| fields.get(i).copied().flatten();
     match terminator {
         b'u' => field(0) == Some(13),
-        // Vk;Sc;Uc;Kd;Cs;Rc. A key-down whose character is CR (Ctrl+M) is read
-        // as Enter by a console reader, as the CR it replaces would be.
-        b'_' => field(3) == Some(1) && (field(0) == Some(0x0D) || field(2) == Some(13)),
+        // Vk;Sc;Uc;Kd;Cs;Rc. A key-down whose character is CR (Ctrl+M) or LF
+        // (Ctrl+J, Ctrl+Enter) is read as the line break it carries.
+        b'_' => {
+            field(3) == Some(1) && (field(0) == Some(0x0D) || matches!(field(2), Some(13 | 10)))
+        }
         _ => false,
     }
 }
 
 // --- Win32 Input Mode ---------------------------------------------------------------
-
-/// Whether a press's legacy bytes lose what was pressed: they are empty, or
-/// they equal the legacy bytes of another press -- the same key with some of
-/// Ctrl, Alt and (for a letter) Shift released, or a plain Enter, Tab, Escape
-/// or Backspace. Shift is not released from other characters, which the
-/// client already sends shifted.
-fn legacy_loses_the_press(input: &KeyInput, modes: InputModes) -> bool {
-    let own = encode_legacy(input, modes);
-    if own.is_empty() {
-        return true;
-    }
-    let plain = Modifiers::default();
-    let plain_keys = [
-        NamedKey::Enter,
-        NamedKey::Tab,
-        NamedKey::Escape,
-        NamedKey::Backspace,
-    ]
-    .map(|key| KeyInput {
-        key: Key::Named(key),
-        mods: plain,
-    });
-    released_modifier_presses(input)
-        .chain(plain_keys.into_iter().filter(|other| other != input))
-        .any(|other| encode_legacy(&other, modes) == own)
-}
-
-/// `input` with every non-empty subset of its releasable modifiers released.
-fn released_modifier_presses(input: &KeyInput) -> impl Iterator<Item = KeyInput> + '_ {
-    let letter = matches!(input.key, Key::Char(c) if c.is_ascii_alphabetic());
-    let Modifiers { shift, alt, ctrl } = input.mods;
-    (1u8..8).filter_map(move |release| {
-        let (drop_ctrl, drop_alt, drop_shift) =
-            (release & 1 != 0, release & 2 != 0, release & 4 != 0);
-        if (drop_ctrl && !ctrl) || (drop_alt && !alt) || (drop_shift && !(shift && letter)) {
-            return None;
-        }
-        let key = match input.key {
-            Key::Char(c) if drop_shift => Key::Char(c.to_ascii_lowercase()),
-            key => key,
-        };
-        Some(KeyInput {
-            key,
-            mods: Modifiers {
-                shift: shift && !drop_shift,
-                alt: alt && !drop_alt,
-                ctrl: ctrl && !drop_ctrl,
-            },
-        })
-    })
-}
 
 const WIN32_LEFT_ALT: u32 = 0x0002;
 const WIN32_LEFT_CTRL: u32 = 0x0008;
@@ -363,6 +332,7 @@ fn win32_key(key: Key) -> Option<(u16, u16, bool)> {
                 'z' => 0x2C,
                 '1'..='9' => u16::from(c as u8 - b'1') + 0x02,
                 '0' => 0x0B,
+                ' ' => return named(0x20, 0x39),
                 ',' => return named(0xBC, 0x33),
                 '-' => return named(0xBD, 0x0C),
                 '.' => return named(0xBE, 0x34),
@@ -374,17 +344,22 @@ fn win32_key(key: Key) -> Option<(u16, u16, bool)> {
     }
 }
 
-/// The character a key record carries: a C0 control for Ctrl with a letter,
-/// as the console reports it; the character itself for other characters.
+/// The character a key record carries, as the console reports it for a US
+/// layout: a C0 control for Ctrl with a letter or Space (NUL), DEL for
+/// Ctrl+Backspace, LF for Ctrl+Enter; the character itself for other
+/// characters.
 fn win32_unicode(key: Key, mods: Modifiers) -> u32 {
     match key {
         Key::Char(c) if mods.ctrl && c.is_ascii_alphabetic() => {
             u32::from(c.to_ascii_uppercase()) - 0x40
         }
+        Key::Char(' ') if mods.ctrl => 0,
         Key::Char(c) => u32::from(c),
+        Key::Named(NamedKey::Enter) if mods.ctrl => 0x0A,
         Key::Named(NamedKey::Enter) => 13,
         Key::Named(NamedKey::Tab) => 9,
         Key::Named(NamedKey::Escape) => 27,
+        Key::Named(NamedKey::Backspace) if mods.ctrl => 0x7F,
         Key::Named(NamedKey::Backspace) => 8,
         Key::Named(_) => 0,
     }
@@ -576,21 +551,33 @@ pub fn encode_focus(focused: bool, modes: InputModes) -> Vec<u8> {
 /// `None` for [`ControlKey::Unknown`].
 #[must_use]
 pub fn encode_control_key(key: ControlKey, modes: InputModes) -> Option<Vec<u8>> {
+    control_key_press(key).map(|press| encode_key(&press, modes))
+}
+
+/// The key press a `send_keys` key stands for; `None` for
+/// [`ControlKey::Unknown`].
+#[must_use]
+pub fn control_key_press(key: ControlKey) -> Option<KeyInput> {
     let plain = Modifiers::default();
-    let named = |key| Some(encode_named(key, plain, modes));
+    let named = |key| {
+        Some(KeyInput {
+            key: Key::Named(key),
+            mods: plain,
+        })
+    };
     match key {
         ControlKey::Escape => named(NamedKey::Escape),
         ControlKey::Backspace => named(NamedKey::Backspace),
         ControlKey::Enter => named(NamedKey::Enter),
         ControlKey::Up => named(NamedKey::ArrowUp),
         ControlKey::Down => named(NamedKey::ArrowDown),
-        ControlKey::CtrlU => Some(encode_char(
-            'u',
-            Modifiers {
+        ControlKey::CtrlU => Some(KeyInput {
+            key: Key::Char('u'),
+            mods: Modifiers {
                 ctrl: true,
                 ..plain
             },
-        )),
+        }),
         ControlKey::Unknown => None,
     }
 }

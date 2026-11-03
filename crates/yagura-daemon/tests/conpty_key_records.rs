@@ -1,8 +1,9 @@
 #![cfg(windows)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Integration test: a key press the legacy form cannot carry reaches a console child
-//! of a daemon-opened ConPTY window with its modifiers, as a console input record.
+//! Integration test: a key press reaches a console child of a daemon-opened ConPTY
+//! window as a console input record with its modifiers. Ctrl+Tab is the case to watch:
+//! its legacy form is the same 0x09 as a plain Tab.
 //!
 //! The child is this test binary started again as `key_record_child`: it reads console
 //! input records with `ReadConsoleInputW` and prints each key-down's virtual key and

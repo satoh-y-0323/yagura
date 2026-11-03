@@ -1648,7 +1648,10 @@ impl WindowEntry {
     ///
     /// A [`WindowEntry::submit_message`] call's own unsent text goes in front
     /// of `data`, taken back (see [`PtySession::write_input_with`]), unless
-    /// `data` is exactly this window's configured interrupt bytes.
+    /// `data` is exactly this window's configured interrupt bytes, as
+    /// [`crate::control::interrupt_window`] writes them. Key presses are
+    /// judged before they are encoded instead
+    /// ([`WindowEntry::write_pty_input_judged`]).
     ///
     /// # Errors
     ///
@@ -1659,6 +1662,26 @@ impl WindowEntry {
         data: &[u8],
         origin: InputOrigin,
     ) -> crate::pty::PtyResult<()> {
+        let interrupt_keys = !data.is_empty() && data == self.interrupt_bytes.as_slice();
+        self.write_pty_input_judged(data, origin, interrupt_keys)
+            .await
+    }
+
+    /// [`WindowEntry::write_pty_input`] for bytes whose caller already judged
+    /// whether they are this window's interrupt keys: a key press's encoded
+    /// bytes (key records, the Kitty form) need not equal the configured
+    /// ones, so the press decides (see
+    /// [`crate::input_encode::press_matches_interrupt`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`WindowEntry::write_pty_input`].
+    pub async fn write_pty_input_judged(
+        &self,
+        data: &[u8],
+        origin: InputOrigin,
+        interrupt_keys: bool,
+    ) -> crate::pty::PtyResult<()> {
         // Scoped so the `std::sync::Mutex` guard is released before the
         // `.await` below (`WindowEntry::detector`).
         {
@@ -1667,12 +1690,18 @@ impl WindowEntry {
                 detector.notify_input(classify_input_echo(data, origin));
             }
         }
-        let prefix = if !data.is_empty() && data == self.interrupt_bytes.as_slice() {
+        let prefix = if interrupt_keys {
             TakeBackPrefix::Withhold
         } else {
             TakeBackPrefix::Apply
         };
         self.session.write_input_with(data, prefix).await
+    }
+
+    /// What [`crate::control::interrupt_window`] writes to this window.
+    #[must_use]
+    pub fn interrupt_bytes(&self) -> &[u8] {
+        &self.interrupt_bytes
     }
 
     /// Writes `data` as one of [`WindowEntry::submit_message`]'s own writes:

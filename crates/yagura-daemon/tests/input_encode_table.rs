@@ -7,7 +7,7 @@
 
 use yagura_daemon::input_encode::{
     InputModes, MouseTracking, PointerOutcome, WheelOutcome, encode_control_key, encode_focus,
-    encode_key, encode_paste, encode_pointer, encode_text, encode_wheel,
+    encode_key, encode_paste, encode_pointer, encode_text, encode_wheel, press_matches_interrupt,
 };
 use yagura_protocol::{
     CellPosition, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton, PointerInput,
@@ -1065,22 +1065,61 @@ fn without_kitty_flags_or_win32_input_keys_keep_their_legacy_bytes() {
 }
 
 #[test]
-fn win32_input_sends_a_press_and_release_record_for_chords_the_legacy_form_loses() {
-    let cases: [(Key, Modifiers, Vec<u8>); 3] = [
-        // Ctrl+Tab would be the same 0x09 as Tab.
+fn win32_input_sends_every_press_on_the_fixed_table_as_records() {
+    let cases: [(Key, Modifiers, Vec<u8>); 13] = [
+        (
+            Key::Named(NamedKey::Enter),
+            NONE,
+            win32_press(0x0D, 0x1C, 13, 0),
+        ),
+        (
+            Key::Named(NamedKey::Escape),
+            NONE,
+            win32_press(0x1B, 0x01, 27, 0),
+        ),
+        (
+            Key::Named(NamedKey::Enter),
+            SHIFT,
+            win32_press(0x0D, 0x1C, 13, 0x0010),
+        ),
+        (Key::Char('c'), CTRL, win32_press(0x43, 0x2E, 3, 0x0008)),
+        (Key::Char('v'), CTRL, win32_press(0x56, 0x2F, 22, 0x0008)),
+        (
+            Key::Named(NamedKey::ArrowUp),
+            NONE,
+            win32_press(0x26, 0x48, 0, 0x0100),
+        ),
+        (
+            Key::Named(NamedKey::Backspace),
+            NONE,
+            win32_press(0x08, 0x0E, 8, 0),
+        ),
+        (
+            Key::Named(NamedKey::Tab),
+            NONE,
+            win32_press(0x09, 0x0F, 9, 0),
+        ),
         (
             Key::Named(NamedKey::Tab),
             CTRL,
             win32_press(0x09, 0x0F, 9, 0x0008),
         ),
-        // Ctrl+Shift+I writes nothing in the legacy form.
+        (
+            Key::Char('A'),
+            CTRL_SHIFT,
+            win32_press(0x41, 0x1E, 1, 0x0018),
+        ),
         (
             Key::Char('I'),
             CTRL_SHIFT,
             win32_press(0x49, 0x17, 9, 0x0018),
         ),
-        // Ctrl+M would be the same CR as Enter.
         (Key::Char('m'), CTRL, win32_press(0x4D, 0x32, 13, 0x0008)),
+        (
+            Key::Char('A'),
+            ALT_SHIFT,
+            win32_press(0x41, 0x1E, 65, 0x0012),
+        ),
     ];
     for (k, mods, expected) in cases {
         assert_bytes(
@@ -1092,12 +1131,35 @@ fn win32_input_sends_a_press_and_release_record_for_chords_the_legacy_form_loses
 }
 
 #[test]
-fn win32_input_keeps_the_legacy_bytes_of_chords_the_legacy_form_carries() {
-    let cases: [(Key, Modifiers, &[u8]); 4] = [
-        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b\r"),
-        (Key::Char('v'), CTRL, b"\x16"),
-        (Key::Named(NamedKey::Tab), NONE, b"\t"),
-        (Key::Char('A'), ALT_SHIFT, b"\x1bA"),
+fn win32_records_carry_the_character_the_console_reports() {
+    let cases: [(Key, Modifiers, Vec<u8>); 4] = [
+        (
+            Key::Named(NamedKey::Backspace),
+            CTRL,
+            win32_press(0x08, 0x0E, 0x7F, 0x0008),
+        ),
+        (
+            Key::Named(NamedKey::Enter),
+            CTRL,
+            win32_press(0x0D, 0x1C, 0x0A, 0x0008),
+        ),
+        (Key::Char(' '), NONE, win32_press(0x20, 0x39, 0x20, 0)),
+        (Key::Char(' '), CTRL, win32_press(0x20, 0x39, 0, 0x0008)),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(
+            key(k, mods, win32(0)),
+            &expected,
+            &format!("{k:?} {mods:?}"),
+        );
+    }
+}
+
+#[test]
+fn win32_input_keeps_the_legacy_bytes_of_keys_off_the_fixed_table() {
+    let cases: [(Key, Modifiers, &[u8]); 2] = [
+        (Key::Char(';'), ALT, b"\x1b;"),
+        (Key::Char('/'), CTRL, b"\x1f"),
     ];
     for (k, mods, expected) in cases {
         assert_bytes(key(k, mods, win32(0)), expected, &format!("{k:?} {mods:?}"));
@@ -1115,46 +1177,78 @@ fn wsl_window(kitty_flags: u8) -> InputModes {
 }
 
 #[test]
-fn lossy_presses_take_the_kitty_form_and_the_rest_stays_legacy() {
-    assert_bytes(
-        key(Key::Named(NamedKey::Tab), CTRL, win32(1 | 8)),
-        b"\x1b[9;5u",
-        "Ctrl+Tab with both",
-    );
-    assert_bytes(
-        key(Key::Named(NamedKey::Enter), SHIFT, win32(1 | 8)),
-        b"\x1b\r",
-        "Shift+Enter with both",
-    );
-    assert_bytes(
-        key(Key::Named(NamedKey::Escape), NONE, win32(1 | 8)),
-        b"\x1b",
-        "Esc with both",
-    );
-    assert_bytes(
-        key(Key::Char('c'), CTRL, win32(1 | 8)),
-        b"\x03",
-        "Ctrl+C with both",
-    );
+fn kitty_flags_on_a_conpty_window_put_every_press_in_the_kitty_form() {
+    let cases: [(Key, Modifiers, &[u8]); 4] = [
+        (Key::Named(NamedKey::Escape), NONE, b"\x1b[27u"),
+        (Key::Char('c'), CTRL, b"\x1b[99;5u"),
+        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b[13;2u"),
+        (Key::Named(NamedKey::Tab), CTRL, b"\x1b[9;5u"),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(
+            key(k, mods, win32(1 | 8)),
+            expected,
+            &format!("{k:?} {mods:?}"),
+        );
+    }
 }
 
 #[test]
 fn a_window_whose_records_are_flattened_never_gets_win32_records() {
-    assert_bytes(
-        key(Key::Char('A'), CTRL_SHIFT, wsl_window(0)),
-        b"",
-        "WSL Ctrl+Shift+A",
-    );
-    assert_bytes(
-        key(Key::Named(NamedKey::Tab), CTRL, wsl_window(0)),
-        b"\t",
-        "WSL Ctrl+Tab",
-    );
+    let cases: [(Key, Modifiers, &[u8]); 4] = [
+        (Key::Char('A'), CTRL_SHIFT, b""),
+        (Key::Named(NamedKey::Tab), CTRL, b"\t"),
+        (Key::Named(NamedKey::Enter), SHIFT, b"\x1b\r"),
+        (Key::Named(NamedKey::Escape), NONE, b"\x1b"),
+    ];
+    for (k, mods, expected) in cases {
+        assert_bytes(
+            key(k, mods, wsl_window(0)),
+            expected,
+            &format!("WSL {k:?} {mods:?}"),
+        );
+    }
     assert_bytes(
         key(Key::Named(NamedKey::Tab), CTRL, wsl_window(1 | 8)),
         b"\x1b[9;5u",
         "WSL Ctrl+Tab with Kitty flags",
     );
+}
+
+#[test]
+fn control_keys_on_a_conpty_window_follow_the_key_press_rule() {
+    assert_eq!(
+        encode_control_key(ControlKey::Escape, win32(0)),
+        Some(win32_press(0x1B, 0x01, 27, 0)),
+        "Escape, records"
+    );
+    assert_eq!(
+        encode_control_key(ControlKey::Up, win32(0)),
+        Some(win32_press(0x26, 0x48, 0, 0x0100)),
+        "Up, records"
+    );
+    assert_eq!(
+        encode_control_key(ControlKey::Escape, win32(1 | 8)).as_deref(),
+        Some(b"\x1b[27u".as_slice()),
+        "Escape, Kitty flags"
+    );
+}
+
+#[test]
+fn the_interrupt_key_is_judged_from_the_press_not_the_written_bytes() {
+    let press = |key, mods| KeyInput { key, mods };
+    assert!(press_matches_interrupt(
+        &press(Key::Char('c'), CTRL),
+        b"\x03"
+    ));
+    assert!(!press_matches_interrupt(
+        &press(Key::Char('d'), CTRL),
+        b"\x03"
+    ));
+    assert!(press_matches_interrupt(
+        &press(Key::Named(NamedKey::Escape), NONE),
+        b"\x1b"
+    ));
 }
 
 #[test]

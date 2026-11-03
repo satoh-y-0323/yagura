@@ -97,7 +97,7 @@ fn control_origin_is_always_may_start_work() {
 
 #[test]
 fn an_enter_in_an_extended_keyboard_protocol_may_start_work() {
-    let enters: [&[u8]; 5] = [
+    let enters: [&[u8]; 6] = [
         b"\x1b[13u",
         b"\x1b[13;2u",
         // A Win32 Input Mode press of VK_RETURN (Vk;Sc;Uc;Kd;Cs;Rc).
@@ -106,6 +106,8 @@ fn an_enter_in_an_extended_keyboard_protocol_may_start_work() {
         b"\x1b[9;15;9;1;8;1_\x1b[13u",
         // Ctrl+M as a Win32 press: Vk 77 with Uc 13.
         b"\x1b[77;50;13;1;8;1_",
+        // Ctrl+J as a Win32 press: Vk 74 with Uc 10, the LF a legacy Ctrl+J writes.
+        b"\x1b[74;36;10;1;8;1_",
     ];
     for bytes in enters {
         assert_eq!(

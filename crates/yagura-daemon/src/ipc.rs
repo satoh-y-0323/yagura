@@ -4082,8 +4082,14 @@ impl IpcServer {
         {
             state.view.note_change();
         }
+        let interrupt_keys = match msg {
+            ClientMessage::Key(key) => {
+                input_encode::press_matches_interrupt(key, entry.interrupt_bytes())
+            }
+            _ => false,
+        };
         if entry
-            .write_pty_input(&bytes, InputOrigin::Interactive)
+            .write_pty_input_judged(&bytes, InputOrigin::Interactive, interrupt_keys)
             .await
             .is_err()
         {
@@ -4747,12 +4753,20 @@ async fn execute_send_keys(
         .filter_map(|key| input_encode::encode_control_key(*key, modes))
         .flatten()
         .collect();
+    let presses: Vec<_> = keys
+        .iter()
+        .filter_map(|key| input_encode::control_key_press(*key))
+        .collect();
+    let interrupt_keys = input_encode::presses_match_interrupt(&presses, entry.interrupt_bytes());
     tracing::info!(
         window_id = %entry.window_id(),
         key_bytes = bytes.len(),
         "accepted send_keys"
     );
-    match entry.write_pty_input(&bytes, InputOrigin::Message).await {
+    match entry
+        .write_pty_input_judged(&bytes, InputOrigin::Message, interrupt_keys)
+        .await
+    {
         Ok(()) => outbound.reply(&DaemonMessage::KeysSent {
             window_id: entry.window_id().to_string(),
         }),
