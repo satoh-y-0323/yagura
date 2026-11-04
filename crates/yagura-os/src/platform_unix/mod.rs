@@ -172,8 +172,10 @@ pub(crate) fn stage3_candidate_path(
 const STAGE3_SOCKET_NAME: &str = "ipc.sock";
 
 /// Unix branch of [`crate::holder_endpoint`]: `{holders_dir}/{window_id}.sock`,
-/// or, when that does not fit in `sockaddr_un.sun_path`, the same name in an
-/// owner-only `{tmp_root}/{namespace}-{user_id}-holders` created on demand.
+/// or, when that does not fit in `sockaddr_un.sun_path`,
+/// `{dir_id}-{window_id}.sock` in an owner-only
+/// `{tmp_root}/{namespace}-{user_id}-holders` created on demand. `dir_id`
+/// names `holders_dir`, which the fallback directory does not separate.
 ///
 /// # Errors
 ///
@@ -187,8 +189,8 @@ pub fn holder_socket_path(
     tmp_root: &Path,
     window_id: &str,
 ) -> Result<String, OsError> {
-    let file_name = format!("{window_id}.sock");
-    if let Ok(endpoint) = build_endpoint(holders_dir, &file_name) {
+    let dir_id = crate::holders_dir_id(holders_dir);
+    if let Ok(endpoint) = build_endpoint(holders_dir, &format!("{window_id}.sock")) {
         return Ok(endpoint);
     }
     let dir = tmp_root.join(format!("{}-{user_id}-holders", namespace.name()));
@@ -199,7 +201,39 @@ pub fn holder_socket_path(
             dir.display()
         )));
     }
-    build_endpoint(&dir, &file_name)
+    build_endpoint(&dir, &format!("{dir_id}-{window_id}.sock"))
+}
+
+/// Unix branch of [`crate::ensure_private_dir`].
+///
+/// # Errors
+///
+/// As for [`crate::ensure_private_dir`].
+pub fn ensure_private_dir(dir: &Path) -> Result<(), OsError> {
+    create_private_dir(dir)?;
+    if is_secure_dir(dir, current_uid()) {
+        Ok(())
+    } else {
+        Err(OsError::Security(format!(
+            "{} is not a private, owned, 0700 directory",
+            dir.display()
+        )))
+    }
+}
+
+/// Unix branch of [`crate::release_standard_output`].
+///
+/// # Errors
+///
+/// As for [`crate::release_standard_output`].
+pub fn release_standard_output() -> Result<(), OsError> {
+    let null = std::fs::OpenOptions::new().write(true).open("/dev/null")?;
+    // SAFETY: both descriptors are valid for the call; dup2 closes the old
+    // standard output and puts a copy of `null` in its place atomically.
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDOUT_FILENO) } < 0 {
+        return Err(OsError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 /// Creates `dir` owner-only (`0700`) unless something is already there, which

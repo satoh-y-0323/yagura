@@ -20,12 +20,7 @@ fn file_name(path: &std::path::Path) -> io::Result<String> {
 /// Publishes `record` as the holder's record.
 pub(crate) fn write_record(place: &Place, record: &HolderRecord) -> io::Result<()> {
     let path = holder_record_path(&place.holders_dir, &record.window_id)?;
-    yagura_os::replace_config_file(
-        &place.state_base,
-        &place.holders_dir,
-        &file_name(&path)?,
-        encode_holder_record(record),
-    )
+    replace_in_holders_dir(place, &path, encode_holder_record(record))
 }
 
 /// Removes the holder's record.
@@ -48,11 +43,21 @@ pub(crate) fn remove_stale_exit(place: &Place, window_id: &str) -> io::Result<()
 /// Writes the child's exit and the output kept with it.
 pub(crate) fn write_exit(place: &Place, window_id: &str, exit: &HolderExit) -> io::Result<()> {
     let path = holder_exit_path(&place.holders_dir, window_id)?;
+    replace_in_holders_dir(place, &path, encode_holder_exit(exit))
+}
+
+/// The directory itself was checked private when the holder started, so it is
+/// both the base and the leaf here: nothing above it is touched.
+fn replace_in_holders_dir(
+    place: &Place,
+    path: &std::path::Path,
+    content: Vec<u8>,
+) -> io::Result<()> {
     yagura_os::replace_config_file(
-        &place.state_base,
         &place.holders_dir,
-        &file_name(&path)?,
-        encode_holder_exit(exit),
+        &place.holders_dir,
+        &file_name(path)?,
+        content,
     )
 }
 
@@ -71,7 +76,6 @@ mod tests {
         let dir = TempDir::new("holder-record", "big-exit");
         let holders_dir = dir.path().join("holders");
         let place = Place {
-            state_base: dir.path().to_path_buf(),
             holders_dir: holders_dir.clone(),
             endpoint: String::new(),
             daemon_endpoint: String::new(),

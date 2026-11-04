@@ -5,9 +5,12 @@
 //! `<instance_id>` for the default instance; everything else, the child's
 //! environment and the window's record included, arrives on standard input
 //! ([`yagura_protocol::holder::encode_holder_launch`]), which is read to its
-//! end. The holder then publishes its record in the instance's `holders`
-//! directory, listens on the endpoint named there, starts the child once the
-//! first daemon is let in, and ends when the child has exited.
+//! end. The holder's own environment is left as it was started with: it is
+//! the base of the child's. The holder then listens on its endpoint,
+//! publishes its record in the `holders` directory the launch names, writes
+//! one line to standard output and closes it (a holder that fails before
+//! this writes nothing there), starts the child once the first daemon is let
+//! in, and ends when the child has exited.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -40,10 +43,15 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// Writes one line to standard error. A closed or broken standard error loses
-/// the line rather than ending the holder, and with it the child.
+/// The line on standard output that tells the starter the holder is ready.
+const READY_NOTICE: &[u8] = b"yagura-holder ready\n";
+
+/// Writes one line to standard error in one write, so lines of holders
+/// appending to the same log never interleave. A closed or broken standard
+/// error loses the line rather than ending the holder, and with it the child.
 pub(crate) fn log(message: std::fmt::Arguments<'_>) {
-    let _ = writeln!(std::io::stderr().lock(), "yagura-holder: {message}");
+    let line = format!("yagura-holder: {message}\n");
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
 }
 
 fn start() -> Result<session::Ending, String> {
@@ -67,12 +75,10 @@ fn start() -> Result<session::Ending, String> {
         .build()
         .map_err(|error| format!("cannot start the runtime: {error}"))?;
     let ending = runtime.block_on(async {
-        let place = endpoint::resolve(&window_id, &namespace)?;
+        let place = endpoint::resolve(&window_id, &namespace, &launch)?;
         let listener = endpoint::bind(&place)
             .await
             .map_err(|error| format!("cannot listen on the holder endpoint: {error}"))?;
-        record::remove_stale_exit(&place, &window_id)
-            .map_err(|error| format!("cannot remove an earlier exit file: {error}"))?;
         let record = HolderRecord {
             window_id: window_id.clone(),
             endpoint: place.endpoint.clone(),
@@ -80,8 +86,12 @@ fn start() -> Result<session::Ending, String> {
             child_pid: None,
             protocol: HOLDER_PROTOCOL,
         };
-        record::write_record(&place, &record)
-            .map_err(|error| format!("cannot write the holder record: {error}"))?;
+        if let Err(error) = publish(&place, &record) {
+            // The endpoint is still this holder's, so its socket file is too.
+            record::remove_record(&place, &window_id);
+            endpoint::remove_endpoint_file(&place);
+            return Err(error);
+        }
         let window = session::Window {
             window_id,
             launch,
@@ -93,6 +103,26 @@ fn start() -> Result<session::Ending, String> {
     // The terminal reader may still be blocked in a read nobody waits for.
     runtime.shutdown_background();
     ending
+}
+
+/// Publishes the holder once it owns its endpoint: clears an earlier exit
+/// file, writes the record, then tells the starter on standard output and
+/// lets go of it.
+fn publish(place: &endpoint::Place, record: &HolderRecord) -> Result<(), String> {
+    record::remove_stale_exit(place, &record.window_id)
+        .map_err(|error| format!("cannot remove an earlier exit file: {error}"))?;
+    record::write_record(place, record)
+        .map_err(|error| format!("cannot write the holder record: {error}"))?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(READY_NOTICE)
+        .and_then(|()| stdout.flush())
+        .map_err(|error| format!("cannot tell the starter the holder is ready: {error}"))?;
+    drop(stdout);
+    if let Err(error) = yagura_os::release_standard_output() {
+        log(format_args!("cannot close standard output: {error}"));
+    }
+    Ok(())
 }
 
 fn read_launch() -> Result<HolderLaunch, String> {
@@ -110,6 +140,12 @@ fn read_launch() -> Result<HolderLaunch, String> {
         .map_err(|_| "the launch on standard input is not valid".to_owned())?;
     if launch.argv.is_empty() || !window_size_within_limit(launch.cols, launch.rows) {
         return Err("the launch names no program or a size out of range".to_owned());
+    }
+    // A relative directory would depend on where the holder was started.
+    if !launch.holders_dir.is_absolute() || launch.daemon_endpoint.is_empty() {
+        return Err(
+            "the launch names no absolute holders directory or no daemon endpoint".to_owned(),
+        );
     }
     Ok(launch)
 }

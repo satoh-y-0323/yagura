@@ -1,5 +1,5 @@
 //! The wire between the daemon and a window's holder, and the files a holder
-//! leaves in its instance's `holders` directory.
+//! leaves in the `holders` directory its launch names.
 //!
 //! A frame is a `u32` LE length of what follows, a `u16` LE type and a body.
 //! The body of a byte-carrying frame ([`HolderFrame::Checkpoint`],
@@ -51,6 +51,9 @@ const TYPE_WRITE: u16 = 12;
 const TYPE_WRITTEN: u16 = 13;
 const TYPE_WRITE_FAILED: u16 = 14;
 const TYPE_RESIZE: u16 = 15;
+const TYPE_RESIZED: u16 = 16;
+const TYPE_RESIZE_FAILED: u16 = 17;
+const TYPE_SPAWN_FAILED: u16 = 18;
 
 /// One frame between the daemon (`d`) and a holder (`h`).
 #[derive(Clone, PartialEq, Eq)]
@@ -154,6 +157,40 @@ pub enum HolderFrame {
         /// Rows.
         rows: u16,
     },
+    /// h -> d: the terminal now has the size a `Resize` asked for.
+    Resized {
+        /// Columns.
+        cols: u16,
+        /// Rows.
+        rows: u16,
+    },
+    /// h -> d: the terminal kept its size; the `Resize` asking for this one
+    /// was refused.
+    ResizeFailed {
+        /// The columns asked for.
+        cols: u16,
+        /// The rows asked for.
+        rows: u16,
+        /// Why.
+        reason: String,
+    },
+    /// h -> d: the child could not be started. Sent before the `Exited` that
+    /// answers the first `Hello` in place of a `Welcome`.
+    SpawnFailed {
+        /// Why.
+        reason: HolderSpawnFailure,
+    },
+}
+
+/// Why a holder could not start its child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HolderSpawnFailure {
+    /// The pseudoconsole bundled beside the holder is missing, altered, or
+    /// cannot be loaded.
+    BundledConptyUnavailable,
+    /// Any other failure to start the child.
+    Spawn,
 }
 
 // The window's record carries its token and a write carries what the user
@@ -212,6 +249,21 @@ impl std::fmt::Debug for HolderFrame {
                 .debug_struct("Resize")
                 .field("cols", cols)
                 .field("rows", rows)
+                .finish(),
+            Self::Resized { cols, rows } => f
+                .debug_struct("Resized")
+                .field("cols", cols)
+                .field("rows", rows)
+                .finish(),
+            Self::ResizeFailed { cols, rows, reason } => f
+                .debug_struct("ResizeFailed")
+                .field("cols", cols)
+                .field("rows", rows)
+                .field("reason", reason)
+                .finish(),
+            Self::SpawnFailed { reason } => f
+                .debug_struct("SpawnFailed")
+                .field("reason", reason)
                 .finish(),
         }
     }
@@ -318,6 +370,18 @@ struct ResizeBody {
     rows: u16,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ResizeFailedBody {
+    cols: u16,
+    rows: u16,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SpawnFailedBody {
+    reason: HolderSpawnFailure,
+}
+
 fn frame(frame_type: u16, body: &[&[u8]]) -> Vec<u8> {
     let body_len: usize = body.iter().map(|part| part.len()).sum();
     // A frame over u32::MAX cannot be read back anyway: the reader refuses
@@ -411,6 +475,24 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
                 rows: *rows,
             },
         ),
+        HolderFrame::Resized { cols, rows } => json_frame(
+            TYPE_RESIZED,
+            &ResizeBody {
+                cols: *cols,
+                rows: *rows,
+            },
+        ),
+        HolderFrame::ResizeFailed { cols, rows, reason } => json_frame(
+            TYPE_RESIZE_FAILED,
+            &ResizeFailedBody {
+                cols: *cols,
+                rows: *rows,
+                reason: reason.clone(),
+            },
+        ),
+        HolderFrame::SpawnFailed { reason } => {
+            json_frame(TYPE_SPAWN_FAILED, &SpawnFailedBody { reason: *reason })
+        }
     }
 }
 
@@ -606,6 +688,18 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
             let ResizeBody { cols, rows } = json(frame_type, body)?;
             HolderFrame::Resize { cols, rows }
         }
+        TYPE_RESIZED => {
+            let ResizeBody { cols, rows } = json(frame_type, body)?;
+            HolderFrame::Resized { cols, rows }
+        }
+        TYPE_RESIZE_FAILED => {
+            let ResizeFailedBody { cols, rows, reason } = json(frame_type, body)?;
+            HolderFrame::ResizeFailed { cols, rows, reason }
+        }
+        TYPE_SPAWN_FAILED => {
+            let SpawnFailedBody { reason } = json(frame_type, body)?;
+            HolderFrame::SpawnFailed { reason }
+        }
         other => return Err(HolderCodecError::UnknownType(other)),
     })
 }
@@ -659,6 +753,18 @@ pub struct HolderLaunch {
     /// `Hello` before it ends without starting the child. A value above
     /// [`MAX_HELLO_DEADLINE_MS`] is cut to it.
     pub hello_deadline_ms: u64,
+    /// The directory the holder keeps its record, its exit file and, on Unix,
+    /// its socket in. It must be an absolute path to a directory private to
+    /// the user; the holder creates it when only it is missing.
+    pub holders_dir: PathBuf,
+    /// The endpoint whose server is the daemon: only the process serving it
+    /// when a `Hello` arrives is let in.
+    pub daemon_endpoint: String,
+    /// Provisional, removed once holders outlive the daemon: a lost
+    /// connection other than [`HolderFrame::Displaced`] ends the child's tree
+    /// and the holder without leaving any file, and an `Ack` frees the output
+    /// it acknowledges.
+    pub end_child_on_disconnect: bool,
 }
 
 impl std::fmt::Debug for HolderLaunch {
@@ -669,6 +775,9 @@ impl std::fmt::Debug for HolderLaunch {
             .field("cols", &self.cols)
             .field("rows", &self.rows)
             .field("hello_deadline_ms", &self.hello_deadline_ms)
+            .field("holders_dir", &self.holders_dir)
+            .field("daemon_endpoint", &self.daemon_endpoint)
+            .field("end_child_on_disconnect", &self.end_child_on_disconnect)
             .finish_non_exhaustive()
     }
 }
@@ -682,6 +791,9 @@ struct LaunchOut<'a> {
     rows: u16,
     record: &'a str,
     hello_deadline_ms: u64,
+    holders_dir: &'a OsStr,
+    daemon_endpoint: &'a str,
+    end_child_on_disconnect: bool,
 }
 
 #[derive(Deserialize)]
@@ -693,6 +805,9 @@ struct LaunchIn {
     rows: u16,
     record: String,
     hello_deadline_ms: u64,
+    holders_dir: OsString,
+    daemon_endpoint: String,
+    end_child_on_disconnect: bool,
 }
 
 /// Encodes `launch` for a holder's standard input. Paths and environment
@@ -707,6 +822,9 @@ pub fn encode_holder_launch(launch: &HolderLaunch) -> Vec<u8> {
         rows: launch.rows,
         record: &launch.record,
         hello_deadline_ms: launch.hello_deadline_ms,
+        holders_dir: launch.holders_dir.as_os_str(),
+        daemon_endpoint: &launch.daemon_endpoint,
+        end_child_on_disconnect: launch.end_child_on_disconnect,
     };
     // Only strings, numbers and OS strings, which serde_json always encodes;
     // an empty launch would be refused by the holder.
@@ -727,6 +845,9 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         rows,
         record,
         hello_deadline_ms,
+        holders_dir,
+        daemon_endpoint,
+        end_child_on_disconnect,
     } = serde_json::from_slice(input).map_err(HolderCodecError::Launch)?;
     Ok(HolderLaunch {
         argv,
@@ -736,6 +857,9 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         rows,
         record,
         hello_deadline_ms,
+        holders_dir: PathBuf::from(holders_dir),
+        daemon_endpoint,
+        end_child_on_disconnect,
     })
 }
 

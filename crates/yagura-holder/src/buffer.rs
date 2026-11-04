@@ -1,6 +1,6 @@
 //! The output a holder keeps: the latest checkpoint and every byte the child
-//! wrote after it. Nothing in it is ever dropped; the holder stops reading
-//! instead (see [`OutputState::reader_must_wait`]).
+//! wrote after it. Nothing in it is dropped for want of room; the holder stops
+//! reading instead (see [`OutputState::reader_must_wait`]).
 
 use yagura_protocol::MAX_WINDOW_DIMENSION;
 use yagura_protocol::holder::HolderCheckpoint;
@@ -66,6 +66,22 @@ impl OutputBuffer {
         if seq < self.start || seq > self.end() {
             return;
         }
+        self.drop_before(seq);
+        self.checkpoint = Some(HolderCheckpoint { seq, bytes });
+    }
+
+    /// Lets go of the output before `seq` with no checkpoint for it, so a
+    /// replay starts at `seq`. Provisional: only the end-child-on-disconnect
+    /// launch, whose daemon never comes back for it, frees output this way.
+    pub(crate) fn release(&mut self, seq: u64) {
+        if seq <= self.start || seq > self.end() {
+            return;
+        }
+        self.drop_before(seq);
+        self.checkpoint = None;
+    }
+
+    fn drop_before(&mut self, seq: u64) {
         let drop_len = usize::try_from(seq - self.start).unwrap_or(self.bytes.len());
         self.bytes.drain(..drop_len.min(self.bytes.len()));
         // Give back what a burst grew, so a window holds memory for what it keeps.
@@ -74,7 +90,6 @@ impl OutputBuffer {
             self.bytes.shrink_to(keep);
         }
         self.start = seq;
-        self.checkpoint = Some(HolderCheckpoint { seq, bytes });
     }
 
     /// The kept output from `from` to `to`, both clamped to what is kept.

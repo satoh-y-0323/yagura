@@ -410,10 +410,15 @@ pub fn default_endpoint_owning(user_id: &str, namespace: &InstanceNamespace) -> 
 }
 
 /// The endpoint the holder of window `window_id` listens on, for `user_id` in
-/// `namespace`: `\\.\pipe\{namespace}-{user_id}-holder-{window_id}` on
-/// Windows (`holders_dir` unused), and `{holders_dir}/{window_id}.sock` on Unix,
-/// moved to a short owner-only directory under the OS temp directory when it
-/// would not fit in `sockaddr_un.sun_path`.
+/// `namespace`, with its holders in `holders_dir`:
+/// `\\.\pipe\{namespace}-{user_id}-holder-{dir_id}-{window_id}` on Windows, and
+/// `{holders_dir}/{window_id}.sock` on Unix, moved to
+/// `{dir_id}-{window_id}.sock` in a short owner-only directory under the OS
+/// temp directory when it would not fit in `sockaddr_un.sun_path`.
+///
+/// `dir_id` is derived from `holders_dir` as spelled (no file system access),
+/// so holders of the same window in two directories never share an endpoint,
+/// and one spelling of a directory always gives the same endpoint.
 ///
 /// # Errors
 ///
@@ -435,10 +440,10 @@ pub fn holder_endpoint(
     }
     #[cfg(windows)]
     {
-        let _ = holders_dir;
         Ok(format!(
-            r"\\.\pipe\{}-{user_id}-holder-{window_id}",
-            namespace.name()
+            r"\\.\pipe\{}-{user_id}-holder-{}-{window_id}",
+            namespace.name(),
+            holders_dir_id(holders_dir)
         ))
     }
     #[cfg(not(windows))]
@@ -450,6 +455,70 @@ pub fn holder_endpoint(
             &std::env::temp_dir(),
             window_id,
         )
+    }
+}
+
+/// A short name for `holders_dir` (FNV-1a 64 of its bytes): stable across
+/// builds, since an endpoint is found again through the name a holder recorded.
+pub(crate) fn holders_dir_id(holders_dir: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in holders_dir.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Makes sure `dir` is a directory private to this user: creates it
+/// owner-only when it is missing (its parent must exist), and otherwise
+/// accepts it only when it is a directory rather than a link. On Unix it must
+/// also be owned by this user and grant nobody else access. On Windows its
+/// access is the ACL it inherits, as for [`secure_owned_dir`].
+///
+/// # Errors
+///
+/// Returns [`OsError::Io`] when `dir` cannot be created or inspected, and
+/// [`OsError::Security`] when it is a link, not a directory, or (Unix) not
+/// private to this user.
+pub fn ensure_private_dir(dir: &Path) -> Result<(), OsError> {
+    #[cfg(windows)]
+    {
+        match std::fs::create_dir(dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            other => other?,
+        }
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.is_symlink() || !meta.is_dir() {
+            return Err(OsError::Security(format!(
+                "{} is not a plain directory",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        platform_unix::ensure_private_dir(dir)
+    }
+}
+
+/// Writes nothing more to this process's standard output: points it at the
+/// null device and closes what it was, so a reader of the old one sees its
+/// end while this process runs on, and a later write cannot reach a handle
+/// reused for something else.
+///
+/// # Errors
+///
+/// Returns [`OsError::Io`] when the null device cannot be opened or put in
+/// place; standard output is then left as it was.
+pub fn release_standard_output() -> Result<(), OsError> {
+    #[cfg(windows)]
+    {
+        platform_windows::release_standard_output()
+    }
+    #[cfg(not(windows))]
+    {
+        platform_unix::release_standard_output()
     }
 }
 

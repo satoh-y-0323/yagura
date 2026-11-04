@@ -730,6 +730,33 @@ pub fn enter_raw_console_input() -> Result<(), OsError> {
     }
 }
 
+/// Windows branch of [`crate::release_standard_output`].
+///
+/// # Errors
+///
+/// As for [`crate::release_standard_output`].
+pub fn release_standard_output() -> Result<(), OsError> {
+    use std::os::windows::io::IntoRawHandle as _;
+    use windows::Win32::System::Console::{STD_OUTPUT_HANDLE, SetStdHandle};
+
+    let null = std::fs::OpenOptions::new().write(true).open("NUL")?;
+    let null = HANDLE(null.into_raw_handle() as isize);
+    // SAFETY: `null` is a handle this function owns until it is either put in
+    // place or closed; the old standard output is closed only after it has
+    // been replaced, so no later lookup of the standard handle returns it.
+    unsafe {
+        let old = GetStdHandle(STD_OUTPUT_HANDLE).ok();
+        if let Err(error) = SetStdHandle(STD_OUTPUT_HANDLE, null) {
+            let _ = CloseHandle(null);
+            return Err(OsError::Io(command_line::win32_error_to_io(&error)));
+        }
+        if let Some(old) = old.filter(|old| !old.is_invalid()) {
+            let _ = CloseHandle(old);
+        }
+    }
+    Ok(())
+}
+
 /// Windows branch of [`crate::program::default_is_executable`]: an existing
 /// file is startable, since what decides *how* it starts is its extension,
 /// which the resolution rule has already chosen. Follows symlinks, so a shim

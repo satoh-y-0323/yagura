@@ -10,11 +10,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn};
+use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn, PtySpawnError};
 use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderEnvOp, HolderExit, HolderFrame, HolderLaunch, HolderRecord,
-    MAX_HELLO_DEADLINE_MS, encode_holder_frame,
+    HolderSpawnFailure, MAX_HELLO_DEADLINE_MS, encode_holder_frame,
 };
 use yagura_protocol::window_size_within_limit;
 
@@ -208,6 +208,36 @@ fn to_env_op(op: &HolderEnvOp) -> EnvOp {
     }
 }
 
+/// Why the child could not be started, and the detail for the holder's log.
+struct SpawnError {
+    reason: HolderSpawnFailure,
+    detail: String,
+}
+
+impl From<PtySpawnError> for SpawnError {
+    fn from(error: PtySpawnError) -> Self {
+        let reason = match error {
+            PtySpawnError::BundledConptyUnavailable(_) => {
+                HolderSpawnFailure::BundledConptyUnavailable
+            }
+            PtySpawnError::Spawn(_) => HolderSpawnFailure::Spawn,
+        };
+        Self {
+            reason,
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl SpawnError {
+    fn other(detail: String) -> Self {
+        Self {
+            reason: HolderSpawnFailure::Spawn,
+            detail,
+        }
+    }
+}
+
 fn spawn_thread(name: &str, body: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name(name.to_owned())
@@ -221,7 +251,7 @@ fn spawn_child(
     launch: &HolderLaunch,
     shared: &Arc<Shared>,
     events: &mpsc::UnboundedSender<Event>,
-) -> Result<Child, String> {
+) -> Result<Child, SpawnError> {
     let command = PtyCommand {
         argv: launch.argv.clone(),
         cwd: launch.cwd.clone(),
@@ -238,7 +268,7 @@ fn spawn_child(
         control,
         reader,
         writer,
-    } = yagura_os::pty::spawn(&command, size).map_err(|error| error.to_string())?;
+    } = yagura_os::pty::spawn(&command, size)?;
     let pid = child.process_id();
     let group = Arc::new(group);
     let control = Arc::new(control);
@@ -280,7 +310,9 @@ fn spawn_child(
         })
     });
     // Dropping what was started ends the child's tree with it.
-    started.map_err(|error| format!("cannot start the holder's threads: {error}"))?;
+    started.map_err(|error| {
+        SpawnError::other(format!("cannot start the holder's threads: {error}"))
+    })?;
     Ok(Child {
         killer,
         group,
@@ -364,6 +396,7 @@ struct Core {
     terminating: bool,
     exit_seen: Option<Instant>,
     exit_reported: bool,
+    provisional: Provisional,
 }
 
 /// Serves the window until the holder is to end.
@@ -382,6 +415,10 @@ pub(crate) async fn serve(
         Duration::from_millis(window.launch.hello_deadline_ms.min(MAX_HELLO_DEADLINE_MS));
     let hello_deadline = Instant::now() + hello_wait;
     let size = (window.launch.cols, window.launch.rows);
+    let provisional = Provisional {
+        end_child_on_disconnect: window.launch.end_child_on_disconnect,
+        discarding: false,
+    };
     let mut core = Core {
         window,
         shared: Arc::new(Shared::default()),
@@ -393,6 +430,7 @@ pub(crate) async fn serve(
         terminating: false,
         exit_seen: None,
         exit_reported: false,
+        provisional,
     };
     let ending = loop {
         let output_ended = core.shared.state().reader_done;
@@ -526,6 +564,9 @@ impl Core {
                 if self.exit_reported {
                     return Some(Ending::ChildExited);
                 }
+                if self.provisional.on_lost_connection(self.child.as_mut()) {
+                    self.terminating = true;
+                }
             }
             Event::WriteDone { conn, id, written } if self.is_current(conn) => {
                 self.answer_write(id, written);
@@ -580,7 +621,10 @@ impl Core {
                     }
                 }
                 Ok(Err(error)) => return Some(self.spawn_failed(accepted, id, &error)),
-                Err(error) => return Some(self.spawn_failed(accepted, id, &error.to_string())),
+                Err(error) => {
+                    let error = SpawnError::other(error.to_string());
+                    return Some(self.spawn_failed(accepted, id, &error));
+                }
             }
         }
         let (welcome, replay_end) = {
@@ -605,8 +649,10 @@ impl Core {
         None
     }
 
-    fn spawn_failed(&mut self, accepted: Accepted, id: u64, error: &str) -> Ending {
-        crate::log(format_args!("cannot start the child: {error}"));
+    /// Answers the first `Hello` with why the child could not start, then
+    /// `Exited`, in place of a `Welcome`.
+    fn spawn_failed(&mut self, accepted: Accepted, id: u64, error: &SpawnError) -> Ending {
+        crate::log(format_args!("cannot start the child: {}", error.detail));
         let exit = HolderExit {
             code: None,
             checkpoint: None,
@@ -617,6 +663,9 @@ impl Core {
             crate::log(format_args!("cannot write the exit file: {error}"));
         }
         let conn = Conn::open(accepted, id, 0, self.events.clone());
+        conn.send(&HolderFrame::SpawnFailed {
+            reason: error.reason,
+        });
         conn.send(&HolderFrame::Exited { code: None });
         self.conn = Some(conn);
         Ending::SpawnFailed
@@ -626,7 +675,11 @@ impl Core {
         match frame {
             HolderFrame::Replay => self.replay(),
             HolderFrame::Ack { seq } => {
-                self.shared.state().acknowledge(seq);
+                {
+                    let mut state = self.shared.state();
+                    state.acknowledge(seq);
+                    self.provisional.on_ack(&mut state);
+                }
                 self.shared.wake_reader();
             }
             HolderFrame::StoreCheckpoint { seq, bytes } => {
@@ -652,7 +705,10 @@ impl Core {
             | HolderFrame::WriteFailed { .. }
             | HolderFrame::Exited { .. }
             | HolderFrame::Displaced
-            | HolderFrame::VersionRejected { .. } => {}
+            | HolderFrame::VersionRejected { .. }
+            | HolderFrame::Resized { .. }
+            | HolderFrame::ResizeFailed { .. }
+            | HolderFrame::SpawnFailed { .. } => {}
         }
         None
     }
@@ -682,13 +738,27 @@ impl Core {
         }
     }
 
+    /// Resizes the terminal and answers whether it took the size.
     fn resize(&mut self, cols: u16, rows: u16) {
-        let fits = window_size_within_limit(cols, rows);
-        let Some(child) = self.child.as_ref().filter(|_| fits) else {
-            return;
+        let resized = if !window_size_within_limit(cols, rows) {
+            Err("the size is out of range".to_owned())
+        } else if let Some(child) = self.child.as_ref() {
+            child
+                .control
+                .resize(cols, rows)
+                .map_err(|error| format!("the terminal refused the size: {error}"))
+        } else {
+            Err("the child has not started".to_owned())
         };
-        if child.control.resize(cols, rows).is_ok() {
-            self.size = (cols, rows);
+        let answer = match resized {
+            Ok(()) => {
+                self.size = (cols, rows);
+                HolderFrame::Resized { cols, rows }
+            }
+            Err(reason) => HolderFrame::ResizeFailed { cols, rows, reason },
+        };
+        if let Some(conn) = &self.conn {
+            conn.send(&answer);
         }
     }
 
@@ -748,7 +818,11 @@ impl Core {
                 end_seq: state.buffer.end(),
             }
         };
-        if let Err(error) = record::write_exit(&self.window.place, &self.window.window_id, &exit) {
+        if !self.provisional.keeps_exit() {
+            record::remove_record(&self.window.place, &self.window.window_id);
+        } else if let Err(error) =
+            record::write_exit(&self.window.place, &self.window.window_id, &exit)
+        {
             crate::log(format_args!("cannot write the exit file: {error}"));
         }
         if let Some(conn) = &self.conn {
@@ -763,6 +837,45 @@ impl Core {
         if let Some(conn) = self.conn.take() {
             let _ = tokio::time::timeout(FINAL_SEND_LIMIT, conn.close()).await;
         }
+    }
+}
+
+/// Provisional, removed with [`HolderLaunch::end_child_on_disconnect`] once
+/// holders outlive the daemon: the one place that flag takes effect. A daemon that left will not come
+/// back for the window, so its output is not kept for one and nothing raw is
+/// left on disk for nobody to read.
+struct Provisional {
+    end_child_on_disconnect: bool,
+    /// The connection was lost and the child's tree is being ended.
+    discarding: bool,
+}
+
+impl Provisional {
+    /// Frees the output the connected daemon has acknowledged.
+    fn on_ack(&self, state: &mut OutputState) {
+        if self.end_child_on_disconnect
+            && let Some(floor) = state.ack_floor
+        {
+            state.buffer.release(floor);
+        }
+    }
+
+    /// Ends the child's tree when the connection was lost other than by this
+    /// holder closing it on a displacement; returns whether it did.
+    fn on_lost_connection(&mut self, child: Option<&mut Child>) -> bool {
+        if !self.end_child_on_disconnect {
+            return false;
+        }
+        self.discarding = true;
+        if let Some(child) = child {
+            child.terminate(true);
+        }
+        true
+    }
+
+    /// Whether the child's exit is left in an exit file, with the record.
+    fn keeps_exit(&self) -> bool {
+        !self.discarding
     }
 }
 

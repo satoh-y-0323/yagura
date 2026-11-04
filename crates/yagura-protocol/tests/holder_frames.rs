@@ -161,3 +161,49 @@ fn incomplete_input_waits_and_broken_frames_are_errors() {
     // A length too short to hold the type.
     assert!(decode_holder_frame(&[1, 0, 0, 0, 1]).is_err());
 }
+
+#[test]
+fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
+    use std::path::PathBuf;
+    use yagura_protocol::holder::{
+        HolderLaunch, HolderSpawnFailure, decode_holder_launch, encode_holder_launch,
+    };
+
+    let frames = [
+        HolderFrame::Resized {
+            cols: 100,
+            rows: 30,
+        },
+        HolderFrame::ResizeFailed {
+            cols: 1001,
+            rows: 30,
+            reason: "out of range".to_owned(),
+        },
+        HolderFrame::SpawnFailed {
+            reason: HolderSpawnFailure::BundledConptyUnavailable,
+        },
+        HolderFrame::SpawnFailed {
+            reason: HolderSpawnFailure::Spawn,
+        },
+    ];
+    for frame in frames {
+        assert_eq!(decode_whole(&encode_holder_frame(&frame)), frame);
+    }
+
+    let launch = HolderLaunch {
+        argv: vec!["cli".to_owned()],
+        cwd: None,
+        env: Vec::new(),
+        cols: 80,
+        rows: 24,
+        record: "record".to_owned(),
+        hello_deadline_ms: 1000,
+        holders_dir: PathBuf::from("state").join("holders"),
+        daemon_endpoint: "daemon-endpoint".to_owned(),
+        end_child_on_disconnect: true,
+    };
+    assert_eq!(
+        decode_holder_launch(&encode_holder_launch(&launch)).unwrap(),
+        launch
+    );
+}
