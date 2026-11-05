@@ -148,7 +148,7 @@ async fn assert_waits_for_its_cli(
     needle: &str,
 ) {
     let entry = h.registry.get(window_id).expect("the window is registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.inbox().pending_count() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -165,8 +165,19 @@ async fn assert_waits_for_its_cli(
     let mut door = h.connect().await;
     let taken = call_door(&mut door, "take", window_id).await;
     assert!(taken.contains(needle), "{taken:?}");
-    let state = wait_for_settled_delivery(client, seq, window_id, Duration::from_secs(10)).await;
+    let state = wait_for_settled_delivery(client, seq, window_id).await;
     assert_eq!(state, "taken");
+    // The fixture echoes what it reads in order, so once this write is echoed
+    // anything typed into the window before it has been echoed too.
+    let sentinel = format!("SENTINEL-AFTER-TAKE-{window_id}.");
+    entry
+        .write_pty_input(
+            sentinel.as_bytes(),
+            yagura_daemon::window::InputOrigin::Interactive,
+        )
+        .await
+        .expect("the sentinel must not fail");
+    h.wait_for_scrollback(window_id, sentinel.as_bytes()).await;
     assert!(
         !String::from_utf8_lossy(&h.scrollback(window_id)).contains(needle),
         "nothing is typed into a window whose status is Unknown"
@@ -180,12 +191,8 @@ const CHAT_ENVELOPE_MARKER: &str = "[yagura chat] ";
 /// marker instead of the handoff one (composer-draw mode paints an
 /// unsubmitted draft with the same marker text, so only an occurrence that is
 /// not immediately preceded by the composer's own marker+separator counts).
-async fn wait_for_accepted_chat_envelope_json(
-    h: &Harness,
-    window_id: &str,
-    timeout: Duration,
-) -> serde_json::Value {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_accepted_chat_envelope_json(h: &Harness, window_id: &str) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let text = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
         if let Some(json) = accepted_chat_envelope_json(&text) {
@@ -286,15 +293,12 @@ fn participant_excluded_by_default(mut config: DaemonConfig, dir: &Path) -> Daem
 /// Reads the reply to a request, skipping any `chat_changed` push that
 /// overtakes it: a connection that is also an approver is pushed to while its
 /// own requests are in flight.
-async fn read_reply(
-    client: &mut yagura_test_support::ipc::Connection,
-    timeout: Duration,
-) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_reply(client: &mut yagura_test_support::ipc::Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::ChatChanged { .. }) {
             return frame;
         }
@@ -319,7 +323,7 @@ async fn send_chat_msg(
         },
     )
     .await;
-    read_reply(client, Duration::from_secs(5)).await
+    read_reply(client).await
 }
 
 /// [`send_chat_msg`], for [`ClientMessage::BroadcastChat`].
@@ -336,7 +340,7 @@ async fn broadcast_chat_msg(
         },
     )
     .await;
-    read_reply(client, Duration::from_secs(5)).await
+    read_reply(client).await
 }
 
 /// [`send_chat_msg`], for [`ClientMessage::ReadChat`].
@@ -355,7 +359,7 @@ async fn read_chat_msg(
         },
     )
     .await;
-    read_reply(client, Duration::from_secs(5)).await
+    read_reply(client).await
 }
 
 struct ReadChatResult {
@@ -446,9 +450,8 @@ async fn wait_for_settled_delivery(
     client: &mut yagura_test_support::ipc::Connection,
     seq: u64,
     window_id: &str,
-    timeout: Duration,
 ) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let read = expect_chat_messages(read_chat_msg(client, None, Some(0), None).await);
         let settled = read
@@ -528,7 +531,7 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
     assert!(posted.unresolved.is_empty());
     assert!(!posted.halted);
 
-    let json = wait_for_accepted_chat_envelope_json(&h, &target_id, Duration::from_secs(10)).await;
+    let json = wait_for_accepted_chat_envelope_json(&h, &target_id).await;
     assert_eq!(
         json.get("room_id").and_then(serde_json::Value::as_str),
         // An identified window's own default room is its own
@@ -554,13 +557,7 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
         "the chat envelope's reply hint must carry the room a reply belongs in, got: {json}"
     );
 
-    let state = wait_for_settled_delivery(
-        &mut poster_conn,
-        posted.seq,
-        &target_id,
-        Duration::from_secs(10),
-    )
-    .await;
+    let state = wait_for_settled_delivery(&mut poster_conn, posted.seq, &target_id).await;
     assert_eq!(
         state, "taken",
         "an envelope typed up to its submit key is taken, whatever the composer showed after"
@@ -596,13 +593,7 @@ async fn send_chat_still_delivers_to_a_target_that_is_currently_running() {
     // A reacting fixture prints `REACT` when a bracketed paste ends, matched byte by byte, so
     // unlike a typed submit this never depends on how the fixture's reads split the input.
     h.write_input(&target_id, b"\x1b[200~\x1b[201~").await;
-    wait_until_status(
-        &mut poster_conn,
-        &target_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut poster_conn, &target_id, WindowStatus::Running).await;
 
     let poster_id = h.open_idle_window(&mut poster_conn).await;
     identify(&mut poster_conn, &poster_id).await;
@@ -901,14 +892,14 @@ async fn window_origin_broadcast_chat_awaits_a_targetless_approval_and_delivers_
     // The requester's connection must keep answering other requests while
     // its own broadcast is awaiting a decision.
     send(&mut poster_conn, &ClientMessage::ListWindows).await;
-    let first = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let first = read_response(&mut poster_conn).await;
     assert!(
         matches!(first, DaemonMessage::WindowList { .. }),
         "list_windows must be answered while the broadcast is still pending, got {first:?}"
     );
 
     decide(&mut approver, &request.request_id, true).await;
-    let posted = expect_chat_posted(read_response(&mut poster_conn, Duration::from_secs(5)).await);
+    let posted = expect_chat_posted(read_response(&mut poster_conn).await);
     assert!(
         posted.targets.contains(&recipient_id),
         "an approved broadcast must reach every participant but the poster"
@@ -937,7 +928,7 @@ async fn window_origin_broadcast_chat_denied_returns_approval_denied() {
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
-    let result = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let result = read_response(&mut poster_conn).await;
     expect_error(result, "approval_denied");
 }
 
@@ -969,10 +960,10 @@ async fn window_origin_broadcast_chat_approval_times_out_and_withdraws() {
     .await;
     let _request = expect_approval_requested(&mut approver).await;
 
-    let result = read_response(&mut poster_conn, Duration::from_secs(10)).await;
+    let result = read_response(&mut poster_conn).await;
     expect_error(result, "approval_timeout");
 
-    let withdrawn = read_response(&mut approver, Duration::from_secs(5)).await;
+    let withdrawn = read_response(&mut approver).await;
     assert!(
         matches!(
             withdrawn,
@@ -1035,7 +1026,7 @@ async fn an_external_connections_send_chat_awaits_approval_when_not_auto_approve
     assert!(request.target.is_none());
 
     decide(&mut approver, &request.request_id, true).await;
-    let posted = expect_chat_posted(read_response(&mut external, Duration::from_secs(5)).await);
+    let posted = expect_chat_posted(read_response(&mut external).await);
     assert!(!posted.halted);
 }
 
@@ -1104,7 +1095,7 @@ async fn window_origin_send_chat_awaits_a_targetless_approval_and_delivers_once_
     );
 
     decide(&mut approver, &request.request_id, true).await;
-    let posted = expect_chat_posted(read_response(&mut poster_conn, Duration::from_secs(5)).await);
+    let posted = expect_chat_posted(read_response(&mut poster_conn).await);
     assert!(posted.targets.contains(&recipient_id));
 
     let approved_json: serde_json::Value = serde_json::from_str(
@@ -1113,8 +1104,7 @@ async fn window_origin_send_chat_awaits_a_targetless_approval_and_delivers_once_
             .expect("already asserted the marker prefix is present"),
     )
     .expect("the approval body must be the JSON the daemon composed");
-    let delivered =
-        wait_for_accepted_chat_envelope_json(&h, &recipient_id, Duration::from_secs(10)).await;
+    let delivered = wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
     assert_eq!(
         approved_json, delivered,
         "the text a human approved and the envelope actually written must carry identical fields"
@@ -1150,7 +1140,7 @@ async fn window_origin_send_chat_denied_returns_approval_denied() {
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
-    let result = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let result = read_response(&mut poster_conn).await;
     expect_error(result, "approval_denied");
 }
 
@@ -1187,7 +1177,7 @@ async fn repetition_halts_the_room_and_notifies_the_approver() {
 
     // The repeat that trips the rule is the one that pushes; the posts after
     // it arrive into an already-halted room, which is announced once.
-    let changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(5)).await;
+    let changed_seq = next_chat_changed_needing_user(&mut approver).await;
     assert!(
         changed_seq > 0 && changed_seq <= last_seq,
         "the push must name one of the posts made here, got {changed_seq}"
@@ -1232,7 +1222,7 @@ async fn after_a_halt_ai_posts_are_undelivered_and_a_user_post_clears_it() {
     for _ in 0..4 {
         broadcast_chat_msg(&mut poster_conn, None, "same message").await;
     }
-    let _halted_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(5)).await;
+    let _halted_seq = next_chat_changed_needing_user(&mut approver).await;
 
     let after_halt =
         expect_chat_posted(broadcast_chat_msg(&mut poster_conn, None, "still talking").await);
@@ -1286,7 +1276,7 @@ async fn a_window_readers_default_after_seq_is_its_own_last_post() {
         },
     )
     .await;
-    let read = expect_chat_messages(read_response(&mut client, Duration::from_secs(5)).await);
+    let read = expect_chat_messages(read_response(&mut client).await);
     assert!(
         read.messages.iter().all(|m| m.seq > first.seq + 1),
         "a window's default read must start after its own most recent post, got {:?}",
@@ -1369,7 +1359,7 @@ async fn mentioning_user_sets_needs_user_and_an_approver_reply_clears_it() {
         expect_chat_posted(send_chat_msg(&mut poster, None, "@user please look at this").await);
     assert!(posted.user);
 
-    let changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(5)).await;
+    let changed_seq = next_chat_changed_needing_user(&mut approver).await;
     assert_eq!(changed_seq, posted.seq);
 
     // The reply must reach the poster's own room, not the approver's "main"
@@ -1410,7 +1400,7 @@ async fn the_start_up_door_carries_the_intro_and_nothing_is_typed() {
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
     expect_chat_posted(send_chat_msg(&mut client, None, &format!("hello @{recipient_id}")).await);
-    wait_for_accepted_chat_envelope_json(&h, &recipient_id, Duration::from_secs(10)).await;
+    wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
     assert!(
         !String::from_utf8_lossy(&h.scrollback(&recipient_id)).contains("welcome to the room"),
         "the intro is never typed into a window"
@@ -1483,7 +1473,7 @@ async fn a_post_still_waiting_when_the_daemon_stopped_reads_back_undelivered_aft
             .registry
             .get(&target_id)
             .expect("the window is registered");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while entry.inbox().pending_count() == 0 {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1568,15 +1558,9 @@ async fn a_halt_and_needs_user_survive_a_daemon_restart_with_the_same_db_path() 
     );
     // The AI post above raises the room's attention flag again on this boot's
     // fresh mirror; drain that push so it does not stand in for a reply below.
-    let _changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(5)).await;
+    let _changed_seq = next_chat_changed_needing_user(&mut approver).await;
 
-    let state = wait_for_settled_delivery(
-        &mut poster,
-        after_restart_post.seq,
-        &recipient_id,
-        Duration::from_secs(10),
-    )
-    .await;
+    let state = wait_for_settled_delivery(&mut poster, after_restart_post.seq, &recipient_id).await;
     assert_eq!(state, "undelivered_halted");
 
     let user_post = expect_chat_posted(
@@ -1619,7 +1603,7 @@ async fn silence_after_a_taken_post_marks_needs_user_and_notifies_the_approver()
 
     send_chat_msg(&mut poster_conn, None, &format!("hello @{recipient_id}")).await;
 
-    let _changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(10)).await;
+    let _changed_seq = next_chat_changed_needing_user(&mut approver).await;
 
     let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, None, None).await);
     assert!(read.needs_user);
@@ -1653,7 +1637,7 @@ async fn a_follow_up_from_the_poster_itself_does_not_count_as_the_addressed_wind
     );
     expect_chat_posted(send_chat_msg(&mut poster_conn, None, "anyone there?").await);
 
-    let _changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(10)).await;
+    let _changed_seq = next_chat_changed_needing_user(&mut approver).await;
     let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, None, None).await);
     assert!(
         read.messages.iter().any(|m| m.from_kind == "system"),
@@ -1689,7 +1673,7 @@ async fn a_full_delivery_budget_leaves_exactly_one_destination_undelivered_exhau
 
     // Both destinations start out pending; the read is repeated until the
     // budget has turned one away or neither is pending any more.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let states: Vec<String> = loop {
         let read = expect_chat_messages(read_chat_msg(&mut client, None, Some(0), None).await);
         let states: Vec<String> = [&first_id, &second_id]
@@ -1800,7 +1784,7 @@ async fn turn_budget_halts_after_the_maximum_ai_posts_since_the_last_user_post()
         "the 2nd AI post since the last user post must trip turn_message_max = 2"
     );
 
-    let changed_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(5)).await;
+    let changed_seq = next_chat_changed_needing_user(&mut approver).await;
     assert_eq!(
         changed_seq, second.seq,
         "the halt must push the room as needing the user, naming the post that tripped it"
@@ -1844,7 +1828,7 @@ async fn a_daemon_with_no_resolved_store_path_returns_unsupported_for_every_chat
         },
     ] {
         send(&mut client, &msg).await;
-        let result = read_response(&mut client, Duration::from_secs(5)).await;
+        let result = read_response(&mut client).await;
         expect_error(result, "unsupported");
     }
 }
@@ -1921,17 +1905,13 @@ async fn open_held_destination(
 }
 
 /// The next `chat_changed` push on `client`, skipping frames that are not
-/// one. Panics when none arrives inside `timeout`.
+/// one. Panics when none arrives within [`yagura_test_support::HANG_GUARD`].
 async fn next_chat_changed(
     client: &mut yagura_test_support::ipc::Connection,
-    timeout: Duration,
 ) -> (String, u64, bool) {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        // The inner budget is the longer one on purpose: the deadline here is
-        // what must decide the outcome, with its own message.
-        let frame = tokio::time::timeout(remaining, read_response(client, timeout + timeout))
+        let frame = tokio::time::timeout_at(deadline, read_response(client))
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for a chat_changed push"));
         if let DaemonMessage::ChatChanged {
@@ -1945,45 +1925,46 @@ async fn next_chat_changed(
     }
 }
 
-/// How long the single-push cases watch for a second `chat_changed` push.
-const SECOND_PUSH_OBSERVATION: Duration = Duration::from_millis(300);
-
-/// The `(room_id, seq)` of every `chat_changed` push arriving on `client`
-/// within `window`. Other pushes an approver connection receives are not
-/// what the single-push cases count, so they are read past.
-async fn chat_changed_within(
+/// Sends a `Ping` on `client` and reads up to its `Pong`, returning the
+/// `(room_id, seq)` of every `chat_changed` push read on the way.
+async fn chat_changed_before_pong(
     client: &mut yagura_test_support::ipc::Connection,
-    window: Duration,
 ) -> Vec<(String, u64)> {
-    let deadline = tokio::time::Instant::now() + window;
+    send(client, &ClientMessage::Ping).await;
     let mut seen = Vec::new();
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return seen;
-        }
-        match tokio::time::timeout(remaining, read_response(client, Duration::from_secs(5))).await {
-            Ok(DaemonMessage::ChatChanged { room_id, seq, .. }) => seen.push((room_id, seq)),
-            Ok(_) => {}
-            Err(_) => return seen,
+        match common::read_message(client).await {
+            DaemonMessage::Pong => return seen,
+            DaemonMessage::ChatChanged { room_id, seq, .. } => seen.push((room_id, seq)),
+            _ => {}
         }
     }
 }
 
+/// Every `chat_changed` push `watcher` was sent for a post `poster` made
+/// before this call. A post pushes from inside the handler of the poster's
+/// connection, which serves one frame at a time: once `poster` answers a
+/// later `Ping`, each of the post's pushes is queued on `watcher`, ahead of
+/// the `Pong` that answers `watcher`'s own `Ping`.
+async fn chat_changed_once_the_post_is_handled(
+    poster: &mut yagura_test_support::ipc::Connection,
+    watcher: &mut yagura_test_support::ipc::Connection,
+) -> Vec<(String, u64)> {
+    chat_changed_before_pong(poster).await;
+    chat_changed_before_pong(watcher).await
+}
+
 /// The next `chat_changed` push that reports the room as needing the user,
 /// skipping the ones that only report a delivery moving on.
-async fn next_chat_changed_needing_user(
-    client: &mut yagura_test_support::ipc::Connection,
-    timeout: Duration,
-) -> u64 {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn next_chat_changed_needing_user(client: &mut yagura_test_support::ipc::Connection) -> u64 {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for a chat_changed push reporting needs_user"
         );
-        let (_, seq, needs_user) = next_chat_changed(client, remaining).await;
+        let (_, seq, needs_user) = next_chat_changed(client).await;
         if needs_user {
             return seq;
         }
@@ -2063,10 +2044,9 @@ async fn a_settled_delivery_pushes_chat_changed_carrying_the_posts_seq() {
     // it does. Every push for this post must name the poster's own room and
     // this post's seq, so read after each until the delivery reads back
     // settled rather than assuming the first push already announces it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let settled_state = loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let (room_id, seq, needs_user) = next_chat_changed(&mut approver, remaining).await;
+        let (room_id, seq, needs_user) = next_chat_changed(&mut approver).await;
         assert_eq!(
             room_id, posted.room_id,
             "every push for this post must name the poster's own room, not a literal \
@@ -2117,7 +2097,7 @@ async fn a_settled_deliverys_push_reports_the_rooms_stored_attention_flag() {
     // Raise the room's attention flag first, and take the push it makes.
     let asked =
         expect_chat_posted(send_chat_msg(&mut poster_conn, None, "@user look at this").await);
-    let raised_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(10)).await;
+    let raised_seq = next_chat_changed_needing_user(&mut approver).await;
     assert_eq!(raised_seq, asked.seq);
 
     // A post addressed at a window neither raises nor clears the flag, so its
@@ -2130,7 +2110,7 @@ async fn a_settled_deliverys_push_reports_the_rooms_stored_attention_flag() {
         )
         .await,
     );
-    let (_, seq, needs_user) = next_chat_changed(&mut approver, Duration::from_secs(10)).await;
+    let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
     assert_eq!(seq, posted.seq);
     assert!(
         needs_user,
@@ -2158,7 +2138,7 @@ async fn a_destination_whose_cli_takes_the_post_pushes_chat_changed_when_it_is_r
         .registry
         .get(&unknown_id)
         .expect("the window is registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.inbox().pending_count() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -2171,10 +2151,9 @@ async fn a_destination_whose_cli_takes_the_post_pushes_chat_changed_when_it_is_r
 
     // The post being recorded pushes once on its own; read after each push until the
     // destination reads back taken rather than assuming the first push announces it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let settled_state = loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let (_, seq, needs_user) = next_chat_changed(&mut approver, remaining).await;
+        let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
         assert_eq!(seq, posted.seq);
         assert!(!needs_user);
         let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
@@ -2242,10 +2221,9 @@ async fn a_destination_refused_by_the_delivery_budget_pushes_chat_changed_when_i
     // delivery task has had a chance to record the budget's outcome; read
     // after each push until one destination reads back refused rather than
     // assuming the first push already announces it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let exhausted_count = loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let (_, seq, needs_user) = next_chat_changed(&mut approver, remaining).await;
+        let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
         assert_eq!(seq, posted.seq);
         assert!(!needs_user);
         let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
@@ -2298,14 +2276,14 @@ async fn an_undelivered_post_into_a_halted_room_pushes_chat_changed_of_its_own()
     assert!(halting.halted, "the first post must trip monologue_max = 1");
     // Take the halting post's own push before the second post, so what is
     // read below can only be the second post's.
-    let halted_seq = next_chat_changed_needing_user(&mut approver, Duration::from_secs(10)).await;
+    let halted_seq = next_chat_changed_needing_user(&mut approver).await;
     assert_eq!(halted_seq, halting.seq);
 
     let refused =
         expect_chat_posted(broadcast_chat_msg(&mut poster_conn, None, "anyone there").await);
     assert!(refused.halted);
 
-    let (_, seq, needs_user) = next_chat_changed(&mut approver, Duration::from_secs(10)).await;
+    let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
     assert_eq!(
         seq, refused.seq,
         "a destination recorded as undelivered because the room is halted must be pushed \
@@ -2350,7 +2328,7 @@ async fn a_window_post_with_no_destination_and_no_mention_pushes_chat_changed_on
         "a body with no @user must not raise needs_user"
     );
 
-    let (room_id, seq, needs_user) = next_chat_changed(&mut approver, Duration::from_secs(5)).await;
+    let (room_id, seq, needs_user) = next_chat_changed(&mut approver).await;
     assert_eq!(room_id, posted.room_id);
     assert_eq!(seq, posted.seq);
     assert!(
@@ -2360,7 +2338,7 @@ async fn a_window_post_with_no_destination_and_no_mention_pushes_chat_changed_on
 
     // Neither a delivery nor a halt announcement follows an unaddressed,
     // non-mentioning post, so this push must be the only one for it.
-    let extra = chat_changed_within(&mut approver, SECOND_PUSH_OBSERVATION).await;
+    let extra = chat_changed_once_the_post_is_handled(&mut poster_conn, &mut approver).await;
     assert!(
         extra.is_empty(),
         "expected exactly one chat_changed push for this post, got {extra:?}"
@@ -2386,7 +2364,7 @@ async fn a_user_post_with_no_destination_and_no_mention_pushes_chat_changed_once
         "a body with no @user must not raise needs_user"
     );
 
-    let (room_id, seq, needs_user) = next_chat_changed(&mut watcher, Duration::from_secs(5)).await;
+    let (room_id, seq, needs_user) = next_chat_changed(&mut watcher).await;
     assert_eq!(room_id, posted.room_id);
     assert_eq!(seq, posted.seq);
     assert!(
@@ -2394,7 +2372,7 @@ async fn a_user_post_with_no_destination_and_no_mention_pushes_chat_changed_once
         "nothing in this post raised the room's needs_user flag"
     );
 
-    let extra = chat_changed_within(&mut watcher, SECOND_PUSH_OBSERVATION).await;
+    let extra = chat_changed_once_the_post_is_handled(&mut poster, &mut watcher).await;
     assert!(
         extra.is_empty(),
         "expected exactly one chat_changed push for this post, got {extra:?}"
@@ -2420,12 +2398,12 @@ async fn an_at_user_mention_still_pushes_chat_changed_only_once() {
         expect_chat_posted(send_chat_msg(&mut poster_conn, None, "@user look at this").await);
     assert!(posted.user);
 
-    let (room_id, seq, needs_user) = next_chat_changed(&mut approver, Duration::from_secs(5)).await;
+    let (room_id, seq, needs_user) = next_chat_changed(&mut approver).await;
     assert_eq!(room_id, posted.room_id);
     assert_eq!(seq, posted.seq);
     assert!(needs_user);
 
-    let extra = chat_changed_within(&mut approver, SECOND_PUSH_OBSERVATION).await;
+    let extra = chat_changed_once_the_post_is_handled(&mut poster_conn, &mut approver).await;
     assert!(
         extra.is_empty(),
         "expected exactly one chat_changed push for an @user mention, got {extra:?}"
@@ -2444,16 +2422,15 @@ async fn an_at_user_mention_still_pushes_chat_changed_only_once() {
 /// `next_chat_changed_needing_user`, which returns its seq instead).
 async fn next_chat_changed_needing_user_room(
     client: &mut yagura_test_support::ipc::Connection,
-    timeout: Duration,
 ) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for a chat_changed push reporting needs_user"
         );
-        let (room_id, _seq, needs_user) = next_chat_changed(client, remaining).await;
+        let (room_id, _seq, needs_user) = next_chat_changed(client).await;
         if needs_user {
             return room_id;
         }
@@ -2484,7 +2461,7 @@ async fn open_identified_participant_in_cwd(
 /// returns the listing.
 async fn list_chat_rooms(client: &mut yagura_test_support::ipc::Connection) -> Vec<ChatRoomInfo> {
     send(client, &ClientMessage::ListChatRooms).await;
-    match read_reply(client, Duration::from_secs(5)).await {
+    match read_reply(client).await {
         DaemonMessage::ChatRooms { rooms } => rooms,
         other => panic!("expected chat_rooms, got {other:?}"),
     }
@@ -2742,7 +2719,7 @@ async fn a_room_row_appears_in_the_listing_before_any_post_or_read_and_before_th
     )
     .await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let rooms = loop {
         let rooms = list_chat_rooms(&mut approver).await;
         if rooms.iter().any(|r| r.room_id != "main") {
@@ -2784,7 +2761,7 @@ async fn opening_a_participant_creates_its_own_room_row_and_its_intro_stays_plai
 
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let rooms = list_chat_rooms(&mut approver).await;
         if rooms.iter().any(|r| r.room_id.starts_with("r-")) {
@@ -2853,8 +2830,7 @@ async fn halt_and_its_clearing_and_notification_are_independent_per_room() {
     assert!(!a_first.halted);
     let a_second = expect_chat_posted(send_chat_msg(&mut a_client, None, "A two, different").await);
     assert!(a_second.halted);
-    let a_changed_room =
-        next_chat_changed_needing_user_room(&mut approver, Duration::from_secs(5)).await;
+    let a_changed_room = next_chat_changed_needing_user_room(&mut approver).await;
     assert_eq!(a_changed_room, a_first.room_id);
 
     // Room B's own monologue counter must be independent of room A's halt.
@@ -2864,8 +2840,7 @@ async fn halt_and_its_clearing_and_notification_are_independent_per_room() {
 
     let b_second = expect_chat_posted(send_chat_msg(&mut b_client, None, "B two, different").await);
     assert!(b_second.halted);
-    let b_changed_room =
-        next_chat_changed_needing_user_room(&mut approver, Duration::from_secs(5)).await;
+    let b_changed_room = next_chat_changed_needing_user_room(&mut approver).await;
     assert_eq!(b_changed_room, b_first.room_id);
 
     // A post to "main" must not clear either A's or B's active halt.
@@ -2922,8 +2897,7 @@ async fn silence_after_a_taken_post_is_independent_per_room() {
     let a_posted = expect_chat_posted(
         send_chat_msg(&mut a_client, None, &format!("hello @{a_recipient_id}")).await,
     );
-    let changed_room =
-        next_chat_changed_needing_user_room(&mut approver, Duration::from_secs(10)).await;
+    let changed_room = next_chat_changed_needing_user_room(&mut approver).await;
     assert_eq!(changed_room, a_posted.room_id);
 
     // A second, freshly opened room, with nobody addressed, must not also
@@ -2948,7 +2922,7 @@ async fn list_chat_rooms_from_a_window_connection_is_refused() {
     identify(&mut client, &poster_id).await;
 
     send(&mut client, &ClientMessage::ListChatRooms).await;
-    let result = read_reply(&mut client, Duration::from_secs(5)).await;
+    let result = read_reply(&mut client).await;
     expect_error(result, "auth_failed");
 }
 
@@ -2959,7 +2933,7 @@ async fn list_chat_rooms_from_an_external_connection_is_refused() {
     let mut client = h.connect().await;
 
     send(&mut client, &ClientMessage::ListChatRooms).await;
-    let result = read_reply(&mut client, Duration::from_secs(5)).await;
+    let result = read_reply(&mut client).await;
     expect_error(result, "auth_failed");
 }
 
@@ -3020,7 +2994,7 @@ async fn list_chat_rooms_reports_participant_count_and_survives_the_window_closi
         },
     )
     .await;
-    match read_response(&mut b_client, Duration::from_secs(5)).await {
+    match read_response(&mut b_client).await {
         DaemonMessage::WindowClosed { .. } => {}
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -3063,7 +3037,7 @@ async fn a_broadcast_chat_approval_request_carries_the_rooms_id_and_display_name
     assert!(!room.name.is_empty());
 
     decide(&mut approver, &request.request_id, true).await;
-    let _ = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let _ = read_response(&mut poster_conn).await;
 }
 
 #[tokio::test]
@@ -3126,7 +3100,7 @@ async fn a_send_chat_approval_request_shows_the_rooms_own_name_and_the_mentioned
     );
 
     decide(&mut approver, &request.request_id, false).await;
-    let _ = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let _ = read_response(&mut poster_conn).await;
 }
 
 #[tokio::test]
@@ -3155,7 +3129,7 @@ async fn a_close_window_approval_request_carries_no_room() {
         "a non-chat tool's approval request must never carry a room"
     );
     decide(&mut approver, &request.request_id, true).await;
-    let _ = read_response(&mut poster_conn, Duration::from_secs(5)).await;
+    let _ = read_response(&mut poster_conn).await;
 }
 
 // =============================================================================
@@ -3242,13 +3216,7 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
         posted.room_id
     );
 
-    let state = wait_for_settled_delivery(
-        &mut b_client,
-        posted.seq,
-        &target_id,
-        Duration::from_secs(10),
-    )
-    .await;
+    let state = wait_for_settled_delivery(&mut b_client, posted.seq, &target_id).await;
     assert_eq!(
         state, "taken",
         "an addressed, non-Unknown target in a second workspace is typed into and taken"
@@ -3278,7 +3246,7 @@ async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_le
         .registry
         .get(&unknown_id)
         .expect("the window is registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.inbox().pending_count() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -3296,12 +3264,6 @@ async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_le
     let mut door = h.connect().await;
     call_door(&mut door, "take", &unknown_id).await;
 
-    assert!(
-        chat_changed_within(&mut approver, SECOND_PUSH_OBSERVATION)
-            .await
-            .is_empty(),
-        "the post is gone, so its delivery settling has nothing to announce"
-    );
     let read = expect_chat_messages(
         read_chat_msg(
             &mut poster_conn,
@@ -3318,7 +3280,7 @@ async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_le
         send_chat_msg(&mut poster_conn, None, &format!("again @{unknown_id}")).await,
     );
     assert!(second.seq > posted.seq, "{} vs {}", second.seq, posted.seq);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.inbox().pending_count() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -3327,8 +3289,13 @@ async fn a_delivery_settling_after_its_post_was_cleared_announces_nothing_and_le
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     call_door(&mut door, "take", &unknown_id).await;
-    let (_, seq, _) = next_chat_changed(&mut approver, Duration::from_secs(10)).await;
-    assert_eq!(seq, second.seq);
+    // The first post's parcel was taken before the second post was even
+    // made, so its delivery's push, had it announced one, comes ahead of this.
+    let (_, seq, _) = next_chat_changed(&mut approver).await;
+    assert_eq!(
+        seq, second.seq,
+        "the cleared post is gone, so its delivery settling has nothing to announce"
+    );
 }
 
 // =============================================================================
@@ -3365,7 +3332,7 @@ async fn removal_outcome(
     expect_participants_push: bool,
 ) -> RemovalOutcome {
     send(client, request).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut outcome = RemovalOutcome {
         reply: DaemonMessage::Pong,
         cleared_push: None,
@@ -3383,7 +3350,7 @@ async fn removal_outcome(
             outcome.cleared_push,
             outcome.participants_changed
         );
-        match common::read_message(client, remaining).await {
+        match common::read_message(client).await {
             DaemonMessage::ChatChanged { .. } => {}
             DaemonMessage::ChatParticipantsChanged => outcome.participants_changed = true,
             DaemonMessage::ChatHistoryCleared { room_id } => outcome.cleared_push = Some(room_id),
@@ -3407,7 +3374,7 @@ async fn refusal_of(
 ) -> DaemonMessage {
     send(client, request).await;
     loop {
-        match common::read_message(client, Duration::from_secs(5)).await {
+        match common::read_message(client).await {
             DaemonMessage::ChatChanged { .. } | DaemonMessage::ChatParticipantsChanged => {}
             other => return other,
         }
@@ -3437,10 +3404,10 @@ async fn only_an_approver_may_clear_or_delete_a_chat_room() {
 
     for request in [clear_request(&room_id), delete_request(&room_id)] {
         send(&mut window_conn, &request).await;
-        let from_window = read_reply(&mut window_conn, Duration::from_secs(5)).await;
+        let from_window = read_reply(&mut window_conn).await;
         expect_error(from_window, "auth_failed");
         send(&mut external, &request).await;
-        let from_external = read_reply(&mut external, Duration::from_secs(5)).await;
+        let from_external = read_reply(&mut external).await;
         expect_error(from_external, "auth_failed");
     }
     let mut approver = h.connect().await;
@@ -3553,7 +3520,7 @@ async fn clearing_takes_a_waiting_post_back_so_the_cli_never_receives_it() {
         .registry
         .get(&unknown_id)
         .expect("the window is registered");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.inbox().pending_count() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -3606,13 +3573,13 @@ async fn a_room_is_in_use_while_its_window_runs_and_can_be_deleted_once_it_has_e
         },
     )
     .await;
-    match read_response(&mut window_conn, Duration::from_secs(5)).await {
+    match read_response(&mut window_conn).await {
         DaemonMessage::WindowClosed { .. } => {}
         other => panic!("expected window_closed, got {other:?}"),
     }
     // `window_closed` waits for the confirmed `Exited` only up to a bound,
     // so the listing is read until the status has settled.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let listed = list_chat_rooms(&mut approver).await;
         let info = listed.iter().find(|room| room.room_id == room_id).unwrap();

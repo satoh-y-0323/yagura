@@ -15,7 +15,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use common::{
     CONTROL_INPUT_TABLE, approver_base_config, composer_section_toml, detection_config,
@@ -34,8 +33,6 @@ const HOOK_DETECTION: &str = "hook-child";
 
 /// The playbook's `[chat] intro`.
 const INTRO: &str = "INTRO-6L-LAUNCH-CONTEXT";
-
-const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The launch-context template; kept out of `format!` so `{context}` stays literal.
 const LAUNCH_CONTEXT: &str = "launch_context = [\"--rules\", \"{context}\"]";
@@ -102,6 +99,7 @@ struct Scene {
     home: PathBuf,
     chat_intro: String,
     _server: tokio::task::JoinHandle<()>,
+    _instance: yagura_test_support::ipc::InstanceEndpoint,
 }
 
 impl Scene {
@@ -176,13 +174,12 @@ impl Scene {
             home,
             chat_intro,
             _server: handle,
+            _instance: yagura_test_support::ipc::InstanceEndpoint::new(&instance),
         }
     }
 
     async fn user(&self) -> Connection {
-        let mut client =
-            yagura_test_support::ipc::connect_with_retry(&self.endpoint, Duration::from_secs(5))
-                .await;
+        let mut client = yagura_test_support::ipc::connect_with_retry(&self.endpoint).await;
         register_approver(&mut client).await;
         client
     }
@@ -257,7 +254,7 @@ impl Scene {
             DaemonMessage::WindowOpened { window_id, .. } => window_id,
             other => panic!("expected window_opened for {profile}, got {other:?}"),
         };
-        wait_until_status(client, &id, WindowStatus::WaitingInput, EVENT_TIMEOUT).await;
+        wait_until_status(client, &id, WindowStatus::WaitingInput).await;
         id
     }
 }
@@ -315,7 +312,7 @@ fn assert_no_launch_context(argv: &[String], intro: &str, what: &str) {
 /// Reads the next response, skipping the pushes an approver connection is sent.
 async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
-        match read_response(client, EVENT_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::ChatChanged { .. }
             | DaemonMessage::ChatParticipantsChanged
             | DaemonMessage::PlanChanged { .. }
@@ -368,13 +365,7 @@ async fn a_participant_opened_with_a_prompt_gets_the_intro_as_its_launch_context
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     };
-    wait_until_status(
-        &mut user,
-        &window_id,
-        WindowStatus::WaitingInput,
-        EVENT_TIMEOUT,
-    )
-    .await;
+    wait_until_status(&mut user, &window_id, WindowStatus::WaitingInput).await;
     assert!(
         scene.delivers(&window_id),
         "the registered hooks held, so the window takes part in chat"

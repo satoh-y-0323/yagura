@@ -23,7 +23,6 @@ use common::{Harness, unique_temp_dir, wait_until_model_shows};
 use yagura_daemon::DaemonConfig;
 
 const FLOODED_MARKER: &[u8] = b"HOLD-FLOODED";
-const GUARD: Duration = Duration::from_secs(120);
 
 fn is_alive(pid: &str) -> bool {
     let output = Command::new("ps")
@@ -44,7 +43,7 @@ fn read_pid(path: &Path) -> String {
 
 #[test]
 fn close_window_returns_and_ends_the_tree_when_replies_cannot_be_delivered() {
-    common::run_on_own_runtime(GUARD, || async {
+    common::run_on_own_runtime(|| async {
         let h = Harness::start("close-stuck-replies", DaemonConfig::default()).await;
         let dir = unique_temp_dir("close-stuck-replies");
         let pid_file = dir.join("grandchild.pid");
@@ -53,7 +52,7 @@ fn close_window_returns_and_ends_the_tree_when_replies_cannot_be_delivered() {
             pid_file.to_str().expect("utf-8 path").to_string(),
         ];
         let window_id = h.open(command, None).await;
-        wait_until_model_shows(&h, &window_id, FLOODED_MARKER, Duration::from_secs(60)).await;
+        wait_until_model_shows(&h, &window_id, FLOODED_MARKER).await;
 
         let grandchild = read_pid(&pid_file);
         assert!(
@@ -66,7 +65,7 @@ fn close_window_returns_and_ends_the_tree_when_replies_cannot_be_delivered() {
             .await
             .expect("close_window should not error");
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while is_alive(&grandchild) {
             assert!(
                 tokio::time::Instant::now() < deadline,

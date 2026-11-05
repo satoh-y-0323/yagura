@@ -13,7 +13,6 @@
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
 
 use common::{ChatPlaybook, Harness, chat_config, expect_error, identify, read_response, send};
 use yagura_protocol::{CHAT_READ_LIMIT_MAX, ClientMessage, DaemonMessage};
@@ -35,7 +34,7 @@ async fn send_chat_msg(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 async fn broadcast_chat_msg(
@@ -51,7 +50,7 @@ async fn broadcast_chat_msg(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 async fn read_chat_msg(
@@ -69,7 +68,7 @@ async fn read_chat_msg(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_chat_messages_roster_len(msg: DaemonMessage) -> (usize, usize) {

@@ -32,8 +32,8 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
@@ -172,10 +172,13 @@ pub(crate) fn stage3_candidate_path(
 const STAGE3_SOCKET_NAME: &str = "ipc.sock";
 
 /// Unix branch of [`crate::holder_endpoint`]: `{holders_dir}/{window_id}.sock`,
-/// or, when that does not fit in `sockaddr_un.sun_path`,
-/// `{dir_id}-{window_id}.sock` in an owner-only
-/// `{tmp_root}/{namespace}-{user_id}-holders` created on demand. `dir_id`
-/// names `holders_dir`, which the fallback directory does not separate.
+/// or, when that does not fit in `sockaddr_un.sun_path`, `{hash}.sock` in an
+/// owner-only [`holder_fallback_dir`] created on demand. `hash` is 16 hex
+/// digits of the instance, `holders_dir` and `window_id`, which that shared
+/// directory does not separate, so the fallback's length depends on `tmp_root`
+/// and `user_id` only (91 bytes under macOS's 49-byte `TMPDIR`). Two windows
+/// whose hashes collide are not served on one socket: the second bind is
+/// refused as held.
 ///
 /// # Errors
 ///
@@ -189,11 +192,10 @@ pub fn holder_socket_path(
     tmp_root: &Path,
     window_id: &str,
 ) -> Result<String, OsError> {
-    let dir_id = crate::holders_dir_id(holders_dir);
     if let Ok(endpoint) = build_endpoint(holders_dir, &format!("{window_id}.sock")) {
         return Ok(endpoint);
     }
-    let dir = tmp_root.join(format!("{}-{user_id}-holders", namespace.name()));
+    let dir = holder_fallback_dir(tmp_root, user_id);
     create_private_dir(&dir)?;
     if !is_secure_dir(&dir, current_uid()) {
         return Err(OsError::Security(format!(
@@ -201,7 +203,18 @@ pub fn holder_socket_path(
             dir.display()
         )));
     }
-    build_endpoint(&dir, &format!("{dir_id}-{window_id}.sock"))
+    let hash = crate::short_hash(&[
+        namespace.name().as_bytes(),
+        holders_dir.as_os_str().as_encoded_bytes(),
+        window_id.as_bytes(),
+    ]);
+    build_endpoint(&dir, &format!("{hash}.sock"))
+}
+
+/// The directory every instance's holder sockets fall back to:
+/// `{tmp_root}/yagura-{user_id}-h`, short because `tmp_root` may be long.
+fn holder_fallback_dir(tmp_root: &Path, user_id: &str) -> PathBuf {
+    tmp_root.join(format!("yagura-{user_id}-h"))
 }
 
 /// Unix branch of [`crate::ensure_private_dir`].
@@ -450,19 +463,31 @@ impl PeerAuth for UnixIpc {
     }
 }
 
-/// A bound socket together with the endpoint lock that marks its daemon as
+/// A bound socket together with the endpoint lock that marks its listener as
 /// alive.
 ///
 /// The lock file (`<endpoint>.lock`) is held for as long as this value lives
-/// and is released by the kernel when the process dies, even by `SIGKILL`; it
-/// is never deleted, since unlinking it would let two processes lock two
-/// different files under the same name.
+/// and is released by the kernel when the process dies, even by `SIGKILL`.
+/// Dropping the value removes the socket and then the lock file while the lock
+/// is still held, so neither can be another listener's; a process that opened
+/// the lock file before it was removed finds, once it locks, that the path no
+/// longer names that file and opens it again, so two processes never hold
+/// locks on one endpoint. A process that dies leaves both files, which the
+/// next bind takes over.
 #[derive(Debug)]
 pub struct SocketListener {
-    // Declared before `_lock` so the socket closes before the lock is
+    // Declared before `lock` so the socket closes before the lock is
     // released: a free lock never leaves a still-listening socket behind.
     listener: UnixListener,
-    _lock: std::fs::File,
+    socket_path: PathBuf,
+    lock: EndpointLock,
+}
+
+impl Drop for SocketListener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.lock.path);
+    }
 }
 
 impl IpcTransport for UnixIpc {
@@ -496,7 +521,8 @@ impl IpcTransport for UnixIpc {
         finalize_socket_permissions(path)?;
         Ok(SocketListener {
             listener,
-            _lock: lock,
+            socket_path: path.to_path_buf(),
+            lock,
         })
     }
 
@@ -521,48 +547,100 @@ impl IpcTransport for UnixIpc {
     }
 }
 
+/// The lock on an endpoint, taken on the file its lock path named once the
+/// lock was held. Only [`take_lock_if_current`] makes one.
+#[derive(Debug)]
+struct EndpointLock {
+    // Holds the lock until dropped.
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+fn endpoint_lock_path(endpoint: &Path) -> PathBuf {
+    let mut lock_path = endpoint.as_os_str().to_owned();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
 /// Takes the lock that marks `endpoint` as owned by a live daemon, opening
 /// (or creating, owner-only) `<endpoint>.lock` beside it.
 ///
 /// A lock already held by another process is reported as
 /// [`OsError::EndpointHeld`].
-fn lock_endpoint(endpoint: &Path) -> Result<std::fs::File, OsError> {
-    let mut lock_path = endpoint.as_os_str().to_owned();
-    lock_path.push(".lock");
-    let lock_path = PathBuf::from(lock_path);
+fn lock_endpoint(endpoint: &Path) -> Result<EndpointLock, OsError> {
+    let lock_path = endpoint_lock_path(endpoint);
+    for _ in 0..LOCK_ATTEMPTS {
+        let file = open_lock_file(&lock_path)?;
+        if let Some(lock) = take_lock_if_current(file, endpoint, &lock_path)? {
+            return Ok(lock);
+        }
+    }
+    Err(OsError::EndpointHeld(format!(
+        "{} kept changing hands while its lock {} was being taken",
+        endpoint.display(),
+        lock_path.display()
+    )))
+}
 
+/// Each retry needs a listener to have let the endpoint go in between, so a
+/// few are plenty; the bound only keeps a churning endpoint from spinning.
+const LOCK_ATTEMPTS: usize = 8;
+
+fn open_lock_file(lock_path: &Path) -> Result<std::fs::File, OsError> {
     // O_NONBLOCK keeps a FIFO planted at the path from blocking the open;
     // O_CLOEXEC keeps a spawned child from holding the lock past our death.
-    let lock = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&lock_path)
+        .open(lock_path)
         .map_err(OsError::Io)?;
-    if !lock.metadata().map_err(OsError::Io)?.is_file() {
+    if !file.metadata().map_err(OsError::Io)?.is_file() {
         return Err(OsError::Security(format!(
             "{} is not a regular file; refusing to use it as the endpoint lock",
             lock_path.display()
         )));
     }
+    Ok(file)
+}
 
-    // SAFETY: `lock` owns this open file descriptor for the whole call, and
+/// Locks `file`, opened from `lock_path`; `None` when the lock was taken on a
+/// file that is no longer the one `lock_path` names (its holder removed it on
+/// the way out), which excludes nobody.
+fn take_lock_if_current(
+    file: std::fs::File,
+    endpoint: &Path,
+    lock_path: &Path,
+) -> Result<Option<EndpointLock>, OsError> {
+    // SAFETY: `file` owns this open file descriptor for the whole call, and
     // flock only reads the descriptor and its flags.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(lock);
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let lock_error = io::Error::last_os_error();
+        if lock_error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Err(OsError::EndpointHeld(format!(
+                "{} is held by a live listener (its lock {} is taken)",
+                endpoint.display(),
+                lock_path.display()
+            )));
+        }
+        return Err(OsError::Io(lock_error));
     }
-    let lock_error = io::Error::last_os_error();
-    if lock_error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        return Err(OsError::EndpointHeld(format!(
-            "{} is held by a live listener (its lock {} is taken)",
-            endpoint.display(),
-            lock_path.display()
-        )));
+    let locked = file.metadata().map_err(OsError::Io)?;
+    let named = match std::fs::symlink_metadata(lock_path) {
+        Ok(named) => named,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(OsError::Io(error)),
+    };
+    if (locked.dev(), locked.ino()) != (named.dev(), named.ino()) {
+        return Ok(None);
     }
-    Err(OsError::Io(lock_error))
+    Ok(Some(EndpointLock {
+        _file: file,
+        path: lock_path.to_path_buf(),
+    }))
 }
 
 /// Handles `EADDRINUSE` from `UnixListener::bind` once the endpoint lock is
@@ -732,19 +810,15 @@ fn peer_executable_path(_conn: &UnixStream) -> Option<PathBuf> {
 // schedule_force_kill
 // =========================================================================
 
-/// How often the escalation thread re-reads `exited` while the grace period
-/// runs, so a child that dies from the caller's first signal stops the
-/// escalation long before the deadline instead of at it.
-const FORCE_KILL_POLL_INTERVAL: Duration = Duration::from_millis(10);
-
 /// Unix branch of [`crate::schedule_force_kill`].
 ///
 /// The wait happens on a detached thread so the caller never blocks for the
-/// grace period, and `exited` is read once more immediately before the signal
-/// rather than only at the deadline: in between, the child may have been
-/// reaped and its pid handed to an unrelated same-uid process. That leaves the
-/// same narrow window `UnixProcessGroup` documents for a reused `pgid`, and is
-/// accepted for the same reason.
+/// grace period; the decision itself is `force_kill::escalate_after_grace`, which reads
+/// `exited` once more immediately before the signal rather than only at the
+/// deadline: in between, the child may have been reaped and its pid handed to
+/// an unrelated same-uid process. That leaves the same narrow window
+/// `UnixProcessGroup` documents for a reused `pgid`, and is accepted for the
+/// same reason.
 ///
 /// `kill` rather than `killpg`, because this escalation is about the single
 /// child the caller spawned; its descendants are the process group's business.
@@ -753,25 +827,13 @@ const FORCE_KILL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// the child is gone from its own exit observation, not from here.
 pub fn schedule_force_kill(pid: u32, grace: Duration, exited: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let deadline = Instant::now() + grace;
-        loop {
-            if exited.load(Ordering::SeqCst) {
-                return;
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            std::thread::sleep(remaining.min(FORCE_KILL_POLL_INTERVAL));
-        }
-        if exited.load(Ordering::SeqCst) {
-            return;
-        }
-        // SAFETY: `kill` signals the single process `pid` supplied by the
-        // caller, which spawned it and is still tracking its exit; `SIGKILL`
-        // is a constant. A pid that no longer exists fails with `ESRCH`
-        // instead of affecting anything.
-        let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        crate::force_kill::escalate_after_grace(grace, &exited, std::thread::sleep, || {
+            // SAFETY: `kill` signals the single process `pid` supplied by the
+            // caller, which spawned it and is still tracking its exit;
+            // `SIGKILL` is a constant. A pid that no longer exists fails with
+            // `ESRCH` instead of affecting anything.
+            let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        });
     });
 }
 
@@ -1015,6 +1077,48 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
     })
 }
 
+/// Unix branch of [`crate::spawn_detached_process`]: a new session, as for
+/// [`spawn_daemon_detached`], with pipes as its standard input and output and
+/// no fd beyond its three standard ones. The caller waits on it.
+///
+/// # Errors
+///
+/// As for [`crate::spawn_detached_process`].
+// The OS boundary owns this detached spawn; the ban in `clippy.toml` keeps
+// every other call site from creating a child of its own.
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_detached_process(
+    path: &Path,
+    args: &[&OsStr],
+    cwd: Option<&Path>,
+    stderr: crate::DetachedStderr,
+) -> Result<crate::DetachedProcess, OsError> {
+    let mut command = Command::new(path);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(match stderr {
+            crate::DetachedStderr::Inherit => Stdio::inherit(),
+            crate::DetachedStderr::Null => Stdio::null(),
+            crate::DetachedStderr::File(file) => Stdio::from(file),
+        });
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    start_in_new_session_with_only_stdio(&mut command).map_err(OsError::Io)?;
+    let mut child = command.spawn().map_err(OsError::Io)?;
+    let stdin = child
+        .stdin
+        .take()
+        .map(|pipe| std::fs::File::from(std::os::fd::OwnedFd::from(pipe)));
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| std::fs::File::from(std::os::fd::OwnedFd::from(pipe)));
+    Ok(crate::DetachedProcess::new(child, stdin, stdout))
+}
+
 // =========================================================================
 // spawn_captured: one-shot, non-PTY process capture
 // =========================================================================
@@ -1119,6 +1223,37 @@ mod tests {
         assert_eq!(client_endpoint, daemon_endpoint);
     }
 
+    // A listener removes its lock file as it ends, so a file opened just before
+    // that is no longer the endpoint's lock; locking it must not count, or two
+    // processes would each hold a lock on the same endpoint.
+    #[test]
+    fn a_lock_on_a_file_the_lock_path_no_longer_names_is_not_the_endpoint_lock() {
+        let dir = yagura_test_support::paths::short_tmp_dir("os-unix", "lock-inode");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("e.sock");
+        let lock_path = endpoint_lock_path(&endpoint);
+
+        let removed = open_lock_file(&lock_path).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        assert!(
+            take_lock_if_current(removed, &endpoint, &lock_path)
+                .unwrap()
+                .is_none(),
+            "a lock on a removed lock file was taken as the endpoint's"
+        );
+
+        let replaced = open_lock_file(&lock_path).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        let current = lock_endpoint(&endpoint).unwrap();
+        assert!(
+            take_lock_if_current(replaced, &endpoint, &lock_path)
+                .unwrap()
+                .is_none(),
+            "a lock on a replaced lock file was taken while the current one is held"
+        );
+        drop(current);
+    }
+
     // The fallback directory may already exist (a concurrent creator won the
     // race); only an owner-only directory of ours may then be used.
     #[test]
@@ -1126,9 +1261,7 @@ mod tests {
         let root = yagura_test_support::paths::short_tmp_dir("os-unix", "holders-fallback");
         let namespace = crate::resolve_instance_from(None).unwrap();
         let too_long = PathBuf::from(format!("/{}", "a".repeat(200)));
-        let fallback = root
-            .path()
-            .join(format!("{}-1000-holders", namespace.name()));
+        let fallback = holder_fallback_dir(root.path(), "1000");
         let resolve = || holder_socket_path("1000", &namespace, &too_long, root.path(), "w1");
 
         std::fs::create_dir(&fallback).unwrap();

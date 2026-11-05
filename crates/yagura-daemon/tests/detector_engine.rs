@@ -9,8 +9,9 @@
 //!
 //! The engine is driven by explicit calls rather than owning a task, so its
 //! time-dependent behaviour is verifiable under `tokio::time::pause()` /
-//! `advance()` without racing a background task. The `DetectorHandle` cases drive
-//! their own task and therefore run in real time.
+//! `advance()` without racing a background task. The `DetectorHandle` cases run
+//! on a paused clock too: the driver steps on a blocking thread, which keeps the
+//! paused clock from moving until each step has been published.
 
 mod common;
 
@@ -18,12 +19,12 @@ use common::ScreenFeed;
 use std::time::Duration;
 
 use common::{
-    SCREEN_COLS, SCREEN_ROWS, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle, new_engine, repaint,
-    screen_of, tick_after_ms,
+    HANG_GUARD, SCREEN_COLS, SCREEN_ROWS, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle,
+    new_engine, repaint, screen_of, tick_after_ms,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{
-    DetectionEngine, DetectorHandle, InputEcho, TURN_ACTIVE_QUIET,
+    ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho, TURN_ACTIVE_QUIET,
 };
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
@@ -429,19 +430,33 @@ async fn exited_outranks_later_pattern_matches() {
     assert_eq!(engine.status(), WindowStatus::Exited);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn detector_handle_publishes_exited_without_debounce() {
     let config = DaemonConfig::default();
     let engine = new_engine(PATTERN_DEF, &config);
     let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let notified_at = tokio::time::Instant::now();
 
     handle.notify_exited();
 
-    let published = tokio::time::timeout(Duration::from_secs(5), statuses.recv())
-        .await
-        .expect("no status was published within 5s")
-        .expect("status channel closed before publishing");
+    let published = next_status(&mut statuses).await;
     assert_eq!(published.status, DetectedStatus::Exited);
+    assert_eq!(
+        notified_at.elapsed(),
+        Duration::ZERO,
+        "Exited must publish without the paused clock moving through confirm_ms"
+    );
+}
+
+/// The driver's next published change. A driver that never publishes fails at
+/// [`HANG_GUARD`] of the paused clock.
+async fn next_status(
+    statuses: &mut tokio::sync::mpsc::UnboundedReceiver<ConfirmedStatus>,
+) -> ConfirmedStatus {
+    tokio::time::timeout(HANG_GUARD, statuses.recv())
+        .await
+        .expect("the driver published nothing before the hang guard")
+        .expect("status channel closed before publishing")
 }
 
 // --- structured source -----------------------------------------
@@ -901,11 +916,11 @@ async fn on_input_does_not_change_the_no_definition_timeline() {
     assert_eq!(engine.status(), WindowStatus::Unknown);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn detector_handle_suppresses_echo_before_publishing_activity() {
-    // The async wrapper. `input_echo_window_ms` is set generously so suppression
-    // stays in effect for the whole observation window regardless of scheduling
-    // jitter; this runs in real time because `DetectorHandle` drives its own task.
+    // The echo window outlasts the quiescence time, so the quiescence `Idle` is the
+    // first change the driver may publish; an echo counted as activity publishes
+    // `Running` ahead of it.
     let config = DaemonConfig {
         input_echo_window_ms: 2_000,
         ..DaemonConfig::default()
@@ -917,11 +932,11 @@ async fn detector_handle_suppresses_echo_before_publishing_activity() {
     handle.notify_input(InputEcho::EchoOnly);
     feed_handle(&screen, &handle, b"x");
 
-    let result = tokio::time::timeout(Duration::from_millis(600), statuses.recv()).await;
-    assert!(
-        result.is_err(),
-        "notify_input(EchoOnly) sent before the output must suppress the echo, so no status \
-         change should publish while the window is still open"
+    assert_eq!(
+        next_status(&mut statuses).await.status,
+        DetectedStatus::Idle,
+        "notify_input(EchoOnly) sent before the output must suppress the echo, so no \
+         activity may publish before the quiescence that follows it"
     );
 }
 
@@ -1239,12 +1254,11 @@ async fn echo_only_still_closes_the_band_immediately_while_a_resize_is_armed() {
     assert_eq!(engine.status(), WindowStatus::Unknown);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn detector_handle_suppresses_resize_redraw_before_publishing_activity() {
-    // The async wrapper, in real time because `DetectorHandle` drives its own
-    // task. A resize arm does not close the construction-time activity band on
-    // its own, so the driver is first left to run past `window_ms` with no input
-    // -- the same evaluation-free precondition `close_construction_band` gives.
+    // A resize arm does not close the construction-time activity band on its own,
+    // so the paused clock is first moved past `window_ms` with no input -- the
+    // same evaluation-free precondition `close_construction_band` gives.
     let config = DaemonConfig {
         resize_redraw_window_ms: 5_000,
         ..DaemonConfig::default()
@@ -1264,11 +1278,13 @@ async fn detector_handle_suppresses_resize_redraw_before_publishing_activity() {
     handle.notify_resize_started();
     feed_handle(&screen, &handle, b"x");
 
-    let result = tokio::time::timeout(Duration::from_millis(600), statuses.recv()).await;
-    assert!(
-        result.is_err(),
+    // The redraw window outlasts the quiescence time, so its `Idle` is the first
+    // change the driver may publish.
+    assert_eq!(
+        next_status(&mut statuses).await.status,
+        DetectedStatus::Idle,
         "notify_resize_started() sent before the output must suppress the redraw output, so \
-         no status change should publish while the window is still open"
+         no activity may publish before the quiescence that follows it"
     );
 }
 

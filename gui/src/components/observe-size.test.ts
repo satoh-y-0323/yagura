@@ -97,12 +97,13 @@ function fireAll(contentRect: Size): void {
   }
 }
 
-/** Lets microtasks, a frame and a macrotask pass, whichever the action waits for. */
+/** Lets microtasks and every timer already queued run, with no wall-clock wait. */
 async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.runAllTimersAsync();
 }
 
 beforeEach(() => {
+  vi.useFakeTimers();
   FakeResizeObserver.instances = [];
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   vi.stubGlobal('requestAnimationFrame', (callback: (time: number) => void) =>
@@ -116,6 +117,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 

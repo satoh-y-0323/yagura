@@ -89,8 +89,6 @@ mod real_daemon {
 
     use super::open_window_args;
 
-    const READY_TIMEOUT: Duration = Duration::from_secs(10);
-
     #[tokio::test]
     async fn a_nonexistent_cwd_is_invalid_argument_end_to_end() {
         let config = DaemonConfig {
@@ -114,8 +112,8 @@ mod real_daemon {
         let transport = EndpointTransport::new(endpoint, None);
         // `EndpointTransport` connects lazily and does not retry, so the first
         // asserted call must not race the accept loop coming up.
-        let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
-        while reply_within(READY_TIMEOUT, "list_windows", list_windows(&transport))
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+        while reply_within("list_windows", list_windows(&transport))
             .await
             .is_err()
         {
@@ -128,7 +126,6 @@ mod real_daemon {
 
         let missing = r"C:\yagura-nonexistent-test-path-should-never-exist-12345";
         let err = reply_within(
-            READY_TIMEOUT,
             "open_window",
             open_window(&transport, open_window_args(Some(missing))),
         )

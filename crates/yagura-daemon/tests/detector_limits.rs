@@ -296,14 +296,25 @@ async fn window_with_an_over_limit_definition_stays_unknown_and_others_are_unaff
         "a definition rejected by a resource limit must fail safe to Unknown"
     );
 
-    // Only the window whose definition loaded can act on the marker; the other must stay
-    // Unknown even though its rejected definition declared the very same rule.
+    // The rejected window runs no definition at all, so its declared marker rule can never
+    // act: a window without a definition stays Unknown whatever it prints (the engine's own
+    // `missing_definition_keeps_confirmed_status_unknown`).
+    assert_eq!(
+        rejected.detection_definition(),
+        None,
+        "a definition rejected by a resource limit must not be the one the window runs"
+    );
+    assert!(
+        rejected.detection_warning().is_some(),
+        "the rejection must be reported as the window's detection warning"
+    );
+    assert!(
+        accepted.detection_definition().is_some(),
+        "the window with a definition within the limits runs it"
+    );
+
+    // Only the window whose definition loaded can act on the marker.
     let marker = format!("{READY_MARKER}\r\n");
-    rejected
-        .session()
-        .write_input(marker.as_bytes())
-        .await
-        .expect("write to the rejected window's pty");
     accepted
         .session()
         .write_input(marker.as_bytes())
@@ -324,13 +335,6 @@ async fn window_with_an_over_limit_definition_stays_unknown_and_others_are_unaff
         }
         sleep(Duration::from_millis(50)).await;
     }
-
-    assert_eq!(
-        rejected.current_status(),
-        WindowStatus::Unknown,
-        "the window with the rejected definition must stay Unknown even after its declared \
-         marker rule would have matched"
-    );
 
     let ids: Vec<String> = registry
         .list()

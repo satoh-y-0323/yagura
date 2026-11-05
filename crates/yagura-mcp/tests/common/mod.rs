@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-/// How long a fixture waits for one line from the bridge before failing.
-pub const LINE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a fixture waits for one line from the bridge before failing: the
+/// one hang guard of every wait.
+pub const LINE_TIMEOUT: Duration = yagura_test_support::HANG_GUARD;
 
 /// Variables removed from every spawned bridge's environment first, so no
 /// ambient value from the test runner's shell (e.g. a developer's

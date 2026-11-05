@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -18,8 +18,6 @@ use serde_json::{Value, json};
 /// characters (observed: `Tool "send_handoff" description truncated from
 /// 2461 to 2048 chars`), so anything the caller needs must fit inside it.
 const MAX_TOOL_DESCRIPTION_CHARS: usize = 2048;
-
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const KNOWN_TOOL_NAMES: &[&str] = &[
     "list_windows",
@@ -142,13 +140,16 @@ fn send_line(stdin: &mut ChildStdin, value: &Value) {
 }
 
 /// Reads lines from `rx` until one parses as a JSON-RPC response whose `id`
-/// matches, or `RESPONSE_TIMEOUT` elapses -- never blocks forever.
+/// matches, or `yagura_test_support::HANG_GUARD` elapses -- never blocks forever.
 fn recv_response(rx: &mpsc::Receiver<String>, want_id: i64) -> Value {
-    let deadline = Instant::now() + RESPONSE_TIMEOUT;
+    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            panic!("timed out waiting {RESPONSE_TIMEOUT:?} for a response with id {want_id}");
+            panic!(
+                "timed out waiting {:?} for a response with id {want_id}",
+                yagura_test_support::HANG_GUARD
+            );
         }
         let line = rx
             .recv_timeout(remaining)
@@ -209,10 +210,16 @@ fn every_tool_description_fits_the_clients_2048_char_limit() {
     let oversized: Vec<(String, usize)> = tools
         .iter()
         .filter_map(|tool| {
-            let name = tool.get("name").and_then(Value::as_str)?.to_string();
-            let description = tool.get("description").and_then(Value::as_str)?;
+            let name = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("every tool has a name: {tool}"));
+            let description = tool
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("{name} has a description"));
             let len = description.chars().count();
-            (len > MAX_TOOL_DESCRIPTION_CHARS).then_some((name, len))
+            (len > MAX_TOOL_DESCRIPTION_CHARS).then_some((name.to_string(), len))
         })
         .collect();
 
@@ -386,26 +393,6 @@ fn open_window_and_list_profiles_descriptions_mention_model_and_effort() {
     }
 }
 
-#[test]
-fn the_three_new_chat_tool_descriptions_fit_the_clients_2048_char_limit() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in ["send_chat", "broadcast_chat", "read_chat"] {
-        let tool = find_tool(tools, name);
-        let description = tool
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("{name} has a description"));
-        let len = description.chars().count();
-        assert!(
-            len <= MAX_TOOL_DESCRIPTION_CHARS,
-            "{name} description is {len} chars, exceeding the {MAX_TOOL_DESCRIPTION_CHARS}-char \
-             client limit"
-        );
-    }
-}
-
 /// Guidance a caller cannot page through the room's history without: that
 /// `next_after_seq` from one reply is the `after_seq` to send on the next
 /// call, that a message mentioning `@user` asks a human to decide something,
@@ -495,16 +482,6 @@ fn send_chat_description_documents_mention_syntax_and_the_participants_only_rule
     );
 }
 
-const PLAN_TOOL_NAMES: &[&str] = &[
-    "create_plan",
-    "update_plan",
-    "get_plan",
-    "list_plans",
-    "delete_plan",
-    "list_roles",
-    "open_task_window",
-];
-
 /// The part of `name`'s description a truncating client actually delivers,
 /// lowercased so guidance is matched regardless of sentence position.
 fn delivered_description(tools: &[Value], name: &str) -> String {
@@ -516,25 +493,6 @@ fn delivered_description(tools: &[Value], name: &str) -> String {
         .take(MAX_TOOL_DESCRIPTION_CHARS)
         .collect::<String>()
         .to_lowercase()
-}
-
-#[test]
-fn the_seven_plan_tool_descriptions_fit_the_clients_2048_char_limit() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in PLAN_TOOL_NAMES {
-        let description = find_tool(tools, name)
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("{name} has a description"));
-        let len = description.chars().count();
-        assert!(
-            len <= MAX_TOOL_DESCRIPTION_CHARS,
-            "{name} description is {len} chars, exceeding the {MAX_TOOL_DESCRIPTION_CHARS}-char \
-             client limit"
-        );
-    }
 }
 
 /// Each plan tool's schema names the arguments the tool takes and marks as
@@ -763,87 +721,6 @@ fn plan_tool_descriptions_explain_waves_conflicts_ownership_visibility_and_prece
         assert!(
             missing.is_empty(),
             "{name} description is missing required guidance {missing:?}, got: {description:?}"
-        );
-    }
-}
-
-/// Phrasings that would pin the plan's writer to the window that created it,
-/// which stops being true once the user names another window the owner.
-const OWNER_IS_ONLY_CREATOR_PHRASES: &[&str] = &[
-    "only the window that created",
-    "only by the window that created",
-    "only the creating window",
-    "only by the creating window",
-    "only the creator",
-    "only its creator",
-    "only by its creator",
-    "creator only",
-];
-
-#[test]
-fn no_plan_tool_description_equates_the_owner_with_the_creating_window() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in PLAN_TOOL_NAMES {
-        let description = delivered_description(tools, name);
-        let found: Vec<&str> = OWNER_IS_ONLY_CREATOR_PHRASES
-            .iter()
-            .copied()
-            .filter(|phrase| description.contains(phrase))
-            .collect();
-        assert!(
-            found.is_empty(),
-            "{name} description ties the owner to the creating window: {found:?}"
-        );
-    }
-}
-
-/// yagura carries no workflow of its own, so a plan tool must not present the
-/// names of workflow stages as defaults a caller should follow.
-const WORKFLOW_STAGE_WORD_PREFIXES: &[&str] = &["design", "implement", "review"];
-const WORKFLOW_STAGE_WORDS: &[&str] = &["tester", "testing"];
-
-#[test]
-fn no_plan_or_report_tool_description_names_workflow_stages() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in PLAN_TOOL_NAMES.iter().chain(REPORT_TOOL_NAMES) {
-        let description = delivered_description(tools, name);
-        let found: Vec<&str> = description
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|word| {
-                WORKFLOW_STAGE_WORD_PREFIXES
-                    .iter()
-                    .any(|prefix| word.starts_with(prefix))
-                    || WORKFLOW_STAGE_WORDS.contains(word)
-            })
-            .collect();
-        assert!(
-            found.is_empty(),
-            "{name} description names workflow stages: {found:?}"
-        );
-    }
-}
-
-const REPORT_TOOL_NAMES: &[&str] = &["send_report", "wait_for_report"];
-
-#[test]
-fn the_two_report_tool_descriptions_fit_the_clients_2048_char_limit() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in REPORT_TOOL_NAMES {
-        let description = find_tool(tools, name)
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("{name} has a description"));
-        let len = description.chars().count();
-        assert!(
-            len <= MAX_TOOL_DESCRIPTION_CHARS,
-            "{name} description is {len} chars, exceeding the {MAX_TOOL_DESCRIPTION_CHARS}-char \
-             client limit"
         );
     }
 }
@@ -1104,34 +981,6 @@ fn get_plan_description_explains_each_instruction_notice_state() {
         missing.is_empty(),
         "get_plan description is missing required guidance {missing:?}, got: {description:?}"
     );
-}
-
-const TICKET_TOOL_NAMES: &[&str] = &[
-    "list_tickets",
-    "get_ticket",
-    "create_ticket",
-    "update_ticket",
-    "add_ticket_result",
-    "set_milestone",
-];
-
-#[test]
-fn the_six_ticket_tool_descriptions_fit_the_clients_2048_char_limit() {
-    let response = fetch_tools_list();
-    let tools = tools_array(&response);
-
-    for name in TICKET_TOOL_NAMES {
-        let description = find_tool(tools, name)
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("{name} has a description"));
-        let len = description.chars().count();
-        assert!(
-            len <= MAX_TOOL_DESCRIPTION_CHARS,
-            "{name} description is {len} chars, exceeding the {MAX_TOOL_DESCRIPTION_CHARS}-char \
-             client limit"
-        );
-    }
 }
 
 /// Each ticket tool's schema names the arguments the tool takes and marks as

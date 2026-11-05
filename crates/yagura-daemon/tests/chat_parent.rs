@@ -12,7 +12,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{
     ChatPlaybook, Harness, call_open_window, chat_config, identify, read_response,
@@ -50,12 +49,12 @@ fn parent_ledger_config(dir: &Path, profiles_dir: PathBuf) -> DaemonConfig {
 /// approver-registered connection may also receive while its own request is
 /// in flight (mirroring `ipc_chat.rs`'s and `ipc_report.rs`'s own
 /// `read_reply` helpers).
-async fn read_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(
             frame,
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. }
@@ -78,7 +77,7 @@ async fn send_chat_msg(
         },
     )
     .await;
-    read_reply(client, Duration::from_secs(5)).await
+    read_reply(client).await
 }
 
 struct ChatPostedResult {
@@ -186,7 +185,7 @@ async fn create_plan(client: &mut Connection, title: &str, tasks: Vec<PlanTaskSp
         },
     )
     .await;
-    match read_reply(client, Duration::from_secs(5)).await {
+    match read_reply(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -202,7 +201,7 @@ async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str)
         },
     )
     .await;
-    match read_reply(client, Duration::from_secs(5)).await {
+    match read_reply(client).await {
         DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
         other => panic!("expected task_window_opened, got {other:?}"),
     }
@@ -217,7 +216,7 @@ async fn set_plan_owner(client: &mut Connection, plan_id: &str, window_id: &str)
         },
     )
     .await;
-    match read_reply(client, Duration::from_secs(5)).await {
+    match read_reply(client).await {
         DaemonMessage::PlanDetail { .. } => {}
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -250,7 +249,7 @@ async fn at_parent_from_a_child_reaches_its_opener_in_their_shared_room() {
     assert_eq!(posted.targets, vec![parent_window.clone()]);
     assert!(posted.unresolved.is_empty());
 
-    h.wait_for_scrollback(&parent_window, b"are you there?", Duration::from_secs(5))
+    h.wait_for_scrollback(&parent_window, b"are you there?")
         .await;
 }
 
@@ -338,7 +337,7 @@ async fn at_parent_from_a_task_window_dropped_from_its_plan_is_unresolved() {
         },
     )
     .await;
-    match read_reply(&mut owner, Duration::from_secs(5)).await {
+    match read_reply(&mut owner).await {
         DaemonMessage::PlanDetail { .. } => {}
         other => panic!("expected plan_detail, got {other:?}"),
     }

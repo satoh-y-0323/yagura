@@ -191,6 +191,11 @@
 //! `[hook_events]` and answers with `delivery`, or with `hook_input_wanted`
 //! when the event reads values from the hook's input. A caller establishes
 //! [`HOOK_EVENTS_MIN_REVISION`] before sending it.
+//!
+//! Revision 32 makes `pong` a point a client can sync on: for a connection
+//! attached to a window, it comes after the frames for everything that
+//! window's daemon side had received when the `ping` was read (see
+//! [`ClientMessage::Ping`]). The messages keep their shape.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -204,7 +209,7 @@ pub mod holder;
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 31;
+pub const PROTOCOL_REVISION: u32 = 32;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -2704,6 +2709,17 @@ pub enum ClientMessage {
         rows: u16,
     },
     /// Liveness check; the daemon replies with [`DaemonMessage::Pong`].
+    ///
+    /// The `pong` is queued after the replies to every request this
+    /// connection sent before the `ping`. While the connection is attached to
+    /// a window, it is also queued after the frames for everything the
+    /// window's feeder (the daemon thread that turns its output into frames)
+    /// had received when it reached the `ping`: the output the holder had sent
+    /// it, and this connection's acknowledgements, visibility,
+    /// selection, scrolling, resizing and the writes that end a synchronized
+    /// update. Output the child wrote that has not yet reached the feeder
+    /// (still in the holder, or unread on the holder's connection) is not
+    /// covered; wait for what it changes in the model instead.
     Ping,
     /// Request the daemon to terminate the child process tree and exit.
     Shutdown,
@@ -5283,17 +5299,36 @@ mod credentials_tests {
         Some(OsString::from(value))
     }
 
-    fn file_with(name: &str, contents: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("yagura-protocol-cred-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create the temp dir");
-        let path = dir.join(name);
-        std::fs::write(&path, contents).expect("write the file");
-        path
+    /// A directory of one test's own, removed with what it holds when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(test: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "yagura-protocol-cred-{}-{test}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create the temp dir");
+            Self(dir)
+        }
+
+        fn file_with(&self, name: &str, contents: &str) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).expect("write the file");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
     fn the_environment_pair_wins_and_an_empty_value_is_no_value() {
-        let file = file_with("env-wins.json", r#"{"window_id":"f","token":"ft"}"#);
+        let scratch = Scratch::new("env-wins");
+        let file = scratch.file_with("env-wins.json", r#"{"window_id":"f","token":"ft"}"#);
         let from_env = window_credentials(os("w"), os("t"), Some(&file)).expect("claim");
         assert_eq!(
             (from_env.window_id.as_str(), from_env.token.as_str()),
@@ -5314,17 +5349,18 @@ mod credentials_tests {
 
     #[test]
     fn a_file_that_is_missing_large_malformed_or_has_an_empty_field_names_no_window() {
+        let scratch = Scratch::new("no-window");
         let huge = format!(
             r#"{{"window_id":"w","token":"{}"}}"#,
             "a".repeat(usize::try_from(CREDENTIALS_FILE_MAX_BYTES).unwrap())
         );
         let cases = [
-            file_with("huge.json", &huge),
-            file_with("garbled.json", "not json"),
-            file_with("no-token.json", r#"{"window_id":"w"}"#),
-            file_with("empty-id.json", r#"{"window_id":"","token":"t"}"#),
-            file_with("empty-token.json", r#"{"window_id":"w","token":""}"#),
-            std::env::temp_dir().join("yagura-protocol-cred-absent.json"),
+            scratch.file_with("huge.json", &huge),
+            scratch.file_with("garbled.json", "not json"),
+            scratch.file_with("no-token.json", r#"{"window_id":"w"}"#),
+            scratch.file_with("empty-id.json", r#"{"window_id":"","token":"t"}"#),
+            scratch.file_with("empty-token.json", r#"{"window_id":"w","token":""}"#),
+            scratch.0.join("absent.json"),
         ];
         for path in cases {
             assert_eq!(

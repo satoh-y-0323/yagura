@@ -22,6 +22,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use yagura_daemon::inbox::Parcel;
+use yagura_test_support::ipc::InstanceEndpoint;
 use yagura_test_support::paths::TempDir;
 
 use common::{Harness, VALID_TOKEN, approver_base_config, detection_config, unique_temp_dir};
@@ -131,6 +132,7 @@ fn assert_silent_success(output: &Output, situation: &str) {
 #[test]
 fn a_door_outside_a_window_ignores_an_argument_this_copy_does_not_know() {
     let instance = unique_instance();
+    let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-door", "bases");
     for door in every_door() {
         let mut args = door.clone();
@@ -146,6 +148,7 @@ fn a_door_outside_a_window_ignores_an_argument_this_copy_does_not_know() {
 #[test]
 fn a_door_outside_a_window_reads_all_of_a_large_input() {
     let instance = unique_instance();
+    let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-door", "bases");
     let mut doors = every_door();
     doors.push(vec![
@@ -307,6 +310,7 @@ async fn a_session_report_finds_the_session_after_a_large_field() {
 #[test]
 fn a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon() {
     let instance = unique_instance();
+    let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-door", "bases");
     let mut args = vec!["--emit-status", "waiting_input", "--source", "hook"];
     args.extend(SKIP_IF_SUBAGENT);
@@ -387,6 +391,7 @@ async fn a_take_for_another_instance_leaves_the_parcels_and_one_for_this_instanc
 #[test]
 fn a_status_for_another_instance_sends_nothing_to_the_daemon() {
     let instance = unique_instance();
+    let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-door", "bases");
     let in_window = Some(("w-1", VALID_TOKEN));
     let status = ["--emit-status", "waiting_input", "--source", "hook"];

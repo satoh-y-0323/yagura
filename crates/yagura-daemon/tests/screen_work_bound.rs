@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! One `feed` of a few KB must return quickly even on the largest screen, whatever the
-//! child asks for: a few bytes can ask for a rewrite of the whole screen.
+//! child asks for: a few bytes can ask for a rewrite of the whole screen. "Quickly" is
+//! measured against a baseline feed in the same run, so the machine's speed cancels out.
 
 use std::time::{Duration, Instant};
 
@@ -9,14 +10,54 @@ use yagura_daemon::detector::VtScreen;
 
 const MAX_COLS: u16 = 1000;
 const MAX_ROWS: u16 = 1000;
-/// Generous on purpose: an unbounded feed takes tens of seconds in a debug build.
-const LIMIT: Duration = Duration::from_secs(3);
+/// How many times the baseline one flood may take. Generous on purpose: a bounded flood
+/// spends at most the same work budget as the baseline, so it takes about as long, while
+/// an unbounded one rewrites the whole screen thousands of times.
+const BASELINE_FACTOR: u32 = 10;
 
-fn timed_feed(screen: &mut VtScreen, bytes: &[u8]) {
+/// The baseline's edits: whole-screen fills and text that spend nearly all of one feed's
+/// work budget (a row of cells per byte plus four screens) without exceeding it. Fills,
+/// the costliest edit per cell, keep the baseline as slow as a bounded flood.
+const BASELINE_SCREEN_FILLS: usize = 12;
+const BASELINE_TEXT_BYTES: usize = 8150;
+
+/// How long a flood may take in this run: [`BASELINE_FACTOR`] times one feed on the
+/// largest screen that spends nearly the whole work budget on edits the budget allows.
+fn flood_bound() -> Duration {
+    let mut bytes = "\x1b#8".repeat(BASELINE_SCREEN_FILLS).into_bytes();
+    bytes.extend(repeated("a", BASELINE_TEXT_BYTES));
+    bytes.extend_from_slice(b"\x1b[1;1HX\x1b[2;1HY\x1b[1;1H\x1b[2K");
+    let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
     let start = Instant::now();
-    screen.feed(bytes);
+    screen.feed(&bytes);
     let took = start.elapsed();
-    assert!(took < LIMIT, "a {} byte feed took {took:?}", bytes.len());
+    let lines = screen.bottom_lines(usize::from(MAX_ROWS));
+    assert!(
+        !lines[0].contains('X') && lines[1].starts_with('Y'),
+        "the baseline's last edits must still fit the work budget: {:?}",
+        &lines[..2]
+    );
+    took * BASELINE_FACTOR
+}
+
+/// Feeds `bytes` on another thread so an unbounded feed fails the test at `bound`
+/// instead of hanging the run.
+fn feed_within(mut screen: VtScreen, bytes: Vec<u8>, bound: Duration) -> Result<VtScreen, ()> {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = screen.feed(&bytes);
+        let _ = done_tx.send(screen);
+    });
+    done_rx.recv_timeout(bound).map_err(|_| ())
+}
+
+fn timed_feed(screen: VtScreen, bytes: &[u8], bound: Duration) -> VtScreen {
+    feed_within(screen, bytes.to_vec(), bound).unwrap_or_else(|()| {
+        panic!(
+            "a {} byte feed took over {bound:?}, {BASELINE_FACTOR} times the baseline",
+            bytes.len()
+        )
+    })
 }
 
 fn repeated(unit: &str, total_bytes: usize) -> Vec<u8> {
@@ -25,50 +66,56 @@ fn repeated(unit: &str, total_bytes: usize) -> Vec<u8> {
 
 #[test]
 fn a_flood_of_screen_alignment_fills_returns_quickly_and_the_first_one_is_applied() {
-    let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
-    timed_feed(&mut screen, &repeated("\x1b#8", 8 * 1024));
+    let bound = flood_bound();
+    let screen = VtScreen::new(MAX_COLS, MAX_ROWS);
+    let screen = timed_feed(screen, &repeated("\x1b#8", 8 * 1024), bound);
     let lines = screen.bottom_lines(usize::from(MAX_ROWS));
     assert!(lines[0].starts_with("EEEE"), "{:?}", &lines[0][..8]);
 }
 
 #[test]
 fn a_flood_of_screen_erases_returns_quickly() {
+    let bound = flood_bound();
     let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
     screen.feed(b"kept?");
-    timed_feed(&mut screen, &repeated("\x1b[2J", 8 * 1024));
+    let screen = timed_feed(screen, &repeated("\x1b[2J", 8 * 1024), bound);
     assert!(screen.bottom_lines(1).iter().all(|l| !l.contains("kept")));
 }
 
 #[test]
 fn a_flood_of_line_erases_and_character_edits_returns_quickly() {
+    let bound = flood_bound();
     let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
     for unit in ["\x1b[2K", "\x1b[1024@", "\x1b[1024P", "\x1b[1024X"] {
-        timed_feed(&mut screen, &repeated(unit, 8 * 1024));
+        screen = timed_feed(screen, &repeated(unit, 8 * 1024), bound);
     }
 }
 
 #[test]
 fn a_flood_of_line_inserts_deletes_and_scrolls_returns_quickly() {
+    let bound = flood_bound();
     let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
     for unit in ["\x1b[512L", "\x1b[512M", "\x1b[512S", "\x1b[512T"] {
-        timed_feed(&mut screen, &repeated(unit, 8 * 1024));
+        screen = timed_feed(screen, &repeated(unit, 8 * 1024), bound);
     }
 }
 
 #[test]
 fn a_flood_of_reverse_index_and_insert_mode_text_returns_quickly() {
-    let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
-    timed_feed(&mut screen, &repeated("\x1bM", 8 * 1024));
+    let bound = flood_bound();
+    let screen = VtScreen::new(MAX_COLS, MAX_ROWS);
+    let screen = timed_feed(screen, &repeated("\x1bM", 8 * 1024), bound);
     let mut bytes = b"\x1b[4h".to_vec();
     bytes.extend(repeated("a", 8 * 1024));
-    timed_feed(&mut screen, &bytes);
+    timed_feed(screen, &bytes, bound);
 }
 
 #[test]
 fn a_flood_of_screen_swaps_returns_quickly() {
-    let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
-    timed_feed(&mut screen, &repeated("\x1b[?1049h\x1b[?1049l", 8 * 1024));
-    timed_feed(&mut screen, &repeated("\x1b[?3h", 8 * 1024));
+    let bound = flood_bound();
+    let screen = VtScreen::new(MAX_COLS, MAX_ROWS);
+    let screen = timed_feed(screen, &repeated("\x1b[?1049h\x1b[?1049l", 8 * 1024), bound);
+    timed_feed(screen, &repeated("\x1b[?3h", 8 * 1024), bound);
 }
 
 #[test]
@@ -101,33 +148,25 @@ fn a_recording_of_full_redraws_is_applied_in_full() {
     assert_eq!(lines[22], "frame 199 row 22");
 }
 
-/// Feeds `bytes` on another thread so an unbounded feed fails the test at the limit
-/// instead of hanging the run.
-fn feed_within_limit(mut screen: VtScreen, bytes: Vec<u8>) -> Result<VtScreen, Duration> {
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let start = Instant::now();
-    std::thread::spawn(move || {
-        let _ = screen.feed(&bytes);
-        let _ = done_tx.send(screen);
-    });
-    done_rx.recv_timeout(LIMIT).map_err(|_| start.elapsed())
-}
-
 #[test]
 fn a_flood_of_every_csi_final_with_the_largest_count_returns_quickly_without_tab_stops() {
     // The cursor sits in the middle row at the last column with no tab stop on the
     // line, where a count-driven loop in the engine has the most to walk.
     let setup = format!("\x1b[3g\x1b[{};{}H", MAX_ROWS / 2, MAX_COLS);
+    let bound = flood_bound();
     let mut slow = Vec::new();
     for final_byte in 0x40u8..=0x7e {
         let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
         let _ = screen.feed(setup.as_bytes());
         let unit = format!("\x1b[65535{}", char::from(final_byte));
-        if let Err(took) = feed_within_limit(screen, repeated(&unit, 8 * 1024)) {
-            slow.push(format!("{:?} ({took:?}+)", char::from(final_byte)));
+        if feed_within(screen, repeated(&unit, 8 * 1024), bound).is_err() {
+            slow.push(format!("{:?}", char::from(final_byte)));
         }
     }
-    assert!(slow.is_empty(), "feeds over {LIMIT:?}: {slow:?}");
+    assert!(
+        slow.is_empty(),
+        "feeds over {bound:?} ({BASELINE_FACTOR} times the baseline): {slow:?}"
+    );
 }
 
 #[test]

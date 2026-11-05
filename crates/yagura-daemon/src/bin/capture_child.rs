@@ -16,10 +16,11 @@
 //!   without writing (`hang`) or writes filler to stdout in a loop (`flood`;
 //!   `param` overrides the per-write chunk size in bytes) until it is killed
 //!   or a safety bound elapses.
-//! - `capture_child tick <tick_path> [<interval_ms>] [<lifetime_ms>]`: appends
-//!   one line to `tick_path` every `interval_ms` (default 100) until it is
-//!   killed or `lifetime_ms` (default: the safety bound) elapses -- the
-//!   descendant a heartbeat test watches.
+//! - `capture_child tick <tick_path> [<interval_ms>] [<lifetime_ms>]`: first
+//!   publishes its own process id in `<tick_path>.pid` (written whole, then
+//!   renamed into place), then appends one line to `tick_path` every
+//!   `interval_ms` (default 100) until it is killed or `lifetime_ms` (default:
+//!   the safety bound) elapses -- the descendant a heartbeat test watches.
 //! - `capture_child touch <marker_path> <exit|hang> [<param>]`: writes
 //!   `marker_path` at startup, then either exits with `param` as the exit
 //!   code (default `0`) or sleeps like `heartbeat`'s `hang`.
@@ -50,12 +51,15 @@
 //!   open belongs to stderr. This process still writes `text` to stdout
 //!   itself, then either exits `0` or sleeps like `heartbeat`'s `hang`. With a
 //!   `launcher`, the grandchild is started the same way `pipe-holder`'s is.
-//! - `capture_child grandchild-first <pid_file> <child_lifetime_ms>`: as its
-//!   first action starts a `pid-holder` grandchild, waits until that grandchild
-//!   has published its process id in `pid_file`, then lives `child_lifetime_ms`
-//!   (`0` = exits at once) and exits `0`. The grandchild stays in this process's
-//!   process group (Unix, with SIGHUP ignored) / job (Windows, with no console
-//!   window of its own) and holds none of its standard handles.
+//! - `capture_child grandchild-first <pid_file> <child_lifetime_ms>
+//!   [<release_file>]`: as its first action starts a `pid-holder` grandchild,
+//!   waits until that grandchild has published its process id in `pid_file`,
+//!   then lives `child_lifetime_ms` (`0` = exits at once) and exits `0`. With a
+//!   `release_file`, it instead lives until that file exists, so a test can see
+//!   the grandchild running before it lets the child exit. The grandchild
+//!   stays in this process's process group (Unix, with SIGHUP ignored) / job
+//!   (Windows, with no console window of its own) and holds none of its
+//!   standard handles.
 //! - `capture_child tick-grandchild <tick_path> <child_lifetime_ms>`: as its
 //!   first action starts a `tick <tick_path>` grandchild placed the same way
 //!   `grandchild-first`'s is, then lives `child_lifetime_ms` and exits `0`.
@@ -210,6 +214,7 @@ fn run_tick(args: &[String]) -> io::Result<()> {
         .and_then(|n| n.parse::<u64>().ok())
         .map_or(SAFETY_BOUND, Duration::from_millis)
         .min(SAFETY_BOUND);
+    publish_own_pid(&format!("{tick_path}.pid"))?;
     tick_loop(&PathBuf::from(tick_path), interval_ms, lifetime)
 }
 
@@ -406,7 +411,9 @@ fn run_grandchild_first(args: &[String]) -> io::Result<()> {
         args.first(),
         args.get(1).and_then(|n| n.parse::<u64>().ok()),
     ) else {
-        eprintln!("usage: capture_child grandchild-first <pid_file> <child_lifetime_ms>");
+        eprintln!(
+            "usage: capture_child grandchild-first <pid_file> <child_lifetime_ms> [<release_file>]"
+        );
         std::process::exit(2);
     };
     spawn_detached_grandchild(&["pid-holder", pid_path, &PID_HOLDER_LIFETIME_MS.to_string()])?;
@@ -418,8 +425,19 @@ fn run_grandchild_first(args: &[String]) -> io::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    std::thread::sleep(Duration::from_millis(lifetime_ms).min(SAFETY_BOUND));
+    match args.get(2) {
+        Some(release_path) => wait_until_exists(release_path),
+        None => std::thread::sleep(Duration::from_millis(lifetime_ms).min(SAFETY_BOUND)),
+    }
     Ok(())
+}
+
+/// Returns once `path` exists, or once the safety bound has passed.
+fn wait_until_exists(path: &str) {
+    let deadline = Instant::now() + SAFETY_BOUND;
+    while !std::path::Path::new(path).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn run_tick_grandchild(args: &[String]) -> io::Result<()> {
@@ -443,11 +461,16 @@ fn run_pid_holder(args: &[String]) -> io::Result<()> {
         eprintln!("usage: capture_child pid-holder <pid_file> <lifetime_ms>");
         std::process::exit(2);
     };
-    let staging = format!("{pid_path}.staging");
-    std::fs::write(&staging, std::process::id().to_string())?;
-    std::fs::rename(&staging, pid_path)?;
+    publish_own_pid(pid_path)?;
     std::thread::sleep(Duration::from_millis(lifetime_ms).min(SAFETY_BOUND));
     Ok(())
+}
+
+/// Writes this process's id to `pid_path` whole: a reader never sees a part.
+fn publish_own_pid(pid_path: &str) -> io::Result<()> {
+    let staging = format!("{pid_path}.staging");
+    std::fs::write(&staging, std::process::id().to_string())?;
+    std::fs::rename(&staging, pid_path)
 }
 
 /// Starts this binary again with `mode_args` as a grandchild that shares no
@@ -460,7 +483,8 @@ fn spawn_detached_grandchild(mode_args: &[&str]) -> io::Result<()> {
     stop_inheriting_standard_handles();
     let exe = env::current_exe()?;
     let mut command = if cfg!(unix) {
-        let mut command = Command::new("sh");
+        // By absolute path: a window's PATH need not name the system directories.
+        let mut command = Command::new("/bin/sh");
         command
             .arg("-c")
             .arg("trap '' HUP; exec \"$0\" \"$@\"")

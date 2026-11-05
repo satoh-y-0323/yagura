@@ -14,7 +14,6 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, open_submit_child_window_with_clear_scope,
@@ -78,6 +77,7 @@ async fn literal_clear_scope_types_caret_u_instead_of_clearing() {
         &input_toml("\\u0015"),
         0,
         "literal-clear",
+        None,
     )
     .await;
     let ordinary = open_submit_child_window_with_clear_scope(
@@ -89,35 +89,18 @@ async fn literal_clear_scope_types_caret_u_instead_of_clearing() {
         &input_toml("\\u0015"),
         0,
         "",
+        None,
     )
     .await;
 
     for window_id in [&literal, &ordinary] {
         write(&h, window_id, b"abc").await;
-        wait_until_composer_is(
-            &h,
-            window_id,
-            &ComposerReadout::Body("abc".to_string()),
-            Duration::from_secs(3),
-        )
-        .await;
+        wait_until_composer_is(&h, window_id, &ComposerReadout::Body("abc".to_string())).await;
         write(&h, window_id, &[0x15]).await;
     }
 
-    wait_until_composer_is(
-        &h,
-        &literal,
-        &ComposerReadout::Body("abc^U".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
-    wait_until_composer_is(
-        &h,
-        &ordinary,
-        &ComposerReadout::Empty,
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &literal, &ComposerReadout::Body("abc^U".to_string())).await;
+    wait_until_composer_is(&h, &ordinary, &ComposerReadout::Empty).await;
 }
 
 /// `take_back_line_clear.rs` only proves anything if one clear byte really
@@ -136,6 +119,7 @@ async fn line_clear_scope_erases_one_display_line_per_clear_byte() {
         &input_toml("\\u0015"),
         0,
         "line-clear",
+        None,
     )
     .await;
     // 70 characters without a space: display lines of 32, 32 and 6.
@@ -147,18 +131,11 @@ async fn line_clear_scope_erases_one_display_line_per_clear_byte() {
             &h,
             &window_id,
             &ComposerReadout::Body(body[..remaining].to_string()),
-            Duration::from_secs(3),
         )
         .await;
         write(&h, &window_id, &[0x15]).await;
     }
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
 }
 
 /// `held:<scope>` holds a pasted body unpainted, and its next clear byte
@@ -178,19 +155,14 @@ async fn held_scope_applies_its_scope_on_the_clear_byte_that_ends_the_hold() {
         &input_toml("\\u0015"),
         0,
         "held:",
+        None,
     )
     .await;
 
     write(&h, &window_id, b"\x1b[200~BODY\x1b[201~").await;
     write(&h, &window_id, &[0x15]).await;
     write(&h, &window_id, b"z").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("z".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("z".to_string())).await;
 }
 
 #[tokio::test]
@@ -207,26 +179,15 @@ async fn partial_clear_scope_erases_only_the_last_unit() {
         &input_toml("\\u0015"),
         0,
         "partial-clear",
+        None,
     )
     .await;
 
     write(&h, &window_id, b"abc").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("abc".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("abc".to_string())).await;
 
     write(&h, &window_id, &[0x15]).await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("ab".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("ab".to_string())).await;
 }
 
 /// `discard-paste:<scope>` is the receiver the window layer reads a probe
@@ -246,17 +207,12 @@ async fn discard_paste_scope_drops_a_pasted_body_and_paints_what_is_typed() {
         &input_toml("\\u0015"),
         0,
         "discard-paste:",
+        None,
     )
     .await;
 
     write(&h, &window_id, b"\x1b[200~BODY\x1b[201~x").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("x".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("x".to_string())).await;
     assert_eq!(
         paste_buffered_values(&h, &window_id),
         vec![0],
@@ -264,13 +220,7 @@ async fn discard_paste_scope_drops_a_pasted_body_and_paints_what_is_typed() {
     );
 
     write(&h, &window_id, b"\x1b[200~MORE\x1b[201~yz").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("xyz".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("xyz".to_string())).await;
 }
 
 /// `discard-first-paste:<scope>` is a CLI still starting up: only the first
@@ -289,18 +239,13 @@ async fn discard_first_paste_scope_drops_only_the_first_pasted_body() {
         &input_toml("\\u0015"),
         0,
         "discard-first-paste:",
+        None,
     )
     .await;
 
     write(&h, &window_id, b"\x1b[200~FIRST\x1b[201~").await;
     write(&h, &window_id, b"\x1b[200~SECOND\x1b[201~").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("SECOND".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("SECOND".to_string())).await;
     assert_eq!(
         paste_buffered_values(&h, &window_id),
         vec![0, "SECOND".len()],
@@ -324,19 +269,14 @@ async fn drain_scope_drops_everything_until_the_first_ctrl_c() {
         &input_toml("\\u0015"),
         0,
         "drain:",
+        None,
     )
     .await;
 
     write(&h, &window_id, b"\x1b[200~LOST\x1b[201~lost").await;
     write(&h, &window_id, &[0x03]).await;
     write(&h, &window_id, b"\x1b[200~KEPT\x1b[201~k").await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("KEPTk".to_string()),
-        Duration::from_secs(3),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("KEPTk".to_string())).await;
     assert_eq!(
         paste_buffered_values(&h, &window_id),
         vec!["KEPT".len()],
@@ -367,13 +307,13 @@ async fn stall_until_announces_when_it_stops_and_when_it_goes_on() {
                 .to_str()
                 .expect("the resume path must be valid UTF-8")
         ),
+        None,
     )
     .await;
 
     write(&h, &window_id, b"\x1b[200~BODY\x1b[201~").await;
     write(&h, &window_id, b"z").await;
-    h.wait_for_scrollback(&window_id, b"STALL-BEGAN", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"STALL-BEGAN").await;
     assert_eq!(
         common::count_marker(&h, &window_id, "STALL-ENDED"),
         0,
@@ -381,12 +321,6 @@ async fn stall_until_announces_when_it_stops_and_when_it_goes_on() {
     );
 
     std::fs::write(&resume, b"").expect("let the receiver resume");
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Body("BODYz".to_string()),
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Body("BODYz".to_string())).await;
     assert_eq!(common::count_marker(&h, &window_id, "STALL-ENDED"), 1);
 }

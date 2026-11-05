@@ -17,6 +17,7 @@ use yagura_protocol::{
     CellColor, DaemonMessage, FRAME_BUDGET_BYTES, MAX_WINDOW_DIMENSION, TerminalSize,
     encode_daemon_message,
 };
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::view::ViewClient;
 
 /// The color `term_script attr-grid` gives cell (`row`, `col`) as foreground.
@@ -58,7 +59,7 @@ async fn a_full_frame_over_the_byte_budget_arrives_in_parts_that_rebuild_the_scr
     assert_eq!((first.grid.cols, first.grid.rows), (side, side));
     h.write_input(&window_id, b"g").await;
 
-    let painted = Instant::now() + Duration::from_secs(180);
+    let painted = Instant::now() + HANG_GUARD;
     loop {
         let model = model_screen(&h, &window_id).await;
         let last_row = model.rows.last().expect("the model has rows");

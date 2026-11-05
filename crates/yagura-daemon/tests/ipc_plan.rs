@@ -18,7 +18,6 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, expect_error, identify, policy, read_response,
@@ -114,20 +113,16 @@ async fn approver_connection(h: &Harness) -> Connection {
     client
 }
 
-/// Fails a request that never gets its reply. Not a speed bound: a plan at
-/// every cap takes seconds to check in a debug build on a slow runner.
-const PLAN_REPLY_GUARD: Duration = Duration::from_secs(60);
-
 /// Reads the next *response* frame, skipping `plan_changed` pushes the same
 /// way `read_response` already skips `Output` / `StatusChanged`: a
 /// connection that is also a registered approver may be pushed to while its
 /// own request is in flight.
-async fn read_plan_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_plan_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -148,7 +143,7 @@ async fn create_plan(
         },
     )
     .await;
-    read_plan_reply(client, PLAN_REPLY_GUARD).await
+    read_plan_reply(client).await
 }
 
 async fn update_plan(
@@ -165,7 +160,7 @@ async fn update_plan(
         },
     )
     .await;
-    read_plan_reply(client, PLAN_REPLY_GUARD).await
+    read_plan_reply(client).await
 }
 
 async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -176,12 +171,12 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_plan_reply(client, PLAN_REPLY_GUARD).await
+    read_plan_reply(client).await
 }
 
 async fn list_plans(client: &mut Connection) -> DaemonMessage {
     send(client, &ClientMessage::ListPlans).await;
-    read_plan_reply(client, PLAN_REPLY_GUARD).await
+    read_plan_reply(client).await
 }
 
 async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -192,7 +187,7 @@ async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_plan_reply(client, PLAN_REPLY_GUARD).await
+    read_plan_reply(client).await
 }
 
 fn expect_plan_detail(msg: DaemonMessage) -> PlanInfo {
@@ -572,7 +567,7 @@ async fn every_ledger_mutation_pushes_plan_changed_to_every_registered_approver(
 }
 
 async fn expect_plan_changed(client: &mut Connection, plan_id: &str) {
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::PlanChanged { plan_id: pushed } => assert_eq!(pushed, plan_id),
         other => panic!("expected plan_changed, got {other:?}"),
     }
@@ -602,7 +597,7 @@ async fn owner_authorization_is_refused_once_the_owner_window_is_closed() {
         },
     )
     .await;
-    match read_response(&mut closer, Duration::from_secs(10)).await {
+    match read_response(&mut closer).await {
         DaemonMessage::WindowClosed { window_id } => assert_eq!(window_id, owner_window),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -634,8 +629,7 @@ async fn owner_authorization_is_refused_once_the_owner_windows_child_has_exited(
     let plan = create_ok(&mut owner, "plan", tasks(&["t1"])).await;
 
     write_window_input(&h.registry, &owner_window, b"\r").await;
-    h.wait_until_child_exited(&owner_window, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&owner_window).await;
 
     let reply = update_plan(&mut owner, &plan.plan_id, tasks(&["t1"])).await;
     expect_error(reply, "not_plan_owner");
@@ -689,7 +683,7 @@ async fn plan_tools_reply_unsupported_and_keep_the_connection_alive_without_a_st
 
     // The connection must still be usable after the refusal.
     send(&mut client, &ClientMessage::Ping).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong after an unsupported plan tool, got {other:?}"),
     }
@@ -705,7 +699,7 @@ async fn a_rejected_request_keeps_the_connection_alive_on_a_ledger_backed_daemon
     expect_error(reply, "auth_failed");
 
     send(&mut external, &ClientMessage::Ping).await;
-    match read_response(&mut external, Duration::from_secs(5)).await {
+    match read_response(&mut external).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong after a real ledger refusal, got {other:?}"),
     }
@@ -799,7 +793,7 @@ async fn create_plan_is_refused_for_a_window_that_is_not_alive() {
         },
     )
     .await;
-    match read_response(&mut closer, Duration::from_secs(10)).await {
+    match read_response(&mut closer).await {
         DaemonMessage::WindowClosed { .. } => {}
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -809,8 +803,7 @@ async fn create_plan_is_refused_for_a_window_that_is_not_alive() {
     let exited_window = h.open(self_exiting_command(), None).await;
     let mut exited_owner = h.connect().await;
     identify(&mut exited_owner, &exited_window).await;
-    h.wait_until_child_exited(&exited_window, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&exited_window).await;
     let reply = create_plan(&mut exited_owner, "plan", tasks(&["t1"])).await;
     expect_error(reply, "invalid_state");
 
@@ -821,11 +814,12 @@ async fn create_plan_is_refused_for_a_window_that_is_not_alive() {
     );
 }
 
-// A held plan lock delays a conflicting change, and the authorization
-// grant is re-checked once the lock is finally taken.
+// An update takes its plan's lock from the daemon's lock table, and the
+// authorization grant is checked once that lock is taken.
 
 #[tokio::test]
-async fn a_held_plan_lock_delays_a_conflicting_update_and_the_grant_is_re_checked_inside_it() {
+async fn an_update_takes_its_plans_lock_from_the_daemons_lock_table_and_the_grant_is_re_checked_inside_it()
+ {
     let dir = unique_temp_dir("ipc-plan-lock-delay");
     let (h, locks) = start_ledger(
         "ipc-plan-lock-delay",
@@ -837,6 +831,17 @@ async fn a_held_plan_lock_delays_a_conflicting_update_and_the_grant_is_re_checke
     let owner_window = open_and_identify(&h, &mut owner).await;
     let plan = create_ok(&mut owner, "plan", tasks(&["t1"])).await;
 
+    locks.remove(&plan.plan_id);
+    assert_eq!(locks.len(), 0, "no other plan holds an entry");
+    expect_plan_detail(update_plan(&mut owner, &plan.plan_id, tasks(&["t1"])).await);
+    assert_eq!(
+        locks.len(),
+        1,
+        "the update must have locked its plan through the daemon's lock table"
+    );
+
+    // Whenever the update reaches the lock, it is granted only after the
+    // close: `issue_change` reads the owner's liveness with the guard in hand.
     let held = locks.lock(&plan.plan_id).await;
 
     send(
@@ -848,16 +853,6 @@ async fn a_held_plan_lock_delays_a_conflicting_update_and_the_grant_is_re_checke
         },
     )
     .await;
-    let blocked = tokio::time::timeout(
-        Duration::from_millis(300),
-        read_plan_reply(&mut owner, Duration::from_secs(30)),
-    )
-    .await;
-    assert!(
-        blocked.is_err(),
-        "an update_plan targeting a plan whose lock the test already holds must not resolve \
-         while the test keeps the lock"
-    );
 
     let mut closer = approver_connection(&h).await;
     send(
@@ -868,14 +863,14 @@ async fn a_held_plan_lock_delays_a_conflicting_update_and_the_grant_is_re_checke
         },
     )
     .await;
-    match read_response(&mut closer, Duration::from_secs(10)).await {
+    match read_response(&mut closer).await {
         DaemonMessage::WindowClosed { .. } => {}
         other => panic!("expected window_closed, got {other:?}"),
     }
 
     drop(held);
 
-    let reply = read_plan_reply(&mut owner, Duration::from_secs(10)).await;
+    let reply = read_plan_reply(&mut owner).await;
     expect_error(reply, "not_plan_owner");
     let read_by_approver = expect_plan_detail(get_plan(&mut closer, &plan.plan_id).await);
     assert_eq!(
@@ -960,8 +955,8 @@ async fn the_lock_table_never_grows_for_nonexistent_plans_and_shrinks_on_delete(
 
     drop(held);
 
-    let update_reply = read_plan_reply(&mut owner, Duration::from_secs(10)).await;
-    let delete_reply = read_plan_reply(&mut approver, Duration::from_secs(10)).await;
+    let update_reply = read_plan_reply(&mut owner).await;
+    let delete_reply = read_plan_reply(&mut approver).await;
 
     match update_reply {
         DaemonMessage::PlanDetail { .. } => {}

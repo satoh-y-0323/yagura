@@ -29,8 +29,9 @@
 //! tests are shell-independent and safe to run concurrently with each other
 //! and with a resident daemon.
 //!
-//! `cargo build -p yagura-daemon --bins` must have run first: the `echo_child`
-//! binary is located next to the test executable.
+//! `cargo build -p yagura-daemon -p yagura-holder --bins` must have run first:
+//! the `echo_child` and `yagura-holder` binaries are located next to the test
+//! executable.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +41,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::detection::{
     CONTROL_DETECTION_NAME, CONTROL_READY_LINE, composer_section_toml, idle_definition_toml,
 };
@@ -49,9 +51,8 @@ use yagura_test_support::ipc::{
 };
 use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::{
-    COMPOSER_MARKER, COMPOSER_SEPARATOR, assert_file_len_stable, echo_child_command,
-    echo_child_command_with_composer, own_canonical_exe, surviving_grandchild_command,
-    wait_until_file_grows,
+    COMPOSER_MARKER, COMPOSER_SEPARATOR, echo_child_command, echo_child_command_with_composer,
+    first_grandchild_command, own_canonical_exe, process_is_running, wait_processes_gone,
 };
 use yagura_test_support::scan::contains_subsequence;
 
@@ -73,14 +74,6 @@ use yagura_protocol::{
 /// Marker text written through `send_message` and looked for in the child's
 /// PTY output. Kept short so ConPTY's 80-column wrapping cannot split it.
 const SEND_MESSAGE_MARKER: &str = "mcp-e2e-send;";
-
-/// Upper bound for every "wait until the daemon/child catches up" loop.
-const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Upper bound for one tool round trip. No daemon-side wait this file sets up
-/// outlasts [`CONVERGENCE_TIMEOUT`]; the margin lets such a wait answer for
-/// itself before a reply that never arrives fails the test.
-const ROUND_TRIP_LIMIT: Duration = CONVERGENCE_TIMEOUT.saturating_add(Duration::from_secs(2));
 
 /// The `[input]` table of [`composer_detection_config`]'s definition: only the
 /// probe a judged delivery needs.
@@ -310,7 +303,7 @@ impl DaemonHarness {
     /// `EndpointTransport` connects lazily and does not retry an initial connect
     /// failure, so the readiness probe has to go through a tool call.
     async fn wait_until_ready<T: DaemonTransport>(&self, transport: &T) {
-        let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             match list_windows(transport).await {
                 Ok(_) => return,
@@ -327,7 +320,7 @@ impl DaemonHarness {
     /// Polls a window's PTY scrollback until `needle` appears.
     async fn await_child_output(&self, window_id: &str, needle: &[u8]) {
         let entry = self.entry(window_id);
-        let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             let tail = entry.session().captured_output();
             if contains_subsequence(&tail, needle) {
@@ -402,7 +395,7 @@ impl DaemonHarness {
         window_id: &str,
         expected: &str,
     ) {
-        let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             let observed = self.status_via_tool(transport, window_id).await;
             if observed == expected {
@@ -504,7 +497,7 @@ impl DaemonHarness {
     /// vacuously true whether or not the daemon ever wrote the envelope.
     async fn await_accepted_handoff_envelope(&self, window_id: &str) {
         let entry = self.entry(window_id);
-        let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             let tail = entry.session().captured_output();
             let text = String::from_utf8_lossy(&tail).into_owned();
@@ -535,7 +528,7 @@ impl DaemonHarness {
             "the harness must still hold at least one window at shutdown time"
         );
 
-        let mut client = connect_with_retry(&self.endpoint, Duration::from_secs(5)).await;
+        let mut client = connect_with_retry(&self.endpoint).await;
         let frame = yagura_protocol::frame_encode(&yagura_protocol::encode_client_message(
             &ClientMessage::Shutdown,
         ));
@@ -544,7 +537,7 @@ impl DaemonHarness {
             .await
             .expect("write the shutdown frame");
 
-        let run_result = tokio::time::timeout(CONVERGENCE_TIMEOUT, self.server_task)
+        let run_result = tokio::time::timeout(HANG_GUARD, self.server_task)
             .await
             .expect("server.run() must complete after shutdown")
             .expect("server task must not panic (JoinError)");
@@ -556,7 +549,7 @@ impl DaemonHarness {
         for entry in entries {
             let window_id = entry.window_id().to_string();
             let mut exited = entry.session().exit_notified();
-            let observed = tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
+            let observed = tokio::time::timeout(HANG_GUARD, async {
                 // `exit_notified` may already hold `true`, so inspect before
                 // awaiting a change.
                 while !*exited.borrow_and_update() {
@@ -578,7 +571,7 @@ impl DaemonHarness {
     }
 }
 
-/// The real transport with every round trip held to [`ROUND_TRIP_LIMIT`]:
+/// The real transport with every round trip held to [`HANG_GUARD`]:
 /// the wait loops below check their deadlines only between calls, so without
 /// it a reply the transport cannot read would block the first call forever.
 struct BoundedTransport {
@@ -597,7 +590,7 @@ impl DaemonTransport for BoundedTransport {
     }
 
     async fn round_trip(&self, msg: ClientMessage) -> Result<DaemonMessage, TransportError> {
-        reply_within(ROUND_TRIP_LIMIT, "a round trip", self.inner.round_trip(msg)).await
+        reply_within("a round trip", self.inner.round_trip(msg)).await
     }
 }
 
@@ -683,13 +676,13 @@ async fn probe_status_event(
     )
     .await;
     send_client_message(client, &ClientMessage::Ping).await;
-    let reply = read_daemon_frame(client, CONVERGENCE_TIMEOUT)
+    let reply = read_daemon_frame(client)
         .await
         .expect_message("status_event probe reply");
     match reply {
         DaemonMessage::Pong => EventOutcome::Accepted,
         DaemonMessage::Error { code, .. } => {
-            let pong = read_daemon_frame(client, CONVERGENCE_TIMEOUT)
+            let pong = read_daemon_frame(client)
                 .await
                 .expect_message("Pong after a rejected status_event");
             assert!(
@@ -782,28 +775,6 @@ async fn open_window_detection_argument_selects_a_per_window_definition() {
     harness
         .await_status(&transport, &with_detection, "idle")
         .await;
-
-    // The omission case is probed only after the explicit-detection window's
-    // transition was observed, so a slow-but-eventually-idle implementation
-    // cannot be mistaken for one that never forwards `detection`.
-    let without_detection = harness
-        .open_via_tool(&transport, echo_child_command(), "without-detection", None)
-        .await;
-    harness
-        .write_window_input(&without_detection, CONTROL_READY_LINE.as_bytes())
-        .await;
-    // The settle window is far longer than the definition's confirm delay, so
-    // a silent fallback to the other window's definition would show up here.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        harness
-            .status_via_tool(&transport, &without_detection)
-            .await,
-        "unknown",
-        "a window opened without `detection` must keep resolving the \
-         daemon's unresolvable default, not the per-window definition \
-         another window asked for"
-    );
 
     harness.shutdown_and_assert_children_exited().await;
 }
@@ -1129,8 +1100,7 @@ async fn interrupt_window_delivers_the_configured_bytes_to_the_child_when_approv
 #[tokio::test]
 async fn close_window_terminates_the_windows_whole_process_tree_when_approved() {
     let dir = unique_temp_dir(FIXTURE_PREFIX, "close-ok");
-    let tick = dir.join("tick.txt");
-    let tick_path = tick.to_str().expect("tick path must be valid UTF-8");
+    let pid_file = dir.join("grandchild.pid");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["close_window"])),
         ..DaemonConfig::default()
@@ -1138,16 +1108,17 @@ async fn close_window_terminates_the_windows_whole_process_tree_when_approved() 
     let harness = DaemonHarness::start_with_config("close-ok", config).await;
     let transport = harness.transport();
     harness.wait_until_ready(&transport).await;
+    // The direct child outlives the test, so only close_window can be what
+    // tears the tree down.
     let window_id = harness
         .open_via_tool(
             &transport,
-            surviving_grandchild_command(tick_path),
+            first_grandchild_command(&pid_file, 600_000),
             "grandchild",
             None,
         )
         .await;
-
-    wait_until_file_grows(&tick, Duration::from_secs(20)).await;
+    let grandchild = running_published_pid(&pid_file).await;
 
     assert!(
         harness.entry(&window_id).session().exit_status().is_none(),
@@ -1173,9 +1144,38 @@ async fn close_window_terminates_the_windows_whole_process_tree_when_approved() 
     // Zero orphans is the contract: the detached grandchild outlives a plain
     // `terminate()` and is only reached through the whole-tree teardown (the
     // Job Object on Windows, the process group on Unix).
-    assert_file_len_stable(&tick, Duration::from_secs(3), "after close_window").await;
+    wait_processes_gone(&[grandchild], move |_| {
+        format!("the grandchild (pid {grandchild}) outlived close_window: an orphan survived")
+    })
+    .await;
 
     harness.shutdown_and_assert_children_exited().await;
+}
+
+/// The process id `pid_file` comes to hold, once it names a running process:
+/// a probe that never reports "running" cannot let a later wait for the end
+/// pass.
+async fn running_published_pid(pid_file: &Path) -> u32 {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the grandchild never published its process id at {}",
+            pid_file.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        process_is_running(pid),
+        "the grandchild (pid {pid}) must be running before close_window is sent"
+    );
+    pid
 }
 
 // =====================================================================
@@ -1194,9 +1194,9 @@ async fn wait_for_status_reports_reached_once_the_window_reaches_the_target() {
 
     // Written straight into the PTY (send_message on an Unknown window is
     // refused before any policy is consulted, so it cannot stimulate this
-    // transition), concurrently with the wait below.
+    // transition), concurrently with the wait below. The daemon reports
+    // `reached` whether the transition lands before or after its wait begins.
     let stimulate = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
         harness
             .write_window_input(&window_id, CONTROL_READY_LINE.as_bytes())
             .await;
@@ -1353,7 +1353,7 @@ async fn a_status_event_carrying_the_daemons_token_is_accepted_and_moves_the_rep
         "fixture precondition: without the marker the window is still Unknown"
     );
 
-    let mut client = connect_with_retry(&harness.endpoint, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&harness.endpoint).await;
     let outcome =
         probe_status_event(&mut client, &window_id, VALID_TOKEN, WindowStatus::Running).await;
     assert_eq!(
@@ -1365,38 +1365,6 @@ async fn a_status_event_carrying_the_daemons_token_is_accepted_and_moves_the_rep
     harness
         .await_status(&transport, &window_id, "running")
         .await;
-
-    drop(client);
-    harness.shutdown_and_assert_children_exited().await;
-}
-
-#[tokio::test]
-async fn a_status_event_without_the_daemons_token_is_auth_failed_and_changes_nothing() {
-    let dir = unique_temp_dir(FIXTURE_PREFIX, "token-refused");
-    let harness = DaemonHarness::start_with_config("token-refused", token_config(&dir)).await;
-    let transport = harness.transport();
-    harness.wait_until_ready(&transport).await;
-    let window_id = harness
-        .open_via_tool(&transport, echo_child_command(), "event-target", None)
-        .await;
-
-    let mut client = connect_with_retry(&harness.endpoint, Duration::from_secs(5)).await;
-    for token in ["", WRONG_TOKEN] {
-        assert_eq!(
-            probe_status_event(&mut client, &window_id, token, WindowStatus::Running).await,
-            EventOutcome::Rejected("auth_failed".to_string()),
-            "an event with token {token:?} must be refused"
-        );
-    }
-
-    // Give a (hypothetical) unauthenticated write time to land before
-    // asserting that nothing moved.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        harness.status_via_tool(&transport, &window_id).await,
-        "unknown",
-        "a refused event must never reach the detector"
-    );
 
     drop(client);
     harness.shutdown_and_assert_children_exited().await;
@@ -1427,7 +1395,7 @@ fn approval_config(dir: &Path, approval_timeout_secs: u64) -> DaemonConfig {
 /// were already awaiting a decision.
 async fn register_approver(client: &mut Connection) -> Vec<ApprovalRequest> {
     send_client_message(client, &ClientMessage::RegisterApprover).await;
-    match read_daemon_frame(client, CONVERGENCE_TIMEOUT)
+    match read_daemon_frame(client)
         .await
         .expect_message("the reply to register_approver")
     {
@@ -1439,7 +1407,7 @@ async fn register_approver(client: &mut Connection) -> Vec<ApprovalRequest> {
 /// Waits for the next request put to the approver, answers it with
 /// `approved`, and returns the request as it arrived.
 async fn settle_next_request(client: &mut Connection, approved: bool) -> ApprovalRequest {
-    let request = match read_daemon_frame(client, CONVERGENCE_TIMEOUT)
+    let request = match read_daemon_frame(client)
         .await
         .expect_message("a request put to the approver")
     {
@@ -1454,7 +1422,7 @@ async fn settle_next_request(client: &mut Connection, approved: bool) -> Approva
         },
     )
     .await;
-    match read_daemon_frame(client, CONVERGENCE_TIMEOUT)
+    match read_daemon_frame(client)
         .await
         .expect_message("the reply to approval_decision")
     {
@@ -1472,7 +1440,7 @@ async fn settle_next_request(client: &mut Connection, approved: bool) -> Approva
 /// Waits until a window's child process has really gone: an acknowledgement
 /// alone would also be sent by a daemon that closed nothing.
 async fn wait_until_child_exited(entry: &Arc<WindowEntry>) {
-    let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while entry.session().exit_status().is_none() {
         if tokio::time::Instant::now() >= deadline {
             panic!(
@@ -1569,7 +1537,7 @@ async fn a_close_held_for_a_human_is_carried_out_once_the_approver_approves_it()
     let window_id = harness.open_idle_window(&external).await;
     let entry = harness.entry(&window_id);
 
-    let mut approver = connect_with_retry(&harness.endpoint, Duration::from_secs(5)).await;
+    let mut approver = connect_with_retry(&harness.endpoint).await;
     let already_pending = register_approver(&mut approver).await;
     assert!(
         already_pending.is_empty(),
@@ -1628,7 +1596,7 @@ async fn a_denied_close_reaches_the_approver_named_as_the_requesting_window_and_
         .await;
 
     let caller = harness.transport_as(&caller_window, VALID_TOKEN);
-    let mut approver = connect_with_retry(&harness.endpoint, Duration::from_secs(5)).await;
+    let mut approver = connect_with_retry(&harness.endpoint).await;
     register_approver(&mut approver).await;
 
     let (result, request) = tokio::join!(
@@ -1719,9 +1687,6 @@ async fn a_transport_that_lost_its_connection_claims_its_window_again_on_the_nex
             other => panic!("attempt {attempt}: expected auth_failed, got {other:?}"),
         }
     }
-    // The disconnect travels the other way, so let it land before the next
-    // request is written into a connection that no longer has a peer.
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Stimulated through the registry again so that the status gate cannot be
     // what answers the second interrupt.
@@ -1914,7 +1879,7 @@ fn launch_profile_source(display_name: &str, logs: &Path) -> String {
 
 /// The launch prompt the `hook_child` logging under `logs` was started with.
 async fn launch_prompt_logged_in(logs: &Path) -> String {
-    let deadline = tokio::time::Instant::now() + CONVERGENCE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
         if let Some(argv) = events

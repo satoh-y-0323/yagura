@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{
     Connection, ReadOutcome, read_status_skipping_message, send_client_message,
 };
@@ -38,13 +39,7 @@ fn detection_config(dir: &Path) -> DaemonConfig {
 /// outranks it), so it cannot be used to reach `idle` in the first place.
 async fn drive_window_idle(harness: &Harness, client: &mut Connection, window_id: &str) {
     write_window_input(&harness.registry, window_id, READY_MARKER).await;
-    wait_for_window_status(
-        client,
-        window_id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_for_window_status(client, window_id, WindowStatus::Idle).await;
 }
 
 /// Reads a raw frame, returning `None` if `timeout` elapses before one starts
@@ -88,7 +83,7 @@ async fn open_window_via_ipc(client: &mut Connection, command: Vec<String>) -> S
         },
     )
     .await;
-    let response = read_status_skipping_message(client, Duration::from_secs(5))
+    let response = read_status_skipping_message(client)
         .await
         .expect_message("WindowOpened response");
     match response {
@@ -108,7 +103,7 @@ async fn query_window_status(client: &mut Connection, window_id: &str) -> (Windo
         },
     )
     .await;
-    let response = read_status_skipping_message(client, Duration::from_secs(5))
+    let response = read_status_skipping_message(client)
         .await
         .expect_message("GetWindowStatus response");
     match response {
@@ -123,13 +118,8 @@ async fn query_window_status(client: &mut Connection, window_id: &str) -> (Windo
 ///
 /// Observing the state rather than sleeping keeps tests from depending on how fast
 /// the detection engine confirms a transition.
-async fn wait_for_window_status(
-    client: &mut Connection,
-    window_id: &str,
-    expected: WindowStatus,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_window_status(client: &mut Connection, window_id: &str, expected: WindowStatus) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let (status, _since_ms) = query_window_status(client, window_id).await;
         if status == expected {
@@ -188,29 +178,28 @@ impl ObservedFrames {
     }
 }
 
-/// Collects every frame arriving within `window`, stopping early once `stop`
-/// matches a frame (that frame is included in the result).
+/// Collects every frame until `stop` matches one (that frame is included in
+/// the result), for at most [`HANG_GUARD`].
 ///
-/// Exhausting the window is a normal outcome and never panics: a connection
+/// Reaching the guard returns what arrived and never panics; every caller then
+/// asserts the frame it waited for is among them: a connection
 /// attached to a live window keeps receiving view frames whether or not the
 /// property under test holds, so interpreting the frames is left to the caller.
 /// Every completed frame is acknowledged, as a renderer does, so the next one
 /// is sent.
 async fn collect_frames(
     client: &mut Connection,
-    window: Duration,
     stop: impl Fn(&DaemonMessage) -> bool,
 ) -> ObservedFrames {
-    collect_frames_acknowledging(client, window, stop, true).await
+    collect_frames_acknowledging(client, stop, true).await
 }
 
 async fn collect_frames_acknowledging(
     client: &mut Connection,
-    window: Duration,
     stop: impl Fn(&DaemonMessage) -> bool,
     acknowledge: bool,
 ) -> ObservedFrames {
-    let deadline = tokio::time::Instant::now() + window;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     let mut observed = ObservedFrames {
         frames: Vec::new(),
         closed: false,
@@ -338,7 +327,6 @@ async fn attach_via_ipc(client: &mut Connection, window_id: &str) -> DaemonMessa
     .await;
     let mut observed = collect_frames_acknowledging(
         client,
-        Duration::from_secs(5),
         |msg| {
             matches!(
                 msg,
@@ -383,7 +371,7 @@ async fn open_window_with_valid_command_spawns_child_and_returns_window_id() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window response");
     match response {
@@ -411,7 +399,7 @@ async fn open_window_with_empty_command_array_returns_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response");
     match response {
@@ -442,7 +430,7 @@ async fn open_window_with_nonexistent_executable_returns_spawn_failed() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response for nonexistent executable");
     match response {
@@ -478,7 +466,7 @@ async fn open_window_with_invalid_detection_name_returns_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response for invalid detection");
     match response {
@@ -514,7 +502,7 @@ async fn open_window_with_nonexistent_cwd_returns_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response for nonexistent cwd");
     match response {
@@ -541,7 +529,7 @@ async fn list_windows_returns_entries_in_insertion_order() {
     }
 
     send_client_message(&mut client, &ClientMessage::ListWindows).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("WindowList response");
     let listed: Vec<String> = match response {
@@ -568,7 +556,7 @@ async fn list_chat_rooms_from_an_unidentified_connection_over_ipc_v2_is_auth_fai
     let mut client = start_server_and_connect(&config, "list-chat-rooms-unidentified").await;
 
     send_client_message(&mut client, &ClientMessage::ListChatRooms).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("Error(auth_failed) response");
     match response {
@@ -581,37 +569,63 @@ async fn list_chat_rooms_from_an_unidentified_connection_over_ipc_v2_is_auth_fai
     }
 }
 
-/// How long both attach-replacement tests watch a connection, at least, once
-/// their observation window has opened: the frames they require to be
-/// *absent* get this long to arrive.
-const ATTACH_ABSENCE_WINDOW: Duration = Duration::from_secs(3);
+/// Attaches `client` to `window_id` and acknowledges the attach frame, as a
+/// renderer does, so the window's view may send the next frame as soon as its
+/// screen changes.
+async fn attach_and_acknowledge(client: &mut Connection, window_id: &str) {
+    attach_via_ipc(client, window_id).await;
+    let observed = collect_frames(
+        client,
+        |msg| matches!(msg, DaemonMessage::Frame(part) if part.last),
+    )
+    .await;
+    assert!(
+        observed
+            .frames
+            .iter()
+            .any(|msg| matches!(msg, DaemonMessage::Frame(part) if part.last)),
+        "the attach to {window_id} must be followed by its frame"
+    );
+}
 
-/// Hang guard on the positive marker both attach-replacement tests wait for.
-const ATTACH_MARKER_CEILING: Duration = Duration::from_secs(20);
+/// Makes `window_id`'s echoing child print `text` and waits until the
+/// window's model shows it, then does the same with a second text: the feeder
+/// takes its batches one after another and hands a batch's frame on before it
+/// takes the next, so once the second text shows, any frame for the first one
+/// has been queued on whichever connection holds the window's view.
+async fn print_through_the_feeder(h: &Harness, window_id: &str, text: &str) {
+    for text in [text.to_string(), format!("{text}-after")] {
+        write_window_input(&h.registry, window_id, text.as_bytes()).await;
+        common::wait_until_model_shows(h, window_id, text.as_bytes()).await;
+    }
+}
 
-/// Collects frames until one shows `marker`, then on until
-/// [`ATTACH_ABSENCE_WINDOW`] has passed since the start. The marker is waited
-/// for as an event, so a slow machine only lengthens the wait; the absence
-/// window is never cut short by it. A diff frame carries whole rows, so a
-/// printed marker is never split across parts.
-async fn collect_frames_past_marker(client: &mut Connection, marker: &str) -> ObservedFrames {
-    let started = tokio::time::Instant::now();
+/// Collects frames until one shows `marker`, then sends a `Ping` and collects
+/// up to its `Pong`. The daemon queues the pong after every frame due to this
+/// connection for what its attached window's feeder had received, so nothing
+/// that is due arrives after it. A diff frame carries whole rows, so a printed
+/// marker is never split across parts.
+async fn collect_frames_through_pong(client: &mut Connection, marker: &str) -> ObservedFrames {
     let mut observed = collect_frames(
         client,
-        ATTACH_MARKER_CEILING,
         |msg| matches!(msg, DaemonMessage::Frame(part) if rows_text(part).contains(marker)),
     )
     .await;
-    if !observed.closed {
-        let rest = collect_frames(
-            client,
-            ATTACH_ABSENCE_WINDOW.saturating_sub(started.elapsed()),
-            |_| false,
-        )
-        .await;
-        observed.frames.extend(rest.frames);
-        observed.closed = rest.closed;
+    if observed.closed {
+        return observed;
     }
+    send_client_message(client, &ClientMessage::Ping).await;
+    let rest = collect_frames(client, |msg| matches!(msg, DaemonMessage::Pong)).await;
+    assert!(
+        rest.closed
+            || rest
+                .frames
+                .iter()
+                .any(|msg| matches!(msg, DaemonMessage::Pong)),
+        "the pong never came"
+    );
+    observed.frames.extend(rest.frames);
+    observed.closed = rest.closed;
     observed
 }
 
@@ -633,29 +647,27 @@ async fn attach_replacement_case_i_switching_windows_stops_old_output() {
     let window_a = open_window_via_ipc(&mut client, echo_child_command()).await;
     let window_b = open_window_via_ipc(&mut client, echo_child_command()).await;
     // `send_text` targeting an Unknown window is refused before any policy is
-    // consulted, so both windows must be driven to `idle` before the markers
-    // below can be sent at all.
-    drive_window_idle(&h, &mut client, &window_a).await;
+    // consulted, so B must be driven to `idle` before its marker can be sent.
     drive_window_idle(&h, &mut client, &window_b).await;
 
-    attach_via_ipc(&mut client, &window_a).await;
-    attach_via_ipc(&mut client, &window_b).await;
+    // A's attach frame is acknowledged, so a view of A still bound to this
+    // connection after the switch would send A's next screen here.
+    attach_and_acknowledge(&mut client, &window_a).await;
+    attach_and_acknowledge(&mut client, &window_b).await;
 
-    // Both markers are written only after the switch completed; output A produced
-    // before it may still be queued and is out of scope. A is written first, so a
-    // subscription left pointing at A would deliver its marker no later than B's.
-    for (window_id, marker) in [(&window_a, MARKER_A), (&window_b, MARKER_B)] {
-        send_client_message(
-            &mut client,
-            &ClientMessage::SendText {
-                window_id: window_id.clone(),
-                text: marker.to_string(),
-            },
-        )
-        .await;
-    }
+    // Every frame for A's marker is queued before B's marker is even sent, so
+    // it would come before the frame showing B's.
+    print_through_the_feeder(&h, &window_a, MARKER_A).await;
+    send_client_message(
+        &mut client,
+        &ClientMessage::SendText {
+            window_id: window_b.clone(),
+            text: MARKER_B.to_string(),
+        },
+    )
+    .await;
 
-    let observed = collect_frames_past_marker(&mut client, MARKER_B).await;
+    let observed = collect_frames_through_pong(&mut client, MARKER_B).await;
     assert!(
         !observed.closed,
         "the connection must stay open across an attach replacement"
@@ -692,8 +704,8 @@ async fn attach_replacement_case_ii_no_superseded_on_separate_attach() {
     attach_via_ipc(&mut client1, &window_b).await;
 
     let mut client2 = h.connect().await;
-    // The observation window opens with this acknowledgement, and nothing reads
-    // client1 until the collection below, so no reaction frame can slip past it.
+    // A supersede of client1 would be told before client2's attach is
+    // answered, so it comes before anything client1 asks for below.
     attach_via_ipc(&mut client2, &window_a).await;
 
     // Positive control: "no superseded arrived" is equally true of a connection
@@ -708,7 +720,7 @@ async fn attach_replacement_case_ii_no_superseded_on_separate_attach() {
     )
     .await;
 
-    let observed = collect_frames_past_marker(&mut client1, MARKER_B).await;
+    let observed = collect_frames_through_pong(&mut client1, MARKER_B).await;
     assert!(
         !observed.contains_error("superseded"),
         "attaching a separate connection to a window client1 has already left must not supersede it"
@@ -744,7 +756,7 @@ async fn send_text_does_not_require_attach() {
         },
     )
     .await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("send_text response");
     match response {
@@ -753,20 +765,13 @@ async fn send_text_does_not_require_attach() {
     }
 
     // The echo must be in the window's model before the attach snapshots it.
-    common::wait_until_model_shows(
-        &h,
-        &window_id,
-        b"send-text-before-attach;",
-        Duration::from_secs(10),
-    )
-    .await;
+    common::wait_until_model_shows(&h, &window_id, b"send-text-before-attach;").await;
 
     let DaemonMessage::Attached { .. } = attach_via_ipc(&mut client, &window_id).await else {
         panic!("attach_via_ipc must return an Attached response");
     };
     let observed = collect_frames(
         &mut client,
-        Duration::from_secs(5),
         |msg| matches!(msg, DaemonMessage::Frame(part) if part.last),
     )
     .await;
@@ -791,7 +796,7 @@ async fn send_text_to_exited_window_returns_child_exited() {
         },
     )
     .await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("send_text error response for an exited window");
     match response {
@@ -816,7 +821,7 @@ async fn send_text_exceeding_1mb_returns_invalid_argument() {
         },
     )
     .await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("send_text error response for oversized text");
     match response {
@@ -838,7 +843,7 @@ async fn send_text_to_unknown_window_id_returns_window_not_found() {
         },
     )
     .await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("send_text error response for an unknown window_id");
     match response {
@@ -847,34 +852,25 @@ async fn send_text_to_unknown_window_id_returns_window_not_found() {
     }
 }
 
-// Both tests below read `since_ms` over IPC from a window on a real PTY, so they
-// run on the wall clock. How the age restarts at a transition is measured on a
-// paused clock by the unit tests in `window.rs`.
-
-/// How long [`since_ms_remains_nondecreasing_within_same_state`] stays inside
-/// one state between its two observations.
-const SAME_STATE_OBSERVATION_GAP: Duration = Duration::from_millis(500);
-
-/// Slack allowed between the wait measured by the test and the growth reported by
-/// the daemon: both readings are floored to whole milliseconds, so the growth can
-/// fall a millisecond short of the wait. No upper bound accompanies it -- load can
-/// stretch the true elapsed time arbitrarily, and a ceiling would fail on that.
-const SINCE_MS_GROWTH_TOLERANCE_MS: u64 = 50;
+// Both tests below judge `since_ms` on the wire by order alone, never by how
+// long they waited. How far the age grows with the clock and that a transition
+// restarts it at zero are measured on a paused clock by
+// `publish_status_restarts_the_age_at_every_transition_on_the_paused_clock`
+// (`window.rs`).
 
 #[tokio::test]
 async fn since_ms_remains_nondecreasing_within_same_state() {
     // echo_child reads its stdin until an EOF ConPTY never delivers, so the child
-    // outlives the measured interval and the "same state" premise cannot silently
+    // outlives both observations and the "same state" premise cannot silently
     // break. That premise is asserted below, not assumed.
     let config = common::opening_config();
     let mut client = start_server_and_connect(&config, "since-nondecreasing").await;
     let window_id = open_window_via_ipc(&mut client, echo_child_command()).await;
 
     let (first_status, first_since_ms) = query_window_status(&mut client, &window_id).await;
-    let wait_started_at = std::time::Instant::now();
-    tokio::time::sleep(SAME_STATE_OBSERVATION_GAP).await;
-    let waited_ms = u64::try_from(wait_started_at.elapsed().as_millis())
-        .expect("a sub-second wait fits in u64 milliseconds");
+    // Another child started and seen to exit lies between the two readings,
+    // so the daemon's clock has moved on by the second.
+    open_exited_window_via_ipc(&mut client).await;
     let (second_status, second_since_ms) = query_window_status(&mut client, &window_id).await;
 
     assert_eq!(
@@ -889,12 +885,6 @@ async fn since_ms_remains_nondecreasing_within_same_state() {
     assert!(
         second_since_ms >= first_since_ms,
         "since_ms must not decrease within one state (first {first_since_ms} ms, second {second_since_ms} ms)"
-    );
-    // The measured wait lies entirely between the two replies, so it is a lower
-    // bound on the daemon's own advance; a constant since_ms would pass above.
-    assert!(
-        second_since_ms - first_since_ms >= waited_ms.saturating_sub(SINCE_MS_GROWTH_TOLERANCE_MS),
-        "since_ms must grow by the time actually waited ({waited_ms} ms) but grew from {first_since_ms} ms to {second_since_ms} ms"
     );
 }
 
@@ -917,55 +907,54 @@ fn exit_on_line_command() -> Vec<String> {
         .collect()
 }
 
-/// How long [`since_ms_resets_on_state_transition`] lets the window sit in its
-/// pre-exit state before reading `since_ms_before`.
-const RESET_WAIT_BEFORE_TRANSITION: Duration = Duration::from_millis(1200);
-
-/// Floor asserted on `since_ms_before`. The window's state clock starts at window
-/// creation, strictly before the wait above begins, so the reading cannot come in
-/// under that wait; the difference is slack for truncation and timer granularity.
-const SINCE_MS_BEFORE_FLOOR_MS: u64 = 1100;
-
 #[tokio::test]
 async fn since_ms_resets_on_state_transition() {
     // since_ms must restart at the transition rather than keep counting from
-    // window creation. The child exits only when the test writes a line, so
-    // `since_ms_before` is always read before the transition.
+    // window creation. The daemon's own clock is read off a window that has
+    // already exited, whose state never changes again: its age grows by
+    // exactly the time between two readings. The transition happens between
+    // the two readings that bracket it, so a restarted age cannot exceed that
+    // growth; one still counting from the window's creation, which came before
+    // the reference window was even opened, exceeds it.
     let harness = Harness::start("since-reset", common::opening_config()).await;
     let mut client = harness.connect().await;
     let window_id = open_window_via_ipc(&mut client, exit_on_line_command()).await;
+    let reference = open_exited_window_via_ipc(&mut client).await;
 
-    tokio::time::sleep(RESET_WAIT_BEFORE_TRANSITION).await;
-    let (status_before, since_ms_before) = query_window_status(&mut client, &window_id).await;
-
+    let (reference_status_before, reference_before) =
+        query_window_status(&mut client, &reference).await;
+    let (status_before, _) = query_window_status(&mut client, &window_id).await;
     assert_ne!(
         status_before,
         WindowStatus::Exited,
-        "since_ms_before must be read while the window is still in its pre-exit state"
-    );
-    assert!(
-        since_ms_before >= SINCE_MS_BEFORE_FLOOR_MS,
-        "since_ms_before must have accumulated the pre-transition wait, got {since_ms_before} ms"
+        "the transition must come after the first reference reading"
     );
 
     harness.write_input(&window_id, b"exit\r").await;
-    wait_for_window_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_for_window_status(&mut client, &window_id, WindowStatus::Exited).await;
     let (status_after, since_ms_after) = query_window_status(&mut client, &window_id).await;
+    let (reference_status_after, reference_after) =
+        query_window_status(&mut client, &reference).await;
 
+    assert_eq!(
+        (reference_status_before, reference_status_after),
+        (WindowStatus::Exited, WindowStatus::Exited),
+        "the reference window's state must not change between its readings"
+    );
+    assert!(
+        reference_after > reference_before,
+        "the daemon's clock must have moved across the transition (reference {reference_before} ms, then {reference_after} ms)"
+    );
     assert_eq!(
         status_after,
         WindowStatus::Exited,
         "the observed transition must still hold when since_ms_after is read"
     );
     assert!(
-        since_ms_after < since_ms_before,
-        "since_ms must restart at the transition (before {since_ms_before} ms, after {since_ms_after} ms)"
+        since_ms_after <= reference_after - reference_before,
+        "since_ms must restart at the transition: {since_ms_after} ms after it, though only \
+         {} ms passed across it",
+        reference_after - reference_before
     );
 }
 
@@ -988,7 +977,7 @@ async fn exited_determination_uses_current_status_not_pty_write_error() {
         },
     )
     .await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("send_text response for oversized text on an exited window");
     match response {
@@ -1028,7 +1017,7 @@ async fn list_detections_returns_valid_names_sorted_in_byte_order_without_warnin
     let mut client = start_server_and_connect(&config, "list-detections-valid").await;
 
     send_client_message(&mut client, &ClientMessage::ListDetections).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("list_detections response");
     match response {
@@ -1070,7 +1059,7 @@ async fn list_detections_with_no_detection_dir_resolved_returns_empty_names_with
     let mut client = start_server_and_connect(&config, "list-detections-no-dir").await;
 
     send_client_message(&mut client, &ClientMessage::ListDetections).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("list_detections response");
     match response {
@@ -1102,7 +1091,7 @@ async fn list_detections_with_an_unresolvable_detection_dir_returns_empty_names_
     let mut client = start_server_and_connect(&config, "list-detections-missing").await;
 
     send_client_message(&mut client, &ClientMessage::ListDetections).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("list_detections response");
     match response {
@@ -1150,7 +1139,7 @@ async fn list_detections_with_bundled_definitions_enabled_returns_the_union_of_b
     let mut client = start_server_and_connect(&config, "list-detections-union").await;
 
     send_client_message(&mut client, &ClientMessage::ListDetections).await;
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("list_detections response");
     match response {
@@ -1221,7 +1210,7 @@ async fn open_window_returns_detection_warning_when_the_default_detection_defini
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window response with a missing default detection");
     match response {

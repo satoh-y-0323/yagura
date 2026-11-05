@@ -1,14 +1,14 @@
 /**
- * The bundle ships the MCP bridge beside the daemon: Tauri must name both as
- * sidecars, and the staging script must put both in place, or a build
- * resolves one and not the other.
+ * The bundle ships the holder and the MCP bridge beside the daemon: Tauri must
+ * name all three as sidecars, and the staging script must put all three in
+ * place, or a build resolves some and not the others.
  */
 import { describe, it, expect } from 'vitest';
 
 import tauriConfJson from '../src-tauri/tauri.conf.json?raw';
 import prepareSidecarSource from '../scripts/prepare-sidecar.mjs?raw';
 
-const SIDECAR_NAMES = ['yagura-daemon', 'yagura-mcp'] as const;
+const SIDECAR_NAMES = ['yagura-daemon', 'yagura-holder', 'yagura-mcp'] as const;
 
 /** The `bundle.externalBin` array of the parsed Tauri config, validated as string[]. */
 function parseExternalBin(raw: string): string[] {
@@ -40,7 +40,7 @@ function namesInStringLiteral(code: string, name: string): boolean {
 }
 
 describe('sidecar configuration', () => {
-  it('names both the daemon and the MCP bridge as external binaries', () => {
+  it('names the daemon, the holder and the MCP bridge as external binaries', () => {
     const externalBin = parseExternalBin(tauriConfJson);
 
     expect(externalBin).toEqual(
@@ -48,7 +48,7 @@ describe('sidecar configuration', () => {
     );
   });
 
-  it('stages both the daemon and the MCP bridge', () => {
+  it('stages the daemon, the holder and the MCP bridge', () => {
     const code = codeOf(prepareSidecarSource);
 
     const missing = SIDECAR_NAMES.filter((name) => !namesInStringLiteral(code, name));

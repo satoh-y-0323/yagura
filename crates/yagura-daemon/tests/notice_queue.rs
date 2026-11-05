@@ -14,21 +14,15 @@ use std::time::Duration;
 
 use common::{
     Harness, MARKER, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, VALID_TOKEN, approver_base_config,
-    call_open_window, identify, open_submit_child_window_with_composer,
-    open_submit_child_window_with_composer_logging_input, policy, read_response, send,
-    unique_temp_dir, wait_until_input_log_contains, wait_until_status,
+    call_open_window, identify, let_every_clock_bound_run_out,
+    open_submit_child_window_with_composer, open_submit_child_window_with_composer_logging_input,
+    policy, read_response, send, unique_temp_dir, wait_until_input_log_contains, wait_until_status,
 };
 
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::echo_child_command;
-
-const NOTICE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Longer than the clock-driven retry interval, so a timer retry would show
-/// up inside it. It is only waited out, never relied on to succeed.
-const NO_RETRY_WINDOW: Duration = Duration::from_secs(4);
 
 const FOREIGN_DRAFT: &str = "NQFOREIGNDRAFT";
 
@@ -41,8 +35,8 @@ fn expected_report_notice(pending: usize) -> String {
 
 // --- reading what reached a window's input ------------------------------------
 
-async fn wait_for_flattened(h: &Harness, window_id: &str, needle: &str, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_flattened(h: &Harness, window_id: &str, needle: &str) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !h.flattened_scrollback(window_id).contains(needle) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -63,7 +57,7 @@ async fn pin_status(probe: &mut Connection, window_id: &str, status: WindowStatu
         },
     )
     .await;
-    wait_until_status(probe, window_id, status, Duration::from_secs(10)).await;
+    wait_until_status(probe, window_id, status).await;
 }
 
 // --- A notice declined by a foreign draft waits for the draft to change ---
@@ -109,7 +103,7 @@ async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_cha
     pin_status(&mut probe, &parent, WindowStatus::WaitingInput).await;
 
     h.write_input(&parent, FOREIGN_DRAFT.as_bytes()).await;
-    wait_for_flattened(&h, &parent, FOREIGN_DRAFT, NOTICE_TIMEOUT).await;
+    wait_for_flattened(&h, &parent, FOREIGN_DRAFT).await;
 
     send(
         &mut child_conn,
@@ -120,13 +114,13 @@ async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_cha
         },
     )
     .await;
-    match read_response(&mut child_conn, Duration::from_secs(5)).await {
+    match read_response(&mut child_conn).await {
         DaemonMessage::ReportSent { .. } => {}
         other => panic!("expected report_sent, got {other:?}"),
     }
 
     let entry = h.registry.get(&parent).expect("parent window entry");
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.notice_attempts() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -136,18 +130,17 @@ async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_cha
     }
 
     // The draft belongs to someone else and nobody writes while the status
-    // stays put: the ledger must not move, so no second attempt may start.
-    // An attempt is counted only after its own writes are recorded, so the
-    // ledger value read here already includes them.
+    // stays put: the ledger must not move, so no second attempt may start,
+    // however far the clock runs. An attempt is counted only after its own
+    // writes are recorded, so the ledger value read here already includes them.
     let before = entry.notice_attempts();
     let settled = entry.session().writes_recorded();
-    let mut writes = entry.session().subscribe_writes_recorded();
-    let moved = tokio::time::timeout(NO_RETRY_WINDOW, writes.changed()).await;
-    assert!(
-        moved.is_err(),
+    let_every_clock_bound_run_out().await;
+    assert_eq!(
+        entry.session().writes_recorded(),
+        settled,
         "a notice declined by a foreign draft must not write into the window again"
     );
-    assert_eq!(entry.session().writes_recorded(), settled);
     assert_eq!(entry.notice_attempts(), before);
     assert_eq!(
         h.submitted_count(&parent, ""),
@@ -160,7 +153,6 @@ async fn a_notice_declined_by_a_foreign_draft_is_retried_only_when_the_draft_cha
         &h,
         &parent,
         &format!("SUBMITTED {}", expected_report_notice(1)),
-        NOTICE_TIMEOUT,
     )
     .await;
     assert_eq!(
@@ -209,7 +201,7 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
     pin_status(&mut probe, &parent, WindowStatus::WaitingInput).await;
 
     h.write_input(&parent, FOREIGN_DRAFT.as_bytes()).await;
-    wait_for_flattened(&h, &parent, FOREIGN_DRAFT, NOTICE_TIMEOUT).await;
+    wait_for_flattened(&h, &parent, FOREIGN_DRAFT).await;
 
     send(
         &mut child_conn,
@@ -220,12 +212,12 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
         },
     )
     .await;
-    match read_response(&mut child_conn, Duration::from_secs(5)).await {
+    match read_response(&mut child_conn).await {
         DaemonMessage::ReportSent { .. } => {}
         other => panic!("expected report_sent, got {other:?}"),
     }
     let entry = h.registry.get(&parent).expect("parent window entry");
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.notice_attempts() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -237,18 +229,18 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
 
     // The user types on: the ledger moves, the composer is still not empty.
     h.write_input(&parent, KEYS_TYPED_ON.as_bytes()).await;
-    let read = wait_until_input_log_contains(&log, KEYS_TYPED_ON.as_bytes(), NOTICE_TIMEOUT).await;
+    let read = wait_until_input_log_contains(&log, KEYS_TYPED_ON.as_bytes()).await;
     let typed_at = read
         .windows(KEYS_TYPED_ON.len())
         .rposition(|w| w == KEYS_TYPED_ON.as_bytes())
         .expect("the log was returned holding the typed keys")
         + KEYS_TYPED_ON.len();
 
-    // Nothing is observed to happen here; the window only bounds a retry that
-    // the ledger move alone would start.
-    tokio::time::sleep(NO_RETRY_WINDOW).await;
+    // Every retry the clock could still start runs before the marker is
+    // written, so a probe it wrote would be read ahead of the marker.
+    let_every_clock_bound_run_out().await;
     h.write_input(&parent, MARKER).await;
-    let read = wait_until_input_log_contains(&log, MARKER, NOTICE_TIMEOUT).await;
+    let read = wait_until_input_log_contains(&log, MARKER).await;
     let at = read
         .windows(MARKER.len())
         .rposition(|w| w == MARKER)
@@ -266,7 +258,6 @@ async fn a_notice_is_not_retried_while_the_user_keeps_typing_into_the_draft() {
         &h,
         &parent,
         &format!("SUBMITTED {}", expected_report_notice(1)),
-        NOTICE_TIMEOUT,
     )
     .await;
     assert_eq!(

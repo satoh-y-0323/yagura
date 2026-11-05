@@ -15,9 +15,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use yagura_daemon::terminal_identity::launcher_terminal_names;
-use yagura_os::{PeerAuth, PlatformIpc};
 use yagura_protocol::{ClientMessage, DaemonMessage};
-use yagura_test_support::ipc::{Connection, connect_with_retry};
+use yagura_test_support::ipc::{Connection, InstanceEndpoint, connect_with_retry};
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::env_probe_path;
 
@@ -49,12 +48,13 @@ pub fn shell_path() -> PathBuf {
 static INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A temp tree holding one daemon's whole world: its state, data and config roots, and
-/// the profiles it launches from.
+/// the profiles it launches from. Its instance's endpoint files go with it.
 pub struct Sandbox {
     pub tree: TempDir,
     pub instance: String,
     pub state_home: PathBuf,
     pub profiles_dir: PathBuf,
+    endpoint: InstanceEndpoint,
 }
 
 impl Sandbox {
@@ -69,6 +69,7 @@ impl Sandbox {
         );
         Self {
             tree,
+            endpoint: InstanceEndpoint::new(&instance),
             instance,
             state_home,
             profiles_dir,
@@ -178,10 +179,13 @@ impl Sandbox {
             command.env_remove(name);
         }
         // Windows opened over IPC are what these tests drive, not the approval
-        // gate, so the playbook lets them open; `--playbook` still overrides it.
+        // gate, so the playbook lets them open and close; `--playbook` still overrides it.
         let playbook = self.tree.make_dir("playbook").join("playbook.toml");
-        std::fs::write(&playbook, "[approval]\nauto_approve = [\"open_window\"]\n")
-            .expect("write the sandbox playbook");
+        std::fs::write(
+            &playbook,
+            "[approval]\nauto_approve = [\"open_window\", \"close_window\"]\n",
+        )
+        .expect("write the sandbox playbook");
         command.env("YAGURA_PLAYBOOK", playbook);
         if cfg!(windows) {
             command.env("LOCALAPPDATA", &self.state_home);
@@ -246,11 +250,7 @@ impl Sandbox {
     }
 
     async fn connect_to(&self, child: Child) -> RunningDaemon {
-        let user = PlatformIpc::default()
-            .current_user_id()
-            .expect("the current user id must resolve");
-        let endpoint = yagura_os::default_endpoint(&user, &self.namespace());
-        let client = connect_with_retry(&endpoint, Duration::from_secs(30)).await;
+        let client = connect_with_retry(self.endpoint.endpoint()).await;
         RunningDaemon { child, client }
     }
 
@@ -302,7 +302,7 @@ impl RunningDaemon {
             },
         )
         .await;
-        match read_response(&mut self.client, Duration::from_secs(15)).await {
+        match read_response(&mut self.client).await {
             DaemonMessage::WindowOpened { window_id, .. } => window_id,
             other => panic!(
                 "expected window_opened, got {other:?}; daemon log:\n{}",
@@ -319,7 +319,7 @@ impl RunningDaemon {
         what: &str,
         done: impl Fn(&str) -> bool,
     ) -> String {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         let mut last = String::new();
         loop {
             send(
@@ -330,8 +330,7 @@ impl RunningDaemon {
                 },
             )
             .await;
-            if let DaemonMessage::WindowOutput { text, .. } =
-                read_response(&mut self.client, Duration::from_secs(5)).await
+            if let DaemonMessage::WindowOutput { text, .. } = read_response(&mut self.client).await
             {
                 last = text;
                 if done(&last) {

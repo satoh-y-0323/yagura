@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::Harness;
-use common::views::{CATCH_UP, assert_converges_to_model};
+use common::views::assert_converges_to_model;
 use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_protocol::{ClientMessage, TerminalSize};
 use yagura_test_support::view::ViewClient;
@@ -57,7 +57,7 @@ async fn read_text(session: &PtySession) -> String {
 }
 
 async fn wait_for_text(session: &PtySession, expected: impl Fn(&str) -> bool, what: &str) {
-    let deadline = Instant::now() + CATCH_UP;
+    let deadline = Instant::now() + common::HANG_GUARD;
     loop {
         let text = read_text(session).await;
         if expected(&text) {
@@ -98,7 +98,16 @@ fn drag_path() -> Vec<(u16, u16)> {
     path
 }
 
-async fn drag_the_window_edge(tag: &str, pause: Duration) {
+/// How the drag's resizes follow one another.
+#[derive(Clone, Copy)]
+enum Pace {
+    /// Each resize is sent as soon as the one before it was.
+    BackToBack,
+    /// Each resize is sent once the view shows the size before it.
+    EachLandsFirst,
+}
+
+async fn drag_the_window_edge(tag: &str, pace: Pace) {
     let (h, window_id, session, mut view) = open_attached(tag, PRINT_ALL_THEN_WAIT).await;
     let expected = child_lines().join("\n");
     wait_for_text(&session, |text| text == expected, "the child's lines").await;
@@ -106,8 +115,11 @@ async fn drag_the_window_edge(tag: &str, pause: Duration) {
     for (cols, rows) in drag_path() {
         // Through the view, the way the GUI resizes, so the view hears of it.
         view.send(&ClientMessage::Resize { cols, rows }).await;
-        if !pause.is_zero() {
-            tokio::time::sleep(pause).await;
+        if let Pace::EachLandsFirst = pace {
+            view.pump_until("the step's size", |grid| {
+                (grid.cols, grid.rows) == (cols, rows)
+            })
+            .await;
         }
     }
     view.sync().await;
@@ -118,21 +130,22 @@ async fn drag_the_window_edge(tag: &str, pause: Duration) {
         "every row reads once after the drag",
     )
     .await;
-    view.pump_until("the dragged size", CATCH_UP, |grid| {
+    view.pump_until("the dragged size", |grid| {
         (grid.cols, grid.rows) == (110, 30)
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "after the drag", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "after the drag").await;
 }
 
 #[tokio::test]
 async fn back_to_back_resizes_leave_no_repeated_row_and_the_view_matches_the_model() {
-    drag_the_window_edge("bundled-drag-0", Duration::ZERO).await;
+    drag_the_window_edge("bundled-drag-0", Pace::BackToBack).await;
 }
 
 #[tokio::test]
-async fn resizes_a_few_milliseconds_apart_leave_no_repeated_row_and_the_view_matches_the_model() {
-    drag_the_window_edge("bundled-drag-3", Duration::from_millis(3)).await;
+async fn resizes_that_each_land_before_the_next_leave_no_repeated_row_and_the_view_matches_the_model()
+ {
+    drag_the_window_edge("bundled-drag-step", Pace::EachLandsFirst).await;
 }
 
 /// Prints a long prompt (it wraps once the window is narrow), then for every
@@ -178,7 +191,7 @@ async fn the_cursor_the_child_reads_after_a_resize_is_the_models() {
 
     for (cols, rows) in [(40u16, 12u16), (100, 30), (25, 10), (80, 24)] {
         view.send(&ClientMessage::Resize { cols, rows }).await;
-        view.pump_until("the resized grid", CATCH_UP, |grid| {
+        view.pump_until("the resized grid", |grid| {
             (grid.cols, grid.rows) == (cols, rows)
         })
         .await;
@@ -202,7 +215,7 @@ async fn the_cursor_the_child_reads_after_a_resize_is_the_models() {
             )
             .await;
             view.sync().await;
-            assert_converges_to_model(&mut view, &h, &window_id, "before the key", CATCH_UP).await;
+            assert_converges_to_model(&mut view, &h, &window_id, "before the key").await;
             let model_cursor = (view.grid.cursor.row, view.grid.cursor.col);
             let before = reports_in(&read_text(&session).await).len();
             h.write_input(&window_id, b"k").await;

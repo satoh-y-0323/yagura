@@ -28,12 +28,13 @@ use yagura_daemon::child_env::{
 use yagura_daemon::cli::{self, CliCommand};
 use yagura_daemon::config::{
     StartupParts, log_dir, prepare_report_dir, registration_cwd, report_dir,
-    resolve_close_settle_ms, resolve_default_window_cwd, resolve_input_echo_window_ms,
-    resolve_max_windows, resolve_resize_redraw_window_ms, resolve_status_token_override,
+    resolve_default_window_cwd, resolve_input_echo_window_ms, resolve_max_windows,
+    resolve_resize_redraw_window_ms, resolve_status_token_override,
 };
 use yagura_daemon::control::{self, ApprovalPolicy};
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_daemon::detector::layers::DetectionLayers;
+use yagura_daemon::holder_host::{HolderPlace, holder_file_name};
 use yagura_daemon::inbox::{PointerValue, is_session_id, values_at_pointers};
 use yagura_daemon::ipc::{chat, plan, ticket};
 use yagura_daemon::palette_store::PaletteStore;
@@ -249,10 +250,6 @@ async fn async_main(
         std::env::var("YAGURA_MAX_WINDOWS").ok().as_deref(),
         defaults.max_windows,
     );
-    let close_settle_ms = resolve_close_settle_ms(
-        std::env::var("YAGURA_CLOSE_SETTLE_MS").ok().as_deref(),
-        defaults.close_settle_ms,
-    );
     let input_echo_window_ms = resolve_input_echo_window_ms(
         std::env::var("YAGURA_INPUT_ECHO_WINDOW_MS").ok().as_deref(),
         defaults.input_echo_window_ms,
@@ -400,7 +397,6 @@ async fn async_main(
         bundled_definitions: detection_layers.bundled,
         detection_name,
         max_windows,
-        close_settle_ms,
         input_echo_window_ms,
         resize_redraw_window_ms,
         playbook,
@@ -471,6 +467,23 @@ async fn async_main(
         }
     };
     config.mcp_bridge = resolve_mcp_bridge(config.host_os.platform());
+    config.holder_exe = resolve_holder_exe();
+    // One spelling of the holders directory for every launch: a holder's
+    // endpoint name is derived from it.
+    config.holder_place = match yagura_os::default_state_base_dir() {
+        Some(base) => Some(HolderPlace {
+            daemon_endpoint: endpoint.clone(),
+            holders_dir: yagura_os::instance_dir(&base, &namespace).join(HOLDERS_DIR_NAME),
+            log_file: Some(log_dir(&base, &namespace).join(LOG_FILE_NAME)),
+        }),
+        None => {
+            tracing::warn!(
+                "no state directory resolved; window holders keep their files in a temporary \
+                 directory of this run"
+            );
+            None
+        }
+    };
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));
     // The endpoint is held by now, so no other daemon of this instance owns a
@@ -619,6 +632,27 @@ const MCP_CONFIG_DIR_NAME: &str = "mcp";
 
 /// File stem of the MCP bridge executable shipped next to the daemon.
 const MCP_BRIDGE_EXE_STEM: &str = "yagura-mcp";
+
+/// Directory, under the instance's state directory, the window holders keep
+/// their records and exit files in.
+const HOLDERS_DIR_NAME: &str = "holders";
+
+/// The daemon's log file in its log directory.
+const LOG_FILE_NAME: &str = "daemon.log";
+
+/// The window holder shipped beside this executable, and nowhere else.
+/// `None` (with an error) when the daemon's own location is unknown: no
+/// window can open then.
+fn resolve_holder_exe() -> Option<PathBuf> {
+    let holder = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(holder_file_name())));
+    match holder.as_deref() {
+        Some(path) => tracing::info!("window holder: {}", path.display()),
+        None => tracing::error!("cannot locate the daemon executable; no window can open"),
+    }
+    holder
+}
 
 /// Resolves the MCP bridge shipped next to this executable, in the form a
 /// child process can be handed. `None` (with a warning) when it is absent or
@@ -1140,7 +1174,7 @@ fn open_log_file(
     let base = yagura_os::default_state_base_dir()
         .ok_or_else(|| "failed to resolve the log directory".to_string())?;
     let dir = log_dir(&base, namespace);
-    let path = dir.join("daemon.log");
+    let path = dir.join(LOG_FILE_NAME);
     // Unlike the session database, the log directory has no explicit-path
     // override, so it is narrowed to owner-only unconditionally.
     yagura_os::secure_owned_dir(&base, &dir).map_err(|reason| {

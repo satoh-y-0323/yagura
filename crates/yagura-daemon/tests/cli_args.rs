@@ -973,47 +973,7 @@ fn resolve_max_windows_parses_valid_positive_integer() {
     }
 }
 
-// resolve_close_settle_ms: missing / blank / non-numeric / zero all fall back to
-// the provided default rather than disabling the wait entirely.
-
-#[test]
-fn resolve_close_settle_ms_returns_default_when_env_not_set() {
-    let result = yagura_daemon::config::resolve_close_settle_ms(None, 200);
-    assert_eq!(result, 200, "unset env var must use the provided default");
-}
-
-#[test]
-fn resolve_close_settle_ms_returns_default_on_invalid_values() {
-    let invalid_values = [
-        "0",    // zero is invalid (would disable the wait entirely)
-        "-1",   // negative is invalid
-        "abc",  // non-numeric is invalid
-        "32.5", // float is invalid
-        "",     // empty string is invalid
-        "   ",  // whitespace-only is invalid (blank, distinct from empty)
-    ];
-    for invalid in &invalid_values {
-        let result = yagura_daemon::config::resolve_close_settle_ms(Some(invalid), 200);
-        assert_eq!(
-            result, 200,
-            "invalid value {invalid:?} must return default (fail-safe)"
-        );
-    }
-}
-
-#[test]
-fn resolve_close_settle_ms_parses_valid_positive_integer() {
-    let test_cases = [("1", 1), ("200", 200), ("5000", 5000), ("60000", 60000)];
-    for (input, expected) in &test_cases {
-        let result = yagura_daemon::config::resolve_close_settle_ms(Some(input), 200);
-        assert_eq!(
-            result, *expected,
-            "valid value {input} must be parsed correctly"
-        );
-    }
-}
-
-// resolve_input_echo_window_ms: same fail-safe shape as resolve_close_settle_ms,
+// resolve_input_echo_window_ms: same fail-safe shape as resolve_max_windows,
 // and a valid value surrounded by whitespace still parses.
 
 #[test]
@@ -1058,8 +1018,7 @@ fn resolve_input_echo_window_ms_trims_leading_and_trailing_whitespace() {
     let result = yagura_daemon::config::resolve_input_echo_window_ms(Some("  250  "), 150);
     assert_eq!(
         result, 250,
-        "a valid value padded with surrounding whitespace must still parse (same trim \
-         behavior as resolve_close_settle_ms)"
+        "a valid value padded with surrounding whitespace must still parse"
     );
 }
 
@@ -1109,7 +1068,7 @@ fn resolve_resize_redraw_window_ms_trims_leading_and_trailing_whitespace() {
     assert_eq!(
         result, 250,
         "a valid value padded with surrounding whitespace must still parse (same trim \
-         behavior as resolve_close_settle_ms / resolve_input_echo_window_ms)"
+         behavior as resolve_input_echo_window_ms)"
     );
 }
 

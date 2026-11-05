@@ -4,6 +4,8 @@
 //! line the child printed still reads back as one line after the window was
 //! narrowed and widened again.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -52,7 +54,7 @@ async fn wait_for_text(session: &PtySession, needle: &str) {
 async fn a_long_line_reads_as_one_line_after_the_window_is_narrowed_and_widened() {
     let line = long_line();
     let child = load_child_path();
-    let session = PtySession::spawn_with_command(
+    let session = common::spawn_session(
         &[child.to_str().unwrap(), "text", line.as_str()],
         &DaemonConfig::default(),
     )

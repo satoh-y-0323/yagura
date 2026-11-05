@@ -11,19 +11,17 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use common::{Harness, read_response, run_on_own_runtime, send};
 use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
-const MAX_COLS: u16 = 1000;
-const MAX_ROWS: u16 = 1000;
+/// The flooded screen's size. The cases measure that reads get their turn
+/// while the child floods, not how much work one fill is, so it stays small.
+const FLOOD_COLS: u16 = 100;
+const FLOOD_ROWS: u16 = 100;
 /// How many reads must get their turn while the flood runs.
 const READS_DURING_FLOOD: usize = 5;
-/// Fails a case whose runtime stopped, instead of hanging the test binary.
-const CASE_GUARD: Duration = Duration::from_secs(180);
-const REPLY_GUARD: Duration = Duration::from_secs(60);
 
 fn load_child_path() -> PathBuf {
     let mut dir = std::env::current_exe().expect("current_exe");
@@ -60,10 +58,13 @@ async fn reads_get_their_turn_during(mode: &str) {
     let config = DaemonConfig::default();
     let argv = load_command(mode);
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let session = PtySession::spawn_with_command(&argv, &config)
+    let session = common::spawn_session(&argv, &config)
         .await
         .expect("spawn the load child");
-    session.resize(MAX_COLS, MAX_ROWS).await.expect("resize");
+    session
+        .resize(FLOOD_COLS, FLOOD_ROWS)
+        .await
+        .expect("resize");
     // The child floods without end from its start, so any output means it is.
     next_output(&session).await;
 
@@ -79,12 +80,12 @@ async fn reads_get_their_turn_during(mode: &str) {
 
 #[test]
 fn reads_get_their_turn_while_the_child_floods_screen_fills() {
-    run_on_own_runtime(CASE_GUARD, || reads_get_their_turn_during("align"));
+    run_on_own_runtime(|| reads_get_their_turn_during("align"));
 }
 
 #[test]
 fn reads_get_their_turn_while_the_child_floods_repeat_requests() {
-    run_on_own_runtime(CASE_GUARD, || reads_get_their_turn_during("rep"));
+    run_on_own_runtime(|| reads_get_their_turn_during("rep"));
 }
 
 /// Sends `request` about a window whose model is held, then the same request
@@ -106,12 +107,12 @@ async fn another_window_is_answered_while_one_model_is_held(request: fn(String) 
     let mut other_client = h.connect().await;
     for _ in 0..3 {
         send(&mut other_client, &request(other_id.clone())).await;
-        let reply = read_response(&mut other_client, REPLY_GUARD).await;
+        let reply = read_response(&mut other_client).await;
         assert_answers(&reply);
     }
 
     drop(hold);
-    let reply = read_response(&mut held_client, REPLY_GUARD).await;
+    let reply = read_response(&mut held_client).await;
     assert_answers(&reply);
     h.registry.terminate_all().await;
 }
@@ -128,7 +129,7 @@ fn assert_answers(reply: &DaemonMessage) {
 
 #[test]
 fn read_output_of_another_window_is_answered_while_one_model_is_held() {
-    run_on_own_runtime(CASE_GUARD, || {
+    run_on_own_runtime(|| {
         another_window_is_answered_while_one_model_is_held(|window_id| ClientMessage::ReadOutput {
             window_id,
             lines: Some(50),
@@ -138,7 +139,7 @@ fn read_output_of_another_window_is_answered_while_one_model_is_held() {
 
 #[test]
 fn the_status_of_another_window_is_answered_while_one_model_is_held() {
-    run_on_own_runtime(CASE_GUARD, || {
+    run_on_own_runtime(|| {
         another_window_is_answered_while_one_model_is_held(|window_id| {
             ClientMessage::GetWindowStatus { window_id }
         })

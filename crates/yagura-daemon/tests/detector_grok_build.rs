@@ -189,7 +189,7 @@ fn grok_build_definition_carries_the_measured_input_keys() {
         .expect("the bundled definition must declare [input]");
 
     assert_eq!(input.clear.as_deref(), Some("\u{15}\u{7f}"));
-    assert_eq!(input.probe.as_deref(), Some("x"));
+    assert_eq!(input.probe.as_deref(), Some("xzv"));
     assert_eq!(input.submit.as_deref(), Some("\r"));
     assert_eq!(input.bracketed_paste, Some(true));
 }

@@ -34,14 +34,6 @@ use yagura_test_support::ipc::Connection;
 
 // --- timing -------------------------------------------------------------------
 
-/// How long any single reply or push may take before a case gives up. An
-/// operation may run several child processes in sequence (probe, add, a
-/// settings-file edit, a status re-read), so this is generous.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How long a case that must observe "no child ran" waits.
-const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(2000);
-
 // --- fixture layout -------------------------------------------------------------
 
 /// One case's directories: the profiles directory, the home the daemon
@@ -372,8 +364,8 @@ async fn run_and_collect(
     request_id: u64,
 ) -> (Requested, RunResult) {
     send_run(client, profile, action, request_id).await;
-    let requested = expect_requested(read_response(client, REPLY_TIMEOUT).await, request_id);
-    let result = expect_result(read_response(client, REPLY_TIMEOUT).await, request_id);
+    let requested = expect_requested(read_response(client).await, request_id);
+    let result = expect_result(read_response(client).await, request_id);
     (requested, result)
 }
 
@@ -1166,10 +1158,7 @@ async fn a_window_connection_and_an_unidentified_connection_are_refused_and_star
         1,
     )
     .await;
-    expect_error(
-        read_response(&mut window_client, REPLY_TIMEOUT).await,
-        "auth_failed",
-    );
+    expect_error(read_response(&mut window_client).await, "auth_failed");
 
     let mut unidentified = h.connect().await;
     send_run(
@@ -1179,13 +1168,25 @@ async fn a_window_connection_and_an_unidentified_connection_are_refused_and_star
         2,
     )
     .await;
-    expect_error(
-        read_response(&mut unidentified, REPLY_TIMEOUT).await,
-        "auth_failed",
-    );
+    expect_error(read_response(&mut unidentified).await, "auth_failed");
 
-    tokio::time::sleep(NEGATIVE_OBSERVATION).await;
-    assert!(!log.exists(), "a refused operation must not start a child");
+    // Control, and the point after which a refused operation's children are
+    // all in the log: the change slot is free only once an operation holding
+    // it has run its steps to their end, so an approver's run of the same
+    // Register is accepted only then. That Register is one `add`.
+    let mut approver = approver_connection(&h).await;
+    let (_, result) =
+        run_and_collect(&mut approver, "juliet", McpRegistrationAction::Register, 3).await;
+    assert!(result.error.is_none(), "{result:?}");
+    let calls = std::fs::read_to_string(&log).expect("the approver's operation logged its calls");
+    let add_calls = calls
+        .lines()
+        .filter(|line| line.contains("\"add\""))
+        .count();
+    assert_eq!(
+        add_calls, 1,
+        "only the approver's operation may start a child: {calls}"
+    );
 
     h.registry.terminate_all().await;
 }
@@ -1209,16 +1210,10 @@ async fn an_unknown_or_table_less_profile_is_invalid_argument() {
         1,
     )
     .await;
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut approver).await, "invalid_argument");
 
     send_run(&mut approver, "kilo", McpRegistrationAction::Register, 2).await;
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut approver).await, "invalid_argument");
 }
 
 #[tokio::test]
@@ -1245,18 +1240,15 @@ async fn a_second_change_while_one_runs_is_resource_exhausted_and_the_slot_frees
     let mut approver = approver_connection(&h).await;
 
     send_run(&mut approver, "lima", McpRegistrationAction::Register, 1).await;
-    expect_requested(read_response(&mut approver, REPLY_TIMEOUT).await, 1);
+    expect_requested(read_response(&mut approver).await, 1);
     send_run(&mut approver, "lima", McpRegistrationAction::Register, 2).await;
 
     // The first operation is held, so the second one's answer comes first.
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "resource_exhausted",
-    );
+    expect_error(read_response(&mut approver).await, "resource_exhausted");
     std::fs::write(&release, b"").expect("release the held fixture calls");
-    let _ = expect_result(read_response(&mut approver, REPLY_TIMEOUT).await, 1);
+    let _ = expect_result(read_response(&mut approver).await, 1);
 
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut request_id = 3;
     loop {
         send_run(
@@ -1266,14 +1258,11 @@ async fn a_second_change_while_one_runs_is_resource_exhausted_and_the_slot_frees
             request_id,
         )
         .await;
-        let reply: DaemonMessage = read_response(&mut approver, REPLY_TIMEOUT).await;
+        let reply: DaemonMessage = read_response(&mut approver).await;
         match reply {
             DaemonMessage::McpRegistrationRequested { .. } => {
                 expect_requested(reply, request_id);
-                let _ = expect_result(
-                    read_response(&mut approver, REPLY_TIMEOUT).await,
-                    request_id,
-                );
+                let _ = expect_result(read_response(&mut approver).await, request_id);
                 break;
             }
             DaemonMessage::Error { ref code, .. }
@@ -1304,16 +1293,10 @@ async fn no_bridge_makes_register_and_update_invalid_state() {
     let mut approver = approver_connection(&h).await;
 
     send_run(&mut approver, "mike", McpRegistrationAction::Register, 1).await;
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "invalid_state",
-    );
+    expect_error(read_response(&mut approver).await, "invalid_state");
 
     send_run(&mut approver, "mike", McpRegistrationAction::Update, 2).await;
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "invalid_state",
-    );
+    expect_error(read_response(&mut approver).await, "invalid_state");
 }
 
 // =============================================================================
@@ -1364,8 +1347,8 @@ async fn a_steps_output_is_sanitized_and_bounded_and_never_reaches_the_log() {
         1,
     )
     .await;
-    expect_requested(read_response(&mut approver, REPLY_TIMEOUT).await, 1);
-    let result_push: DaemonMessage = read_response(&mut approver, REPLY_TIMEOUT).await;
+    expect_requested(read_response(&mut approver).await, 1);
+    let result_push: DaemonMessage = read_response(&mut approver).await;
     let result = expect_result(result_push, 1);
 
     // The add step's own output is shown to the caller who ran the
@@ -1394,7 +1377,7 @@ async fn a_steps_output_is_sanitized_and_bounded_and_never_reaches_the_log() {
     // unspecified order: trigger the positive control's warn again, from
     // this connection, rather than depending on that first pass.
     send(&mut approver, &ClientMessage::ListProfiles).await;
-    let _ = read_response(&mut approver, REPLY_TIMEOUT).await;
+    let _ = read_response(&mut approver).await;
 
     assert!(
         captured_log_contains("logcontrolsentinel"),

@@ -13,22 +13,17 @@
 //! capture's process group.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use yagura_daemon::child_env::ChildBaseEnv;
 use yagura_daemon::pty::CaptureChildEnv;
 use yagura_os::{CaptureEnv, CaptureLimits, CaptureOutcome, MarkerOutcome};
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::paths::TempDir;
-use yagura_test_support::process::{assert_file_len_stable, wait_until_file_grows};
-
-/// How long a control wait for the grandchild's first tick, or for a normal
-/// exit, may take before the test gives up and fails loud.
-const GROWTH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long [`assert_file_len_stable`] keeps sampling for renewed growth,
-/// after its own fixed settle wait for an in-flight teardown to land.
-const OBSERVATION: Duration = Duration::from_secs(3);
+#[cfg(unix)]
+use yagura_test_support::process::wait_until_file_grows;
+use yagura_test_support::process::{process_is_running, wait_processes_gone_blocking};
 
 /// Path to the fixture binary `name` that belongs to the test binary
 /// currently running.
@@ -82,7 +77,7 @@ fn capture_child_argv(mode_args: &[&str]) -> Vec<String> {
 
 fn generous_limits() -> CaptureLimits {
     CaptureLimits {
-        timeout: GROWTH_TIMEOUT,
+        timeout: HANG_GUARD,
         max_output_bytes: 1 << 20,
     }
 }
@@ -180,13 +175,11 @@ fn stderr_over_the_output_limit_does_not_turn_the_outcome_into_output_too_large(
     let argv = capture_child_argv(&["stderr-bytes", "8192", "stdout intact"]);
     let child = yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), None)
         .expect("spawn should succeed");
-    let timeout = Duration::from_secs(10);
     let limits = CaptureLimits {
-        timeout,
+        timeout: HANG_GUARD,
         max_output_bytes: 1024,
     };
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || child.collect(limits));
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits));
     match outcome {
         CaptureOutcome::Exited {
             code,
@@ -207,12 +200,31 @@ fn stderr_over_the_output_limit_does_not_turn_the_outcome_into_output_too_large(
 
 // ---------------------------------------------------------------------
 // A timeout, and an output-size overrun, each end the whole descendant
-// tree -- observed through a grandchild's heartbeat file, which must have
-// been growing beforehand (the control) and must stop growing afterwards.
+// tree -- observed through the process id of the grandchild ticking into a
+// heartbeat file, which must be running beforehand (the control) and must
+// end afterwards.
 // ---------------------------------------------------------------------
 
-#[tokio::test]
-async fn a_timeout_returns_timed_out_and_ends_the_whole_descendant_tree() {
+/// The process id the `tick` grandchild writing `tick_path` publishes, once it
+/// is seen naming a running process: a probe that never reports "running"
+/// cannot let [`assert_descendant_ends`] pass.
+fn running_tick_pid(tick_path: &Path) -> u32 {
+    let mut pid_path = tick_path.as_os_str().to_owned();
+    pid_path.push(".pid");
+    running_published_pid(Path::new(&pid_path))
+}
+
+/// Waits for `pid` to end, failing at [`HANG_GUARD`] with `after` naming the
+/// teardown route that left it running.
+fn assert_descendant_ends(pid: u32, after: &str) {
+    let after = after.to_string();
+    wait_processes_gone_blocking(&[pid], move |_| {
+        format!("the descendant (pid {pid}) is still running {after}: it outlived the teardown")
+    });
+}
+
+#[test]
+fn a_timeout_returns_timed_out_and_ends_the_whole_descendant_tree() {
     let tmp = TempDir::new("yagura-one-shot-capture", "timeout");
     let tick_path = tmp.path().join("tick.log");
 
@@ -224,7 +236,7 @@ async fn a_timeout_returns_timed_out_and_ends_the_whole_descendant_tree() {
     let child = yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), None)
         .expect("spawn should succeed");
 
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let grandchild = running_tick_pid(&tick_path);
 
     let outcome = child.collect(CaptureLimits {
         timeout: Duration::from_millis(500),
@@ -235,7 +247,7 @@ async fn a_timeout_returns_timed_out_and_ends_the_whole_descendant_tree() {
         "expected TimedOut, got {outcome:?}"
     );
 
-    assert_file_len_stable(&tick_path, OBSERVATION, "after a timeout").await;
+    assert_descendant_ends(grandchild, "after a timeout");
 }
 
 // The direct child is itself gone when `collect` returns, not merely on its way
@@ -251,7 +263,7 @@ fn the_direct_child_has_ended_by_the_time_a_timed_out_collect_returns() {
         "600000",
     ]);
     let child = spawn_inheriting(&argv);
-    let pid = wait_for_published_pid(&pid_path);
+    let pid = running_published_pid(&pid_path);
 
     let outcome = child.collect(limits_with_timeout(Duration::from_millis(300)));
 
@@ -260,13 +272,13 @@ fn the_direct_child_has_ended_by_the_time_a_timed_out_collect_returns() {
         "expected TimedOut, got {outcome:?}"
     );
     assert!(
-        process_ends_within(pid, Duration::ZERO),
+        !process_is_running(pid),
         "the direct child (pid {pid}) was still running when collect returned"
     );
 }
 
-#[tokio::test]
-async fn output_over_the_limit_returns_output_too_large_and_ends_the_whole_descendant_tree() {
+#[test]
+fn output_over_the_limit_returns_output_too_large_and_ends_the_whole_descendant_tree() {
     let tmp = TempDir::new("yagura-one-shot-capture", "output-too-large");
     let tick_path = tmp.path().join("tick.log");
 
@@ -279,10 +291,10 @@ async fn output_over_the_limit_returns_output_too_large_and_ends_the_whole_desce
     let child = yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), None)
         .expect("spawn should succeed");
 
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let grandchild = running_tick_pid(&tick_path);
 
     let outcome = child.collect(CaptureLimits {
-        timeout: Duration::from_secs(20),
+        timeout: HANG_GUARD,
         max_output_bytes: 1024,
     });
     assert!(
@@ -290,7 +302,7 @@ async fn output_over_the_limit_returns_output_too_large_and_ends_the_whole_desce
         "expected OutputTooLarge, got {outcome:?}"
     );
 
-    assert_file_len_stable(&tick_path, OBSERVATION, "after output exceeded the limit").await;
+    assert_descendant_ends(grandchild, "after output exceeded the limit");
 }
 
 // ---------------------------------------------------------------------
@@ -298,8 +310,8 @@ async fn output_over_the_limit_returns_output_too_large_and_ends_the_whole_desce
 // the whole descendant tree.
 // ---------------------------------------------------------------------
 
-#[tokio::test]
-async fn dropping_without_collecting_still_ends_the_whole_descendant_tree() {
+#[test]
+fn dropping_without_collecting_still_ends_the_whole_descendant_tree() {
     let tmp = TempDir::new("yagura-one-shot-capture", "drop-without-collect");
     let tick_path = tmp.path().join("tick.log");
 
@@ -308,14 +320,15 @@ async fn dropping_without_collecting_still_ends_the_whole_descendant_tree() {
         tick_path.to_str().expect("tick path must be valid UTF-8"),
         "hang",
     ]);
-    {
+    let grandchild = {
         let child = yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), None)
             .expect("spawn should succeed");
-        wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+        let grandchild = running_tick_pid(&tick_path);
         drop(child);
-    }
+        grandchild
+    };
 
-    assert_file_len_stable(&tick_path, OBSERVATION, "after dropping without collecting").await;
+    assert_descendant_ends(grandchild, "after dropping without collecting");
 }
 
 // ---------------------------------------------------------------------
@@ -339,8 +352,8 @@ fn a_missing_program_fails_to_spawn() {
 // ---------------------------------------------------------------------
 
 #[cfg(windows)]
-#[tokio::test]
-async fn a_cmd_shim_resolved_through_resolve_program_times_out_down_to_the_fixture_grandchild() {
+#[test]
+fn a_cmd_shim_resolved_through_resolve_program_times_out_down_to_the_fixture_grandchild() {
     use yagura_os::program::{
         Platform, ProgramLookup, default_is_executable, into_spawn_argv, resolve_program,
     };
@@ -371,7 +384,7 @@ async fn a_cmd_shim_resolved_through_resolve_program_times_out_down_to_the_fixtu
     let child = yagura_os::spawn_captured(&spawn_argv, None, CaptureEnv::Inherit(&[]), None)
         .expect("spawn should succeed");
 
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let grandchild = running_tick_pid(&tick_path);
 
     let outcome = child.collect(CaptureLimits {
         timeout: Duration::from_millis(500),
@@ -382,12 +395,7 @@ async fn a_cmd_shim_resolved_through_resolve_program_times_out_down_to_the_fixtu
         "expected TimedOut, got {outcome:?}"
     );
 
-    assert_file_len_stable(
-        &tick_path,
-        OBSERVATION,
-        "after a timeout through a .cmd shim",
-    )
-    .await;
+    assert_descendant_ends(grandchild, "after a timeout through a .cmd shim");
 }
 
 // ---------------------------------------------------------------------
@@ -426,14 +434,16 @@ async fn spawn_one_shot_behaves_like_the_direct_path_for_a_normal_exit() {
 // writer of the pipe to go away.
 // ---------------------------------------------------------------------
 
-/// Extra time, on top of a capture's own timeout, that tearing the tree down
-/// and reaping the child may take before a return counts as late.
-const RETURN_SLACK: Duration = Duration::from_secs(3);
-
 /// How long a pipe-holding grandchild that a teardown is expected to kill may
-/// live on its own: far beyond every timeout below, so only a teardown (or a
-/// wait for end-of-file) can explain it going away within a case.
-const HOLDER_LIFETIME: Duration = Duration::from_secs(60);
+/// live on its own: past [`HANG_GUARD`] counted from any later point in a
+/// case, so only a teardown (or a wait for end-of-file) can explain it going
+/// away within the case.
+const HOLDER_LIFETIME: Duration = Duration::from_secs(5 * HANG_GUARD.as_secs());
+
+/// A capture timeout past [`HANG_GUARD`]: a capture that wrongly waits for a
+/// pipe holder after its end marker hangs the case at the guard instead of
+/// returning at its own timeout as if it had completed.
+const PAST_THE_GUARD: Duration = Duration::from_secs(2 * HANG_GUARD.as_secs());
 
 /// The end marker every marker-driven case looks for.
 const END_MARKER: &str = "[capture-end-marker]";
@@ -450,23 +460,19 @@ fn spawn_inheriting(argv: &[String]) -> yagura_os::CapturedChild {
         .expect("spawn should succeed")
 }
 
-/// Runs `run` on a detached thread and waits at most `outer` for it, so a
-/// capture whose return is not bounded fails the case instead of hanging
-/// the whole test binary. Returns the result and how long it took.
-fn run_within<T: Send + 'static>(
-    outer: Duration,
-    run: impl FnOnce() -> T + Send + 'static,
-) -> (T, Duration) {
+/// Runs `run` on a detached thread and waits for it at most [`HANG_GUARD`],
+/// so a capture whose return is not bounded fails the case instead of
+/// hanging the whole test binary.
+fn run_guarded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = std::sync::mpsc::channel::<T>();
-    let started = Instant::now();
     std::thread::spawn(move || {
         let _ = tx.send(run());
     });
-    match rx.recv_timeout(outer) {
-        Ok(value) => (value, started.elapsed()),
+    match rx.recv_timeout(HANG_GUARD) {
+        Ok(value) => value,
         Err(_) => panic!(
-            "the capture had not returned after {outer:?}: its return is not bounded by its own \
-             timeout"
+            "the capture had not returned after {HANG_GUARD:?}: its return is not bounded by its \
+             own timeout"
         ),
     }
 }
@@ -522,11 +528,30 @@ fn pipe_holder_stderr_argv(
 #[cfg(unix)]
 const OWN_GROUP_LAUNCHER: [&str; 3] = ["bash", "-c", "set -m; \"$0\" \"$@\" &"];
 
-/// How long the grandchild outside the group lives. Nothing tears it down, so
-/// it bounds how long it outlives its case; it must still outlast the case's
-/// outer deadline and the survival check after it.
+/// The grandchild outside the capture's group: it lives past [`HANG_GUARD`]
+/// ([`HOLDER_LIFETIME`]) and nothing the capture does tears it down, so the
+/// case kills it, through the process id it publishes, once it ends.
 #[cfg(unix)]
-const OUTSIDE_HOLDER_LIFETIME: Duration = Duration::from_secs(20);
+struct OutsideHolder(u32);
+
+#[cfg(unix)]
+impl OutsideHolder {
+    /// The holder ticking into `tick_path`, once it is seen running.
+    fn running(tick_path: &Path) -> Self {
+        Self(running_tick_pid(tick_path))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OutsideHolder {
+    fn drop(&mut self) {
+        yagura_os::schedule_force_kill(
+            self.0,
+            Duration::ZERO,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+    }
+}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -535,19 +560,17 @@ async fn a_timeout_returns_within_its_bound_while_a_descendant_outside_the_group
     let tick_path = tmp.path().join("tick.log");
     let argv = pipe_holder_argv(
         &tick_path,
-        OUTSIDE_HOLDER_LIFETIME,
+        HOLDER_LIFETIME,
         "outside holder started",
         "exit",
         &OWN_GROUP_LAUNCHER,
     );
     let child = spawn_inheriting(&argv);
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let _holder = OutsideHolder::running(&tick_path);
+    wait_until_file_grows(&tick_path).await;
 
     let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     assert!(
         matches!(outcome, CaptureOutcome::TimedOut),
         "expected TimedOut, got {outcome:?}"
@@ -555,18 +578,15 @@ async fn a_timeout_returns_within_its_bound_while_a_descendant_outside_the_group
 
     // The case only means something if the holder really sat outside the
     // torn-down group: it must still be ticking after collect returned.
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    wait_until_file_grows(&tick_path).await;
 }
 
 #[test]
 fn a_timeout_bounded_run_with_no_descendant_holding_stdout_returns_exited() {
     let argv = capture_child_argv(&["echo", "0", "no holder"]);
     let child = spawn_inheriting(&argv);
-    let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let timeout = HANG_GUARD;
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     match outcome {
         CaptureOutcome::Exited { code, stdout, .. } => {
             assert_eq!(code, Some(0));
@@ -593,10 +613,7 @@ fn stdout_closed_argv(mode_args: &[&str]) -> Vec<String> {
 fn collect_does_not_report_an_exit_for_a_child_that_closed_stdout_but_still_runs() {
     let child = spawn_inheriting(&stdout_closed_argv(&["sleep", "600000"]));
     let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     assert!(
         matches!(outcome, CaptureOutcome::TimedOut),
         "expected TimedOut, got {outcome:?}"
@@ -628,10 +645,9 @@ fn collect_returns_the_own_exit_code_of_a_child_that_closed_stdout_before_exitin
 fn collect_until_does_not_report_an_exit_for_a_child_that_closed_stdout_but_still_runs() {
     let child = spawn_inheriting(&stdout_closed_argv(&["sleep", "600000"]));
     let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     assert!(
         matches!(outcome, MarkerOutcome::TimedOut),
         "expected TimedOut, got {outcome:?}"
@@ -651,11 +667,12 @@ fn collect_until_completes_at_the_end_marker_while_a_descendant_in_the_group_hol
     );
     let child = spawn_inheriting(&argv);
 
-    let timeout = Duration::from_secs(10);
-    let (outcome, elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    // The holder outlives the guard and the timeout is past it, so a capture
+    // that waits for the pipe to close instead of completing at the marker
+    // hangs here.
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(PAST_THE_GUARD), END_MARKER.as_bytes())
+    });
     match outcome {
         MarkerOutcome::Reached {
             stdout,
@@ -673,11 +690,6 @@ fn collect_until_completes_at_the_end_marker_while_a_descendant_in_the_group_hol
         }
         other => panic!("expected Reached, got {other:?}"),
     }
-    assert!(
-        elapsed < timeout / 2,
-        "collect_until returned after {elapsed:?}: it waited for the pipe to close instead of \
-         completing at the marker"
-    );
 }
 
 #[test]
@@ -693,10 +705,7 @@ fn collect_times_out_on_the_same_in_group_holder_that_collect_until_completes_on
     let child = spawn_inheriting(&argv);
 
     let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     assert!(
         matches!(outcome, CaptureOutcome::TimedOut),
         "expected TimedOut while the holder keeps the pipe open, got {outcome:?}"
@@ -715,11 +724,10 @@ fn collect_until_waits_for_the_direct_child_to_finish_after_the_marker() {
     ]);
     let child = spawn_inheriting(&argv);
 
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let timeout = HANG_GUARD;
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     // Checked before anything else: the child's own after-marker work must
     // have run to completion by the time collect_until hands back control.
     let done_exists = done_path.exists();
@@ -741,20 +749,19 @@ fn collect_until_waits_for_the_direct_child_to_finish_after_the_marker() {
     );
 }
 
-#[tokio::test]
-async fn collect_until_stops_waiting_for_a_child_that_outlives_the_timeout_and_ends_the_tree() {
+#[test]
+fn collect_until_stops_waiting_for_a_child_that_outlives_the_timeout_and_ends_the_tree() {
     let tmp = TempDir::new("yagura-one-shot-capture", "marker-then-hang");
     let tick_path = tmp.path().join("tick.log");
     let text = format!("before {END_MARKER}");
     let argv = pipe_holder_argv(&tick_path, HOLDER_LIFETIME, &text, "hang", &[]);
     let child = spawn_inheriting(&argv);
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let holder = running_tick_pid(&tick_path);
 
     let timeout = Duration::from_secs(2);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     match outcome {
         MarkerOutcome::Reached {
             stdout,
@@ -772,12 +779,7 @@ async fn collect_until_stops_waiting_for_a_child_that_outlives_the_timeout_and_e
         }
         other => panic!("expected Reached, got {other:?}"),
     }
-    assert_file_len_stable(
-        &tick_path,
-        OBSERVATION,
-        "after collect_until gave up waiting for the child",
-    )
-    .await;
+    assert_descendant_ends(holder, "after collect_until gave up waiting for the child");
 }
 
 #[test]
@@ -797,11 +799,10 @@ fn output_written_after_the_end_marker_is_drained_so_the_child_exits_normally() 
     ]);
     let child = spawn_inheriting(&argv);
 
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let timeout = HANG_GUARD;
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     let done_exists = done_path.exists();
     match outcome {
         MarkerOutcome::Reached {
@@ -839,11 +840,10 @@ fn an_end_marker_split_across_two_writes_is_still_found() {
     ]);
     let child = spawn_inheriting(&argv);
 
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let timeout = HANG_GUARD;
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     match outcome {
         MarkerOutcome::Reached { stdout, .. } => {
             let stdout_text = String::from_utf8_lossy(&stdout);
@@ -860,11 +860,10 @@ fn an_end_marker_split_across_two_writes_is_still_found() {
 fn collect_until_reports_an_exit_without_the_marker_with_its_stdout_and_code() {
     let argv = capture_child_argv(&["echo", "3", "no marker in this output"]);
     let child = spawn_inheriting(&argv);
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let timeout = HANG_GUARD;
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     match outcome {
         MarkerOutcome::Exited { code, stdout, .. } => {
             assert_eq!(code, Some(3));
@@ -878,17 +877,16 @@ fn collect_until_reports_an_exit_without_the_marker_with_its_stdout_and_code() {
 fn collect_until_reports_output_over_the_limit_before_any_marker() {
     let argv = capture_child_argv(&["bytes", "4096"]);
     let child = spawn_inheriting(&argv);
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(
-                CaptureLimits {
-                    timeout,
-                    max_output_bytes: 1024,
-                },
-                END_MARKER.as_bytes(),
-            )
-        });
+    let timeout = HANG_GUARD;
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(
+            CaptureLimits {
+                timeout,
+                max_output_bytes: 1024,
+            },
+            END_MARKER.as_bytes(),
+        )
+    });
     assert!(
         matches!(outcome, MarkerOutcome::OutputTooLarge),
         "expected OutputTooLarge, got {outcome:?}"
@@ -900,7 +898,7 @@ const LIMIT: usize = 1024;
 
 fn limits_of_exactly(max_output_bytes: usize) -> CaptureLimits {
     CaptureLimits {
-        timeout: GROWTH_TIMEOUT,
+        timeout: HANG_GUARD,
         max_output_bytes,
     }
 }
@@ -931,13 +929,12 @@ fn collect_until_keeps_stdout_of_exactly_the_output_limit() {
 
 #[test]
 fn collect_until_times_out_when_the_marker_never_comes() {
-    let argv = capture_child_argv(&["sleep", "30000"]);
+    let argv = capture_child_argv(&["sleep", "600000"]);
     let child = spawn_inheriting(&argv);
     let timeout = Duration::from_millis(500);
-    let (outcome, _elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
+    });
     assert!(
         matches!(outcome, MarkerOutcome::TimedOut),
         "expected TimedOut, got {outcome:?}"
@@ -1115,11 +1112,8 @@ fn stdin_bytes_are_delivered_to_the_child_in_full_even_at_a_large_size() {
     let child =
         yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), Some(payload.clone()))
             .expect("spawn should succeed");
-    let timeout = Duration::from_secs(10);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let timeout = HANG_GUARD;
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     match outcome {
         CaptureOutcome::Exited { code, stdout, .. } => {
             assert_eq!(code, Some(0));
@@ -1135,11 +1129,8 @@ fn a_child_that_never_reads_stdin_is_not_held_up_by_a_large_stdin_payload() {
     let payload = vec![b'z'; 1 << 20];
     let child = yagura_os::spawn_captured(&argv, None, CaptureEnv::Inherit(&[]), Some(payload))
         .expect("spawn should succeed");
-    let timeout = Duration::from_secs(5);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let timeout = HANG_GUARD;
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     match outcome {
         CaptureOutcome::Exited { code, stdout, .. } => {
             assert_eq!(code, Some(0));
@@ -1179,19 +1170,17 @@ async fn collect_returns_within_its_bound_while_a_descendant_outside_the_group_h
     let tick_path = tmp.path().join("tick.log");
     let argv = pipe_holder_stderr_argv(
         &tick_path,
-        OUTSIDE_HOLDER_LIFETIME,
+        HOLDER_LIFETIME,
         "direct child stdout",
         "exit",
         &OWN_GROUP_LAUNCHER,
     );
     let child = spawn_inheriting(&argv);
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let _holder = OutsideHolder::running(&tick_path);
+    wait_until_file_grows(&tick_path).await;
 
     let timeout = Duration::from_secs(1);
-    let (outcome, _elapsed): (CaptureOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect(limits_with_timeout(timeout))
-        });
+    let outcome: CaptureOutcome = run_guarded(move || child.collect(limits_with_timeout(timeout)));
     match outcome {
         CaptureOutcome::Exited { stdout, .. } => {
             assert_eq!(stdout, b"direct child stdout");
@@ -1204,7 +1193,7 @@ async fn collect_returns_within_its_bound_while_a_descendant_outside_the_group_h
 
     // The case only means something if the holder really sat outside the
     // torn-down group: it must still be ticking after collect returned.
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    wait_until_file_grows(&tick_path).await;
 }
 
 #[cfg(unix)]
@@ -1215,19 +1204,21 @@ async fn collect_until_completes_at_the_marker_while_a_descendant_outside_the_gr
     let text = format!("listing before the marker {END_MARKER}");
     let argv = pipe_holder_stderr_argv(
         &tick_path,
-        OUTSIDE_HOLDER_LIFETIME,
+        HOLDER_LIFETIME,
         &text,
         "exit",
         &OWN_GROUP_LAUNCHER,
     );
     let child = spawn_inheriting(&argv);
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    let _holder = OutsideHolder::running(&tick_path);
+    wait_until_file_grows(&tick_path).await;
 
-    let timeout = Duration::from_secs(10);
-    let (outcome, elapsed): (MarkerOutcome, Duration) =
-        run_within(timeout + RETURN_SLACK, move || {
-            child.collect_until(limits_with_timeout(timeout), END_MARKER.as_bytes())
-        });
+    // A timeout past the guard: a capture that waits on stderr after the
+    // marker either hangs here or returns only once the holder has exited,
+    // which the growth check below then catches.
+    let outcome: MarkerOutcome = run_guarded(move || {
+        child.collect_until(limits_with_timeout(PAST_THE_GUARD), END_MARKER.as_bytes())
+    });
     match outcome {
         MarkerOutcome::Reached { stdout, .. } => {
             let stdout_text = String::from_utf8_lossy(&stdout);
@@ -1238,14 +1229,9 @@ async fn collect_until_completes_at_the_marker_while_a_descendant_outside_the_gr
         }
         other => panic!("expected Reached, got {other:?}"),
     }
-    assert!(
-        elapsed < timeout / 2,
-        "collect_until returned after {elapsed:?}: unlike collect, it must not wait on stderr \
-         at all once the marker is found"
-    );
 
     // The holder must still be outside the torn-down group.
-    wait_until_file_grows(&tick_path, GROWTH_TIMEOUT).await;
+    wait_until_file_grows(&tick_path).await;
 }
 
 // ---------------------------------------------------------------------
@@ -1314,113 +1300,56 @@ async fn spawn_one_shot_delivers_stdin_to_the_child() {
 // runs, not be attached to it afterwards.
 // ---------------------------------------------------------------------
 
-/// Waits until `pid_path` holds a process id and returns it.
-fn wait_for_published_pid(pid_path: &std::path::Path) -> u32 {
-    let deadline = Instant::now() + GROWTH_TIMEOUT;
-    loop {
+/// Waits until `pid_path` holds a process id, and returns it once it is seen
+/// naming a running process.
+fn running_published_pid(pid_path: &Path) -> u32 {
+    let deadline = Instant::now() + HANG_GUARD;
+    let pid = loop {
         if let Some(pid) = std::fs::read_to_string(pid_path)
             .ok()
             .and_then(|text| text.trim().parse::<u32>().ok())
         {
-            return pid;
+            break pid;
         }
         assert!(
             Instant::now() < deadline,
-            "the grandchild never published its process id at {}",
+            "no process id was published at {}",
             pid_path.display()
         );
         std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Whether process `pid` has ended, waiting up to `bound` for it to.
-#[cfg(windows)]
-fn process_ends_within(pid: u32, bound: Duration) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
-    // SAFETY: the handle is opened for waiting only, used on this thread, and
-    // closed before returning.
-    unsafe {
-        match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-            Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => true,
-            Err(error) => panic!("OpenProcess({pid}) failed unexpectedly: {error}"),
-            Ok(handle) => {
-                let millis = u32::try_from(bound.as_millis()).unwrap_or(u32::MAX);
-                let signaled = WaitForSingleObject(handle, millis) == WAIT_OBJECT_0;
-                let _ = CloseHandle(handle);
-                signaled
-            }
-        }
-    }
-}
-
-/// Whether process `pid` has ended, waiting up to `bound` for it to.
-#[cfg(unix)]
-fn process_ends_within(pid: u32, bound: Duration) -> bool {
-    let deadline = Instant::now() + bound;
-    loop {
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("kill should be runnable")
-            .success();
-        if !alive {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        process_is_running(pid),
+        "the process (pid {pid}) must be running before the teardown under test"
+    );
+    pid
 }
 
 #[test]
 fn a_grandchild_started_as_the_childs_first_action_is_gone_once_collect_returns() {
     let tmp = TempDir::new("yagura-one-shot-capture", "first-grandchild");
     let pid_path = tmp.path().join("grandchild.pid");
+    let release = tmp.path().join("release");
+    // The child exits only once released, so the grandchild is seen running
+    // before the teardown under test.
     let argv = capture_child_argv(&[
         "grandchild-first",
         pid_path.to_str().expect("pid path must be valid UTF-8"),
         "0",
+        release.to_str().expect("release path must be valid UTF-8"),
     ]);
     let child = spawn_inheriting(&argv);
+    let grandchild = running_published_pid(&pid_path);
+    std::fs::write(&release, b"go").expect("the release file should be writable");
     match child.collect(generous_limits()) {
         CaptureOutcome::Exited { code, .. } => assert_eq!(code, Some(0)),
         other => panic!("expected Exited, got {other:?}"),
     }
 
-    let grandchild = wait_for_published_pid(&pid_path);
-    assert!(
-        process_ends_within(grandchild, GROWTH_TIMEOUT),
-        "the grandchild (pid {grandchild}) the child started first thing outlived collect: it \
-         was started outside the capture's teardown unit"
-    );
-}
-
-#[test]
-fn the_first_grandchild_fixture_keeps_the_grandchild_alive_while_the_child_lives() {
-    let tmp = TempDir::new("yagura-one-shot-capture", "first-grandchild-control");
-    let pid_path = tmp.path().join("grandchild.pid");
-    let argv = capture_child_argv(&[
-        "grandchild-first",
-        pid_path.to_str().expect("pid path must be valid UTF-8"),
-        "600000",
-    ]);
-    let child = spawn_inheriting(&argv);
-
-    let grandchild = wait_for_published_pid(&pid_path);
-    let ended_while_child_lives = process_ends_within(grandchild, Duration::from_millis(500));
-    drop(child);
-    assert!(
-        !ended_while_child_lives,
-        "the fixture's grandchild (pid {grandchild}) must be running while its child is"
-    );
-    assert!(
-        process_ends_within(grandchild, GROWTH_TIMEOUT),
-        "dropping the capture must still end the grandchild (pid {grandchild})"
+    assert_descendant_ends(
+        grandchild,
+        "after collect returned: the child started it first thing, outside the capture's \
+         teardown unit",
     );
 }
 
@@ -1537,7 +1466,9 @@ fn a_captured_child_does_not_inherit_an_inheritable_handle_the_daemon_holds() {
     use std::io::Read;
 
     let (mut reader, writer) = inheritable_write_pipe();
-    let argv = capture_child_argv(&["sleep", "60000"]);
+    // The child outlives the guard, so a reader blocked on a copy it holds
+    // fails the case at the guard.
+    let argv = capture_child_argv(&["sleep", "600000"]);
     let child = spawn_inheriting(&argv);
     drop(writer);
 
@@ -1546,7 +1477,7 @@ fn a_captured_child_does_not_inherit_an_inheritable_handle_the_daemon_holds() {
         let mut byte = [0u8; 1];
         let _ = tx.send(reader.read(&mut byte));
     });
-    let seen = rx.recv_timeout(Duration::from_secs(5));
+    let seen = rx.recv_timeout(HANG_GUARD);
     // Ends the child, which also releases a copy of the write end if it held one.
     drop(child);
 
@@ -1618,7 +1549,7 @@ fn concurrent_one_shots_do_not_hold_each_others_pipes() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                spawn_inheriting(&capture_child_argv(&["sleep", "60000"]))
+                spawn_inheriting(&capture_child_argv(&["sleep", "600000"]))
             })
         })
         .collect();
@@ -1629,9 +1560,7 @@ fn concurrent_one_shots_do_not_hold_each_others_pipes() {
                 barrier.wait();
                 let text = format!("short-{i}");
                 let child = spawn_inheriting(&capture_child_argv(&["echo", "0", &text]));
-                let (outcome, _) = run_within(RETURN_SLACK, move || {
-                    child.collect(limits_with_timeout(GROWTH_TIMEOUT))
-                });
+                let outcome = run_guarded(move || child.collect(limits_with_timeout(HANG_GUARD)));
                 (text, outcome)
             })
         })

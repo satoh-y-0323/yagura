@@ -82,11 +82,12 @@ pub struct InputProfile {
     pub delivery_confirm: Duration,
     /// How many times a submit may be re-sent after an unconfirmed delivery.
     pub resend_max: u8,
-    /// One printable character the receiver's editor shows as typed, written
-    /// behind the daemon's own writes: the receiver handles input in order, so
-    /// once it shows, everything written before it has been handled. `None`
-    /// means the daemon writes no judged line into the window.
-    pub probe: Option<char>,
+    /// The characters the receiver's editor shows as typed, each written on
+    /// its own behind the daemon's own writes: the receiver handles input in
+    /// order, so once one shows, everything written before it has been
+    /// handled. A later one stands in for an earlier one a dialog may have
+    /// taken. `None` means the daemon writes no judged line into the window.
+    pub probe: Option<ProbeChars>,
     /// The key that erases one character, used to take the probe back out.
     pub erase: Vec<u8>,
     /// Characters the receiver's editor takes as a key, not as text, when one
@@ -158,10 +159,7 @@ impl InputProfile {
                 .delivery_confirm_ms
                 .map_or(defaults.delivery_confirm, Duration::from_millis),
             resend_max: section.resend_max.unwrap_or(defaults.resend_max),
-            probe: section
-                .probe
-                .as_deref()
-                .and_then(|value| value.chars().next()),
+            probe: section.probe.as_deref().and_then(ProbeChars::new),
             erase: section
                 .erase
                 .as_ref()
@@ -445,10 +443,79 @@ impl ComposerLine {
         &self.0
     }
 
-    /// The composer's text once `probe` is typed behind this line.
+    /// The composer's text once `probes` are typed behind this line, in order.
     #[must_use]
-    pub fn with_probe(&self, probe: char) -> String {
-        format!("{}{probe}", self.0)
+    pub fn with_probes(&self, probes: &[char]) -> String {
+        let mut text = self.0.clone();
+        text.extend(probes);
+        text
+    }
+}
+
+/// A definition's `[input].probe`: characters that are all different, in the
+/// order the daemon tries them. Each is one probe of its own; the string as a
+/// whole is never typed.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::input::ProbeChars;
+///
+/// let probes = ProbeChars::new("xzv").expect("three distinct characters");
+/// assert_eq!(probes.pick(&['x'], &['z']), Some('v'));
+/// assert_eq!(probes.pick(&['x', 'v'], &['z']), None);
+/// assert_eq!(probes.pick_first(&[], &['x']), 'z');
+/// assert_eq!(probes.pick_first(&[], &['x', 'z', 'v']), 'x');
+///
+/// let one = ProbeChars::new("x").expect("one character");
+/// assert_eq!(one.pick_first(&[], &['x']), 'x');
+/// assert_eq!(one.pick(&['x'], &[]), None);
+/// assert!(ProbeChars::new("xx").is_none());
+/// assert!(ProbeChars::new("").is_none());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeChars {
+    first: char,
+    all: Vec<char>,
+}
+
+impl ProbeChars {
+    /// The characters of `value`, or `None` when it is empty or names a
+    /// character twice. The loader has already refused every other shape.
+    #[must_use]
+    pub fn new(value: &str) -> Option<Self> {
+        let all: Vec<char> = value.chars().collect();
+        let distinct = all
+            .iter()
+            .enumerate()
+            .all(|(index, c)| !all[..index].contains(c));
+        let first = *all.first()?;
+        distinct.then_some(Self { first, all })
+    }
+
+    /// The characters, in the order they are tried.
+    #[must_use]
+    pub fn as_slice(&self) -> &[char] {
+        &self.all
+    }
+
+    /// The first character that is neither one of the probes still `in_flight`
+    /// nor one of the characters to `avoid`: a probe behind which the end of
+    /// the composer's text and the probes typed so far can each be told apart.
+    #[must_use]
+    pub fn pick(&self, in_flight: &[char], avoid: &[char]) -> Option<char> {
+        self.all
+            .iter()
+            .copied()
+            .find(|c| !in_flight.contains(c) && !avoid.contains(c))
+    }
+
+    /// The probe a check starts with: [`ProbeChars::pick`], or the first
+    /// character when none qualifies, which leaves the check to read the
+    /// composer the way a one-character probe does.
+    #[must_use]
+    pub fn pick_first(&self, in_flight: &[char], avoid: &[char]) -> char {
+        self.pick(in_flight, avoid).unwrap_or(self.first)
     }
 }
 

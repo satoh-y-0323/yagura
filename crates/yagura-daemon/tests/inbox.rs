@@ -77,7 +77,7 @@ fn has_waiter(h: &Harness, window_id: &str) -> bool {
 
 /// Polls an observable daemon-side state; the deadline only detects a hang.
 async fn until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !condition() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -293,16 +293,9 @@ async fn a_wait_in_an_unknown_window_is_not_woken_by_a_parcel() {
 
     // Once the window can take a push the held parcels come out.
     h.write_input(&id, READY_MARKER).await;
-    wait_until_status(
-        &mut client,
-        &id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &id, WindowStatus::Idle).await;
     deposit(&h, &id, "c", "PARCEL-GAMMA");
-    let (output, _, _) =
-        expect_delivery(common::read_response(&mut waiter, Duration::from_secs(10)).await);
+    let (output, _, _) = expect_delivery(common::read_response(&mut waiter).await);
     assert!(
         output.contains("PARCEL-ALPHA"),
         "the parcel held while unknown is delivered: {output:?}"
@@ -371,8 +364,7 @@ async fn a_registered_wait_returns_when_a_parcel_arrives_in_the_declared_form() 
     until("the wait to be registered", || has_waiter(&h, &id)).await;
 
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (output, stream, code) =
-        expect_delivery(common::read_response(&mut waiter, Duration::from_secs(10)).await);
+    let (output, stream, code) = expect_delivery(common::read_response(&mut waiter).await);
     assert!(output.contains("PARCEL-ALPHA"));
     assert_eq!(stream, DeliveryStream::Stdout);
     assert_eq!(code, 7);
@@ -388,8 +380,7 @@ async fn the_default_wake_is_a_stderr_text_with_exit_code_two() {
     common::send(&mut waiter, &wait_msg(&id)).await;
     until("the wait to be registered", || has_waiter(&h, &id)).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (_, stream, code) =
-        expect_delivery(common::read_response(&mut waiter, Duration::from_secs(10)).await);
+    let (_, stream, code) = expect_delivery(common::read_response(&mut waiter).await);
     assert_eq!(stream, DeliveryStream::Stderr);
     assert_eq!(code, 2);
 }
@@ -415,15 +406,13 @@ async fn the_newest_wait_wins_and_the_old_one_ends_silently() {
 
     let mut newer = h.connect().await;
     common::send(&mut newer, &wait_msg(&id)).await;
-    let (output, _, code) =
-        expect_delivery(common::read_response(&mut old, Duration::from_secs(10)).await);
+    let (output, _, code) = expect_delivery(common::read_response(&mut old).await);
     assert!(output.is_empty(), "the superseded wait prints nothing");
     assert_eq!(code, 0, "and exits 0");
     assert!(has_waiter(&h, &id), "the newer wait stays");
 
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (output, _, code) =
-        expect_delivery(common::read_response(&mut newer, Duration::from_secs(10)).await);
+    let (output, _, code) = expect_delivery(common::read_response(&mut newer).await);
     assert!(output.contains("PARCEL-ALPHA"));
     assert_eq!(code, 2);
 }
@@ -532,7 +521,7 @@ async fn the_daemon_does_not_log_a_session_value() {
         token: "00000000000000000000000000000000".into(),
     };
     common::send(&mut client, &foreign).await;
-    let _ = common::read_response(&mut client, Duration::from_secs(5)).await;
+    let _ = common::read_response(&mut client).await;
     assert!(logs_contain("rejected a status_event"));
 
     assert!(held(

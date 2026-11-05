@@ -22,8 +22,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, DaemonMessage};
@@ -34,7 +32,7 @@ async fn probe_reports_this_builds_own_wire_revision() {
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::GetProtocolRevision).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::ProtocolRevision { revision } => {
             assert_eq!(revision, yagura_protocol::PROTOCOL_REVISION);
         }
@@ -53,7 +51,7 @@ async fn probe_answers_every_connection_with_no_identification_or_approver_regis
 
     for client in [&mut first, &mut second] {
         send(client, &ClientMessage::GetProtocolRevision).await;
-        match read_response(client, Duration::from_secs(5)).await {
+        match read_response(client).await {
             DaemonMessage::ProtocolRevision { .. } => {}
             other => panic!(
                 "expected protocol_revision from an unidentified, unregistered connection, got {other:?}"
@@ -68,13 +66,13 @@ async fn connection_stays_usable_after_the_probe_responds() {
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::GetProtocolRevision).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::ProtocolRevision { .. } => {}
         other => panic!("expected protocol_revision, got {other:?}"),
     }
 
     send(&mut client, &ClientMessage::Ping).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong on the same connection after the probe, got {other:?}"),
     }

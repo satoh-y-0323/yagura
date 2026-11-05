@@ -1,111 +1,54 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! `close_window` settles the window's confirmed status before its IPC reply returns.
+//! Once `close_window` has replied for a window whose exit the daemon observed, every
+//! later read reports the window `exited`.
 //!
-//! The contract lives in the reply timing of `handle_close_window` (`ipc.rs`), so it is
-//! measured over a real IPC round trip: `ListWindows` goes out on the same connection
-//! immediately after `WindowClosed` arrives, and the status it reports is asserted.
+//! Measured end to end over a real IPC round trip on a window whose detection driver
+//! has died, so no detector is left to publish the exit: `ListWindows` goes out on the
+//! same connection right after `WindowClosed` arrives, and the status it reports is
+//! asserted.
 
 mod common;
 
-use std::time::Duration;
-
-use common::{Harness, policy, read_response, send};
+use common::{HANG_GUARD, Harness, policy, read_response, send};
 use yagura_daemon::DaemonConfig;
-use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
 
-/// Far above the measured settle gap, so the wait's timeout never races the assertion.
-const INJECTED_SETTLE_MS: u64 = 5000;
-
-fn config_with_settle_ms(close_settle_ms: u64) -> DaemonConfig {
-    DaemonConfig {
+#[tokio::test]
+async fn closing_a_window_whose_detection_stopped_reports_exited_in_the_next_list_windows() {
+    // The product's grace bound is the hang guard too, so reaching it fails the case
+    // instead of letting a fixed budget decide it.
+    let config = DaemonConfig {
         approval_policy: Some(policy(&["close_window"])),
-        close_settle_ms,
+        close_grace_ms: HANG_GUARD.as_millis() as u64,
         ..DaemonConfig::default()
-    }
-}
+    };
+    let h = Harness::start("close-exit-detector-stopped", config).await;
+    let mut client = h.connect().await;
+    let window_id = h.open(common::sleepy_command("30"), None).await;
 
-/// Opens a real, long-lived child. Only the post-close status is asserted, so no
-/// detection definition is configured.
-async fn open_a_real_window(h: &Harness) -> String {
-    h.open(common::sleepy_command("30"), None).await
-}
-
-/// Closes the window, then reads its status from a `ListWindows` sent on the same
-/// connection right after the `WindowClosed` ack -- the boundary under test.
-async fn close_then_read_status_from_list_windows(
-    client: &mut yagura_test_support::ipc::Connection,
-    window_id: &str,
-    force: Option<bool>,
-) -> WindowStatus {
-    send(
-        client,
-        &ClientMessage::CloseWindow {
-            window_id: window_id.to_string(),
-            force,
-        },
-    )
+    let entry = h
+        .registry
+        .get(&window_id)
+        .expect("the opened window must be registered");
+    let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
+    let mut statuses = entry.watch_status();
+    entry.inject_detector_driver_panic();
+    let reached = tokio::time::timeout(HANG_GUARD, async {
+        while statuses.borrow_and_update().status != stopped {
+            if statuses.changed().await.is_err() {
+                return false;
+            }
+        }
+        true
+    })
     .await;
-    match read_response(client, Duration::from_secs(10)).await {
-        DaemonMessage::WindowClosed { window_id: acked } => {
-            assert_eq!(acked, window_id, "WindowClosed must ack the closed window")
-        }
-        other => panic!("expected window_closed, got {other:?}"),
-    }
-
-    send(client, &ClientMessage::ListWindows).await;
-    match read_response(client, Duration::from_secs(10)).await {
-        DaemonMessage::WindowList { windows } => {
-            windows
-                .into_iter()
-                .find(|w| w.window_id == window_id)
-                .unwrap_or_else(|| panic!("closed window {window_id} missing from list_windows"))
-                .status
-        }
-        other => panic!("expected window_list, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn close_window_without_force_reports_exited_in_the_immediately_following_list_windows() {
-    let h = Harness::start("settle-graceful", config_with_settle_ms(INJECTED_SETTLE_MS)).await;
-    let mut client = h.connect().await;
-    let window_id = open_a_real_window(&h).await;
-
-    let status = close_then_read_status_from_list_windows(&mut client, &window_id, None).await;
-
     assert_eq!(
-        status,
-        WindowStatus::Exited,
-        "the list_windows sent immediately after window_closed must already report Exited \
-         (handle_close_window must wait for the confirmed status to settle before replying)"
+        reached,
+        Ok(true),
+        "the window must report Unknown(DetectorStopped) once its driver dies, got {:?}",
+        entry.current_detected()
     );
-}
-
-#[tokio::test]
-async fn close_window_with_force_reports_exited_in_the_immediately_following_list_windows() {
-    let h = Harness::start("settle-forced", config_with_settle_ms(INJECTED_SETTLE_MS)).await;
-    let mut client = h.connect().await;
-    let window_id = open_a_real_window(&h).await;
-
-    let status =
-        close_then_read_status_from_list_windows(&mut client, &window_id, Some(true)).await;
-
-    assert_eq!(
-        status,
-        WindowStatus::Exited,
-        "the force=true path must satisfy the same settle contract as the graceful path -- \
-         force only reorders terminate / job shutdown, it must not skip the wait"
-    );
-}
-
-// Scoped to "does not error": a zero budget does not guarantee the limit is reached
-// (a status already Exited before the wait starts never reaches it).
-#[tokio::test]
-async fn close_window_with_a_zero_settle_budget_still_returns_window_closed_without_erroring() {
-    let h = Harness::start("settle-zero-budget", config_with_settle_ms(0)).await;
-    let mut client = h.connect().await;
-    let window_id = open_a_real_window(&h).await;
 
     send(
         &mut client,
@@ -115,13 +58,29 @@ async fn close_window_with_a_zero_settle_budget_still_returns_window_closed_with
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => {
             assert_eq!(acked, window_id, "WindowClosed must ack the closed window")
         }
-        other => {
-            panic!("a close_settle_ms of 0 must not turn the reply into an error, got {other:?}")
-        }
+        other => panic!("expected window_closed, got {other:?}"),
     }
-    // No status assertion: only the absence of an error is under test.
+
+    send(&mut client, &ClientMessage::ListWindows).await;
+    let status = match read_response(&mut client).await {
+        DaemonMessage::WindowList { windows } => {
+            windows
+                .into_iter()
+                .find(|w| w.window_id == window_id)
+                .unwrap_or_else(|| panic!("closed window {window_id} missing from list_windows"))
+                .status
+        }
+        other => panic!("expected window_list, got {other:?}"),
+    };
+
+    assert_eq!(
+        status,
+        WindowStatus::Exited,
+        "the list_windows sent right after window_closed must report the closed window \
+         exited, even though no detector is left to publish its exit"
+    );
 }

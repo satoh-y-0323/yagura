@@ -94,23 +94,16 @@ async fn a_delivery_to_a_window_whose_view_lost_focus_is_typed_with_focus_and_su
     command.push("0".to_string()); // paste_enter_window_ms
     command.push(format!("focus-reports;output-on|{}", output_now.display()));
     let window_id = h.open_delivering(command, Some(name)).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
 
     let mut view = h.connect().await;
     attach(&mut view, &window_id).await;
     send(&mut view, &ClientMessage::Focus { focused: false }).await;
-    wait_until_input_log_contains(&log, FOCUS_OUT, HANG_GUARD).await;
+    wait_until_input_log_contains(&log, FOCUS_OUT).await;
     wait_until_frame_satisfies(
         &h,
         &window_id,
         "the cursor hidden after losing focus",
-        HANG_GUARD,
         |_, unfinished| unfinished,
     )
     .await;
@@ -123,7 +116,7 @@ async fn a_delivery_to_a_window_whose_view_lost_focus_is_typed_with_focus_and_su
         },
     )
     .await;
-    let answer = tokio::time::timeout(HANG_GUARD, read_response(&mut client, HANG_GUARD * 2)).await;
+    let answer = tokio::time::timeout(HANG_GUARD, read_response(&mut client)).await;
     let Ok(answer) = answer else {
         panic!(
             "the delivery was never answered; waited on an unfinished screen: {}; the child read {:?}",
@@ -135,12 +128,8 @@ async fn a_delivery_to_a_window_whose_view_lost_focus_is_typed_with_focus_and_su
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
-    h.wait_for_scrollback(
-        &window_id,
-        format!("SUBMITTED {BODY}").as_bytes(),
-        HANG_GUARD,
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, format!("SUBMITTED {BODY}").as_bytes())
+        .await;
 
     std::fs::write(&output_now, b"").expect("create the output trigger");
     let read = std::fs::read(&log).unwrap_or_default();

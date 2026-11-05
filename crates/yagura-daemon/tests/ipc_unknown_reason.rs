@@ -56,7 +56,7 @@ async fn full_window_status(
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowStatus {
             status,
             unknown_reason,
@@ -135,7 +135,7 @@ async fn a_definition_present_but_unmatched_reports_no_rule_matched_without_a_wa
     write_window_input(&h.registry, &window_id, SCROLL_CTRL_READY_OUT).await;
 
     // Waits for the engine's first judgment of that output, whatever it is.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let (status, unknown_reason, detection_warning) = loop {
         let reading = full_window_status(&mut client, &window_id).await;
         if reading.1 != Some(UnknownReason::NotYetJudged) {
@@ -204,7 +204,7 @@ async fn a_status_changed_notification_carries_the_reason() {
     )
     .await;
     loop {
-        match read_daemon_frame(&mut client, Duration::from_secs(5)).await {
+        match read_daemon_frame(&mut client).await {
             ReadOutcome::Message(DaemonMessage::Attached { .. }) => break,
             ReadOutcome::Message(_) => continue,
             ReadOutcome::Closed => panic!("connection closed while waiting for attach"),
@@ -220,14 +220,14 @@ async fn a_status_changed_notification_carries_the_reason() {
     // The attach handler above answers with one StatusChanged of its own
     // (echoing the current, still-Idle status) before the real transition
     // this test is about; only the Unknown one is the assertion target.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for the Unknown StatusChanged push"
         );
-        match read_daemon_frame(&mut client, remaining).await {
+        match read_daemon_frame(&mut client).await {
             ReadOutcome::Message(DaemonMessage::StatusChanged {
                 window_id: id,
                 status,
@@ -276,13 +276,7 @@ async fn interrupt_window_approved_after_falling_back_to_unknown_reports_the_rea
         },
     )
     .await;
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(5),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Running).await;
 
     let mut requester = h.connect().await;
     send(
@@ -302,17 +296,11 @@ async fn interrupt_window_approved_after_falling_back_to_unknown_reports_the_rea
 
     // Let the open turn go quiet, so the window falls back to Unknown before
     // the decision is made.
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Unknown,
-        Duration::from_secs(15),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Unknown).await;
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     let message = expect_error(msg, "status_unknown");
     assert!(
         message.contains(UnknownReason::NoRuleMatched.phrase()),
@@ -353,7 +341,7 @@ async fn send_text_to_an_unknown_window_with_no_definition_names_the_reason_in_t
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "status_unknown");
     assert_eq!(
         message,
@@ -535,13 +523,7 @@ async fn a_confirmed_transition_logs_exactly_one_info_event_naming_the_status_an
 
     let window_id = h.open_idle_window(&mut client).await;
     write_window_input(&h.registry, &window_id, SCROLL_CTRL_READY_OUT).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Unknown,
-        Duration::from_secs(5),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Unknown).await;
 
     // The blank screen a window starts on may itself be confirmed as no_rule_matched before
     // the ready marker paints, so the transition count is the daemon's, not an assumed one.

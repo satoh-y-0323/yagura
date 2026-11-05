@@ -11,13 +11,12 @@
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, call_list_windows, decide, empty_lookup,
-    expect_approval_requested, expect_approval_requested_within, expect_error,
-    handoff_profile_config, identify, launch_prompt_profile_source, policy, read_approver_reply,
-    read_response, register_approver, send, send_handoff_from_profile, write_profile,
+    expect_approval_requested, expect_error, handoff_profile_config, identify,
+    launch_prompt_profile_source, policy, read_approver_reply, read_response, register_approver,
+    send, send_handoff_from_profile, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
@@ -208,8 +207,7 @@ async fn a_windows_open_window_waits_for_an_approver_and_opens_once_approved() {
     );
 
     decide(&mut approver, &request.request_id, true).await;
-    let window_id =
-        expect_window_opened(read_response(&mut requester, Duration::from_secs(10)).await);
+    let window_id = expect_window_opened(read_response(&mut requester).await);
     assert!(h.registry.get(&window_id).is_some());
     assert_eq!(window_count(&h).await, before + 1);
 }
@@ -225,10 +223,7 @@ async fn a_denied_open_window_opens_nothing() {
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_response(&mut requester).await, "approval_denied");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -242,10 +237,7 @@ async fn an_open_window_without_a_decision_times_out_and_opens_nothing() {
     send_open_command(&mut requester, echo_child_command(), None).await;
     expect_approval_requested(&mut approver).await;
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(10)).await,
-        "approval_timeout",
-    );
+    expect_error(read_response(&mut requester).await, "approval_timeout");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -257,10 +249,7 @@ async fn an_external_open_window_with_no_approver_is_refused_as_approval_require
 
     send_open_command(&mut external, echo_child_command(), None).await;
 
-    expect_error(
-        read_response(&mut external, Duration::from_secs(5)).await,
-        "approval_required",
-    );
+    expect_error(read_response(&mut external).await, "approval_required");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -272,7 +261,7 @@ async fn open_window_listed_in_auto_approve_opens_without_asking_anyone() {
     send_open_command(&mut requester, echo_child_command(), None).await;
 
     // No approver is connected, so an approval request would be refused.
-    expect_window_opened(read_response(&mut requester, Duration::from_secs(10)).await);
+    expect_window_opened(read_response(&mut requester).await);
 }
 
 #[tokio::test]
@@ -282,7 +271,7 @@ async fn an_approver_opens_a_window_without_waiting_for_anyone() {
 
     send_open_command(&mut approver, echo_child_command(), None).await;
 
-    expect_window_opened(read_approver_reply(&mut approver, Duration::from_secs(10)).await);
+    expect_window_opened(read_approver_reply(&mut approver).await);
 }
 
 #[tokio::test]
@@ -296,10 +285,7 @@ async fn a_request_too_long_to_show_an_approver_is_refused_instead_of_shown_cut_
     command.push("a".repeat(yagura_protocol::APPROVAL_TEXT_MAX_BYTES + 1));
     send_open_command(&mut requester, command, None).await;
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut requester).await, "invalid_argument");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -313,10 +299,7 @@ async fn a_broken_playbook_refuses_an_agents_open_window() {
 
     send_open_command(&mut requester, echo_child_command(), None).await;
 
-    let message = expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "approval_required",
-    );
+    let message = expect_error(read_response(&mut requester).await, "approval_required");
     assert!(message.contains("playbook failed to load"), "{message}");
 }
 
@@ -341,7 +324,7 @@ async fn a_profile_open_window_asks_about_the_profile_and_opens_once_approved() 
     assert_eq!(window_count(&h).await, before);
 
     decide(&mut approver, &request.request_id, true).await;
-    expect_window_opened(read_response(&mut requester, Duration::from_secs(10)).await);
+    expect_window_opened(read_response(&mut requester).await);
     assert_eq!(window_count(&h).await, before + 1);
 }
 
@@ -357,10 +340,7 @@ async fn a_denied_profile_open_window_opens_nothing() {
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_response(&mut requester).await, "approval_denied");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -383,7 +363,7 @@ async fn a_profile_handoff_asks_once_before_the_window_exists_and_starts_it_once
 
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
 
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_starts_a_window_with_the_envelope(&request);
     let lines = text_lines(&request);
     assert_eq!(lines[0], "profile: ready");
@@ -402,7 +382,7 @@ async fn a_profile_handoff_asks_once_before_the_window_exists_and_starts_it_once
 
     decide(&mut approver, &request.request_id, true).await;
 
-    match read_response(&mut requester, Duration::from_secs(10)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
             opened, delivery, ..
         } => {
@@ -432,14 +412,11 @@ async fn a_profile_handoff_whose_start_is_denied_opens_no_window_and_gives_its_b
     let before = window_count(&h).await;
 
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_starts_a_window_with_the_envelope(&request);
     decide(&mut approver, &request.request_id, false).await;
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_response(&mut requester).await, "approval_denied");
     assert_eq!(window_count(&h).await, before);
 }
 
@@ -459,12 +436,12 @@ fn task(task_id: &str) -> PlanTaskSpec {
     }
 }
 
-async fn read_plan_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_plan_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -481,7 +458,7 @@ async fn create_one_task_plan(owner: &mut Connection) -> String {
         },
     )
     .await;
-    match read_plan_reply(owner, Duration::from_secs(5)).await {
+    match read_plan_reply(owner).await {
         DaemonMessage::PlanDetail { plan } => plan.plan_id,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -490,7 +467,7 @@ async fn create_one_task_plan(owner: &mut Connection) -> String {
 /// The next approval request on an approver connection, skipping the
 /// `plan_changed` pushes an approver is sent while plans change.
 async fn expect_open_request(approver: &mut Connection) -> ApprovalRequest {
-    match read_approver_reply(approver, Duration::from_secs(5)).await {
+    match read_approver_reply(approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     }
@@ -532,7 +509,7 @@ async fn open_task_window_asks_before_the_task_window_exists_and_binds_it_once_a
     assert_eq!(window_count(&h).await, before);
 
     decide(&mut approver, &request.request_id, true).await;
-    match read_plan_reply(&mut owner, Duration::from_secs(10)).await {
+    match read_plan_reply(&mut owner).await {
         DaemonMessage::TaskWindowOpened { task_id, .. } => assert_eq!(task_id, "t1"),
         other => panic!("expected task_window_opened, got {other:?}"),
     }
@@ -552,10 +529,7 @@ async fn a_denied_task_window_leaves_the_task_unbound_and_the_plan_usable() {
     send_open_task_window(&mut owner, &plan_id).await;
     let request = expect_open_request(&mut approver).await;
     decide(&mut approver, &request.request_id, false).await;
-    expect_error(
-        read_plan_reply(&mut owner, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_plan_reply(&mut owner).await, "approval_denied");
     assert_eq!(window_count(&h).await, before);
 
     // The plan's lock was released with the refusal: the same task can be
@@ -578,7 +552,7 @@ async fn open_task_window_listed_in_auto_approve_binds_without_asking() {
 
     send_open_task_window(&mut owner, &plan_id).await;
 
-    match read_plan_reply(&mut owner, Duration::from_secs(10)).await {
+    match read_plan_reply(&mut owner).await {
         DaemonMessage::TaskWindowOpened { .. } => {}
         other => panic!("expected task_window_opened, got {other:?}"),
     }
@@ -633,15 +607,9 @@ async fn an_open_window_that_cannot_open_is_refused_without_asking_an_approver()
     let missing = dir.path().join("missing");
 
     send_open_command(&mut requester, Vec::new(), None).await;
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut requester).await, "invalid_argument");
     send_open_command(&mut requester, echo_child_command(), missing.to_str()).await;
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut requester).await, "invalid_argument");
 
     // The first request the approver sees is the valid one that follows, so
     // neither refusal queued an approval.
@@ -660,10 +628,7 @@ async fn an_open_window_over_the_window_limit_is_refused_before_anyone_is_asked(
     // No approver is connected: a request that reached the gate would be
     // refused as `approval_required`.
     send_open_command(&mut requester, echo_child_command(), None).await;
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "resource_exhausted",
-    );
+    expect_error(read_response(&mut requester).await, "resource_exhausted");
 }
 
 #[cfg(windows)]
@@ -706,10 +671,7 @@ async fn an_effort_a_windows_shim_cannot_pass_is_refused_with_the_guidance_befor
         },
     )
     .await;
-    let message = expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "unsupported",
-    );
+    let message = expect_error(read_response(&mut requester).await, "unsupported");
     assert!(
         message.contains("SHIMGATE use the WSL profile."),
         "the refusal says where the option works: {message}"
@@ -726,7 +688,7 @@ async fn an_effort_a_windows_shim_cannot_pass_is_refused_with_the_guidance_befor
 // --- the requester leaves while the approval waits -------------------------
 
 async fn expect_withdrawn_because_requester_left(approver: &mut Connection, request_id: &str) {
-    match read_approver_reply(approver, Duration::from_secs(5)).await {
+    match read_approver_reply(approver).await {
         DaemonMessage::ApprovalWithdrawn {
             request_id: withdrawn,
             reason,
@@ -769,14 +731,14 @@ async fn a_profile_handoff_whose_requester_leaves_during_the_start_approval_give
     let before = window_count(&h).await;
 
     send_handoff_from_profile(&mut first, "ready", None, None, "src/foo.rs", "look").await;
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     drop(first);
     expect_withdrawn_because_requester_left(&mut approver, &request.request_id).await;
 
     // With the only handoff slot still held this would be answered
     // `resource_exhausted` instead of asking.
     send_handoff_from_profile(&mut second, "ready", None, None, "src/foo.rs", "look").await;
-    let again = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let again = expect_approval_requested(&mut approver).await;
     assert_starts_a_window_with_the_envelope(&again);
     assert_eq!(window_count(&h).await, before);
 }

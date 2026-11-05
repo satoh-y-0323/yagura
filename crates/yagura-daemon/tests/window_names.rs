@@ -16,7 +16,6 @@
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
@@ -45,8 +44,6 @@ const ON_NAME_TAKEN: &str = "on_name_taken";
 /// The profile every case opens its windows from.
 const TWIN: &str = "twin";
 const TWIN_NAME: &str = "Twin";
-
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 const AUTO_APPROVE: &[&str] = &["send_chat", "open_window", "close_window", "send_handoff"];
 
@@ -126,7 +123,7 @@ async fn send_json(client: &mut Connection, request: &Value) {
 /// The next frame that answers a request, skipping the pushes a connection may be sent.
 async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
-        match read_response(client, REPLY_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => return other,
         }
@@ -258,7 +255,7 @@ async fn close_and_wait_exited(client: &mut Connection, window_id: &str) {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
-    wait_until_status(client, window_id, WindowStatus::Exited, REPLY_TIMEOUT).await;
+    wait_until_status(client, window_id, WindowStatus::Exited).await;
 }
 
 /// Opens a window whose child exits at once, and returns once it is `Exited`.
@@ -266,7 +263,7 @@ async fn open_exited(client: &mut Connection, cwd: &Path, name: &str) -> String 
     let id = expect_opened(
         open_command(client, exit_with_code_command("0"), cwd, Some(name), None).await,
     );
-    wait_until_status(client, &id, WindowStatus::Exited, REPLY_TIMEOUT).await;
+    wait_until_status(client, &id, WindowStatus::Exited).await;
     id
 }
 
@@ -503,9 +500,7 @@ async fn a_taken_name_is_refused_before_the_approver_is_asked() {
 
 async fn next_approval_request(approver: &mut Connection) -> yagura_protocol::ApprovalRequest {
     loop {
-        if let DaemonMessage::ApprovalRequested { request } =
-            read_response(approver, REPLY_TIMEOUT).await
-        {
+        if let DaemonMessage::ApprovalRequested { request } = read_response(approver).await {
             return request;
         }
     }

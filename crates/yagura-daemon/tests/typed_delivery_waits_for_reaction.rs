@@ -29,15 +29,48 @@ const READY_MARKER: &str = "receiver-ready";
 const FIRST: &str = "first-ALPHA";
 const SECOND: &str = "second-BRAVO";
 
-/// The delivery confirmation the receiver's definition declares: the longest
-/// the daemon allows, so that no wait in this test can end by running into it.
+/// The delivery confirmation the receiver's definition declares: non-zero, so
+/// the agent waits for a reaction at all, and the longest the daemon allows.
 const DELIVERY_CONFIRM_MS: u64 = 30_000;
 
-/// How long the second text is watched for while the receiver has not reacted:
-/// far below the delivery confirmation, so it can only miss a text written late.
-const NOT_WRITTEN_WINDOW: Duration = Duration::from_secs(3);
+/// The test's clock, stopped and held still: tokio does not move a paused
+/// clock by itself while a blocking task runs, so no deadline of the daemon's
+/// can pass while this is held, however long real work takes.
+struct StillClock {
+    release: std::sync::mpsc::Sender<()>,
+    holder: tokio::task::JoinHandle<()>,
+}
 
-const STEP_TIMEOUT: Duration = Duration::from_secs(15);
+impl StillClock {
+    fn hold() -> Self {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        tokio::time::pause();
+        // Spawned before anything is awaited, so the clock never moves between
+        // the pause and the hold.
+        let holder = tokio::task::spawn_blocking(move || {
+            let _ = released.recv();
+        });
+        Self { release, holder }
+    }
+
+    async fn let_go(self) {
+        drop(self.release);
+        self.holder.await.expect("the clock holder must not panic");
+        tokio::time::resume();
+    }
+}
+
+/// Waits until `done` holds while the clock is held still, paced by the real
+/// clock: no timer of the stopped one would ever fire.
+async fn wait_while_still(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "{what}");
+        tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(10)))
+            .await
+            .expect("the pacing sleep must not panic");
+    }
+}
 
 fn write_definition(dir: &Path, name: &str) {
     let toml = format!(
@@ -116,7 +149,7 @@ async fn post_chat(client: &mut Connection, body: &str) {
     )
     .await;
     loop {
-        match read_response(client, Duration::from_secs(5)).await {
+        match read_response(client).await {
             DaemonMessage::ChatChanged { .. } => {}
             DaemonMessage::ChatPosted { targets, .. } => {
                 assert_eq!(targets.len(), 1, "the message must reach the receiver");
@@ -128,7 +161,7 @@ async fn post_chat(client: &mut Connection, body: &str) {
 }
 
 async fn wait_for_submitted(h: &Harness, window_id: &str, token: &str) {
-    let deadline = tokio::time::Instant::now() + STEP_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !submitted(h, window_id, token) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -157,13 +190,7 @@ async fn the_next_typed_text_waits_for_the_window_to_react_to_the_previous_one()
     write_definition(&dir, "receiver");
     let mut probe = h.connect().await;
     let receiver = open_receiver(&h, "receiver").await;
-    wait_until_status(
-        &mut probe,
-        &receiver,
-        WindowStatus::WaitingInput,
-        STEP_TIMEOUT,
-    )
-    .await;
+    wait_until_status(&mut probe, &receiver, WindowStatus::WaitingInput).await;
 
     let mut receiver_conn = h.connect().await;
     identify(&mut receiver_conn, &receiver).await;
@@ -174,29 +201,45 @@ async fn the_next_typed_text_waits_for_the_window_to_react_to_the_previous_one()
     post_chat(&mut sender_conn, &format!("@parent {FIRST}")).await;
     post_chat(&mut sender_conn, &format!("@parent {SECOND}")).await;
     wait_for_submitted(&h, &receiver, FIRST).await;
-    let first_submitted_at = tokio::time::Instant::now();
+    let entry = h
+        .registry
+        .get(&receiver)
+        .expect("the receiver is registered");
 
-    let watched_until = first_submitted_at + NOT_WRITTEN_WINDOW;
-    while tokio::time::Instant::now() < watched_until {
+    // The attempt is counted on the agent's task, which goes on to the next
+    // text without awaiting anything but the reaction: with the window ready
+    // and no hold, an agent that took the second text without one would have
+    // taken it before this count could be read.
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while entry.notice_attempts() == 0 {
         assert!(
-            !h.flattened_scrollback_keeping_osc_payload(&receiver)
-                .contains(SECOND),
-            "the second text was written before the receiver reacted to the first; \
-             screen text: {}",
-            h.flattened_scrollback_keeping_osc_payload(&receiver)
+            tokio::time::Instant::now() < deadline,
+            "the first text's attempt never ended"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert_eq!(
+        entry.inbox().pending_count(),
+        1,
+        "the second text was taken for typing before the receiver reacted to the first; \
+         screen text: {}",
+        h.flattened_scrollback_keeping_osc_payload(&receiver)
+    );
 
     report_status(&mut probe, &receiver, WindowStatus::Running).await;
-    wait_until_status(&mut probe, &receiver, WindowStatus::Running, STEP_TIMEOUT).await;
+    wait_until_status(&mut probe, &receiver, WindowStatus::Running).await;
     report_status(&mut probe, &receiver, WindowStatus::WaitingInput).await;
-    wait_for_submitted(&h, &receiver, SECOND).await;
+    wait_until_status(&mut probe, &receiver, WindowStatus::WaitingInput).await;
 
-    assert!(
-        first_submitted_at.elapsed() < Duration::from_millis(DELIVERY_CONFIRM_MS),
-        "the second text came only after the delivery confirmation ran out, not after \
-         the reaction"
-    );
+    // With the clock held still the delivery confirmation cannot run out, so
+    // only the reaction can release the second text.
+    let still = StillClock::hold();
+    wait_while_still(
+        "the second text waited for the delivery confirmation to run out, not for the reaction",
+        || entry.inbox().pending_count() == 0,
+    )
+    .await;
+    still.let_go().await;
+    wait_for_submitted(&h, &receiver, SECOND).await;
     h.registry.terminate_all().await;
 }

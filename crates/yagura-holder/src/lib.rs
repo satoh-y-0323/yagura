@@ -22,6 +22,8 @@ use yagura_protocol::holder::{
 use yagura_protocol::window_size_within_limit;
 
 mod buffer;
+pub use buffer::ACK_WINDOW;
+mod conn;
 mod endpoint;
 mod peer;
 mod record;
@@ -49,9 +51,24 @@ const READY_NOTICE: &[u8] = b"yagura-holder ready\n";
 /// Writes one line to standard error in one write, so lines of holders
 /// appending to the same log never interleave. A closed or broken standard
 /// error loses the line rather than ending the holder, and with it the child.
+/// Control characters in `message` are escaped: it can carry a path or a
+/// program name, and the log it lands in is the daemon's, read line by line.
 pub(crate) fn log(message: std::fmt::Arguments<'_>) {
-    let line = format!("yagura-holder: {message}\n");
+    let line = log_line(&message.to_string());
     let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
+fn log_line(message: &str) -> String {
+    let mut line = String::from("yagura-holder: ");
+    for c in message.chars() {
+        if c.is_control() {
+            line.extend(c.escape_default());
+        } else {
+            line.push(c);
+        }
+    }
+    line.push('\n');
+    line
 }
 
 fn start() -> Result<session::Ending, String> {
@@ -79,24 +96,26 @@ fn start() -> Result<session::Ending, String> {
         let listener = endpoint::bind(&place)
             .await
             .map_err(|error| format!("cannot listen on the holder endpoint: {error}"))?;
-        let record = HolderRecord {
-            window_id: window_id.clone(),
-            endpoint: place.endpoint.clone(),
-            holder_pid: std::process::id(),
-            child_pid: None,
-            protocol: HOLDER_PROTOCOL,
-        };
+        let provisional = session::Provisional::new(&launch);
+        let mut record = provisional.own_record(
+            &place,
+            HolderRecord {
+                window_id,
+                endpoint: place.endpoint.clone(),
+                holder_pid: std::process::id(),
+                child_pid: None,
+                protocol: HOLDER_PROTOCOL,
+            },
+        );
         if let Err(error) = publish(&place, &record) {
-            // The endpoint is still this holder's, so its socket file is too.
-            record::remove_record(&place, &window_id);
-            endpoint::remove_endpoint_file(&place);
+            record.remove();
             return Err(error);
         }
         let window = session::Window {
-            window_id,
             launch,
             place,
             record,
+            provisional,
         };
         Ok::<_, String>(session::serve(window, listener).await)
     });
@@ -108,10 +127,11 @@ fn start() -> Result<session::Ending, String> {
 /// Publishes the holder once it owns its endpoint: clears an earlier exit
 /// file, writes the record, then tells the starter on standard output and
 /// lets go of it.
-fn publish(place: &endpoint::Place, record: &HolderRecord) -> Result<(), String> {
-    record::remove_stale_exit(place, &record.window_id)
+fn publish(place: &endpoint::Place, record: &record::RecordFile) -> Result<(), String> {
+    record::remove_stale_exit(place, record.window_id())
         .map_err(|error| format!("cannot remove an earlier exit file: {error}"))?;
-    record::write_record(place, record)
+    record
+        .write()
         .map_err(|error| format!("cannot write the holder record: {error}"))?;
     let mut stdout = std::io::stdout().lock();
     stdout
@@ -148,4 +168,30 @@ fn read_launch() -> Result<HolderLaunch, String> {
         );
     }
     Ok(launch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_line;
+
+    // A path or program name in the message must not end the line early or
+    // drive the terminal of whoever reads the daemon's log.
+    #[test]
+    fn a_log_line_carries_no_control_character_but_its_end_and_keeps_printable_text() {
+        let printable = r"C:\work dir/é 日本 [31m";
+        let message = format!("a\nforged line\r{printable}\u{1b}[31m\u{7}\t\u{85}\0");
+
+        let line = log_line(&message);
+
+        assert!(line.ends_with('\n'), "the line has no end: {line:?}");
+        let body = &line[..line.len() - 1];
+        assert!(
+            !body.chars().any(char::is_control),
+            "a control character passed through: {line:?}"
+        );
+        assert!(
+            body.contains(printable),
+            "printable text was changed: {line:?}"
+        );
+    }
 }

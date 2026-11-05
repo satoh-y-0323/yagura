@@ -2330,9 +2330,6 @@ mod tests {
 
     const ENDPOINT_PREFIX: &str = "yagura-test-gui-ipc-client";
 
-    /// How long the stand-in daemon waits for a request frame before failing.
-    const FRAME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
-
     type PeerConnection = <PlatformIpc as PeerAuth>::Connection;
 
     /// A client whose write half reaches `PeerConnection` over a real
@@ -2381,9 +2378,7 @@ mod tests {
         kind: PendingKind,
         outcome: Result<Reply, IpcError>,
     ) -> ClientMessage {
-        let request =
-            yagura_test_support::ipc::reply_within(FRAME_LIMIT, "request", next_request(peer))
-                .await;
+        let request = yagura_test_support::ipc::reply_within("request", next_request(peer)).await;
         match outcome {
             Ok(reply) => client.complete_pending(kind, reply).await,
             Err(error) => client.fail_pending(error).await,
@@ -3238,8 +3233,7 @@ mod tests {
         assert!(client.is_connected().await);
 
         let (listed, ()) = tokio::join!(client.list_windows(), async {
-            yagura_test_support::ipc::reply_within(FRAME_LIMIT, "request", next_request(&mut peer))
-                .await;
+            yagura_test_support::ipc::reply_within("request", next_request(&mut peer)).await;
             client.disconnect().await;
         });
         assert!(
@@ -3381,17 +3375,23 @@ mod tests {
         assert!(accepted.is_ok() && reached.is_some(), "connect_retrying");
     }
 
-    // A lower bound only: the sleeps guarantee it, and an upper bound would
-    // depend on the machine's load.
-    #[tokio::test]
+    // The paused clock moves only when the retry loop sleeps, and only to that
+    // sleep's deadline, so the elapsed time counts the sleeps exactly: one
+    // interval between each pair of attempts and none before the first.
+    #[tokio::test(start_paused = true)]
     async fn a_refused_endpoint_is_retried_an_interval_apart() {
         let endpoint = yagura_test_support::ipc::unique_endpoint_name(ENDPOINT_PREFIX, "nobody");
-        let started = std::time::Instant::now();
-        assert!(connect_retrying_with_limit(&endpoint, 3).await.is_none());
-        assert!(
-            started.elapsed() >= CONNECT_RETRY_INTERVAL * 2,
-            "three attempts took {:?}",
-            started.elapsed()
+
+        let started = tokio::time::Instant::now();
+        assert!(connect_retrying_with_limit(&endpoint, 1).await.is_none());
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::ZERO,
+            "a single attempt waits"
         );
+
+        let started = tokio::time::Instant::now();
+        assert!(connect_retrying_with_limit(&endpoint, 3).await.is_none());
+        assert_eq!(started.elapsed(), CONNECT_RETRY_INTERVAL * 2);
     }
 }

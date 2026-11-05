@@ -2,8 +2,10 @@
 
 //! Self-check for the `mcp_cli_stub` test fixture (`src/bin/mcp_cli_stub.rs`):
 //! every mode the fixture documents is exercised here, each paired with a
-//! contrast that shows the alternative behavior. This file does not test
-//! any product code -- the fixture is the thing under test.
+//! contrast that shows the alternative behavior, except the delay, the hold
+//! and the call log: a test that uses one of those reads it as its own
+//! premise. This file does not test any product code -- the fixture is the
+//! thing under test.
 //!
 //! Spawned through `yagura_os::spawn_captured`, the same one-shot capture
 //! path the daemon's own registration mechanism (a later layer) drives the
@@ -13,7 +15,7 @@ mod common;
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use yagura_os::{CaptureEnv, CaptureLimits, CaptureOutcome};
 
@@ -659,43 +661,6 @@ fn without_a_matching_fail_subcommand_the_call_runs_normally() {
 }
 
 // ---------------------------------------------------------------------
-// Delay and call-log injection: the log's own timestamps bracket the
-// configured sleep, and record the call's argv.
-// ---------------------------------------------------------------------
-
-#[test]
-fn a_delay_and_the_call_log_bracket_the_configured_sleep() {
-    let dir = common::unique_temp_dir("delay-log");
-    let log_path = dir.join("log.jsonl");
-    let started = Instant::now();
-    let outcome = run(
-        &stub_argv(&["probe", "x"]),
-        &[
-            ("MCP_CLI_STUB_DELAY_MS", "300"),
-            ("MCP_CLI_STUB_LOG", log_path.to_str().unwrap()),
-        ],
-        None,
-    );
-    let elapsed = started.elapsed();
-    assert_exit(&outcome, 0);
-    assert!(
-        elapsed >= Duration::from_millis(300),
-        "the spawn must have waited out the configured delay, took {elapsed:?}"
-    );
-
-    let log_text = std::fs::read_to_string(&log_path).expect("read the call log");
-    let record: serde_json::Value =
-        serde_json::from_str(log_text.lines().next().expect("one log line")).expect("valid JSON");
-    let started_at = record["started_at_ms"].as_u64().expect("started_at_ms");
-    let finished_at = record["finished_at_ms"].as_u64().expect("finished_at_ms");
-    assert!(
-        finished_at - started_at >= 300,
-        "the log's own timestamps must bracket the delay too: {record}"
-    );
-    assert_eq!(record["argv"].clone(), serde_json::json!(["probe", "x"]));
-}
-
-// ---------------------------------------------------------------------
 // Sanity check on the added profile-document builder
 // (`common::mcp_cli_stub_profile_source`): it parses, and renders `add`
 // and the `toml_set` table pointing at the fixture.
@@ -724,40 +689,6 @@ fn the_stub_profile_source_parses_and_renders_add_and_toml_set_against_the_fixtu
     assert_eq!(add.first().map(String::as_str), Some("mcp"));
     let toml_set = spec.toml_set().expect("the toml_set table must be present");
     assert_eq!(toml_set.file(), ".neutral/config.toml");
-}
-
-// ---------------------------------------------------------------------
-// Hold: a call stays in flight until the release file exists.
-// ---------------------------------------------------------------------
-
-#[test]
-fn a_hold_until_path_keeps_the_call_in_flight_until_the_file_exists() {
-    let dir = common::unique_temp_dir("hold-until");
-    let release = dir.join("release");
-    let release_var = release.to_str().unwrap().to_string();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let outcome = run(
-            &stub_argv(&["probe", "x"]),
-            &[("MCP_CLI_STUB_HOLD_UNTIL", release_var.as_str())],
-            None,
-        );
-        let _ = sender.send(outcome);
-    });
-
-    // Negative window: a probe call that is not held finishes within milliseconds.
-    assert!(
-        matches!(
-            receiver.recv_timeout(Duration::from_millis(1500)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ),
-        "the call must stay in flight while the release file is absent"
-    );
-    std::fs::write(&release, b"").expect("release the held call");
-    let outcome = receiver
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the call must finish once the release file exists");
-    assert_exit(&outcome, 0);
 }
 
 // ---------------------------------------------------------------------

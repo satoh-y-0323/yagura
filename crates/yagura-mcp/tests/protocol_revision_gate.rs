@@ -35,10 +35,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
-/// How long a test waits for the scripted server to observe an expected
-/// number of accepted connections before failing loudly instead of hanging.
-const AWAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Endpoint-name prefix for this file's scripted server, kept distinct from
 /// `transport_frames.rs`'s so the two files' endpoints never collide.
 const PIPE_PREFIX: &str = "yagura-mcp-revision-gate";
@@ -94,8 +90,8 @@ impl ScriptedServer {
 
     /// Waits until the accept counter reaches `target`, panicking on timeout
     /// so a missing connection fails loudly instead of hanging.
-    async fn await_accepted(&self, target: usize, timeout: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+    async fn await_accepted(&self, target: usize) {
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while self.accepted() < target {
             if tokio::time::Instant::now() >= deadline {
                 panic!(
@@ -378,28 +374,18 @@ async fn a_confirmed_revision_is_latched_and_not_reprobed() {
     );
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    let first = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
+    let first = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
     assert!(
         matches!(first, Ok(DaemonMessage::Pong)),
         "the first call must still succeed once the probe settles, got {first:?}"
     );
-    let second = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
+    let second = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
     assert!(
         matches!(second, Ok(DaemonMessage::Pong)),
         "the second call must succeed too, got {second:?}"
     );
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.received_kinds(0),
         vec!["get_protocol_revision", "ping", "ping"],
@@ -422,22 +408,14 @@ async fn unknown_type_confirms_baseline_and_is_latched() {
     );
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("an unrelated request must still succeed once an unknown_type probe settles");
-    reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the second call must succeed too");
+    reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("an unrelated request must still succeed once an unknown_type probe settles");
+    reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the second call must succeed too");
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.received_kinds(0),
         vec!["get_protocol_revision", "ping", "ping"],
@@ -461,22 +439,14 @@ async fn a_non_terminal_probe_result_is_not_latched_and_retries_on_the_next_call
     );
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("a non-terminal probe result must not fail the caller's own unrelated request");
-    reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the second call must succeed too");
+    reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("a non-terminal probe result must not fail the caller's own unrelated request");
+    reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the second call must succeed too");
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.received_kinds(0),
         vec![
@@ -507,37 +477,24 @@ async fn a_replaced_connection_does_not_inherit_the_previous_connections_confirm
     );
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    let first = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the first call must succeed once the probe settles");
+    let first = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the first call must succeed once the probe settles");
     assert_eq!(first, DaemonMessage::Pong);
 
-    let second = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
+    let second = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
     assert!(
         second.is_err(),
         "the scripted server closes the connection mid-exchange, so the second call must fail \
          and drop the connection, got {second:?}"
     );
 
-    let third = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("a retried call on a fresh connection must succeed");
+    let third = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("a retried call on a fresh connection must succeed");
     assert_eq!(third, DaemonMessage::Pong);
 
-    server.await_accepted(2, AWAIT_TIMEOUT).await;
+    server.await_accepted(2).await;
     assert_eq!(
         server.received_kinds(1),
         vec!["get_protocol_revision", "ping"],
@@ -551,11 +508,10 @@ async fn a_replaced_connection_does_not_inherit_the_previous_connections_confirm
 /// comes back.
 #[tokio::test]
 async fn a_baseline_connection_never_writes_the_launch_option_frame_to_the_wire() {
-    let server = spawn_scripted_server("mg5", vec![vec![Reply::UnknownType]]);
+    let server = spawn_scripted_server("mg5", vec![vec![Reply::UnknownType, Reply::Pong]]);
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
     let result = reply_within(
-        AWAIT_TIMEOUT,
         "a round trip",
         transport.round_trip(gated_open_window_from_profile()),
     )
@@ -565,10 +521,22 @@ async fn a_baseline_connection_never_writes_the_launch_option_frame_to_the_wire(
         "a baseline peer must refuse a launch-option message before it is written, got {result:?}"
     );
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    // The connection reads its frames in order, so once this later call is
+    // answered on it, anything the refused call wrote has been recorded.
+    let after = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
+    assert!(
+        matches!(after, Ok(DaemonMessage::Pong)),
+        "the refused call must leave its connection usable, got {after:?}"
+    );
+
+    assert_eq!(
+        server.accepted(),
+        1,
+        "the later call must reuse the connection"
+    );
     assert_eq!(
         server.received_kinds(0),
-        vec!["get_protocol_revision"],
+        vec!["get_protocol_revision", "ping"],
         "only the probe may reach the wire; the launch-option frame itself must never be written"
     );
 }
@@ -585,7 +553,6 @@ async fn an_unconfirmed_connection_refuses_a_gated_call_but_stays_open_for_an_un
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
     let gated = reply_within(
-        AWAIT_TIMEOUT,
         "a round trip",
         transport.round_trip(gated_open_window_from_profile()),
     )
@@ -595,19 +562,14 @@ async fn an_unconfirmed_connection_refuses_a_gated_call_but_stays_open_for_an_un
         "an unconfirmed connection must refuse a launch-option message, got {gated:?}"
     );
 
-    let ungated = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
+    let ungated = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
     assert!(
         matches!(ungated, Ok(DaemonMessage::Pong)),
         "an unconfirmed connection must still serve a request that needs no revision, \
          got {ungated:?}"
     );
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.accepted(),
         1,
@@ -637,16 +599,11 @@ async fn mg7a_an_already_established_connection_still_runs_the_probe_and_gate_wh
     );
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the first call establishes the connection without confirming a revision");
+    reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the first call establishes the connection without confirming a revision");
 
     let opened = reply_within(
-        AWAIT_TIMEOUT,
         "a round trip",
         transport.round_trip(gated_open_window_from_profile()),
     )
@@ -657,7 +614,7 @@ async fn mg7a_an_already_established_connection_still_runs_the_probe_and_gate_wh
          got {opened:?}"
     );
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.received_kinds(0),
         vec![
@@ -686,7 +643,6 @@ async fn mg7b_a_retried_attempt_after_a_failed_probe_also_runs_the_gate() {
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
     let opened = reply_within(
-        AWAIT_TIMEOUT,
         "a round trip",
         transport.round_trip(gated_open_window_from_profile()),
     )
@@ -697,7 +653,7 @@ async fn mg7b_a_retried_attempt_after_a_failed_probe_also_runs_the_gate() {
          probe and gate again, got {opened:?}"
     );
 
-    server.await_accepted(2, AWAIT_TIMEOUT).await;
+    server.await_accepted(2).await;
     assert_eq!(
         server.received_kinds(1),
         vec!["get_protocol_revision", "open_window_from_profile"],
@@ -721,18 +677,13 @@ async fn a_baseline_connection_still_sends_a_non_launch_option_call_unchanged() 
         on_name_taken: Default::default(),
     };
 
-    let result = reply_within(
-        AWAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(sent.clone()),
-    )
-    .await;
+    let result = reply_within("a round trip", transport.round_trip(sent.clone())).await;
     assert!(
         matches!(result, Ok(DaemonMessage::WindowOpened { .. })),
         "a baseline peer must still serve a request that carries no launch option, got {result:?}"
     );
 
-    server.await_accepted(1, AWAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     let received = server.received(0);
     assert_eq!(
         received.len(),
@@ -757,7 +708,6 @@ async fn the_rejection_message_carries_the_restart_remedy_and_its_consequence() 
     let open_server = spawn_scripted_server("mg10-open", vec![vec![Reply::UnknownType]]);
     let open_transport = EndpointTransport::new(open_server.endpoint.clone(), None);
     let open_result = reply_within(
-        AWAIT_TIMEOUT,
         "open_window",
         open_window(
             &open_transport,
@@ -785,7 +735,6 @@ async fn the_rejection_message_carries_the_restart_remedy_and_its_consequence() 
     let handoff_server = spawn_scripted_server("mg10-handoff", vec![vec![Reply::UnknownType]]);
     let handoff_transport = EndpointTransport::new(handoff_server.endpoint.clone(), None);
     let handoff_result = reply_within(
-        AWAIT_TIMEOUT,
         "send_handoff",
         send_handoff(
             &handoff_transport,
@@ -834,7 +783,6 @@ async fn the_gate_rejection_maps_to_unsupported_not_unavailable_or_internal() {
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
     let result = reply_within(
-        AWAIT_TIMEOUT,
         "open_window",
         open_window(
             &transport,

@@ -207,3 +207,77 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         launch
     );
 }
+
+/// The daemon learns the child's pid from the `Welcome`, not from the record
+/// the holder may already have removed; a `Welcome` from a holder that does
+/// not send it reads as having none.
+#[test]
+fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
+    let welcome = HolderFrame::Welcome {
+        protocol: 3,
+        record: "record".to_owned(),
+        cols: 80,
+        rows: 24,
+        exited: false,
+        checkpoint_seq: Some(5),
+        replay_end_seq: 9,
+        child_pid: Some(4242),
+        ack_window: None,
+    };
+    let encoded = encode_holder_frame(&welcome);
+    assert_eq!(decode_whole(&encoded), welcome);
+
+    let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
+    let without_pid = framed(
+        welcome_type,
+        br#"{"protocol":3,"record":"record","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9}"#,
+    );
+    match decode_whole(&without_pid) {
+        HolderFrame::Welcome {
+            child_pid,
+            replay_end_seq,
+            ..
+        } => {
+            assert_eq!(child_pid, None);
+            assert_eq!(replay_end_seq, 9);
+        }
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+}
+
+/// The daemon acks in steps of the window the holder names in its `Welcome`;
+/// a `Welcome` from a holder that does not name one reads as having none.
+#[test]
+fn welcome_carries_the_holders_ack_window_and_one_without_it_reads_as_none() {
+    let welcome = HolderFrame::Welcome {
+        protocol: 3,
+        record: "record".to_owned(),
+        cols: 80,
+        rows: 24,
+        exited: false,
+        checkpoint_seq: None,
+        replay_end_seq: 9,
+        child_pid: Some(4242),
+        ack_window: Some(256 * 1024),
+    };
+    let encoded = encode_holder_frame(&welcome);
+    assert_eq!(decode_whole(&encoded), welcome);
+
+    let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
+    let ack_window_of = |json: &[u8]| match decode_whole(&framed(welcome_type, json)) {
+        HolderFrame::Welcome { ack_window, .. } => ack_window,
+        other => panic!("expected Welcome, got {other:?}"),
+    };
+    assert_eq!(
+        ack_window_of(
+            br#"{"protocol":3,"record":"r","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9,"child_pid":4242}"#
+        ),
+        None
+    );
+    assert_eq!(
+        ack_window_of(
+            br#"{"protocol":3,"record":"r","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9,"child_pid":4242,"ack_window":262144}"#
+        ),
+        Some(262_144)
+    );
+}

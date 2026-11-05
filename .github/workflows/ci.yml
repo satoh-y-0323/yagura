@@ -60,13 +60,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path gui/dist
           Set-Content -Path gui/dist/index.html -Value '<!doctype html><html><head><meta charset="utf-8"><title>ci placeholder</title></head><body></body></html>' -Encoding utf8
       - name: Create placeholder sidecar binaries
-        # bundle.externalBin makes tauri-build resolve the staged sidecars (the daemon and the
-        # MCP bridge) at cargo build time. clippy/test never execute the sidecars and CI does
-        # not bundle, so empty placeholders are sufficient; real staging
-        # (gui/scripts/prepare-sidecar.mjs) stays a local/bundle concern.
+        # bundle.externalBin makes tauri-build resolve the staged sidecars (the daemon, the
+        # holder and the MCP bridge) at cargo build time. CI does not bundle, so empty
+        # placeholders are sufficient; real staging (gui/scripts/prepare-sidecar.mjs) stays a
+        # local/bundle concern. Whenever the GUI build script runs, it copies them over
+        # target/debug/<name>.exe. It has nothing new to run for by the test step, which links
+        # the real daemon and holder back there (cargo relinks a bin even when it is fresh)
+        # before any test starts a window.
         run: |
           New-Item -ItemType Directory -Force -Path gui/src-tauri/binaries
           New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-daemon-x86_64-pc-windows-msvc.exe
+          New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-holder-x86_64-pc-windows-msvc.exe
           New-Item -ItemType File -Force -Path gui/src-tauri/binaries/yagura-mcp-x86_64-pc-windows-msvc.exe
       - name: Prepare rustup toolchain
         run: |
@@ -134,7 +138,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
+      - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
       # Save right after clippy so build artifacts carry over even if the test step times out.
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -142,4 +146,4 @@ jobs:
             ~/.cargo/registry
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - run: cargo test -p yagura-protocol -p yagura-os -p yagura-daemon -p yagura-mcp -p yagura-test-support --locked
+      - run: cargo test -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-daemon -p yagura-mcp -p yagura-test-support --locked

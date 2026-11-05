@@ -219,19 +219,29 @@ pub fn sleepy_command(ping_count: &str) -> Vec<String> {
     yagura_test_support::process::sleepy_command(ping_count)
 }
 
+/// Starts `argv` in a session of its own, outside any registry, under a holder
+/// host made from `config` the way a window's child runs.
+pub async fn spawn_session(
+    argv: &[&str],
+    config: &DaemonConfig,
+) -> yagura_daemon::pty::PtyResult<yagura_daemon::PtySession> {
+    let host = yagura_daemon::HolderHost::from_config(config);
+    yagura_daemon::PtySession::spawn_with_command(argv, config, &host).await
+}
+
+/// [`spawn_session`] in `cwd`, with `extra_env` laid over the child's environment.
+pub async fn spawn_session_in_env(
+    argv: &[&str],
+    cwd: Option<&Path>,
+    extra_env: &[(&str, &str)],
+    config: &DaemonConfig,
+) -> yagura_daemon::pty::PtyResult<yagura_daemon::PtySession> {
+    let host = yagura_daemon::HolderHost::from_config(config);
+    yagura_daemon::PtySession::spawn_with_command_in_env(argv, cwd, extra_env, config, &host).await
+}
+
 pub fn file_len(path: &Path) -> u64 {
     yagura_test_support::process::file_len(path)
-}
-
-/// Asserts the descendant is alive: the file it appends to keeps growing.
-pub async fn wait_until_file_grows(path: &Path, timeout: Duration) {
-    yagura_test_support::process::wait_until_file_grows(path, timeout).await;
-}
-
-/// Asserts that after teardown the file size stays put. The failure text names the
-/// teardown route `"after teardown"`.
-pub async fn assert_file_len_stable(path: &Path, observation: Duration) {
-    yagura_test_support::process::assert_file_len_stable(path, observation, "after teardown").await;
 }
 
 /// Installs a permanent, always-enabled, discard-everything `tracing` global default
@@ -381,128 +391,127 @@ pub fn children_of(table: &[ProcessRow], parent: u32) -> Vec<ProcessRow> {
 #[cfg(windows)]
 pub const PTY_HOST_IMAGES: [&str; 2] = ["OpenConsole.exe", "conhost.exe"];
 
-/// Lists the process IDs of every direct child of the current process that is a
-/// pseudoconsole host (any of [`PTY_HOST_IMAGES`]).
-///
-/// `cfg(windows)`: a pseudoconsole host has no Unix analogue, so this stays Windows-only.
+/// The image of the process a window runs in, between the daemon and the window's child.
 #[cfg(windows)]
-pub fn pty_host_child_pids() -> Vec<u32> {
-    children_of(&process_table(), std::process::id())
+pub const HOLDER_IMAGE: &str = "yagura-holder.exe";
+
+/// The `yagura-holder` process the window's child `child_pid` runs under.
+///
+/// # Panics
+///
+/// Panics when the child is not running, or when its parent is anything but a
+/// `yagura-holder` born before it.
+#[cfg(windows)]
+pub fn holder_of(child_pid: u32) -> ProcessRow {
+    let table = process_table();
+    let child = table
+        .iter()
+        .find(|row| row.pid == child_pid)
+        .unwrap_or_else(|| panic!("the window's child {child_pid} is not running"));
+    let parent = table.iter().find(|row| row.pid == child.parent_pid);
+    let born_before = matches!(
+        (creation_time(child.parent_pid), creation_time(child_pid)),
+        (Some(parent), Some(child)) if parent <= child
+    );
+    match parent {
+        Some(row) if born_before && row.image.eq_ignore_ascii_case(HOLDER_IMAGE) => row.clone(),
+        other => panic!(
+            "the window's child {child_pid} must run under a {HOLDER_IMAGE}, its parent is \
+             {other:?} (this process is {})",
+            std::process::id()
+        ),
+    }
+}
+
+/// The pseudoconsole hosts the holder of the window's child `child_pid` started.
+#[cfg(windows)]
+pub fn window_pty_hosts(child_pid: u32) -> Vec<ProcessRow> {
+    let holder = holder_of(child_pid);
+    children_of(&process_table(), holder.pid)
         .into_iter()
         .filter(|row| {
             PTY_HOST_IMAGES
                 .iter()
                 .any(|image| row.image.eq_ignore_ascii_case(image))
         })
-        .map(|row| row.pid)
         .collect()
 }
 
-/// Returns the subset of `after` not present in `before`: the PIDs that newly appeared
-/// between the two snapshots. Scoping an observed PID set to what appeared around a
-/// test's own window open keeps it correct while other tests in the same binary spawn
-/// and exit their own pseudoconsole host processes -- those PIDs cancel out of the diff.
-///
-/// `cfg(windows)`: only meaningful paired with [`pty_host_child_pids`].
+/// The full path of the image process `pid` runs, or `None` when it cannot be
+/// opened (already gone, or not this user's).
 #[cfg(windows)]
-pub fn new_pids(before: &[u32], after: &[u32]) -> Vec<u32> {
-    after
-        .iter()
-        .copied()
-        .filter(|pid| !before.contains(pid))
-        .collect()
-}
-
-/// Waits until a pseudoconsole host not in `before` is a direct child of this
-/// process and returns the new hosts' PIDs, failing once `timeout` passes.
-///
-/// `cfg(windows)`: only meaningful paired with [`pty_host_child_pids`].
-#[cfg(windows)]
-pub async fn wait_for_new_pty_host_pids(before: &[u32], timeout: Duration) -> Vec<u32> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let new_hosts = new_pids(before, &pty_host_child_pids());
-        if !new_hosts.is_empty() {
-            return new_hosts;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("no pseudoconsole host appeared as a direct child after opening a window");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Polls until every PID in `pids` is no longer a running process, bounded by `timeout`.
-///
-/// "Running" is decided by `GetExitCodeProcess` reporting `STILL_ACTIVE` rather than by
-/// `OpenProcess` merely succeeding: a PID can outlive the process's actual exit as a
-/// stale handle elsewhere, and that must not be mistaken for the process still running.
-///
-/// `cfg(windows)`: probes PIDs through a Windows-only API surface.
-#[cfg(windows)]
-pub async fn wait_processes_gone(pids: &[u32], timeout: Duration) {
+pub fn image_path(pid: u32) -> Option<PathBuf> {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::GetExitCodeProcess;
-    use windows::Win32::System::Threading::OpenProcess;
-    use windows::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    use windows::core::PWSTR;
 
-    const STILL_ACTIVE: u32 = 259;
+    let mut buffer = vec![0u16; 32 * 1024];
+    let mut len = buffer.len() as u32;
+    // SAFETY: the handle is closed right after the one call that reads it, and
+    // `buffer` outlives that call with `len` set to its capacity in UTF-16 units.
+    let read = unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = CloseHandle(handle);
+        result
+    };
+    read.ok()?;
+    Some(PathBuf::from(String::from_utf16_lossy(
+        &buffer[..len as usize],
+    )))
+}
 
-    fn is_running(pid: u32) -> bool {
-        // SAFETY: OpenProcess either returns an owned handle for an existing
-        // process or an error; the handle is closed on the success path
-        // immediately after GetExitCodeProcess reads it, and never used
-        // afterwards.
-        unsafe {
-            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-                return false;
-            };
-            let mut exit_code = 0u32;
-            let running =
-                GetExitCodeProcess(handle, &mut exit_code).is_ok() && exit_code == STILL_ACTIVE;
-            let _ = CloseHandle(handle);
-            running
-        }
-    }
+/// `path` canonicalized and lowercased, for comparing directories on Windows.
+#[cfg(windows)]
+pub fn canonical_lower(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path)
+        .unwrap_or_else(|e| panic!("{} should canonicalize: {e}", path.display()));
+    yagura_test_support::paths::strip_extended_length_prefix(&resolved)
+        .to_string_lossy()
+        .to_lowercase()
+}
 
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let still_alive: Vec<u32> = pids
+/// Returns once no PID in `pids` is a running process, bounded by
+/// [`HANG_GUARD`]. The probe and the wait are
+/// [`yagura_test_support::process::wait_processes_gone`]'s; this adds what a
+/// failure names of each process still running and of its parent.
+#[cfg(windows)]
+pub async fn wait_processes_gone(pids: &[u32]) {
+    process::wait_processes_gone(pids, |still_alive| {
+        let table = process_table();
+        let describe = |pid: u32| {
+            let row = table.iter().find(|row| row.pid == pid);
+            format!(
+                "{pid} {} created {:?}",
+                row.map_or("?", |row| row.image.as_str()),
+                creation_time(pid)
+            )
+        };
+        let rows: Vec<String> = still_alive
             .iter()
-            .copied()
-            .filter(|&pid| is_running(pid))
-            .collect();
-        if still_alive.is_empty() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let table = process_table();
-            let describe = |pid: u32| {
-                let row = table.iter().find(|row| row.pid == pid);
+            .map(|&pid| {
+                let parent = table
+                    .iter()
+                    .find(|row| row.pid == pid)
+                    .map(|row| row.parent_pid);
                 format!(
-                    "{pid} {} created {:?}",
-                    row.map_or("?", |row| row.image.as_str()),
-                    creation_time(pid)
+                    "[{}; parent {}]",
+                    describe(pid),
+                    parent.map_or("?".to_string(), describe)
                 )
-            };
-            let rows: Vec<String> = still_alive
-                .iter()
-                .map(|&pid| {
-                    let parent = table
-                        .iter()
-                        .find(|row| row.pid == pid)
-                        .map(|row| row.parent_pid);
-                    format!(
-                        "[{}; parent {}]",
-                        describe(pid),
-                        parent.map_or("?".to_string(), describe)
-                    )
-                })
-                .collect();
-            panic!("processes still alive after teardown: {}", rows.join(", "));
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+            })
+            .collect();
+        format!("left after teardown: {}", rows.join(", "))
+    })
+    .await;
 }
 
 /// Returns a platform-specific path that is guaranteed to be nonexistent,
@@ -523,6 +532,8 @@ pub struct Harness {
     // How the daemon was configured to answer at a window's doors, which the windows
     // opened by `open_delivering` declare as their profile's own.
     delivery: yagura_daemon::inbox::DeliverySpec,
+    // A `start_on_instance` task also holds the made-up instance's guard,
+    // dropped after the server it serves.
     _server: tokio::task::JoinHandle<()>,
 }
 
@@ -726,7 +737,7 @@ impl Harness {
     }
 
     pub async fn connect(&self) -> Connection {
-        yagura_test_support::ipc::connect_with_retry(&self.endpoint, Duration::from_secs(5)).await
+        yagura_test_support::ipc::connect_with_retry(&self.endpoint).await
     }
 
     pub async fn open(&self, command: Vec<String>, detection: Option<&str>) -> String {
@@ -881,8 +892,8 @@ impl Harness {
         }
     }
 
-    pub async fn wait_for_scrollback(&self, window_id: &str, needle: &[u8], timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+    pub async fn wait_for_scrollback(&self, window_id: &str, needle: &[u8]) {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         let appeared = self
             .poll_scrollback(window_id, |scrollback, now| {
                 if contains_subsequence(scrollback, needle) {
@@ -911,9 +922,8 @@ impl Harness {
         window_id: &str,
         needle: &str,
         min_count: usize,
-        timeout: Duration,
     ) {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         let (found, reached) = self
             .poll_scrollback(window_id, |scrollback, now| {
                 let found = count_in_scrollback(scrollback, needle);
@@ -929,11 +939,12 @@ impl Harness {
         }
     }
 
-    /// Waits until `window_id`'s child has exited and the window's confirmed
-    /// status says so: the daemon's own gates go by that status, which only
-    /// follows the exit itself.
-    pub async fn wait_until_child_exited(&self, window_id: &str, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+    /// Waits until `window_id`'s child has exited, the window's confirmed
+    /// status says so, and everything the child wrote is in
+    /// [`Self::scrollback`]: the exit is not ordered after the raw output, but
+    /// a screen read made once the exit is known waits for all of it.
+    pub async fn wait_until_child_exited(&self, window_id: &str) {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
             let entry = self
                 .registry
@@ -942,6 +953,7 @@ impl Harness {
             let exited = entry.session().exit_status().is_some()
                 && entry.current_status() == WindowStatus::Exited;
             if exited {
+                let _ = entry.session().text_tail(1, 1).await;
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1111,7 +1123,7 @@ default = [{command}]
 /// The `args` the `hook_child` logging under `logs` was started with, once it has
 /// logged them.
 pub async fn launch_args_logged_in(logs: &Path) -> Vec<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
         let argv = events
@@ -1216,13 +1228,7 @@ impl Harness {
     ) -> String {
         let window_id = self.open_delivering(command, Some(detection)).await;
         self.write_input(&window_id, READY_MARKER).await;
-        wait_until_status(
-            client,
-            &window_id,
-            WindowStatus::Idle,
-            Duration::from_secs(10),
-        )
-        .await;
+        wait_until_status(client, &window_id, WindowStatus::Idle).await;
         window_id
     }
 }
@@ -1261,6 +1267,28 @@ pub async fn write_window_input(registry: &WindowRegistry, window_id: &str, byte
         .expect("write_input");
 }
 
+/// Waits until no connection is identified as `window_id`. The daemon drops a
+/// connection's identification only once it has finished with the
+/// connection, so from here on the daemon has seen that connection end.
+pub async fn wait_until_no_connection_claims(registry: &WindowRegistry, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let connected = registry
+            .list()
+            .into_iter()
+            .find(|info| info.window_id == window_id)
+            .and_then(|info| info.mcp_connected);
+        if connected == Some(false) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never saw the connection identified as {window_id} end (last: {connected:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Path to the `echo_child` test-fixture binary next to this test binary.
 pub fn echo_child_path() -> PathBuf {
     yagura_test_support::process::echo_child_path()
@@ -1278,12 +1306,8 @@ pub fn env_probe_path() -> PathBuf {
 
 /// Polls `session`'s scrollback until it contains `needle` and returns the decoded text.
 /// Polling rather than a fixed sleep keeps the test deterministic on a loaded machine.
-pub async fn wait_for_scrollback_containing(
-    session: &PtySession,
-    needle: &str,
-    timeout: Duration,
-) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn wait_for_scrollback_containing(session: &PtySession, needle: &str) -> String {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let captured = session.captured_output();
         let text = String::from_utf8_lossy(&captured[captured.len().saturating_sub(64 * 1024)..])
@@ -1357,10 +1381,10 @@ pub fn unique_pipe_name(tag: &str) -> String {
 }
 
 /// Runs the future `test` builds on a single-threaded runtime of its own,
-/// failing instead of hanging when it has not finished after `guard`. Anything
+/// failing instead of hanging when it has not finished after [`HANG_GUARD`]. Anything
 /// that blocks that runtime's one thread stops the whole test with it, so a
 /// case that needs the runtime to keep running cannot pass by luck.
-pub fn run_on_own_runtime<F>(guard: Duration, test: impl FnOnce() -> F + Send + 'static)
+pub fn run_on_own_runtime<F>(test: impl FnOnce() -> F + Send + 'static)
 where
     F: std::future::Future<Output = ()> + 'static,
 {
@@ -1373,7 +1397,7 @@ where
         runtime.block_on(test());
         let _ = done_tx.send(());
     });
-    match done_rx.recv_timeout(guard) {
+    match done_rx.recv_timeout(HANG_GUARD) {
         Ok(()) => thread.join().expect("the test's thread"),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             if let Err(panic) = thread.join() {
@@ -1381,7 +1405,7 @@ where
             }
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            panic!("the test had not finished after {guard:?}: its runtime is blocked")
+            panic!("the test had not finished after {HANG_GUARD:?}")
         }
     }
 }
@@ -1396,17 +1420,25 @@ pub async fn send(client: &mut Connection, msg: &ClientMessage) {
 }
 
 /// Reads exactly one frame, whatever it is. Ordering-sensitive tests use this
-/// directly; everything else goes through [`read_response`].
-pub async fn read_frame(client: &mut Connection, timeout: Duration) -> DaemonMessage {
+/// directly; everything else goes through [`read_response`]. Panics when none
+/// has arrived within [`HANG_GUARD`].
+pub async fn read_frame(client: &mut Connection) -> DaemonMessage {
+    read_frame_until(client, tokio::time::Instant::now() + HANG_GUARD).await
+}
+
+async fn read_frame_until(
+    client: &mut Connection,
+    deadline: tokio::time::Instant,
+) -> DaemonMessage {
     let mut len_buf = [0u8; 4];
-    match tokio::time::timeout(timeout, client.read_exact(&mut len_buf)).await {
+    match tokio::time::timeout_at(deadline, client.read_exact(&mut len_buf)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => panic!("connection closed while reading a frame length prefix: {e}"),
         Err(_) => panic!("timed out waiting for a frame length prefix"),
     }
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
-    match tokio::time::timeout(timeout, client.read_exact(&mut body)).await {
+    match tokio::time::timeout_at(deadline, client.read_exact(&mut body)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => panic!("connection closed while reading a frame body: {e}"),
         Err(_) => panic!("timed out waiting for a frame body"),
@@ -1418,11 +1450,10 @@ pub async fn read_frame(client: &mut Connection, timeout: Duration) -> DaemonMes
 /// Reads the next *response* frame, skipping the asynchronous notification
 /// kinds (view `Frame` parts / `StatusChanged` / `ChatParticipantsChanged`)
 /// that a connection may interleave at any moment.
-pub async fn read_response(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn read_response(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match read_message(client, remaining).await {
+        match read_message_until(client, deadline).await {
             DaemonMessage::ChatParticipantsChanged => continue,
             other => return other,
         }
@@ -1431,12 +1462,16 @@ pub async fn read_response(client: &mut Connection, timeout: Duration) -> Daemon
 
 /// [`read_response`] without skipping `ChatParticipantsChanged`, for a test
 /// that waits for that push itself.
-pub async fn read_message(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn read_message(client: &mut Connection) -> DaemonMessage {
+    read_message_until(client, tokio::time::Instant::now() + HANG_GUARD).await
+}
+
+async fn read_message_until(
+    client: &mut Connection,
+    deadline: tokio::time::Instant,
+) -> DaemonMessage {
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for a response");
-        match read_frame(client, remaining).await {
+        match read_frame_until(client, deadline).await {
             DaemonMessage::Frame(_) | DaemonMessage::StatusChanged { .. } => continue,
             other => return other,
         }
@@ -1483,7 +1518,7 @@ pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowSta
     .await;
     // An approver connection is also sent room and plan changes as they settle.
     loop {
-        match read_response(client, Duration::from_secs(5)).await {
+        match read_response(client).await {
             DaemonMessage::WindowStatus { status, .. } => return status,
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => panic!("expected window_status, got {other:?}"),
@@ -1491,13 +1526,8 @@ pub async fn query_status(client: &mut Connection, window_id: &str) -> WindowSta
     }
 }
 
-pub async fn wait_until_status(
-    client: &mut Connection,
-    window_id: &str,
-    expected: WindowStatus,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn wait_until_status(client: &mut Connection, window_id: &str, expected: WindowStatus) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let status = query_status(client, window_id).await;
         if status == expected {
@@ -1754,7 +1784,7 @@ pub fn approval_config(dir: &Path, approval_timeout_secs: u64) -> DaemonConfig {
 /// carried.
 pub async fn register_approver(client: &mut Connection) -> Vec<ApprovalRequest> {
     send(client, &ClientMessage::RegisterApprover).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ApproverRegistered { pending } => pending,
         other => panic!("expected approver_registered, got {other:?}"),
     }
@@ -1763,25 +1793,7 @@ pub async fn register_approver(client: &mut Connection) -> Vec<ApprovalRequest> 
 /// Reads the next frame and asserts it is `approval_requested`, returning the
 /// request it carried.
 pub async fn expect_approval_requested(client: &mut Connection) -> ApprovalRequest {
-    expect_approval_requested_within(client, Duration::from_secs(5)).await
-}
-
-/// Same contract as `expect_approval_requested`, but with a caller-chosen
-/// timeout. Use this instead of the 5s default at call sites where the
-/// request being awaited just launched a profile-addressed window: that
-/// launch spawns a fresh OS process and runs it through the status-detection
-/// engine's poll/debounce cycle before the gate ever executes, so it
-/// competes for OS process-spawn capacity with every other test binary
-/// running concurrently in the same `cargo test` invocation. This suite
-/// already budgets 10s for that category of wait elsewhere
-/// (`Harness::wait_until_child_exited`, the `wait_for_scrollback` right
-/// after a profile launch); a bare IPC round trip on an already-open window
-/// does not need it and should keep using `expect_approval_requested`.
-pub async fn expect_approval_requested_within(
-    client: &mut Connection,
-    timeout: Duration,
-) -> ApprovalRequest {
-    match read_response(client, timeout).await {
+    match read_response(client).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     }
@@ -1797,7 +1809,7 @@ pub async fn decide(client: &mut Connection, request_id: &str, approved: bool) {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ApprovalResolved {
             request_id: resolved,
         } => assert_eq!(resolved, request_id),
@@ -1862,15 +1874,15 @@ pub fn live_playbook_config(dir: &Path, base: DaemonConfig, source: &str) -> Dae
 /// Reads the next response frame on an approver connection, skipping the
 /// `chat_changed` / `plan_changed` pushes an approver is sent while its own
 /// requests are in flight.
-pub async fn read_approver_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn read_approver_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for an approver reply"
         );
-        let frame: DaemonMessage = read_response(client, remaining).await;
+        let frame: DaemonMessage = read_response(client).await;
         match frame {
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => return other,
@@ -1878,14 +1890,11 @@ pub async fn read_approver_reply(client: &mut Connection, timeout: Duration) -> 
     }
 }
 
-/// [`expect_approval_requested_within`] on an approver connection that may
+/// [`expect_approval_requested`] on an approver connection that may
 /// also be pushed `chat_changed` / `plan_changed` (see
 /// [`read_approver_reply`]).
-pub async fn expect_approval_requested_skipping_pushes(
-    client: &mut Connection,
-    timeout: Duration,
-) -> ApprovalRequest {
-    let reply: DaemonMessage = read_approver_reply(client, timeout).await;
+pub async fn expect_approval_requested_skipping_pushes(client: &mut Connection) -> ApprovalRequest {
+    let reply: DaemonMessage = read_approver_reply(client).await;
     match reply {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
@@ -1907,7 +1916,7 @@ pub async fn set_auto_approve(
         },
     )
     .await;
-    let reply: DaemonMessage = read_approver_reply(client, Duration::from_secs(10)).await;
+    let reply: DaemonMessage = read_approver_reply(client).await;
     match reply {
         DaemonMessage::AutoApproveSet { settings } => settings,
         other => panic!("expected auto_approve_set for {tool}={auto_approve}, got {other:?}"),
@@ -1921,7 +1930,7 @@ pub async fn set_plan_approval_required(
     required: bool,
 ) -> ApprovalSettingsInfo {
     send(client, &ClientMessage::SetPlanApprovalRequired { required }).await;
-    let reply: DaemonMessage = read_approver_reply(client, Duration::from_secs(10)).await;
+    let reply: DaemonMessage = read_approver_reply(client).await;
     match reply {
         DaemonMessage::PlanApprovalRequiredSet { settings } => settings,
         other => panic!("expected plan_approval_required_set for {required}, got {other:?}"),
@@ -2243,8 +2252,7 @@ pub fn ready_pattern_with_redraw(marker: &str) -> String {
 /// prints it once it reads raw input, and a byte written before that is lost,
 /// so the byte waits for the marker to appear.
 pub async fn redraw_screen(h: &Harness, window_id: &str, marker: &str) {
-    h.wait_for_scrollback(window_id, marker.as_bytes(), Duration::from_secs(30))
-        .await;
+    h.wait_for_scrollback(window_id, marker.as_bytes()).await;
     h.write_input(window_id, &[0x03]).await;
 }
 
@@ -2310,6 +2318,7 @@ pub fn write_submit_definition_with_input_toml(
 /// launched in composer-draw mode with `clear_scope` selecting the fixture's
 /// take-back behavior (see
 /// [`yagura_test_support::process::submit_child_command_with_clear_scope`]),
+/// with the child appending every byte it reads to `input_log` when given,
 /// and observes it reach `waiting_input` before returning.
 #[allow(clippy::too_many_arguments)]
 pub async fn open_submit_child_window_with_clear_scope(
@@ -2321,9 +2330,10 @@ pub async fn open_submit_child_window_with_clear_scope(
     input_toml: &str,
     reflect_delay_ms: u64,
     clear_scope: &str,
+    input_log: Option<&Path>,
 ) -> String {
     write_submit_definition_with_input_toml(dir, name, marker, input_toml);
-    let command = yagura_test_support::process::submit_child_command_with_clear_scope(
+    let mut command = yagura_test_support::process::submit_child_command_with_clear_scope(
         marker,
         0,
         0,
@@ -2331,14 +2341,17 @@ pub async fn open_submit_child_window_with_clear_scope(
         reflect_delay_ms,
         clear_scope,
     );
+    if let Some(log) = input_log {
+        // overlay and overlay_heading: none; then the input log.
+        command.resize(14, String::new());
+        command.push(
+            log.to_str()
+                .expect("the input log path must be valid UTF-8")
+                .to_string(),
+        );
+    }
     let window_id = h.open_delivering(command, Some(name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -2359,7 +2372,7 @@ pub async fn identify(client: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -2382,7 +2395,7 @@ pub async fn call_open_window(client: &mut Connection, command: Vec<String>) -> 
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     }
@@ -2397,20 +2410,14 @@ pub async fn open_exited_window_via_ipc(client: &mut Connection) -> String {
         yagura_test_support::process::exit_with_code_command("5"),
     )
     .await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::Exited).await;
     window_id
 }
 
 /// Sends `ListWindows` and returns the windows it reports.
 pub async fn call_list_windows(client: &mut Connection) -> Vec<WindowInfo> {
     send(client, &ClientMessage::ListWindows).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowList { windows } => windows,
         other => panic!("expected window_list, got {other:?}"),
     }
@@ -2436,77 +2443,6 @@ pub fn count_marker(h: &Harness, window_id: &str, needle: &str) -> usize {
 
 fn count_in_scrollback(scrollback: &[u8], needle: &str) -> usize {
     yagura_test_support::scan::count_occurrences(&String::from_utf8_lossy(scrollback), needle)
-}
-
-/// How long [`settled_marker_count`] keeps watching once `expected` copies
-/// have shown, so an extra copy still in flight is counted too. No event
-/// proves a copy will never come; on a slow machine this window can only
-/// miss a late extra copy (a false pass), never fail a correct run.
-const MARKER_SETTLE_QUIET: Duration = Duration::from_millis(500);
-
-/// `needle`'s count in `window_id`'s scrollback, read only once `expected`
-/// copies have appeared (or 10s passed) and no further copy has shown for
-/// [`MARKER_SETTLE_QUIET`]. A call returning `Placed` has written its bytes,
-/// but the child's echo reaches the scrollback through its own asynchronous
-/// path, so an immediate read can still see nothing.
-pub async fn settled_marker_count(
-    h: &Harness,
-    window_id: &str,
-    needle: &str,
-    expected: usize,
-) -> usize {
-    settled_count(h, window_id, expected, |scrollback| {
-        count_in_scrollback(scrollback, needle)
-    })
-    .await
-}
-
-/// [`settled_marker_count`] with the counting left to `count`, for a caller
-/// that must tell some copies apart from others (a composer draft from an
-/// accepted line).
-pub async fn settled_count(
-    h: &Harness,
-    window_id: &str,
-    expected: usize,
-    count: impl Fn(&[u8]) -> usize,
-) -> usize {
-    let appear_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let mut quiet_deadline = None;
-    h.poll_scrollback(window_id, |scrollback, now| {
-        let found = count(scrollback);
-        let settled = if found > expected {
-            true
-        } else if found == expected {
-            now >= *quiet_deadline.get_or_insert(now + MARKER_SETTLE_QUIET)
-        } else {
-            now >= appear_deadline
-        };
-        settled.then_some(found)
-    })
-    .await
-}
-
-/// [`settled_marker_count`] for the line `submit_child` echoes once `body` is
-/// submitted, with or without the space the daemon ends its text with: a
-/// repaint may drop a trailing space, and whether it was written is measured
-/// on the child's input instead.
-pub async fn settled_submitted_count(
-    h: &Harness,
-    window_id: &str,
-    body: &str,
-    expected: usize,
-) -> usize {
-    let lines = [
-        format!("SUBMITTED {body}\r"),
-        format!("SUBMITTED {body} \r"),
-    ];
-    settled_count(h, window_id, expected, |scrollback| {
-        lines
-            .iter()
-            .map(|line| count_in_scrollback(scrollback, line))
-            .sum()
-    })
-    .await
 }
 
 /// Opens a `submit_child` window bound to a fresh detection definition built
@@ -2538,7 +2474,6 @@ pub async fn open_submit_child_window(
         input,
         None,
         SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        None,
     )
     .await
 }
@@ -2572,7 +2507,6 @@ pub async fn open_submit_child_window_with_composer(
         input,
         Some(reflect_delay_ms),
         SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        None,
     )
     .await
 }
@@ -2608,7 +2542,6 @@ pub async fn open_submit_child_window_with_composer_in_cwd(
         Some(reflect_delay_ms),
         SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
         None,
-        None,
     )
     .await
 }
@@ -2643,7 +2576,6 @@ pub async fn open_submit_child_window_with_composer_logging_input(
         input,
         Some(reflect_delay_ms),
         SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        None,
         Some(input_log),
     )
     .await
@@ -2680,50 +2612,13 @@ pub async fn open_submit_child_window_with_composer_and_bottom_line_count(
         input,
         Some(reflect_delay_ms),
         bottom_line_count,
-        None,
-    )
-    .await
-}
-
-/// [`open_submit_child_window_with_composer`] with the fixture's composer
-/// folded: whatever is written to it paints as `placeholder` instead of the
-/// body, so the composer stays observable while
-/// its content cannot be read back off the screen, so only the write record
-/// can vouch for a resend or a take-back.
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_folded_composer(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: u64,
-    placeholder: &str,
-) -> String {
-    open_submit_child_window_in_mode(
-        h,
-        client,
-        dir,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        Some(reflect_delay_ms),
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        Some(placeholder),
     )
     .await
 }
 
 /// The one implementation behind all `submit_child` window openers: they
-/// differ only in whether the fixture is launched in composer-draw mode, in
-/// whether that composer folds, and in `bottom_line_count`, and the
+/// differ only in whether the fixture is launched in composer-draw mode and
+/// in `bottom_line_count`, and the
 /// definition, the readiness wait and the failure text must not drift
 /// between them.
 #[allow(clippy::too_many_arguments)]
@@ -2739,7 +2634,6 @@ async fn open_submit_child_window_in_mode(
     input: SubmitDefinitionInput,
     reflect_delay_ms: Option<u64>,
     bottom_line_count: u16,
-    fold_placeholder: Option<&str>,
 ) -> String {
     open_submit_child_window_in_mode_with_cwd(
         h,
@@ -2754,7 +2648,6 @@ async fn open_submit_child_window_in_mode(
         input,
         reflect_delay_ms,
         bottom_line_count,
-        fold_placeholder,
         None,
     )
     .await
@@ -2778,31 +2671,18 @@ async fn open_submit_child_window_in_mode_with_cwd(
     input: SubmitDefinitionInput,
     reflect_delay_ms: Option<u64>,
     bottom_line_count: u16,
-    fold_placeholder: Option<&str>,
     input_log: Option<&Path>,
 ) -> String {
     write_submit_definition_with_bottom_line_count(dir, name, marker, input, bottom_line_count);
-    let mut command = match (reflect_delay_ms, fold_placeholder) {
-        (Some(reflect_delay_ms), Some(placeholder)) => {
-            yagura_test_support::process::submit_child_command_with_folded_composer(
-                marker,
-                discard_reads,
-                paste_guard_keys,
-                react_on_body,
-                reflect_delay_ms,
-                placeholder,
-            )
-        }
-        (Some(reflect_delay_ms), None) => {
-            yagura_test_support::process::submit_child_command_with_composer(
-                marker,
-                discard_reads,
-                paste_guard_keys,
-                react_on_body,
-                reflect_delay_ms,
-            )
-        }
-        (None, _) => yagura_test_support::process::submit_child_command(
+    let mut command = match reflect_delay_ms {
+        Some(reflect_delay_ms) => yagura_test_support::process::submit_child_command_with_composer(
+            marker,
+            discard_reads,
+            paste_guard_keys,
+            react_on_body,
+            reflect_delay_ms,
+        ),
+        None => yagura_test_support::process::submit_child_command(
             marker,
             discard_reads,
             paste_guard_keys,
@@ -2820,13 +2700,7 @@ async fn open_submit_child_window_in_mode_with_cwd(
         );
     }
     let window_id = h.open_delivering_in(command, Some(name), cwd).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -2846,7 +2720,7 @@ pub async fn attach(client: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::Attached { .. } => {}
         other => panic!("expected attached, got {other:?}"),
     }
@@ -3018,13 +2892,6 @@ pub async fn send_handoff_from_profile_with_options(
 }
 
 /// [`send_handoff_from_profile`] followed by reading the reply.
-///
-/// Use this for cases rejected before a window is ever opened
-/// (`invalid_argument` / `approval_required` on a pre-launch policy
-/// judgement): the reply is a plain IPC round trip, so the default 5s is
-/// enough. A case that actually launches a profile window and waits for it
-/// to become ready before replying `handoff_sent` needs
-/// [`call_send_handoff_from_profile_within`] instead (see its doc comment).
 pub async fn call_send_handoff_from_profile(
     client: &mut Connection,
     profile: &str,
@@ -3052,63 +2919,11 @@ pub async fn call_send_handoff_from_profile_with_options(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> DaemonMessage {
-    call_send_handoff_from_profile_within_with_options(
-        client,
-        profile,
-        cwd,
-        name,
-        reference,
-        note,
-        model,
-        effort,
-        Duration::from_secs(5),
-    )
-    .await
-}
-
-/// Same contract as [`call_send_handoff_from_profile`], but with a
-/// caller-chosen timeout. A request that launches a profile-addressed
-/// window and reports `opened: true` only replies `handoff_sent` once that
-/// window has spawned and passed the status-detection engine's
-/// poll/debounce cycle, the same category of wait this suite already
-/// budgets 10s for elsewhere (`Harness::wait_until_child_exited`,
-/// `Harness::wait_for_scrollback_occurrences` right after a profile
-/// launch); a flat 5s races with that spawn under the process-spawn
-/// contention of a full multi-binary `cargo test` run.
-pub async fn call_send_handoff_from_profile_within(
-    client: &mut Connection,
-    profile: &str,
-    cwd: Option<&str>,
-    name: Option<&str>,
-    reference: &str,
-    note: &str,
-    timeout: Duration,
-) -> DaemonMessage {
-    call_send_handoff_from_profile_within_with_options(
-        client, profile, cwd, name, reference, note, None, None, timeout,
-    )
-    .await
-}
-
-/// [`call_send_handoff_from_profile_within`] carrying the two launch options
-/// only the profile form of the request accepts.
-#[allow(clippy::too_many_arguments)]
-pub async fn call_send_handoff_from_profile_within_with_options(
-    client: &mut Connection,
-    profile: &str,
-    cwd: Option<&str>,
-    name: Option<&str>,
-    reference: &str,
-    note: &str,
-    model: Option<&str>,
-    effort: Option<&str>,
-    timeout: Duration,
-) -> DaemonMessage {
     send_handoff_from_profile_with_options(
         client, profile, cwd, name, reference, note, model, effort,
     )
     .await;
-    read_response(client, timeout).await
+    read_response(client).await
 }
 
 /// Asserts `msg` is `handoff_sent` and returns `(window_id, opened, delivery)`.
@@ -3169,9 +2984,8 @@ const HANDOFF_ENVELOPE_MARKER: &str = "[yagura handoff] ";
 pub async fn wait_for_accepted_handoff_envelope_json(
     h: &Harness,
     window_id: &str,
-    timeout: Duration,
 ) -> serde_json::Value {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let text = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
         if let Some(json) = accepted_handoff_envelope_json(&text) {
@@ -3480,30 +3294,24 @@ pub async fn read_composer_now(h: &Harness, window_id: &str) -> ComposerReadout 
 }
 
 /// Reads [`read_composer_now`] until it equals `expected`, failing once
-/// `timeout` passes: a case waits for what the child shows, not for a delay.
-pub async fn wait_until_composer_is(
-    h: &Harness,
-    window_id: &str,
-    expected: &ComposerReadout,
-    timeout: Duration,
-) {
-    wait_until_composer_satisfies(h, window_id, &format!("{expected:?}"), timeout, |readout| {
+/// [`HANG_GUARD`] passes: a case waits for what the child shows, not for a delay.
+pub async fn wait_until_composer_is(h: &Harness, window_id: &str, expected: &ComposerReadout) {
+    wait_until_composer_satisfies(h, window_id, &format!("{expected:?}"), |readout| {
         readout == expected
     })
     .await;
 }
 
 /// Reads [`read_composer_now`] until `accept` holds and returns that readout,
-/// failing with `what` once `timeout` passes. For a case that knows only part
+/// failing with `what` once [`HANG_GUARD`] passes. For a case that knows only part
 /// of what the child will show: any other readout on the way is not the end.
 pub async fn wait_until_composer_satisfies(
     h: &Harness,
     window_id: &str,
     what: &str,
-    timeout: Duration,
     accept: impl Fn(&ComposerReadout) -> bool,
 ) -> ComposerReadout {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let readout = read_composer_now(h, window_id).await;
         if accept(&readout) {
@@ -3520,12 +3328,11 @@ pub async fn wait_until_composer_satisfies(
 /// composer `submit_child` shows in it and whether the program is still
 /// painting it (the cursor hidden or a synchronized update open, which no
 /// write is decided on). Woken by the model's own output arrivals, never by a
-/// delay; `timeout` only calls it hung.
+/// delay; [`HANG_GUARD`] only calls it hung.
 pub async fn wait_until_frame_satisfies(
     h: &Harness,
     window_id: &str,
     what: &str,
-    timeout: Duration,
     accept: impl Fn(&ComposerReadout, bool) -> bool,
 ) -> ComposerReadout {
     let session = h
@@ -3536,7 +3343,7 @@ pub async fn wait_until_frame_satisfies(
         .clone();
     let mut arrivals = session.output_arrivals();
     let mut last = None;
-    let found = tokio::time::timeout(timeout, async {
+    let found = tokio::time::timeout(HANG_GUARD, async {
         loop {
             // Marked seen before the read, so output fed after it wakes the
             // wait below.
@@ -3577,12 +3384,7 @@ pub fn hex_of(bytes: &[u8]) -> String {
 
 /// Waits until `window_id`'s model, not just its raw output, holds `marker`: the
 /// modes the child set before printing it are then the model's modes.
-pub async fn wait_until_model_shows(
-    h: &Harness,
-    window_id: &str,
-    marker: &[u8],
-    timeout: Duration,
-) {
+pub async fn wait_until_model_shows(h: &Harness, window_id: &str, marker: &[u8]) {
     let marker = String::from_utf8_lossy(marker).into_owned();
     let session = h
         .registry
@@ -3590,7 +3392,7 @@ pub async fn wait_until_model_shows(
         .expect("window must exist in registry")
         .session()
         .clone();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         if let Some((text, _)) = session.text_tail(200, 64 * 1024).await
             && text.contains(&marker)
@@ -3622,10 +3424,9 @@ pub async fn assert_hex_echo_receives(
     window_id: &str,
     marker: &[u8],
     expected: &[u8],
-    timeout: Duration,
 ) {
     let needle = hex_of(expected);
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let received = output_after_marker(h, window_id, marker);
         if contains_subsequence(&received, needle.as_bytes()) {
@@ -3678,8 +3479,8 @@ pub async fn let_every_clock_bound_run_out_while_a_thread_is_awaited() {
 
 /// The id of the one window a fresh harness ends up holding: the one a
 /// profile-addressed handoff opens.
-pub async fn wait_for_only_window(h: &Harness, timeout: Duration) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn wait_for_only_window(h: &Harness) -> String {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         if let Some(window) = h.registry.list().into_iter().next() {
             return window.window_id;
@@ -3726,12 +3527,8 @@ pub fn submit_child_profile_source_logging_input(
 /// handoff holding the budget gave it back, which it does only once it has
 /// decided whether to close the window it opened -- the answer its departed
 /// requester can no longer read. The hang guard only bounds a failure.
-pub async fn wait_until_the_handoff_budget_is_given_back(
-    h: &Harness,
-    probe_profile: &str,
-    timeout: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn wait_until_the_handoff_budget_is_given_back(h: &Harness, probe_profile: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
@@ -3748,7 +3545,7 @@ pub async fn wait_until_the_handoff_budget_is_given_back(
             "probe",
         )
         .await;
-        match read_response(&mut probe, remaining).await {
+        match read_response(&mut probe).await {
             DaemonMessage::Error { code, .. } if code == "resource_exhausted" => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -3761,12 +3558,8 @@ pub async fn wait_until_the_handoff_budget_is_given_back(
 /// Waits until the child's input log holds `needle`, and returns the log.
 /// Written into the window after everything a case wants to inspect, a
 /// sentinel read back this way proves the child has read all of it.
-pub async fn wait_until_input_log_contains(
-    log: &Path,
-    needle: &[u8],
-    timeout: Duration,
-) -> Vec<u8> {
-    let deadline = tokio::time::Instant::now() + timeout;
+pub async fn wait_until_input_log_contains(log: &Path, needle: &[u8]) -> Vec<u8> {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let read = std::fs::read(log).unwrap_or_default();
         if read.windows(needle.len()).any(|window| window == needle) {
@@ -3782,24 +3575,109 @@ pub async fn wait_until_input_log_contains(
 
 /// Everything the child read up to now, from its input log. The log is filled
 /// as the child reads, behind the daemon's writes, so it is read only once a
-/// sentinel written after them has come back through it.
+/// sentinel written after them has come back through it. Each call writes a
+/// sentinel of its own, so a log read again is read up to the later call's
+/// sentinel, never cut at an earlier one.
 pub async fn input_log_read_so_far(
     entry: &yagura_daemon::window::WindowEntry,
     log: &Path,
-    timeout: Duration,
 ) -> Vec<u8> {
-    const SENTINEL: &[u8] = b"SENTINEL-AFTER";
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // The trailing `.` keeps one sentinel from being the prefix of another.
+    let sentinel = format!(
+        "SENTINEL-AFTER-{}.",
+        CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let sentinel = sentinel.as_bytes();
     entry
-        .write_pty_input(SENTINEL, yagura_daemon::window::InputOrigin::Interactive)
+        .write_pty_input(sentinel, yagura_daemon::window::InputOrigin::Interactive)
         .await
         .expect("the sentinel must not fail");
-    let mut read = wait_until_input_log_contains(log, SENTINEL, timeout).await;
+    let mut read = wait_until_input_log_contains(log, sentinel).await;
     let at = read
-        .windows(SENTINEL.len())
-        .position(|window| window == SENTINEL)
+        .windows(sentinel.len())
+        .position(|window| window == sentinel)
         .expect("the log was returned holding the sentinel");
     read.truncate(at);
     read
+}
+
+/// The line ends (`\r`, `\n`) in `read` outside a bracketed paste: the only
+/// bytes on which `submit_child` takes a line, or its dialog takes a key.
+/// None of them read means nothing was submitted, however late the child's
+/// echo of it would have come.
+pub fn line_ends_outside_paste(read: &[u8]) -> usize {
+    const START: &[u8] = b"\x1b[200~";
+    const END: &[u8] = b"\x1b[201~";
+    let mut in_paste = false;
+    let mut found = 0;
+    let mut at = 0;
+    while at < read.len() {
+        let rest = &read[at..];
+        if rest.starts_with(START) {
+            in_paste = true;
+            at += START.len();
+        } else if rest.starts_with(END) {
+            in_paste = false;
+            at += END.len();
+        } else {
+            if !in_paste && matches!(rest[0], b'\r' | b'\n') {
+                found += 1;
+            }
+            at += 1;
+        }
+    }
+    found
+}
+
+/// Everything a window's child read, from its input log, up to a sentinel
+/// written behind everything before the call: what was written is counted on
+/// what the child received, not on what it echoed.
+pub struct ChildInput(Vec<u8>);
+
+impl ChildInput {
+    /// Writes the sentinel of [`input_log_read_so_far`] and reads the log up
+    /// to it, waiting at most [`HANG_GUARD`].
+    pub async fn read(entry: &yagura_daemon::window::WindowEntry, log: &Path) -> Self {
+        Self(input_log_read_so_far(entry, log).await)
+    }
+
+    /// The bytes read, in order.
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Non-overlapping occurrences of `needle` in what was read.
+    pub fn count(&self, needle: &[u8]) -> usize {
+        assert!(!needle.is_empty(), "an empty needle counts nothing");
+        let mut found = 0;
+        let mut rest = self.0.as_slice();
+        while let Some(at) = rest
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            found += 1;
+            rest = &rest[at + needle.len()..];
+        }
+        found
+    }
+
+    /// Times the daemon wrote `body` as one message: the composer line
+    /// ([`yagura_daemon::input::ComposerLine`], its trailing space included),
+    /// framed as a paste or not.
+    pub fn line_writes(&self, body: &str) -> usize {
+        self.count(
+            yagura_daemon::input::ComposerLine::new(body)
+                .as_str()
+                .as_bytes(),
+        )
+    }
+
+    /// Times the default submit key ([`yagura_daemon::input::InputProfile`])
+    /// was read.
+    pub fn submit_keys(&self) -> usize {
+        self.count(&yagura_daemon::input::InputProfile::default().submit)
+    }
 }
 
 // --- a `submit_child` window whose screen can show an approval dialog ---------
@@ -3937,20 +3815,13 @@ pub async fn open_gate_window(
         );
     }
     let window_id = h.open_delivering(command, Some(window.name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
 // --- shared by the foreign-write gate suites ---------------------------------
 
-/// The longest any single step may take before the case is called hung.
-pub const HANG_GUARD: Duration = Duration::from_secs(60);
+pub use yagura_test_support::HANG_GUARD;
 
 pub const BODY: &str = "BODY";
 pub const CLEAR: u8 = 0x15;
@@ -4015,9 +3886,11 @@ impl Harness {
             endpoint.clone(),
             config.clone(),
         ));
-        let handle = tokio::spawn(async move {
-            let _ = server.run().await;
-        });
+        let handle = tokio::spawn(
+            yagura_test_support::ipc::InstanceEndpoint::new(instance).released_after(async move {
+                let _ = server.run().await;
+            }),
+        );
         Self {
             registry,
             endpoint,
@@ -4030,7 +3903,7 @@ impl Harness {
 /// Sends one inbox door message and reads its single reply.
 pub async fn call_door(client: &mut Connection, msg: &ClientMessage) -> DaemonMessage {
     send(client, msg).await;
-    read_response(client, Duration::from_secs(10)).await
+    read_response(client).await
 }
 
 /// Unwraps a `delivery` reply into (output, stream, exit code).

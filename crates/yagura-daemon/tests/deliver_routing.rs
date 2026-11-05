@@ -47,9 +47,6 @@ const HOOK_DETECTION: &str = "hook-child";
 /// The playbook's `[chat] intro`.
 const INTRO: &str = "INTRO-7Q-STARTUP-TEXT";
 
-/// How long a case waits for something that must happen.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
-
 /// The session id a command-waking fixture reports.
 const SESSION: &str = "sess-hook-7";
 
@@ -201,9 +198,11 @@ impl Scene {
             IpcServer::new_with_chat(registry.clone(), endpoint.clone(), config, chat)
                 .with_ledger(ledger),
         );
-        let handle = tokio::spawn(async move {
-            let _ = server.run().await;
-        });
+        let handle = tokio::spawn(
+            yagura_test_support::ipc::InstanceEndpoint::new(&instance).released_after(async move {
+                let _ = server.run().await;
+            }),
+        );
         Self {
             registry,
             endpoint,
@@ -215,7 +214,7 @@ impl Scene {
     }
 
     async fn connect(&self) -> Connection {
-        yagura_test_support::ipc::connect_with_retry(&self.endpoint, Duration::from_secs(5)).await
+        yagura_test_support::ipc::connect_with_retry(&self.endpoint).await
     }
 
     /// A connection registered as an approver: it posts as the user, to `main`, which every
@@ -313,7 +312,7 @@ impl Scene {
             DaemonMessage::WindowOpened { window_id, .. } => window_id,
             other => panic!("expected window_opened for {profile}, got {other:?}"),
         };
-        wait_until_status(client, &id, WindowStatus::WaitingInput, EVENT_TIMEOUT).await;
+        wait_until_status(client, &id, WindowStatus::WaitingInput).await;
         id
     }
 
@@ -332,7 +331,7 @@ impl Scene {
             .await
             .expect("open the window")
             .window_id;
-        wait_until_status(client, &id, WindowStatus::WaitingInput, EVENT_TIMEOUT).await;
+        wait_until_status(client, &id, WindowStatus::WaitingInput).await;
         id
     }
 
@@ -343,7 +342,7 @@ impl Scene {
             logs.count_events("turn_started") > before
         })
         .await;
-        wait_until_status(client, window_id, WindowStatus::Running, EVENT_TIMEOUT).await;
+        wait_until_status(client, window_id, WindowStatus::Running).await;
     }
 
     async fn end_turn(&self, client: &mut Connection, logs: &Logs, window_id: &str) {
@@ -353,11 +352,11 @@ impl Scene {
             logs.count_events("turn_ended") > before
         })
         .await;
-        wait_until_status(client, window_id, WindowStatus::WaitingInput, EVENT_TIMEOUT).await;
+        wait_until_status(client, window_id, WindowStatus::WaitingInput).await;
     }
 
     async fn until(&self, what: &str, mut condition: impl FnMut() -> bool) {
-        let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while !condition() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -503,7 +502,7 @@ impl Logs {
     }
 
     async fn until(&self, what: &str, mut condition: impl FnMut(&Self) -> bool) {
-        let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while !condition(self) {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -537,7 +536,7 @@ impl Logs {
 /// Reads the next response, skipping the pushes an approver connection is sent.
 async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
-        match read_response(client, EVENT_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::ChatChanged { .. }
             | DaemonMessage::PlanChanged { .. }
             | DaemonMessage::ApprovalRequested { .. } => continue,
@@ -599,7 +598,7 @@ async fn delivery_state(client: &mut Connection, seq: u64, window_id: &str) -> O
 }
 
 async fn until_state(client: &mut Connection, seq: u64, window_id: &str, state: &str) {
-    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let seen = delivery_state(client, seq, window_id).await;
         if seen.as_deref() == Some(state) {
@@ -1012,7 +1011,7 @@ async fn plan_owner(scene: &Scene) -> Connection {
 /// The stored command of the window named `name`, once the store holds it.
 async fn stored_command(scene: &Scene, name: &str) -> Vec<String> {
     let db = scene.root.join("yagura.db");
-    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if let Ok(conn) = yagura_daemon::store::open_readonly(&db)
             && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
@@ -1083,13 +1082,7 @@ async fn a_task_windows_notice_is_its_launch_prompt_and_nothing_is_typed() {
         "a notice handed over at spawn is delivered once the window is open"
     );
     let mut probe = scene.connect().await;
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::WaitingInput,
-        EVENT_TIMEOUT,
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::WaitingInput).await;
     logs.assert_never_typed("[yagura task]");
 }
 
@@ -1273,8 +1266,19 @@ async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again()
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-none").await;
     scene.start_turn(&mut user, &logs, &id).await;
+    let writes = scene.entry(&id).write_seq();
     let (seq, _) = post(&mut user, &format!("@{id} R6AFTERTURN")).await;
     until_state(&mut user, seq, &id, "pending").await;
+    // The screen still shows the busy line, so no clock bound can make the
+    // window wait for input again: whatever the agent would type while the
+    // window works has been typed once they have all run out.
+    common::let_every_clock_bound_run_out().await;
+    assert_eq!(
+        scene.entry(&id).write_seq(),
+        writes,
+        "nothing is typed into a working window: {:?}",
+        logs.typed()
+    );
     logs.assert_never_typed("R6AFTERTURN");
 
     scene.end_turn(&mut user, &logs, &id).await;
@@ -1351,7 +1355,7 @@ const WAIT_FLAGS_QUIET: &[&str] = &["--context", "--take", "--wait"];
 
 async fn lose(scene: &Scene, client: &mut Connection, window_id: &str) {
     scene.type_line(window_id, "LOSE").await;
-    wait_until_status(client, window_id, WindowStatus::Unknown, EVENT_TIMEOUT).await;
+    wait_until_status(client, window_id, WindowStatus::Unknown).await;
 }
 
 #[tokio::test]
@@ -1663,13 +1667,7 @@ async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_pro
         "the envelope is the launch prompt: {:?}",
         logs.argv()
     );
-    wait_until_status(
-        &mut user,
-        &window_id,
-        WindowStatus::WaitingInput,
-        EVENT_TIMEOUT,
-    )
-    .await;
+    wait_until_status(&mut user, &window_id, WindowStatus::WaitingInput).await;
     logs.assert_never_typed("R11OPENED");
     assert_eq!(logs.received("R11OPENED"), 0, "handed over once, at launch");
 

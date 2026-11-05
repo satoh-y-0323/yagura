@@ -6,7 +6,6 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::sync::mpsc;
-use std::time::Duration;
 
 use yagura_os::pty::{PtyCommand, PtySize, PtySpawn, spawn};
 
@@ -50,7 +49,7 @@ impl Output {
     fn wait_for(&mut self, needle: &str) {
         while !String::from_utf8_lossy(&self.seen).contains(needle) {
             // Only a hang guard: the output ending fails the wait at once.
-            match self.chunks.recv_timeout(Duration::from_secs(10)) {
+            match self.chunks.recv_timeout(yagura_test_support::HANG_GUARD) {
                 Ok(chunk) => self.seen.extend(chunk),
                 Err(error) => panic!(
                     "{needle:?} never appeared ({error}); output: {:?}",

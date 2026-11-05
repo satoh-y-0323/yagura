@@ -251,10 +251,12 @@ pub struct InputSection {
     /// has no effect: whether a write showed is decided by events, never by a
     /// bound on how long to wait for it.
     pub reflect_wait_ms: Option<u64>,
-    /// One printable, non-blank character the receiver's editor shows as
-    /// typed and that triggers nothing else there, written after a take-back
-    /// to learn that everything before it was handled. Omitted, a take-back is
-    /// never confirmed, so the window assumes something may remain.
+    /// Distinct printable, non-blank characters (1..=8) the receiver's editor
+    /// shows as typed and that trigger nothing else there. Each is one probe,
+    /// written behind the daemon's own writes to learn that everything before
+    /// it was handled; a later one stands in for an earlier one a dialog may
+    /// have taken. Omitted, a take-back is never confirmed, so the window
+    /// assumes something may remain.
     pub probe: Option<String>,
     /// The key that erases one character (1..=8 bytes; default DEL).
     pub erase: Option<String>,
@@ -461,8 +463,11 @@ const MAX_DELIVERY_CONFIRM_MS: u64 = 30_000;
 
 /// The first character of every line the daemon writes on its own (`[yagura `
 /// handoff, task, plan, chat and report lines), which `[input].probe` must
-/// not be.
-const DAEMON_LINE_LEAD: &str = "[";
+/// not name.
+const DAEMON_LINE_LEAD: char = '[';
+
+/// Upper bound (inclusive) on how many characters `[input].probe` names.
+const MAX_PROBE_CHARS: usize = 8;
 
 /// Upper bound (inclusive) on `[input].resend_max`.
 const MAX_RESEND_MAX: u8 = 4;
@@ -568,25 +573,6 @@ fn validate_input_section(
             format!("must be between 0 and {MAX_RESEND_MAX}, got {value}"),
         ));
     }
-    if let Some(probe) = section.probe.as_deref() {
-        if !is_one_visible_char(probe) {
-            return Err(invalid_input(
-                "probe",
-                "must be exactly one printable, non-blank character",
-            ));
-        }
-        // A probe that is the first character of the daemon's own lines would
-        // read alone exactly as one of those lines begins to show.
-        if probe == DAEMON_LINE_LEAD {
-            return Err(invalid_input(
-                "probe",
-                format!(
-                    "must not be {DAEMON_LINE_LEAD:?}, the first character of every line the \
-                     daemon writes"
-                ),
-            ));
-        }
-    }
     if let Some(keys) = section.leading_keys.as_deref()
         && !keys.iter().all(|key| is_one_visible_char(key))
     {
@@ -594,6 +580,9 @@ fn validate_input_section(
             "leading_keys",
             "entries must each be exactly one printable, non-blank character",
         ));
+    }
+    if let Some(probe) = section.probe.as_deref() {
+        validate_probe(probe, section.leading_keys.as_deref().unwrap_or_default())?;
     }
     if let Some(erase) = section.erase.as_deref()
         && (erase.is_empty() || erase.len() > MAX_INPUT_SEQUENCE_BYTES)
@@ -653,6 +642,57 @@ fn validate_input_section(
         }
     }
 
+    Ok(())
+}
+
+/// Checks `[input].probe`: 1 to [`MAX_PROBE_CHARS`] distinct printable,
+/// non-blank characters, none of them [`DAEMON_LINE_LEAD`] or one of the same
+/// definition's `leading_keys`.
+fn validate_probe(probe: &str, leading_keys: &[String]) -> Result<(), DefinitionError> {
+    let chars: Vec<char> = probe.chars().collect();
+    if chars.is_empty()
+        || chars.len() > MAX_PROBE_CHARS
+        || chars.iter().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(invalid_input(
+            "probe",
+            format!("must be 1 to {MAX_PROBE_CHARS} printable, non-blank characters"),
+        ));
+    }
+    // A probe that is the first character of the daemon's own lines would
+    // read alone exactly as one of those lines begins to show.
+    if chars.contains(&DAEMON_LINE_LEAD) {
+        return Err(invalid_input(
+            "probe",
+            format!(
+                "must not contain {DAEMON_LINE_LEAD:?}, the first character of every line the \
+                 daemon writes"
+            ),
+        ));
+    }
+    // Each character is a probe of its own, told apart from the others by
+    // which one shows.
+    if chars
+        .iter()
+        .enumerate()
+        .any(|(index, c)| chars[..index].contains(c))
+    {
+        return Err(invalid_input(
+            "probe",
+            "must not name the same character twice",
+        ));
+    }
+    // A probe may be typed into an empty composer on its own, where a leading
+    // key is taken as a key rather than as text.
+    if let Some(key) = leading_keys
+        .iter()
+        .find(|key| key.chars().any(|c| chars.contains(&c)))
+    {
+        return Err(invalid_input(
+            "probe",
+            format!("must not contain {key:?}, one of input.leading_keys"),
+        ));
+    }
     Ok(())
 }
 

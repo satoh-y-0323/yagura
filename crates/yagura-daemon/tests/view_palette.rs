@@ -12,15 +12,12 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, Palette, TerminalSize};
 use yagura_test_support::view::ViewClient;
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 
 const QUERY_BACKGROUND: &[u8] = b"\x1b]11;?\x1b\\";
@@ -64,8 +61,7 @@ async fn window_that_asks(
     ];
     argv.extend(queries.iter().map(|query| hex_of(query)));
     let window_id = h.open(argv, None).await;
-    h.wait_for_scrollback(&window_id, b"CTRL-READY", REPLY_TIMEOUT)
-        .await;
+    h.wait_for_scrollback(&window_id, b"CTRL-READY").await;
     let mut view = ViewClient::attach(h.connect().await, &window_id, Some(SIZE)).await;
     if with_palette {
         view.send(&ClientMessage::SetPalette(palette())).await;
@@ -91,7 +87,7 @@ async fn before_the_gui_sent_a_palette_a_color_query_is_answered_from_the_built_
         DEVICE_STATUS_REPLY.to_vec(),
     ]
     .concat();
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected, REPLY_TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected).await;
 }
 
 #[tokio::test]
@@ -129,7 +125,7 @@ async fn color_queries_are_answered_from_the_palette_the_gui_sent() {
         DEVICE_STATUS_REPLY.to_vec(),
     ]
     .concat();
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected, REPLY_TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected).await;
 }
 
 #[tokio::test]
@@ -154,5 +150,5 @@ async fn a_color_the_program_set_is_answered_in_place_of_the_palette_until_it_re
         DEVICE_STATUS_REPLY.to_vec(),
     ]
     .concat();
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected, REPLY_TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, &expected).await;
 }

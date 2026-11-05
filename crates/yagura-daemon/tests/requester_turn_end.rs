@@ -19,7 +19,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 
@@ -37,8 +36,7 @@ use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus,
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(30);
+use yagura_test_support::HANG_GUARD;
 
 /// What the requester window prints to take each status.
 const RUNNING: &str = "REQ-RUNNING";
@@ -190,7 +188,7 @@ impl Stage {
                 },
             )
             .await;
-            match read_response(&mut self.observer, HANG_GUARD).await {
+            match read_response(&mut self.observer).await {
                 DaemonMessage::WindowClosed { .. } => {}
                 other => panic!("expected window_closed, got {other:?}"),
             }
@@ -202,13 +200,7 @@ impl Stage {
                 )
                 .await;
         }
-        wait_until_status(
-            &mut self.observer,
-            &self.requester_window,
-            step.status(),
-            HANG_GUARD,
-        )
-        .await;
+        wait_until_status(&mut self.observer, &self.requester_window, step.status()).await;
     }
 
     async fn drive_all(&mut self, steps: &[Step]) {
@@ -232,13 +224,7 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
         .await;
     h.write_input(&requester_window, format!("{WAITING_INPUT}\r\n").as_bytes())
         .await;
-    wait_until_status(
-        &mut observer,
-        &requester_window,
-        WindowStatus::WaitingInput,
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_status(&mut observer, &requester_window, WindowStatus::WaitingInput).await;
 
     let input_log = dir.join("receiver-input.log");
     let resume = dir.join("resume");
@@ -272,13 +258,7 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
             .to_string(),
     );
     let receiver = h.open_delivering(command, Some("receiver")).await;
-    wait_until_status(
-        &mut observer,
-        &receiver,
-        WindowStatus::WaitingInput,
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_status(&mut observer, &receiver, WindowStatus::WaitingInput).await;
 
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window).await;
@@ -308,7 +288,7 @@ async fn start_send_message(stage: &Stage, requester: &mut Connection) {
     .await;
     stage
         .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN", HANG_GUARD)
+        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
         .await;
 }
 
@@ -330,13 +310,13 @@ async fn start_handoff(stage: &Stage, requester: &mut Connection) {
     .await;
     stage
         .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN", HANG_GUARD)
+        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
         .await;
 }
 
 async fn expect_pong(requester: &mut Connection) {
     send(requester, &ClientMessage::Ping).await;
-    let pong = read_response(requester, HANG_GUARD).await;
+    let pong = read_response(requester).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "the connection must still be served and have nothing else queued, got {pong:?}"
@@ -352,14 +332,8 @@ async fn expect_withdrawn_without_a_submit_key_and_no_second_answer(
     requester: &mut Connection,
 ) {
     std::fs::write(&stage.resume, b"").expect("let the receiver read on");
-    wait_until_input_log_contains(&stage.input_log, b"\x15", HANG_GUARD).await;
-    wait_until_composer_is(
-        &stage.h,
-        &stage.receiver,
-        &ComposerReadout::Empty,
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_input_log_contains(&stage.input_log, b"\x15").await;
+    wait_until_composer_is(&stage.h, &stage.receiver, &ComposerReadout::Empty).await;
 
     // Granted only once the first request's delivery has let go of the window.
     send(
@@ -370,11 +344,11 @@ async fn expect_withdrawn_without_a_submit_key_and_no_second_answer(
         },
     )
     .await;
-    match read_response(requester, HANG_GUARD).await {
+    match read_response(requester).await {
         DaemonMessage::TextSent { window_id } => assert_eq!(window_id, stage.receiver),
         other => panic!("the next frame must answer the next request, got {other:?}"),
     }
-    let read = wait_until_input_log_contains(&stage.input_log, b"MARK", HANG_GUARD).await;
+    let read = wait_until_input_log_contains(&stage.input_log, b"MARK").await;
     assert!(
         !read.contains(&b'\r'),
         "no submit key may be written for a request whose requester left: {read:?}"
@@ -383,7 +357,6 @@ async fn expect_withdrawn_without_a_submit_key_and_no_second_answer(
         &stage.h,
         &stage.receiver,
         &ComposerReadout::Body("MARK".to_string()),
-        HANG_GUARD,
     )
     .await;
 }
@@ -457,10 +430,7 @@ async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_run
     start_send_message(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "not_written",
-    );
+    expect_error(read_response(&mut requester).await, "not_written");
     expect_pong(&mut requester).await;
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
@@ -473,10 +443,7 @@ async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_run
     start_send_message(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Interrupted]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "not_written",
-    );
+    expect_error(read_response(&mut requester).await, "not_written");
     expect_pong(&mut requester).await;
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
@@ -487,10 +454,7 @@ async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_run
     start_send_message(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Idle]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "not_written",
-    );
+    expect_error(read_response(&mut requester).await, "not_written");
     expect_pong(&mut requester).await;
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
@@ -502,10 +466,7 @@ async fn a_send_message_is_answered_not_written_when_its_requester_window_is_clo
     start_send_message(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Close]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "not_written",
-    );
+    expect_error(read_response(&mut requester).await, "not_written");
     expect_pong(&mut requester).await;
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
@@ -519,7 +480,7 @@ async fn a_handoff_is_answered_undelivered_when_its_requester_goes_from_running_
     start_handoff(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    match read_response(&mut requester, HANG_GUARD).await {
+    match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
             window_id,
             opened,
@@ -565,7 +526,7 @@ async fn a_wait_for_status_ends_as_timed_out_when_its_requester_goes_from_runnin
     .await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    match read_response(&mut requester, HANG_GUARD).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WaitResult {
             window_id, outcome, ..
         } => {
@@ -600,7 +561,7 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
     .await;
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, true).await;
-    let child = match read_response(&mut requester, HANG_GUARD).await {
+    let child = match read_response(&mut requester).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     };
@@ -611,7 +572,7 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
     .await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    match read_response(&mut requester, HANG_GUARD).await {
+    match read_response(&mut requester).await {
         DaemonMessage::Reports { reports, .. } => assert!(reports.is_empty(), "{reports:?}"),
         other => panic!("expected an empty reports answer, got {other:?}"),
     }
@@ -628,7 +589,7 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
         },
     )
     .await;
-    match read_response(&mut reporter, HANG_GUARD).await {
+    match read_response(&mut reporter).await {
         DaemonMessage::ReportSent { delivered_to, .. } => {
             assert_eq!(
                 delivered_to.as_deref(),
@@ -642,7 +603,7 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
         &ClientMessage::WaitForReport { timeout_sec: 0 },
     )
     .await;
-    match read_response(&mut requester, HANG_GUARD).await {
+    match read_response(&mut requester).await {
         DaemonMessage::Reports { reports, .. } => {
             assert_eq!(reports.len(), 1, "{reports:?}");
             assert_eq!(reports[0].summary, "after the turn");
@@ -659,10 +620,7 @@ async fn a_requester_changing_state_after_its_send_message_was_answered_is_answe
     start_send_message(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "not_written",
-    );
+    expect_error(read_response(&mut requester).await, "not_written");
     stage
         .drive_all(&[Step::Running, Step::Interrupted, Step::Running, Step::Idle])
         .await;
@@ -758,11 +716,8 @@ async fn an_open_window_waiting_for_an_approver_is_withdrawn_when_its_requester_
     let request = expect_approval_requested(&mut approver).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    expect_error(
-        read_response(&mut requester, HANG_GUARD).await,
-        "approval_timeout",
-    );
-    match read_approver_reply(&mut approver, HANG_GUARD).await {
+    expect_error(read_response(&mut requester).await, "approval_timeout");
+    match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
             assert_eq!(request_id, request.request_id);
             assert_eq!(reason, WithdrawReason::RequesterDisconnected);

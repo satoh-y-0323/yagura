@@ -18,8 +18,8 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{
-    BODY, CLEAR, CTRL_C, HANG_GUARD, Harness, MARKER, SUBMIT_CHILD_PROBE, SubmitDefinitionInput,
-    after_the_body, approver_base_config, gate_config, read_composer_now, settled_marker_count,
+    BODY, CLEAR, CTRL_C, ChildInput, HANG_GUARD, Harness, MARKER, SUBMIT_CHILD_PROBE,
+    SubmitDefinitionInput, after_the_body, approver_base_config, gate_config, read_composer_now,
     take_back_in_front_of, unique_temp_dir, wait_until_composer_is, wait_until_input_log_contains,
     wait_until_status, window_entry, write_submit_definition,
 };
@@ -81,7 +81,7 @@ async fn open_stalled_window(
             .to_string(),
     );
     let window_id = h.open(command, Some(name)).await;
-    wait_until_status(client, &window_id, WindowStatus::WaitingInput, HANG_GUARD).await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     Stalled {
         window_id,
         log,
@@ -102,7 +102,7 @@ async fn deliver_until_stalled(
             .submit_message(BODY, None, SendStage::BeforeSubmitKey, None)
             .await
     });
-    h.wait_for_scrollback(&window.window_id, b"STALL-BEGAN", HANG_GUARD)
+    h.wait_for_scrollback(&window.window_id, b"STALL-BEGAN")
         .await;
     call
 }
@@ -119,7 +119,7 @@ async fn resume_and_collect(
         .write_pty_input(MARKER, InputOrigin::Interactive)
         .await
         .expect("the marker must not fail");
-    let mut read = wait_until_input_log_contains(&window.log, MARKER, HANG_GUARD).await;
+    let mut read = wait_until_input_log_contains(&window.log, MARKER).await;
     let at = read
         .windows(MARKER.len())
         .rposition(|w| w == MARKER)
@@ -170,7 +170,7 @@ async fn a_foreign_write_while_the_body_waits_to_show_gets_the_body_taken_back_i
         "nothing but the take-back may stand between the body and the other writer's bytes; \
          it read {read:?}"
     );
-    wait_until_composer_is(&h, &window.window_id, &ComposerReadout::Empty, HANG_GUARD).await;
+    wait_until_composer_is(&h, &window.window_id, &ComposerReadout::Empty).await;
 
     let judgment = tokio::time::timeout(
         HANG_GUARD,
@@ -188,10 +188,14 @@ async fn a_foreign_write_while_the_body_waits_to_show_gets_the_body_taken_back_i
         matches!(judgment.placement, SubmitPlacement::Placed(_)),
         "the same body sent again must be placed into the emptied composer, got {judgment:?}"
     );
+    h.wait_for_scrollback(&window.window_id, format!("SUBMITTED {BODY}").as_bytes())
+        .await;
+    let read = ChildInput::read(&window_entry(&h, &window.window_id), &window.log).await;
     assert_eq!(
-        settled_marker_count(&h, &window.window_id, &format!("SUBMITTED {BODY}"), 1).await,
-        1,
-        "the body must be submitted once, on its own"
+        read.line_writes(BODY),
+        2,
+        "the taken-back body and the one sent again, each written once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -224,7 +228,6 @@ async fn a_foreign_keystroke_is_all_the_composer_holds_once_the_body_is_taken_ba
         &h,
         &window.window_id,
         &ComposerReadout::Body("h".to_string()),
-        HANG_GUARD,
     )
     .await;
     let readout = read_composer_now(&h, &window.window_id).await;

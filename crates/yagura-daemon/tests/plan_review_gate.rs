@@ -35,15 +35,6 @@ use yagura_test_support::process::{echo_child_command, ready_child_profile_sourc
 /// The fixed marker every plan notice starts with.
 const PLAN_NOTICE_MARKER: &str = "[yagura plan]";
 
-/// Upper bound for a reply or a notice that is expected to arrive.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// How long a case watches a ready owner for a notice that must not be typed
-/// again. A notice that is going to be typed lands after the ready hold plus
-/// the submit delay (a quarter of a second here), so this is more than ten
-/// times that.
-const ABSENCE_WINDOW: Duration = Duration::from_secs(3);
-
 /// The owner's `[input] ready_hold_ms`.
 const READY_HOLD_MS: u64 = 200;
 
@@ -178,7 +169,7 @@ async fn close_window(closer: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_ledger_reply(closer, Duration::from_secs(10)).await {
+    match read_ledger_reply(closer).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -188,12 +179,12 @@ async fn close_window(closer: &mut Connection, window_id: &str) {
 
 /// Reads the next *response* frame, skipping `plan_changed` pushes: a
 /// registered approver may be pushed to while its own request is in flight.
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -209,7 +200,7 @@ fn expect_plan_detail(msg: DaemonMessage) -> PlanInfo {
 
 async fn request(client: &mut Connection, msg: ClientMessage) -> DaemonMessage {
     send(client, &msg).await;
-    read_ledger_reply(client, REPLY_TIMEOUT).await
+    read_ledger_reply(client).await
 }
 
 async fn create_plan(client: &mut Connection, title: &str, tasks: Vec<PlanTaskSpec>) -> PlanInfo {
@@ -328,15 +319,14 @@ async fn set_override(approver: &mut Connection, plan_id: &str, task_id: &str, p
 /// `plan_id` arrives. Registered only right before the change under test,
 /// so no earlier change can satisfy it.
 async fn expect_plan_changed(observer: &mut Connection, plan_id: &str) {
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for plan_changed for {plan_id}"
         );
-        if let DaemonMessage::PlanChanged { plan_id: changed } =
-            read_response(observer, remaining).await
+        if let DaemonMessage::PlanChanged { plan_id: changed } = read_response(observer).await
             && changed == plan_id
         {
             return;
@@ -364,7 +354,7 @@ fn marks(plan: &PlanInfo) -> Vec<(String, Option<ReviewMark>)> {
 // --- reading what reached the owner's input ------------------------------------
 
 async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if h.submitted_count(window_id, text) >= 1 {
             return;
@@ -380,23 +370,15 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
     }
 }
 
-/// Watches the window for [`ABSENCE_WINDOW`], failing as soon as it has
-/// accepted `text` more than `allowed` times.
-async fn assert_submitted_stays_at(h: &Harness, window_id: &str, text: &str, allowed: usize) {
-    let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
-    loop {
-        let seen = h.submitted_count(window_id, text);
-        assert!(
-            seen <= allowed,
-            "the window accepted {text:?} {seen} time(s), expected {allowed}; flattened \
-             scrollback tail: {:?}",
-            text_tail(&h.flattened_scrollback(window_id)),
-        );
-        if tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+/// The number in a window id (`w<n>-<boot>`): the registry numbers every
+/// open it starts in turn, a failed one included, so an open's number tells
+/// how many opens were started before it.
+fn open_number(window_id: &str) -> u64 {
+    window_id
+        .strip_prefix('w')
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
 }
 
 // --- creation --------------------------------------------------------------------
@@ -442,7 +424,13 @@ async fn a_pending_plan_refuses_its_owners_open_task_window_and_opens_nothing() 
     open_plain_owner(&h, &mut owner).await;
     let plan = create_plan(&mut owner, "plan", vec![task("t1", "first")]).await;
     let mut lister = h.connect().await;
-    let before = call_list_windows(&mut lister).await.len();
+    let listed = call_list_windows(&mut lister).await;
+    let before = listed.len();
+    let highest_before = listed
+        .iter()
+        .map(|window| open_number(&window.window_id))
+        .max()
+        .unwrap_or(0);
 
     let reply = open_task_window(&mut owner, &plan.plan_id, "t1").await;
     expect_error(reply, "plan_not_approved");
@@ -454,6 +442,22 @@ async fn a_pending_plan_refuses_its_owners_open_task_window_and_opens_nothing() 
     );
     let read = get_plan(&mut owner, &plan.plan_id).await;
     assert_eq!(task_info(&read, "t1").window_id, None);
+
+    // Control: once approved, the same request opens, and it is the first
+    // open started since the refusal -- a window started for the refused
+    // request, even one left running behind the answer, would have come first.
+    let mut approver = approver_connection(&h).await;
+    approve_ok(&mut approver, &plan.plan_id, plan.version).await;
+    match open_task_window(&mut owner, &plan.plan_id, "t1").await {
+        DaemonMessage::TaskWindowOpened { window_id, .. } => {
+            assert_eq!(
+                open_number(&window_id),
+                highest_before + 1,
+                "the refused request must not have started an open"
+            );
+        }
+        other => panic!("expected task_window_opened, got {other:?}"),
+    }
     h.registry.terminate_all().await;
 }
 
@@ -554,24 +558,17 @@ async fn approving_an_approved_plan_again_succeeds_unchanged_and_does_not_notify
     assert_eq!(again.version, first.version);
     assert_eq!(again.tasks, first.tasks);
 
-    assert_submitted_stays_at(&h, &owner.window_id, &notice, 1).await;
-
-    // A later notice queued behind any re-sent one would land after it. The
-    // typed notice left the owner's screen running; it takes the next one
-    // once it has redrawn its prompt.
+    // A later notice queued behind any re-sent one is typed after it, so the
+    // re-sent one would be counted once the later one shows. The typed notice
+    // left the owner's screen running; it takes the next one once it has
+    // redrawn its prompt.
     common::redraw_screen(
         &h,
         &owner.window_id,
         &common::ready_pattern_with_redraw(OWNER_MARKER),
     )
     .await;
-    wait_until_status(
-        &mut probe,
-        &owner.window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut probe, &owner.window_id, WindowStatus::WaitingInput).await;
     let sentinel = create_plan(&mut owner.conn, "sentinel", vec![task("t1", "first")]).await;
     approve_ok(&mut approver, &sentinel.plan_id, sentinel.version).await;
     wait_for_submitted(&h, &owner.window_id, &expected_notice(&sentinel.plan_id)).await;

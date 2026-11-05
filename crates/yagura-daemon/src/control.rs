@@ -19,7 +19,7 @@ use yagura_protocol::{DetectedStatus, UnknownReason};
 
 use crate::config::DaemonConfig;
 use crate::room::{ChatLimits, ChatLimitsError};
-use crate::window::{InputOrigin, WindowEntry};
+use crate::window::{ExitConfirmed, ExitUnobserved, InputOrigin, WindowEntry};
 
 /// A destructive operation the approval gate covers.
 ///
@@ -561,12 +561,10 @@ pub enum ComposerAccess {
     /// A `[composer]` without an `[input].probe`: the daemon may write a body
     /// it has no line to judge, but cannot tell whether a line showed.
     RawOnly,
-    /// A `[composer]` and a probe character: the daemon may write and judge a
-    /// line.
-    Judged {
-        /// The character written behind a body to learn whether it showed.
-        probe: char,
-    },
+    /// A `[composer]` and an `[input].probe`: the daemon may write and judge a
+    /// line. The probe characters themselves are the window's
+    /// [`crate::input::InputProfile::probe`].
+    Judged,
 }
 
 impl ComposerAccess {
@@ -574,7 +572,7 @@ impl ComposerAccess {
     /// it showed: the access every judged delivery needs.
     #[must_use]
     pub fn is_judged(self) -> bool {
-        matches!(self, Self::Judged { .. })
+        matches!(self, Self::Judged)
     }
 }
 
@@ -634,9 +632,9 @@ pub fn composer_gate(
     write: ComposerWrite,
 ) -> Result<(), DenyReason> {
     let allowed = match tool {
-        DestructiveTool::SendHandoff => matches!(access, ComposerAccess::Judged { .. }),
+        DestructiveTool::SendHandoff => matches!(access, ComposerAccess::Judged),
         DestructiveTool::SendMessage => match write {
-            ComposerWrite::Judged => matches!(access, ComposerAccess::Judged { .. }),
+            ComposerWrite::Judged => matches!(access, ComposerAccess::Judged),
             ComposerWrite::Raw => !matches!(access, ComposerAccess::Absent),
         },
         DestructiveTool::OpenWindow
@@ -862,20 +860,31 @@ pub async fn interrupt_window(
         })
 }
 
-/// Closes `entry`, guaranteeing that no descendant of its child survives.
+/// What [`close_window`] did with the window's status.
+#[derive(Debug)]
+pub struct Closed {
+    /// `Ok` when the child's exit was observed: the window's confirmed status
+    /// is then already `Exited` for every later read. `Err` when the holder
+    /// did not report the exit within the grace; the exit watcher publishes
+    /// `Exited` once it does.
+    pub exit: Result<ExitConfirmed, ExitUnobserved>,
+}
+
+/// Closes `entry`, guaranteeing that no descendant of its child survives,
+/// and returns once the window's holder process has ended (waiting at most
+/// `grace` for that too) and an observed exit is published as `Exited`.
 ///
 /// The two orderings differ. Graceful (`force = false`) asks the session to
 /// terminate, spends up to `grace` waiting for the child's exit
 /// notification, and only then ends the process tree, so a child that is
 /// still flushing is not killed mid-flush. Forced (`force = true`) ends the
 /// process tree first and terminates the session afterwards, which
-/// releases the PTY reader/writer and marks the window exited.
+/// releases the writer and marks the window exited.
 ///
 /// The tree is ended on both paths and without a liveness check: ending it is
-/// idempotent, so this path may race the session's own exit monitor, which
-/// ends the same tree when the child exits by itself. Whichever runs first,
-/// closing an already-exited window still succeeds and leaves no descendant
-/// behind.
+/// idempotent, so this path may race the holder, which ends the same tree
+/// when the child exits by itself. Whichever runs first, closing an
+/// already-exited window still succeeds and leaves no descendant behind.
 ///
 /// # Errors
 ///
@@ -886,27 +895,21 @@ pub async fn close_window(
     entry: &WindowEntry,
     force: bool,
     grace: Duration,
-) -> Result<(), ControlError> {
+) -> Result<Closed, ControlError> {
     if force {
-        terminate_tree(entry);
+        entry.session().terminate_tree();
         entry.session().terminate();
-        return Ok(());
+    } else {
+        entry.session().terminate();
+        let mut exited = entry.session().exit_notified();
+        if !*exited.borrow_and_update() {
+            let _ = tokio::time::timeout(grace, exited.changed()).await;
+        }
+        entry.session().terminate_tree();
     }
-    entry.session().terminate();
-    let mut exited = entry.session().exit_notified();
-    if !*exited.borrow_and_update() {
-        let _ = tokio::time::timeout(grace, exited.changed()).await;
-    }
-    terminate_tree(entry);
-    Ok(())
-}
-
-/// Ends `entry`'s process tree; a failure is only logged, because the
-/// session's own exit monitor ends the same tree again once the child exits.
-fn terminate_tree(entry: &WindowEntry) {
-    if let Err(error) = entry.session().terminate_tree() {
-        tracing::warn!(%error, "failed to end the window's process tree");
-    }
+    Ok(Closed {
+        exit: entry.settle_close(grace).await,
+    })
 }
 
 /// Reads `entry`'s text as the window shows it, as its last `lines` logical

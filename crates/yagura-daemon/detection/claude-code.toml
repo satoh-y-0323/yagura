@@ -73,7 +73,7 @@ bracketed_paste = true
 submit = "\r"
 submit_delay_ms = 800       # verified to work at 200ms too; kept equal to the default for headroom
 clear = "\u0015"           # erases one display line per press, harmless on an empty composer (repeated by the daemon)
-probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (2.1.317 and 2.1.318, Windows, Linux and macOS)
 # First character taken as a key: `!` enters shell mode, `?` on an empty
 # composer shows the help (docs: interactive mode; checked on this CLI).
 leading_keys = ["!", "?"]

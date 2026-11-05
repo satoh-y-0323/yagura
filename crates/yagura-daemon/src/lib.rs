@@ -9,6 +9,7 @@ pub mod control;
 pub mod detector;
 pub mod handoff;
 pub mod health;
+pub mod holder_host;
 pub mod host_paths;
 pub mod inbox;
 pub mod input;
@@ -51,6 +52,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use config::DaemonConfig;
+pub use holder_host::{HolderHost, HolderPlace};
 pub use ipc::{IpcError, IpcServer};
 pub use pty::{PtyError, PtySession};
 pub use window::{OpenWindowRequest, RequestedCwd, WindowEntry, WindowOpenError, WindowRegistry};

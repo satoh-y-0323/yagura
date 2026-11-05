@@ -13,7 +13,7 @@ mod common;
 use common::ScreenFeed;
 use std::time::Duration;
 
-use common::{TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle};
+use common::{HANG_GUARD, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle};
 use tokio::sync::mpsc;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::VtScreen;
@@ -168,10 +168,8 @@ async fn confirmed_status_reaches_idle_after_after_ms_plus_confirm_ms_following_
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn detector_handle_keeps_publishing_after_the_screen_is_rebuilt() {
-    // Real time rather than a paused clock, matching this crate's `DetectorHandle`
-    // convention: the driver task owns its own clock.
     let definition = parse_definition(TIME_BOTH_PROMPT_DEF).expect("fixture parses");
     let config = DaemonConfig::default();
     let mut engine = DetectionEngine::new(
@@ -193,20 +191,16 @@ async fn detector_handle_keeps_publishing_after_the_screen_is_rebuilt() {
 
     feed_handle(&screen, &handle, RESIZE_CHUNK);
     feed_handle(&screen, &handle, RESIZE_CHUNK);
-    let running = recv_within(&mut statuses, Duration::from_millis(CONFIRM_MS + 500)).await;
+    let running = next_status(&mut statuses).await;
     assert_eq!(running, DetectedStatus::Running);
 
     screen.lock().resize(46, 1);
     handle.notify_resized();
     feed_handle(&screen, &handle, RESIZE_CHUNK);
-    let unknown = recv_within(&mut statuses, Duration::from_millis(1_000)).await;
+    let unknown = next_status(&mut statuses).await;
     assert_eq!(unknown, DetectedStatus::Unknown(UnknownReason::ScreenLost));
 
-    let idle = recv_within(
-        &mut statuses,
-        Duration::from_millis(AFTER_MS + CONFIRM_MS + 1_000),
-    )
-    .await;
+    let idle = next_status(&mut statuses).await;
     assert_eq!(
         idle,
         DetectedStatus::Idle,
@@ -232,7 +226,7 @@ region = "bottom"
 
 /// The resize notice sent through the handle, the way the IPC resize does,
 /// degrades a rebuilt screen at once, with no output or tick after it.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_resize_that_rebuilds_the_screen_degrades_through_the_handle() {
     let definition = parse_definition(RULES_ONLY_DEF).expect("fixture parses");
     let config = DaemonConfig::default();
@@ -245,23 +239,22 @@ async fn a_resize_that_rebuilds_the_screen_degrades_through_the_handle() {
     let (handle, mut statuses) = DetectorHandle::spawn(engine);
 
     feed_handle(&screen, &handle, CONTINUATION_PROMPT);
-    let idle = recv_within(&mut statuses, Duration::from_millis(5_000)).await;
+    let idle = next_status(&mut statuses).await;
     assert_eq!(idle, DetectedStatus::Idle);
 
     screen.lock().poison_after_calls(0);
     screen.lock().resize(60, 20);
     handle.notify_resized();
-    let lost = recv_within(&mut statuses, Duration::from_millis(5_000)).await;
+    let lost = next_status(&mut statuses).await;
     assert_eq!(lost, DetectedStatus::Unknown(UnknownReason::ScreenLost));
 }
 
-async fn recv_within(
-    statuses: &mut mpsc::UnboundedReceiver<ConfirmedStatus>,
-    timeout: Duration,
-) -> DetectedStatus {
-    tokio::time::timeout(timeout, statuses.recv())
+/// The driver's next published change. On a paused clock the guard fails a
+/// driver that never publishes instead of letting it hang.
+async fn next_status(statuses: &mut mpsc::UnboundedReceiver<ConfirmedStatus>) -> DetectedStatus {
+    tokio::time::timeout(HANG_GUARD, statuses.recv())
         .await
-        .expect("no status was published within the timeout")
+        .expect("the driver published nothing before the hang guard")
         .expect("status channel closed before publishing")
         .status
 }
@@ -280,7 +273,7 @@ async fn a_window_whose_detection_driver_dies_is_reported_unknown() {
 
     let mut statuses = entry.watch_status();
     entry.inject_detector_driver_panic();
-    let reached = tokio::time::timeout(Duration::from_secs(5), async {
+    let reached = tokio::time::timeout(HANG_GUARD, async {
         while statuses.borrow_and_update().status != stopped {
             if statuses.changed().await.is_err() {
                 return false;
@@ -294,6 +287,58 @@ async fn a_window_whose_detection_driver_dies_is_reported_unknown() {
         reached,
         Ok(true),
         "the window must report Unknown(DetectorStopped) once its driver dies, got {:?}",
+        entry.current_detected()
+    );
+    registry.terminate_all().await;
+}
+
+/// A window whose detection driver has died still reports `exited` once its process
+/// ends without `close_window`: the exit is a mechanical fact, not a detector verdict.
+#[tokio::test]
+async fn a_window_whose_detection_driver_died_reports_exited_once_its_process_ends() {
+    let registry = WindowRegistry::new(DaemonConfig::default());
+    let window_id = common::open_echo_window(&registry, None).await.window_id;
+    let entry = registry
+        .get(&window_id)
+        .expect("the opened window must be registered");
+    let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
+    let mut statuses = entry.watch_status();
+    entry.inject_detector_driver_panic();
+    let reached_stopped = tokio::time::timeout(HANG_GUARD, async {
+        while statuses.borrow_and_update().status != stopped {
+            if statuses.changed().await.is_err() {
+                return false;
+            }
+        }
+        true
+    })
+    .await;
+    assert_eq!(
+        reached_stopped,
+        Ok(true),
+        "the window must report Unknown(DetectorStopped) once its driver dies, got {:?}",
+        entry.current_detected()
+    );
+
+    entry.session().terminate_tree();
+    assert!(
+        entry.session().wait_until_released(HANG_GUARD).await,
+        "the window's holder must end once its tree is terminated"
+    );
+    let reached_exited = tokio::time::timeout(HANG_GUARD, async {
+        while statuses.borrow_and_update().status != DetectedStatus::Exited {
+            if statuses.changed().await.is_err() {
+                return false;
+            }
+        }
+        true
+    })
+    .await;
+
+    assert_eq!(
+        reached_exited,
+        Ok(true),
+        "a window whose driver died must report Exited once its process ends, got {:?}",
         entry.current_detected()
     );
     registry.terminate_all().await;

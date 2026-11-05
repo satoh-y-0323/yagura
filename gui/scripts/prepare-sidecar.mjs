@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Stages the release binaries Tauri bundles as sidecars (`bundle.externalBin`):
-// the daemon and the MCP bridge. `tauri-build` resolves `externalBin` at cargo
-// build time, so every cargo build of the workspace depends on this having run.
+// the daemon, the holder the daemon starts for each window from beside itself,
+// and the MCP bridge. `tauri-build` resolves `externalBin` at cargo build time,
+// so every cargo build of the workspace depends on this having run.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -12,7 +13,7 @@ const workspaceRoot = resolve(scriptDir, '..', '..');
 const binariesDir = join(workspaceRoot, 'gui', 'src-tauri', 'binaries');
 
 // The packages staged as sidecars, in the order `bundle.externalBin` names them.
-const SIDECAR_PACKAGES = ['yagura-daemon', 'yagura-mcp'];
+const SIDECAR_PACKAGES = ['yagura-daemon', 'yagura-holder', 'yagura-mcp'];
 
 function fail(message) {
   console.error(`prepare-sidecar: ${message}`);

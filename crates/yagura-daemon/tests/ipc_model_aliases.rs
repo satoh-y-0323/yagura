@@ -24,6 +24,7 @@ use yagura_protocol::{
     ClientMessage, DaemonMessage, LaunchOptionAlias, ModelChoice, ModelChoiceSource, ProfileInfo,
     validate_launch_option_value,
 };
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 
 // --- the capture_child fixture binary ---------------------------------------
@@ -163,6 +164,19 @@ fn touch_profile(display_name: &str, command_path: &Path, marker_path: &Path) ->
     )
 }
 
+/// A profile whose listing command stays running until `release` exists, so
+/// a case can act while a listing is in flight without timing it.
+fn held_profile(display_name: &str, pid_file: &Path, release: &Path) -> String {
+    let pid_file = pid_file.to_str().expect("pid file path is UTF-8");
+    let release = release.to_str().expect("release path is UTF-8");
+    command_profile(
+        display_name,
+        &capture_child_path(),
+        &["grandchild-first", pid_file, "0", release],
+        "format = \"lines\"\nseparator = \"\\t\"",
+    )
+}
+
 fn alias_profile(display_name: &str, aliases: &[(&str, &str)]) -> String {
     let alias_lines: String = aliases
         .iter()
@@ -189,36 +203,6 @@ async fn approver_connection(h: &Harness) -> Connection {
     register_approver(&mut client).await;
     client
 }
-
-async fn wait_until_marker_appears(marker: &Path, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if marker.exists() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for the marker file to appear at {}",
-                marker.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-async fn assert_marker_absent_after(marker: &Path, observation: Duration) {
-    tokio::time::sleep(observation).await;
-    assert!(
-        !marker.exists(),
-        "no listing command must have started: marker file exists at {}",
-        marker.display()
-    );
-}
-
-/// How long a case that must observe "nothing happened" waits before
-/// checking. Long enough for a listing command's spawn (if one wrongly
-/// happened) to have already written its marker file.
-const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(500);
 
 fn expect_requested(msg: DaemonMessage) -> (u64, String) {
     match msg {
@@ -261,7 +245,7 @@ fn expect_aliases_saved(msg: DaemonMessage) -> (String, Vec<LaunchOptionAlias>) 
 
 async fn list_profiles(client: &mut Connection) -> Vec<ProfileInfo> {
     send(client, &ClientMessage::ListProfiles).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ProfileList { profiles, .. } => profiles,
         other => panic!("expected profile_list, got {other:?}"),
     }
@@ -276,12 +260,25 @@ async fn list_profiles(client: &mut Connection) -> Vec<ProfileInfo> {
 async fn list_model_choices_from_a_non_approver_connection_is_refused_and_starts_no_child() {
     let (root, profiles_dir) = fresh_dirs("model-i1-list");
     let marker = root.join("marker.txt");
+    let other_marker = root.join("other-marker.txt");
     write_profile(
         &profiles_dir,
         "listing",
         &touch_profile("Listing", &capture_child_path(), &marker),
     );
-    let f = Harness::start("model-i1-list", base_config(profiles_dir, Vec::new())).await;
+    write_profile(
+        &profiles_dir,
+        "other",
+        &touch_profile("Other", &capture_child_path(), &other_marker),
+    );
+    // One listing slot: an approver's listing is admitted only once no
+    // listing holds it, so only once a listing started for the refused request
+    // would have run its command to the end.
+    let config = DaemonConfig {
+        model_choices_max_concurrent: 1,
+        ..base_config(profiles_dir, Vec::new())
+    };
+    let f = Harness::start("model-i1-list", config).await;
     let mut external = f.connect().await;
 
     send(
@@ -292,23 +289,40 @@ async fn list_model_choices_from_a_non_approver_connection_is_refused_and_starts
         },
     )
     .await;
-    let msg = read_response(&mut external, Duration::from_secs(5)).await;
+    let msg = read_response(&mut external).await;
     expect_error(msg, "auth_failed");
-    assert_marker_absent_after(&marker, NEGATIVE_OBSERVATION).await;
+
+    let mut approver = approver_connection(&f).await;
+    list_to_the_end(&mut approver, "other", 2).await;
+    assert!(
+        other_marker.exists(),
+        "a listing's command has run by the time its list is pushed"
+    );
+    assert!(
+        !marker.exists(),
+        "no listing command must have started for the refused request"
+    );
 
     // Control: the same profile, requested by a registered approver, does
     // start the listing command.
-    let mut approver = approver_connection(&f).await;
+    list_to_the_end(&mut approver, "listing", 3).await;
+    assert!(marker.exists(), "the approver's listing ran its command");
+}
+
+/// Lists `profile`'s choices and reads the list pushed at the end, by which
+/// time the listing command has ended.
+async fn list_to_the_end(client: &mut Connection, profile: &str, request_id: u64) {
     send(
-        &mut approver,
+        client,
         &ClientMessage::ListModelChoices {
-            profile: "listing".to_string(),
-            request_id: 2,
+            profile: profile.to_string(),
+            request_id,
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    wait_until_marker_appears(&marker, Duration::from_secs(5)).await;
+    expect_requested(read_response(client).await);
+    let (answered, ..) = expect_choices(read_response(client).await);
+    assert_eq!(answered, request_id);
 }
 
 #[tokio::test]
@@ -342,7 +356,7 @@ async fn save_model_aliases_from_a_non_approver_connection_is_refused_and_leaves
         },
     )
     .await;
-    let msg = read_response(&mut external, Duration::from_secs(5)).await;
+    let msg = read_response(&mut external).await;
     expect_error(msg, "auth_failed");
     assert_eq!(
         std::fs::read(&path).expect("file must stay readable"),
@@ -370,7 +384,7 @@ async fn an_invalid_profile_id_is_invalid_argument() {
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -394,7 +408,7 @@ async fn no_profiles_dir_configured_answers_unsupported() {
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "unsupported");
 }
 
@@ -429,13 +443,12 @@ async fn a_values_profile_answers_from_values_and_starts_no_child() {
         },
     )
     .await;
-    let (request_id, profile) =
-        expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
+    let (request_id, profile) = expect_requested(read_response(&mut approver).await);
     assert_eq!(request_id, 4242);
     assert_eq!(profile, "fixed");
 
     let (request_id, profile, source, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(5)).await);
+        expect_choices(read_response(&mut approver).await);
     assert_eq!(request_id, 4242);
     assert_eq!(profile, "fixed");
     assert_eq!(source, Some(ModelChoiceSource::Values));
@@ -453,7 +466,16 @@ async fn a_values_profile_answers_from_values_and_starts_no_child() {
         ]
     );
     assert!(error.is_none());
-    assert_marker_absent_after(&marker, NEGATIVE_OBSERVATION).await;
+    // Pushed only once the listing ended, so a command it started has run.
+    assert!(
+        !marker.exists(),
+        "no listing command must have started: marker file exists at {}",
+        marker.display()
+    );
+
+    // Control: listing the other profile does run its command by its push.
+    list_to_the_end(&mut approver, "unused-touch", 4243).await;
+    assert!(marker.exists(), "the other profile's command ran");
 }
 
 #[tokio::test]
@@ -480,9 +502,8 @@ async fn a_lines_profile_lists_choices_read_from_the_commands_output() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, source, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, source, choices, error) = expect_choices(read_response(&mut approver).await);
     match source {
         Some(ModelChoiceSource::Command { argv }) => {
             assert_eq!(
@@ -535,9 +556,8 @@ async fn a_json_profile_with_a_filter_lists_only_the_matching_choices() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, choices, error) = expect_choices(read_response(&mut approver).await);
     assert_eq!(
         choices,
         vec![ModelChoice {
@@ -564,9 +584,8 @@ async fn a_profile_with_no_choices_table_reports_no_source_no_choices_and_no_err
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, source, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(5)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, source, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(source.is_none());
     assert!(choices.is_empty());
     assert!(error.is_none());
@@ -586,9 +605,8 @@ async fn an_unlisted_profile_id_reports_an_error_in_the_push() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, source, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(5)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, source, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(source.is_none());
     assert!(choices.is_empty());
     assert!(error.is_some());
@@ -622,11 +640,11 @@ async fn two_requests_carry_the_callers_own_request_ids_independently() {
     let mut requested_ids = Vec::new();
     let mut choice_ids = Vec::new();
     for _ in 0..2 {
-        let (id, _) = expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
+        let (id, _) = expect_requested(read_response(&mut approver).await);
         requested_ids.push(id);
     }
     for _ in 0..2 {
-        let (id, ..) = expect_choices(read_response(&mut approver, Duration::from_secs(5)).await);
+        let (id, ..) = expect_choices(read_response(&mut approver).await);
         choice_ids.push(id);
     }
     requested_ids.sort_unstable();
@@ -667,9 +685,8 @@ async fn a_command_that_times_out_reports_the_time_limit() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, _, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, _, error) = expect_choices(read_response(&mut approver).await);
     assert_eq!(error.as_deref(), Some("did not finish within 1 seconds"));
 }
 
@@ -701,9 +718,8 @@ async fn output_larger_than_the_configured_limit_is_refused() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, _, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, _, error) = expect_choices(read_response(&mut approver).await);
     assert_eq!(error.as_deref(), Some("output too large"));
 }
 
@@ -735,9 +751,8 @@ async fn a_nonzero_exit_status_is_reported() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, _, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, _, error) = expect_choices(read_response(&mut approver).await);
     assert_eq!(error.as_deref(), Some("exited with status 2"));
 }
 
@@ -766,9 +781,8 @@ async fn an_exit_status_127_names_the_program_that_was_not_found() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, _, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, _, error) = expect_choices(read_response(&mut approver).await);
     let program = command_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -779,8 +793,7 @@ async fn an_exit_status_127_names_the_program_that_was_not_found() {
 
 #[tokio::test]
 async fn an_unavailable_profile_is_refused_before_anything_is_started() {
-    let (root, profiles_dir) = fresh_dirs("model-i4-unavailable");
-    let marker = root.join("marker.txt");
+    let (_root, profiles_dir) = fresh_dirs("model-i4-unavailable");
     write_profile(
         &profiles_dir,
         "unavailable",
@@ -801,16 +814,14 @@ async fn an_unavailable_profile_is_refused_before_anything_is_started() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, source, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(5)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, source, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(source.is_none());
     assert!(choices.is_empty());
     assert_eq!(
         error.as_deref(),
         Some("the executable for this profile could not be found")
     );
-    assert_marker_absent_after(&marker, NEGATIVE_OBSERVATION).await;
 }
 
 #[tokio::test]
@@ -841,9 +852,8 @@ async fn output_that_does_not_match_the_profiles_format_is_refused() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, _, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, _, error) = expect_choices(read_response(&mut approver).await);
     assert_eq!(
         error.as_deref(),
         Some("output did not match the profile's format")
@@ -879,9 +889,8 @@ async fn standard_error_never_reaches_the_push_or_the_log() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, choices, error) = expect_choices(read_response(&mut approver).await);
     // Control: the stdout sentinel is present.
     assert!(choices.iter().any(|c| c.id == "tier-a"));
     assert!(error.is_none());
@@ -897,29 +906,22 @@ async fn standard_error_never_reaches_the_push_or_the_log() {
 
 #[tokio::test]
 async fn a_listing_beyond_the_concurrency_limit_is_refused_without_waiting() {
-    let (_root, profiles_dir) = fresh_dirs("model-i6-concurrency");
+    let (root, profiles_dir) = fresh_dirs("model-i6-concurrency");
+    let release = root.join("release");
     write_profile(
         &profiles_dir,
         "slow-a",
-        &command_profile(
-            "SlowA",
-            &capture_child_path(),
-            &["sleep", "2000"],
-            "format = \"lines\"\nseparator = \"\\t\"",
-        ),
+        &held_profile("SlowA", &root.join("a.pid"), &release),
     );
     write_profile(
         &profiles_dir,
         "slow-b",
-        &command_profile(
-            "SlowB",
-            &capture_child_path(),
-            &["sleep", "2000"],
-            "format = \"lines\"\nseparator = \"\\t\"",
-        ),
+        &held_profile("SlowB", &root.join("b.pid"), &release),
     );
+    // The listing's own time limit never ends the held listing first.
     let config = DaemonConfig {
         model_choices_max_concurrent: 1,
+        model_choices_timeout: HANG_GUARD,
         ..base_config(profiles_dir, Vec::new())
     };
     let f = Harness::start("model-i6-concurrency", config).await;
@@ -933,7 +935,7 @@ async fn a_listing_beyond_the_concurrency_limit_is_refused_without_waiting() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
+    expect_requested(read_response(&mut approver).await);
 
     send(
         &mut approver,
@@ -943,14 +945,14 @@ async fn a_listing_beyond_the_concurrency_limit_is_refused_without_waiting() {
         },
     )
     .await;
-    // Bounded well below the fixture's own 2s sleep: this must be an
-    // immediate refusal, not a wait for the first listing to finish.
-    let msg = read_response(&mut approver, Duration::from_millis(500)).await;
+    // The first listing cannot end before the release, so an answer that
+    // comes now did not wait for it.
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "resource_exhausted");
 
     // The first request still finishes and its push still arrives.
-    let (request_id, ..) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    std::fs::write(&release, b"").expect("release the held listing");
+    let (request_id, ..) = expect_choices(read_response(&mut approver).await);
     assert_eq!(request_id, 1);
 }
 
@@ -960,22 +962,18 @@ async fn a_listing_beyond_the_concurrency_limit_is_refused_without_waiting() {
 
 #[tokio::test]
 async fn list_windows_answers_immediately_while_a_listing_is_still_running() {
-    let (_root, profiles_dir) = fresh_dirs("model-i7-list-windows");
+    let (root, profiles_dir) = fresh_dirs("model-i7-list-windows");
+    let release = root.join("release");
     write_profile(
         &profiles_dir,
         "slow",
-        &command_profile(
-            "Slow",
-            &capture_child_path(),
-            &["sleep", "2000"],
-            "format = \"lines\"\nseparator = \"\\t\"",
-        ),
+        &held_profile("Slow", &root.join("slow.pid"), &release),
     );
-    let f = Harness::start(
-        "model-i7-list-windows",
-        base_config(profiles_dir, Vec::new()),
-    )
-    .await;
+    let config = DaemonConfig {
+        model_choices_timeout: HANG_GUARD,
+        ..base_config(profiles_dir, Vec::new())
+    };
+    let f = Harness::start("model-i7-list-windows", config).await;
     let mut approver = approver_connection(&f).await;
 
     send(
@@ -986,16 +984,22 @@ async fn list_windows_answers_immediately_while_a_listing_is_still_running() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
+    expect_requested(read_response(&mut approver).await);
 
     send(&mut approver, &ClientMessage::ListWindows).await;
-    let msg = read_response(&mut approver, Duration::from_millis(500)).await;
+    // The listing cannot end before the release, so a list that comes now was
+    // answered while it ran.
+    let msg = read_response(&mut approver).await;
     match msg {
         DaemonMessage::WindowList { .. } => {}
         other => {
             panic!("expected an immediate window_list while a listing is in flight, got {other:?}")
         }
     }
+
+    std::fs::write(&release, b"").expect("release the held listing");
+    let (request_id, ..) = expect_choices(read_response(&mut approver).await);
+    assert_eq!(request_id, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,8 +1035,7 @@ async fn save_model_aliases_stores_the_values_and_list_profiles_reports_them() {
         },
     )
     .await;
-    let (profile, saved) =
-        expect_aliases_saved(read_response(&mut approver, Duration::from_secs(5)).await);
+    let (profile, saved) = expect_aliases_saved(read_response(&mut approver).await);
     assert_eq!(profile, "tiers");
     assert_eq!(saved, requested);
 
@@ -1073,7 +1076,7 @@ async fn save_model_aliases_with_a_changed_key_set_is_invalid_argument_and_leave
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "invalid_argument");
     assert_eq!(
         std::fs::read(&path).expect("file must stay readable"),
@@ -1116,7 +1119,7 @@ async fn save_model_aliases_with_an_invalid_value_is_invalid_argument_and_leaves
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "invalid_argument");
     assert_eq!(
         std::fs::read(&path).expect("file must stay readable"),
@@ -1163,9 +1166,8 @@ async fn a_cmd_shim_profile_lists_choices_through_the_resolved_argv() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(
         error.is_none(),
         "the shim must be resolved and run successfully, got error {error:?}"
@@ -1214,9 +1216,8 @@ async fn a_program_found_only_in_the_extra_bin_directory_lists_choices() {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(
         error.is_none(),
         "the program found only through the extra bin directory must be resolved and run, got \
@@ -1294,9 +1295,8 @@ async fn listed_ids(tag: &str, config: DaemonConfig) -> Vec<String> {
         },
     )
     .await;
-    expect_requested(read_response(&mut approver, Duration::from_secs(5)).await);
-    let (_, _, _, choices, error) =
-        expect_choices(read_response(&mut approver, Duration::from_secs(10)).await);
+    expect_requested(read_response(&mut approver).await);
+    let (_, _, _, choices, error) = expect_choices(read_response(&mut approver).await);
     assert!(error.is_none(), "the listing failed: {error:?}");
     choices.into_iter().map(|choice| choice.id).collect()
 }

@@ -8,10 +8,8 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{Harness, read_response, send};
-use yagura_daemon::{DaemonConfig, PtySession};
+use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
 const MAX_COLS: u16 = 1000;
@@ -38,7 +36,7 @@ async fn attached_echo_window(h: &Harness) -> (yagura_test_support::ipc::Connect
         },
     )
     .await;
-    let reply = read_response(&mut client, Duration::from_secs(5)).await;
+    let reply = read_response(&mut client).await;
     assert!(matches!(reply, DaemonMessage::Attached { .. }), "{reply:?}");
     (client, window_id)
 }
@@ -52,7 +50,7 @@ async fn resize_over_ipc_beyond_the_limit_is_invalid_argument_and_changes_nothin
 
     for (cols, rows) in TOO_LARGE {
         send(&mut client, &ClientMessage::Resize { cols, rows }).await;
-        match read_response(&mut client, Duration::from_secs(5)).await {
+        match read_response(&mut client).await {
             DaemonMessage::Error { code, .. } => assert_eq!(code, "invalid_argument"),
             other => panic!("resize({cols}, {rows}) should be invalid_argument, got {other:?}"),
         }
@@ -79,7 +77,7 @@ async fn resize_over_ipc_to_exactly_the_limit_is_accepted() {
     )
     .await;
     send(&mut client, &ClientMessage::Ping).await;
-    let reply = read_response(&mut client, Duration::from_secs(5)).await;
+    let reply = read_response(&mut client).await;
     assert!(
         matches!(reply, DaemonMessage::Pong),
         "the largest size must be accepted, got {reply:?}"
@@ -91,7 +89,7 @@ async fn resize_over_ipc_to_exactly_the_limit_is_accepted() {
 async fn pty_session_resize_beyond_the_limit_fails_and_changes_nothing() {
     let config = DaemonConfig::default();
     let child = common::echo_child_path();
-    let session = PtySession::spawn_with_command(&[child.to_str().unwrap()], &config)
+    let session = common::spawn_session(&[child.to_str().unwrap()], &config)
         .await
         .expect("spawn echo_child");
     let before = session.size().await.unwrap();
@@ -109,7 +107,7 @@ async fn pty_session_resize_beyond_the_limit_fails_and_changes_nothing() {
 async fn pty_session_resize_to_exactly_the_limit_succeeds() {
     let config = DaemonConfig::default();
     let child = common::echo_child_path();
-    let session = PtySession::spawn_with_command(&[child.to_str().unwrap()], &config)
+    let session = common::spawn_session(&[child.to_str().unwrap()], &config)
         .await
         .expect("spawn echo_child");
 

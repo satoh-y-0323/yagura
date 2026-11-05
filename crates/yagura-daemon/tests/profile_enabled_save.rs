@@ -107,9 +107,9 @@ const BROKEN_FORM: &str = "schema = 99
 display_name = \"Toggle\"
 ";
 
-/// How long a case waits between writing a file and calling the operation, so
-/// a rewrite would move the file's modification time.
-const MTIME_OBSERVATION: Duration = Duration::from_millis(1500);
+/// A modification time well in the past that any rewrite moves away from, so
+/// a case sees a rewrite without waiting for the clock to tick.
+const PINNED_MTIME_SECS: u64 = 1_000_000_000;
 
 fn crlf(source: &str) -> String {
     source.replace('\n', "\r\n")
@@ -188,6 +188,23 @@ fn modified(path: &Path) -> SystemTime {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .expect("modification time should be readable")
+}
+
+/// Sets the file's modification time to [`PINNED_MTIME_SECS`] and returns it
+/// as read back, so the caller compares against what the file system stores.
+fn pin_modified(path: &Path) -> SystemTime {
+    let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(PINNED_MTIME_SECS);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(pinned))
+        .expect("modification time should be settable");
+    let read_back = modified(path);
+    assert_eq!(
+        read_back, pinned,
+        "the file system should keep the pinned time"
+    );
+    read_back
 }
 
 fn entry_names(dir: &Path) -> Vec<String> {
@@ -366,8 +383,7 @@ fn assert_no_write_when_already_that_state(tag: &str, source: &str, enabled: boo
     let fixture = Fixture::new(tag);
     let path = fixture.write(PROFILE_ID, source);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let result = saved(set_profile_enabled(&fixture.config, PROFILE_ID, enabled));
 
@@ -404,8 +420,7 @@ fn a_request_changing_the_state_moves_the_modification_time() {
     let fixture = Fixture::new("enabled-write-moves-mtime");
     let path = fixture.write(PROFILE_ID, NO_ENABLED_LF);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let result = saved(set_profile_enabled(&fixture.config, PROFILE_ID, false));
 

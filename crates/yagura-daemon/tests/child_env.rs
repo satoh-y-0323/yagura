@@ -9,8 +9,8 @@ mod common;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
+use yagura_daemon::DaemonConfig;
 use yagura_daemon::child_env::{
     ChildBaseEnv, LOGIN_ENV_END_MARKER, LOGIN_ENV_START_MARKER, LoginShellSource,
     compose_child_base_env, env_for_login_shell, filter_login_env, is_reserved_env_name,
@@ -18,7 +18,6 @@ use yagura_daemon::child_env::{
 };
 use yagura_daemon::config::inherits_terminal;
 use yagura_daemon::profile::ProfileOs;
-use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_os::program::ProgramLookup;
 
 fn inherited_from(pairs: Vec<(&str, &str)>) -> impl Fn(&OsStr) -> Option<OsString> {
@@ -829,17 +828,12 @@ async fn probe_env(
 ) {
     let probe = common::env_probe_path();
     let probe_str = probe.to_str().expect("env_probe path must be valid UTF-8");
-    let session = PtySession::spawn_with_command_in_env(
-        &[probe_str, var_name],
-        None::<&Path>,
-        extra_env,
-        config,
-    )
-    .await
-    .expect("spawn_with_command_in_env should start env_probe");
+    let session =
+        common::spawn_session_in_env(&[probe_str, var_name], None::<&Path>, extra_env, config)
+            .await
+            .expect("spawn_with_command_in_env should start env_probe");
 
-    let text =
-        common::wait_for_scrollback_containing(&session, expected, Duration::from_secs(10)).await;
+    let text = common::wait_for_scrollback_containing(&session, expected).await;
     assert!(
         text.contains(expected),
         "env_probe must report {var_name} as part of {expected:?}; got {text:?}"

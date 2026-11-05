@@ -142,6 +142,92 @@ pub(super) fn spawn_detached(
     Ok(())
 }
 
+/// A process [`spawn_detached_piped`] started, with the caller's ends of its
+/// standard input and output.
+pub(super) struct DetachedPiped {
+    child: ChildProcess,
+    stdin: File,
+    stdout: File,
+}
+
+impl DetachedPiped {
+    pub(super) fn into_process(self, used_fallback: bool) -> crate::DetachedProcess {
+        crate::DetachedProcess::new(self.child, used_fallback, self.stdin, self.stdout)
+    }
+}
+
+/// Starts `program` with `args` outside any job of this crate, with a pipe as
+/// its standard input and output and `stderr` as its standard error, and no
+/// other handle inherited, in the caller's own environment.
+///
+/// # Errors
+///
+/// As for resolving the program and building the command line, plus the
+/// operating system's error when a pipe, the `NUL` device or a duplicate of
+/// `stderr` cannot be made or the process cannot be created with `flags`.
+pub(super) fn spawn_detached_piped(
+    program: &OsStr,
+    args: &[&OsStr],
+    cwd: Option<&Path>,
+    stderr: &crate::DetachedStderr,
+    flags: PROCESS_CREATION_FLAGS,
+) -> io::Result<DetachedPiped> {
+    let (stdin_parent, stdin_child) = pipe_for_child(false)?;
+    let (stdout_parent, stdout_child) = pipe_for_child(true)?;
+    let io = Io::Pipes(StdHandles {
+        stdin: stdin_child,
+        stdout: stdout_child,
+        stderr: inheritable_stderr(stderr)?,
+    });
+    let path = std::env::var_os("PATH");
+    let info = create_process(Creation {
+        program,
+        args,
+        child_path: path.as_deref(),
+        env_block: None,
+        cwd,
+        io: &io,
+        flags,
+    })?;
+    // The child's ends are closed here, so the caller sees the end of the
+    // output once the child lets go of it.
+    drop(io);
+    // SAFETY: CreateProcessW succeeded, so both handles are fresh and owned
+    // here alone; each gets exactly one owner.
+    let (process, thread) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(info.hProcess.0 as *mut c_void),
+            OwnedHandle::from_raw_handle(info.hThread.0 as *mut c_void),
+        )
+    };
+    drop(thread);
+    Ok(DetachedPiped {
+        child: ChildProcess::new(process, info.dwProcessId),
+        stdin: File::from(stdin_parent),
+        stdout: File::from(stdout_parent),
+    })
+}
+
+/// An inheritable handle for a detached process's standard error: a
+/// duplicate of what `stderr` names, so the caller's own handle is never made
+/// inheritable.
+fn inheritable_stderr(stderr: &crate::DetachedStderr) -> io::Result<OwnedHandle> {
+    use std::os::windows::io::AsHandle as _;
+    let duplicate = match stderr {
+        crate::DetachedStderr::Null => return inheritable_null(true),
+        crate::DetachedStderr::File(file) => file.as_handle().try_clone_to_owned()?,
+        // A process without a standard error gives its child none either.
+        crate::DetachedStderr::Inherit => {
+            match std::io::stderr().as_handle().try_clone_to_owned() {
+                Ok(handle) => handle,
+                Err(_) => return inheritable_null(true),
+            }
+        }
+    };
+    make_inheritable(&duplicate)?;
+    Ok(duplicate)
+}
+
 /// What [`create_process`] starts.
 struct Creation<'a, A> {
     /// Resolved by [`command_line::resolve_application`] against `child_path`.

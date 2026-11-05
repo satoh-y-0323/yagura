@@ -8,7 +8,7 @@ use yagura_test_support::ipc::reply_within;
 
 use super::*;
 use crate::events::{EVENT_CHAT_HISTORY_CLEARED, EVENT_SUPERSEDED};
-use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, WAIT_LIMIT, error_frame};
+use crate::host::fake::{FakeHost, Reaction, ScriptedDaemon, error_frame};
 
 fn frame(seq: u64) -> Frame {
     Frame {
@@ -68,7 +68,7 @@ async fn an_attached_windows_frame_goes_to_the_mailbox() {
     .await;
 
     assert!(!superseded);
-    let delivered = reply_within(WAIT_LIMIT, "frames", host.mailbox().take()).await;
+    let delivered = reply_within("frames", host.mailbox().take()).await;
     assert_eq!(delivered, [("w1".to_owned(), frame(1))]);
     assert!(host.take_events().is_empty());
 }

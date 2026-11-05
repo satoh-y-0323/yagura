@@ -20,6 +20,7 @@
 
 use yagura_mcp::transport::{FrameReader, should_resend};
 use yagura_protocol::{FrameError, MAX_FRAME_BODY_LEN, frame_encode};
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
 // =====================================================================
@@ -151,9 +152,10 @@ enum Behavior {
     /// On the first connection, answer the first request with two response
     /// frames written in a single `write_all`; afterwards behave normally.
     ExtraFrameOnFirstReply,
-    /// Delay the first connection's first reply long enough for the client's
-    /// `round_trip` future to be dropped; afterwards behave normally.
-    SlowFirstReply,
+    /// Hold the first connection's first reply until the test releases it,
+    /// after the client's `round_trip` future was dropped; afterwards behave
+    /// normally.
+    HeldFirstReply,
     /// Reply to every request, including `identify`, with a payload-bearing
     /// message that is neither `identified` nor `error` -- the fixture for
     /// the identify path's "unexpected reply" error. The payload carries a
@@ -161,18 +163,6 @@ enum Behavior {
     /// apart from one that dumped the reply's full `{:?}`.
     UnexpectedDuringIdentify,
 }
-
-/// How long `SlowFirstReply` stalls -- comfortably longer than the
-/// cancellation timeout used by the cancel-safety test.
-const SLOW_REPLY: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Upper bound on a reply the scripted server sends promptly or never, so a
-/// reply the transport cannot read fails the test instead of hanging it.
-const REPLY_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Settling delay before reading a counter for a "must NOT have happened"
-/// assertion, so the connection under test is closed first.
-const SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Endpoint-name prefix for this file's scripted server, kept distinct from
 /// the one `tests/e2e.rs` uses so the two files' endpoints never collide.
@@ -184,6 +174,7 @@ struct ScriptedServer {
     endpoint: String,
     accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     frames_received: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    held_reply: std::sync::Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -197,10 +188,28 @@ impl ScriptedServer {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Lets `HeldFirstReply` write the reply it is holding.
+    fn release_held_reply(&self) {
+        self.held_reply.notify_one();
+    }
+
+    /// Waits until a request frame under test has reached the server.
+    async fn await_frames_received(&self, target: usize) {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
+        while self.frames_received() < target {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "only {} request frames arrived, waiting for {target}",
+                self.frames_received()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     /// Waits until the accept counter reaches `target`, panicking on
     /// timeout so a missing connection fails loudly instead of hanging.
-    async fn await_accepted(&self, target: usize, timeout: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+    async fn await_accepted(&self, target: usize) {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         while self.accepted() < target {
             if tokio::time::Instant::now() >= deadline {
                 panic!(
@@ -231,6 +240,7 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
     let endpoint = unique_endpoint_name(PIPE_PREFIX, tag);
     let accepted = Arc::new(AtomicUsize::new(0));
     let frames_received = Arc::new(AtomicUsize::new(0));
+    let held_reply = Arc::new(tokio::sync::Notify::new());
 
     let name = endpoint.clone();
     // Created synchronously, before the task starts, so the endpoint exists
@@ -242,6 +252,7 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
         .expect("the first pipe instance must be creatable");
     let accepted_for_task = Arc::clone(&accepted);
     let frames_for_task = Arc::clone(&frames_received);
+    let held_for_task = Arc::clone(&held_reply);
     let task = tokio::spawn(async move {
         let mut index = 0usize;
         loop {
@@ -258,8 +269,9 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
             accepted_for_task.fetch_add(1, Ordering::SeqCst);
 
             let frames = Arc::clone(&frames_for_task);
+            let held = Arc::clone(&held_for_task);
             tokio::spawn(async move {
-                handle_connection(conn, index, behavior, frames).await;
+                handle_connection(conn, index, behavior, frames, held).await;
             });
             index += 1;
         }
@@ -269,6 +281,7 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
         endpoint,
         accepted,
         frames_received,
+        held_reply,
         task,
     }
 }
@@ -285,11 +298,13 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
     let endpoint = unique_endpoint_name(PIPE_PREFIX, tag);
     let accepted = Arc::new(AtomicUsize::new(0));
     let frames_received = Arc::new(AtomicUsize::new(0));
+    let held_reply = Arc::new(tokio::sync::Notify::new());
 
     let listener =
         UnixListener::bind(&endpoint).expect("bind must succeed on a fresh unique endpoint");
     let accepted_for_task = Arc::clone(&accepted);
     let frames_for_task = Arc::clone(&frames_received);
+    let held_for_task = Arc::clone(&held_reply);
     let task = tokio::spawn(async move {
         let mut index = 0usize;
         loop {
@@ -299,8 +314,9 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
             accepted_for_task.fetch_add(1, Ordering::SeqCst);
 
             let frames = Arc::clone(&frames_for_task);
+            let held = Arc::clone(&held_for_task);
             tokio::spawn(async move {
-                handle_connection(conn, index, behavior, frames).await;
+                handle_connection(conn, index, behavior, frames, held).await;
             });
             index += 1;
         }
@@ -310,6 +326,7 @@ fn spawn_scripted_server(tag: &str, behavior: Behavior) -> ScriptedServer {
         endpoint,
         accepted,
         frames_received,
+        held_reply,
         task,
     }
 }
@@ -324,6 +341,7 @@ async fn handle_connection(
     index: usize,
     behavior: Behavior,
     frames: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    held_reply: std::sync::Arc<tokio::sync::Notify>,
 ) {
     use tokio::io::AsyncWriteExt;
     use yagura_protocol::{DaemonMessage, encode_daemon_message};
@@ -347,8 +365,8 @@ async fn handle_connection(
                 return;
             }
         }
-        Behavior::SlowFirstReply if index == 0 => {
-            tokio::time::sleep(SLOW_REPLY).await;
+        Behavior::HeldFirstReply if index == 0 => {
+            held_reply.notified().await;
             if write_pong(&mut conn).await.is_err() {
                 return;
             }
@@ -452,19 +470,16 @@ async fn a_request_that_was_fully_sent_is_never_resent_on_a_second_connection() 
     let server = spawn_scripted_server("atmostonce", Behavior::CloseAfterOneRequest);
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    let err = reply_within(
-        REPLY_LIMIT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect_err("a daemon that closes without replying must surface an error");
+    let err = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect_err("a daemon that closes without replying must surface an error");
     assert!(
         matches!(err, TransportError::Unavailable(_)),
         "expected Unavailable, got {err:?}"
     );
 
-    tokio::time::sleep(SETTLE).await;
+    // A resend would have gone out on a connection that first had its wire
+    // revision answered, so both counts hold it by the time the call returns.
     assert_eq!(
         server.accepted(),
         1,
@@ -479,9 +494,7 @@ async fn a_request_that_was_fully_sent_is_never_resent_on_a_second_connection() 
     // Proves the assertions above are not vacuous: an instance was listening
     // throughout, so a resend would have shown up as a second connection.
     let _probe = connect_scripted_probe(&server.endpoint).await;
-    server
-        .await_accepted(2, std::time::Duration::from_secs(5))
-        .await;
+    server.await_accepted(2).await;
 }
 
 #[cfg(windows)]
@@ -514,37 +527,25 @@ async fn a_batched_response_returns_the_first_frame_and_abandons_the_connection(
     let server = spawn_scripted_server("frameexact", Behavior::ExtraFrameOnFirstReply);
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    let first = reply_within(
-        REPLY_LIMIT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the first response frame must be returned");
+    let first = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the first response frame must be returned");
     assert_eq!(
         first,
         DaemonMessage::Pong,
         "frame-exact reading must return the first frame, not a merged/second one"
     );
 
-    server
-        .await_accepted(1, std::time::Duration::from_secs(5))
-        .await;
+    server.await_accepted(1).await;
     let before = server.accepted();
 
-    let second = reply_within(
-        REPLY_LIMIT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the next round trip must succeed on a fresh connection");
+    let second = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the next round trip must succeed on a fresh connection");
     assert_eq!(second, DaemonMessage::Pong);
 
-    server
-        .await_accepted(before + 1, std::time::Duration::from_secs(5))
-        .await;
-    tokio::time::sleep(SETTLE).await;
+    // Every connection the second call opened was answered, and so accepted,
+    // before the call returned.
     assert_eq!(
         server.accepted(),
         before + 1,
@@ -557,41 +558,30 @@ async fn a_dropped_round_trip_future_abandons_its_connection() {
     use yagura_mcp::transport::{DaemonTransport, EndpointTransport};
     use yagura_protocol::{ClientMessage, DaemonMessage};
 
-    let server = spawn_scripted_server("cancel", Behavior::SlowFirstReply);
+    let server = spawn_scripted_server("cancel", Behavior::HeldFirstReply);
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    let cancelled = tokio::time::timeout(
-        std::time::Duration::from_millis(300),
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
-    assert!(
-        cancelled.is_err(),
-        "the round trip must still be in flight when its future is dropped"
-    );
+    // Dropped once its request has reached the server, which holds the reply.
+    tokio::select! {
+        reply = transport.round_trip(ClientMessage::Ping) => {
+            panic!("the held reply cannot have arrived yet, got {reply:?}")
+        }
+        () = server.await_frames_received(1) => {}
+    }
+    server.release_held_reply();
 
-    server
-        .await_accepted(1, std::time::Duration::from_secs(5))
-        .await;
+    server.await_accepted(1).await;
     let before = server.accepted();
 
-    let second = reply_within(
-        REPLY_LIMIT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the next round trip must succeed on a fresh connection");
+    let second = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the next round trip must succeed on a fresh connection");
     assert_eq!(
         second,
         DaemonMessage::Pong,
         "the late reply to the cancelled request must not be handed to the next caller"
     );
 
-    server
-        .await_accepted(before + 1, std::time::Duration::from_secs(5))
-        .await;
-    tokio::time::sleep(SETTLE).await;
     assert_eq!(
         server.accepted(),
         before + 1,
@@ -614,12 +604,7 @@ async fn identify_gets_an_unexpected_reply_and_the_protocol_error_names_the_vari
     };
     let transport = EndpointTransport::new(server.endpoint.clone(), Some(identity));
 
-    let result = reply_within(
-        REPLY_LIMIT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await;
+    let result = reply_within("a round trip", transport.round_trip(ClientMessage::Ping)).await;
 
     match result {
         Err(TransportError::Protocol(message)) => {
@@ -638,7 +623,7 @@ async fn identify_gets_an_unexpected_reply_and_the_protocol_error_names_the_vari
         ),
     }
 
-    tokio::time::sleep(SETTLE).await;
+    // Each identify attempt was answered, so its connection is counted.
     assert_eq!(
         server.accepted(),
         2,

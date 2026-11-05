@@ -21,6 +21,8 @@
 //! arguments and exit, so no delivery ever reaches them). All three are
 //! covered here.
 
+mod common;
+
 use std::time::Duration;
 
 use regex::Regex;
@@ -28,7 +30,7 @@ use regex::Regex;
 use yagura_daemon::detector::definition::ComposerSection;
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::{DaemonConfig, PtySession};
-use yagura_test_support::process;
+use yagura_test_support::{HANG_GUARD, process};
 
 /// The composer section every test in this file reads through, built from
 /// the one shared string triple [`process::COMPOSER_MARKER`] /
@@ -52,22 +54,22 @@ fn composer_section() -> ComposerSection {
 /// judgment about what it wrote.
 async fn spawn(argv: &[String]) -> PtySession {
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    PtySession::spawn_with_command(&refs, &DaemonConfig::default())
+    common::spawn_session(&refs, &DaemonConfig::default())
         .await
         .expect("spawn_with_command should start the composer-draw-mode fixture")
 }
 
-/// Reads the composer off `session`'s model and polls
-/// until `accept` is satisfied or `timeout` elapses. Returns the last
-/// observed readout either way, so a timing failure still reports what was
-/// actually on screen.
+/// Reads the composer off `session`'s model and polls until `accept` is
+/// satisfied or [`HANG_GUARD`] elapses. Returns the last observed readout
+/// either way, so the caller's assertion reports what was actually on screen;
+/// each caller asserts what it accepts, so a readout returned at the guard
+/// fails.
 async fn observe_composer_until(
     session: &PtySession,
     section: &ComposerSection,
-    timeout: Duration,
     mut accept: impl FnMut(&ComposerReadout) -> bool,
 ) -> ComposerReadout {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let section = section.clone();
         let readout = session
@@ -103,7 +105,7 @@ async fn assert_starts_empty(argv: &[String], ctx: &str) {
     let section = composer_section();
     let session = spawn(argv).await;
 
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
+    let readout = observe_composer_until(&session, &section, |r| {
         !matches!(r, ComposerReadout::NotObserved)
     })
     .await;
@@ -118,7 +120,7 @@ async fn assert_starts_empty(argv: &[String], ctx: &str) {
 async fn assert_shows_a_written_body(argv: &[String], body: &str, ctx: &str) {
     let section = composer_section();
     let session = spawn(argv).await;
-    observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
+    observe_composer_until(&session, &section, |r| {
         !matches!(r, ComposerReadout::NotObserved)
     })
     .await;
@@ -128,8 +130,8 @@ async fn assert_shows_a_written_body(argv: &[String], body: &str, ctx: &str) {
         .await
         .expect("write_input should reach the running fixture");
 
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        matches!(r, ComposerReadout::Body(_))
+    let readout = observe_composer_until(&session, &section, |r| {
+        *r == ComposerReadout::Body(body.to_string())
     })
     .await;
 
@@ -144,25 +146,25 @@ async fn assert_shows_a_written_body(argv: &[String], body: &str, ctx: &str) {
 async fn assert_reflects_keystroke_by_keystroke_input(argv: &[String], body: &str, ctx: &str) {
     let section = composer_section();
     let session = spawn(argv).await;
-    observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
+    observe_composer_until(&session, &section, |r| {
         !matches!(r, ComposerReadout::NotObserved)
     })
     .await;
 
-    for byte in body.as_bytes() {
+    // Each byte is written once the one before it shows, so every byte reaches the
+    // fixture in a read of its own.
+    for typed in 1..=body.len() {
         session
-            .write_input(&[*byte])
+            .write_input(&body.as_bytes()[typed - 1..typed])
             .await
             .expect("write_input should reach the running fixture");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let shown = &body[..typed];
+        let readout = observe_composer_until(&session, &section, |r| {
+            *r == ComposerReadout::Body(shown.to_string())
+        })
+        .await;
+        assert_body(&readout, shown, ctx);
     }
-
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        matches!(r, ComposerReadout::Body(_))
-    })
-    .await;
-
-    assert_body(&readout, body, ctx);
 }
 
 // =====================================================================
@@ -260,7 +262,7 @@ async fn echo_child_composer_keeps_a_space_at_the_wrap_point() {
 async fn echo_child_composer_drops_paste_markers_submits_on_enter_and_clears_on_ctrl_u() {
     let section = composer_section();
     let session = spawn(&echo_argv(0)).await;
-    observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
+    observe_composer_until(&session, &section, |r| {
         !matches!(r, ComposerReadout::NotObserved)
     })
     .await;
@@ -269,8 +271,8 @@ async fn echo_child_composer_drops_paste_markers_submits_on_enter_and_clears_on_
         .write_input(b"\x1b[200~PastedBody\x1b[201~")
         .await
         .expect("write_input should reach the running fixture");
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        matches!(r, ComposerReadout::Body(_))
+    let readout = observe_composer_until(&session, &section, |r| {
+        *r == ComposerReadout::Body("PastedBody".to_string())
     })
     .await;
     assert_body(
@@ -283,10 +285,8 @@ async fn echo_child_composer_drops_paste_markers_submits_on_enter_and_clears_on_
         .write_input(b"\r")
         .await
         .expect("write_input should reach the running fixture");
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        *r == ComposerReadout::Empty
-    })
-    .await;
+    let readout =
+        observe_composer_until(&session, &section, |r| *r == ComposerReadout::Empty).await;
     assert_empty(&readout, "Enter must submit the body");
     let (text, _) = session
         .text_tail(50, 64 * 1024)
@@ -301,18 +301,17 @@ async fn echo_child_composer_drops_paste_markers_submits_on_enter_and_clears_on_
         .write_input(b"abc")
         .await
         .expect("write_input should reach the running fixture");
-    observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        matches!(r, ComposerReadout::Body(_))
+    let readout = observe_composer_until(&session, &section, |r| {
+        *r == ComposerReadout::Body("abc".to_string())
     })
     .await;
+    assert_body(&readout, "abc", "the body before Ctrl-U");
     session
         .write_input(&[0x15])
         .await
         .expect("write_input should reach the running fixture");
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        *r == ComposerReadout::Empty
-    })
-    .await;
+    let readout =
+        observe_composer_until(&session, &section, |r| *r == ComposerReadout::Empty).await;
     assert_empty(&readout, "Ctrl-U must empty the body");
 }
 

@@ -23,7 +23,10 @@
 //! against those objects' own identity, so another test cannot change its
 //! verdict.
 
+#[cfg(windows)]
 use std::time::Duration;
+
+use yagura_test_support::HANG_GUARD;
 
 /// Free argument that turns a re-invocation of a test into its probe child.
 const CHILD_MARKER: &str = "yagura-fd-probe-child";
@@ -31,8 +34,6 @@ const CHILD_MARKER: &str = "yagura-fd-probe-child";
 const INHERITABLE_ARG: &str = "inheritable=";
 const NON_INHERITABLE_ARG: &str = "non-inheritable=";
 const REPORT_ARG: &str = "report=";
-/// Only a hang guard: every wait below returns as soon as the child reports.
-const HANG_GUARD: Duration = Duration::from_secs(30);
 
 /// Whether one parent object reached the child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

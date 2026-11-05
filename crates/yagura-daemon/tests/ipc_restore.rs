@@ -44,7 +44,7 @@ async fn wait_for_current_snapshot(
     label: &str,
     predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
 ) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut last: Option<Vec<store::SnapshotWindow>> = None;
     loop {
         if let Ok(conn) = store::open_readonly(db_path)
@@ -93,7 +93,7 @@ async fn list_restore_candidates_returns_the_prev_slot_not_current() {
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::ListRestoreCandidates).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::RestoreCandidateList {
             windows,
             taken_at_epoch_s,
@@ -114,7 +114,6 @@ async fn list_restore_candidates_returns_the_prev_slot_not_current() {
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -123,7 +122,7 @@ async fn list_restore_candidates_with_no_resolved_path_returns_an_empty_normal_r
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::ListRestoreCandidates).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::RestoreCandidateList {
             windows,
             taken_at_epoch_s,
@@ -138,7 +137,6 @@ async fn list_restore_candidates_with_no_resolved_path_returns_an_empty_normal_r
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -149,11 +147,10 @@ async fn list_restore_candidates_with_a_nonexistent_database_returns_an_internal
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::ListRestoreCandidates).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let _ = expect_error(msg, "internal");
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -170,7 +167,7 @@ async fn update_window_layout_acks_a_valid_layout() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowLayoutUpdated { window_id: acked } => {
             assert_eq!(
                 acked, window_id,
@@ -181,7 +178,6 @@ async fn update_window_layout_acks_a_valid_layout() {
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -197,11 +193,10 @@ async fn update_window_layout_returns_window_not_found_for_an_unknown_window() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let _ = expect_error(msg, "window_not_found");
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -219,11 +214,10 @@ async fn update_window_layout_rejects_a_layout_json_over_the_byte_limit() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let _ = expect_error(msg, "invalid_argument");
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -241,7 +235,7 @@ async fn update_window_layout_accepts_a_layout_json_at_exactly_the_byte_limit() 
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowLayoutUpdated { window_id: acked } => {
             assert_eq!(acked, window_id)
         }
@@ -251,7 +245,6 @@ async fn update_window_layout_accepts_a_layout_json_at_exactly_the_byte_limit() 
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -278,7 +271,7 @@ async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowLayoutUpdated { .. } => {}
         other => panic!("expected window_layout_updated, got {other:?}"),
     }
@@ -291,7 +284,6 @@ async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
     .await;
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -301,7 +293,7 @@ async fn list_windows_reports_layout_json_after_it_is_set() {
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::ListWindows).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowList { windows } => {
             let entry = windows
                 .iter()
@@ -324,13 +316,13 @@ async fn list_windows_reports_layout_json_after_it_is_set() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowLayoutUpdated { .. } => {}
         other => panic!("expected window_layout_updated, got {other:?}"),
     }
 
     send(&mut client, &ClientMessage::ListWindows).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowList { windows } => {
             let entry = windows
                 .iter()
@@ -346,7 +338,6 @@ async fn list_windows_reports_layout_json_after_it_is_set() {
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 /// A syntactically valid JSON array of one string whose encoded byte length is exactly
@@ -385,7 +376,7 @@ async fn list_restore_candidates_truncates_from_the_row_that_exceeds_the_reply_b
     let mut client = harness.connect().await;
 
     send(&mut client, &ClientMessage::ListRestoreCandidates).await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::RestoreCandidateList { windows, .. } => {
             assert_eq!(
                 windows.len(),
@@ -406,11 +397,10 @@ async fn list_restore_candidates_truncates_from_the_row_that_exceeds_the_reply_b
 
     // The connection must remain usable after a truncated response.
     send(&mut client, &ClientMessage::Ping).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong after a truncated restore_candidate_list, got {other:?}"),
     }
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }

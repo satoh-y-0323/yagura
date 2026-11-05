@@ -10,13 +10,13 @@
 //! The daemon serves a named instance reserved for this file, so the spawned
 //! bridge can only ever reach it, never a resident daemon.
 //!
-//! `cargo build -p yagura-daemon --bins` must have run first: the `echo_child`
-//! binary is located next to the test executable.
+//! `cargo build -p yagura-daemon -p yagura-holder --bins` must have run first:
+//! the `echo_child` and `yagura-holder` binaries are located next to the test
+//! executable.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use yagura_daemon::{
@@ -38,8 +38,6 @@ const INSTANCE: &str = "mcpticketflow";
 /// The only shape `StatusToken::from_override` accepts; it lets the bridge
 /// hold a valid token for the window the harness opened.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A daemon whose workspace is a temporary directory with a bare `.git`
 /// marker, and whose board rules are the repository's reference file.
@@ -103,7 +101,7 @@ async fn start_daemon() -> Daemon {
             .with_tickets(tickets),
     );
     let server = tokio::spawn(server.run());
-    drop(connect_with_retry(&endpoint, READY_TIMEOUT).await);
+    drop(connect_with_retry(&endpoint).await);
 
     let window_id = registry
         .open(OpenWindowRequest {

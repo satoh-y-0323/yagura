@@ -54,11 +54,3 @@ pub(crate) async fn bind(
     let security = ipc.endpoint_security()?;
     ipc.bind(&place.endpoint, security).await
 }
-
-/// Removes the socket file a Unix holder leaves when it ends; a pipe leaves
-/// nothing behind.
-pub(crate) fn remove_endpoint_file(place: &Place) {
-    if cfg!(unix) {
-        let _ = std::fs::remove_file(&place.endpoint);
-    }
-}

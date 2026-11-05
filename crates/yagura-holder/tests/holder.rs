@@ -18,18 +18,12 @@ use tokio::time::Instant;
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, HolderLaunch, HolderRecord,
-    encode_holder_frame, encode_holder_launch, read_holder_exit, read_holder_record,
+    encode_holder_frame, encode_holder_launch, holder_exit_path, read_holder_exit,
+    read_holder_record,
 };
 use yagura_test_support::paths::{TempDir, unique_suffix};
 
-/// Upper bound on every wait, so a broken holder fails the test instead of
-/// hanging it. Nothing is synchronised on it.
-const LIMIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(20);
-/// How long the flood's written total must stand still to count as stopped.
-/// Unbounded flooding never stands still this long, so a holder that keeps
-/// reading fails on [`LIMIT`] rather than passing.
-const QUIET: Duration = Duration::from_millis(1000);
 /// Long enough that no test meets the first-connection deadline by accident.
 const NO_DEADLINE_MS: u64 = 600_000;
 const HOLDER: &str = env!("CARGO_BIN_EXE_yagura-holder");
@@ -180,7 +174,7 @@ async fn record_in(
     window_id: &str,
     satisfied: impl Fn(&HolderRecord) -> bool,
 ) -> HolderRecord {
-    let deadline = Instant::now() + LIMIT;
+    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if let Ok(record) = read_holder_record(holders, window_id)
             && satisfied(&record)
@@ -202,7 +196,7 @@ struct Holder {
 
 impl Holder {
     async fn wait_exit(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + LIMIT;
+        let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
@@ -271,6 +265,25 @@ impl Drop for Peer {
 }
 
 impl Peer {
+    /// Connects and is welcomed; returns `replay_end_seq` and the
+    /// `ack_window` the holder steps in.
+    async fn welcomed_with_window(endpoint: &str) -> (Self, u64, u64) {
+        let mut peer = Self::connect(endpoint).await;
+        peer.send(hello(HOLDER_PROTOCOL)).await;
+        match peer.frame().await {
+            HolderFrame::Welcome {
+                replay_end_seq,
+                ack_window,
+                ..
+            } => (
+                peer,
+                replay_end_seq,
+                ack_window.expect("the Welcome names no ack window"),
+            ),
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+
     async fn connect(endpoint: &str) -> Self {
         let connection = PlatformIpc::default()
             .connect(endpoint)
@@ -335,7 +348,7 @@ impl Peer {
     }
 
     async fn next(&mut self) -> Event {
-        tokio::time::timeout(LIMIT, self.events.recv())
+        tokio::time::timeout(yagura_test_support::HANG_GUARD, self.events.recv())
             .await
             .expect("nothing from the holder within the limit")
             .expect("the reader ended without saying why")
@@ -381,21 +394,8 @@ fn path_arg(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
-/// The flood's last fully written total; `0` before it starts.
-fn flood_total(count_file: &Path) -> u64 {
-    let Ok(text) = std::fs::read_to_string(count_file) else {
-        return 0;
-    };
-    let complete = &text[..text.rfind('\n').map_or(0, |end| end + 1)];
-    complete
-        .lines()
-        .next_back()
-        .and_then(|line| line.parse().ok())
-        .unwrap_or(0)
-}
-
 async fn wait_until(what: &str, satisfied: impl Fn() -> bool) {
-    let deadline = Instant::now() + LIMIT;
+    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
     while !satisfied() {
         assert!(Instant::now() < deadline, "never happened: {what}");
         tokio::time::sleep(POLL).await;
@@ -421,58 +421,33 @@ impl Stream {
     }
 }
 
-/// Drains the holder's output without acknowledging it until the flood's
-/// written total stands still; returns that total.
-async fn drain_until_flood_stops(peer: &mut Peer, stream: &mut Stream, count_file: &Path) -> u64 {
-    let deadline = Instant::now() + LIMIT;
-    let mut total = flood_total(count_file);
-    let mut since = Instant::now();
-    loop {
-        tokio::select! {
-            event = peer.next() => match event {
-                Event::Frame(HolderFrame::Output { seq, bytes }) => stream.take(seq, bytes.len()),
-                Event::Frame(other) => panic!("unexpected frame while flooding: {other:?}"),
-                Event::Closed => panic!("the holder closed the connection"),
-                Event::Broken(error) => panic!("the holder sent a broken frame: {error}"),
-            },
-            () = tokio::time::sleep(POLL) => {}
-        }
-        let now = flood_total(count_file);
-        if now != total {
-            total = now;
-            since = Instant::now();
-        } else if total > 0 && since.elapsed() >= QUIET {
-            return total;
+/// Reads output until it is exactly `window` past `acked`, failing on any
+/// frame that takes it further.
+async fn read_to_the_window(peer: &mut Peer, stream: &mut Stream, acked: u64, window: u64) {
+    while stream.end - acked < window {
+        match peer.frame().await {
+            HolderFrame::Output { seq, bytes } => stream.take(seq, bytes.len()),
+            other => panic!("unexpected frame while flooding: {other:?}"),
         }
         assert!(
-            Instant::now() < deadline,
-            "the flood never stopped while unacknowledged ({total} bytes written)"
+            stream.end - acked <= window,
+            "the holder read {} bytes past the acknowledged {acked}, more than its window {window}",
+            stream.end - acked
         );
     }
 }
 
-/// Keeps draining until the flood writes past `stalled`.
-async fn drain_until_flood_passes(
-    peer: &mut Peer,
-    stream: &mut Stream,
-    count_file: &Path,
-    stalled: u64,
-) {
-    let deadline = Instant::now() + LIMIT;
-    while flood_total(count_file) <= stalled {
-        tokio::select! {
-            event = peer.next() => match event {
-                Event::Frame(HolderFrame::Output { seq, bytes }) => stream.take(seq, bytes.len()),
-                Event::Frame(other) => panic!("unexpected frame while flooding: {other:?}"),
-                Event::Closed => panic!("the holder closed the connection"),
-                Event::Broken(error) => panic!("the holder sent a broken frame: {error}"),
-            },
-            () = tokio::time::sleep(POLL) => {}
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the flood did not move on from {stalled} bytes"
-        );
+/// Asks the holder something it refuses at once and expects the refusal
+/// before any more output: a holder held at its window reads nothing more.
+async fn assert_held(peer: &mut Peer) {
+    peer.send(HolderFrame::Resize {
+        cols: yagura_protocol::MAX_WINDOW_DIMENSION + 1,
+        rows: 30,
+    })
+    .await;
+    match peer.frame().await {
+        HolderFrame::ResizeFailed { .. } => {}
+        other => panic!("the holder went on without an Ack: {other:?}"),
     }
 }
 
@@ -572,13 +547,17 @@ async fn connected_output_stops_at_the_unacknowledged_window_and_resumes_on_ack(
     let _daemon = hold_daemon_endpoint(&rig).await;
     let count = rig.file("count");
     let _holder = rig.start(&rig.launch(&["flood", path_arg(&count)], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    let (mut peer, _, window) = Peer::welcomed_with_window(&rig.record().await.endpoint).await;
     peer.send(HolderFrame::Replay).await;
 
     let mut stream = Stream { end: 0 };
-    let stalled = drain_until_flood_stops(&mut peer, &mut stream, &count).await;
-    peer.send(HolderFrame::Ack { seq: stream.end }).await;
-    drain_until_flood_passes(&mut peer, &mut stream, &count, stalled).await;
+    let mut acked = 0;
+    for _ in 0..3 {
+        read_to_the_window(&mut peer, &mut stream, acked, window).await;
+        assert_held(&mut peer).await;
+        acked = stream.end;
+        peer.send(HolderFrame::Ack { seq: acked }).await;
+    }
 }
 
 /// The holder keeps the checkpoint and every byte after it while no daemon is
@@ -612,24 +591,28 @@ async fn replay_hands_over_the_checkpoint_and_every_byte_after_it_then_live_outp
         .await;
     drop(first);
 
-    // No daemon: the flood must come to a stop at the holder's bound.
-    let deadline = Instant::now() + LIMIT;
-    let mut stalled = flood_total(&count);
-    let mut since = Instant::now();
-    while since.elapsed() < QUIET {
-        tokio::time::sleep(POLL).await;
-        let now = flood_total(&count);
-        if now != stalled {
-            stalled = now;
-            since = Instant::now();
+    // No daemon: the holder keeps exactly its bound after the checkpoint and
+    // no more. Each look is a connection of its own, which holds the reader
+    // at its window until the connection is dropped.
+    let bound = kept_output_bound();
+    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
+    let (mut second, replay_end_seq, window) = loop {
+        let (peer, replay_end_seq, window) = Peer::welcomed_with_window(&endpoint).await;
+        let kept = replay_end_seq - checkpoint_seq;
+        assert!(
+            kept <= bound,
+            "the holder kept {kept} bytes after the checkpoint, more than its bound {bound}"
+        );
+        if kept == bound {
+            break (peer, replay_end_seq, window);
         }
         assert!(
             Instant::now() < deadline,
-            "the flood never stopped with no daemon connected ({stalled} bytes written)"
+            "the holder never came to its bound with no daemon connected ({kept} bytes kept)"
         );
-    }
-
-    let (mut second, _, replay_end_seq) = Peer::welcomed(&endpoint).await;
+        drop(peer);
+        tokio::time::sleep(POLL).await;
+    };
     second.send(HolderFrame::Replay).await;
     assert_eq!(
         second.frame().await,
@@ -663,18 +646,7 @@ async fn replay_hands_over_the_checkpoint_and_every_byte_after_it_then_live_outp
             seq: replay_end_seq,
         })
         .await;
-    drain_until_flood_passes(&mut second, &mut stream, &count, stalled).await;
-    // The child's writes moving on and its output reaching us race, so read until it arrives.
-    tokio::time::timeout(LIMIT, async {
-        while stream.end <= replay_end_seq {
-            match second.frame().await {
-                HolderFrame::Output { seq, bytes } => stream.take(seq, bytes.len()),
-                other => panic!("unexpected frame after the replay: {other:?}"),
-            }
-        }
-    })
-    .await
-    .expect("no live output followed the replay");
+    read_to_the_window(&mut second, &mut stream, replay_end_seq, window).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -826,6 +798,40 @@ async fn a_child_exiting_while_disconnected_leaves_its_result_and_output() {
     );
 }
 
+/// A daemon stops reading at `Exited`, so it must come after every byte the
+/// connection is owed, even when the child is gone before the replay is asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_follows_all_output_when_the_replay_is_asked_for_after_the_exit() {
+    let rig = Rig::new("latereplay");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let mut holder = rig.start(&rig.launch(&["exit", "0"], NO_DEADLINE_MS));
+    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    // The exit file is written once the holder has both the exit and the output.
+    wait_until("the holder has the child's exit", || {
+        read_holder_exit(&rig.holders_dir(), &rig.window_id).is_ok()
+    })
+    .await;
+
+    peer.send(HolderFrame::Replay).await;
+    let mut output = Vec::new();
+    let code = loop {
+        match peer.frame().await {
+            HolderFrame::Output { bytes, .. } => output.extend_from_slice(&bytes),
+            HolderFrame::Checkpoint { .. } => {}
+            HolderFrame::Exited { code } => break code,
+            other => panic!("unexpected frame before Exited: {other:?}"),
+        }
+    };
+    assert!(
+        contains(&output, b"EXITING 0"),
+        "Exited came before the child's output: {:?}",
+        String::from_utf8_lossy(&output)
+    );
+    assert_eq!(code, Some(0));
+    drop(peer);
+    holder.wait_exit().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn terminate_ends_the_child_tree_and_the_holder() {
     let rig = Rig::new("tree");
@@ -876,6 +882,129 @@ async fn terminate_ends_a_child_ignoring_requests_to_end_and_keeps_its_exit() {
         "the child's output is missing: {:?}",
         String::from_utf8_lossy(&exit.output)
     );
+}
+
+/// Kills a descendant the holder is not expected to end (or failed to), so a
+/// test leaves nothing behind.
+#[cfg(unix)]
+struct Reaper {
+    pid: libc::pid_t,
+    always: bool,
+}
+
+#[cfg(unix)]
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if self.always || std::thread::panicking() {
+            // SAFETY: SIGKILL to a descendant this test started and has not seen end.
+            unsafe { libc::kill(self.pid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(unix)]
+fn pid_in(path: &Path) -> libc::pid_t {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// A grandchild that ignores SIGTERM ends only by the escalation to SIGKILL,
+/// which the holder has to have sent before it ends.
+#[cfg(unix)]
+async fn a_stubborn_grandchild_ends_with_the_holder(label: &str, terminate: bool) {
+    let rig = Rig::new(label);
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let pid_file = rig.file("grandchild");
+    let gate = rig.file("gate");
+    let args = if terminate {
+        vec!["stubborn-tree", path_arg(&pid_file)]
+    } else {
+        vec!["stubborn-tree", path_arg(&pid_file), path_arg(&gate)]
+    };
+    let mut holder = rig.start(&rig.launch(&args, NO_DEADLINE_MS));
+    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.send(HolderFrame::Replay).await;
+    peer.output_until(b"HOLDER-CHILD-TREE").await;
+    let grandchild = pid_in(&pid_file);
+    let _reaper = Reaper {
+        pid: grandchild,
+        always: false,
+    };
+    assert!(alive(grandchild), "the grandchild is alive before the end");
+
+    if terminate {
+        peer.send(HolderFrame::Terminate { tree: false }).await;
+    } else {
+        std::fs::write(&gate, b"").unwrap();
+    }
+    until_exited(&mut peer).await;
+    drop(peer);
+    holder.wait_exit().await;
+    wait_until(
+        "the grandchild ignoring SIGTERM ends with the holder",
+        || !alive(grandchild),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grandchild_ignoring_sigterm_ends_with_the_holder_after_the_child_exits_on_its_own() {
+    a_stubborn_grandchild_ends_with_the_holder("stubexit", false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grandchild_ignoring_sigterm_ends_with_the_holder_after_terminate() {
+    a_stubborn_grandchild_ends_with_the_holder("stubterm", true).await;
+}
+
+/// The write's Ctrl+C ends the child, while the rest of it can never be
+/// written: a process outside the tree keeps the terminal open and never
+/// reads it. The write is still answered, as failed, before `Exited`, and the
+/// holder then ends.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_that_ends_the_child_is_answered_before_exited() {
+    let rig = Rig::new("wexit");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let pid_file = rig.file("escaped");
+    let mut holder =
+        rig.start(&rig.launch(&["escaped-holder", path_arg(&pid_file)], NO_DEADLINE_MS));
+    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.send(HolderFrame::Replay).await;
+    peer.output_until(b"HOLDER-CHILD-ESCAPED").await;
+    let _reaper = Reaper {
+        pid: pid_in(&pid_file),
+        always: true,
+    };
+
+    // Complete lines, so the terminal's input queue fills instead of
+    // discarding an overlong line.
+    let mut bytes = vec![0x03];
+    bytes.extend(b"x\n".repeat(512 * 1024));
+    peer.send(HolderFrame::Write { id: 7, bytes }).await;
+    let mut answers = Vec::new();
+    loop {
+        match peer.next().await {
+            Event::Frame(HolderFrame::Output { seq, .. }) => {
+                peer.send(HolderFrame::Ack { seq }).await;
+            }
+            Event::Frame(HolderFrame::Exited { .. }) => break,
+            Event::Frame(other) => answers.push(other),
+            Event::Closed => panic!("closed before Exited, after {answers:?}"),
+            Event::Broken(error) => panic!("the holder sent a broken frame: {error}"),
+        }
+    }
+    assert!(
+        matches!(answers.as_slice(), [HolderFrame::WriteFailed { id: 7, .. }]),
+        "the write was not answered as failed before Exited: {answers:?}"
+    );
+    drop(peer);
+    holder.wait_exit().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -957,7 +1086,7 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
     let mut holder = rig.start_with(&encode_holder_launch(&launch), Stdio::piped());
     let stdout = std::io::BufReader::new(holder.child.stdout.take().unwrap());
     let (line, mut stdout) = tokio::time::timeout(
-        LIMIT,
+        yagura_test_support::HANG_GUARD,
         tokio::task::spawn_blocking(move || {
             let mut stdout = stdout;
             let mut line = Vec::new();
@@ -978,7 +1107,7 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
         .expect("the record is written before the notice");
     let (_peer, _, _) = Peer::welcomed(&record.endpoint).await;
     let rest = tokio::time::timeout(
-        LIMIT,
+        yagura_test_support::HANG_GUARD,
         tokio::task::spawn_blocking(move || {
             let mut rest = Vec::new();
             stdout.read_to_end(&mut rest).unwrap();
@@ -998,7 +1127,7 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
     let mut failed = unready.start_with(b"not a launch", Stdio::piped());
     let mut stdout = failed.child.stdout.take().unwrap();
     let printed = tokio::time::timeout(
-        LIMIT,
+        yagura_test_support::HANG_GUARD,
         tokio::task::spawn_blocking(move || {
             let mut printed = Vec::new();
             stdout.read_to_end(&mut printed).unwrap();
@@ -1046,10 +1175,102 @@ async fn provisional_flag_a_lost_connection_ends_the_tree_and_the_holder_and_lea
     watch.wait_gone().await;
     // The exit file and the record hold the child's raw output and nobody
     // would read them.
-    let left: Vec<_> = std::fs::read_dir(rig.holders_dir())
+    let left = files_left(&rig);
+    assert!(left.is_empty(), "the holder left {left:?}");
+}
+
+fn files_left(rig: &Rig) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(rig.holders_dir())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
-        .collect();
+        .collect()
+}
+
+/// Reads past the output to `Exited`, which must be the next other frame.
+async fn until_exited(peer: &mut Peer) -> Option<i32> {
+    loop {
+        match peer.frame().await {
+            HolderFrame::Output { .. } => {}
+            HolderFrame::Exited { code } => return code,
+            other => panic!("unexpected frame before Exited: {other:?}"),
+        }
+    }
+}
+
+/// A provisional holder of a running `hex` child, connected and replayed,
+/// then told to end the child: returns once `Exited` has arrived.
+async fn provisional_terminated(rig: &Rig) -> (Holder, Peer) {
+    let mut launch = rig.launch(&["hex"], NO_DEADLINE_MS);
+    launch.end_child_on_disconnect = true;
+    let holder = rig.start(&launch);
+    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.send(HolderFrame::Replay).await;
+    peer.output_until(b"HOLDER-CHILD-READY").await;
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    until_exited(&mut peer).await;
+    (holder, peer)
+}
+
+fn assert_no_exit_file(rig: &Rig, route: &str) {
+    let exit = holder_exit_path(&rig.holders_dir(), &rig.window_id).unwrap();
+    assert!(
+        !exit.exists(),
+        "{route}: the provisional holder wrote {} although nobody reads it",
+        exit.display()
+    );
+}
+
+/// Provisional: goes with the end-child-on-disconnect flag. Checked on the
+/// arrival of `Exited`, before this side closes, so an exit file written and
+/// removed later still shows.
+#[tokio::test(flavor = "multi_thread")]
+async fn provisional_flag_terminate_writes_no_exit_file_before_exited() {
+    let rig = Rig::new("flagterm");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let (mut holder, peer) = provisional_terminated(&rig).await;
+
+    assert_no_exit_file(&rig, "Terminate");
+    drop(peer);
+    holder.wait_exit().await;
+}
+
+/// Provisional: goes with the end-child-on-disconnect flag. The daemon here
+/// removes nothing, so whatever is left is the holder's.
+#[tokio::test(flavor = "multi_thread")]
+async fn provisional_flag_the_holder_removes_its_files_after_exited_and_the_close() {
+    let rig = Rig::new("flagclean");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let (mut holder, peer) = provisional_terminated(&rig).await;
+
+    drop(peer);
+    holder.wait_exit().await;
+    let left = files_left(&rig);
+    assert!(left.is_empty(), "the holder left {left:?}");
+}
+
+/// Provisional: goes with the end-child-on-disconnect flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn provisional_flag_a_child_that_cannot_start_leaves_no_exit_file_and_no_record() {
+    let rig = Rig::new("flagnospawn");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let mut launch = rig.launch(&[], NO_DEADLINE_MS);
+    launch.argv = vec![path_arg(&rig.file("no-such-program")).to_owned()];
+    launch.end_child_on_disconnect = true;
+    let mut holder = rig.start(&launch);
+    let mut peer = Peer::connect(&rig.record().await.endpoint).await;
+    peer.send(hello(HOLDER_PROTOCOL)).await;
+
+    let reason = peer.frame().await;
+    assert!(
+        matches!(reason, HolderFrame::SpawnFailed { .. }),
+        "expected the reason first, got {reason:?}"
+    );
+    assert_eq!(peer.frame().await, HolderFrame::Exited { code: None });
+    assert_no_exit_file(&rig, "the child not starting");
+
+    drop(peer);
+    holder.wait_exit().await;
+    let left = files_left(&rig);
     assert!(left.is_empty(), "the holder left {left:?}");
 }
 
@@ -1193,7 +1414,7 @@ impl GrandchildWatch {
         use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use windows::Win32::System::Threading::WaitForSingleObject;
         let handle = self.handle;
-        let millis = u32::try_from(LIMIT.as_millis()).unwrap();
+        let millis = u32::try_from(yagura_test_support::HANG_GUARD.as_millis()).unwrap();
         // SAFETY: `handle` is a process handle this watch owns until here.
         let waited = tokio::task::spawn_blocking(move || unsafe {
             let waited = WaitForSingleObject(handle, millis);

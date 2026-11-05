@@ -31,7 +31,7 @@ use std::time::Duration;
 use yagura_daemon::detector::definition::{ComposerSection, parse_definition};
 use yagura_daemon::detector::screen::ComposerReadout;
 use yagura_daemon::{DaemonConfig, PtySession};
-use yagura_test_support::{detection, process};
+use yagura_test_support::{HANG_GUARD, detection, process};
 
 fn composer_section() -> ComposerSection {
     let source = format!(
@@ -44,13 +44,19 @@ fn composer_section() -> ComposerSection {
         .expect("a definition with a [composer] table must load one")
 }
 
+/// Reads the composer until `accept` holds for a readout.
+///
+/// # Panics
+///
+/// Panics with the last readout if `accept` still does not hold after
+/// [`HANG_GUARD`].
 async fn observe_composer_until(
     session: &PtySession,
     section: &ComposerSection,
-    timeout: Duration,
+    what: &str,
     mut accept: impl FnMut(&ComposerReadout) -> bool,
-) -> ComposerReadout {
-    let deadline = tokio::time::Instant::now() + timeout;
+) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let section = section.clone();
         let readout = session
@@ -58,11 +64,12 @@ async fn observe_composer_until(
             .await
             .unwrap();
         if accept(&readout) {
-            return readout;
+            return;
         }
-        if tokio::time::Instant::now() >= deadline {
-            return readout;
-        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the composer never showed {what}; last read {readout:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -72,11 +79,15 @@ async fn submit_child_launched_from_this_crate_via_the_shared_launcher_draws_a_w
     let section = composer_section();
     let argv = process::submit_child_command_with_composer("MCP-COMPOSER-READY", 0, 0, 0, 0);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let session = PtySession::spawn_with_command(&refs, &DaemonConfig::default())
-        .await
-        .expect("spawn_with_command should start the composer-draw-mode fixture");
+    let session = PtySession::spawn_with_command(
+        &refs,
+        &DaemonConfig::default(),
+        &yagura_daemon::HolderHost::from_config(&DaemonConfig::default()),
+    )
+    .await
+    .expect("spawn_with_command should start the composer-draw-mode fixture");
 
-    observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
+    observe_composer_until(&session, &section, "its marker", |r| {
         !matches!(r, ComposerReadout::NotObserved)
     })
     .await;
@@ -86,18 +97,14 @@ async fn submit_child_launched_from_this_crate_via_the_shared_launcher_draws_a_w
         .await
         .expect("write_input should reach the running fixture");
 
-    let readout = observe_composer_until(&session, &section, Duration::from_secs(5), |r| {
-        matches!(r, ComposerReadout::Body(_))
-    })
+    // A window opened from this crate through the shared launcher alone must
+    // draw the body it was written, the same as when the identical fixture is
+    // opened from yagura-daemon's own tests.
+    observe_composer_until(
+        &session,
+        &section,
+        "the written body",
+        |r| matches!(r, ComposerReadout::Body(text) if text == "McpReachableBody7"),
+    )
     .await;
-
-    match readout {
-        ComposerReadout::Body(text) => assert_eq!(
-            text, "McpReachableBody7",
-            "a window opened from this crate through the shared launcher alone must draw the \
-             body it was written, the same as when the identical fixture is opened from \
-             yagura-daemon's own tests"
-        ),
-        other => panic!("expected Body(\"McpReachableBody7\"), got {other:?}"),
-    }
 }

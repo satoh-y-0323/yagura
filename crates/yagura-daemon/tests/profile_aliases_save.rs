@@ -109,9 +109,9 @@ const PROFILE_ID: &str = "tiers";
 const OLD_FAST: &str = "\"tier-a-1\"";
 const NEW_FAST: &str = "\"tier-a-2\"";
 
-/// How long a case waits between writing a file and calling the operation, so
-/// a rewrite would move the file's modification time.
-const MTIME_OBSERVATION: Duration = Duration::from_millis(1500);
+/// A modification time well in the past that any rewrite moves away from, so
+/// a case sees a rewrite without waiting for the clock to tick.
+const PINNED_MTIME_SECS: u64 = 1_000_000_000;
 
 fn crlf(source: &str) -> String {
     source.replace('\n', "\r\n")
@@ -190,6 +190,23 @@ fn modified(path: &Path) -> SystemTime {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .expect("modification time should be readable")
+}
+
+/// Sets the file's modification time to [`PINNED_MTIME_SECS`] and returns it
+/// as read back, so the caller compares against what the file system stores.
+fn pin_modified(path: &Path) -> SystemTime {
+    let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(PINNED_MTIME_SECS);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(pinned))
+        .expect("modification time should be settable");
+    let read_back = modified(path);
+    assert_eq!(
+        read_back, pinned,
+        "the file system should keep the pinned time"
+    );
+    read_back
 }
 
 fn entry_names(dir: &Path) -> Vec<String> {
@@ -469,8 +486,7 @@ fn a_request_changing_no_value_is_not_written_and_keeps_the_modification_time() 
     let fixture = Fixture::new("alias-no-change");
     let path = fixture.write(PROFILE_ID, TABLE_FORM);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let reordered = pairs(&[
         ("strong", "tier-c-1"),
@@ -501,8 +517,7 @@ fn a_request_changing_a_value_is_written_and_moves_the_modification_time() {
     let fixture = Fixture::new("alias-change");
     let path = fixture.write(PROFILE_ID, TABLE_FORM);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let result = saved(save_model_aliases(
         &fixture.config,

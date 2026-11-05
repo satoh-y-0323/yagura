@@ -7,8 +7,6 @@
 //! against a scripted peer. Against a correct daemon these helpers only ever
 //! see the quiet case, so their failing branches are measured here.
 
-use std::time::Duration;
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{
@@ -19,8 +17,6 @@ use yagura_test_support::ipc;
 use yagura_test_support::view::ViewClient;
 
 type ServerConnection = <PlatformIpc as PeerAuth>::Connection;
-
-const GRACE: Duration = Duration::from_millis(300);
 
 fn frame(seq: u64, reset: bool) -> DaemonMessage {
     DaemonMessage::Frame(Frame {
@@ -98,7 +94,7 @@ async fn attached(tag: &str) -> (ViewClient, Peer) {
     let transport = PlatformIpc::default();
     let security = transport.endpoint_security().expect("endpoint security");
     let mut listener = transport.bind(&name, security).await.expect("bind");
-    let conn = ipc::connect_with_retry(&name, Duration::from_secs(5)).await;
+    let conn = ipc::connect_with_retry(&name).await;
     let mut peer = Peer {
         conn: transport.accept(&mut listener).await.expect("accept"),
         buf: Vec::new(),
@@ -138,7 +134,7 @@ async fn sync_applies_and_acknowledges_the_frames_sent_before_the_pong() {
         [1, 2],
         "sync must apply the frame that came before the pong"
     );
-    tokio::time::timeout(Duration::from_secs(5), serve)
+    tokio::time::timeout(yagura_test_support::HANG_GUARD, serve)
         .await
         .expect("sync must acknowledge the frame it applied")
         .expect("the sync script");
@@ -155,12 +151,11 @@ async fn assert_no_frame_fails_when_a_frame_comes_before_the_pong() {
         peer
     });
 
-    view.assert_no_frame("nothing may change", GRACE).await;
+    view.assert_no_frame("nothing may change").await;
 }
 
 #[tokio::test]
-#[should_panic(expected = "arrived after the pong but nothing may change")]
-async fn assert_no_frame_fails_when_a_frame_follows_the_pong() {
+async fn assert_no_frame_returns_at_the_pong_and_leaves_what_follows_unread() {
     let (mut view, mut peer) = attached("after-pong").await;
     let _serve = tokio::spawn(async move {
         assert_eq!(peer.recv().await, ClientMessage::Ping);
@@ -169,11 +164,23 @@ async fn assert_no_frame_fails_when_a_frame_follows_the_pong() {
         peer
     });
 
-    view.assert_no_frame("nothing may change", GRACE).await;
+    view.assert_no_frame("nothing may change").await;
+
+    assert_eq!(
+        view.completed.iter().map(|f| f.seq).collect::<Vec<_>>(),
+        [1],
+        "a frame after the pong is not the helper's to read"
+    );
+    let parts = view.next_complete_frame().await;
+    assert_eq!(
+        parts.last().map(|part| part.seq),
+        Some(2),
+        "the frame after the pong must still be on the connection"
+    );
 }
 
 #[tokio::test]
-async fn assert_no_frame_accepts_a_pushed_exit_after_the_pong() {
+async fn assert_no_frame_accepts_a_pushed_exit_before_the_pong() {
     let (mut view, mut peer) = attached("exit").await;
     let serve = tokio::spawn(async move {
         let mut acks = Vec::new();
@@ -181,12 +188,12 @@ async fn assert_no_frame_accepts_a_pushed_exit_after_the_pong() {
             peer.recv_skipping_acks(&mut acks).await,
             ClientMessage::Ping
         );
-        peer.send(&DaemonMessage::Pong).await;
         peer.send(&DaemonMessage::Exit { exit_code: 0 }).await;
+        peer.send(&DaemonMessage::Pong).await;
         peer
     });
 
-    view.assert_no_frame("the child only exited", GRACE).await;
+    view.assert_no_frame("the child only exited").await;
 
     assert_eq!(view.exited, Some(0), "the pushed exit must be recorded");
     drop(serve.await.expect("the exit script"));

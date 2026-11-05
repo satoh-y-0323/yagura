@@ -51,6 +51,14 @@ METRICS = {
     "mem_per_window_mib": ("MiB", False, 0.06),
 }
 
+# name: (unit, higher_is_better). Reported next to METRICS but never judged: they take
+# no part in WORSE/ok or in the exit code.
+REPORT_ONLY = {
+    "mem_private_loaded_mib": ("MiB", False),
+    "mem_private_per_window_mib": ("MiB", False),
+}
+REPORTED = {**{name: spec[:2] for name, spec in METRICS.items()}, **REPORT_ONLY}
+
 
 class BenchError(Exception):
     pass
@@ -615,6 +623,8 @@ def one_rep(args, build: Build, rep: int, workdir: Path) -> dict:
         mib = 1024 * 1024
         mem_base = procs.total(base, "working_set") / mib
         mem_loaded = procs.total(idle_end, "working_set") / mib
+        private_base = procs.total(base, "private") / mib
+        private_loaded = procs.total(idle_end, "private") / mib
         flood_bytes = flood_windows * flood_count * len(FLOOD_LINE)
         return {
             "rep": rep,
@@ -628,13 +638,15 @@ def one_rep(args, build: Build, rep: int, workdir: Path) -> dict:
             "mem_base_mib": mem_base,
             "mem_loaded_mib": mem_loaded,
             "mem_per_window_mib": (mem_loaded - mem_base) / args.windows,
+            "mem_private_loaded_mib": private_loaded,
+            "mem_private_per_window_mib": (private_loaded - private_base) / args.windows,
             "detail": {
                 "flood_seconds": finished - started,
                 "flood_bytes": flood_bytes,
                 "loaded_samples_ms": loaded,
                 "idle_samples_ms": idle,
-                "private_base_mib": procs.total(base, "private") / mib,
-                "private_loaded_mib": procs.total(idle_end, "private") / mib,
+                "private_base_mib": private_base,
+                "private_loaded_mib": private_loaded,
                 "by_image_loaded": idle_end,
             },
         }
@@ -668,7 +680,7 @@ def summarize(values: List[float]) -> dict:
 
 def _summaries(reps: List[dict]) -> dict:
     summary = {}
-    for name in METRICS:
+    for name in REPORTED:
         values = [rep[name] for rep in reps if rep[name] is not None]
         if values:
             summary[name] = summarize(values)
@@ -744,7 +756,7 @@ def command_run(args) -> int:
             print(
                 f"rep {rep} [{builds[index].label}]: "
                 + ", ".join(
-                    f"{name}={result[name]:.3f}" for name in METRICS if result[name] is not None
+                    f"{name}={result[name]:.3f}" for name in REPORTED if result[name] is not None
                 ),
                 flush=True,
             )
@@ -788,7 +800,12 @@ def judge_paired(base: dict, new: dict, name: str, z: float) -> Optional[dict]:
 
     Repetition i of both builds ran next to each other, so their difference
     carries no drift between sessions."""
-    unit, higher_is_better, floor = METRICS[name]
+    report_only = name in REPORT_ONLY
+    if report_only:
+        unit, higher_is_better = REPORT_ONLY[name]
+        floor = 0.0
+    else:
+        unit, higher_is_better, floor = METRICS[name]
     pairs = [
         (a[name], b[name])
         for a, b in zip(base["reps"], new["reps"])
@@ -812,7 +829,8 @@ def judge_paired(base: dict, new: dict, name: str, z: float) -> Optional[dict]:
         "worse_by": worse_by,
         "tolerance": tolerance,
         "pairs": len(pairs),
-        "worse": worse_by > tolerance,
+        "report_only": report_only,
+        "worse": False if report_only else worse_by > tolerance,
     }
 
 
@@ -832,11 +850,11 @@ def command_compare(args) -> int:
         # medians are shown but nothing is judged (README.md section 4).
         base, new = (json.loads(Path(p).read_text())["builds"][0] for p in args.results)
         print("separate runs: not judged; measure both builds in one run to judge")
-        for name in METRICS:
+        for name in REPORTED:
             if name in base["summary"] and name in new["summary"]:
                 a, b = base["summary"][name]["median"], new["summary"][name]["median"]
                 ratio = f"{b / a:.3f}" if a else "-"
-                print(f"{name:<20} {a:>10.3f} {b:>10.3f} {ratio:>7}")
+                print(f"{name:<26} {a:>10.3f} {b:>10.3f} {ratio:>7}")
         return 3
     document = json.loads(Path(args.results[0]).read_text())
     if len(document["builds"]) < 2:
@@ -844,16 +862,20 @@ def command_compare(args) -> int:
         return 2
     base = _build(document, args.base, 0)
     new = _build(document, args.new, 1)
-    verdicts = [v for v in (judge_paired(base, new, name, args.z) for name in METRICS) if v]
+    verdicts = [v for v in (judge_paired(base, new, name, args.z) for name in REPORTED) if v]
     print(f"base = {base['label']}, new = {new['label']}, z = {args.z}")
     print(
-        f"{'metric':<20} {'base':>10} {'new':>10} {'ratio':>7} {'worse_by':>10} {'tol':>9}  verdict"
+        f"{'metric':<26} {'base':>10} {'new':>10} {'ratio':>7} {'worse_by':>10} {'tol':>9}  verdict"
     )
     for v in verdicts:
         ratio = f"{v['ratio']:.3f}" if v["ratio"] is not None else "-"
+        if v["report_only"]:
+            tol, verdict = "-", "report only"
+        else:
+            tol, verdict = f"{v['tolerance']:.3f}", "WORSE" if v["worse"] else "ok"
         print(
-            f"{v['metric']:<20} {v['base']:>10.3f} {v['new']:>10.3f} {ratio:>7} "
-            f"{v['worse_by']:>10.3f} {v['tolerance']:>9.3f}  {'WORSE' if v['worse'] else 'ok'}"
+            f"{v['metric']:<26} {v['base']:>10.3f} {v['new']:>10.3f} {ratio:>7} "
+            f"{v['worse_by']:>10.3f} {tol:>9}  {verdict}"
         )
     if args.json:
         Path(args.json).write_text(json.dumps(verdicts, indent=2))

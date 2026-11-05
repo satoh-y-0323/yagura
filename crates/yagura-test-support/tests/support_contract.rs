@@ -908,9 +908,7 @@ mod unix_process {
 #[cfg(windows)]
 mod windows_ipc {
     use std::collections::HashSet;
-    use std::time::Duration;
 
-    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
     use yagura_protocol::DaemonMessage;
     use yagura_test_support::ipc;
 
@@ -966,51 +964,6 @@ mod windows_ipc {
     fn expect_closed_fails_loud_when_a_frame_arrived_instead() {
         ipc::ReadOutcome::Message(DaemonMessage::Pong).expect_closed("red-ctx");
     }
-
-    #[tokio::test]
-    async fn try_read_daemon_message_returns_none_on_timeout() {
-        let name = ipc::unique_endpoint_name("yagura-red-pipe", "try-read-timeout");
-        let server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&name)
-            .expect("named pipe server must be creatable");
-        let mut client = ClientOptions::new()
-            .open(&name)
-            .expect("client must connect to the freshly created pipe");
-        server.connect().await.expect("server must accept a client");
-
-        let outcome: Option<DaemonMessage> =
-            ipc::try_read_daemon_message(&mut client, Duration::from_millis(200)).await;
-
-        assert!(
-            outcome.is_none(),
-            "a drain loop that waits and receives nothing must report `None`, not fail: \
-             {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn try_read_daemon_message_returns_none_on_eof() {
-        let name = ipc::unique_endpoint_name("yagura-red-pipe", "try-read-eof");
-        let server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&name)
-            .expect("named pipe server must be creatable");
-        let mut client = ClientOptions::new()
-            .open(&name)
-            .expect("client must connect to the freshly created pipe");
-        server.connect().await.expect("server must accept a client");
-        drop(server);
-
-        let outcome: Option<DaemonMessage> =
-            ipc::try_read_daemon_message(&mut client, Duration::from_secs(5)).await;
-
-        assert!(
-            outcome.is_none(),
-            "a closed connection is the same `None` as a timeout for this drain-only helper: \
-             {outcome:?}"
-        );
-    }
 }
 
 // =====================================================================
@@ -1023,9 +976,8 @@ mod unix_ipc {
     use std::collections::HashSet;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
-    use std::time::Duration;
 
-    use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
+    use yagura_os::{PeerAuth, PlatformIpc};
     use yagura_protocol::DaemonMessage;
     use yagura_test_support::ipc;
 
@@ -1112,61 +1064,6 @@ mod unix_ipc {
     #[should_panic(expected = "expected connection to be closed")]
     fn expect_closed_fails_loud_when_a_frame_arrived_instead() {
         ipc::ReadOutcome::Message(DaemonMessage::Pong).expect_closed("red-ctx");
-    }
-
-    #[tokio::test]
-    async fn try_read_daemon_message_returns_none_on_timeout() {
-        let name = ipc::unique_endpoint_name("yagura-red-endpoint", "try-read-timeout");
-        let transport = PlatformIpc::default();
-        let security = transport
-            .endpoint_security()
-            .expect("endpoint_security must succeed");
-        let mut listener = transport
-            .bind(&name, security)
-            .await
-            .expect("bind must succeed on a freshly created endpoint directory");
-        let mut client = ipc::connect_with_retry(&name, Duration::from_secs(5)).await;
-        let _server = transport
-            .accept(&mut listener)
-            .await
-            .expect("accept must succeed");
-
-        let outcome: Option<DaemonMessage> =
-            ipc::try_read_daemon_message(&mut client, Duration::from_millis(200)).await;
-
-        assert!(
-            outcome.is_none(),
-            "a drain loop that waits and receives nothing must report `None`, not fail: \
-             {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn try_read_daemon_message_returns_none_on_eof() {
-        let name = ipc::unique_endpoint_name("yagura-red-endpoint", "try-read-eof");
-        let transport = PlatformIpc::default();
-        let security = transport
-            .endpoint_security()
-            .expect("endpoint_security must succeed");
-        let mut listener = transport
-            .bind(&name, security)
-            .await
-            .expect("bind must succeed on a freshly created endpoint directory");
-        let mut client = ipc::connect_with_retry(&name, Duration::from_secs(5)).await;
-        let server = transport
-            .accept(&mut listener)
-            .await
-            .expect("accept must succeed");
-        drop(server);
-
-        let outcome: Option<DaemonMessage> =
-            ipc::try_read_daemon_message(&mut client, Duration::from_secs(5)).await;
-
-        assert!(
-            outcome.is_none(),
-            "a closed connection is the same `None` as a timeout for this drain-only helper: \
-             {outcome:?}"
-        );
     }
 }
 
@@ -1411,23 +1308,5 @@ async fn wait_until_file_grows_returns_once_the_file_grows() {
     let tick = tick_file("grows");
     let _writer = keep_appending(&tick, std::time::Duration::from_secs(5));
 
-    process::wait_until_file_grows(&tick, std::time::Duration::from_secs(5)).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "never appended")]
-async fn wait_until_file_grows_fails_when_the_file_never_grows() {
-    let tick = tick_file("still");
-
-    process::wait_until_file_grows(&tick, std::time::Duration::from_millis(300)).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "after teardown")]
-async fn assert_file_len_stable_fails_while_the_file_keeps_growing() {
-    let tick = tick_file("leak");
-    let _writer = keep_appending(&tick, std::time::Duration::from_secs(5));
-
-    process::assert_file_len_stable(&tick, std::time::Duration::from_secs(1), "after teardown")
-        .await;
+    process::wait_until_file_grows(&tick).await;
 }

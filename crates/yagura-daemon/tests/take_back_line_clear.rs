@@ -13,15 +13,13 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
-    Harness, approver_base_config, let_every_clock_bound_run_out,
-    open_submit_child_window_with_clear_scope, read_composer_now, settled_marker_count,
-    settled_submitted_count, unique_temp_dir, wait_until_composer_is, wait_until_status,
-    write_submit_definition_with_input_toml,
+    ChildInput, Harness, approver_base_config, let_every_clock_bound_run_out,
+    open_submit_child_window_with_clear_scope, read_composer_now, unique_temp_dir,
+    wait_until_composer_is, wait_until_status, write_submit_definition_with_input_toml,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -29,6 +27,7 @@ use yagura_daemon::window::{
     NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement, WindowEntry,
 };
 use yagura_protocol::WindowStatus;
+use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
 fn detection_config(dir: &Path) -> DaemonConfig {
@@ -70,6 +69,42 @@ fn line_clear_input_toml() -> String {
     )
 }
 
+/// The file `name`'s child appends every byte it reads to.
+fn input_log(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}-input.log"))
+}
+
+fn log_argument(log: &Path) -> String {
+    log.to_str()
+        .expect("the input log path must be valid UTF-8")
+        .to_string()
+}
+
+/// A `submit_child` window in composer-draw mode under [`line_clear_input_toml`],
+/// launched with `clear_scope` and logging its input to [`input_log`]: what is
+/// counted is what the child read, never what it echoed.
+async fn open_line_clear_window(
+    h: &Harness,
+    client: &mut Connection,
+    dir: &Path,
+    name: &str,
+    clear_scope: &str,
+) -> String {
+    let marker = format!("{name}-marker");
+    open_submit_child_window_with_clear_scope(
+        h,
+        client,
+        dir,
+        name,
+        &marker,
+        &line_clear_input_toml(),
+        0,
+        clear_scope,
+        Some(&input_log(dir, name)),
+    )
+    .await
+}
+
 /// 70 characters without a space: three display lines in the child's composer.
 fn long_body() -> String {
     "abcdefghij".repeat(7)
@@ -98,8 +133,7 @@ fn start_delivery(
 /// Waits until the receiver has stopped reading with the body begun: the
 /// delivery has written its body.
 async fn wait_for_the_stall(h: &Harness, window_id: &str) {
-    h.wait_for_scrollback(window_id, b"STALL-BEGAN", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(window_id, b"STALL-BEGAN").await;
 }
 
 fn not_placed(result: &SubmitJudgment, what: &str) -> NotPlaced {
@@ -114,22 +148,12 @@ async fn a_take_back_empties_a_composer_whose_clear_key_erases_one_display_line_
     let dir = unique_temp_dir("line-clear-empties");
     let h = Harness::start("line-clear-empties", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
-        &h,
-        &mut client,
-        &dir,
-        "empties",
-        "empties-marker",
-        &line_clear_input_toml(),
-        0,
-        "held:line-clear",
-    )
-    .await;
+    let window_id =
+        open_line_clear_window(&h, &mut client, &dir, "empties", "held:line-clear").await;
     let body = long_body();
 
     let (leave, call) = start_delivery(&h, &window_id, &body);
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     leave.send(true).expect("the call holds its receiver");
     let result = call
         .await
@@ -148,10 +172,12 @@ async fn a_take_back_empties_a_composer_whose_clear_key_erases_one_display_line_
         !declined.envelope_remains,
         "with the composer empty the sender must be told nothing remains"
     );
+    let read = ChildInput::read(&entry(&h, &window_id), &input_log(&dir, "empties")).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
+        read.submit_keys(),
         0,
-        "nothing may reach the receiver as a submission"
+        "nothing may reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -161,17 +187,8 @@ async fn a_take_back_queued_behind_a_stall_empties_the_composer_once_the_receive
     let resume = dir.join("resume");
     let h = Harness::start("line-clear-stall", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
-        &h,
-        &mut client,
-        &dir,
-        "stall",
-        "stall-marker",
-        &line_clear_input_toml(),
-        0,
-        &stalled_line_clear(&resume),
-    )
-    .await;
+    let window_id =
+        open_line_clear_window(&h, &mut client, &dir, "stall", &stalled_line_clear(&resume)).await;
     let body = long_body();
 
     let (leave, call) = start_delivery(&h, &window_id, &body);
@@ -198,21 +215,14 @@ async fn a_take_back_queued_behind_a_stall_empties_the_composer_once_the_receive
         !declined.envelope_remains,
         "the take-back was confirmed by the probe showing alone, so nothing remains"
     );
+    h.wait_for_scrollback(&window_id, b"STALL-ENDED").await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
+    let read = ChildInput::read(&entry(&h, &window_id), &input_log(&dir, "stall")).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "STALL-ENDED", 1).await,
-        1,
-        "the receiver must resume"
-    );
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(30),
-    )
-    .await;
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0
+        read.submit_keys(),
+        0,
+        "nothing may reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -222,17 +232,8 @@ async fn a_second_attempt_after_a_stalled_take_back_writes_the_body_only_once() 
     let resume = dir.join("resume");
     let h = Harness::start("line-clear-retry", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
-        &h,
-        &mut client,
-        &dir,
-        "retry",
-        "retry-marker",
-        &line_clear_input_toml(),
-        0,
-        &stalled_line_clear(&resume),
-    )
-    .await;
+    let window_id =
+        open_line_clear_window(&h, &mut client, &dir, "retry", &stalled_line_clear(&resume)).await;
     let body = long_body();
 
     let (leave, call) = start_delivery(&h, &window_id, &body);
@@ -243,18 +244,8 @@ async fn a_second_attempt_after_a_stalled_take_back_writes_the_body_only_once() 
         .await
         .expect("the submit task must not panic")
         .expect("write must not fail at the PTY level");
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "STALL-ENDED", 1).await,
-        1,
-        "the receiver must resume"
-    );
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(30),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, b"STALL-ENDED").await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
 
     let second = entry(&h, &window_id)
         .submit_message(
@@ -278,13 +269,15 @@ async fn a_second_attempt_after_a_stalled_take_back_writes_the_body_only_once() 
              attempt must write and submit the body, got {other:?}"
         ),
     }
+    h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
+        .await;
+    let read = ChildInput::read(&entry(&h, &window_id), &input_log(&dir, "retry")).await;
     assert_eq!(
-        // Ends at `\r`, the start of the line end on every platform (a Unix
-        // PTY turns the child's `\r\n` into `\r\r\n`), so a body written
-        // twice in a row still fails to match.
-        settled_submitted_count(&h, &window_id, &body, 1).await,
-        1,
-        "the receiver must be handed the body exactly once, not twice in a row"
+        read.line_writes(&body),
+        2,
+        "each attempt must hand the receiver the body once, never twice in a row; the child \
+         read {:?}",
+        read.bytes()
     );
 }
 
@@ -318,14 +311,11 @@ async fn a_clear_key_the_receiver_ignores_leaves_the_sender_told_something_may_r
             .to_str()
             .expect("the resume path must be valid UTF-8")
     ));
+    // overlay and overlay_heading: none; then the input log.
+    command.resize(14, String::new());
+    command.push(log_argument(&input_log(&dir, "ignored")));
     let window_id = h.open(command, Some("ignored")).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
     let body = long_body();
 
     let (leave, call) = start_delivery(&h, &window_id, &body);
@@ -353,14 +343,11 @@ async fn a_clear_key_the_receiver_ignores_leaves_the_sender_told_something_may_r
          it may remain"
     );
     assert_eq!(result.residue_write_seq, None);
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "STALL-ENDED", 1).await,
-        1
-    );
+    h.wait_for_scrollback(&window_id, b"STALL-ENDED").await;
 
     let write_seq_after_first = entry(&h, &window_id).write_seq();
     let retry = tokio::time::timeout(
-        Duration::from_secs(20),
+        yagura_test_support::HANG_GUARD,
         entry(&h, &window_id).submit_message(&body, None, SendStage::BeforeSubmitKey, None),
     )
     .await
@@ -375,8 +362,11 @@ async fn a_clear_key_the_receiver_ignores_leaves_the_sender_told_something_may_r
         write_seq_after_first,
         "the body must not be written a second time on top of what may remain"
     );
+    let read = ChildInput::read(&entry(&h, &window_id), &input_log(&dir, "ignored")).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0
+        read.submit_keys(),
+        0,
+        "nothing may reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }

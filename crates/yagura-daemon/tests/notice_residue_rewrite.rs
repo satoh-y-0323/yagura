@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    Harness, SUBMIT_CHILD_PROBE, approver_base_config, call_open_window, composer_section_toml,
-    identify, policy, read_composer_now, read_response, send, unique_temp_dir,
-    wait_until_composer_satisfies, wait_until_status,
+    HANG_GUARD, Harness, SUBMIT_CHILD_PROBE, approver_base_config, call_open_window,
+    composer_section_toml, identify, policy, read_composer_now, read_response, send,
+    unique_temp_dir, wait_until_composer_satisfies, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -29,8 +29,6 @@ use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{self, echo_child_command};
 
 const APPROVAL_HEADING: &str = "NOTICE-APPROVAL";
-
-const NOTICE_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn notice_for(pending: usize) -> String {
     format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
@@ -144,10 +142,26 @@ impl Scene {
         std::fs::write(&self.dialog_gone, b"").expect("remove the dialog");
     }
 
+    /// Waits until the inbox holds no report notice any more. An attempt is counted
+    /// before its push ends, so the count read afterwards is final.
+    async fn wait_until_inbox_lets_go_of_the_notice(&self) {
+        let entry = self.entry();
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
+        while entry.inbox().holds("report") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the notice never left the inbox; screen text: {}",
+                self.h
+                    .flattened_scrollback_keeping_osc_payload(&self.parent)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Waits until the notice agent has finished `count` attempts in all.
     async fn wait_for_attempts(&self, count: u64) {
         let entry = self.entry();
-        let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
         while entry.notice_attempts() < count {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -170,7 +184,7 @@ async fn report(child_conn: &mut Connection) {
         },
     )
     .await;
-    match read_response(child_conn, Duration::from_secs(5)).await {
+    match read_response(child_conn).await {
         DaemonMessage::ReportSent { .. } => {}
         other => panic!("expected report_sent, got {other:?}"),
     }
@@ -195,13 +209,7 @@ async fn scene_with_first_notice_waiting(tag: &str, clear_scope: &str, style: &s
     ));
     command.push(APPROVAL_HEADING.to_string());
     let parent = open_delivering(&h, command, "parent").await;
-    wait_until_status(
-        &mut observer,
-        &parent,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut observer, &parent, WindowStatus::WaitingInput).await;
 
     let mut parent_conn = h.connect().await;
     identify(&mut parent_conn, &parent).await;
@@ -216,7 +224,7 @@ async fn scene_with_first_notice_waiting(tag: &str, clear_scope: &str, style: &s
         child_conn,
         dialog_gone,
     };
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while !scene
         .h
         .flattened_scrollback_keeping_osc_payload(&scene.parent)
@@ -231,11 +239,6 @@ async fn scene_with_first_notice_waiting(tag: &str, clear_scope: &str, style: &s
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(
-        scene.entry().notice_attempts(),
-        0,
-        "the first attempt is still waiting behind the dialog, it has not finished"
-    );
     scene
 }
 
@@ -252,7 +255,7 @@ async fn a_notice_written_before_the_pending_count_moved_is_submitted_as_it_was_
     let old = notice_for(1);
     let new = notice_for(2);
     let submitted = format!("SUBMITTED {old}");
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while !scene
         .h
         .flattened_scrollback_keeping_osc_payload(&scene.parent)
@@ -282,6 +285,17 @@ async fn a_notice_written_before_the_pending_count_moved_is_submitted_as_it_was_
         .all(|merged| !text.contains(merged.as_str())),
         "the old and the new text must not be sent together"
     );
+    scene.wait_until_inbox_lets_go_of_the_notice().await;
+    let taken = scene
+        .h
+        .flattened_scrollback_keeping_osc_payload(&scene.parent)
+        .matches("SUBMITTED ")
+        .count() as u64;
+    assert_eq!(
+        scene.entry().notice_attempts(),
+        taken,
+        "every attempt of the notice agent is one notice the receiver took"
+    );
     scene.h.registry.terminate_all().await;
 }
 
@@ -297,7 +311,6 @@ async fn text_typed_behind_a_waiting_notice_is_neither_cleared_overwritten_nor_s
         &scene.h,
         &parent,
         "the notice in the composer",
-        NOTICE_TIMEOUT,
         |readout| matches!(readout, ComposerReadout::Body(text) if text.starts_with(&old)),
     )
     .await;
@@ -312,6 +325,21 @@ async fn text_typed_behind_a_waiting_notice_is_neither_cleared_overwritten_nor_s
     scene.wait_for_attempts(1).await;
 
     scene.wait_for_attempts(2).await;
+    // Bytes reach the child in the order they were written, so once this mark
+    // shows in the composer the screen holds whatever the child drew for what
+    // was written before it.
+    scene
+        .entry()
+        .write_pty_input(b"ECHO-MARK", InputOrigin::Interactive)
+        .await
+        .expect("write the mark");
+    wait_until_composer_satisfies(
+        &scene.h,
+        &parent,
+        "the mark in the composer",
+        |readout| matches!(readout, ComposerReadout::Body(text) if text.contains("ECHO-MARK")),
+    )
+    .await;
     let text = scene.h.flattened_scrollback_keeping_osc_payload(&parent);
     // This receiver types the clear key out as `^U`, so the notice's take-back
     // shows where it reached the composer: in front of the other writer's text.

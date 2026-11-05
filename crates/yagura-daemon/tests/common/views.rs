@@ -2,20 +2,15 @@
 //! driven by `term_script`, a read of the model's screen to compare the
 //! applied grid with, and the wait that holds until they agree.
 
-use std::time::Duration;
-
 use tokio::time::Instant;
 use yagura_daemon::detector::VtScreen;
 use yagura_test_support::frame::Grid;
 use yagura_test_support::view::ViewClient;
 
-use super::Harness;
+use super::{HANG_GUARD, Harness};
 
 /// What `term_script` prints once it reads stdin.
 pub const SCRIPT_READY: &[u8] = b"SCRIPT-READY";
-
-/// The longest a test waits for the daemon to catch up with an event.
-pub const CATCH_UP: Duration = Duration::from_secs(20);
 
 /// The argv of a `term_script` window in script mode.
 pub fn script_argv() -> Vec<String> {
@@ -38,7 +33,7 @@ pub fn script_command(bytes: &[u8]) -> Vec<u8> {
 /// Opens a `term_script` window and waits until it is reading commands.
 pub async fn open_script_window(h: &Harness) -> String {
     let window_id = h.open(script_argv(), None).await;
-    super::wait_until_model_shows(h, &window_id, SCRIPT_READY, CATCH_UP).await;
+    super::wait_until_model_shows(h, &window_id, SCRIPT_READY).await;
     window_id
 }
 
@@ -51,7 +46,7 @@ pub async fn script_write(h: &Harness, window_id: &str, bytes: &[u8]) {
 /// `marker`, which `bytes` must end with.
 pub async fn script_write_and_wait(h: &Harness, window_id: &str, bytes: &[u8], marker: &str) {
     script_write(h, window_id, bytes).await;
-    super::wait_until_model_shows(h, window_id, marker.as_bytes(), CATCH_UP).await;
+    super::wait_until_model_shows(h, window_id, marker.as_bytes()).await;
 }
 
 /// The window's model as a reader of the daemon sees it.
@@ -147,16 +142,16 @@ pub fn grid_differs_from_model(grid: &Grid, model: &ModelScreen) -> Option<Strin
 
 /// Applies (and acknowledges) frames until the grid is the picture of the
 /// model as it reads at that moment, failing with the last difference when it
-/// does not within `timeout`. The model is read again after every frame, so a
-/// child that is still writing is followed, not raced.
+/// does not within [`HANG_GUARD`]. Each round takes every frame due before a
+/// `Ping`'s `Pong` ([`ViewClient::sync`]) and reads the model again, so a child
+/// that is still writing is followed, not raced.
 pub async fn assert_converges_to_model(
     view: &mut ViewClient,
     h: &Harness,
     window_id: &str,
     what: &str,
-    timeout: Duration,
 ) {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         let model = model_screen(h, window_id).await;
         let Some(difference) = grid_differs_from_model(&view.grid, &model) else {
@@ -168,13 +163,7 @@ pub async fn assert_converges_to_model(
              grid:\n{}\nmodel: {model:?}",
             view.grid.dump()
         );
-        if let Some(parts) = view
-            .try_next_complete_frame(Duration::from_millis(250))
-            .await
-            && let Some(last) = parts.last()
-        {
-            view.ack(last.seq).await;
-        }
+        view.sync().await;
     }
 }
 
@@ -215,9 +204,7 @@ pub async fn open_view_with_history(
     bytes.extend(numbered_lines(1, lines));
     bytes.extend_from_slice(b"HIST-FILL");
     script_write_and_wait(h, &window_id, &bytes, "HIST-FILL").await;
-    view.pump_until("the filled screen", CATCH_UP, |grid| {
-        grid.contains_text("HIST-FILL")
-    })
-    .await;
+    view.pump_until("the filled screen", |grid| grid.contains_text("HIST-FILL"))
+        .await;
     (window_id, view)
 }

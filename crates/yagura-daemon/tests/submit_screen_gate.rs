@@ -27,11 +27,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    APPROVAL_HEADING, CLEAR, ERASE, GateWindow, HANG_GUARD, Harness, PASTE_END, SUBMIT_CHILD_PROBE,
-    WORKING_HEADING, approver_base_config, count_marker, input_log_read_so_far,
-    let_every_clock_bound_run_out, new_engine, open_gate_window, policy, read_composer_now,
-    read_response, repaint, send, settled_marker_count, submit_child_composer_section,
-    tick_after_ms, unique_temp_dir, wait_until_composer_is, wait_until_composer_satisfies,
+    APPROVAL_HEADING, CLEAR, ChildInput, ERASE, GateWindow, HANG_GUARD, Harness, PASTE_END,
+    SUBMIT_CHILD_PROBE, WORKING_HEADING, approver_base_config, count_marker, input_log_read_so_far,
+    let_every_clock_bound_run_out, line_ends_outside_paste, new_engine, open_gate_window, policy,
+    read_composer_now, read_response, repaint, send, submit_child_composer_section, tick_after_ms,
+    unique_temp_dir, wait_until_composer_is, wait_until_composer_satisfies,
     wait_until_input_log_contains,
 };
 use tracing_test::traced_test;
@@ -212,7 +212,7 @@ async fn an_engine_that_cannot_answer_resolves_to_a_screen_rule_that_closes_the_
     drop(statuses);
     handle.notify_exited();
 
-    let observation = tokio::time::timeout(Duration::from_secs(5), handle.query_composer())
+    let observation = tokio::time::timeout(HANG_GUARD, handle.query_composer())
         .await
         .expect("the query must resolve on its own once the engine task is gone");
 
@@ -288,7 +288,7 @@ async fn wait_for_screen(
     what: &str,
     mut ready: impl FnMut(&ScreenRead) -> bool,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while !ready(&rebuilt_screen(h, window_id).await) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -358,7 +358,7 @@ fn assert_declined_as_not_accepting(judgment: &SubmitJudgment, envelope_remains:
 /// Every byte the child read, in order, from the log a [`GateWindow`] with an
 /// `input_log` fills.
 async fn child_input(h: &Harness, window_id: &str, log: &Path) -> Vec<u8> {
-    input_log_read_so_far(&entry(h, window_id), log, Duration::from_secs(10)).await
+    input_log_read_so_far(&entry(h, window_id), log).await
 }
 
 fn count_subslice(haystack: &[u8], needle: &[u8]) -> usize {
@@ -430,20 +430,21 @@ fn assert_no_acting_byte_in(received: &[u8]) {
     }
 }
 
-/// Asserts the child took none of the daemon's bytes: no submit key and no
-/// other byte reached its dialog, and nothing was submitted.
-async fn assert_child_took_nothing(h: &Harness, window_id: &str) {
-    assert_eq!(
-        settled_marker_count(h, window_id, "APPROVED", 0).await,
-        0,
-        "a submit key reached the approval dialog"
+/// Asserts the child took none of the daemon's bytes: of everything it read
+/// up to a sentinel written behind them, nothing follows the key that put the
+/// dialog up.
+async fn assert_child_took_nothing(h: &Harness, window_id: &str, log: &Path) {
+    let read = ChildInput::read(&entry(h, window_id), log).await;
+    let raised = read
+        .bytes()
+        .iter()
+        .rposition(|&byte| byte == OVERLAY_SHOW)
+        .unwrap_or_else(|| panic!("the dialog's key must have been read: {:?}", read.bytes()));
+    assert!(
+        read.bytes()[raised + 1..].is_empty(),
+        "no byte may reach the child once the dialog is up; it read {:?}",
+        read.bytes()
     );
-    assert_eq!(
-        settled_marker_count(h, window_id, "DIALOG-INPUT", 0).await,
-        0,
-        "a byte reached the approval dialog"
-    );
-    assert_eq!(count_marker(h, window_id, "SUBMITTED"), 0);
 }
 
 // --- what the fixture's dialog reports ------------------------------------
@@ -466,7 +467,7 @@ async fn a_submit_key_that_reaches_the_fixtures_dialog_is_reported_as_approved()
 
     press(&h, &window_id, b'\r').await;
 
-    h.wait_for_scrollback_occurrences(&window_id, "APPROVED", 1, Duration::from_secs(10))
+    h.wait_for_scrollback_occurrences(&window_id, "APPROVED", 1)
         .await;
 }
 
@@ -475,13 +476,17 @@ async fn a_submit_key_that_reaches_the_fixtures_dialog_is_reported_as_approved()
 #[tokio::test]
 async fn a_key_only_resend_is_not_written_while_an_approval_dialog_hides_the_composer() {
     let dir = unique_temp_dir("screen-gate-resend-hidden");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-resend-hidden", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new("hidden", "hidden-marker", "key:hidden", APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("hidden", "hidden-marker", "key:hidden", APPROVAL_HEADING)
+        },
     )
     .await;
     seed_composer(&h, &window_id, "ENV").await;
@@ -517,28 +522,35 @@ async fn a_key_only_resend_is_not_written_while_an_approval_dialog_hides_the_com
         seq,
         "nothing was written"
     );
-    assert_child_took_nothing(&h, &window_id).await;
+    assert_child_took_nothing(&h, &window_id, &log).await;
 }
 
 #[tokio::test]
 async fn a_key_only_resend_is_not_written_when_the_dialogs_option_row_reads_as_a_composer() {
     let dir = unique_temp_dir("screen-gate-resend-option");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-resend-option", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new("option", "option-marker", "key:option", APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("option", "option-marker", "key:option", APPROVAL_HEADING)
+        },
     )
     .await;
     seed_composer(&h, &window_id, "ENV").await;
     show_overlay(&h, &window_id, APPROVAL_HEADING).await;
-    assert_eq!(
-        read_composer_now(&h, &window_id).await,
-        ComposerReadout::Body("1. Yes".to_string()),
-        "the dialog's option row must read as a composer holding other text"
-    );
+    // The option row can be drawn after the heading show_overlay waits for.
+    wait_for_screen(
+        &h,
+        &window_id,
+        "the dialog's option row to read as a composer holding other text",
+        |screen| composer_of(screen) == ComposerReadout::Body("1. Yes".to_string()),
+    )
+    .await;
 
     let seq = entry(&h, &window_id).write_seq();
     let judgment = entry(&h, &window_id)
@@ -561,19 +573,23 @@ async fn a_key_only_resend_is_not_written_when_the_dialogs_option_row_reads_as_a
         seq,
         "nothing was written"
     );
-    assert_child_took_nothing(&h, &window_id).await;
+    assert_child_took_nothing(&h, &window_id, &log).await;
 }
 
 #[tokio::test]
 async fn a_key_only_resend_is_still_written_once_the_dialog_is_gone() {
     let dir = unique_temp_dir("screen-gate-resend-after");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-resend-after", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new("after", "after-marker", "key:hidden", APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("after", "after-marker", "key:hidden", APPROVAL_HEADING)
+        },
     )
     .await;
     seed_composer(&h, &window_id, "ENV").await;
@@ -605,10 +621,14 @@ async fn a_key_only_resend_is_still_written_once_the_dialog_is_gone() {
         SubmitPlacement::Placed(_) => {}
         other => panic!("an input screen must take the key-only resend, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED ENV").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED ENV", 1).await,
+        read.count(b"ENV"),
         1,
-        "the submit key alone must submit the envelope already in the composer"
+        "the submit key alone must submit the envelope already in the composer, never \
+         rewritten; the child read {:?}",
+        read.bytes()
     );
     assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
 }
@@ -616,18 +636,22 @@ async fn a_key_only_resend_is_still_written_once_the_dialog_is_gone() {
 #[tokio::test]
 async fn a_key_only_resend_is_still_written_while_the_window_shows_it_is_working() {
     let dir = unique_temp_dir("screen-gate-resend-working");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-resend-working", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new(
-            "rworking",
-            "rworking-marker",
-            "key:working",
-            WORKING_HEADING,
-        ),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "rworking",
+                "rworking-marker",
+                "key:working",
+                WORKING_HEADING,
+            )
+        },
     )
     .await;
     seed_composer(&h, &window_id, "ENV").await;
@@ -651,9 +675,14 @@ async fn a_key_only_resend_is_still_written_while_the_window_shows_it_is_working
         SubmitPlacement::Placed(_) => {}
         other => panic!("a working screen must take the key-only resend, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED ENV").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED ENV", 1).await,
-        1
+        read.count(b"ENV"),
+        1,
+        "the submit key alone must submit the envelope already in the composer, never \
+         rewritten; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -725,21 +754,20 @@ async fn a_dialog_that_replaces_the_written_body_gets_the_take_back_but_never_th
         }
         other => panic!("a second writer's byte must end the check, got {other:?}"),
     }
-    assert_only_the_take_back_reached_the_child_after_the_body(
-        &child_input(&h, &window_id, &log).await,
-        b'Q',
-    );
+    let received = child_input(&h, &window_id, &log).await;
+    assert_only_the_take_back_reached_the_child_after_the_body(&received, b'Q');
     assert_eq!(
-        count_marker(&h, &window_id, "APPROVED"),
+        line_ends_outside_paste(&received),
         0,
-        "a submit key reached the approval dialog"
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
 }
 
 #[tokio::test]
 async fn a_dialog_that_flashes_after_the_body_is_written_still_lets_the_submit_key_through() {
     let dir = unique_temp_dir("screen-gate-flash");
+    let log = dir.join("child-input.log");
     let dialog_gone = dir.join("dialog-gone");
     let h = Harness::start("screen-gate-flash", detection_config(&dir)).await;
     let mut client = h.connect().await;
@@ -748,7 +776,10 @@ async fn a_dialog_that_flashes_after_the_body_is_written_still_lets_the_submit_k
         &h,
         &mut client,
         &dir,
-        GateWindow::new("flash", "flash-marker", &overlay, APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("flash", "flash-marker", &overlay, APPROVAL_HEADING)
+        },
     )
     .await;
 
@@ -779,14 +810,20 @@ async fn a_dialog_that_flashes_after_the_body_is_written_still_lets_the_submit_k
              {other:?}"
         ),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED hello").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "APPROVED", 0).await,
+        read.line_writes("hello"),
+        1,
+        "the body reaches the receiver once; the child read {:?}",
+        read.bytes()
+    );
+    // The child reports each read it handles before it reads the next, so a
+    // key the dialog took would stand in front of the accepted line.
+    assert_eq!(
+        count_marker(&h, &window_id, "APPROVED"),
         0,
         "the submit key must wait until the dialog is gone"
-    );
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED hello", 1).await,
-        1
     );
 }
 
@@ -879,8 +916,12 @@ async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and
         1,
         "the body must have been written exactly once; the child read {received:?}"
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
-    assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
+    );
 }
 
 // --- before the body is written -----------------------------------------
@@ -888,26 +929,33 @@ async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and
 #[tokio::test]
 async fn the_body_is_not_written_when_an_approval_rule_matches_beside_an_empty_composer() {
     let dir = unique_temp_dir("screen-gate-before-body");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-before-body", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new(
-            "beforebody",
-            "beforebody-marker",
-            "key:beside",
-            APPROVAL_HEADING,
-        ),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "beforebody",
+                "beforebody-marker",
+                "key:beside",
+                APPROVAL_HEADING,
+            )
+        },
     )
     .await;
     show_overlay(&h, &window_id, APPROVAL_HEADING).await;
-    assert_eq!(
-        read_composer_now(&h, &window_id).await,
-        ComposerReadout::Empty,
-        "the composer must read empty for this case to mean anything"
-    );
+    // The approval line can be drawn before the composer row beside it.
+    wait_for_screen(
+        &h,
+        &window_id,
+        "the empty composer beside the approval, for this case to mean anything",
+        |screen| composer_of(screen) == ComposerReadout::Empty,
+    )
+    .await;
 
     let seq = entry(&h, &window_id).write_seq();
     let judgment = entry(&h, &window_id)
@@ -922,29 +970,27 @@ async fn the_body_is_not_written_when_an_approval_rule_matches_beside_an_empty_c
         seq,
         "nothing was written"
     );
-    assert_child_took_nothing(&h, &window_id).await;
+    assert_child_took_nothing(&h, &window_id, &log).await;
 }
 
 #[tokio::test]
 async fn a_body_is_still_written_into_a_window_that_shows_it_is_working() {
     let dir = unique_temp_dir("screen-gate-working");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-working", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new("working", "working-marker", "key:working", WORKING_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("working", "working-marker", "key:working", WORKING_HEADING)
+        },
     )
     .await;
     show_overlay(&h, &window_id, WORKING_HEADING).await;
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
 
     let judgment = entry(&h, &window_id)
         .submit_message("hello", None, SendStage::BeforeSubmitKey, None)
@@ -955,9 +1001,13 @@ async fn a_body_is_still_written_into_a_window_that_shows_it_is_working() {
         SubmitPlacement::Placed(_) => {}
         other => panic!("a working window must still be written to, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED hello").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED hello", 1).await,
-        1
+        read.line_writes("hello"),
+        1,
+        "the body reaches the receiver once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -979,18 +1029,22 @@ fn dialog_raised_by(trigger: &str, style: &str, gone: &Path) -> String {
 #[tokio::test]
 async fn an_unreadable_composer_is_waited_on_until_the_requester_leaves() {
     let dir = unique_temp_dir("screen-gate-unreadable-bound");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-unreadable-bound", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new(
-            "unreadable",
-            "unreadable-marker",
-            "key:hidden",
-            APPROVAL_HEADING,
-        ),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new(
+                "unreadable",
+                "unreadable-marker",
+                "key:hidden",
+                APPROVAL_HEADING,
+            )
+        },
     )
     .await;
     show_overlay(&h, &window_id, APPROVAL_HEADING).await;
@@ -1031,7 +1085,7 @@ async fn an_unreadable_composer_is_waited_on_until_the_requester_leaves() {
         seq,
         "nothing was written"
     );
-    assert_child_took_nothing(&h, &window_id).await;
+    assert_child_took_nothing(&h, &window_id, &log).await;
 }
 
 /// Another writer ending that wait is reported as such, not as a composer
@@ -1103,6 +1157,7 @@ async fn an_unreadable_composer_wait_ended_by_another_writer_is_reported_as_inte
 #[tokio::test]
 async fn a_composer_hidden_for_a_moment_takes_the_body_once_it_is_readable_again() {
     let dir = unique_temp_dir("screen-gate-unreadable-recovers");
+    let log = dir.join("child-input.log");
     let dialog_gone = dir.join("dialog-gone");
     let h = Harness::start("screen-gate-unreadable-recovers", detection_config(&dir)).await;
     let mut client = h.connect().await;
@@ -1111,7 +1166,10 @@ async fn a_composer_hidden_for_a_moment_takes_the_body_once_it_is_readable_again
         &h,
         &mut client,
         &dir,
-        GateWindow::new("recovers", "recovers-marker", &overlay, APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("recovers", "recovers-marker", &overlay, APPROVAL_HEADING)
+        },
     )
     .await;
     press(&h, &window_id, 0x15).await;
@@ -1140,9 +1198,13 @@ async fn a_composer_hidden_for_a_moment_takes_the_body_once_it_is_readable_again
         SubmitPlacement::Placed(_) => {}
         other => panic!("a composer readable again must take the body, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED BODY", 1).await,
-        1
+        read.line_writes("BODY"),
+        1,
+        "the body reaches the receiver once; the child read {:?}",
+        read.bytes()
     );
     assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
 }
@@ -1208,9 +1270,14 @@ async fn nothing_is_written_after_a_probe_once_a_dialog_has_appeared_beside_it()
         }
         other => panic!("a second writer's byte must end the check, got {other:?}"),
     }
-    assert_no_acting_byte_reached_the_child(&child_input(&h, &window_id, &log).await);
-    assert_eq!(count_marker(&h, &window_id, "APPROVED"), 0);
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    let received = child_input(&h, &window_id, &log).await;
+    assert_no_acting_byte_reached_the_child(&received);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
+    );
 }
 
 /// A dialog that appears as the probe is erased, with the envelope reading
@@ -1294,11 +1361,11 @@ async fn no_submit_key_follows_a_probe_erase_that_raises_a_dialog_beside_the_env
         "the submit key must never have been written; the child read {received:?}"
     );
     assert_eq!(
-        count_marker(&h, &window_id, "APPROVED"),
+        line_ends_outside_paste(&received),
         0,
-        "a submit key reached the approval dialog"
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
 }
 
 // --- a frame caught between erasing the composer and drawing a dialog --------
@@ -1392,11 +1459,11 @@ async fn assert_no_submit_key_reached_the_child(
         "a torn frame is no evidence for the submit key; the child read {received:?}"
     );
     assert_eq!(
-        count_marker(h, window_id, "APPROVED"),
+        line_ends_outside_paste(&received),
         0,
-        "a submit key reached the approval dialog"
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
     );
-    assert_eq!(count_marker(h, window_id, "SUBMITTED"), 0);
     assert!(
         matches!(judgment.placement, SubmitPlacement::NotPlaced(_)),
         "nothing may be placed on a torn frame, got {:?}",
@@ -1480,7 +1547,7 @@ async fn no_submit_key_follows_a_probe_erase_whose_composer_reads_as_a_torn_fram
             .await
     });
     let erase_after_the_body = [PASTE_END, SUBMIT_CHILD_PROBE.as_bytes(), &[ERASE]].concat();
-    wait_until_input_log_contains(&log, &erase_after_the_body, HANG_GUARD).await;
+    wait_until_input_log_contains(&log, &erase_after_the_body).await;
     wait_for_screen(&h, &window_id, "the torn frame after the erase", |screen| {
         heading_not_drawn(screen) && composer_of(screen) == ComposerReadout::NotObserved
     })
@@ -1640,6 +1707,7 @@ async fn no_key_only_resend_is_written_when_a_torn_frame_shows_the_envelope_in_i
 #[tokio::test]
 async fn a_body_taller_than_the_screen_is_placed_from_its_tail() {
     let dir = unique_temp_dir("screen-gate-tail");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-tail", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let body: String = (0..300).map(|i| format!("{i:04}")).collect();
@@ -1661,7 +1729,6 @@ async fn a_body_taller_than_the_screen_is_placed_from_its_tail() {
         &h,
         &shape,
         "the body's tail",
-        Duration::from_secs(10),
         |readout| matches!(readout, ComposerReadout::Tail(tail) if body.ends_with(tail.as_str())),
     )
     .await;
@@ -1670,7 +1737,10 @@ async fn a_body_taller_than_the_screen_is_placed_from_its_tail() {
         &h,
         &mut client,
         &dir,
-        GateWindow::new("tail", "tail-marker", "", ""),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("tail", "tail-marker", "", "")
+        },
     )
     .await;
     let judgment = tokio::time::timeout(
@@ -1685,10 +1755,13 @@ async fn a_body_taller_than_the_screen_is_placed_from_its_tail() {
         SubmitPlacement::Placed(_) => {}
         other => panic!("a body whose tail reads back must be placed, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED 0000").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED 0000", 1).await,
+        read.line_writes(&body),
         1,
-        "the body reaches the receiver exactly once"
+        "the body reaches the receiver exactly once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -1725,7 +1798,6 @@ async fn a_folded_envelope_is_resent_only_once_the_probe_has_shown_behind_it() {
         &h,
         &window_id,
         &ComposerReadout::Body(PLACEHOLDER.to_string()),
-        Duration::from_secs(10),
     )
     .await;
     let seq = entry(&h, &window_id).write_seq();
@@ -1750,10 +1822,8 @@ async fn a_folded_envelope_is_resent_only_once_the_probe_has_shown_behind_it() {
         SubmitPlacement::Placed(_) => {}
         other => panic!("a folded, untouched envelope must still resend, got {other:?}"),
     }
-    assert_eq!(
-        settled_marker_count(&h, &window_id, &format!("SUBMITTED {body}"), 1).await,
-        1
-    );
+    h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
+        .await;
     let received = child_input(&h, &window_id, &log).await;
     assert_eq!(
         count_subslice(&received, b"\x1b[200~"),
@@ -1774,7 +1844,7 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 /// Ends `call` within a bound that is not a clock the daemon owns: a call
 /// that is blocked for good fails here, not by hanging the suite.
 async fn ended(call: SubmitCall, what: &str) -> SubmitJudgment {
-    tokio::time::timeout(Duration::from_secs(10), call)
+    tokio::time::timeout(HANG_GUARD, call)
         .await
         .unwrap_or_else(|_| panic!("{what}"))
         .expect("the submit task must not panic")
@@ -1818,7 +1888,6 @@ async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidenc
         &h,
         &window_id,
         &ComposerReadout::Body(PLACEHOLDER.to_string()),
-        Duration::from_secs(10),
     )
     .await;
     let seq = entry(&h, &window_id).write_seq();
@@ -1838,7 +1907,7 @@ async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidenc
             .await
     });
     let probe_then_erase = [SUBMIT_CHILD_PROBE.as_bytes(), &[ERASE]].concat();
-    wait_until_input_log_contains(&log, &probe_then_erase, HANG_GUARD).await;
+    wait_until_input_log_contains(&log, &probe_then_erase).await;
     let_every_clock_bound_run_out().await;
     let judgment = ended(
         call,
@@ -1851,13 +1920,7 @@ async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidenc
         "a probe alone is no evidence the envelope is there, got {:?}",
         judgment.placement
     );
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
     let received = child_input(&h, &window_id, &log).await;
     assert!(
         !received.contains(&b'\r'),
@@ -1868,7 +1931,12 @@ async fn a_probe_that_shows_alone_behind_a_vouched_folded_envelope_is_no_evidenc
         1,
         "the body must not be written again; the child read {received:?}"
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "no key may reach the dialog or submit a line; the child read {:?}",
+        received
+    );
 }
 
 /// The end of a body taller than the screen is what shows, the ledger vouches
@@ -1904,7 +1972,6 @@ async fn a_probe_written_behind_a_tall_draft_is_erased_once_another_writer_inter
         &h,
         &window_id,
         "the draft's tail",
-        Duration::from_secs(10),
         |readout| matches!(readout, ComposerReadout::Tail(tail) if body.ends_with(tail.as_str())),
     )
     .await;
@@ -1987,7 +2054,7 @@ async fn an_unshown_envelope_is_not_decided_on_while_its_probe_reads_as_a_torn_f
         .write_pty_input(b"\x1b[200~ENV\x1b[201~", InputOrigin::Message)
         .await
         .expect("seed write must not fail");
-    wait_until_input_log_contains(&log, PASTE_END, HANG_GUARD).await;
+    wait_until_input_log_contains(&log, PASTE_END).await;
     wait_for_screen(&h, &window_id, "the held paste to be read", |screen| {
         shows(screen, "PASTE 1")
     })
@@ -2034,8 +2101,9 @@ async fn an_unshown_envelope_is_not_decided_on_while_its_probe_reads_as_a_torn_f
     assert_only_the_take_back_reached_the_child_after_the_body(&received, FOREIGN);
 }
 
-/// The requester leaves after the body and its probe are written, while the
-/// composer reads as a torn frame: the body's take-back needs a reading of
+/// The requester leaves after the body is written, while the composer reads
+/// as a torn frame (no probe follows the body until a screen accepts input):
+/// the body's take-back needs a reading of
 /// the composer too, so the daemon writes none of its own on it; only the one
 /// the registered body gets in front of another writer's byte reaches the child.
 #[tokio::test]
@@ -2065,8 +2133,7 @@ async fn no_take_back_is_written_for_a_departed_requester_while_the_composer_rea
             .submit_message("hello", None, SendStage::BeforeSubmitKey, Some(requester))
             .await
     });
-    let probe_after_the_body = [PASTE_END, SUBMIT_CHILD_PROBE.as_bytes()].concat();
-    wait_until_input_log_contains(&log, &probe_after_the_body, HANG_GUARD).await;
+    wait_until_input_log_contains(&log, PASTE_END).await;
     wait_for_screen(&h, &window_id, "the torn frame after the body", |screen| {
         heading_not_drawn(screen)
             && shows(screen, "PASTE 1")
@@ -2165,7 +2232,7 @@ async fn send_text_expecting_not_written(
 }
 
 async fn read_not_written(client: &mut Connection) -> String {
-    match read_response(client, Duration::from_secs(15)).await {
+    match read_response(client).await {
         DaemonMessage::Error { code, message, .. } => {
             assert_eq!(code, "not_written", "unexpected error: {message}");
             message
@@ -2183,7 +2250,7 @@ async fn send_text_expecting_text_sent(client: &mut Connection, window_id: &str,
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(15)).await {
+    match read_response(client).await {
         DaemonMessage::TextSent { .. } => {}
         other => panic!("an input screen must still take {text:?} written through, got {other:?}"),
     }
@@ -2195,13 +2262,17 @@ async fn send_text_expecting_text_sent(client: &mut Connection, window_id: &str,
 #[tokio::test]
 async fn a_written_through_send_message_is_not_written_into_an_approval_dialog() {
     let dir = unique_temp_dir("screen-gate-raw");
+    let log = dir.join("child-input.log");
     let h = Harness::start("screen-gate-raw", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_gate_window(
         &h,
         &mut client,
         &dir,
-        GateWindow::new("raw", "raw-marker", "key:beside", APPROVAL_HEADING),
+        GateWindow {
+            input_log: Some(&log),
+            ..GateWindow::new("raw", "raw-marker", "key:beside", APPROVAL_HEADING)
+        },
     )
     .await;
     show_overlay(&h, &window_id, APPROVAL_HEADING).await;
@@ -2214,7 +2285,7 @@ async fn a_written_through_send_message_is_not_written_into_an_approval_dialog()
         "a written-through body declined for the same screen must say the same thing"
     );
     assert_eq!(bare_terminator, judged);
-    assert_child_took_nothing(&h, &window_id).await;
+    assert_child_took_nothing(&h, &window_id, &log).await;
 
     hide_overlay(&h, &window_id, APPROVAL_HEADING).await;
     send_text_expecting_text_sent(&mut client, &window_id, "alpha").await;
@@ -2226,10 +2297,15 @@ async fn a_written_through_send_message_is_not_written_into_an_approval_dialog()
     )
     .await;
     send_text_expecting_text_sent(&mut client, &window_id, "\r").await;
+    h.wait_for_scrollback(&window_id, b"SUBMITTED alpha").await;
+    // A second read of the same log, up to a sentinel of its own.
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED alpha", 1).await,
+        read.count(b"alpha"),
         1,
-        "a bare terminator must still submit what an input screen holds"
+        "a bare terminator must still submit what an input screen holds, written once; the \
+         child read {:?}",
+        read.bytes()
     );
 }
 
@@ -2284,8 +2360,7 @@ async fn the_not_accepting_message_differs_from_every_other_reason() {
             .submit_message("first", None, SendStage::BeforeSubmitKey, Some(requester))
             .await
     });
-    h.wait_for_scrollback(&unconfirmed_window, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&unconfirmed_window, b"PASTE 1").await;
     leave.send(true).expect("the call holds its receiver");
     first
         .await
@@ -2327,8 +2402,7 @@ async fn the_not_accepting_message_differs_from_every_other_reason() {
     .await;
     // The body has reached the child but never shows, so the daemon is still
     // waiting for it to reflect when the foreign write lands.
-    h.wait_for_scrollback(&interrupted_window, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&interrupted_window, b"PASTE 1").await;
     entry(&h, &interrupted_window)
         .write_pty_input(b"X", InputOrigin::Message)
         .await
@@ -2494,28 +2568,14 @@ async fn raise_an_unfinished_dialog(
 /// took neither a submit key nor anything else, nothing was submitted, and
 /// the child read only the key that raised the dialog. `others` are bytes
 /// the test itself wrote after that key.
-async fn assert_no_daemon_byte_reached_the_child(
-    h: &Harness,
-    window_id: &str,
-    log: &Path,
-    others: &[u8],
-) {
+/// Asserts the window took no write but the test's own `others` since
+/// `seq`: every writer's write is counted in the window's ledger, so the
+/// daemon cannot have written a byte the child could read.
+fn assert_no_daemon_byte_was_written(h: &Harness, window_id: &str, seq: u64, others: u64) {
     assert_eq!(
-        settled_marker_count(h, window_id, "APPROVED", 0).await,
-        0,
-        "a submit key reached the dialog"
-    );
-    assert_eq!(
-        settled_marker_count(h, window_id, "DIALOG-INPUT", 0).await,
-        0,
-        "a byte reached the dialog"
-    );
-    assert_eq!(count_marker(h, window_id, "SUBMITTED"), 0);
-    let read = std::fs::read(log).unwrap_or_default();
-    let expected = [&[OVERLAY_SHOW][..], others].concat();
-    assert_eq!(
-        read, expected,
-        "the child must have read only the test's own bytes"
+        entry(h, window_id).write_seq(),
+        seq + others,
+        "the daemon must not write while the dialog is unfinished"
     );
 }
 
@@ -2533,6 +2593,7 @@ async fn a_raw_send_waits_out_an_unfinished_dialog(
     let mut client = h.connect().await;
     let (window_id, log, rest) =
         raise_an_unfinished_dialog(&h, &mut client, &dir, "unfinished", torn, shape).await;
+    let seq = entry(&h, &window_id).write_seq();
 
     let sender = entry(&h, &window_id);
     let plan = plan_raw_write(text);
@@ -2542,7 +2603,7 @@ async fn a_raw_send_waits_out_an_unfinished_dialog(
         !call.is_finished(),
         "a screen still being painted is waited on, not written to and not given up on by a clock"
     );
-    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+    assert_no_daemon_byte_was_written(&h, &window_id, seq, 0);
 
     std::fs::write(&rest, b"").expect("draw the rest of the dialog");
     wait_for_screen(
@@ -2559,7 +2620,7 @@ async fn a_raw_send_waits_out_an_unfinished_dialog(
         .expect("the call must not fail at the PTY level");
 
     assert_declined_as_not_accepting(&judgment, false);
-    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+    assert_no_daemon_byte_was_written(&h, &window_id, seq, 0);
     assert_eq!(
         child_input(&h, &window_id, &log).await,
         [OVERLAY_SHOW],
@@ -2575,6 +2636,7 @@ async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, sh
     let mut client = h.connect().await;
     let (window_id, log, rest) =
         raise_an_unfinished_dialog(&h, &mut client, &dir, "unfinished", torn, shape).await;
+    let seq = entry(&h, &window_id).write_seq();
 
     let sender = entry(&h, &window_id);
     let call = tokio::spawn(async move {
@@ -2587,7 +2649,7 @@ async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, sh
         !call.is_finished(),
         "a screen still being painted is waited on, not written to and not given up on by a clock"
     );
-    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[]).await;
+    assert_no_daemon_byte_was_written(&h, &window_id, seq, 0);
 
     draw_the_rest_of_the_dialog(&h, &window_id, &rest).await;
     wait_until_the_judged_send_waits_on_the_dialog(&window_id).await;
@@ -2598,7 +2660,7 @@ async fn a_judged_send_waits_out_an_unfinished_dialog(case: &str, torn: &str, sh
         "nothing may be placed on a screen that was never finished as a composer, got {:?}",
         judgment.placement
     );
-    assert_no_daemon_byte_reached_the_child(&h, &window_id, &log, &[FOREIGN]).await;
+    assert_no_daemon_byte_was_written(&h, &window_id, seq, 1);
     assert_eq!(
         child_input(&h, &window_id, &log).await,
         [OVERLAY_SHOW, FOREIGN],

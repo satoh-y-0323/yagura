@@ -19,10 +19,9 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use yagura_daemon::token::StatusToken;
-use yagura_daemon::{DaemonConfig, OpenWindowRequest, PtySession, WindowEntry, WindowRegistry};
+use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowEntry, WindowRegistry};
 
 /// A well-formed hex-32 value fed to `DaemonConfig::status_token_override`. Fixed rather
 /// than random so a failure message is reproducible; it never reaches a real daemon.
@@ -258,7 +257,7 @@ async fn spawn_with_command_in_env_delivers_extra_env_to_the_child() {
     #[cfg(unix)]
     let argv = ["/bin/sh", "-c", "echo [$YAGURA_TEST_ENV_MARKER]"];
     let config = DaemonConfig::default();
-    let session = PtySession::spawn_with_command_in_env(
+    let session = common::spawn_session_in_env(
         &argv,
         None::<&Path>,
         &[("YAGURA_TEST_ENV_MARKER", ENV_MARKER_VALUE)],
@@ -267,9 +266,7 @@ async fn spawn_with_command_in_env_delivers_extra_env_to_the_child() {
     .await
     .expect("spawn_with_command_in_env must spawn the shell");
 
-    let text =
-        common::wait_for_scrollback_containing(&session, ENV_MARKER_VALUE, Duration::from_secs(10))
-            .await;
+    let text = common::wait_for_scrollback_containing(&session, ENV_MARKER_VALUE).await;
     assert!(
         text.contains(&format!("[{ENV_MARKER_VALUE}]")),
         "the child must observe the injected variable's value, not the unexpanded name; got {text:?}"
@@ -311,12 +308,7 @@ async fn registry_open_injects_the_status_token_that_verify_status_token_accepts
         .get(&window_id)
         .expect("the opened window must be in the registry");
 
-    let text = common::wait_for_scrollback_containing(
-        entry.session(),
-        KNOWN_TOKEN,
-        Duration::from_secs(10),
-    )
-    .await;
+    let text = common::wait_for_scrollback_containing(entry.session(), KNOWN_TOKEN).await;
 
     // The value is read back out of the child's own output, so this confirms the child
     // received exactly what the window verifies against.
@@ -373,12 +365,7 @@ async fn registry_open_injects_the_window_id_alongside_the_status_token() {
     // The wait is on the window_id, not the token: the token is a bare 32-char hex run
     // with nothing tying it to this child's own output, so the window_id is what proves
     // the line the token is read from is the one YAGURA_WINDOW_ID landed in.
-    let text = common::wait_for_scrollback_containing(
-        entry.session(),
-        &window_id,
-        Duration::from_secs(10),
-    )
-    .await;
+    let text = common::wait_for_scrollback_containing(entry.session(), &window_id).await;
 
     let Some(observed_token) = find_hex32(&text) else {
         panic!("the child's output must contain a 32-character hex token; got {text:?}");

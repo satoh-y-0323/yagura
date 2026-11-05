@@ -6,8 +6,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{Harness, attach, expect_error, hex_echo_path, read_response, send};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ClientMessage, check_input_bounds};
@@ -42,10 +40,7 @@ async fn a_paste_past_one_mebibyte_is_refused_with_the_protocols_reason() {
 
     send(&mut client, &paste).await;
     send(&mut client, &ClientMessage::Ping).await;
-    let message = expect_error(
-        read_response(&mut client, Duration::from_secs(10)).await,
-        "invalid_argument",
-    );
+    let message = expect_error(read_response(&mut client).await, "invalid_argument");
     assert_eq!(message, reason);
 }
 
@@ -65,10 +60,7 @@ async fn text_and_wheel_past_their_bounds_are_refused_with_the_protocols_reasons
     for msg in over {
         let reason = check_input_bounds(&msg).expect_err("the protocol refuses this input");
         send(&mut client, &msg).await;
-        let message = expect_error(
-            read_response(&mut client, Duration::from_secs(10)).await,
-            "invalid_argument",
-        );
+        let message = expect_error(read_response(&mut client).await, "invalid_argument");
         assert_eq!(message, reason);
     }
 }

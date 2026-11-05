@@ -90,7 +90,7 @@ clear = "\u0015"
 ready_hold_ms = 1500
 submit_delay_ms = 800
 delivery_confirm_ms = 8000
-probe = "x"
+probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.0.105, Windows, Linux and macOS)
 # First character taken as a key: `!` runs a shell command, `?` on an empty
 # composer shows the help (docs: cli-command-reference; checked). `$` stays as text.
 leading_keys = ["!", "?"]

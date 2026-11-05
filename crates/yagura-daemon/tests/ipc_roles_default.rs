@@ -11,7 +11,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, expect_error, identify, policy, read_response,
@@ -94,12 +93,12 @@ fn rows() -> Vec<RoleEntry> {
     ]
 }
 
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -108,7 +107,7 @@ async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> Daemon
 
 async fn request(client: &mut Connection, message: &ClientMessage) -> DaemonMessage {
     send(client, message).await;
-    read_ledger_reply(client, Duration::from_secs(10)).await
+    read_ledger_reply(client).await
 }
 
 async fn approver_connection(h: &Harness) -> Connection {
@@ -321,11 +320,7 @@ async fn open_task_window_launches_the_default_rows_profile_for_tasks_without_a_
             "task {task_id}"
         );
         f.harness
-            .wait_for_scrollback(
-                &window_id,
-                format!("<<argv[1]={DEFAULT_FLAG}>>").as_bytes(),
-                Duration::from_secs(10),
-            )
+            .wait_for_scrollback(&window_id, format!("<<argv[1]={DEFAULT_FLAG}>>").as_bytes())
             .await;
         assert!(
             common::contains_subsequence(&f.harness.scrollback(&window_id), b"<<argv[2]=fast>>"),

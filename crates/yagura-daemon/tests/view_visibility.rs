@@ -4,17 +4,14 @@
 //! producing output, and gets the whole screen the moment it is reported on screen again.
 //! The window's model, its status and `read_output` carry on regardless.
 //!
-//! The waits are for events; the assertions that nothing arrives ask the daemon a `ping`
-//! first, so everything it had ready has been sent, and then watch a short grace period
-//! that can only let a wrong daemon be caught.
+//! The waits are for events; the assertions that nothing arrives ask the daemon a `ping`,
+//! whose answer comes after every frame due for what the window's feeder had received.
 
 mod common;
 
-use std::time::Duration;
-
 use common::Harness;
 use common::views::{
-    CATCH_UP, assert_converges_to_model, numbered_lines, open_script_window, script_write,
+    assert_converges_to_model, numbered_lines, open_script_window, script_write,
     script_write_and_wait,
 };
 use yagura_daemon::DaemonConfig;
@@ -23,14 +20,13 @@ use yagura_test_support::view::ViewClient;
 
 const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 const CLEAR: &[u8] = b"\x1b[H\x1b[2J";
-const GRACE: Duration = Duration::from_millis(300);
 
 async fn settled_view(tag: &str) -> (Harness, String, ViewClient) {
     let h = Harness::start(tag, DaemonConfig::default()).await;
     let window_id = open_script_window(&h).await;
     let mut view = ViewClient::attach(h.connect().await, &window_id, Some(SIZE)).await;
     script_write(&h, &window_id, CLEAR).await;
-    view.pump_until("the cleared screen", CATCH_UP, |grid| {
+    view.pump_until("the cleared screen", |grid| {
         !grid.contains_text("SCRIPT-READY")
     })
     .await;
@@ -53,7 +49,7 @@ async fn a_hidden_view_gets_no_frame_while_output_continues() {
         let mut bytes = numbered_lines(burst * 30, 30);
         bytes.extend_from_slice(format!("HIDDEN-{burst}").as_bytes());
         script_write_and_wait(&h, &window_id, &bytes, &format!("HIDDEN-{burst}")).await;
-        view.assert_no_frame("the view is hidden", GRACE).await;
+        view.assert_no_frame("the view is hidden").await;
     }
 }
 
@@ -69,7 +65,7 @@ async fn a_hidden_view_gets_no_frame_for_a_change_of_the_cursor_or_the_screen_mo
         "ALT-SHOWN",
     )
     .await;
-    view.assert_no_frame("the view is hidden", GRACE).await;
+    view.assert_no_frame("the view is hidden").await;
 }
 
 #[tokio::test]
@@ -104,26 +100,19 @@ async fn showing_the_view_again_sends_every_row_with_what_happened_meanwhile() {
     let mut bytes = numbered_lines(1, 40);
     bytes.extend_from_slice(b"WHILE-HIDDEN");
     script_write_and_wait(&h, &window_id, &bytes, "WHILE-HIDDEN").await;
-    view.assert_no_frame("the view is hidden", GRACE).await;
+    view.assert_no_frame("the view is hidden").await;
 
     view.send(&ClientMessage::SetVisible { visible: true })
         .await;
-    let parts = view.next_complete_frame(CATCH_UP).await;
+    let parts = view.next_complete_frame().await;
     let carried: usize = parts.iter().map(|part| part.lines.len()).sum();
     assert_eq!(carried, usize::from(SIZE.rows), "every row is sent");
     assert!(view.grid.contains_text("WHILE-HIDDEN"));
 
     let last = parts.last().expect("a frame has a part").seq;
     view.ack(last).await;
-    assert_converges_to_model(
-        &mut view,
-        &h,
-        &window_id,
-        "after showing the view",
-        CATCH_UP,
-    )
-    .await;
-    view.assert_no_frame("everything has been sent and acknowledged", GRACE)
+    assert_converges_to_model(&mut view, &h, &window_id, "after showing the view").await;
+    view.assert_no_frame("everything has been sent and acknowledged")
         .await;
 }
 
@@ -134,13 +123,13 @@ async fn a_shown_view_follows_output_again_after_it_was_hidden() {
     script_write_and_wait(&h, &window_id, b"MID-HIDDEN", "MID-HIDDEN").await;
     view.send(&ClientMessage::SetVisible { visible: true })
         .await;
-    view.pump_until("the screen after showing", CATCH_UP, |grid| {
+    view.pump_until("the screen after showing", |grid| {
         grid.contains_text("MID-HIDDEN")
     })
     .await;
 
     script_write_and_wait(&h, &window_id, b" AFTER-SHOWN", "AFTER-SHOWN").await;
-    view.pump_until("output after showing", CATCH_UP, |grid| {
+    view.pump_until("output after showing", |grid| {
         grid.contains_text("MID-HIDDEN AFTER-SHOWN")
     })
     .await;

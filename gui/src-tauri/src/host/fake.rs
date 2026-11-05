@@ -6,7 +6,6 @@
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -24,10 +23,6 @@ use crate::frame_mailbox::FrameMailbox;
 use crate::ipc_client::IpcError;
 
 const ENDPOINT_PREFIX: &str = "yagura-test-gui-host";
-
-/// How long a test waits for something it has already caused to happen. Only
-/// keeps a broken run from hanging the suite; nothing is synchronised on it.
-pub(crate) const WAIT_LIMIT: Duration = Duration::from_secs(10);
 
 type PeerConnection = <PlatformIpc as PeerAuth>::Connection;
 
@@ -136,13 +131,9 @@ impl ScriptedDaemon {
     /// Waits until at least `count` requests have arrived and returns them all.
     pub(crate) async fn received_at_least(&self, count: usize) -> Vec<ClientMessage> {
         let mut arrived = self.state.arrived.subscribe();
-        reply_within(
-            WAIT_LIMIT,
-            "daemon requests",
-            arrived.wait_for(|n| *n >= count),
-        )
-        .await
-        .expect("the daemon state outlives the wait");
+        reply_within("daemon requests", arrived.wait_for(|n| *n >= count))
+            .await
+            .expect("the daemon state outlives the wait");
         self.received()
     }
 
@@ -287,14 +278,14 @@ impl FakeHost {
     /// Waits until the daemon has been asked to start `count` times.
     pub(crate) async fn wait_for_spawns(&self, count: usize) {
         let mut spawns = self.state.spawns.subscribe();
-        reply_within(WAIT_LIMIT, "daemon start", spawns.wait_for(|n| *n >= count))
+        reply_within("daemon start", spawns.wait_for(|n| *n >= count))
             .await
             .expect("the host state outlives the wait");
     }
 
     /// The payload of the next event named `name`, skipping the others.
     pub(crate) async fn next_event(&self, name: &str) -> Value {
-        reply_within(WAIT_LIMIT, name, async {
+        reply_within(name, async {
             let mut recorded = self.state.recorded.lock().await;
             loop {
                 let event = recorded.recv().await.expect("the host keeps its sender");

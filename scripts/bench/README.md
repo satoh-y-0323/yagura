@@ -11,10 +11,11 @@ tool: CI never calls it, and it is not a test.
   the daemon's named pipe. On macOS and Linux `run` prints a message and exits with code 1; the
   Unix-socket endpoint and `/proc` / `ps` statistics are not written. `compare` runs anywhere.
 - `python` on `PATH` (measured with 3.11.9). **Standard library only**; no dependency is added.
-- A release build of the daemon and the `hex_echo` fixture, with the bundled ConPTY beside them:
+- A release build of the daemon, the holder it starts for each window from beside itself, and the
+  `hex_echo` fixture, with the bundled ConPTY beside them:
 
   ```bash
-  CARGO_TARGET_DIR=D:/yagura-build/target-t1051 cargo build --release -p yagura-daemon --bins
+  CARGO_TARGET_DIR=D:/yagura-build/target-t1051 cargo build --release -p yagura-daemon -p yagura-holder --bins
   ```
 
 ## 2. What it does
@@ -55,6 +56,12 @@ The pseudo-child is a test fixture, not a vendor CLI, so the load does not depen
 | `mem_base_mib` | Working set of the process set before any window opens |
 | `mem_loaded_mib` | Working set of the process set with every window open after the flood |
 | `mem_per_window_mib` | (`mem_loaded_mib` - `mem_base_mib`) / `--windows` |
+| `mem_private_loaded_mib` | Private bytes of the process set with every window open after the flood. Report only: not judged |
+| `mem_private_per_window_mib` | (private bytes loaded - private bytes before any window) / `--windows`. Report only: not judged |
+
+The working-set metrics count a page of a shared DLL once per process, so they read larger than
+the memory the product adds. The two private metrics are reported beside them and take no part
+in `WORSE` / `ok` or in the exit code of `compare`.
 
 Each repetition's `detail` keeps the raw latency samples, the private bytes and a per-image
 breakdown that also covers processes outside the set (`OpenConsole.exe`, the fixtures).

@@ -14,12 +14,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::TryRecvError;
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{
-    Connection, connect_with_retry, read_daemon_frame, send_client_message,
-    try_read_daemon_message, unique_endpoint_name,
+    Connection, connect_with_retry, read_daemon_frame, send_client_message, unique_endpoint_name,
 };
 use yagura_test_support::paths::{unique_detection_dir, write_definition};
 
+use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::{DaemonConfig, IpcServer, OpenWindowRequest, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
 
@@ -77,20 +80,19 @@ fn detection_config(dir: &Path, detection_name: &str) -> DaemonConfig {
 }
 
 /// Waits for a `StatusChanged` satisfying `predicate`, discarding frames of
-/// other kinds (mostly `Output`) meanwhile. Panics if `timeout` passes without
-/// one arriving.
+/// other kinds (mostly `Output`) meanwhile. Panics if [`HANG_GUARD`] passes
+/// without one arriving.
 async fn wait_for_status_changed(
     client: &mut Connection,
     predicate: impl Fn(WindowStatus) -> bool,
-    timeout: Duration,
 ) -> WindowStatus {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             panic!("timed out waiting for a matching StatusChanged");
         }
-        match read_daemon_frame(client, remaining)
+        match read_daemon_frame(client)
             .await
             .expect_message("frame while waiting for a matching StatusChanged")
         {
@@ -107,37 +109,69 @@ async fn wait_for_status_changed(
 /// Waits for the "current status" `StatusChanged` that follows an attach, skipping
 /// view frames: ConPTY itself may emit terminal-mode control sequences ahead
 /// of any child output.
-async fn expect_status_changed_after_attach(
-    client: &mut Connection,
-    expected: WindowStatus,
-    timeout: Duration,
-) {
-    let status = wait_for_status_changed(client, |_| true, timeout).await;
+async fn expect_status_changed_after_attach(client: &mut Connection, expected: WindowStatus) {
+    let status = wait_for_status_changed(client, |_| true).await;
     assert_eq!(
         status, expected,
         "unexpected status in the post-attach StatusChanged"
     );
 }
 
-/// Collects every `StatusChanged.status` seen within `idle_timeout`. Tolerates zero
-/// results, so it can show that no transition away from `Unknown` happened at all.
-async fn drain_status_changes(
-    client: &mut Connection,
-    idle_timeout: Duration,
-) -> Vec<WindowStatus> {
+/// Sends a `Ping` and returns every `StatusChanged.status` that arrived before
+/// its `Pong`, skipping other frames.
+async fn statuses_before_pong(client: &mut Connection) -> Vec<WindowStatus> {
+    send_client_message(client, &ClientMessage::Ping).await;
     let mut statuses = Vec::new();
     loop {
-        match try_read_daemon_message(client, idle_timeout).await {
-            Some(DaemonMessage::StatusChanged {
-                window_id: _,
-                status,
-                ..
-            }) => statuses.push(status),
-            Some(_) => continue,
-            None => break,
+        match read_daemon_frame(client)
+            .await
+            .expect_message("frame before the pong")
+        {
+            DaemonMessage::Pong => return statuses,
+            DaemonMessage::StatusChanged { status, .. } => statuses.push(status),
+            _ => continue,
         }
     }
-    statuses
+}
+
+/// Lets every clock bound run out, then returns every status published to
+/// `changes` since it subscribed.
+async fn statuses_published_once_every_clock_ran_out(
+    changes: &mut broadcast::Receiver<StatusAt>,
+) -> Vec<WindowStatus> {
+    common::let_every_clock_bound_run_out().await;
+    let mut published = Vec::new();
+    loop {
+        match changes.try_recv() {
+            Ok(at) => published.push(at.status.status()),
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return published,
+            Err(TryRecvError::Lagged(missed)) => {
+                panic!("{missed} status change(s) were missed, so their absence cannot be shown")
+            }
+        }
+    }
+}
+
+/// Polls the window's model until it shows `marker`.
+async fn wait_until_model_shows(registry: &WindowRegistry, window_id: &str, marker: &str) {
+    let session = registry
+        .get(window_id)
+        .expect("window must exist in registry")
+        .session()
+        .clone();
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        if let Some((text, _)) = session.text_tail(200, 64 * 1024).await
+            && text.contains(marker)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the window's model never showed {marker:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 const WIRING_TEST_DEFINITION: &str = r#"
@@ -225,7 +259,7 @@ async fn pty_output_pattern_match_reaches_attached_client_as_status_changed() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -234,18 +268,13 @@ async fn pty_output_pattern_match_reaches_attached_client_as_status_changed() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
 
     common::write_window_input(&registry, &window_id, b"NEEDS-APPROVAL\r\n").await;
 
-    let status = wait_for_status_changed(
-        &mut client,
-        |s| s == WindowStatus::WaitingApproval,
-        Duration::from_secs(10),
-    )
-    .await;
+    let status = wait_for_status_changed(&mut client, |s| s == WindowStatus::WaitingApproval).await;
     assert_eq!(status, WindowStatus::WaitingApproval);
 }
 
@@ -263,7 +292,7 @@ async fn status_event_reaches_attached_client_as_status_changed() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -272,7 +301,7 @@ async fn status_event_reaches_attached_client_as_status_changed() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
 
@@ -282,12 +311,7 @@ async fn status_event_reaches_attached_client_as_status_changed() {
     )
     .await;
 
-    let status = wait_for_status_changed(
-        &mut client,
-        |s| s == WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    let status = wait_for_status_changed(&mut client, |s| s == WindowStatus::Running).await;
     assert_eq!(status, WindowStatus::Running);
 }
 
@@ -327,7 +351,7 @@ async fn child_exit_reaches_attached_client_as_status_changed_exited() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -336,16 +360,11 @@ async fn child_exit_reaches_attached_client_as_status_changed_exited() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
 
-    let status = wait_for_status_changed(
-        &mut client,
-        |s| s == WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    let status = wait_for_status_changed(&mut client, |s| s == WindowStatus::Exited).await;
     assert_eq!(status, WindowStatus::Exited);
 }
 
@@ -363,7 +382,7 @@ async fn status_event_rejects_invalid_source() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
 
     send_client_message(
         &mut client,
@@ -371,7 +390,7 @@ async fn status_event_rejects_invalid_source() {
     )
     .await;
 
-    let msg = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let msg = read_daemon_frame(&mut client)
         .await
         .expect_message("error(invalid_argument) response for invalid source");
     match msg {
@@ -380,7 +399,7 @@ async fn status_event_rejects_invalid_source() {
     }
 
     send_client_message(&mut client, &ClientMessage::Ping).await;
-    let pong = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let pong = read_daemon_frame(&mut client)
         .await
         .expect_message("pong after invalid status_event source");
     assert!(matches!(pong, DaemonMessage::Pong));
@@ -393,7 +412,7 @@ async fn status_event_rejects_invalid_source() {
     )
     .await;
     send_client_message(&mut client, &ClientMessage::Ping).await;
-    let next = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let next = read_daemon_frame(&mut client)
         .await
         .expect_message("response immediately following a valid status_event");
     match next {
@@ -405,7 +424,7 @@ async fn status_event_rejects_invalid_source() {
         }
         DaemonMessage::Pong => {}
         DaemonMessage::StatusChanged { .. } => {
-            let pong2 = read_daemon_frame(&mut client, Duration::from_secs(5))
+            let pong2 = read_daemon_frame(&mut client)
                 .await
                 .expect_message("pong after a valid status_event's StatusChanged");
             assert!(matches!(pong2, DaemonMessage::Pong));
@@ -429,7 +448,7 @@ async fn status_changed_is_not_sent_to_unattached_connection() {
     ));
     let _server_task = tokio::spawn(server.clone().run());
 
-    let mut attached_client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut attached_client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut attached_client,
         &ClientMessage::AttachView {
@@ -438,23 +457,26 @@ async fn status_changed_is_not_sent_to_unattached_connection() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut attached_client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut attached_client)
         .await
         .expect_message("attach response");
 
-    let mut unattached_client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut unattached_client = connect_with_retry(&pipe_name).await;
+    // Answered, so the connection's task is running before the change below.
+    let mut leaked = statuses_before_pong(&mut unattached_client).await;
 
     common::write_window_input(&registry, &window_id, b"NEEDS-APPROVAL\r\n").await;
 
-    let status = wait_for_status_changed(
-        &mut attached_client,
-        |s| s == WindowStatus::WaitingApproval,
-        Duration::from_secs(10),
-    )
-    .await;
+    let status =
+        wait_for_status_changed(&mut attached_client, |s| s == WindowStatus::WaitingApproval).await;
     assert_eq!(status, WindowStatus::WaitingApproval);
 
-    let leaked = drain_status_changes(&mut unattached_client, Duration::from_millis(800)).await;
+    // A connection's own task both pushes its status changes and answers its
+    // pings. The change was published to every subscriber before the attached
+    // connection got it, so a push owed to this connection comes before the
+    // first pong or, once that ping is answered, before the second.
+    leaked.extend(statuses_before_pong(&mut unattached_client).await);
+    leaked.extend(statuses_before_pong(&mut unattached_client).await);
     assert!(
         leaked.is_empty(),
         "unattached connection must never receive StatusChanged, got {leaked:?}"
@@ -473,7 +495,7 @@ async fn attach_immediately_sends_current_status_as_status_changed() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
 
     send_client_message(
         &mut client,
@@ -483,13 +505,12 @@ async fn attach_immediately_sends_current_status_as_status_changed() {
         },
     )
     .await;
-    let attached = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let attached = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
     assert!(matches!(attached, DaemonMessage::Attached { .. }));
 
-    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown, Duration::from_secs(5))
-        .await;
+    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown).await;
 }
 
 #[tokio::test]
@@ -506,7 +527,7 @@ async fn resize_then_output_still_reaches_status_changed() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -515,21 +536,16 @@ async fn resize_then_output_still_reaches_status_changed() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
-    let _ = wait_for_status_changed(&mut client, |_| true, Duration::from_secs(5)).await;
+    let _ = wait_for_status_changed(&mut client, |_| true).await;
 
     send_client_message(&mut client, &ClientMessage::Resize { cols: 40, rows: 12 }).await;
 
     common::write_window_input(&registry, &window_id, b"READY-MARK\r\n").await;
 
-    let status = wait_for_status_changed(
-        &mut client,
-        |s| s == WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    let status = wait_for_status_changed(&mut client, |s| s == WindowStatus::Running).await;
     assert_eq!(status, WindowStatus::Running);
 }
 
@@ -549,7 +565,7 @@ async fn assert_selected_definition_status(
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -558,15 +574,14 @@ async fn assert_selected_definition_status(
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
-    let _ = wait_for_status_changed(&mut client, |_| true, Duration::from_secs(5)).await;
+    let _ = wait_for_status_changed(&mut client, |_| true).await;
 
     common::write_window_input(&registry, &window_id, b"SELECT-MARK\r\n").await;
 
-    let status =
-        wait_for_status_changed(&mut client, |s| s == expected, Duration::from_secs(10)).await;
+    let status = wait_for_status_changed(&mut client, |s| s == expected).await;
     assert_eq!(status, expected);
 }
 
@@ -603,7 +618,7 @@ async fn invalid_detection_name_keeps_engine_unknown_and_daemon_alive() {
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -612,26 +627,31 @@ async fn invalid_detection_name_keeps_engine_unknown_and_daemon_alive() {
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
-    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown, Duration::from_secs(5))
-        .await;
+    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown).await;
 
     // Text the wiring-test definition would match, but no definition was
     // selected, so no transition away from Unknown can occur.
+    let mut changes = registry
+        .get(&window_id)
+        .expect("window must exist in registry")
+        .subscribe_status();
     common::write_window_input(&registry, &window_id, b"NEEDS-APPROVAL\r\n").await;
-    let statuses = drain_status_changes(&mut client, Duration::from_millis(800)).await;
+    wait_until_model_shows(&registry, &window_id, "NEEDS-APPROVAL").await;
+    let published = statuses_published_once_every_clock_ran_out(&mut changes).await;
     assert!(
-        statuses.iter().all(|s| *s == WindowStatus::Unknown),
-        "invalid detection_name must never produce a non-unknown status, got {statuses:?}"
+        published.iter().all(|s| *s == WindowStatus::Unknown),
+        "invalid detection_name must never produce a non-unknown status, got {published:?}"
     );
 
-    send_client_message(&mut client, &ClientMessage::Ping).await;
-    let pong = read_daemon_frame(&mut client, Duration::from_secs(5))
-        .await
-        .expect_message("pong after invalid detection_name");
-    assert!(matches!(pong, DaemonMessage::Pong));
+    // The daemon still answers, and pushed nothing but Unknown on the way.
+    let pushed = statuses_before_pong(&mut client).await;
+    assert!(
+        pushed.iter().all(|s| *s == WindowStatus::Unknown),
+        "invalid detection_name must never push a non-unknown status, got {pushed:?}"
+    );
 }
 
 #[tokio::test]
@@ -648,7 +668,7 @@ async fn missing_selected_definition_file_falls_back_to_unknown_and_keeps_daemon
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -657,14 +677,13 @@ async fn missing_selected_definition_file_falls_back_to_unknown_and_keeps_daemon
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
-    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown, Duration::from_secs(5))
-        .await;
+    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown).await;
 
     send_client_message(&mut client, &ClientMessage::Ping).await;
-    let pong = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let pong = read_daemon_frame(&mut client)
         .await
         .expect_message("pong despite missing detection definition file");
     assert!(matches!(pong, DaemonMessage::Pong));
@@ -684,7 +703,7 @@ async fn malformed_selected_definition_file_falls_back_to_unknown_and_keeps_daem
         config.clone(),
     ));
     let _server_task = tokio::spawn(server.clone().run());
-    let mut client = connect_with_retry(&pipe_name, Duration::from_secs(5)).await;
+    let mut client = connect_with_retry(&pipe_name).await;
     send_client_message(
         &mut client,
         &ClientMessage::AttachView {
@@ -693,14 +712,13 @@ async fn malformed_selected_definition_file_falls_back_to_unknown_and_keeps_daem
         },
     )
     .await;
-    let _ = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let _ = read_daemon_frame(&mut client)
         .await
         .expect_message("attach response");
-    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown, Duration::from_secs(5))
-        .await;
+    expect_status_changed_after_attach(&mut client, WindowStatus::Unknown).await;
 
     send_client_message(&mut client, &ClientMessage::Ping).await;
-    let pong = read_daemon_frame(&mut client, Duration::from_secs(5))
+    let pong = read_daemon_frame(&mut client)
         .await
         .expect_message("pong despite malformed detection definition file");
     assert!(matches!(pong, DaemonMessage::Pong));

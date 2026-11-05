@@ -27,25 +27,30 @@ use std::path::Path;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::broadcast::error::TryRecvError;
 
 use common::{
-    CONTROL_DETECTION_NAME, Harness, READY_MARKER, SubmitDefinitionInput, VALID_TOKEN,
-    approval_config, approver_base_config as base_config, assert_file_len_stable,
-    call_list_windows, count_marker, decide, echo_child_path, env_probe_path,
-    expect_approval_requested, expect_error, hex_echo_path, identify, open_submit_child_window,
+    CONTROL_DETECTION_NAME, ChildInput, Harness, READY_MARKER, SubmitDefinitionInput, VALID_TOKEN,
+    approval_config, approver_base_config as base_config, call_list_windows, count_marker, decide,
+    echo_child_path, env_probe_path, expect_approval_requested, expect_error, hex_echo_path,
+    identify, let_every_clock_bound_run_out, open_submit_child_window,
     open_submit_child_window_with_clear_scope, open_submit_child_window_with_composer,
     open_submit_child_window_with_composer_and_bottom_line_count,
     open_submit_child_window_with_composer_logging_input, paste_buffered_values, policy,
     query_status, read_frame, read_response, register_approver, report_status, send,
-    send_from_two_connections, surviving_grandchild_command, unique_temp_dir,
-    wait_for_accepted_handoff_envelope_json, wait_until_file_grows, wait_until_input_log_contains,
-    wait_until_status, write_submit_definition,
+    send_from_two_connections, unique_temp_dir, wait_for_accepted_handoff_envelope_json,
+    wait_until_input_log_contains, wait_until_status, write_submit_definition,
 };
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::exit_with_code_command;
 use yagura_test_support::process::submit_child_command;
+use yagura_test_support::process::{
+    first_grandchild_command, process_is_running, wait_processes_gone,
+};
 
 use yagura_daemon::handoff::{EnvelopeFrom, compose_envelope};
+use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{
@@ -94,7 +99,7 @@ fn with_handoff_delivery_limit(mut config: DaemonConfig, secs: u64) -> DaemonCon
 /// Waits until `window_id`'s inbox holds `count` parcels.
 async fn wait_until_inbox_holds(h: &Harness, window_id: &str, count: usize) {
     let entry = h.registry.get(window_id).expect("window must exist");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while entry.inbox().pending_count() != count {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -132,13 +137,7 @@ impl Harness {
     /// confirmed `Exited` status before returning.
     async fn open_exited_window(&self, client: &mut Connection) -> String {
         let window_id = self.open(exit_with_code_command("5"), None).await;
-        wait_until_status(
-            client,
-            &window_id,
-            WindowStatus::Exited,
-            Duration::from_secs(10),
-        )
-        .await;
+        wait_until_status(client, &window_id, WindowStatus::Exited).await;
         window_id
     }
 }
@@ -169,10 +168,10 @@ async fn probe_status_event(
     )
     .await;
     send(client, &ClientMessage::Ping).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::Pong => EventOutcome::Accepted,
         DaemonMessage::Error { code, .. } => {
-            let pong = read_response(client, Duration::from_secs(5)).await;
+            let pong = read_response(client).await;
             assert!(
                 matches!(pong, DaemonMessage::Pong),
                 "the connection must stay usable after a rejected status_event, got {pong:?}"
@@ -180,6 +179,51 @@ async fn probe_status_event(
             EventOutcome::Rejected(code)
         }
         other => panic!("unexpected frame while probing status_event: {other:?}"),
+    }
+}
+
+/// Every status a window publishes from the moment this is made. A window's
+/// clock takes `Running` back to `Unknown`, so its current status cannot tell
+/// "never moved" from "moved and went back"; the published transitions can.
+struct PublishedStatuses {
+    window_id: String,
+    changes: tokio::sync::broadcast::Receiver<StatusAt>,
+}
+
+impl PublishedStatuses {
+    fn watch(h: &Harness, window_id: &str) -> Self {
+        let changes = h
+            .registry
+            .get(window_id)
+            .expect("window must exist in registry")
+            .subscribe_status();
+        Self {
+            window_id: window_id.to_string(),
+            changes,
+        }
+    }
+
+    /// Lets every clock bound run out, so whatever the daemon queued for this
+    /// window has been judged and published, then asserts that none of the
+    /// statuses it published was `status`.
+    async fn assert_never_published(mut self, status: WindowStatus, why: &str) {
+        let_every_clock_bound_run_out().await;
+        let mut published = Vec::new();
+        loop {
+            match self.changes.try_recv() {
+                Ok(at) => published.push(at.status.status()),
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                Err(TryRecvError::Lagged(missed)) => panic!(
+                    "{missed} status change(s) of {} were missed, so their absence cannot be shown",
+                    self.window_id
+                ),
+            }
+        }
+        assert!(
+            !published.contains(&status),
+            "{why}: {} published {published:?}",
+            self.window_id
+        );
     }
 }
 
@@ -203,15 +247,14 @@ async fn interrupt_window_acknowledges_and_delivers_configured_bytes_when_approv
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
 
     // The echo child writes back whatever reaches the PTY input, so the
     // configured bytes are observable in the scrollback.
-    h.wait_for_scrollback(&window_id, INTERRUPT_MARKER, Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, INTERRUPT_MARKER).await;
 }
 
 #[tokio::test]
@@ -224,7 +267,7 @@ async fn interrupt_window_returns_approval_required_without_a_policy() {
 
     send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "approval_required");
 }
 
@@ -246,7 +289,7 @@ async fn interrupt_window_returns_status_unknown_even_when_the_tool_is_approved(
 
     send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -268,7 +311,7 @@ async fn interrupt_window_on_an_unknown_status_window_reports_status_unknown_eve
 
     send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -291,7 +334,7 @@ async fn interrupt_window_returns_window_not_found_for_an_unknown_window_id() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "window_not_found");
 }
 
@@ -307,7 +350,7 @@ async fn interrupt_window_on_an_exited_window_returns_child_exited_when_approved
 
     send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
@@ -322,26 +365,67 @@ async fn interrupt_window_on_an_exited_window_returns_child_exited_without_any_a
 
     send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
+/// A text of its own for each call, so a wait for one never ends on another.
+fn later_mark() -> String {
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "LATER-MARK-{}.",
+        CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// Types a mark into `window_id` and waits until its child has painted it. The
+/// child takes its input in order, so whatever it printed for a write ahead of
+/// the mark is in the scrollback by then. The composer is cleared first: a
+/// mark painted behind a body left there can wrap and never read back whole.
+async fn wait_until_the_child_shows_a_later_mark(h: &Harness, window_id: &str) {
+    let mark = later_mark();
+    h.write_input(window_id, format!("\x15{mark}").as_bytes())
+        .await;
+    h.wait_for_scrollback(window_id, mark.as_bytes()).await;
+}
+
+/// [`wait_until_the_child_shows_a_later_mark`] for a `submit_child` that paints
+/// nothing typed and takes no line typed in one read: the cleared buffer is
+/// given a paste of [`PASTED_MARK_LEN`] bytes, so the child's own
+/// `PASTE <n> buffered=<len>` line for it is the output waited for. That paste
+/// is one more `PASTE ` line for the caller to count.
+async fn paste_a_later_mark(h: &Harness, window_id: &str) {
+    let mark = format!("{:-<PASTED_MARK_LEN$}", later_mark());
+    h.write_input(
+        window_id,
+        format!("\x15\x1b[200~{mark}\x1b[201~").as_bytes(),
+    )
+    .await;
+    h.wait_for_scrollback(window_id, format!("buffered={PASTED_MARK_LEN}").as_bytes())
+        .await;
+}
+
+/// Long enough that no buffer this file's fixtures hold before the mark
+/// reports a length starting with the same digits.
+const PASTED_MARK_LEN: usize = 97;
+
 async fn close_window_kills_the_process_tree(tag: &str, force: Option<bool>) {
     let dir = unique_temp_dir(tag);
-    let tick = dir.join("tick.txt");
-    let tick_path = tick.to_str().expect("tick path must be valid UTF-8");
+    let pid_file = dir.join("grandchild.pid");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["close_window"])),
         ..base_config()
     };
     let h = Harness::start(tag, config).await;
     let mut client = h.connect().await;
-    // The surviving fixture is required: with the immediate-exit one the window's
-    // own exit watcher would tear the process tree down before `close_window` is
-    // ever sent, and this test would stop measuring the close path.
-    let window_id = h.open(surviving_grandchild_command(tick_path), None).await;
-
-    wait_until_file_grows(&tick, Duration::from_secs(20)).await;
+    // The direct child outlives the test: with one that exits on its own the
+    // window's own exit watcher would tear the process tree down before
+    // `close_window` is ever sent, and this test would stop measuring the
+    // close path.
+    let window_id = h
+        .open(first_grandchild_command(&pid_file, 600_000), None)
+        .await;
+    let grandchild = running_published_pid(&pid_file);
 
     assert!(
         h.registry
@@ -362,12 +446,41 @@ async fn close_window_kills_the_process_tree(tag: &str, force: Option<bool>) {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
 
-    assert_file_len_stable(&tick, Duration::from_secs(3)).await;
+    wait_processes_gone(&[grandchild], move |_| {
+        format!("the grandchild (pid {grandchild}) outlived close_window: an orphan survived")
+    })
+    .await;
+}
+
+/// The process id `pid_file` comes to hold, once it is seen naming a running
+/// process: a probe that never reports "running" cannot let a later wait for
+/// the end pass.
+fn running_published_pid(pid_file: &Path) -> u32 {
+    let deadline = std::time::Instant::now() + HANG_GUARD;
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the grandchild never published its process id at {}",
+            pid_file.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        process_is_running(pid),
+        "the grandchild (pid {pid}) must be running before the teardown under test"
+    );
+    pid
 }
 
 #[tokio::test]
@@ -407,12 +520,11 @@ async fn close_window_succeeds_on_an_unknown_window_when_approved() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
 }
 
 #[tokio::test]
@@ -433,7 +545,7 @@ async fn close_window_on_an_exited_window_is_idempotent_when_approved() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -455,7 +567,7 @@ async fn graceful_close_lets_the_child_finish_its_hangup_handling() {
     let window_id = h
         .open(vec!["/bin/sh".into(), "-c".into(), script], None)
         .await;
-    common::wait_until_model_shows(&h, &window_id, b"HUP-TRAPPED", Duration::from_secs(10)).await;
+    common::wait_until_model_shows(&h, &window_id, b"HUP-TRAPPED").await;
 
     let entry = h.registry.get(&window_id).expect("window must exist");
     yagura_daemon::control::close_window(&entry, false, Duration::from_secs(5))
@@ -483,7 +595,7 @@ async fn close_window_returns_approval_required_without_a_policy() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "approval_required");
 }
 
@@ -517,7 +629,7 @@ async fn approval_required_message_states_no_approver_is_connected_when_a_policy
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("no approver is connected"),
@@ -545,7 +657,7 @@ async fn approval_required_message_states_no_approver_is_connected_when_nothing_
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("no approver is connected"),
@@ -577,7 +689,7 @@ async fn approval_required_message_states_the_playbook_failed_to_load_when_confi
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("failed to load"),
@@ -605,7 +717,7 @@ async fn identify_with_the_correct_window_and_token_unlocks_that_windows_own_ope
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -619,7 +731,7 @@ async fn identify_with_the_correct_window_and_token_unlocks_that_windows_own_ope
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
@@ -640,7 +752,7 @@ async fn identify_twice_to_the_same_window_is_idempotent() {
             },
         )
         .await;
-        match read_response(&mut client, Duration::from_secs(5)).await {
+        match read_response(&mut client).await {
             DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
             other => panic!("expected identified, got {other:?}"),
         }
@@ -662,7 +774,7 @@ async fn identify_to_a_different_window_after_already_identified_is_invalid_stat
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_a),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -675,7 +787,7 @@ async fn identify_to_a_different_window_after_already_identified_is_invalid_stat
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_state");
 }
 
@@ -697,7 +809,7 @@ async fn identify_with_another_windows_real_token_is_auth_failed() {
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    let token_a = wait_for_window_token(&h, &window_a, Duration::from_secs(10)).await;
+    let token_a = wait_for_window_token(&h, &window_a).await;
     let window_b = h.open_unknown_window().await;
 
     send(
@@ -708,7 +820,7 @@ async fn identify_with_another_windows_real_token_is_auth_failed() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 
     // The same token must still authenticate an identify against its own window.
@@ -720,7 +832,7 @@ async fn identify_with_another_windows_real_token_is_auth_failed() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_a),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -740,7 +852,7 @@ async fn identify_with_a_malformed_token_is_auth_failed() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 }
 
@@ -764,7 +876,7 @@ async fn identify_with_an_unknown_window_id_is_window_not_found_and_does_not_cou
             },
         )
         .await;
-        let msg = read_response(&mut client, Duration::from_secs(5)).await;
+        let msg = read_response(&mut client).await;
         expect_error(msg, "window_not_found");
     }
 
@@ -776,7 +888,7 @@ async fn identify_with_an_unknown_window_id_is_window_not_found_and_does_not_cou
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { .. } => {}
         other => panic!(
             "expected identified after non-counting window_not_found failures, got {other:?}"
@@ -799,12 +911,12 @@ async fn three_auth_failed_identifies_close_the_connection() {
             },
         )
         .await;
-        let msg = read_response(&mut client, Duration::from_secs(5)).await;
+        let msg = read_response(&mut client).await;
         expect_error(msg, "auth_failed");
     }
 
     let mut buf = [0u8; 1];
-    let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+    let n = tokio::time::timeout(HANG_GUARD, client.read(&mut buf))
         .await
         .expect("the connection must not hang after the third auth_failed identify")
         .expect("reading past a closed connection must not error, only report EOF");
@@ -828,7 +940,7 @@ async fn a_failed_identify_leaves_the_connections_origin_external() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 
     // With no playbook and no successful identify, this connection is still
@@ -842,7 +954,7 @@ async fn a_failed_identify_leaves_the_connections_origin_external() {
         },
     )
     .await;
-    let msg2 = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg2 = read_response(&mut client).await;
     expect_error(msg2, "approval_required");
 }
 
@@ -865,7 +977,7 @@ async fn register_approver_without_approver_exe_configured_is_auth_failed() {
     let window_id = h.open_unknown_window().await;
 
     send(&mut client, &ClientMessage::RegisterApprover).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 
     // Registration was refused, so the connection is still External: the
@@ -879,7 +991,7 @@ async fn register_approver_without_approver_exe_configured_is_auth_failed() {
         },
     )
     .await;
-    let msg2 = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg2 = read_response(&mut client).await;
     expect_error(msg2, "approval_required");
 }
 
@@ -908,7 +1020,7 @@ async fn register_approver_with_a_different_executable_configured_is_auth_failed
     let mut client = h.connect().await;
 
     send(&mut client, &ClientMessage::RegisterApprover).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 }
 
@@ -923,14 +1035,14 @@ async fn three_auth_failed_register_approver_attempts_do_not_close_the_connectio
 
     for _ in 0..3 {
         send(&mut client, &ClientMessage::RegisterApprover).await;
-        let msg = read_response(&mut client, Duration::from_secs(5)).await;
+        let msg = read_response(&mut client).await;
         expect_error(msg, "auth_failed");
     }
 
     // Unlike `identify`'s 3-strikes rule, `register_approver`'s auth_failed
     // is never counted, so the connection must still be usable.
     send(&mut client, &ClientMessage::Ping).await;
-    let pong = read_response(&mut client, Duration::from_secs(5)).await;
+    let pong = read_response(&mut client).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "expected pong after three register_approver auth_failed responses, got {pong:?}"
@@ -948,7 +1060,7 @@ async fn identify_still_succeeds_after_a_register_approver_auth_failure() {
     let window_id = h.open_unknown_window().await;
 
     send(&mut client, &ClientMessage::RegisterApprover).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "auth_failed");
 
     send(
@@ -959,7 +1071,7 @@ async fn identify_still_succeeds_after_a_register_approver_auth_failure() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
         other => {
             panic!("expected identified after a register_approver auth failure, got {other:?}")
@@ -986,7 +1098,7 @@ async fn send_text_to_an_unknown_window_is_status_unknown_even_for_the_windows_o
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -999,7 +1111,7 @@ async fn send_text_to_an_unknown_window_is_status_unknown_even_for_the_windows_o
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -1017,7 +1129,7 @@ async fn send_keys_to_an_unknown_window_is_status_unknown_even_for_the_windows_o
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected identified, got {other:?}"),
     }
@@ -1030,7 +1142,7 @@ async fn send_keys_to_an_unknown_window_is_status_unknown_even_for_the_windows_o
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -1051,13 +1163,7 @@ async fn send_keys_from_its_own_window_writes_the_exact_bytes_immediately() {
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
 
     send(
         &mut client,
@@ -1068,7 +1174,7 @@ async fn send_keys_from_its_own_window_writes_the_exact_bytes_immediately() {
     )
     .await;
     assert!(matches!(
-        read_response(&mut client, Duration::from_secs(5)).await,
+        read_response(&mut client).await,
         DaemonMessage::Identified { .. }
     ));
 
@@ -1081,13 +1187,12 @@ async fn send_keys_from_its_own_window_writes_the_exact_bytes_immediately() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected keys_sent, got {other:?}"),
     }
 
-    h.wait_for_scrollback(&window_id, b"1b5b411b5b420d", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"1b5b411b5b420d").await;
 }
 
 #[tokio::test]
@@ -1109,7 +1214,7 @@ async fn send_keys_auto_approve_is_distinct_from_send_message() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected auto-approved keys_sent, got {other:?}"),
     }
@@ -1131,10 +1236,7 @@ async fn send_keys_auto_approve_is_distinct_from_send_message() {
         },
     )
     .await;
-    expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "approval_required",
-    );
+    expect_error(read_response(&mut client).await, "approval_required");
 }
 
 #[tokio::test]
@@ -1156,7 +1258,7 @@ async fn send_text_to_another_window_succeeds_when_the_playbook_lists_send_messa
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
@@ -1177,7 +1279,7 @@ async fn send_text_from_an_external_connection_without_a_policy_is_approval_requ
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("no approver is connected"),
@@ -1205,7 +1307,7 @@ async fn send_text_with_a_playbook_configured_but_failed_to_load_is_approval_req
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("failed to load"),
@@ -1237,7 +1339,7 @@ async fn send_text_exceeding_the_size_limit_is_invalid_argument_even_with_an_app
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1254,7 +1356,7 @@ async fn send_text_of_exactly_the_size_limit_is_not_refused_for_its_size() {
         .expect_err("a body ending in an escape character is refused")
         .to_string();
     send(&mut client, &ClientMessage::SendText { window_id, text }).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     assert_eq!(expect_error(msg, "invalid_argument"), expected);
 }
 
@@ -1279,7 +1381,7 @@ async fn send_text_with_an_escape_character_and_no_terminator_is_invalid_argumen
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1305,7 +1407,7 @@ async fn send_text_with_an_escape_character_and_a_trailing_terminator_is_invalid
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1330,7 +1432,7 @@ async fn send_text_with_an_escape_character_in_a_multiline_body_is_invalid_argum
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1352,7 +1454,7 @@ async fn send_text_to_an_exited_window_is_child_exited_even_with_an_approving_po
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
@@ -1374,7 +1476,7 @@ async fn send_keys_to_an_exited_window_is_child_exited_even_with_an_approving_po
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
@@ -1395,17 +1497,11 @@ async fn send_keys_with_an_unknown_key_name_is_invalid_argument_without_reaching
         .await
         .expect("write raw send_keys frame");
 
-    expect_error(
-        read_response(&mut requester, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut requester).await, "invalid_argument");
 
     send(&mut approver, &ClientMessage::Ping).await;
     assert!(
-        matches!(
-            read_response(&mut approver, Duration::from_secs(5)).await,
-            DaemonMessage::Pong
-        ),
+        matches!(read_response(&mut approver).await, DaemonMessage::Pong),
         "an invalid key name must not enqueue an approval request"
     );
 }
@@ -1441,7 +1537,7 @@ async fn wait_for_status_reports_reached_when_the_target_status_arrives() {
     // initial value) is what completes the wait.
     h.write_input(&window_id, READY_MARKER).await;
 
-    match read_response(&mut client, Duration::from_secs(15)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WaitResult {
             window_id: acked,
             outcome,
@@ -1473,7 +1569,7 @@ async fn wait_for_status_reports_timeout_with_the_status_observed_at_reply_time(
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(15)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WaitResult {
             window_id: acked,
             outcome,
@@ -1506,13 +1602,13 @@ async fn wait_for_status_does_not_block_other_messages_on_the_same_connection() 
     .await;
     send(&mut client, &ClientMessage::Ping).await;
 
-    let first = read_frame(&mut client, Duration::from_secs(2)).await;
+    let first = read_frame(&mut client).await;
     assert!(
         matches!(first, DaemonMessage::Pong),
         "ping must be answered while the wait is still pending, got {first:?}"
     );
 
-    let second = read_response(&mut client, Duration::from_secs(15)).await;
+    let second = read_response(&mut client).await;
     assert!(
         matches!(second, DaemonMessage::WaitResult { .. }),
         "the wait must still complete afterwards, got {second:?}"
@@ -1536,7 +1632,7 @@ async fn wait_for_status_returns_child_exited_when_the_child_dies_while_waiting(
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(20)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
@@ -1558,7 +1654,7 @@ async fn wait_for_status_rejects_unknown_as_a_target() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1578,7 +1674,7 @@ async fn wait_for_status_rejects_a_zero_timeout() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1602,7 +1698,7 @@ async fn wait_for_status_rejects_a_timeout_above_the_configured_maximum() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1627,7 +1723,7 @@ async fn wait_for_status_accepts_a_timeout_exactly_at_the_configured_maximum() {
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(15)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WaitResult { outcome, .. } => assert_eq!(outcome, "reached"),
         other => panic!("expected wait_result, got {other:?}"),
     }
@@ -1657,7 +1753,7 @@ async fn wait_for_status_rejects_more_concurrent_waiters_than_the_connection_all
         .await;
     }
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "resource_exhausted");
 }
 
@@ -1667,8 +1763,7 @@ async fn open_window_with_marker_lines(h: &Harness) -> String {
         h.write_input(&window_id, format!("RO-LINE-{i}\r\n").as_bytes())
             .await;
     }
-    h.wait_for_scrollback(&window_id, b"RO-LINE-3", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"RO-LINE-3").await;
     window_id
 }
 
@@ -1687,7 +1782,7 @@ async fn read_output_returns_ansi_free_text_for_the_trailing_lines() {
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowOutput {
             window_id: acked,
             text,
@@ -1722,7 +1817,7 @@ async fn read_output_reads_further_back_when_lines_is_omitted() {
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowOutput { text, .. } => assert!(
             text.contains("RO-LINE-1"),
             "the default line count must reach back past the last line, got {text:?}"
@@ -1746,7 +1841,7 @@ async fn read_output_honours_a_small_line_count() {
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowOutput { text, .. } => assert!(
             !text.contains("RO-LINE-1"),
             "a one-line read must not reach the first marker, got {text:?}"
@@ -1770,7 +1865,7 @@ async fn read_output_rejects_zero_lines() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1793,7 +1888,7 @@ async fn read_output_rejects_a_line_count_above_the_configured_maximum() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -1816,7 +1911,7 @@ async fn read_output_accepts_a_line_count_exactly_at_the_configured_maximum() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     assert!(
         matches!(msg, DaemonMessage::WindowOutput { .. }),
         "expected window_output, got {msg:?}"
@@ -1837,7 +1932,7 @@ async fn read_output_returns_window_not_found_for_an_unknown_window_id() {
     )
     .await;
 
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "window_not_found");
 }
 
@@ -1861,13 +1956,7 @@ async fn status_event_with_a_valid_token_is_accepted_and_updates_the_window() {
     .await;
     assert_eq!(outcome, EventOutcome::Accepted);
 
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Running).await;
 }
 
 #[tokio::test]
@@ -1880,6 +1969,7 @@ async fn status_event_with_a_wrong_token_is_rejected_and_leaves_the_status_untou
     let window_id = h
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
+    let published = PublishedStatuses::watch(&h, &window_id);
 
     let outcome = probe_status_event(
         &mut client,
@@ -1890,9 +1980,12 @@ async fn status_event_with_a_wrong_token_is_rejected_and_leaves_the_status_untou
     .await;
     assert_eq!(outcome, EventOutcome::Rejected("auth_failed".to_string()));
 
-    // Give a (hypothetical) unauthenticated write time to land before
-    // asserting that nothing moved.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "a rejected event must not reach the detector",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &window_id).await,
         WindowStatus::Unknown,
@@ -1911,9 +2004,18 @@ async fn status_event_with_an_empty_token_is_rejected() {
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
 
+    let published = PublishedStatuses::watch(&h, &window_id);
+
     let outcome =
         probe_status_event(&mut client, Some(&window_id), "", WindowStatus::Running).await;
     assert_eq!(outcome, EventOutcome::Rejected("auth_failed".to_string()));
+
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "an event refused for its token's shape must not reach the detector",
+        )
+        .await;
 }
 
 #[tokio::test]
@@ -2107,13 +2209,14 @@ async fn one_windows_token_cannot_authenticate_an_event_about_another_window() {
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    let token_a = wait_for_window_token(&h, &window_a, Duration::from_secs(10)).await;
+    let token_a = wait_for_window_token(&h, &window_a).await;
 
     let path = echo_child_path();
     let path = path.to_str().expect("echo_child path must be valid UTF-8");
     let window_b = h
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
+    let published = PublishedStatuses::watch(&h, &window_b);
 
     assert_eq!(
         probe_status_event(
@@ -2126,9 +2229,12 @@ async fn one_windows_token_cannot_authenticate_an_event_about_another_window() {
         EventOutcome::Rejected("auth_failed".to_string()),
         "window A's token must not authenticate an event aimed at window B"
     );
-    // Give a (hypothetical) unauthenticated write time to land before
-    // asserting that nothing moved.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "a rejected cross-window event must not reach window B's detector",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &window_b).await,
         WindowStatus::Unknown,
@@ -2146,18 +2252,12 @@ async fn one_windows_token_cannot_authenticate_an_event_about_another_window() {
         EventOutcome::Accepted,
         "the same token must still authenticate an event about window A itself"
     );
-    wait_until_status(
-        &mut client,
-        &window_a,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_a, WindowStatus::Running).await;
 }
 
 /// Polls `window_id`'s scrollback until the token its child printed appears.
-async fn wait_for_window_token(h: &Harness, window_id: &str, timeout: Duration) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_window_token(h: &Harness, window_id: &str) -> String {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let text = String::from_utf8_lossy(&h.scrollback(window_id)).to_string();
         if let Some(token) = find_hex32(&text) {
@@ -2200,9 +2300,9 @@ async fn a_windows_own_token_and_window_id_together_authenticate_its_status_even
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    h.wait_for_scrollback(&window_b, window_b.as_bytes(), Duration::from_secs(10))
-        .await;
-    let token_b = wait_for_window_token(&h, &window_b, Duration::from_secs(10)).await;
+    h.wait_for_scrollback(&window_b, window_b.as_bytes()).await;
+    let token_b = wait_for_window_token(&h, &window_b).await;
+    let published = PublishedStatuses::watch(&h, &bystander);
 
     assert_eq!(
         probe_status_event(
@@ -2216,15 +2316,14 @@ async fn a_windows_own_token_and_window_id_together_authenticate_its_status_even
         "the token and window_id a spawned child actually received must together \
          authenticate its own status_event"
     );
-    wait_until_status(
-        &mut client,
-        &window_b,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_b, WindowStatus::Running).await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "the event must attribute to window_b alone, not to the window opened before it",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &bystander).await,
         WindowStatus::Unknown,
@@ -2250,19 +2349,22 @@ async fn a_status_event_without_a_window_id_is_rejected_even_with_a_windows_real
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    h.wait_for_scrollback(&window_b, window_b.as_bytes(), Duration::from_secs(10))
-        .await;
-    let token_b = wait_for_window_token(&h, &window_b, Duration::from_secs(10)).await;
+    h.wait_for_scrollback(&window_b, window_b.as_bytes()).await;
+    let token_b = wait_for_window_token(&h, &window_b).await;
     let before = query_status(&mut client, &window_b).await;
+    let published = PublishedStatuses::watch(&h, &window_b);
 
     assert_eq!(
         probe_status_event(&mut client, None, &token_b, WindowStatus::Running).await,
         EventOutcome::Rejected("invalid_argument".to_string()),
         "an event that omits window_id must be refused, even with a real window's token"
     );
-    // Give a (hypothetical) unauthenticated write time to land before asserting that
-    // nothing moved.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "a rejected omitted-window_id event must not reach the token owner's detector",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &window_b).await,
         before,
@@ -2282,6 +2384,7 @@ async fn status_event_with_an_explicit_window_id_attributes_to_that_window_alone
     let target_window = h
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
+    let published = PublishedStatuses::watch(&h, &bystander);
 
     assert_eq!(
         probe_status_event(
@@ -2293,15 +2396,14 @@ async fn status_event_with_an_explicit_window_id_attributes_to_that_window_alone
         .await,
         EventOutcome::Accepted,
     );
-    wait_until_status(
-        &mut client,
-        &target_window,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &target_window, WindowStatus::Running).await;
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "an explicit window_id must not also touch the window opened before it",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &bystander).await,
         WindowStatus::Unknown,
@@ -2327,13 +2429,22 @@ async fn a_status_event_without_a_window_id_is_rejected_and_touches_no_window() 
     let later_window = h
         .open(vec![path.to_string()], Some(CONTROL_DETECTION_NAME))
         .await;
+    let published =
+        [&first_window, &later_window].map(|window| PublishedStatuses::watch(&h, window));
 
     assert_eq!(
         probe_status_event(&mut client, None, VALID_TOKEN, WindowStatus::Running).await,
         EventOutcome::Rejected("invalid_argument".to_string()),
     );
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    for published in published {
+        published
+            .assert_never_published(
+                WindowStatus::Running,
+                "an omitted-window_id event must not touch any window",
+            )
+            .await;
+    }
     for window in [&first_window, &later_window] {
         assert_eq!(
             query_status(&mut client, window).await,
@@ -2351,6 +2462,7 @@ async fn status_event_with_an_empty_window_id_returns_window_not_found() {
     let h = Harness::start("hk-empty-window-id", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window = h.open_unknown_window().await;
+    let published = PublishedStatuses::watch(&h, &window);
 
     let outcome =
         probe_status_event(&mut client, Some(""), VALID_TOKEN, WindowStatus::Running).await;
@@ -2359,7 +2471,12 @@ async fn status_event_with_an_empty_window_id_returns_window_not_found() {
         EventOutcome::Rejected("window_not_found".to_string())
     );
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    published
+        .assert_never_published(
+            WindowStatus::Running,
+            "an empty window_id must not reach any window",
+        )
+        .await;
     assert_eq!(
         query_status(&mut client, &window).await,
         WindowStatus::Unknown,
@@ -2439,6 +2556,47 @@ async fn a_failed_open_does_not_appear_in_list_windows() {
 }
 
 #[tokio::test]
+async fn a_window_opened_without_detection_keeps_the_default_after_another_named_one() {
+    // The default name resolves to no definition, so a window that reaches
+    // `idle` on the marker can only have picked up the other window's.
+    let dir = unique_temp_dir("detection-arg-default");
+    let config = DaemonConfig {
+        detection_name: "no-such-detection".to_string(),
+        ..detection_config(&dir)
+    };
+    let h = Harness::start("detection-arg-default", config).await;
+    let mut client = h.connect().await;
+    h.open_idle_window(&mut client).await;
+
+    let path = echo_child_path();
+    let path = path.to_str().expect("echo_child path must be valid UTF-8");
+    let without_detection = h.open(vec![path.to_string()], None).await;
+    assert!(
+        h.registry
+            .get(&without_detection)
+            .expect("window must exist in registry")
+            .detection_warning()
+            .is_some(),
+        "a window opened without `detection` must resolve the daemon's unresolvable default"
+    );
+    let published = PublishedStatuses::watch(&h, &without_detection);
+    h.write_input(&without_detection, READY_MARKER).await;
+    h.wait_for_scrollback(
+        &without_detection,
+        yagura_test_support::detection::CONTROL_READY_MARKER.as_bytes(),
+    )
+    .await;
+
+    published
+        .assert_never_published(
+            WindowStatus::Idle,
+            "a window opened without `detection` must not judge by the definition another \
+             window asked for",
+        )
+        .await;
+}
+
+#[tokio::test]
 async fn dropping_a_connection_with_a_pending_waiter_leaves_the_daemon_healthy() {
     let dir = unique_temp_dir("wait-disconnect");
     let h = Harness::start("wait-disconnect", detection_config(&dir)).await;
@@ -2458,28 +2616,27 @@ async fn dropping_a_connection_with_a_pending_waiter_leaves_the_daemon_healthy()
         },
     )
     .await;
+    // The waiter is registered by the time the `Pong` behind it arrives.
+    send(&mut client, &ClientMessage::Ping).await;
+    assert!(matches!(
+        read_response(&mut client).await,
+        DaemonMessage::Pong
+    ));
     drop(client);
 
-    // The transition the aborted waiter was watching for happens *after* the
-    // connection is gone: its task must be aborted, not left writing into a
-    // dead connection.
+    // Whether the gone connection's waiter was aborted is not visible to a
+    // client; that the daemon still serves and still judges the transition the
+    // waiter was watching for is.
     h.write_input(&window_id, READY_MARKER).await;
-    tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let mut follow_up = h.connect().await;
     send(&mut follow_up, &ClientMessage::Ping).await;
-    let pong = read_response(&mut follow_up, Duration::from_secs(5)).await;
+    let pong = read_response(&mut follow_up).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "the daemon must still serve new connections, got {pong:?}"
     );
-    wait_until_status(
-        &mut follow_up,
-        &window_id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut follow_up, &window_id, WindowStatus::Idle).await;
 }
 
 // =====================================================================
@@ -2534,12 +2691,11 @@ async fn close_window_from_an_external_connection_is_pending_and_decision_true_c
 
     decide(&mut approver, &request.request_id, true).await;
 
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
 }
 
 #[tokio::test]
@@ -2564,7 +2720,7 @@ async fn close_window_pending_decision_false_returns_approval_denied() {
 
     decide(&mut approver, &request.request_id, false).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2588,10 +2744,10 @@ async fn a_pending_request_that_is_never_decided_times_out_and_notifies_the_appr
     .await;
     let request = expect_approval_requested(&mut approver).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_timeout");
 
-    match read_response(&mut approver, Duration::from_secs(5)).await {
+    match read_response(&mut approver).await {
         DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
             assert_eq!(request_id, request.request_id);
             assert_eq!(reason, WithdrawReason::Timeout);
@@ -2616,7 +2772,7 @@ async fn close_window_with_no_approver_connected_is_refused_without_creating_a_p
         },
     )
     .await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("no approver is connected"),
@@ -2655,7 +2811,7 @@ async fn close_window_with_a_broken_playbook_is_refused_even_with_an_approver_re
     )
     .await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("failed to load"),
@@ -2665,7 +2821,7 @@ async fn close_window_with_a_broken_playbook_is_refused_even_with_an_approver_re
     // The approver must not have been asked: a broken playbook is a
     // configuration failure, not something a human decides.
     send(&mut approver, &ClientMessage::Ping).await;
-    let pong = read_response(&mut approver, Duration::from_secs(5)).await;
+    let pong = read_response(&mut approver).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "expected pong (no approval_requested was queued), got {pong:?}"
@@ -2696,7 +2852,7 @@ async fn pending_request_is_withdrawn_once_the_requester_disconnects() {
 
     // The ceiling only guards against a hang; it stays under the 30 s approval
     // timeout so an expiry cannot stand in for the withdrawal.
-    match read_response(&mut approver, Duration::from_secs(10)).await {
+    match read_response(&mut approver).await {
         DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
             assert_eq!(request_id, request.request_id);
             assert_eq!(reason, WithdrawReason::RequesterDisconnected);
@@ -2712,7 +2868,7 @@ async fn pending_request_is_withdrawn_once_the_requester_disconnects() {
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "approval_not_pending");
 }
 
@@ -2747,7 +2903,7 @@ async fn pending_request_survives_the_approvers_disconnect_and_reappears_on_rere
 
     decide(&mut approver2, &request.request_id, true).await;
 
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -2835,7 +2991,7 @@ async fn a_single_send_text_request_creates_exactly_one_pending_approval() {
     assert_eq!(pending[0].request_id, request.request_id);
 
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2868,7 +3024,7 @@ async fn a_single_interrupt_window_request_creates_exactly_one_pending_approval(
     assert_eq!(pending[0].request_id, request.request_id);
 
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2902,7 +3058,7 @@ async fn a_single_close_window_request_creates_exactly_one_pending_approval() {
     assert_eq!(pending[0].request_id, request.request_id);
 
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2942,7 +3098,7 @@ async fn a_single_send_handoff_request_creates_exactly_one_pending_approval() {
     assert_eq!(pending[0].request_id, request.request_id);
 
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2962,13 +3118,13 @@ async fn registering_as_approver_from_a_window_identified_connection_is_invalid_
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::Identified { .. } => {}
         other => panic!("expected identified, got {other:?}"),
     }
 
     send(&mut client, &ClientMessage::RegisterApprover).await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_state");
 }
 
@@ -2989,7 +3145,7 @@ async fn identify_from_an_approver_registered_connection_is_invalid_state() {
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_state");
 }
 
@@ -3022,7 +3178,7 @@ async fn approval_decision_from_an_unregistered_connection_is_approval_not_pendi
         },
     )
     .await;
-    let msg = read_response(&mut stranger, Duration::from_secs(5)).await;
+    let msg = read_response(&mut stranger).await;
     expect_error(msg, "approval_not_pending");
 }
 
@@ -3048,7 +3204,7 @@ async fn approval_decision_for_an_already_settled_request_is_approval_not_pendin
     let request = expect_approval_requested(&mut approver).await;
 
     decide(&mut approver, &request.request_id, true).await;
-    let _ = read_response(&mut requester, Duration::from_secs(5)).await;
+    let _ = read_response(&mut requester).await;
 
     send(
         &mut approver,
@@ -3058,7 +3214,7 @@ async fn approval_decision_for_an_already_settled_request_is_approval_not_pendin
         },
     )
     .await;
-    let msg = read_response(&mut approver, Duration::from_secs(5)).await;
+    let msg = read_response(&mut approver).await;
     expect_error(msg, "approval_not_pending");
 }
 
@@ -3088,7 +3244,7 @@ async fn deciding_from_one_approver_notifies_the_other_of_the_resolution() {
 
     decide(&mut approver1, &request1.request_id, true).await;
 
-    match read_response(&mut approver2, Duration::from_secs(5)).await {
+    match read_response(&mut approver2).await {
         DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
             assert_eq!(request_id, request1.request_id);
             assert_eq!(reason, WithdrawReason::Resolved);
@@ -3096,7 +3252,7 @@ async fn deciding_from_one_approver_notifies_the_other_of_the_resolution() {
         other => panic!("expected approval_withdrawn(resolved), got {other:?}"),
     }
 
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -3135,7 +3291,7 @@ async fn exceeding_the_per_connection_pending_cap_is_resource_exhausted() {
         },
     )
     .await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "resource_exhausted");
 }
 
@@ -3174,7 +3330,7 @@ async fn exceeding_the_daemon_wide_pending_cap_is_resource_exhausted_even_from_a
         },
     )
     .await;
-    let msg = read_response(&mut requester2, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester2).await;
     expect_error(msg, "resource_exhausted");
 }
 
@@ -3199,7 +3355,7 @@ async fn ping_still_works_on_a_connection_with_a_pending_approval_request() {
     let _request = expect_approval_requested(&mut approver).await;
 
     send(&mut requester, &ClientMessage::Ping).await;
-    let pong = read_response(&mut requester, Duration::from_secs(5)).await;
+    let pong = read_response(&mut requester).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "expected pong on a connection with a request still pending, got {pong:?}"
@@ -3237,8 +3393,8 @@ async fn pending_approval_requests_do_not_consume_the_connections_wait_for_statu
 
     // Five wait_for_status calls on the same connection, whose targets never
     // arrive: if the four pending approvals above left the waiter budget
-    // untouched, exactly one (the fifth) is rejected immediately and the
-    // other four produce no frame within the short window below.
+    // untouched, exactly one (the fifth) is rejected and the other four are
+    // registered without an answer.
     for window_id in &windows {
         send(
             &mut client,
@@ -3260,25 +3416,17 @@ async fn pending_approval_requests_do_not_consume_the_connections_wait_for_statu
     )
     .await;
 
-    // The rejection is an event, so the first read waits for it up to the
-    // ceiling; only the reads after it watch a short window for a second one.
-    expect_error(
-        read_response(&mut client, Duration::from_secs(10)).await,
-        "resource_exhausted",
-    );
-    let mut immediate_errors = 1;
-    for _ in 0..4 {
-        match tokio::time::timeout(
-            Duration::from_millis(500),
-            read_response(&mut client, Duration::from_secs(20)),
-        )
-        .await
-        {
-            Ok(msg) => {
+    // A wait_for_status is refused while it is handled, so every refusal is
+    // ahead of the `Pong` behind the five.
+    send(&mut client, &ClientMessage::Ping).await;
+    let mut immediate_errors = 0;
+    loop {
+        match read_response(&mut client).await {
+            DaemonMessage::Pong => break,
+            msg => {
                 expect_error(msg, "resource_exhausted");
                 immediate_errors += 1;
             }
-            Err(_) => break,
         }
     }
     assert_eq!(
@@ -3305,7 +3453,7 @@ async fn an_approvers_own_close_window_and_interrupt_window_bypass_the_gate_with
         },
     )
     .await;
-    match read_response(&mut approver, Duration::from_secs(5)).await {
+    match read_response(&mut approver).await {
         DaemonMessage::WindowInterrupted { window_id } => assert_eq!(window_id, window_a),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
@@ -3319,7 +3467,7 @@ async fn an_approvers_own_close_window_and_interrupt_window_bypass_the_gate_with
         },
     )
     .await;
-    match read_response(&mut approver, Duration::from_secs(5)).await {
+    match read_response(&mut approver).await {
         DaemonMessage::WindowClosed { window_id } => assert_eq!(window_id, window_b),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -3351,7 +3499,7 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
         },
     )
     .await;
-    match read_response(&mut source, Duration::from_secs(5)).await {
+    match read_response(&mut source).await {
         DaemonMessage::Identified { .. } => {}
         other => panic!("expected identified, got {other:?}"),
     }
@@ -3385,7 +3533,7 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
     );
 
     decide(&mut approver, &request.request_id, true).await;
-    match read_response(&mut source, Duration::from_secs(5)).await {
+    match read_response(&mut source).await {
         DaemonMessage::TextSent { window_id } => assert_eq!(window_id, window_b),
         other => panic!("expected text_sent, got {other:?}"),
     }
@@ -3418,7 +3566,7 @@ async fn send_keys_from_an_identified_window_to_another_window_is_pending_with_k
     )
     .await;
     assert!(matches!(
-        read_response(&mut source, Duration::from_secs(5)).await,
+        read_response(&mut source).await,
         DaemonMessage::Identified { .. }
     ));
 
@@ -3450,7 +3598,7 @@ async fn send_keys_from_an_identified_window_to_another_window_is_pending_with_k
     );
 
     decide(&mut approver, &request.request_id, true).await;
-    match read_response(&mut source, Duration::from_secs(5)).await {
+    match read_response(&mut source).await {
         DaemonMessage::KeysSent { window_id } => assert_eq!(window_id, window_b),
         other => panic!("expected keys_sent, got {other:?}"),
     }
@@ -3480,13 +3628,13 @@ async fn send_text_requiring_approval_over_the_body_limit_is_rejected_without_re
     )
     .await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "invalid_argument");
 
     // The approver's connection must stay idle: no approval_requested was
     // queued for a request rejected before it reached the ledger.
     send(&mut approver, &ClientMessage::Ping).await;
-    let pong = read_response(&mut approver, Duration::from_secs(5)).await;
+    let pong = read_response(&mut approver).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "expected pong (no approval_requested was queued), got {pong:?}"
@@ -3520,7 +3668,7 @@ async fn send_text_requiring_approval_at_exactly_the_body_limit_reaches_the_appr
         "a body of exactly the cap must reach the approver whole"
     );
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -3534,13 +3682,7 @@ async fn a_pending_close_window_still_succeeds_after_the_target_has_already_exit
 
     let mut requester = h.connect().await;
     let window_id = h.open(exit_with_code_command("0"), None).await;
-    wait_until_status(
-        &mut requester,
-        &window_id,
-        WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut requester, &window_id, WindowStatus::Exited).await;
 
     send(
         &mut requester,
@@ -3553,7 +3695,7 @@ async fn a_pending_close_window_still_succeeds_after_the_target_has_already_exit
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, true).await;
 
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!(
             "expected window_closed even though the child had already exited (idempotent), \
@@ -3587,17 +3729,11 @@ async fn a_pending_interrupt_window_returns_child_exited_if_the_target_exits_bef
         .expect("window must exist in registry")
         .session()
         .terminate();
-    wait_until_status(
-        &mut requester,
-        &window_id,
-        WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut requester, &window_id, WindowStatus::Exited).await;
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "child_exited");
 }
 
@@ -3630,13 +3766,7 @@ async fn a_pending_interrupt_window_is_refused_status_unknown_if_the_target_fall
         },
     )
     .await;
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(5),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Running).await;
 
     let mut requester = h.connect().await;
     send(
@@ -3658,17 +3788,11 @@ async fn a_pending_interrupt_window_is_refused_status_unknown_if_the_target_fall
 
     // Let the open turn go quiet, so the window falls back to Unknown before
     // the decision is made.
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Unknown,
-        Duration::from_secs(15),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Unknown).await;
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -3706,7 +3830,7 @@ async fn send_handoff_to_ones_own_window_needs_no_playbook_and_delivers_the_enve
     // No playbook is configured at all: only the self-window relief in the
     // gate (which also covers send_handoff) can let
     // this through.
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
@@ -3722,8 +3846,7 @@ async fn send_handoff_to_ones_own_window_needs_no_playbook_and_delivers_the_enve
         other => panic!("expected handoff_sent, got {other:?}"),
     }
 
-    let json =
-        wait_for_accepted_handoff_envelope_json(&h, &window_id, Duration::from_secs(10)).await;
+    let json = wait_for_accepted_handoff_envelope_json(&h, &window_id).await;
     assert_eq!(
         json["from"]["window_id"], window_id,
         "the envelope's from.window_id must be the requester's own id: {json}"
@@ -3758,7 +3881,7 @@ async fn send_handoff_from_an_external_connection_to_another_window_without_a_po
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "approval_required");
     assert!(
         message.contains("no approver is connected"),
@@ -3791,7 +3914,7 @@ async fn send_handoff_between_two_windows_succeeds_when_the_playbook_lists_send_
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
@@ -3805,8 +3928,7 @@ async fn send_handoff_between_two_windows_succeeds_when_the_playbook_lists_send_
         other => panic!("expected handoff_sent, got {other:?}"),
     }
 
-    let json =
-        wait_for_accepted_handoff_envelope_json(&h, &window_id, Duration::from_secs(10)).await;
+    let json = wait_for_accepted_handoff_envelope_json(&h, &window_id).await;
     assert_eq!(
         json["from"], "external",
         "an unidentified connection's envelope must carry \"from\":\"external\": {json}"
@@ -3838,7 +3960,7 @@ async fn send_handoff_to_an_unknown_window_is_status_unknown_even_for_the_window
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -3866,7 +3988,7 @@ async fn send_handoff_to_an_exited_window_is_child_exited_even_with_an_approving
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "child_exited");
 }
 
@@ -3893,7 +4015,7 @@ async fn send_handoff_with_a_missing_window_id_and_a_multiline_note_is_invalid_a
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -3924,7 +4046,7 @@ async fn send_handoff_with_a_reference_over_the_size_limit_is_invalid_argument_e
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -3955,7 +4077,7 @@ async fn send_handoff_with_a_note_over_the_size_limit_is_invalid_argument_even_w
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 }
 
@@ -3990,7 +4112,7 @@ async fn send_handoff_denied_by_the_approver_leaves_the_targets_pty_unchanged() 
 
     decide(&mut approver, &request.request_id, false).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
     assert_eq!(
         h.scrollback(&window_id),
@@ -4028,13 +4150,7 @@ async fn a_pending_send_handoff_is_refused_status_unknown_if_the_target_falls_ba
         },
     )
     .await;
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(5),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Running).await;
 
     let mut requester = h.connect().await;
     send(
@@ -4063,17 +4179,11 @@ async fn a_pending_send_handoff_is_refused_status_unknown_if_the_target_falls_ba
 
     // Let the open turn go quiet, so the window falls back to Unknown before
     // the decision is made.
-    wait_until_status(
-        &mut probe,
-        &window_id,
-        WindowStatus::Unknown,
-        Duration::from_secs(15),
-    )
-    .await;
+    wait_until_status(&mut probe, &window_id, WindowStatus::Unknown).await;
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "status_unknown");
 }
 
@@ -4124,7 +4234,7 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_deli
 
     decide(&mut approver, &request.request_id, true).await;
 
-    match read_response(&mut source, Duration::from_secs(5)).await {
+    match read_response(&mut source).await {
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
@@ -4138,8 +4248,7 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_deli
         other => panic!("expected handoff_sent, got {other:?}"),
     }
 
-    let json =
-        wait_for_accepted_handoff_envelope_json(&h, &window_b, Duration::from_secs(10)).await;
+    let json = wait_for_accepted_handoff_envelope_json(&h, &window_b).await;
     assert_eq!(
         json["from"]["window_id"], window_a,
         "the envelope's from.window_id must be the requesting window: {json}"
@@ -4218,7 +4327,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
@@ -4231,18 +4340,14 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED [yagura handoff] ", 1)
+        .await;
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "PASTE "),
         1,
         "the body must be written exactly once"
     );
-    h.wait_for_scrollback_occurrences(
-        &window_id,
-        "SUBMITTED [yagura handoff] ",
-        1,
-        Duration::from_secs(10),
-    )
-    .await;
     assert!(
         count_marker(&h, &window_id, "SUBMITTED [yagura handoff] ") >= 1,
         "the submit key must have been taken as a submit, not folded into the body \
@@ -4295,7 +4400,7 @@ async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_is_take
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
                 wire(delivery),
@@ -4354,7 +4459,7 @@ async fn send_handoff_to_a_window_id_that_never_reacts_is_taken_and_the_window_s
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
@@ -4408,13 +4513,7 @@ async fn send_handoff_definition_requiring_resend_without_a_clear_sequence_loads
 
     // A rejected load would leave the window Unknown for good; a loaded one
     // detects the fixture's marker line.
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
 }
 
 #[tokio::test]
@@ -4466,7 +4565,7 @@ async fn send_handoff_to_a_window_id_delivers_through_the_same_submit_sequence_a
     let request = expect_approval_requested(&mut approver).await;
     decide(&mut approver, &request.request_id, true).await;
 
-    match read_response(&mut requester, Duration::from_secs(10)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
             delivery, opened, ..
         } => {
@@ -4475,6 +4574,7 @@ async fn send_handoff_to_a_window_id_delivers_through_the_same_submit_sequence_a
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "PASTE "),
         1,
@@ -4547,14 +4647,14 @@ async fn send_handoff_to_a_window_id_is_resource_exhausted_after_the_per_connect
     )
     .await;
 
-    let second = read_response(&mut client, Duration::from_secs(5)).await;
+    let second = read_response(&mut client).await;
     let message = expect_error(second, "resource_exhausted");
     assert!(
         message.contains("per-connection"),
         "message must name the per-connection limit: {message:?}"
     );
 
-    match read_response(&mut client, Duration::from_secs(30)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { .. } => {}
         other => panic!("expected the first handoff's own reply, got {other:?}"),
     }
@@ -4610,7 +4710,7 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_written_once(
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
                 wire(delivery),
@@ -4620,6 +4720,7 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_written_once(
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "SUBMITTED "),
         0,
@@ -4687,19 +4788,20 @@ async fn send_handoff_to_a_window_id_does_not_resend_once_the_window_leaves_the_
     // read only once the probe after the body is erased and the submit key
     // pressed: from here on the daemon is waiting for a reaction the paste
     // guard never lets the fixture show.
-    wait_until_input_log_contains(&input_log, b"\x7f\r", Duration::from_secs(10)).await;
+    wait_until_input_log_contains(&input_log, b"\x7f\r").await;
     // `interrupt_window` sits behind an approval gate this connection's
     // policy does not auto-approve, and 0x03 sent through it would not
     // reach the fixture in time anyway; writing directly bypasses that gate
     // the same way `Harness::write_input` always does.
     h.write_input(&window_id, &[0x03]).await;
 
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "PASTE "),
         1,
@@ -4761,13 +4863,7 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
     )
     .await;
     report_status(&mut reporter, &window_id, WindowStatus::Running).await;
-    wait_until_status(
-        &mut reporter,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut reporter, &window_id, WindowStatus::Running).await;
     assert_eq!(
         receiver.write_seq(),
         seq_before,
@@ -4775,14 +4871,15 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
     );
     report_status(&mut reporter, &window_id, WindowStatus::WaitingInput).await;
 
-    match read_response(&mut client, Duration::from_secs(15)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
-    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1, Duration::from_secs(10))
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1)
         .await;
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED "), 1);
     assert_eq!(count_marker(&h, &window_id, "PASTE "), 1);
 }
@@ -4823,13 +4920,7 @@ async fn send_handoff_to_a_working_window_waits_in_its_inbox_and_is_typed_once_i
     let receiver = h.registry.get(&window_id).expect("window must exist");
     let mut reporter = h.connect().await;
     report_status(&mut reporter, &window_id, WindowStatus::Running).await;
-    wait_until_status(
-        &mut reporter,
-        &window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut reporter, &window_id, WindowStatus::Running).await;
     let seq_before = receiver.write_seq();
 
     send(
@@ -4854,13 +4945,14 @@ async fn send_handoff_to_a_working_window_waits_in_its_inbox_and_is_typed_once_i
     );
 
     report_status(&mut reporter, &window_id, WindowStatus::WaitingInput).await;
-    match read_response(&mut client, Duration::from_secs(15)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(wire(delivery), "taken");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
     assert_eq!(receiver.inbox().pending_count(), 0);
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "PASTE "),
         1,
@@ -4935,18 +5027,14 @@ async fn send_message_to_a_window_id_submits_a_single_line_regardless_of_which_b
             },
         )
         .await;
-        match read_response(&mut client, Duration::from_secs(10)).await {
+        match read_response(&mut client).await {
             DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
             other => panic!("expected text_sent for terminator {case}, got {other:?}"),
         }
 
-        h.wait_for_scrollback_occurrences(
-            &window_id,
-            &format!("SUBMITTED {body}"),
-            1,
-            Duration::from_secs(10),
-        )
-        .await;
+        h.wait_for_scrollback_occurrences(&window_id, &format!("SUBMITTED {body}"), 1)
+            .await;
+        wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
         assert_eq!(
             count_marker(&h, &window_id, "PASTE "),
             1,
@@ -4990,18 +5078,13 @@ async fn send_message_with_a_trailing_newline_and_no_forbidden_character_still_s
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
 
-    h.wait_for_scrollback_occurrences(
-        &window_id,
-        &format!("SUBMITTED {body}"),
-        1,
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback_occurrences(&window_id, &format!("SUBMITTED {body}"), 1)
+        .await;
 }
 
 #[tokio::test]
@@ -5019,6 +5102,11 @@ async fn send_message_with_multiple_lines_is_invalid_argument_and_writes_nothing
     let mut client = h.connect().await;
     let window_id = h.open_idle_window(&mut client).await;
 
+    let seq_before = h
+        .registry
+        .get(&window_id)
+        .expect("window must exist")
+        .write_seq();
     send(
         &mut client,
         &ClientMessage::SendText {
@@ -5027,9 +5115,18 @@ async fn send_message_with_multiple_lines_is_invalid_argument_and_writes_nothing
         },
     )
     .await;
-    let msg = read_response(&mut client, Duration::from_secs(10)).await;
+    let msg = read_response(&mut client).await;
     expect_error(msg, "invalid_argument");
 
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
+    assert_eq!(
+        h.registry
+            .get(&window_id)
+            .expect("window must exist")
+            .write_seq(),
+        seq_before + 1,
+        "a refused body must never be written: the later mark is the only write"
+    );
     assert_eq!(
         count_marker(&h, &window_id, "send-message-multi-line-first"),
         0,
@@ -5090,7 +5187,7 @@ async fn send_message_without_a_usable_terminator_still_writes_the_raw_bytes_unc
             },
         )
         .await;
-        match read_response(&mut client, Duration::from_secs(10)).await {
+        match read_response(&mut client).await {
             DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
             other => panic!("expected text_sent for case {case}, got {other:?}"),
         }
@@ -5102,10 +5199,12 @@ async fn send_message_without_a_usable_terminator_still_writes_the_raw_bytes_unc
             "case {case} must be written raw, in at most one write, got {}",
             receiver.write_seq() - seq_before
         );
+        paste_a_later_mark(&h, &window_id).await;
         assert_eq!(
             count_marker(&h, &window_id, "PASTE "),
-            0,
-            "case {case} must never take the bracketed-paste submit-plan path"
+            1,
+            "case {case} must never take the bracketed-paste submit-plan path: the later \
+             mark's is the only paste"
         );
         assert_eq!(
             count_marker(&h, &window_id, "SUBMITTED"),
@@ -5164,13 +5263,7 @@ async fn send_message_does_not_wait_for_a_reaction_or_resend() {
             .to_string(),
     );
     let window_id = h.open(command, Some("no-confirm")).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
 
     send(
         &mut client,
@@ -5180,7 +5273,7 @@ async fn send_message_does_not_wait_for_a_reaction_or_resend() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(20)).await {
+    match read_response(&mut client).await {
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("send_message must never wait on delivery_confirm_ms, got {other:?}"),
     }
@@ -5189,12 +5282,17 @@ async fn send_message_does_not_wait_for_a_reaction_or_resend() {
     // second submit key although the submit key was swallowed and never
     // reacted to.
     let expected: &[u8] = b"x\x7f\x1b[200~send-message-no-confirm-body \x1b[201~x\x7f\r";
-    // The reply can arrive before the child has logged the submit key it read.
-    let read = wait_until_input_log_contains(&input_log, expected, Duration::from_secs(20)).await;
+    let read = ChildInput::read(
+        &h.registry.get(&window_id).expect("window must exist"),
+        &input_log,
+    )
+    .await;
     assert_eq!(
-        read, expected,
+        read.bytes(),
+        expected,
         "send_message must not resend just because the submit key was swallowed"
     );
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED "), 0);
 }
 
@@ -5261,8 +5359,7 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
         },
     )
     .await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     send(
         &mut client_b,
         &ClientMessage::SendText {
@@ -5272,7 +5369,7 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
     )
     .await;
 
-    match read_response(&mut client_a, Duration::from_secs(10)).await {
+    match read_response(&mut client_a).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
                 wire(delivery),
@@ -5283,13 +5380,14 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
         }
         other => panic!("expected handoff_sent for a, got {other:?}"),
     }
-    match read_response(&mut client_b, Duration::from_secs(10)).await {
+    match read_response(&mut client_b).await {
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent for the send_text, got {other:?}"),
     }
 
-    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1, Duration::from_secs(5))
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED ", 1)
         .await;
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "SUBMITTED "),
         1,
@@ -5363,6 +5461,7 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
         .input_toml(),
         0,
         "discard-paste:",
+        None,
     )
     .await;
 
@@ -5396,12 +5495,12 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
         },
         // Handoff a's first body has reached the fixture, so b arrives while
         // a's retry sequence still holds the window.
-        h.wait_for_scrollback(&window_id, b"PASTE 1 ", Duration::from_secs(10)),
+        h.wait_for_scrollback(&window_id, b"PASTE 1 "),
     )
     .await;
 
     for mut client in [client_a, client_b] {
-        match read_response(&mut client, Duration::from_secs(20)).await {
+        match read_response(&mut client).await {
             DaemonMessage::HandoffSent { delivery, .. } => {
                 assert_eq!(
                     wire(delivery),
@@ -5506,7 +5605,7 @@ async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the
     )
     .await;
 
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { delivery, .. } => {
             assert_eq!(
                 wire(delivery),
@@ -5517,6 +5616,7 @@ async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
     assert_eq!(
         count_marker(&h, &window_id, "SUBMITTED"),
         0,
@@ -5547,7 +5647,7 @@ async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> Daem
         },
     )
     .await;
-    read_response(client, Duration::from_secs(10)).await
+    read_response(client).await
 }
 
 #[tokio::test]
@@ -5566,9 +5666,23 @@ async fn send_message_starting_with_a_leading_key_is_invalid_argument_and_writes
         )
         .await;
 
+    let seq_before = h
+        .registry
+        .get(&window_id)
+        .expect("window must exist")
+        .write_seq();
     let msg = send_text(&mut client, &window_id, "!send-message-leading-key-mark\n").await;
     expect_error(msg, "invalid_argument");
 
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
+    assert_eq!(
+        h.registry
+            .get(&window_id)
+            .expect("window must exist")
+            .write_seq(),
+        seq_before + 1,
+        "a refused body must never be written: the later mark is the only write"
+    );
     assert_eq!(
         count_marker(&h, &window_id, "send-message-leading-key-mark"),
         0,
@@ -5595,6 +5709,11 @@ async fn send_message_raw_body_with_a_leading_key_after_blanks_is_invalid_argume
         )
         .await;
 
+    let seq_before = h
+        .registry
+        .get(&window_id)
+        .expect("window must exist")
+        .write_seq();
     let msg = send_text(
         &mut client,
         &window_id,
@@ -5603,6 +5722,15 @@ async fn send_message_raw_body_with_a_leading_key_after_blanks_is_invalid_argume
     .await;
     expect_error(msg, "invalid_argument");
 
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
+    assert_eq!(
+        h.registry
+            .get(&window_id)
+            .expect("window must exist")
+            .write_seq(),
+        seq_before + 1,
+        "a refused body must never be written: the later mark is the only write"
+    );
     assert_eq!(
         count_marker(&h, &window_id, "send-message-leading-key-raw-mark"),
         0,
@@ -5630,13 +5758,8 @@ async fn send_message_with_a_leading_key_character_elsewhere_is_still_written() 
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
-    h.wait_for_scrollback_occurrences(
-        &window_id,
-        "send-message-inner-key-mark!",
-        1,
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback_occurrences(&window_id, "send-message-inner-key-mark!", 1)
+        .await;
 }
 
 #[tokio::test]
@@ -5659,6 +5782,11 @@ async fn send_message_starting_with_a_leading_key_is_refused_before_the_approval
         )
         .await;
 
+    let seq_before = h
+        .registry
+        .get(&window_id)
+        .expect("window must exist")
+        .write_seq();
     let msg = send_text(
         &mut client,
         &window_id,
@@ -5667,6 +5795,15 @@ async fn send_message_starting_with_a_leading_key_is_refused_before_the_approval
     .await;
     expect_error(msg, "invalid_argument");
 
+    wait_until_the_child_shows_a_later_mark(&h, &window_id).await;
+    assert_eq!(
+        h.registry
+            .get(&window_id)
+            .expect("window must exist")
+            .write_seq(),
+        seq_before + 1,
+        "a refused body must never be written: the later mark is the only write"
+    );
     assert_eq!(
         count_marker(&h, &window_id, "send-message-leading-key-gate-mark"),
         0,

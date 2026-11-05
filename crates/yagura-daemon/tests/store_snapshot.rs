@@ -29,7 +29,6 @@ use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
-const POLL_BUDGET: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Polls the current slot until `predicate` holds, then returns the rows that satisfied
@@ -40,7 +39,7 @@ async fn wait_for_current_snapshot(
     label: &str,
     predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
 ) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + POLL_BUDGET;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut last: Option<Vec<store::SnapshotWindow>> = None;
     loop {
         if let Ok(conn) = store::open_readonly(db_path)
@@ -180,7 +179,6 @@ async fn opening_a_window_adds_a_fully_populated_row_to_the_current_slot() {
     );
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -212,7 +210,7 @@ async fn renaming_a_window_updates_its_snapshot_row() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowRenamed { name, .. } => {
             assert_eq!(name, "after-rename", "the rename must be acknowledged")
         }
@@ -226,7 +224,6 @@ async fn renaming_a_window_updates_its_snapshot_row() {
     assert_eq!(rows.len(), 1, "renaming must not add or drop rows");
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -258,7 +255,7 @@ async fn closing_a_window_removes_it_from_the_snapshot() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => {
             assert_eq!(acked, window_id, "window_closed must ack the closed window")
         }
@@ -271,7 +268,6 @@ async fn closing_a_window_removes_it_from_the_snapshot() {
     .await;
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -304,9 +300,7 @@ async fn a_naturally_exited_window_stays_in_the_snapshot() {
     .await;
     wait_for_current_snapshot(&db.path, "both windows to appear", |rows| rows.len() == 2).await;
 
-    harness
-        .wait_until_child_exited(&short_lived, Duration::from_secs(20))
-        .await;
+    harness.wait_until_child_exited(&short_lived).await;
 
     send(
         &mut client,
@@ -316,7 +310,7 @@ async fn a_naturally_exited_window_stays_in_the_snapshot() {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowRenamed { .. } => {}
         other => panic!("expected window_renamed, got {other:?}"),
     }
@@ -332,7 +326,6 @@ async fn a_naturally_exited_window_stays_in_the_snapshot() {
     );
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -367,7 +360,6 @@ async fn a_failed_store_init_warns_once_and_leaves_window_operations_working() {
     );
 
     drop(harness);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[test]
@@ -537,7 +529,6 @@ async fn wire_into_makes_a_registry_open_land_in_the_current_slot() {
     );
 
     drop(registry);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -564,7 +555,6 @@ async fn wire_into_rotates_the_previous_configuration_into_prev() {
     );
 
     drop(registry);
-    tokio::time::sleep(Duration::from_millis(200)).await;
 }
 
 // `open_store`'s permission asymmetry for an explicit db path: the file is narrowed
@@ -625,7 +615,7 @@ fn dump_store_for_manual_verification() {
     });
     let path = PathBuf::from(raw);
 
-    let deadline = std::time::Instant::now() + POLL_BUDGET;
+    let deadline = std::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         match dump_once(&path) {
             Ok(text) => {

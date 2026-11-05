@@ -84,7 +84,11 @@
 //! byte has been applied to the buffer), `byte=<hex>` (the same, for the
 //! first read carrying that byte: how a dialog is raised by the daemon's own
 //! probe or erase) or `erase` (the same, for the first `DEL` read after a
-//! bracketed paste began). A `body`, `clear`, `byte` or `erase` overlay is
+//! bracketed paste began) or `paste-byte=<hex>` (the first read of that byte
+//! once a bracketed paste has ended: the dialog is drawn before the byte is
+//! handled, so the byte is the dialog's input and never reaches the buffer, the
+//! way a CLI raises a dialog between a pasted body and what is typed behind
+//! it). A `body`, `clear`, `byte`, `erase` or `paste-byte` overlay is
 //! removed once the file `<path>` exists when `until|<path>` is given, or by
 //! the first read of the byte `<hex>` when `until-byte|<hex>` is given: that
 //! byte is then handled as if no dialog had been drawn, and the screen shows
@@ -508,6 +512,9 @@ enum OverlayTrigger {
     Byte(u8),
     /// The first read carrying `DEL` once a bracketed paste has begun.
     Erase,
+    /// The first read carrying this byte once a bracketed paste has ended;
+    /// the overlay is drawn before the byte is handled.
+    AfterPasteByte(u8),
 }
 
 /// The parsed `overlay` / `overlay_heading` arguments.
@@ -579,7 +586,7 @@ impl OverlayTrigger {
             OverlayTrigger::Clear => Some(0x15),
             OverlayTrigger::Byte(byte) => Some(byte),
             OverlayTrigger::Erase => Some(0x7f),
-            OverlayTrigger::Key | OverlayTrigger::Body => None,
+            OverlayTrigger::Key | OverlayTrigger::Body | OverlayTrigger::AfterPasteByte(_) => None,
         }
     }
 }
@@ -615,9 +622,12 @@ impl OverlaySettings {
             "body" => OverlayTrigger::Body,
             "clear" => OverlayTrigger::Clear,
             "erase" => OverlayTrigger::Erase,
-            other => {
-                OverlayTrigger::Byte(u8::from_str_radix(other.strip_prefix("byte=")?, 16).ok()?)
-            }
+            other => match other.strip_prefix("paste-byte=") {
+                Some(hex) => OverlayTrigger::AfterPasteByte(u8::from_str_radix(hex, 16).ok()?),
+                None => {
+                    OverlayTrigger::Byte(u8::from_str_radix(other.strip_prefix("byte=")?, 16).ok()?)
+                }
+            },
         };
         let (overlay, is_dialog) = match parts.next()? {
             "hidden" => (
@@ -1093,6 +1103,16 @@ fn main() -> io::Result<()> {
                         set_overlay(&out, &overlay_drawn, overlay, false)?;
                     }
                     continue;
+                }
+                if let OverlayTrigger::AfterPasteByte(trigger) = overlay.trigger
+                    && !overlay_fired
+                    && byte == trigger
+                    && state.pastes_begun > 0
+                    && !state.in_paste
+                    && state.pending.is_empty()
+                {
+                    overlay_fired = true;
+                    fire_overlay(&out, &overlay_drawn, overlay)?;
                 }
                 if overlay.is_dialog && overlay_drawn.load(Ordering::SeqCst) {
                     if overlay.gone_on_byte == Some(byte) {

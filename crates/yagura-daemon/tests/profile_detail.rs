@@ -8,7 +8,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{Harness, approver_base_config, expect_error, read_response, send};
 use serde_json::json;
@@ -206,10 +205,7 @@ async fn reading_details_or_setting_a_command_is_refused_to_a_connection_that_is
         },
     ] {
         send(&mut client, &message).await;
-        expect_error(
-            read_response(&mut client, Duration::from_secs(5)).await,
-            "auth_failed",
-        );
+        expect_error(read_response(&mut client).await, "auth_failed");
     }
     assert!(!dir.join("codex-cli.toml").exists());
 }

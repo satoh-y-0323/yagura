@@ -8,7 +8,6 @@
 mod common;
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
@@ -21,8 +20,6 @@ use yagura_protocol::ClientMessage;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::echo_child_path;
-
-const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The key an error frame carries to name the argument it rejected.
 const ARGUMENT_KEY: &str = "rejected_argument";
@@ -39,15 +36,21 @@ fn echo_child_argv() -> Vec<String> {
 /// Reads one frame and returns its body parsed as JSON.
 async fn read_frame_json(client: &mut Connection) -> Value {
     let mut len_buf = [0u8; 4];
-    tokio::time::timeout(FRAME_TIMEOUT, client.read_exact(&mut len_buf))
-        .await
-        .expect("timed out waiting for a frame length prefix")
-        .expect("connection closed while reading a frame length prefix");
+    tokio::time::timeout(
+        yagura_test_support::HANG_GUARD,
+        client.read_exact(&mut len_buf),
+    )
+    .await
+    .expect("timed out waiting for a frame length prefix")
+    .expect("connection closed while reading a frame length prefix");
     let mut body = vec![0u8; u32::from_le_bytes(len_buf) as usize];
-    tokio::time::timeout(FRAME_TIMEOUT, client.read_exact(&mut body))
-        .await
-        .expect("timed out waiting for a frame body")
-        .expect("connection closed while reading a frame body");
+    tokio::time::timeout(
+        yagura_test_support::HANG_GUARD,
+        client.read_exact(&mut body),
+    )
+    .await
+    .expect("timed out waiting for a frame body")
+    .expect("connection closed while reading a frame body");
     serde_json::from_slice(&body).expect("the daemon must only ever emit well-formed JSON frames")
 }
 

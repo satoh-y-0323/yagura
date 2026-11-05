@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{
-    CONTROL_DETECTION_NAME, Harness, READY_MARKER, read_response, run_on_own_runtime, send,
-    unique_temp_dir, write_control_definition_with_bottom_line_count,
+    CONTROL_DETECTION_NAME, HANG_GUARD, Harness, READY_MARKER, read_response, run_on_own_runtime,
+    send, unique_temp_dir, write_control_definition_with_bottom_line_count,
 };
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, PtySession, WindowEntry, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
@@ -58,8 +58,8 @@ async fn resize_window(h: &Harness, window_id: &str, cols: u16, rows: u16) {
 }
 
 /// Writes `payload` from a thread with its own runtime and blocks the calling
-/// thread until the window shows `until`, so nothing on the caller's runtime
-/// follows the output meanwhile.
+/// thread until the window's model shows `until`, so nothing on the caller's
+/// runtime follows the output meanwhile.
 fn write_while_runtime_blocked(session: Arc<PtySession>, payload: Vec<u8>, until: &str) {
     let until = until.to_string();
     let worker = std::thread::spawn(move || {
@@ -69,7 +69,7 @@ fn write_while_runtime_blocked(session: Arc<PtySession>, payload: Vec<u8>, until
             .unwrap()
             .block_on(async {
                 session.write_input(&payload).await.expect("write_input");
-                let deadline = Instant::now() + Duration::from_secs(20);
+                let deadline = Instant::now() + HANG_GUARD;
                 while !session
                     .text_tail(10_000, 1 << 20)
                     .await
@@ -88,26 +88,27 @@ fn write_while_runtime_blocked(session: Arc<PtySession>, payload: Vec<u8>, until
     if let Err(panic) = worker.join() {
         std::panic::resume_unwind(panic);
     }
-    std::thread::sleep(Duration::from_millis(300));
 }
 
+/// Waits for the window's confirmed status to be `expected`; on reaching
+/// [`HANG_GUARD`] first, the status it is at.
 async fn wait_for_status(
     h: &Harness,
     window_id: &str,
     expected: WindowStatus,
-    timeout: Duration,
-) -> Result<Duration, WindowStatus> {
+) -> Result<(), WindowStatus> {
     let entry = h.registry.get(window_id).unwrap();
-    let start = Instant::now();
-    loop {
-        let status = entry.current_status();
-        if status == expected {
-            return Ok(start.elapsed());
-        }
-        if start.elapsed() >= timeout {
-            return Err(status);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    let mut status = entry.watch_status();
+    let reached = tokio::time::timeout(
+        HANG_GUARD,
+        status.wait_for(|at| at.status.status() == expected),
+    )
+    .await
+    .is_ok_and(|seen| seen.is_ok());
+    if reached {
+        Ok(())
+    } else {
+        Err(entry.current_status())
     }
 }
 
@@ -121,7 +122,7 @@ async fn read_output_text(h: &Harness, window_id: &str) -> String {
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowOutput { text, .. } => text,
         other => panic!("expected window_output, got {other:?}"),
     }
@@ -139,16 +140,23 @@ async fn detection_judges_the_screen_the_window_shows_after_a_burst_it_did_not_f
         )
         .await;
     resize_window(&h, &window_id, TALL_COLS, TALL_ROWS).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let session = h.registry.get(&window_id).unwrap().session().clone();
     let mut arrivals = session.output_arrivals();
     let before = *arrivals.borrow_and_update();
     write_while_runtime_blocked(session.clone(), marker_then_filler(), FILLER_END);
-    let chunks = arrivals.borrow().wrapping_sub(before);
+    // An arrival is announced just after the model takes it in, so the count is
+    // awaited rather than read.
+    let in_chunks = tokio::time::timeout(
+        HANG_GUARD,
+        arrivals.wait_for(|arrived| arrived.wrapping_sub(before) >= 2),
+    )
+    .await
+    .is_ok_and(|seen| seen.is_ok());
     assert!(
-        chunks >= 2,
-        "the output burst must reach the model in more than one chunk, got {chunks}"
+        in_chunks,
+        "the output burst must reach the model in more than one chunk, got {}",
+        arrivals.borrow().wrapping_sub(before)
     );
 
     let marker = std::str::from_utf8(READY_MARKER).unwrap().trim_end();
@@ -157,8 +165,7 @@ async fn detection_judges_the_screen_the_window_shows_after_a_burst_it_did_not_f
         shown.contains(marker),
         "the window's text must still show the marker: {shown:?}"
     );
-    let reached =
-        wait_for_status(&h, &window_id, WindowStatus::Idle, Duration::from_secs(10)).await;
+    let reached = wait_for_status(&h, &window_id, WindowStatus::Idle).await;
     assert!(
         reached.is_ok(),
         "the window shows {marker:?}, but detection stayed at {:?} after a burst it did not follow",
@@ -181,10 +188,9 @@ async fn detection_judges_the_same_tall_screen_when_nothing_lagged() {
         )
         .await;
     resize_window(&h, &window_id, TALL_COLS, TALL_ROWS).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
 
     h.write_input(&window_id, &marker_then_filler()).await;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + HANG_GUARD;
     while !read_output_text(&h, &window_id).await.contains(FILLER_END) {
         assert!(
             Instant::now() < deadline,
@@ -192,9 +198,7 @@ async fn detection_judges_the_same_tall_screen_when_nothing_lagged() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let reached =
-        wait_for_status(&h, &window_id, WindowStatus::Idle, Duration::from_secs(20)).await;
+    let reached = wait_for_status(&h, &window_id, WindowStatus::Idle).await;
     assert!(
         reached.is_ok(),
         "detection stayed at {:?} on a screen showing the marker",
@@ -205,7 +209,7 @@ async fn detection_judges_the_same_tall_screen_when_nothing_lagged() {
 
 #[test]
 fn detection_in_one_window_goes_on_while_another_window_s_model_is_held() {
-    run_on_own_runtime(Duration::from_secs(180), detection_goes_on_while_held);
+    run_on_own_runtime(detection_goes_on_while_held);
 }
 
 async fn detection_goes_on_while_held() {
@@ -228,12 +232,13 @@ async fn detection_goes_on_while_held() {
 
     let held_session = h.registry.get(&held_id).unwrap().session().clone();
     let hold = held_session.hold_model();
-    // Output arriving at the held window leaves its reader and its detection
-    // waiting on the held lock.
+    // Output arriving at the held window leaves its reader waiting on the held
+    // lock; a resize notice sends its detection to read the model too.
     h.write_input(&held_id, READY_MARKER).await;
+    h.registry.get(&held_id).unwrap().propagate_resize();
 
     h.write_input(&quiet_id, READY_MARKER).await;
-    let reached = wait_for_status(&h, &quiet_id, WindowStatus::Idle, Duration::from_secs(30)).await;
+    let reached = wait_for_status(&h, &quiet_id, WindowStatus::Idle).await;
     assert!(
         reached.is_ok(),
         "the quiet window stayed at {:?} while the other window's model was held",
@@ -242,20 +247,14 @@ async fn detection_goes_on_while_held() {
     // Pushes the marker out of the matched bottom region.
     h.write_input(&quiet_id, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\n")
         .await;
-    let left = wait_for_status(
-        &h,
-        &quiet_id,
-        WindowStatus::Unknown,
-        Duration::from_secs(30),
-    )
-    .await;
+    let left = wait_for_status(&h, &quiet_id, WindowStatus::Unknown).await;
     assert!(
         left.is_ok(),
         "the quiet window never left idle while the other window's model was held"
     );
 
     drop(hold);
-    let released = wait_for_status(&h, &held_id, WindowStatus::Idle, Duration::from_secs(30)).await;
+    let released = wait_for_status(&h, &held_id, WindowStatus::Idle).await;
     assert!(
         released.is_ok(),
         "the held window stayed at {:?} after its model was released",
@@ -270,12 +269,9 @@ const RULES_ONLY_DETECTION_NAME: &str = "rules-only-test";
 
 async fn wait_for_detected(entry: &WindowEntry, expected: DetectedStatus) {
     let mut status = entry.watch_status();
-    let reached = tokio::time::timeout(
-        Duration::from_secs(10),
-        status.wait_for(|at| at.status == expected),
-    )
-    .await
-    .is_ok_and(|seen| seen.is_ok());
+    let reached = tokio::time::timeout(HANG_GUARD, status.wait_for(|at| at.status == expected))
+        .await
+        .is_ok_and(|seen| seen.is_ok());
     assert!(
         reached,
         "the window never reached {expected:?}; it is at {:?}",

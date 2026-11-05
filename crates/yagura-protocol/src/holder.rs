@@ -101,6 +101,14 @@ pub enum HolderFrame {
         /// The end of the replay [`HolderFrame::Replay`] asks for: output up
         /// to here was read before this connection.
         replay_end_seq: u64,
+        /// The child's process id. `None` from a holder that does not send
+        /// it; the daemon learns the pid here, not from the record, which
+        /// the holder may already have removed.
+        child_pid: Option<u32>,
+        /// How many bytes the holder sends past the daemon's last `Ack`
+        /// before it stops reading. `None` from a holder that does not name
+        /// it; [`AckStep`] then acks every `Output`.
+        ack_window: Option<u64>,
     },
     /// d -> h: send the checkpoint, every byte after it, then the live output.
     Replay,
@@ -221,6 +229,8 @@ impl std::fmt::Debug for HolderFrame {
                 exited,
                 checkpoint_seq,
                 replay_end_seq,
+                child_pid,
+                ack_window,
             } => f
                 .debug_struct("Welcome")
                 .field("protocol", protocol)
@@ -230,6 +240,8 @@ impl std::fmt::Debug for HolderFrame {
                 .field("exited", exited)
                 .field("checkpoint_seq", checkpoint_seq)
                 .field("replay_end_seq", replay_end_seq)
+                .field("child_pid", child_pid)
+                .field("ack_window", ack_window)
                 .finish(),
             Self::Replay => f.write_str("Replay"),
             Self::Checkpoint { seq, bytes } => byte_frame(f, "Checkpoint", "seq", *seq, bytes),
@@ -346,6 +358,10 @@ struct WelcomeBody {
     exited: bool,
     checkpoint_seq: Option<u64>,
     replay_end_seq: u64,
+    #[serde(default)]
+    child_pid: Option<u32>,
+    #[serde(default)]
+    ack_window: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -407,6 +423,45 @@ fn bytes_frame(frame_type: u16, number: u64, bytes: &[u8]) -> Vec<u8> {
     frame(frame_type, &[&number.to_le_bytes(), bytes])
 }
 
+/// A holder's ack window holds this many steps: the daemon acks once a step
+/// of output has come since its last `Ack`.
+const ACK_STEPS_PER_WINDOW: u64 = 4;
+
+/// When the daemon answers a holder's `Output` with an `Ack`: on the first
+/// `Output`, then once a quarter of the window the holder named in its
+/// [`HolderFrame::Welcome`] has come since the last `Ack`. A step is never
+/// more than the window, so the output left unacked stays below it and the
+/// holder never stops reading for want of an `Ack`. Without a window, or
+/// with one too small to make a step, every `Output` is acked.
+#[derive(Debug, Clone, Copy)]
+pub struct AckStep {
+    step: u64,
+    last_ack: Option<u64>,
+}
+
+impl AckStep {
+    /// Steps for `window`, the [`HolderFrame::Welcome`]'s `ack_window`.
+    #[must_use]
+    pub fn new(window: Option<u64>) -> Self {
+        Self {
+            step: window.map_or(0, |window| window / ACK_STEPS_PER_WINDOW),
+            last_ack: None,
+        }
+    }
+
+    /// Takes in the `Output` ending at `seq`; returns the `seq` to ack, if
+    /// one is due.
+    pub fn on_output(&mut self, seq: u64) -> Option<u64> {
+        let due = self
+            .last_ack
+            .is_none_or(|last| seq.saturating_sub(last) >= self.step);
+        if due {
+            self.last_ack = Some(seq);
+        }
+        due.then_some(seq)
+    }
+}
+
 /// Encodes `frame` for the wire.
 #[must_use]
 pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
@@ -440,6 +495,8 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
             exited,
             checkpoint_seq,
             replay_end_seq,
+            child_pid,
+            ack_window,
         } => json_frame(
             TYPE_WELCOME,
             &WelcomeBody {
@@ -450,6 +507,8 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
                 exited: *exited,
                 checkpoint_seq: *checkpoint_seq,
                 replay_end_seq: *replay_end_seq,
+                child_pid: *child_pid,
+                ack_window: *ack_window,
             },
         ),
         HolderFrame::Replay => json_frame(TYPE_REPLAY, &EmptyBody {}),
@@ -641,6 +700,8 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 exited,
                 checkpoint_seq,
                 replay_end_seq,
+                child_pid,
+                ack_window,
             } = json(frame_type, body)?;
             HolderFrame::Welcome {
                 protocol,
@@ -650,6 +711,8 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 exited,
                 checkpoint_seq,
                 replay_end_seq,
+                child_pid,
+                ack_window,
             }
         }
         TYPE_REPLAY => {
@@ -762,8 +825,9 @@ pub struct HolderLaunch {
     pub daemon_endpoint: String,
     /// Provisional, removed once holders outlive the daemon: a lost
     /// connection other than [`HolderFrame::Displaced`] ends the child's tree
-    /// and the holder without leaving any file, and an `Ack` frees the output
-    /// it acknowledges.
+    /// and the holder, and an `Ack` frees the output it acknowledges. With it
+    /// the holder writes no exit file on any path and removes its own record
+    /// before it ends, so a holder that ends by itself leaves no file.
     pub end_child_on_disconnect: bool,
 }
 

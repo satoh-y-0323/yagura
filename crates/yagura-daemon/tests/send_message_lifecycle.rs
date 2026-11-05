@@ -13,21 +13,17 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, SubmitDefinitionInput, approver_base_config, expect_error, identify, policy,
-    read_response, send, unique_temp_dir, wait_until_input_log_contains, wait_until_status,
-    write_submit_definition,
+    read_response, send, unique_temp_dir, wait_until_input_log_contains,
+    wait_until_no_connection_claims, wait_until_status, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
 use yagura_protocol::{ClientMessage, ControlKey, DaemonMessage, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
-
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(60);
 
 /// Typed into a window last; read back, it proves the child has read
 /// everything written before it.
@@ -88,7 +84,7 @@ async fn open_window(
             .to_string(),
     );
     let window_id = h.open(command, Some(name)).await;
-    wait_until_status(client, &window_id, WindowStatus::WaitingInput, HANG_GUARD).await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -117,29 +113,6 @@ fn expect_text_sent(msg: DaemonMessage, window_id: &str) {
     }
 }
 
-/// Waits until the daemon has finished with the connection identified as
-/// `requester_window`: its identification is released only after the
-/// connection's end has been signalled to everything it asked for.
-async fn wait_until_the_requester_is_gone(h: &Harness, requester_window: &str) {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let connected = h
-            .registry
-            .list()
-            .into_iter()
-            .find(|info| info.window_id == requester_window)
-            .and_then(|info| info.mcp_connected);
-        if connected == Some(false) {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the daemon never saw the requester's connection end"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
         .windows(needle.len())
@@ -161,10 +134,9 @@ async fn a_ping_is_answered_on_the_connection_whose_send_message_waits_on_a_wind
     let window_id = open_window(&h, &mut client, &dir, "ping", "\\u0015", "frozen:", &log).await;
 
     send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     send(&mut client, &ClientMessage::Ping).await;
-    let pong = read_response(&mut client, HANG_GUARD).await;
+    let pong = read_response(&mut client).await;
     assert!(
         matches!(pong, DaemonMessage::Pong),
         "a ping must be answered while the same connection's send_message waits, got {pong:?}"
@@ -174,7 +146,7 @@ async fn a_ping_is_answered_on_the_connection_whose_send_message_waits_on_a_wind
         .write_pty_input(b"Q", InputOrigin::Interactive)
         .await
         .expect("another writer's byte must not fail");
-    expect_error(read_response(&mut client, HANG_GUARD).await, "not_written");
+    expect_error(read_response(&mut client).await, "not_written");
 }
 
 // =====================================================================
@@ -203,21 +175,20 @@ async fn a_requester_leaving_mid_send_message_gets_no_submit_key_and_its_body_ta
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window).await;
     send_text(&mut requester, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"STALL-BEGAN", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"STALL-BEGAN").await;
     drop(requester);
-    wait_until_the_requester_is_gone(&h, &requester_window).await;
+    wait_until_no_connection_claims(&h.registry, &requester_window).await;
     std::fs::write(&resume, b"").expect("let the receiver read on");
 
     let mut next = h.connect().await;
     send_text(&mut next, &window_id, "BODY\r").await;
-    expect_text_sent(read_response(&mut next, HANG_GUARD).await, &window_id);
+    expect_text_sent(read_response(&mut next).await, &window_id);
 
     entry(&h, &window_id)
         .write_pty_input(SENTINEL, InputOrigin::Interactive)
         .await
         .expect("the sentinel must not fail");
-    let read = wait_until_input_log_contains(&log, SENTINEL, HANG_GUARD).await;
+    let read = wait_until_input_log_contains(&log, SENTINEL).await;
     let first_paste = read
         .windows(b"\x1b[200~BODY".len())
         .position(|window| window == b"\x1b[200~BODY")
@@ -244,8 +215,7 @@ async fn a_requester_leaving_mid_send_message_gets_no_submit_key_and_its_body_ta
     );
     // The answer can come before the receiver draws the line it printed on
     // taking the body; that line is what is waited for, then counted.
-    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
     assert_eq!(
         count(&h.scrollback(&window_id), b"SUBMITTED BODY"),
         1,
@@ -266,24 +236,23 @@ async fn a_send_message_waiting_for_its_turn_writes_nothing_once_its_requester_l
     let window_id = open_window(&h, &mut first, &dir, "queued", "\\u0015", "frozen:", &log).await;
 
     send_text(&mut first, &window_id, "FIRST\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     let mut queued = h.connect().await;
     identify(&mut queued, &requester_window).await;
     send_text(&mut queued, &window_id, "SECOND\r").await;
     drop(queued);
-    wait_until_the_requester_is_gone(&h, &requester_window).await;
+    wait_until_no_connection_claims(&h.registry, &requester_window).await;
 
     entry(&h, &window_id)
         .write_pty_input(b"Q", InputOrigin::Interactive)
         .await
         .expect("another writer's byte must not fail");
-    expect_error(read_response(&mut first, HANG_GUARD).await, "not_written");
+    expect_error(read_response(&mut first).await, "not_written");
 
     let mut last = h.connect().await;
     send_text(&mut last, &window_id, "MARK").await;
-    expect_text_sent(read_response(&mut last, HANG_GUARD).await, &window_id);
-    let read = wait_until_input_log_contains(&log, b"MARK", HANG_GUARD).await;
+    expect_text_sent(read_response(&mut last).await, &window_id);
+    let read = wait_until_input_log_contains(&log, b"MARK").await;
     assert!(
         read.windows(b"QMARK".len())
             .any(|window| window == b"QMARK"),
@@ -306,8 +275,7 @@ async fn send_keys_from_another_connection_is_written_while_a_send_message_waits
     let window_id = open_window(&h, &mut client, &dir, "keys", "\\u0015", "frozen:", &log).await;
 
     send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     let mut keys = h.connect().await;
     send(
         &mut keys,
@@ -317,17 +285,24 @@ async fn send_keys_from_another_connection_is_written_while_a_send_message_waits
         },
     )
     .await;
-    match read_response(&mut keys, HANG_GUARD).await {
+    match read_response(&mut keys).await {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("send_keys must be written while a send_message waits, got {other:?}"),
     }
 
-    let message = expect_error(read_response(&mut client, HANG_GUARD).await, "not_written");
+    let message = expect_error(read_response(&mut client).await, "not_written");
     assert!(
         message.contains("another write reached the window"),
         "the keys are another writer, so the waiting send_message ends interrupted: {message}"
     );
-    let read = wait_until_input_log_contains(&log, b"\x1b[201~", HANG_GUARD).await;
+    // Read up to a sentinel written after the answer, so a submit key that
+    // followed the paste is in what is read.
+    let read = common::input_log_read_so_far(&entry(&h, &window_id), &log).await;
+    assert!(
+        read.windows(b"\x1b[201~".len())
+            .any(|window| window == b"\x1b[201~"),
+        "the body's paste must have ended: {read:?}"
+    );
     assert!(
         !read.contains(&b'\r'),
         "the interrupted send_message must not press the submit key: {read:?}"
@@ -347,8 +322,7 @@ async fn a_waiting_send_message_counts_against_the_connections_pending_waits() {
     let window_id = open_window(&h, &mut client, &dir, "limit", "\\u0015", "frozen:", &log).await;
 
     send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1", HANG_GUARD)
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
 
     send(
         &mut client,
@@ -359,18 +333,12 @@ async fn a_waiting_send_message_counts_against_the_connections_pending_waits() {
         },
     )
     .await;
-    expect_error(
-        read_response(&mut client, HANG_GUARD).await,
-        "resource_exhausted",
-    );
+    expect_error(read_response(&mut client).await, "resource_exhausted");
     send_text(&mut client, &window_id, "MORE\r").await;
-    expect_error(
-        read_response(&mut client, HANG_GUARD).await,
-        "resource_exhausted",
-    );
+    expect_error(read_response(&mut client).await, "resource_exhausted");
     send(&mut client, &ClientMessage::Ping).await;
     assert!(matches!(
-        read_response(&mut client, HANG_GUARD).await,
+        read_response(&mut client).await,
         DaemonMessage::Pong
     ));
 }

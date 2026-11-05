@@ -10,8 +10,7 @@ mod common;
 
 use common::Harness;
 use common::views::{
-    CATCH_UP, assert_converges_to_model, numbered_lines, open_view_with_history,
-    script_write_and_wait,
+    assert_converges_to_model, numbered_lines, open_view_with_history, script_write_and_wait,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
@@ -63,7 +62,7 @@ async fn scroll_back(view: &mut ViewClient, how: ScrollBack) {
         ScrollBack::Wheel => view.send_wheel(wheel(-5)).await,
         ScrollBack::Message => view.send(&ClientMessage::ScrollView { lines: 5 }).await,
     }
-    view.pump_until("the view five rows back", CATCH_UP, |grid| {
+    view.pump_until("the view five rows back", |grid| {
         grid.view.display_offset == 5
     })
     .await;
@@ -87,9 +86,9 @@ async fn assert_input_brings_the_view_to_the_bottom(
 
     view.send(&input).await;
     let what = format!("the view at the bottom after {input:?} (scrolled back by {how:?})");
-    view.pump_until(&what, CATCH_UP, |grid| grid.view.display_offset == 0)
+    view.pump_until(&what, |grid| grid.view.display_offset == 0)
         .await;
-    assert_converges_to_model(&mut view, &h, &window_id, &what, CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, &what).await;
     assert!(
         view.grid.contains_text("HIST-FILL"),
         "the live screen is shown again:\n{}",
@@ -149,7 +148,7 @@ async fn output_alone_keeps_a_view_scrolled_back_in_a_history_that_is_not_full()
     // model, so it shows where the view stood once the output arrived.
     view.send(&ClientMessage::ScrollView { lines: 1 }).await;
     let expected_before = before.clone();
-    view.pump_until("one more row back", CATCH_UP, |grid| {
+    view.pump_until("one more row back", |grid| {
         grid.screen_text() != expected_before
     })
     .await;
@@ -175,20 +174,16 @@ async fn focus_pointer_wheel_and_paging_keys_keep_a_view_scrolled_back() {
     let (_window_id, mut view) = open_view_with_history(&h, SIZE, 100).await;
 
     view.send_key(shifted(NamedKey::PageUp)).await;
-    view.pump_until("a page back", CATCH_UP, |grid| grid.view.display_offset > 0)
+    view.pump_until("a page back", |grid| grid.view.display_offset > 0)
         .await;
     let page = view.grid.view.display_offset;
     view.send_key(shifted(NamedKey::PageDown)).await;
-    view.pump_until("back at the bottom", CATCH_UP, |grid| {
-        grid.view.display_offset == 0
-    })
-    .await;
+    view.pump_until("back at the bottom", |grid| grid.view.display_offset == 0)
+        .await;
 
     view.send(&ClientMessage::ScrollView { lines: 5 }).await;
-    view.pump_until("five rows back", CATCH_UP, |grid| {
-        grid.view.display_offset == 5
-    })
-    .await;
+    view.pump_until("five rows back", |grid| grid.view.display_offset == 5)
+        .await;
 
     view.send(&ClientMessage::Focus { focused: false }).await;
     view.send(&ClientMessage::Focus { focused: true }).await;
@@ -201,15 +196,13 @@ async fn focus_pointer_wheel_and_paging_keys_keep_a_view_scrolled_back() {
     // Had anything above returned the view to the bottom, the wheel would end
     // two rows back instead of seven.
     view.send_wheel(wheel(-2)).await;
-    view.pump_until(
-        "seven rows back after focus, pointer and wheel",
-        CATCH_UP,
-        |grid| grid.view.display_offset == 7,
-    )
+    view.pump_until("seven rows back after focus, pointer and wheel", |grid| {
+        grid.view.display_offset == 7
+    })
     .await;
 
     view.send_key(shifted(NamedKey::PageUp)).await;
-    view.pump_until("a page further back", CATCH_UP, |grid| {
+    view.pump_until("a page further back", |grid| {
         grid.view.display_offset == 7 + page
     })
     .await;

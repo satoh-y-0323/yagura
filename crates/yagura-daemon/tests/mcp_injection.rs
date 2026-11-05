@@ -134,7 +134,7 @@ async fn call_open_window_from_profile_with_options(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_window_opened(msg: DaemonMessage) -> String {
@@ -157,12 +157,12 @@ fn extract_sentinel_value(text: &str, name: &str) -> Option<String> {
 
 // --- plan ledger round trips (open_task_window path) ------------------------
 
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -197,7 +197,7 @@ async fn create_plan_ok(
         },
     )
     .await;
-    match read_ledger_reply(client, Duration::from_secs(5)).await {
+    match read_ledger_reply(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -213,7 +213,7 @@ async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str)
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(10)).await
+    read_ledger_reply(client).await
 }
 
 fn expect_task_window_opened(msg: DaemonMessage) -> String {
@@ -234,7 +234,7 @@ async fn wait_for_current_snapshot(
     label: &str,
     predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
 ) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut last: Option<Vec<store::SnapshotWindow>> = None;
     loop {
         if let Ok(conn) = store::open_readonly(db_path)
@@ -279,8 +279,7 @@ async fn open_window_from_profile_injects_the_mcp_bridge_path_when_a_bridge_is_c
         yagura_protocol::MCP_BRIDGE_ENV,
         bridge.display()
     );
-    h.wait_for_scrollback(&window_id, needle.as_bytes(), Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, needle.as_bytes()).await;
 }
 
 #[tokio::test]
@@ -301,8 +300,7 @@ async fn open_window_from_profile_leaves_the_mcp_bridge_variable_unset_when_no_b
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "env-probe").await);
     let needle = format!("<<{} unset>>", yagura_protocol::MCP_BRIDGE_ENV);
-    h.wait_for_scrollback(&window_id, needle.as_bytes(), Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, needle.as_bytes()).await;
 }
 
 // =============================================================================
@@ -329,8 +327,7 @@ async fn open_window_from_profile_extends_the_childs_wslenv_with_the_mcp_channel
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "env-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<WSLENV=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<WSLENV=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     let value = extract_sentinel_value(&text, "WSLENV")
         .expect("the child must report a WSLENV value, not unset");
@@ -365,8 +362,7 @@ async fn open_window_from_profile_extends_wslenv_without_the_bridge_flag_when_no
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "env-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<WSLENV=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<WSLENV=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     let value = extract_sentinel_value(&text, "WSLENV")
         .expect("the child must report a WSLENV value, not unset");
@@ -404,8 +400,7 @@ async fn open_window_from_profile_does_not_touch_wslenv_on_unix() {
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "env-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<WSLENV=FOO/l>>", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<WSLENV=FOO/l>>").await;
 }
 
 // =============================================================================
@@ -433,8 +428,7 @@ async fn open_window_from_profile_appends_the_rendered_mcp_config_file_argument_
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         text.contains("<<argv[1]=--mcp-config>>"),
@@ -481,8 +475,7 @@ async fn open_window_from_profile_renders_the_bridge_toml_and_env_names_placehol
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<argv[4]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[4]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
 
     let command_arg = extract_sentinel_value(&text, "argv[2]")
@@ -537,8 +530,7 @@ async fn open_window_from_profile_names_the_injected_mcp_server_after_the_named_
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
-    h.wait_for_scrollback(&window_id, b"<<argv[4]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[4]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
 
     let command_arg = extract_sentinel_value(&text, "argv[4]")
@@ -576,8 +568,7 @@ async fn open_window_from_profile_without_an_mcp_table_injects_nothing_into_argv
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         !text.contains("<<argv[1]="),
@@ -603,8 +594,7 @@ async fn open_window_from_profile_injects_nothing_when_no_bridge_is_configured_e
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         !text.contains("<<argv[1]="),
@@ -654,8 +644,7 @@ async fn send_handoff_from_a_profile_carries_the_same_mcp_injection_into_the_chi
     assert!(opened);
     assert_eq!(delivery, HandoffDelivery::Taken);
 
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         text.contains("<<argv[1]=--mcp-config>>"),
@@ -697,8 +686,7 @@ async fn open_task_window_carries_the_same_mcp_injection_into_the_childs_argv() 
     let window_id =
         expect_task_window_opened(open_task_window(&mut owner, &plan.plan_id, "t1").await);
 
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         text.contains("<<argv[1]=--mcp-config>>"),
@@ -728,8 +716,7 @@ async fn open_window_from_profile_with_mcp_injection_excludes_the_injection_from
         expect_window_opened(call_open_window_from_profile(&mut client, "argv-probe").await);
     // Prove the injection did reach the real spawn argv before checking that
     // it never reached the stored one.
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
 
     let rows = wait_for_current_snapshot(
         &db_path,
@@ -979,7 +966,7 @@ fn write_env_refs_profiles(profiles_dir: &Path, tables: &str) -> Vec<(String, &'
 /// The `argv[2]` an in-process daemon's `argv-probe` window reports.
 async fn harness_argv2(h: &Harness, client: &mut Connection) -> String {
     let window_id = expect_window_opened(call_open_window_from_profile(client, "argv-probe").await);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let text = h.flattened_scrollback(&window_id);
         if has_report(&text, "argv[2]") {
@@ -1002,7 +989,7 @@ async fn harness_received_names(
     let mut received = std::collections::BTreeSet::new();
     for (id, name) in probes {
         let window_id = expect_window_opened(call_open_window_from_profile(client, id).await);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         let set = loop {
             let text = h.flattened_scrollback(&window_id);
             if let Some(set) = reported_set(&text, name) {
@@ -1095,16 +1082,10 @@ async fn open_window_from_profile_renders_bridge_json_from_the_host_paths_conver
 }
 
 /// A copy of the built daemon in a folder of its own, beside a stand-in MCP
-/// bridge (and, on Windows, the vendored pseudoconsole pair it needs).
+/// bridge, the holder and, on Windows, the pseudoconsole pair.
 fn install_daemon_with_bridge(sandbox: &common::real_daemon::Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
-    #[cfg(windows)]
-    {
-        let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/conpty/x64");
-        for name in ["conpty.dll", "OpenConsole.exe"] {
-            std::fs::copy(vendored.join(name), dir.join(name)).unwrap();
-        }
-    }
+    yagura_test_support::process::install_window_runtime(&dir);
     let suffix = std::env::consts::EXE_SUFFIX;
     let bin = dir.join(format!("yagura-daemon{suffix}"));
     std::fs::copy(common::real_daemon::daemon_bin(), &bin).unwrap();
@@ -1202,8 +1183,7 @@ async fn absent_case_injected(h: &Harness, client: &mut Connection, profile: &st
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("{profile}: the window must open either way, got {other:?}"),
     };
-    h.wait_until_child_exited(&window_id, Duration::from_secs(15))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         text.contains(&format!("<<argv[1]={ABSENT_FIRST_ARG}>>")),

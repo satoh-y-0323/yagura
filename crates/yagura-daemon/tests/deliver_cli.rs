@@ -120,7 +120,7 @@ impl Setup {
     }
 
     async fn until(&self, what: &str, mut condition: impl FnMut() -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while !condition() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -498,18 +498,12 @@ impl Setup {
             },
         )
         .await;
-        let id = match common::read_response(&mut client, Duration::from_secs(5)).await {
+        let id = match common::read_response(&mut client).await {
             yagura_protocol::DaemonMessage::WindowOpened { window_id, .. } => window_id,
             other => panic!("expected window_opened, got {other:?}"),
         };
         self.h.write_input(&id, common::READY_MARKER).await;
-        common::wait_until_status(
-            &mut client,
-            &id,
-            yagura_protocol::WindowStatus::Idle,
-            Duration::from_secs(10),
-        )
-        .await;
+        common::wait_until_status(&mut client, &id, yagura_protocol::WindowStatus::Idle).await;
         id
     }
 }

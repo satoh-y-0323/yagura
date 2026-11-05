@@ -31,13 +31,13 @@ use std::time::Duration;
 
 use common::{
     Harness, call_list_windows, call_send_handoff_from_profile,
-    call_send_handoff_from_profile_with_options, call_send_handoff_from_profile_within, decide,
-    empty_lookup, expect_approval_requested_within, expect_error, expect_handoff_sent,
-    handoff_profile_config, identify, policy, read_response, register_approver, send,
-    send_handoff_from_profile, write_profile,
+    call_send_handoff_from_profile_with_options, decide, empty_lookup, expect_approval_requested,
+    expect_error, expect_handoff_sent, handoff_profile_config, identify, policy, read_response,
+    register_approver, send, send_handoff_from_profile, write_profile,
 };
 
 use yagura_daemon::profile::ProfileOs;
+use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
@@ -45,18 +45,13 @@ use yagura_protocol::{
     HandoffDelivery, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, WindowInfo,
     WithdrawReason,
 };
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::paths::strip_extended_length_prefix;
 use yagura_test_support::process::{
     argv_probe_profile_source, echo_child_command, echo_child_path,
 };
-// `file_len` / `wait_until_file_grows` back the Windows-only shim-argument
-// fixtures below (npm-style extensionless shim, cmd.exe verbatim-argument
-// delivery); every call site is under `#[cfg(windows)]`, so a plain,
-// unconditional `use` is an unused import on every other target.
-#[cfg(windows)]
-use yagura_test_support::process::{file_len, wait_until_file_grows};
 
 // --- fixtures: profiles are written ad hoc, not read from a shared directory ----
 
@@ -150,7 +145,7 @@ fn launch_profile_source(
 /// The launch prompt the `hook_child` logging under `logs` was started with, once it
 /// has logged its argv.
 async fn launch_prompt_logged_in(logs: &Path) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let events = std::fs::read_to_string(logs.join("events.jsonl")).unwrap_or_default();
         let argv = events
@@ -198,7 +193,7 @@ fn wire(delivery: HandoffDelivery) -> String {
 /// Reads `approver`'s next message, which must withdraw `request_id` because its
 /// requester left.
 async fn expect_withdrawn_for_a_departed_requester(approver: &mut Connection, request_id: &str) {
-    match read_response(approver, Duration::from_secs(10)).await {
+    match read_response(approver).await {
         DaemonMessage::ApprovalWithdrawn {
             request_id: withdrawn,
             reason,
@@ -273,7 +268,7 @@ fn config_with(profiles_dir: Option<PathBuf>, lookup: ProgramLookup) -> DaemonCo
 
 async fn call_list_profiles(client: &mut Connection) -> (Vec<ProfileInfo>, Vec<String>) {
     send(client, &ClientMessage::ListProfiles).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ProfileList { profiles, warnings } => (profiles, warnings),
         other => panic!("expected profile_list, got {other:?}"),
     }
@@ -310,7 +305,7 @@ async fn call_open_window_from_profile_with_options(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_window_opened(msg: DaemonMessage) -> String {
@@ -833,9 +828,7 @@ async fn open_window_from_profile_reserved_environment_key_never_reaches_the_chi
         call_open_window_from_profile(&mut client, "reserved-env", None, None).await,
     );
 
-    harness
-        .wait_for_scrollback(&window_id, b"kept-value", Duration::from_secs(10))
-        .await;
+    harness.wait_for_scrollback(&window_id, b"kept-value").await;
     let scrollback = harness.scrollback(&window_id);
 
     assert!(
@@ -951,7 +944,7 @@ async fn open_window_with_a_bare_name_missing_from_the_injected_lookup_returns_s
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
+    let response = read_response(&mut client).await;
     expect_error(response, "spawn_failed");
 }
 
@@ -986,7 +979,7 @@ async fn open_window_with_a_nul_byte_in_an_argv_element_is_rejected() {
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
+    let response = read_response(&mut client).await;
     expect_error(response, "invalid_argument");
 }
 
@@ -1013,7 +1006,7 @@ async fn open_window_with_a_metacharacter_argument_against_a_shim_returns_invali
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
+    let response = read_response(&mut client).await;
     expect_error(response, "invalid_argument");
 }
 
@@ -1024,10 +1017,44 @@ async fn open_window_with_a_metacharacter_argument_against_a_shim_returns_invali
 // daemon side, not in `yagura-os`, which stops at the resolved argv.
 // =============================================================================
 
+/// Writes a `codex.cmd` shim that appends its first argument as one line to
+/// `output_file`, then, once that line is written, appends one line to the
+/// file [`done_file_of`] names.
 #[cfg(windows)]
 fn write_arg_dump_cmd(dir: &Path, output_file: &Path) {
-    let content = format!("@echo off\r\necho %~1>>\"{}\"\r\n", output_file.display());
+    let content = format!(
+        "@echo off\r\necho %~1>>\"{}\"\r\necho done>>\"{}\"\r\n",
+        output_file.display(),
+        done_file_of(output_file).display()
+    );
     std::fs::write(dir.join("codex.cmd"), content).expect("shim fixture should be writable");
+}
+
+/// The file a [`write_arg_dump_cmd`] shim appends to after its line.
+#[cfg(windows)]
+fn done_file_of(output_file: &Path) -> PathBuf {
+    output_file.with_extension("done")
+}
+
+/// Waits until `count` runs of a [`write_arg_dump_cmd`] shim have finished
+/// writing to `output_file`.
+#[cfg(windows)]
+async fn wait_until_shims_done(output_file: &Path, count: usize) {
+    let done = done_file_of(output_file);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while std::fs::read_to_string(&done)
+        .unwrap_or_default()
+        .lines()
+        .count()
+        < count
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "hang guard: the shim never finished writing to {}",
+            output_file.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[cfg(windows)]
@@ -1083,22 +1110,16 @@ async fn open_window_with_an_extensionless_argv0_opens_through_the_cmd_shim_in_a
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
+    let response = read_response(&mut client).await;
     let window_id = expect_window_opened(response);
 
-    wait_until_file_grows(&output_file, Duration::from_secs(10)).await;
-    // One in-flight write may still be landing; the shim writes exactly one line.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_until_shims_done(&output_file, 1).await;
     let content = std::fs::read_to_string(&output_file).expect("output file must be readable");
     assert_eq!(
         content.trim(),
         "hello",
         "an extensionless argv0 must resolve through the .cmd shim, not the extensionless file \
          next to it (window {window_id})"
-    );
-    assert!(
-        file_len(&output_file) > 0,
-        "the shim must have written something"
     );
 
     harness.registry.terminate_all().await;
@@ -1136,11 +1157,10 @@ async fn assert_absolute_shim_delivers(dir_name: &str, argument: &str, tag: &str
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
+    let response = read_response(&mut client).await;
     let window_id = expect_window_opened(response);
 
-    wait_until_file_grows(&output_file, Duration::from_secs(10)).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_until_shims_done(&output_file, 1).await;
     let content = std::fs::read_to_string(&output_file).expect("output file must be readable");
     assert_eq!(
         content.trim(),
@@ -1199,13 +1219,29 @@ async fn open_window_with_an_absolute_cmd_shim_path_and_a_metacharacter_argument
         },
     )
     .await;
-    let response = read_response(&mut client, Duration::from_secs(5)).await;
-    harness.registry.terminate_all().await;
+    let response = read_response(&mut client).await;
     expect_error(response, "invalid_argument");
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        !output_file.exists(),
+    // Control, opened after the refusal was answered: the same shim does run,
+    // and once it has written its line the file holds that line alone.
+    send(
+        &mut client,
+        &ClientMessage::OpenWindow {
+            command: vec![shim.to_string_lossy().into_owned(), "hello".to_string()],
+            cwd: None,
+            name: Some("abs-shim".to_string()),
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    expect_window_opened(read_response(&mut client).await);
+    wait_until_shims_done(&output_file, 1).await;
+    harness.registry.terminate_all().await;
+    assert_eq!(
+        std::fs::read_to_string(&output_file).expect("output file must be readable"),
+        "hello\r\n",
         "a rejected request must never start the shim"
     );
 }
@@ -1237,19 +1273,13 @@ async fn assert_argument_delivered_verbatim(bin_dir: &Path, tag: &str) {
         call_open_window_from_profile(&mut client, "verbatim", None, None).await,
     );
 
-    wait_until_file_grows(&output_file, Duration::from_secs(10)).await;
-    // One in-flight write may still be landing; the shim writes exactly one line.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_until_shims_done(&output_file, 1).await;
     let content = std::fs::read_to_string(&output_file).expect("output file must be readable");
     assert_eq!(
         content.trim(),
         "hello world",
         "the argument must arrive at the child exactly as written, including its internal \
          space (window {window_id})"
-    );
-    assert!(
-        file_len(&output_file) > 0,
-        "the shim must have written something"
     );
 
     harness.registry.terminate_all().await;
@@ -1311,16 +1341,9 @@ async fn send_handoff_from_a_profile_opens_a_new_window_with_the_envelope_as_its
     let h = Harness::start("handoff-profile-basic", config).await;
     let mut client = h.connect().await;
 
-    let msg = call_send_handoff_from_profile_within(
-        &mut client,
-        "ready",
-        None,
-        None,
-        "src/foo.rs",
-        "look here",
-        Duration::from_secs(10),
-    )
-    .await;
+    let msg =
+        call_send_handoff_from_profile(&mut client, "ready", None, None, "src/foo.rs", "look here")
+            .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert_eq!(
         wire(delivery),
@@ -1397,14 +1420,13 @@ async fn send_handoff_from_a_profile_uses_the_explicit_cwd_argument_over_everyth
     identify(&mut requester, &requester_window_id).await;
 
     let explicit_cwd_str = explicit_cwd.to_string_lossy().into_owned();
-    let msg = call_send_handoff_from_profile_within(
+    let msg = call_send_handoff_from_profile(
         &mut requester,
         "ready",
         Some(&explicit_cwd_str),
         None,
         "src/foo.rs",
         "look here",
-        Duration::from_secs(10),
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
@@ -1473,16 +1495,9 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_uses_the_requesters_ow
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window_id).await;
 
-    let msg = call_send_handoff_from_profile_within(
-        &mut requester,
-        "ready",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-        Duration::from_secs(10),
-    )
-    .await;
+    let msg =
+        call_send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look")
+            .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert_eq!(wire(delivery), "taken");
     assert!(opened);
@@ -1546,16 +1561,9 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_and_an_external_reques
     // back to, so the profile's own default must be used.
     let mut client = h.connect().await;
 
-    let msg = call_send_handoff_from_profile_within(
-        &mut client,
-        "ready",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-        Duration::from_secs(10),
-    )
-    .await;
+    let msg =
+        call_send_handoff_from_profile(&mut client, "ready", None, None, "src/foo.rs", "look")
+            .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert_eq!(wire(delivery), "taken");
     assert!(opened);
@@ -1683,7 +1691,7 @@ async fn send_handoff_from_a_profile_starts_nothing_until_approved_and_nothing_o
     let mut requester = h.connect().await;
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
 
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "send_handoff");
     assert!(
         call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
@@ -1691,7 +1699,7 @@ async fn send_handoff_from_a_profile_starts_nothing_until_approved_and_nothing_o
     );
 
     decide(&mut approver, &request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
     assert!(
         call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
@@ -1777,7 +1785,7 @@ async fn send_handoff_from_a_profile_starts_nothing_if_the_requester_disconnects
     let mut requester = h.connect().await;
 
     send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look").await;
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     drop(requester);
     expect_withdrawn_for_a_departed_requester(&mut approver, &request.request_id).await;
 
@@ -1928,7 +1936,7 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
         },
     )
     .await;
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::WindowRenamed { .. } => {}
         other => panic!("expected window_renamed, got {other:?}"),
     }
@@ -2061,7 +2069,7 @@ async fn hold_a_slot_pending_approval(
     profile: &str,
 ) -> yagura_protocol::ApprovalRequest {
     send_handoff_from_profile(requester, profile, None, None, "r", "t").await;
-    expect_approval_requested_within(approver, Duration::from_secs(10)).await
+    expect_approval_requested(approver).await
 }
 
 #[tokio::test]
@@ -2094,7 +2102,7 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
     let first = hold_a_slot_pending_approval(&mut client, &mut approver, "ready").await;
 
     send_handoff_from_profile(&mut client, "ready", None, None, "r", "t").await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("per-connection"),
@@ -2106,10 +2114,7 @@ async fn a_second_profile_handoff_on_the_same_connection_while_the_first_awaits_
     );
 
     decide(&mut approver, &first.request_id, false).await;
-    expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_response(&mut client).await, "approval_denied");
 }
 
 #[tokio::test]
@@ -2143,7 +2148,7 @@ async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awai
 
     let mut second_conn = h.connect().await;
     send_handoff_from_profile(&mut second_conn, "ready", None, None, "r", "t").await;
-    let msg = read_response(&mut second_conn, Duration::from_secs(5)).await;
+    let msg = read_response(&mut second_conn).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("daemon-wide"),
@@ -2151,10 +2156,7 @@ async fn a_second_profile_handoff_on_a_different_connection_while_the_first_awai
     );
 
     decide(&mut approver, &first.request_id, false).await;
-    expect_error(
-        read_response(&mut first_conn, Duration::from_secs(5)).await,
-        "approval_denied",
-    );
+    expect_error(read_response(&mut first_conn).await, "approval_denied");
 }
 
 #[tokio::test]
@@ -2186,38 +2188,28 @@ async fn a_pending_profile_handoff_holds_its_slot_until_decided_and_releases_it_
 
     let mut requester = h.connect().await;
     send_handoff_from_profile(&mut requester, "ready", None, None, "r", "t").await;
-    // A profile-addressed launch spawns a fresh OS process and waits for the
-    // status-detection engine's poll/debounce cycle before the gate ever
-    // runs, the same category of work this suite already budgets 10s for
-    // elsewhere (`Harness::wait_until_child_exited`, and the profile-launch
-    // `wait_for_scrollback` above); a plain 5s read races with that spawn
-    // whenever other test binaries in the same `cargo test` invocation are
-    // competing for OS process-spawn capacity (reproduced directly: two
-    // fresh timeouts landed here, never past it, across 18 full-suite runs).
-    let first_request =
-        expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let first_request = expect_approval_requested(&mut approver).await;
     assert_eq!(first_request.tool, "send_handoff");
 
     // A second request on the same connection must be refused while the
     // first is still pending: the slot is held for the whole approval wait,
     // not just the readiness wait.
     send_handoff_from_profile(&mut requester, "ready", None, None, "r", "t").await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(message.contains("per-connection"));
 
     decide(&mut approver, &first_request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 
     // The slot is released before that reply is sent, so
     // a third request must be accepted into the pending state again.
     send_handoff_from_profile(&mut requester, "ready", None, None, "r", "t").await;
-    let third_request =
-        expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let third_request = expect_approval_requested(&mut approver).await;
     assert_eq!(third_request.tool, "send_handoff");
     decide(&mut approver, &third_request.request_id, false).await;
-    let msg = read_response(&mut requester, Duration::from_secs(5)).await;
+    let msg = read_response(&mut requester).await;
     expect_error(msg, "approval_denied");
 }
 
@@ -2257,7 +2249,7 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
     // per-connection wording instead of succeeding.
     let mut y = h.connect().await;
     send_handoff_from_profile(&mut y, "ready", None, None, "r", "t").await;
-    let msg = read_response(&mut y, Duration::from_secs(5)).await;
+    let msg = read_response(&mut y).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("daemon-wide"),
@@ -2272,7 +2264,7 @@ async fn a_second_stage_slot_failure_rolls_back_the_first_stage_reservation() {
     // Y's next attempt must now succeed.
     let retry = hold_a_slot_pending_approval(&mut y, &mut approver, "ready").await;
     decide(&mut approver, &retry.request_id, true).await;
-    match read_response(&mut y, Duration::from_secs(10)).await {
+    match read_response(&mut y).await {
         DaemonMessage::HandoffSent { opened, .. } => assert!(opened),
         DaemonMessage::Error { code, message, .. } => panic!(
             "Y's retry must succeed once X's slot is freed, got error({code}): {message} -- a \
@@ -2322,16 +2314,16 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
     )
     .await;
 
-    let request = expect_approval_requested_within(&mut approver, Duration::from_secs(10)).await;
+    let request = expect_approval_requested(&mut approver).await;
     assert_eq!(request.tool, "send_handoff");
     assert!(
-        !was_started(&logs),
+        call_list_windows(&mut approver).await.is_empty() && !was_started(&logs),
         "nothing starts before the approval is decided"
     );
 
     decide(&mut approver, &request.request_id, true).await;
 
-    let msg = read_response(&mut requester, Duration::from_secs(10)).await;
+    let msg = read_response(&mut requester).await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert_eq!(wire(delivery), "taken");
     assert!(opened, "a profile target must always report opened: true");
@@ -2402,11 +2394,10 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
         },
     )
     .await;
-    let requester_window_id =
-        expect_window_opened(read_response(&mut client, Duration::from_secs(5)).await);
+    let requester_window_id = expect_window_opened(read_response(&mut client).await);
 
     send_handoff_from_profile(&mut client, "ready", None, None, "r", "t").await;
-    let msg = read_response(&mut client, Duration::from_secs(5)).await;
+    let msg = read_response(&mut client).await;
     let message = expect_error(msg, "resource_exhausted");
     assert!(
         message.contains("maximum number of windows"),
@@ -2428,7 +2419,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowClosed { window_id: acked } => {
             assert_eq!(acked, requester_window_id);
         }
@@ -2440,7 +2431,7 @@ async fn a_profile_handoff_refused_by_the_window_limit_after_acquiring_its_slot_
     // still exhausted and this request fails with the per-connection
     // wording instead of succeeding.
     send_handoff_from_profile(&mut client, "ready", None, None, "r2", "t2").await;
-    match read_response(&mut client, Duration::from_secs(10)).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { opened, .. } => {
             assert!(opened, "a profile target must always report opened: true");
         }
@@ -2529,11 +2520,7 @@ async fn open_window_from_profile_carries_both_supplied_launch_options_into_the_
     );
 
     harness
-        .wait_for_scrollback(
-            &window_id,
-            b"<<argv[4]=tier=tier-b>>",
-            Duration::from_secs(10),
-        )
+        .wait_for_scrollback(&window_id, b"<<argv[4]=tier=tier-b>>")
         .await;
     assert_in_order(
         &harness.scrollback(&window_id),
@@ -2786,7 +2773,7 @@ async fn open_window_from_profile_still_opens_from_a_frame_that_predates_the_lau
         br#"{"type":"open_window_from_profile","profile":"plain","cwd":null,"name":null}"#,
     )
     .await;
-    let window_id = expect_window_opened(read_response(&mut client, Duration::from_secs(5)).await);
+    let window_id = expect_window_opened(read_response(&mut client).await);
 
     let windows = call_list_windows(&mut client).await;
     assert_eq!(
@@ -2841,12 +2828,8 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
     assert!(opened);
     assert_eq!(wire(delivery), "taken");
 
-    h.wait_for_scrollback(
-        &window_id,
-        b"<<argv[6]=[yagura handoff] ",
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[6]=[yagura handoff] ")
+        .await;
     assert_in_order(
         &h.scrollback(&window_id),
         &[
@@ -2880,6 +2863,11 @@ async fn send_handoff_addressed_to_an_existing_window_refuses_a_launch_option() 
 
     let window_id =
         expect_window_opened(call_open_window_from_profile(&mut client, "plain", None, None).await);
+    let entry = h
+        .registry
+        .get(&window_id)
+        .expect("the window is registered");
+    let writes_before = entry.write_seq();
 
     send(
         &mut client,
@@ -2895,17 +2883,25 @@ async fn send_handoff_addressed_to_an_existing_window_refuses_a_launch_option() 
         },
     )
     .await;
-    let message = expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    let message = expect_error(read_response(&mut client).await, "invalid_argument");
     assert_eq!(
         message, "model and effort cannot be specified with window_id",
         "a window that is already running was launched with whatever it was \
          launched with, so this is refused rather than quietly dropped"
     );
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A write of the test's own after the refusal: once the child has echoed
+    // it, the window has taken every write before it.
+    entry
+        .write_pty_input(b"later-mark", InputOrigin::Interactive)
+        .await
+        .expect("the later mark is written");
+    h.wait_for_scrollback(&window_id, b"later-mark").await;
+    assert_eq!(
+        entry.write_seq(),
+        writes_before + 1,
+        "a refused handoff writes nothing into the window it named"
+    );
     let scrollback = h.scrollback(&window_id);
     assert!(
         !common::contains_subsequence(&scrollback, b"handoff-reference-marker"),

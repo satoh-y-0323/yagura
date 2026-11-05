@@ -7,6 +7,8 @@
 //! The child is `hex_echo`, which prints each byte it receives as two hex
 //! digits, so the order and count of the bytes it got are read off the screen.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -18,7 +20,6 @@ use yagura_test_support::process::hex_echo_path;
 
 const CLEAR: u8 = 0x15;
 const READY: &str = "CTRL-READY";
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Written last, with no prefix, so that everything the child got before it is
 /// known to have arrived and nothing extra can hide behind a comparison that
 /// stops early.
@@ -31,7 +32,7 @@ struct Fixture {
 impl Fixture {
     async fn start() -> Self {
         let child = hex_echo_path();
-        let session = PtySession::spawn_with_command(
+        let session = common::spawn_session(
             &[child.to_str().expect("hex_echo path must be UTF-8")],
             &DaemonConfig::default(),
         )
@@ -43,7 +44,7 @@ impl Fixture {
     }
 
     async fn wait_until_ready(&self) {
-        let deadline = tokio::time::Instant::now() + RECEIVE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         loop {
             let (text, _) = self.session.text_tail(200, 64 * 1024).await.unwrap();
             if text.contains(READY) {
@@ -80,7 +81,7 @@ impl Fixture {
             .chain(std::iter::once(SENTINEL))
             .flat_map(|bytes| bytes.iter().map(|b| format!("{b:02x}")))
             .collect();
-        let deadline = tokio::time::Instant::now() + RECEIVE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         loop {
             let got = self.received_hex().await;
             if got.len() >= want.len() {

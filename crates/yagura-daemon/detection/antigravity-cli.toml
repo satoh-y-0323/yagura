@@ -81,7 +81,7 @@ delivery_confirm_ms = 8000  # reaction latency not separately measured; kept at 
 # Ctrl+U erases one display line per press and does nothing on an empty
 # composer, so a take-back repeats it once per line the body may occupy.
 clear = "\u0015"
-probe = "x"                # typed to learn that earlier input was handled; checked on this CLI (shows as typed, erased by DEL, triggers nothing)
+probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.4.12 and 1.5.0, Windows, Linux and macOS)
 # First character taken as a key: `!` runs a shell command, `?` opens the help
 # (docs: antigravity.google/docs/cli/using; checked on this CLI).
 leading_keys = ["!", "?"]

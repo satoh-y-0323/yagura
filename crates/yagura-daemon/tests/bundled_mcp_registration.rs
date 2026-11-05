@@ -865,7 +865,7 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
         &ClientMessage::ListMcpRegistrations { request_id: 7 },
     )
     .await;
-    let rows = match read_response(&mut client, REPLY_TIMEOUT).await {
+    let rows = match read_response(&mut client).await {
         DaemonMessage::McpRegistrationsListed {
             request_id,
             bridge,
@@ -1023,14 +1023,14 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
             &ClientMessage::ListMcpRegistrations { request_id: 1 },
         )
         .await;
-        let rows = match read_response(&mut client, REPLY_TIMEOUT).await {
+        let rows = match read_response(&mut client).await {
             DaemonMessage::McpRegistrationsListed { rows, .. } => rows,
             other => panic!("expected mcp_registrations_listed, got {other:?}"),
         };
         // The listing is followed by one status push per row; drain them so
         // the next read is the registration's own answer.
         for _ in 0..rows.len() {
-            match read_response(&mut client, REPLY_TIMEOUT).await {
+            match read_response(&mut client).await {
                 DaemonMessage::McpRegistrationStatus { request_id: 1, .. } => {}
                 other => panic!("expected mcp_registration_status, got {other:?}"),
             }
@@ -1053,11 +1053,11 @@ async fn registering_muse_code_writes_the_bridge_and_window_only_hooks_into_the_
             },
         )
         .await;
-        match read_response(&mut client, REPLY_TIMEOUT).await {
+        match read_response(&mut client).await {
             DaemonMessage::McpRegistrationRequested { request_id: 2, .. } => {}
             other => panic!("expected mcp_registration_requested, got {other:?}"),
         }
-        let (steps, error, status) = match read_response(&mut client, REPLY_TIMEOUT).await {
+        let (steps, error, status) = match read_response(&mut client).await {
             DaemonMessage::McpRegistrationResult {
                 request_id: 2,
                 steps,
@@ -1211,11 +1211,11 @@ async fn run_grok_action(
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationRequested { .. } => {}
         other => panic!("expected mcp_registration_requested, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationResult {
             error,
             status,
@@ -1444,7 +1444,7 @@ async fn grok_window_keeps_hooks(
         },
     )
     .await;
-    let window_id = match read_response(client, REPLY_TIMEOUT).await {
+    let window_id = match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     };
@@ -1462,12 +1462,12 @@ async fn grok_listed_state(
     request_id: u64,
 ) -> McpRegistrationState {
     send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationsListed { .. } => {}
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     }
     loop {
-        match read_response(client, REPLY_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::McpRegistrationStatus { status, .. }
                 if status.profile == GROK_PLACED_ID =>
             {

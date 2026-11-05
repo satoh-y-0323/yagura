@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tokio::sync::{
@@ -39,32 +39,32 @@ use crate::detector::engine::{
 use crate::detector::layers::{DefinitionSource, DetectionLayers, LayerError, ResolvedDefinition};
 use crate::detector::screen::ComposerReadout;
 use crate::handoff::{ReadyHoldLatch, StartupEvidence};
+use crate::holder_host::HolderHost;
 use crate::inbox::{Inbox, is_session_id};
 use crate::input::{
-    ComposerLine, InputProfile, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep, TakeBack,
-    plan_submit_line,
+    ComposerLine, InputProfile, ProbeChars, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep,
+    TakeBack, plan_submit_line,
 };
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
-    GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix, TakeBackRegistration,
-    lock_recover,
+    AttachGeneration, GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix,
+    TakeBackRegistration, WindowSpawn, lock_recover,
 };
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
+mod status_gate;
+
+use status_gate::{Publication, StatusGate};
+
 /// Capacity of the fan-out channel carrying confirmed status changes to
 /// subscribers. Status changes are debounced and therefore rare, so this is
 /// generous enough that a lagging subscriber means a stalled connection
 /// rather than a burst.
 pub(crate) const STATUS_BROADCAST_CAPACITY: usize = 64;
-
-/// The current holder of a window's "attached" slot. A later
-/// [`WindowEntry::register_attach`] supersedes the previous holder, which is
-/// notified via the stored [`oneshot::Sender`].
-type AttachSlot = Option<(u64, oneshot::Sender<()>)>;
 
 /// Number of base36 digits in a registry's boot nonce (see [`boot_nonce`]).
 const BOOT_NONCE_LEN: usize = 6;
@@ -81,7 +81,7 @@ static REGISTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// that identifiers minted by different daemon instances do not
 /// collide, so a client still holding an identifier from a previous daemon
 /// gets `window_not_found` instead of silently matching a different window.
-fn boot_nonce() -> String {
+pub(crate) fn boot_nonce() -> String {
     // Fail-safe: a clock that cannot be read (or predates the Unix epoch)
     // must not abort daemon startup, and the process ID plus the sequence
     // still keep nonces distinct within this process, so degrade to 0.
@@ -866,13 +866,21 @@ fn placed(outcome: SubmitOutcome, write_seq: u64) -> SubmitJudgment {
 
 /// What [`WindowEntry::read_through_probe`] found.
 enum ProbeReading {
-    /// The probe showed last in the composer, on a screen that accepts a
-    /// write, behind this.
-    Shown(BehindProbe),
+    /// The probes showed last in the composer, on a screen that accepts a
+    /// write (see [`ProbeWait::Shown`]).
+    Shown {
+        behind: BehindProbe,
+        shown: Vec<char>,
+        at: u64,
+        flight: Flight,
+        observation: ComposerObservation,
+    },
     /// Another writer wrote after the probe.
     Interrupted,
     /// The requester left, before the probe was written or before it showed.
     Abandoned,
+    /// See [`ProbeWait::Undecidable`].
+    Undecidable,
 }
 
 /// What [`WindowEntry::erase_probe`] found.
@@ -882,6 +890,31 @@ enum ProbeErased {
     Emptied(ComposerObservation, u64),
     /// Another writer wrote; this call's own writes left the ledger here.
     Interrupted(u64),
+    /// See [`ProbeWait::Undecidable`].
+    Undecidable,
+}
+
+/// What [`WindowEntry::erase_probe_behind`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErasedBehind {
+    /// Another writer wrote before the erase, which was not written.
+    Moved,
+    /// The erase was written and reached, or another writer wrote since.
+    Erased,
+    /// See [`ProbeWait::Undecidable`].
+    Undecidable,
+}
+
+/// What [`WindowEntry::erase_probe_back_to`] ended as.
+enum ErasedBack {
+    /// The composer reads as the target again, the ledger at `at`.
+    Restored { at: u64 },
+    /// Another writer wrote; this call's own writes left the ledger at `at`.
+    OtherWriter { at: u64 },
+    /// The requester left with these probes possibly still in the composer.
+    RequesterGone { at: u64, flight: Flight },
+    /// See [`ProbeWait::Undecidable`].
+    Undecidable,
 }
 
 /// What ended [`WindowEntry::wait_for_composer`].
@@ -942,6 +975,13 @@ impl ShownText {
                 .strip_suffix(probe)
                 .filter(|before| !before.trim().is_empty())
                 .map(|before| BehindProbe::Text(Self::Tail(before.to_string()))),
+        }
+    }
+
+    /// The last visible character of the text.
+    fn end(&self) -> Option<char> {
+        match self {
+            Self::Body(text) | Self::Tail(text) => last_visible(text),
         }
     }
 
@@ -1021,14 +1061,11 @@ impl BehindProbe {
         }
     }
 
-    /// Whether this is a probe showing right behind `before`: what a second
-    /// probe written behind the first finds.
-    fn is_probe_behind(&self, before: &Self, probe: char) -> bool {
+    /// The last visible character of what shows in front of the probes.
+    fn end(&self) -> Option<char> {
         match self {
-            Self::Text(shown) => shown
-                .behind(probe)
-                .is_some_and(|first| first.same_as(before)),
-            Self::Alone => false,
+            Self::Alone => None,
+            Self::Text(shown) => shown.end(),
         }
     }
 }
@@ -1133,23 +1170,236 @@ fn tail_is_end_of(tail: &str, body: &str) -> bool {
 /// whitespace is disregarded (see
 /// [`composer_text_matches_ignoring_lost_whitespace`]).
 fn is_proper_prefix_ignoring_whitespace(text: &str, body: &str, probe: char) -> bool {
-    let shown: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let written: Vec<char> = body
-        .chars()
-        .chain(std::iter::once(probe))
-        .filter(|c| !c.is_whitespace())
-        .collect();
-    shown.len() < written.len() && written.starts_with(&shown)
+    is_proper_prefix_ignoring_whitespace_of(text, &format!("{body}{probe}"))
 }
 
 /// Whether `text` is what this call wrote before a take-back (`written`, or
-/// `written` short of its trailing probe), still showing: a reading the
+/// `written` short of its trailing probes), still showing: a reading the
 /// take-back has not reached yet.
-fn reads_as_before_take_back(text: &str, written: &str, probe: char) -> bool {
+fn reads_as_before_take_back(text: &str, written: &str) -> bool {
     composer_text_matches_ignoring_lost_whitespace(text, written)
-        || written
-            .strip_suffix(probe)
-            .is_some_and(|body| composer_text_matches_ignoring_lost_whitespace(text, body))
+        || composer_text_matches_ignoring_lost_whitespace(text, split_own_probes(written).0)
+}
+
+/// `written` (a [`ComposerLine`], possibly with probes typed behind it) split
+/// into the line and the probes. A line always ends with a space and a probe
+/// is never blank, so the probes are whatever follows the last blank.
+fn split_own_probes(written: &str) -> (&str, &str) {
+    match written
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+    {
+        Some((index, blank)) => written.split_at(index + blank.len_utf8()),
+        None => ("", written),
+    }
+}
+
+/// The last character of `text` that is not blank.
+fn last_visible(text: &str) -> Option<char> {
+    text.chars().rev().find(|c| !c.is_whitespace())
+}
+
+/// The last visible character a reading shows in the composer, if any.
+fn readout_end(readout: &ComposerReadout) -> Option<char> {
+    match readout {
+        ComposerReadout::Body(text) | ComposerReadout::Tail(text) => last_visible(text),
+        ComposerReadout::Empty | ComposerReadout::NotObserved => None,
+    }
+}
+
+/// Reads a composer that ends with the last of the probes `typed` (in the
+/// order they were typed): walking back from the end, every visible
+/// character that is one of them, in an order they were typed in, is a probe
+/// of this check's own; any one may be missing, taken by a dialog. Stops at
+/// the first character that is not, which is where the composer's own text
+/// ends: each probe was picked to differ from it. `None` while the last probe
+/// typed has not shown, or -- with `expected`, the line this check wrote in
+/// front of its probes -- while what is in front of them is on its way to
+/// that line or a tail that does not end it.
+fn count_own_probes(
+    readout: &ComposerReadout,
+    typed: &[char],
+    expected: Option<&ComposerLine>,
+) -> Option<(BehindProbe, Vec<char>)> {
+    if readout_end(readout) != typed.last().copied() {
+        return None;
+    }
+    let (behind, shown) = probes_behind(readout, typed)?;
+    if let (Some(line), BehindProbe::Text(front)) = (expected, &behind) {
+        let on_its_way = match front {
+            ShownText::Body(front) => is_proper_prefix_ignoring_whitespace_of(front, line.as_str()),
+            ShownText::Tail(front) => !tail_is_end_of(front, line.as_str()),
+        };
+        if on_its_way {
+            return None;
+        }
+    }
+    Some((behind, shown))
+}
+
+/// What shows in front of the probes of `typed` (in the order typed, any of
+/// them missing) at the end of `readout`, and those probes. `None` for a
+/// reading with no text, or a tail that shows nothing but probes.
+fn probes_behind(readout: &ComposerReadout, typed: &[char]) -> Option<(BehindProbe, Vec<char>)> {
+    let (text, tail) = match readout {
+        ComposerReadout::Body(text) => (text, false),
+        ComposerReadout::Tail(text) => (text, true),
+        ComposerReadout::Empty | ComposerReadout::NotObserved => return None,
+    };
+    let mut unmatched = typed.len();
+    let mut shown = Vec::new();
+    let mut cut = text.len();
+    for (index, c) in text.char_indices().rev() {
+        if c.is_whitespace() {
+            continue;
+        }
+        let Some(position) = typed[..unmatched].iter().rposition(|probe| *probe == c) else {
+            break;
+        };
+        unmatched = position;
+        shown.push(c);
+        cut = index;
+    }
+    shown.reverse();
+    let before = &text[..cut];
+    let behind = match (before.trim().is_empty(), tail) {
+        (true, false) => BehindProbe::Alone,
+        // The probes alone at the end of a taller composer say nothing of what
+        // precedes them, which is off the screen.
+        (true, true) => return None,
+        (false, false) => BehindProbe::Text(ShownText::Body(before.to_string())),
+        (false, true) => BehindProbe::Text(ShownText::Tail(before.to_string())),
+    };
+    Some((behind, shown))
+}
+
+/// The reading of a fresh `line` and the probe typed behind it, until a
+/// probe is typed again (see [`reflection_of`]).
+fn reflection_settle(
+    line: &ComposerLine,
+) -> impl FnMut(&ComposerObservation, &[char]) -> Option<(BehindProbe, Vec<char>)> + '_ {
+    move |observation, typed| {
+        let probe = *typed.last()?;
+        if !screen_accepts_write(observation) {
+            return None;
+        }
+        reflection_of(&observation.readout, line, probe).map(|behind| (behind, vec![probe]))
+    }
+}
+
+/// Whether `text` is a proper prefix of `body` once whitespace is
+/// disregarded.
+fn is_proper_prefix_ignoring_whitespace_of(text: &str, body: &str) -> bool {
+    let shown: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let written: Vec<char> = body.chars().filter(|c| !c.is_whitespace()).collect();
+    shown.len() < written.len() && written.starts_with(&shown)
+}
+
+/// The probes one check has typed and not seen erased, in the order typed,
+/// and the closed screens counted as of its latest decision (see
+/// [`ComposerObservation::closed_screens`]).
+#[derive(Debug, Clone, Default)]
+struct Flight {
+    typed: Vec<char>,
+    closures: u64,
+}
+
+/// Whether [`WindowEntry::confirm_own_probes`] types the first probe itself
+/// or the caller has already written what it waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstWrite {
+    /// Picks the first probe and writes it at the check's ledger count.
+    Probe,
+    /// The caller's own write (an erase, a probe of an earlier call) left
+    /// the ledger at the check's count.
+    Written,
+}
+
+/// One wait on the daemon's own probes (see
+/// [`WindowEntry::confirm_own_probes`]).
+struct ProbeCheck<'a> {
+    route: &'static str,
+    /// The ledger count the first probe is written at, or the count the
+    /// caller's own write left.
+    at: u64,
+    first: FirstWrite,
+    flight: Flight,
+    /// Characters the composer's own text may end with: never typed as a
+    /// probe, so the probes and that text have one boundary.
+    avoid: Vec<char>,
+    /// The line written in front of the probes, when there is one.
+    expected: Option<&'a ComposerLine>,
+    /// Whether the probes are read by [`count_own_probes`] from the start,
+    /// rather than by the caller's own reading until a probe is typed again.
+    counted: bool,
+    /// The composer reading the probes were typed behind, when the probes in
+    /// flight -- those `flight` starts with included -- are recorded as
+    /// unconfirmed probes of the call's own.
+    unconfirmed: Option<&'a ComposerReadout>,
+}
+
+/// What ended [`WindowEntry::confirm_own_probes`].
+enum ProbeWait {
+    /// The probes showed: `behind` is what is in front of them and `shown`
+    /// the probes of this check's own at the end, in typed order.
+    Shown {
+        behind: BehindProbe,
+        shown: Vec<char>,
+        at: u64,
+        flight: Flight,
+        observation: ComposerObservation,
+    },
+    /// The first probe was not written: another writer wrote first.
+    NotWritten,
+    /// Another writer wrote; this check's own writes left the ledger at `at`.
+    OtherWriter { at: u64 },
+    /// The requester left with these probes still on their way, already
+    /// left for a later reading to count (see
+    /// [`WindowEntry::leave_unseen_probes`]).
+    RequesterGone { at: u64, flight: Flight },
+    /// A screen closed the gate since the latest probe, which has not shown,
+    /// and no probe character is left to type behind it: where the write
+    /// went cannot be told from the screen.
+    Undecidable,
+}
+
+/// What [`WindowEntry::confirm_own_probes`] does on one reading.
+#[derive(Debug)]
+enum ProbeStep {
+    /// The probes are read: what is in front of them, and the own probes at
+    /// the end.
+    Decided(BehindProbe, Vec<char>),
+    /// A screen closed the gate since the latest probe, which has not shown:
+    /// type this probe, as of this many closed screens.
+    Retype(char, u64),
+    /// As [`ProbeStep::Retype`], with no probe character left.
+    Undecidable,
+}
+
+/// The step one reading calls for, `decided` being what the reading made of
+/// the probes. Undecided, a reading that accepts a write after more closed
+/// screens than `flight` has seen calls for the next probe character.
+fn probe_step(
+    observation: &ComposerObservation,
+    probes: &ProbeChars,
+    flight: &Flight,
+    avoid: &[char],
+    decided: Option<(BehindProbe, Vec<char>)>,
+) -> Option<ProbeStep> {
+    if let Some((behind, shown)) = decided {
+        return Some(ProbeStep::Decided(behind, shown));
+    }
+    let reopened = observation.closed_screens > flight.closures
+        && screen_accepts_write(observation)
+        && observation.readout != ComposerReadout::NotObserved;
+    if !reopened {
+        return None;
+    }
+    Some(match probes.pick(&flight.typed, avoid) {
+        Some(probe) => ProbeStep::Retype(probe, observation.closed_screens),
+        None => ProbeStep::Undecidable,
+    })
 }
 
 /// What the write gate makes of one [`ComposerObservation`] (see
@@ -1172,7 +1422,9 @@ enum WriteGate {
 /// `send_message` body written straight through -- passes before its first
 /// byte. It takes the very [`ComposerObservation`] the decision to write was
 /// made from, never a fresh one taken a moment later, so the check and the
-/// write see the same screen.
+/// write see the same screen. Every screen the detector reads closed is also
+/// counted ([`ComposerObservation::closed_screens`]), so a dialog that came
+/// and went between two readings is not missed.
 fn write_gate(observation: &ComposerObservation) -> WriteGate {
     if matches!(
         observation.screen_rule,
@@ -1263,8 +1515,11 @@ enum OwnLeft {
     Nothing,
     /// Text the call confirmed as its own part of the composer.
     Text(String),
-    /// A probe written behind a composer that read as this, not seen yet.
-    UnconfirmedProbe(ComposerReadout),
+    /// Probes written behind a composer that read as `before`, not seen yet.
+    UnconfirmedProbe {
+        before: ComposerReadout,
+        probes: Vec<char>,
+    },
 }
 
 /// What [`WindowEntry::check_own_text`] found of the call's own text.
@@ -1284,16 +1539,15 @@ enum OwnShows {
 }
 
 /// How `text` reads against `own`, the call's own text (possibly ending with
-/// the probe it wrote). A reading `own` starts with counts as beside
+/// the probes it wrote). A reading `own` starts with counts as beside
 /// something rather than gone, since part of `own` may be what is left.
-fn own_text_shows(text: &str, own: &str, probe: char) -> OwnShows {
-    if reads_as_before_take_back(text, own, probe) {
+fn own_text_shows(text: &str, own: &str) -> OwnShows {
+    if reads_as_before_take_back(text, own) {
         return OwnShows::Alone;
     }
     let shown: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-    let core: String = own
-        .strip_suffix(probe)
-        .unwrap_or(own)
+    let core: String = split_own_probes(own)
+        .0
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
@@ -1418,20 +1672,18 @@ pub struct WindowEntry {
     closed: AtomicBool,
     session: Arc<PtySession>,
     /// The one and only long-lived strong holder besides
-    /// `spawn_exit_watcher`'s task. Taken (set to `None`) once the window's
-    /// confirmed status reaches `Exited`.
+    /// `spawn_exit_watcher`'s task. Taken (set to `None`) by
+    /// [`WindowEntry::confirm_exited`] before it publishes `Exited`, so a
+    /// reader that has seen `Exited` never finds a detector here.
     detector: Mutex<Option<Arc<DetectorHandle>>>,
     /// Kept even after `detector` is taken so [`WindowEntry::detector_task_alive`]
     /// can observe the driver task's teardown converging to zero strong
     /// references.
     detector_weak: Weak<DetectorHandle>,
-    status_changes: broadcast::Sender<StatusAt>,
-    current_status: watch::Sender<StatusAt>,
-    /// Whether this window has been shown to be past its startup phase, so a
-    /// handoff into it may skip the wait for one.
-    ready_hold: ReadyHoldLatch,
-    current_attach: Mutex<AttachSlot>,
-    attach_generation: AtomicU64,
+    /// The confirmed status, its fan-out and the startup latch. Written only
+    /// through [`WindowEntry::publish_confirmed`],
+    /// [`WindowEntry::confirm_exited`] and the detector-loss backstop.
+    status_gate: StatusGate,
     /// This window's own `StatusEvent` auth token, scoped to it. Held behind
     /// an [`Arc`] because
     /// [`DaemonConfig::status_token_override`] makes every window share one
@@ -1476,11 +1728,12 @@ pub struct WindowEntry {
     /// reflect may still be sitting unobserved. It self-clears the moment any
     /// further write moves the sequence past this value.
     degenerate_since: Mutex<Option<u64>>,
-    /// The write ledger's count right after a probe whose requester left
-    /// before it showed (see [`InputProfile::probe`]): if it shows later,
-    /// with nothing written since, what the composer holds can still be
-    /// settled.
-    unanswered_probe: Mutex<Option<u64>>,
+    /// The write ledger's count right after probes whose requester left
+    /// before they showed (see [`InputProfile::probe`]), the probes in the
+    /// order typed, and the closed screens counted as of the latest of them:
+    /// if they show later, with nothing written since, what the composer
+    /// holds can still be settled.
+    unanswered_probe: Mutex<Option<(u64, Vec<char>, u64)>>,
     /// What [`crate::control::interrupt_window`] writes, from the same
     /// configuration: a write of exactly these bytes goes out with no
     /// take-back in front, since some CLIs exit on an interrupt to an empty
@@ -1925,7 +2178,12 @@ impl WindowEntry {
     /// its input in, never by a clock: the probe is written behind the body,
     /// and the body counts as handled once the probe shows. Until then the
     /// call waits, and only the child exiting, `requester` leaving or another
-    /// writer's write ends that wait without an answer from the screen.
+    /// writer's write ends that wait without an answer from the screen. A
+    /// dialog that may have taken a probe gets the next probe character typed
+    /// behind it once the screen accepts input again; with every one typed,
+    /// the call declines and the window takes no further write of the
+    /// daemon's until another writer writes (see
+    /// [`WindowEntry::confirm_own_probes`]).
     ///
     /// Another writer's write gets this call's unsent text taken back in
     /// front of it, and this call writes nothing more of its plan. Before it
@@ -1984,9 +2242,9 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
         let _scope = self.begin_take_back_scope();
-        let ComposerAccess::Judged { probe } = self.composer_access else {
+        if !self.composer_access.is_judged() || self.input.probe.is_none() {
             return Ok(declined(NotPlacedReason::NoComposer, None));
-        };
+        }
         // The one place the bodies become what is written: everything below
         // decides on, writes and takes back the lines alone.
         let line = ComposerLine::new(body);
@@ -1998,9 +2256,9 @@ impl WindowEntry {
                 write_seq: residue.write_seq,
             });
         let judgment = self
-            .judge_submit(&line, probe, residue, stage, &mut requester)
+            .judge_submit(&line, residue, stage, &mut requester)
             .await?;
-        self.check_after_another_write(judgment, probe, &mut requester)
+        self.check_after_another_write(judgment, &mut requester)
             .await
     }
 
@@ -2009,7 +2267,6 @@ impl WindowEntry {
     async fn judge_submit(
         &self,
         line: &ComposerLine,
-        probe: char,
         residue: Option<LineResidue<'_>>,
         stage: SendStage,
         requester: &mut Requester,
@@ -2070,7 +2327,7 @@ impl WindowEntry {
                 return Ok(declined(NotPlacedReason::Unobservable, None));
             }
             return self
-                .confirm_unshown_envelope(line, probe, &observation, vouched_seq, stage, requester)
+                .confirm_unshown_envelope(line, &observation, vouched_seq, stage, requester)
                 .await;
         }
         match &observation.readout {
@@ -2080,7 +2337,7 @@ impl WindowEntry {
                 if self.degenerate_and_unchanged() {
                     return Ok(declined(NotPlacedReason::Unobservable, None));
                 }
-                self.confirm_empty_then_write(line, probe, &observation, seen, stage, requester)
+                self.confirm_empty_then_write(line, &observation, seen, stage, requester)
                     .await
             }
             ComposerReadout::Body(_) | ComposerReadout::Tail(_) => {
@@ -2094,15 +2351,10 @@ impl WindowEntry {
                     | ComposerReadout::NotObserved => None,
                 };
                 if let Some(text) = marked {
-                    match self
-                        .settle_unanswered_probe(text, probe, &observation)
-                        .await?
-                    {
+                    match self.settle_unanswered_probe(text, &observation).await? {
                         Some(TakenBack::Emptied(settled, seq)) => {
                             return self
-                                .write_fresh_and_decide(
-                                    line, probe, &settled, seq, stage, requester,
-                                )
+                                .write_fresh_and_decide(line, &settled, seq, stage, requester)
                                 .await;
                         }
                         Some(TakenBack::Declined(judgment)) => return Ok(judgment),
@@ -2149,8 +2401,7 @@ impl WindowEntry {
                         (true, None) => {
                             self.confirm_envelope_then_resend(
                                 line,
-                                probe,
-                                &observation.readout,
+                                &observation,
                                 seen,
                                 false,
                                 stage,
@@ -2164,8 +2415,7 @@ impl WindowEntry {
                         (false, Some(vouched_seq)) => {
                             self.confirm_envelope_then_resend(
                                 line,
-                                probe,
-                                &observation.readout,
+                                &observation,
                                 vouched_seq,
                                 true,
                                 stage,
@@ -2184,7 +2434,6 @@ impl WindowEntry {
                 {
                     self.take_back_own_residue_then_write(
                         line,
-                        probe,
                         residue,
                         &observation,
                         stage,
@@ -2194,7 +2443,7 @@ impl WindowEntry {
                 } else if !self.degenerate_and_unchanged() {
                     // What reads as someone else's text may only be a screen
                     // that has not caught up with input that emptied it.
-                    self.confirm_empty_then_write(line, probe, &observation, seen, stage, requester)
+                    self.confirm_empty_then_write(line, &observation, seen, stage, requester)
                         .await
                 } else {
                     Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
@@ -2244,7 +2493,6 @@ impl WindowEntry {
     async fn check_after_another_write(
         &self,
         judgment: SubmitJudgment,
-        probe: char,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         let SubmitPlacement::NotPlaced(NotPlaced {
@@ -2259,15 +2507,13 @@ impl WindowEntry {
             OwnLeft::Nothing => Ok(judgment),
             // A requester already gone is not waited for.
             OwnLeft::Text(_) if requester.has_left() => Ok(remaining(judgment)),
-            OwnLeft::Text(text) => Ok(
-                match self.check_own_text(text, &own, probe, requester).await? {
-                    Checked::Gone => declined(NotPlacedReason::Interrupted, None),
-                    Checked::MayRemain => remaining(judgment),
-                },
-            ),
-            OwnLeft::UnconfirmedProbe(before_probe) => {
+            OwnLeft::Text(text) => Ok(match self.check_own_text(text, &own, requester).await? {
+                Checked::Gone => declined(NotPlacedReason::Interrupted, None),
+                Checked::MayRemain => remaining(judgment),
+            }),
+            OwnLeft::UnconfirmedProbe { before, probes } => {
                 if !requester.has_left() {
-                    self.check_unconfirmed_probe(before_probe, probe, requester)
+                    self.check_unconfirmed_probe(before, probes, requester)
                         .await?;
                 }
                 Ok(judgment)
@@ -2284,17 +2530,17 @@ impl WindowEntry {
         &self,
         route: &'static str,
         requester: &mut Requester,
-    ) -> PtyResult<Option<(ComposerReadout, u64)>> {
+    ) -> PtyResult<Option<(ComposerObservation, u64)>> {
         let seen = self.write_seq();
         match self
             .wait_for_composer(route, Some(seen), requester, |observation| {
                 (screen_accepts_write(observation)
                     && observation.readout != ComposerReadout::NotObserved)
-                    .then(|| observation.readout.clone())
+                    .then(|| observation.clone())
             })
             .await
         {
-            ComposerWait::Done(readout) => Ok(Some((readout, seen))),
+            ComposerWait::Done(observation) => Ok(Some((observation, seen))),
             ComposerWait::OtherWriter | ComposerWait::RequesterGone => Ok(None),
             ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
         }
@@ -2314,7 +2560,6 @@ impl WindowEntry {
         &self,
         own: &str,
         part: &OwnPart,
-        probe: char,
         requester: &mut Requester,
     ) -> PtyResult<Checked> {
         let gone_if_read_back = if part.read_back {
@@ -2322,40 +2567,49 @@ impl WindowEntry {
         } else {
             Checked::MayRemain
         };
-        let Some((reading, seen)) = self
+        let Some((observation, seen)) = self
             .read_writable_screen("check_own_text", requester)
             .await?
         else {
             return Ok(Checked::MayRemain);
         };
-        let shows = match &reading {
+        let shows = match &observation.readout {
             ComposerReadout::Empty => OwnShows::Absent,
             ComposerReadout::NotObserved | ComposerReadout::Tail(_) => {
                 return Ok(Checked::MayRemain);
             }
-            ComposerReadout::Body(text) => own_text_shows(text, own, probe),
+            ComposerReadout::Body(text) => own_text_shows(text, own),
         };
         let only_interrupt_keys_since = part.after_own_write.map(|after| after.wrapping_add(1))
             == Some(seen)
             && self.session.latest_withheld_write() == Some(seen);
         if only_interrupt_keys_since
-            && matches!(reading, ComposerReadout::Body(_))
+            && matches!(observation.readout, ComposerReadout::Body(_))
             && matches!(shows, OwnShows::Absent | OwnShows::WithOthers)
         {
-            return self.take_back_own(own, probe, seen, &reading).await;
+            return self.take_back_own(own, seen, &observation).await;
         }
         match shows {
             OwnShows::Absent => return Ok(gone_if_read_back),
             OwnShows::WithOthers => return Ok(Checked::MayRemain),
             OwnShows::Alone => {}
         }
-        let ProbeReading::Shown(behind) = self
-            .read_through_probe(probe, seen, &reading, requester)
+        let ProbeReading::Shown {
+            behind,
+            shown,
+            at,
+            flight,
+            observation: probed,
+        } = self
+            .read_through_probe(seen, &observation, &[], requester)
             .await?
         else {
             return Ok(Checked::MayRemain);
         };
-        let after_probe = seen + 1;
+        let gone_once_erased = |erased: ErasedBehind, gone: Checked| match erased {
+            ErasedBehind::Undecidable => Checked::MayRemain,
+            ErasedBehind::Moved | ErasedBehind::Erased => gone,
+        };
         let before = match &behind {
             BehindProbe::Text(ShownText::Body(before))
                 if !before.chars().all(char::is_whitespace) =>
@@ -2363,30 +2617,34 @@ impl WindowEntry {
                 before
             }
             BehindProbe::Alone | BehindProbe::Text(ShownText::Body(_)) => {
-                self.erase_probe_behind(after_probe, probe, &behind).await?;
-                return Ok(Checked::Gone);
+                let erased = self
+                    .erase_probe_behind(at, shown.len(), flight, &behind)
+                    .await?;
+                return Ok(gone_once_erased(erased, Checked::Gone));
             }
             // The end of a taller composer cannot show the call's own text
             // alone.
             BehindProbe::Text(ShownText::Tail(_)) => {
-                self.erase_probe_behind(after_probe, probe, &behind).await?;
+                self.erase_probe_behind(at, shown.len(), flight, &behind)
+                    .await?;
                 return Ok(Checked::MayRemain);
             }
         };
-        match own_text_shows(before, own, probe) {
+        match own_text_shows(before, own) {
             OwnShows::Alone => {
-                let written = format!("{own}{probe}");
-                let shown = ComposerReadout::Body(format!("{before}{probe}"));
-                self.take_back_own(&written, probe, after_probe, &shown)
-                    .await
+                let written: String = own.chars().chain(shown.iter().copied()).collect();
+                self.take_back_own(&written, at, &probed).await
             }
             OwnShows::WithOthers => {
-                self.erase_probe_behind(after_probe, probe, &behind).await?;
+                self.erase_probe_behind(at, shown.len(), flight, &behind)
+                    .await?;
                 Ok(Checked::MayRemain)
             }
             OwnShows::Absent => {
-                self.erase_probe_behind(after_probe, probe, &behind).await?;
-                Ok(gone_if_read_back)
+                let erased = self
+                    .erase_probe_behind(at, shown.len(), flight, &behind)
+                    .await?;
+                Ok(gone_once_erased(erased, gone_if_read_back))
             }
         }
     }
@@ -2396,13 +2654,12 @@ impl WindowEntry {
     async fn take_back_own(
         &self,
         written: &str,
-        probe: char,
         seq_after_written: u64,
-        before_take_back: &ComposerReadout,
+        before_take_back: &ComposerObservation,
     ) -> PtyResult<Checked> {
         Ok(
             match self
-                .take_back_and_settle(written, probe, seq_after_written, before_take_back)
+                .take_back_and_settle(written, seq_after_written, before_take_back)
                 .await?
             {
                 TakenBack::Emptied(..) => Checked::Gone,
@@ -2412,46 +2669,54 @@ impl WindowEntry {
         )
     }
 
-    /// Once another writer's write ended the call while its probe, written
+    /// Once another writer's write ended the call while its `probes`, written
     /// behind a composer reading as `before_probe`, had not shown: erases
-    /// that probe when the screen shows it right behind `before_probe` -- the
-    /// end of a taller composer included -- and writes nothing otherwise (it
-    /// may sit among the other writer's text).
+    /// them when the screen shows them right behind `before_probe` -- the end
+    /// of a taller composer included -- and writes nothing otherwise (they
+    /// may sit among the other writer's text). The other writer's bytes are
+    /// not told apart from the probes: a character of theirs at the end that
+    /// equals one of the probes is erased as one.
     async fn check_unconfirmed_probe(
         &self,
         before_probe: &ComposerReadout,
-        probe: char,
+        probes: &[char],
         requester: &mut Requester,
     ) -> PtyResult<()> {
         let Some(before) = BehindProbe::before(before_probe) else {
             return Ok(());
         };
-        let Some((reading, seen)) = self
+        let Some((observation, seen)) = self
             .read_writable_screen("check_unconfirmed_probe", requester)
             .await?
         else {
             return Ok(());
         };
-        let probe_shows = &reading != before_probe
-            && BehindProbe::of(&reading, probe).is_some_and(|shown| shown.same_as(&before));
-        if !probe_shows {
+        let probes_show = &observation.readout != before_probe
+            && probes_behind(&observation.readout, probes)
+                .is_some_and(|(front, shown)| !shown.is_empty() && front.same_as(&before));
+        if !probes_show {
             return Ok(());
         }
-        let ProbeReading::Shown(shown) = self
-            .read_through_probe(probe, seen, &reading, requester)
+        let ProbeReading::Shown {
+            behind,
+            shown,
+            at,
+            flight,
+            observation: probed,
+        } = self
+            .read_through_probe(seen, &observation, probes, requester)
             .await?
         else {
             return Ok(());
         };
-        let after_check = seen + 1;
-        if shown.is_probe_behind(&before, probe) {
-            if self.erase_probe_behind(after_check, probe, &shown).await? == GuardedWrite::Written {
-                self.erase_probe_behind(after_check + 1, probe, &before)
-                    .await?;
-            }
-        } else {
-            self.erase_probe_behind(after_check, probe, &shown).await?;
-        }
+        // The probes this check typed showed, so every probe at the end --
+        // the earlier ones included -- is counted at once, and all of them
+        // are erased when they show right behind `before`.
+        let (count, rest) = match probes_behind(&probed.readout, &flight.typed) {
+            Some((rest, all)) if rest.same_as(&before) => (all.len(), rest),
+            Some(_) | None => (shown.len(), behind),
+        };
+        self.erase_probe_behind(at, count, flight, &rest).await?;
         Ok(())
     }
 
@@ -2507,7 +2772,9 @@ impl WindowEntry {
     /// reading. Output reaching the screen and a status change are cues to
     /// read again and nothing more; there is no time limit, and this relies
     /// on the detector answering a query it has taken up (see
-    /// [`DetectorHandle::query_composer`]).
+    /// [`DetectorHandle::query_composer`]). Each reading carries how many
+    /// closed screens the detector has read so far, whether or not this wait
+    /// saw them ([`ComposerObservation::closed_screens`]).
     ///
     /// A reading of a screen the program has not finished painting (see
     /// [`WriteGate::Unfinished`]) never reaches `settle`: it is read again,
@@ -2698,7 +2965,6 @@ impl WindowEntry {
     async fn confirm_empty_then_write(
         &self,
         line: &ComposerLine,
-        probe: char,
         observed: &ComposerObservation,
         seq: u64,
         stage: SendStage,
@@ -2707,55 +2973,122 @@ impl WindowEntry {
         if !screen_accepts_write(observed) {
             return Ok(decline_not_accepting(None));
         }
-        if *lock_recover(&self.unanswered_probe) == Some(seq) {
-            // An earlier probe is still on its way: a second one behind it
-            // would leave one of them in the composer.
-            let shown_before = |observation: &ComposerObservation| match &observation.readout {
-                ComposerReadout::Body(_) if screen_accepts_write(observation) => {
-                    BehindProbe::of(&observation.readout, probe)
-                }
-                ComposerReadout::Body(_)
-                | ComposerReadout::Empty
-                | ComposerReadout::NotObserved
-                | ComposerReadout::Tail(_) => None,
+        let unanswered = lock_recover(&self.unanswered_probe)
+            .clone()
+            .filter(|(at, ..)| *at == seq);
+        if let Some((_, probes, closures)) = unanswered {
+            // Earlier probes are still on their way. A second probe of the
+            // same character would leave one of them in the composer; one of
+            // another character tells, counted from the end, which of them
+            // showed. With none left to type, they are waited for.
+            let avoid: Vec<char> = readout_end(&observed.readout).into_iter().collect();
+            let next = self
+                .input
+                .probe
+                .as_ref()
+                .and_then(|chars| chars.pick(&probes, &avoid));
+            let (first, closures) = match next {
+                Some(_) => (FirstWrite::Probe, observed.closed_screens),
+                None => (FirstWrite::Written, closures),
+            };
+            let check = ProbeCheck {
+                route: "confirm_empty_then_write",
+                at: seq,
+                first,
+                flight: Flight {
+                    typed: probes,
+                    closures,
+                },
+                avoid,
+                expected: None,
+                counted: true,
+                unconfirmed: Some(&observed.readout),
             };
             return match self
-                .wait_for_composer(
-                    "confirm_empty_then_write",
-                    Some(seq),
+                .confirm_own_probes(
+                    check,
                     requester,
-                    shown_before,
+                    |_| TakeBackRegistration::Empty,
+                    |_, _| None,
                 )
-                .await
+                .await?
             {
-                ComposerWait::Done(BehindProbe::Alone) => {
-                    self.write_once_probe_erased(line, probe, seq, stage, requester)
+                ProbeWait::Shown {
+                    behind: BehindProbe::Alone,
+                    shown,
+                    at,
+                    flight,
+                    ..
+                } => {
+                    self.write_once_probe_erased(line, at, shown.len(), flight, stage, requester)
                         .await
                 }
-                ComposerWait::Done(before @ BehindProbe::Text(_)) => {
-                    self.erase_probe_behind(seq, probe, &before).await?;
-                    Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
+                ProbeWait::Shown {
+                    behind: before @ BehindProbe::Text(_),
+                    shown,
+                    at,
+                    flight,
+                    ..
+                } => {
+                    self.decline_foreign_behind_probes(at, shown.len(), flight, &before)
+                        .await
                 }
-                ComposerWait::OtherWriter => Ok(declined(NotPlacedReason::Interrupted, None)),
-                ComposerWait::RequesterGone => Ok(declined(NotPlacedReason::Unobservable, None)),
-                ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+                ProbeWait::NotWritten | ProbeWait::OtherWriter { .. } => {
+                    Ok(declined(NotPlacedReason::Interrupted, None))
+                }
+                ProbeWait::RequesterGone { .. } => {
+                    Ok(declined(NotPlacedReason::Unobservable, None))
+                }
+                ProbeWait::Undecidable => Ok(self.declined_undecidable()),
             };
         }
         match self
-            .read_through_probe(probe, seq, &observed.readout, requester)
+            .read_through_probe(seq, observed, &[], requester)
             .await?
         {
-            ProbeReading::Shown(BehindProbe::Alone) => {
-                self.write_once_probe_erased(line, probe, seq + 1, stage, requester)
+            ProbeReading::Shown {
+                behind: BehindProbe::Alone,
+                shown,
+                at,
+                flight,
+                ..
+            } => {
+                self.write_once_probe_erased(line, at, shown.len(), flight, stage, requester)
                     .await
             }
-            ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
-                self.erase_probe_behind(seq + 1, probe, &before).await?;
-                Ok(foreign_draft(declined(NotPlacedReason::Foreign, None)))
+            ProbeReading::Shown {
+                behind: before @ BehindProbe::Text(_),
+                shown,
+                at,
+                flight,
+                ..
+            } => {
+                self.decline_foreign_behind_probes(at, shown.len(), flight, &before)
+                    .await
             }
             ProbeReading::Interrupted => Ok(declined(NotPlacedReason::Interrupted, None)),
             ProbeReading::Abandoned => Ok(declined(NotPlacedReason::Unobservable, None)),
+            ProbeReading::Undecidable => Ok(self.declined_undecidable()),
         }
+    }
+
+    /// Erases `count` probes that showed behind someone else's text (ledger
+    /// at `seq`) and declines for that text.
+    async fn decline_foreign_behind_probes(
+        &self,
+        seq: u64,
+        count: usize,
+        flight: Flight,
+        before: &BehindProbe,
+    ) -> PtyResult<SubmitJudgment> {
+        Ok(
+            match self.erase_probe_behind(seq, count, flight, before).await? {
+                ErasedBehind::Undecidable => self.declined_undecidable(),
+                ErasedBehind::Moved | ErasedBehind::Erased => {
+                    foreign_draft(declined(NotPlacedReason::Foreign, None))
+                }
+            },
+        )
     }
 
     /// The ledger vouches that only the caller's own envelope was written
@@ -2770,7 +3103,6 @@ impl WindowEntry {
     async fn confirm_unshown_envelope(
         &self,
         line: &ComposerLine,
-        probe: char,
         observed: &ComposerObservation,
         seq: u64,
         stage: SendStage,
@@ -2782,71 +3114,82 @@ impl WindowEntry {
         if requester.has_left() {
             return Ok(declined(NotPlacedReason::Unobservable, Some(seq)));
         }
-        let after_probe = seq + 1;
-        let envelope_and_probe = self.own_text(&line.with_probe(probe));
-        if self
-            .write_judged(probe.to_string().as_bytes(), seq, envelope_and_probe)
-            .await?
-            == GuardedWrite::Moved
-        {
-            // The earlier attempt's envelope stays, carried forward as it was.
-            return Ok(declined(NotPlacedReason::Interrupted, Some(seq)));
-        }
-        let shown = |observation: &ComposerObservation| {
-            if screen_accepts_write(observation) {
-                reflection_of(&observation.readout, line, probe)
-            } else {
-                None
-            }
+        let check = ProbeCheck {
+            route: "confirm_unshown_envelope",
+            at: seq,
+            first: FirstWrite::Probe,
+            flight: Flight {
+                typed: Vec::new(),
+                closures: observed.closed_screens,
+            },
+            avoid: last_visible(line.as_str())
+                .into_iter()
+                .chain(readout_end(&observed.readout))
+                .collect(),
+            expected: Some(line),
+            counted: false,
+            unconfirmed: None,
         };
         match self
-            .wait_for_composer(
-                "confirm_unshown_envelope",
-                Some(after_probe),
+            .confirm_own_probes(
+                check,
                 requester,
-                shown,
+                |typed| self.own_text(&line.with_probes(typed)),
+                reflection_settle(line),
             )
-            .await
+            .await?
         {
-            ComposerWait::Done(BehindProbe::Text(shown)) => {
-                if let ShownText::Body(before) = &shown {
+            ProbeWait::Shown {
+                behind: BehindProbe::Text(front),
+                shown,
+                at,
+                flight,
+                ..
+            } => {
+                if let ShownText::Body(before) = &front {
                     self.note_read_back(before, line);
                 }
-                self.erase_probe_then_resend(line, &shown, after_probe, requester)
+                self.erase_probe_then_resend(line, &front, at, shown.len(), flight, requester)
                     .await
             }
-            ComposerWait::Done(BehindProbe::Alone) => {
-                self.write_once_probe_erased(line, probe, after_probe, stage, requester)
+            ProbeWait::Shown {
+                behind: BehindProbe::Alone,
+                shown,
+                at,
+                flight,
+                ..
+            } => {
+                self.write_once_probe_erased(line, at, shown.len(), flight, stage, requester)
                     .await
             }
-            ComposerWait::OtherWriter => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
-            ComposerWait::RequesterGone => {
-                // Whether or not another write got in first, the requester is
-                // gone and nothing more is decided here.
-                self.write_judged(&self.input.erase, after_probe, self.own_text(line.as_str()))
-                    .await?;
+            // The earlier attempt's envelope stays, carried forward as it was.
+            ProbeWait::NotWritten => Ok(declined(NotPlacedReason::Interrupted, Some(seq))),
+            ProbeWait::OtherWriter { .. } => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
+            ProbeWait::RequesterGone { .. } => {
                 Ok(declined_unvouched(NotPlacedReason::Unobservable))
             }
-            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+            ProbeWait::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// Erases a probe that shows alone (ledger at `seq`) and writes `line`
-    /// once the composer reads empty.
+    /// Erases `count` probes that show alone (ledger at `seq`) and writes
+    /// `line` once the composer reads empty.
     async fn write_once_probe_erased(
         &self,
         line: &ComposerLine,
-        probe: char,
         seq: u64,
+        count: usize,
+        flight: Flight,
         stage: SendStage,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
-        match self.erase_probe(seq).await? {
+        match self.erase_probe(seq, count, flight).await? {
             ProbeErased::Emptied(settled, after_erase) => {
-                self.write_fresh_and_decide(line, probe, &settled, after_erase, stage, requester)
+                self.write_fresh_and_decide(line, &settled, after_erase, stage, requester)
                     .await
             }
             ProbeErased::Interrupted(_) => Ok(declined(NotPlacedReason::Interrupted, None)),
+            ProbeErased::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
@@ -2871,8 +3214,7 @@ impl WindowEntry {
     async fn confirm_envelope_then_resend(
         &self,
         line: &ComposerLine,
-        probe: char,
-        observed: &ComposerReadout,
+        observed: &ComposerObservation,
         seq: u64,
         ledger_vouches: bool,
         stage: SendStage,
@@ -2886,139 +3228,415 @@ impl WindowEntry {
             ShownText::Tail(before) => tail_is_end_of(before, line.as_str()),
         };
         match self
-            .read_through_probe(probe, seq, observed, requester)
+            .read_through_probe(seq, observed, &[], requester)
             .await?
         {
-            ProbeReading::Shown(BehindProbe::Alone) => match stage {
-                SendStage::BeforeSubmitKey => self.erase_dropped_probe(seq + 1).await,
-                SendStage::AfterSubmitKey => Ok(match self.erase_probe(seq + 1).await? {
-                    ProbeErased::Emptied(..) => declined(NotPlacedReason::Taken, None),
-                    ProbeErased::Interrupted(_) => declined_unvouched(NotPlacedReason::Vanished),
-                }),
+            ProbeReading::Shown {
+                behind: BehindProbe::Alone,
+                shown,
+                at,
+                flight,
+                ..
+            } => match stage {
+                SendStage::BeforeSubmitKey => {
+                    self.erase_dropped_probe(at, shown.len(), flight).await
+                }
+                SendStage::AfterSubmitKey => {
+                    Ok(match self.erase_probe(at, shown.len(), flight).await? {
+                        ProbeErased::Emptied(..) => declined(NotPlacedReason::Taken, None),
+                        ProbeErased::Interrupted(_) => {
+                            declined_unvouched(NotPlacedReason::Vanished)
+                        }
+                        ProbeErased::Undecidable => self.declined_undecidable(),
+                    })
+                }
             },
-            ProbeReading::Shown(BehindProbe::Text(shown)) if envelope_shows(&shown) => {
-                if let ShownText::Body(before) = &shown {
+            ProbeReading::Shown {
+                behind: BehindProbe::Text(front),
+                shown,
+                at,
+                flight,
+                ..
+            } if envelope_shows(&front) => {
+                if let ShownText::Body(before) = &front {
                     self.note_read_back(before, line);
                 }
-                self.erase_probe_then_resend(line, &shown, seq + 1, requester)
+                self.erase_probe_then_resend(line, &front, at, shown.len(), flight, requester)
                     .await
             }
-            ProbeReading::Shown(before @ BehindProbe::Text(_)) => {
-                self.erase_probe_behind(seq + 1, probe, &before).await?;
-                Ok(foreign_draft(declined_unvouched(NotPlacedReason::Foreign)))
-            }
+            ProbeReading::Shown {
+                behind: before @ BehindProbe::Text(_),
+                shown,
+                at,
+                flight,
+                ..
+            } => Ok(
+                match self
+                    .erase_probe_behind(at, shown.len(), flight, &before)
+                    .await?
+                {
+                    ErasedBehind::Undecidable => self.declined_undecidable(),
+                    ErasedBehind::Moved | ErasedBehind::Erased => {
+                        foreign_draft(declined_unvouched(NotPlacedReason::Foreign))
+                    }
+                },
+            ),
             ProbeReading::Interrupted => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
             ProbeReading::Abandoned => Ok(declined_unvouched(NotPlacedReason::Unobservable)),
+            ProbeReading::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// Erases a probe that showed right behind the caller's own envelope
-    /// (ledger at `seq`), and presses the submit key alone once the composer
-    /// reads as `target` again.
+    /// Erases `count` probes that showed right behind the caller's own
+    /// envelope (ledger at `seq`), and presses the submit key alone once the
+    /// composer reads as `target` again.
     async fn erase_probe_then_resend(
         &self,
         line: &ComposerLine,
         target: &ShownText,
         seq: u64,
+        count: usize,
+        flight: Flight,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         match self
-            .erase_probe_back_to(seq, target, line, requester)
+            .erase_probe_back_to(seq, count, flight, target, line, requester)
             .await?
         {
-            Some(ComposerWait::Done(())) => self.resend_key_only(line, seq + 1, requester).await,
-            None | Some(ComposerWait::OtherWriter) => {
-                Ok(declined_unvouched(NotPlacedReason::Interrupted))
-            }
-            Some(ComposerWait::RequesterGone) => {
+            ErasedBack::Restored { at } => self.resend_key_only(line, at, requester).await,
+            ErasedBack::OtherWriter { .. } => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
+            ErasedBack::RequesterGone { .. } => {
                 Ok(declined_unvouched(NotPlacedReason::Unobservable))
             }
-            Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
+            ErasedBack::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// Erases a probe that showed behind `before` (ledger at `seq`), and reads
-    /// until the erase is reached -- the composer shows `before` again, or
-    /// something that no longer ends with the probe -- or another writer
-    /// moves the ledger, so the next reader sees what was there before the
-    /// probe. [`GuardedWrite::Moved`] when the erase itself was not written.
+    /// Erases `count` probes that showed behind `before` (ledger at `seq`),
+    /// and reads, on a screen that accepts a write, until the erase is
+    /// reached -- the composer shows `before` again, or something that no
+    /// longer ends with one of `flight`'s probes -- or another writer moves
+    /// the ledger, so the next reader sees what was there before the probes.
+    /// Probes a dialog kept from being erased are counted behind the next
+    /// probe and erased again.
     async fn erase_probe_behind(
         &self,
         seq: u64,
-        probe: char,
+        count: usize,
+        flight: Flight,
         before: &BehindProbe,
-    ) -> PtyResult<GuardedWrite> {
-        if self
-            .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(GuardedWrite::Moved);
-        }
-        self.wait_for_composer_unwatched("erase_probe_behind", seq + 1, |observation| {
-            // A screen not readable yet is no sign the erase was reached.
-            let erased = match &observation.readout {
-                ComposerReadout::Body(text) | ComposerReadout::Tail(text) => !text.ends_with(probe),
-                ComposerReadout::Empty => true,
-                ComposerReadout::NotObserved => false,
+    ) -> PtyResult<ErasedBehind> {
+        let (mut seq, mut count, mut flight) = (seq, count, flight);
+        let mut moved = ErasedBehind::Moved;
+        loop {
+            if self
+                .write_judged(&self.erase_keys(count), seq, TakeBackRegistration::Empty)
+                .await?
+                == GuardedWrite::Moved
+            {
+                return Ok(moved);
+            }
+            moved = ErasedBehind::Erased;
+            let check = ProbeCheck {
+                route: "erase_probe_behind",
+                at: seq + 1,
+                first: FirstWrite::Written,
+                flight,
+                avoid: before.end().into_iter().collect(),
+                expected: None,
+                counted: false,
+                unconfirmed: None,
             };
-            (erased || before.shows_again_in(&observation.readout)).then_some(())
-        })
-        .await?;
-        Ok(GuardedWrite::Written)
+            let reached = |observation: &ComposerObservation, typed: &[char]| {
+                // A screen not readable yet is no sign the erase was reached.
+                let erased = match &observation.readout {
+                    ComposerReadout::Body(text) | ComposerReadout::Tail(text) => {
+                        !last_visible(text).is_some_and(|c| typed.contains(&c))
+                    }
+                    ComposerReadout::Empty => true,
+                    ComposerReadout::NotObserved => false,
+                };
+                (screen_accepts_write(observation)
+                    && (erased || before.shows_again_in(&observation.readout)))
+                .then(|| (before.clone(), Vec::new()))
+            };
+            match self
+                .confirm_own_probes(
+                    check,
+                    &mut Requester::none(),
+                    |_| TakeBackRegistration::Empty,
+                    reached,
+                )
+                .await?
+            {
+                ProbeWait::Shown {
+                    shown,
+                    at,
+                    flight: next,
+                    ..
+                } if !shown.is_empty() => {
+                    (seq, count, flight) = (at, shown.len(), next);
+                }
+                ProbeWait::Shown { .. }
+                | ProbeWait::NotWritten
+                | ProbeWait::OtherWriter { .. }
+                | ProbeWait::RequesterGone { .. } => return Ok(ErasedBehind::Erased),
+                ProbeWait::Undecidable => return Ok(ErasedBehind::Undecidable),
+            }
+        }
     }
 
-    /// Writes the probe behind everything written so far (ledger at `seq`)
-    /// and reads until the composer has changed from `before_probe` and ends
-    /// with the probe on a screen that accepts a write. Input is handled in
+    /// Writes a probe behind everything written so far (ledger at `seq`) and
+    /// reads until the composer has changed from what `observed` read and
+    /// ends with it, on a screen that accepts a write. Input is handled in
     /// order, so a probe that shows means everything before it has been
-    /// handled. A requester that leaves first writes no probe, and one that
-    /// leaves while it is on its way leaves it recorded as unanswered.
+    /// handled. `in_flight` are probes of an earlier write that may still be
+    /// on their way, which this probe differs from. A requester that leaves
+    /// first writes no probe, and one that leaves while it is on its way
+    /// leaves it recorded as unanswered.
     async fn read_through_probe(
         &self,
-        probe: char,
         seq: u64,
-        before_probe: &ComposerReadout,
+        observed: &ComposerObservation,
+        in_flight: &[char],
         requester: &mut Requester,
     ) -> PtyResult<ProbeReading> {
         if requester.has_left() {
             return Ok(ProbeReading::Abandoned);
         }
-        let probe_text = probe.to_string();
-        let after_probe = seq + 1;
-        // Nothing before this probe is confirmed as this call's own yet.
-        if self
-            .write_judged(probe_text.as_bytes(), seq, TakeBackRegistration::Empty)
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(ProbeReading::Interrupted);
-        }
-        lock_recover(&self.own_part).left = OwnLeft::UnconfirmedProbe(before_probe.clone());
-        let shown_before = |observation: &ComposerObservation| {
+        let before_probe = &observed.readout;
+        let check = ProbeCheck {
+            route: "read_through_probe",
+            at: seq,
+            first: FirstWrite::Probe,
+            flight: Flight {
+                typed: in_flight.to_vec(),
+                closures: observed.closed_screens,
+            },
+            avoid: readout_end(before_probe).into_iter().collect(),
+            expected: None,
+            counted: false,
+            unconfirmed: Some(before_probe),
+        };
+        let shown_before = |observation: &ComposerObservation, typed: &[char]| {
+            let probe = *typed.last()?;
             if &observation.readout == before_probe || !screen_accepts_write(observation) {
                 return None;
             }
-            BehindProbe::of(&observation.readout, probe)
+            BehindProbe::of(&observation.readout, probe).map(|behind| (behind, vec![probe]))
         };
-        match self
-            .wait_for_composer(
-                "read_through_probe",
-                Some(after_probe),
-                requester,
-                shown_before,
-            )
-            .await
-        {
-            ComposerWait::Done(behind) => Ok(ProbeReading::Shown(behind)),
-            ComposerWait::OtherWriter => Ok(ProbeReading::Interrupted),
-            ComposerWait::RequesterGone => {
-                // Still on its way: the next call settles it by this count.
-                *lock_recover(&self.unanswered_probe) = Some(after_probe);
-                Ok(ProbeReading::Abandoned)
+        // Nothing before this probe is confirmed as this call's own yet.
+        Ok(
+            match self
+                .confirm_own_probes(
+                    check,
+                    requester,
+                    |_| TakeBackRegistration::Empty,
+                    shown_before,
+                )
+                .await?
+            {
+                ProbeWait::Shown {
+                    behind,
+                    shown,
+                    at,
+                    flight,
+                    observation,
+                } => ProbeReading::Shown {
+                    behind,
+                    shown,
+                    at,
+                    flight,
+                    observation,
+                },
+                ProbeWait::NotWritten | ProbeWait::OtherWriter { .. } => ProbeReading::Interrupted,
+                ProbeWait::RequesterGone { .. } => ProbeReading::Abandoned,
+                ProbeWait::Undecidable => ProbeReading::Undecidable,
+            },
+        )
+    }
+
+    /// The one wait on the daemon's own probes, for every write it judges by
+    /// one and every erase of one: types the first probe when `check` asks
+    /// for it, then reads until the probes are read.
+    ///
+    /// Until a screen the gate closes on has been counted (see
+    /// [`ComposerObservation::closed_screens`]), `settle` reads them, given
+    /// the probes typed so far. A dialog may have taken a probe or an erase
+    /// as its own input, so once one has been counted and the screen accepts
+    /// a write again with nothing read, the next probe character is typed
+    /// behind (see [`ProbeChars::pick`]). From then on only the last probe
+    /// typed showing decides, and the probes are counted back from the end
+    /// ([`count_own_probes`]). With no character left to type, it ends
+    /// [`ProbeWait::Undecidable`]: the number of probes is the bound, not a
+    /// clock. A closed screen that took nothing costs one probe typed and
+    /// erased again. Probes it ends without seeing are left through
+    /// [`WindowEntry::leave_unseen_probes`].
+    ///
+    /// # Errors
+    ///
+    /// [`crate::pty::PtyError::ChildExited`] once the child exits, and what a
+    /// probe's write propagates.
+    async fn confirm_own_probes(
+        &self,
+        check: ProbeCheck<'_>,
+        requester: &mut Requester,
+        registration: impl Fn(&[char]) -> TakeBackRegistration,
+        mut settle: impl FnMut(&ComposerObservation, &[char]) -> Option<(BehindProbe, Vec<char>)>,
+    ) -> PtyResult<ProbeWait> {
+        let ProbeCheck {
+            route,
+            mut at,
+            first,
+            mut flight,
+            avoid,
+            expected,
+            mut counted,
+            unconfirmed,
+        } = check;
+        let Some(probes) = self.input.probe.as_ref() else {
+            return Ok(ProbeWait::Undecidable);
+        };
+        self.leave_unseen_probes(&flight, unconfirmed, None);
+        if first == FirstWrite::Probe {
+            let probe = probes.pick_first(&flight.typed, &avoid);
+            if !self
+                .type_probe(probe, at, &mut flight, &registration, unconfirmed)
+                .await?
+            {
+                return Ok(ProbeWait::NotWritten);
             }
-            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+            at += 1;
         }
+        loop {
+            let step = {
+                let flight = &flight;
+                self.wait_for_composer(route, Some(at), requester, |observation| {
+                    let decided = if counted {
+                        screen_accepts_write(observation)
+                            .then(|| {
+                                count_own_probes(&observation.readout, &flight.typed, expected)
+                            })
+                            .flatten()
+                    } else {
+                        settle(observation, &flight.typed)
+                    };
+                    probe_step(observation, probes, flight, &avoid, decided)
+                        .map(|step| (step, observation.clone()))
+                })
+                .await
+            };
+            match step {
+                ComposerWait::Done((ProbeStep::Decided(behind, shown), observation)) => {
+                    // What follows (the erase of these probes) is decided on
+                    // this reading, so only a screen closed after it counts.
+                    flight.closures = observation.closed_screens;
+                    return Ok(ProbeWait::Shown {
+                        behind,
+                        shown,
+                        at,
+                        flight,
+                        observation,
+                    });
+                }
+                ComposerWait::Done((ProbeStep::Retype(probe, closures), _)) => {
+                    if !self
+                        .type_probe(probe, at, &mut flight, &registration, unconfirmed)
+                        .await?
+                    {
+                        return Ok(ProbeWait::OtherWriter { at });
+                    }
+                    at += 1;
+                    flight.closures = closures;
+                    counted = true;
+                    tracing::debug!(
+                        window_id = %self.window_id(),
+                        route,
+                        typed = flight.typed.len(),
+                        "a closed screen may have taken a probe; typed the next one"
+                    );
+                }
+                ComposerWait::Done((ProbeStep::Undecidable, _)) => {
+                    tracing::info!(
+                        window_id = %self.window_id(),
+                        route,
+                        typed = flight.typed.len(),
+                        "a closed screen may have taken every probe; declining the write"
+                    );
+                    return Ok(ProbeWait::Undecidable);
+                }
+                ComposerWait::OtherWriter => return Ok(ProbeWait::OtherWriter { at }),
+                ComposerWait::RequesterGone => {
+                    self.leave_unseen_probes(&flight, unconfirmed, Some(at));
+                    return Ok(ProbeWait::RequesterGone { at, flight });
+                }
+                ComposerWait::Exited => return Err(crate::pty::PtyError::ChildExited),
+            }
+        }
+    }
+
+    /// Writes `probe` at ledger `at` as the next of `flight`'s probes, and
+    /// leaves them as unconfirmed behind `unconfirmed` when given.
+    /// `false` when another writer wrote first, and nothing was written.
+    async fn type_probe(
+        &self,
+        probe: char,
+        at: u64,
+        flight: &mut Flight,
+        registration: &impl Fn(&[char]) -> TakeBackRegistration,
+        unconfirmed: Option<&ComposerReadout>,
+    ) -> PtyResult<bool> {
+        let mut typed = flight.typed.clone();
+        typed.push(probe);
+        let mut bytes = [0u8; 4];
+        if self
+            .write_judged(
+                probe.encode_utf8(&mut bytes).as_bytes(),
+                at,
+                registration(&typed),
+            )
+            .await?
+            == GuardedWrite::Moved
+        {
+            return Ok(false);
+        }
+        flight.typed = typed;
+        self.leave_unseen_probes(flight, unconfirmed, None);
+        Ok(true)
+    }
+
+    /// The one place probes a check has typed and not seen counted are left:
+    /// how many of them are in the composer is never taken from how many were
+    /// typed, since a dialog may have taken any of them, but counted back
+    /// from the end of a later reading ([`probes_behind`]). Typed behind
+    /// `unconfirmed`, they are the call's own to check once another writer
+    /// ends it ([`WindowEntry::check_unconfirmed_probe`]); left by a
+    /// requester at ledger count `unanswered_at`, the next call settles them
+    /// while nothing is written since.
+    fn leave_unseen_probes(
+        &self,
+        flight: &Flight,
+        unconfirmed: Option<&ComposerReadout>,
+        unanswered_at: Option<u64>,
+    ) {
+        if flight.typed.is_empty() {
+            return;
+        }
+        if let Some(before) = unconfirmed {
+            lock_recover(&self.own_part).left = OwnLeft::UnconfirmedProbe {
+                before: before.clone(),
+                probes: flight.typed.clone(),
+            };
+        }
+        if let Some(at) = unanswered_at {
+            *lock_recover(&self.unanswered_probe) =
+                Some((at, flight.typed.clone(), flight.closures));
+        }
+    }
+
+    /// The erase key, `count` times over, as one write.
+    fn erase_keys(&self, count: usize) -> Vec<u8> {
+        self.input.erase.repeat(count)
     }
 
     /// Whether the write ledger alone vouches for
@@ -3092,19 +3710,21 @@ impl WindowEntry {
     /// a fresh reading of its own; `seq` is the ledger that empty reading was
     /// taken at.
     ///
-    /// A screen that stops accepting a write once something showed (a dialog
-    /// covering the composer) is waited out, never declined on. A write from
-    /// another writer ends the call with the body reported as remaining: the
-    /// body is registered as this call's own, so that writer's bytes go out
-    /// behind its take-back, and nothing more of this plan is written after
-    /// them ([`WindowEntry::submit_message`] then checks what is left).
-    /// A requester that leaves once the body is written gets no submit key;
+    /// The probe is typed only on a screen that accepts a write: a dialog
+    /// covering the composer once the body is written is waited out first,
+    /// never declined on. A dialog that comes up after the probe is waited
+    /// out too, and the next probe character is typed behind it when nothing
+    /// shows (see [`WindowEntry::confirm_own_probes`]). A write from another
+    /// writer ends the call with the body reported as remaining: the body is
+    /// registered as this call's own, so that writer's bytes go out behind
+    /// its take-back, and nothing more of this plan is written after them
+    /// ([`WindowEntry::submit_message`] then checks what is left). A
+    /// requester that leaves once the body is written gets no submit key;
     /// the body is taken back instead (see
     /// [`WindowEntry::take_back_for_departed_requester`]).
     async fn write_fresh_and_decide(
         &self,
         line: &ComposerLine,
-        probe: char,
         observed: &ComposerObservation,
         seq: u64,
         stage: SendStage,
@@ -3149,82 +3769,128 @@ impl WindowEntry {
         }
         if requester.has_left() {
             return self
-                .take_back_for_departed_requester(line.as_str(), probe, after_body)
+                .take_back_for_departed_requester(line.as_str(), after_body)
                 .await;
         }
-
-        let after_probe = after_body + 1;
-        if self
-            .write_judged(
-                probe.to_string().as_bytes(),
-                after_body,
-                self.own_text(&line.with_probe(probe)),
+        // Closed screens counted before this reading are not taken for one
+        // that took the probe.
+        let accepting = |observation: &ComposerObservation| {
+            (screen_accepts_write(observation)
+                && observation.readout != ComposerReadout::NotObserved)
+                .then(|| observation.clone())
+        };
+        let ahead = match self
+            .wait_for_composer(
+                "write_fresh_and_decide",
+                Some(after_body),
+                requester,
+                accepting,
             )
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(declined(NotPlacedReason::Interrupted, Some(after_body)));
-        }
-        match self
-            .wait_for_reflection(line, probe, after_probe, requester)
             .await
         {
-            ComposerWait::Done(BehindProbe::Text(shown)) => {
+            ComposerWait::Done(observation) => observation,
+            ComposerWait::OtherWriter => {
+                return Ok(declined(NotPlacedReason::Interrupted, Some(after_body)));
+            }
+            ComposerWait::RequesterGone => {
+                return self
+                    .take_back_for_departed_requester(line.as_str(), after_body)
+                    .await;
+            }
+            ComposerWait::Exited => return Err(crate::pty::PtyError::ChildExited),
+        };
+        let check = ProbeCheck {
+            route: "wait_for_reflection",
+            at: after_body,
+            first: FirstWrite::Probe,
+            flight: Flight {
+                typed: Vec::new(),
+                closures: ahead.closed_screens,
+            },
+            avoid: last_visible(line.as_str())
+                .into_iter()
+                .chain(readout_end(&ahead.readout))
+                .collect(),
+            expected: Some(line),
+            counted: false,
+            unconfirmed: None,
+        };
+        match self.wait_for_reflection(line, check, requester).await? {
+            ProbeWait::Shown {
+                behind: BehindProbe::Text(front),
+                shown,
+                at,
+                flight,
+                ..
+            } => {
                 self.erase_probe_then_submit(
                     line,
-                    probe,
-                    &shown,
+                    &front,
                     &submit_step,
-                    after_probe,
+                    at,
+                    shown.len(),
+                    flight,
                     requester,
                 )
                 .await
             }
-            ComposerWait::Done(BehindProbe::Alone) => self.erase_dropped_probe(after_probe).await,
-            ComposerWait::OtherWriter => {
-                Ok(declined(NotPlacedReason::Interrupted, Some(after_probe)))
-            }
-            ComposerWait::RequesterGone => {
-                self.take_back_for_departed_requester(&line.with_probe(probe), probe, after_probe)
+            ProbeWait::Shown {
+                behind: BehindProbe::Alone,
+                shown,
+                at,
+                flight,
+                ..
+            } => self.erase_dropped_probe(at, shown.len(), flight).await,
+            ProbeWait::NotWritten => Ok(declined(NotPlacedReason::Interrupted, Some(after_body))),
+            ProbeWait::OtherWriter { at } => Ok(declined(NotPlacedReason::Interrupted, Some(at))),
+            ProbeWait::RequesterGone { at, flight } => {
+                self.take_back_for_departed_requester(&line.with_probes(&flight.typed), at)
                     .await
             }
-            ComposerWait::Exited => Err(crate::pty::PtyError::ChildExited),
+            ProbeWait::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// [`WindowEntry::wait_for_composer`] for what a fresh `line` and the
-    /// probe behind it (ledger at `seq`) leave in the composer, on a screen
-    /// that accepts a write.
+    /// [`WindowEntry::confirm_own_probes`] for what a fresh `line` and the
+    /// probes behind it leave in the composer, on a screen that accepts a
+    /// write.
     async fn wait_for_reflection(
         &self,
         line: &ComposerLine,
-        probe: char,
-        seq: u64,
+        check: ProbeCheck<'_>,
         requester: &mut Requester,
-    ) -> ComposerWait<BehindProbe> {
+    ) -> PtyResult<ProbeWait> {
         let started = Instant::now();
         let reflection = self
-            .wait_for_composer("wait_for_reflection", Some(seq), requester, |observation| {
-                if screen_accepts_write(observation) {
-                    reflection_of(&observation.readout, line, probe)
-                } else {
-                    None
-                }
-            })
-            .await;
+            .confirm_own_probes(
+                check,
+                requester,
+                |typed| self.own_text(&line.with_probes(typed)),
+                reflection_settle(line),
+            )
+            .await?;
         let (outcome, reflected) = match &reflection {
-            ComposerWait::Done(BehindProbe::Text(ShownText::Body(before))) => {
+            ProbeWait::Shown {
+                behind: BehindProbe::Text(ShownText::Body(before)),
+                ..
+            } => {
                 self.note_read_back(before, line);
                 (
                     "behind",
                     composer_text_matches_ignoring_lost_whitespace(before, line.as_str()),
                 )
             }
-            ComposerWait::Done(BehindProbe::Alone) => ("dropped", false),
-            ComposerWait::Done(BehindProbe::Text(ShownText::Tail(_))) => ("behind_tail", true),
-            ComposerWait::OtherWriter => ("other_writer", false),
-            ComposerWait::RequesterGone => ("requester_gone", false),
-            ComposerWait::Exited => ("exited", false),
+            ProbeWait::Shown {
+                behind: BehindProbe::Alone,
+                ..
+            } => ("dropped", false),
+            ProbeWait::Shown {
+                behind: BehindProbe::Text(ShownText::Tail(before)),
+                ..
+            } => ("behind_tail", tail_is_end_of(before, line.as_str())),
+            ProbeWait::NotWritten | ProbeWait::OtherWriter { .. } => ("other_writer", false),
+            ProbeWait::RequesterGone { .. } => ("requester_gone", false),
+            ProbeWait::Undecidable => ("undecidable", false),
         };
         // Whether what shows before the probe matches the body this call
         // wrote is not part of the decision, but is worth seeing when
@@ -3237,100 +3903,136 @@ impl WindowEntry {
             reflected,
             "composer reflection observed"
         );
-        reflection
+        Ok(reflection)
     }
 
-    /// Erases a probe that showed behind the composer's text (ledger at
-    /// `seq`) and waits until the composer reads as `target` again, on a
+    /// Erases `count` probes that showed behind the composer's text (ledger
+    /// at `seq`) and waits until the composer reads as `target` again, on a
     /// screen that accepts a write. A reading that cannot be read is waited
     /// on, not taken for the erase having been reached. `own` is this call's
-    /// text the composer holds once the probe is erased. `None` when another
-    /// write got in before the erase, which is then not written.
+    /// text the composer holds once the probes are erased. Probes a dialog
+    /// kept from being erased are counted behind the next probe and erased
+    /// again.
     async fn erase_probe_back_to(
         &self,
         seq: u64,
+        count: usize,
+        flight: Flight,
         target: &ShownText,
         own: &ComposerLine,
         requester: &mut Requester,
-    ) -> PtyResult<Option<ComposerWait<()>>> {
-        if self
-            .write_judged(&self.input.erase, seq, self.own_text(own.as_str()))
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(None);
+    ) -> PtyResult<ErasedBack> {
+        let (mut seq, mut count, mut flight) = (seq, count, flight);
+        loop {
+            if self
+                .write_judged(&self.erase_keys(count), seq, self.own_text(own.as_str()))
+                .await?
+                == GuardedWrite::Moved
+            {
+                return Ok(ErasedBack::OtherWriter { at: seq });
+            }
+            let check = ProbeCheck {
+                route: "erase_probe_back_to",
+                at: seq + 1,
+                first: FirstWrite::Written,
+                flight,
+                avoid: target.end().into_iter().collect(),
+                expected: None,
+                counted: false,
+                unconfirmed: None,
+            };
+            let reads_as_before = |observation: &ComposerObservation, _: &[char]| {
+                (screen_accepts_write(observation) && target.restored_in(&observation.readout, own))
+                    .then(|| (BehindProbe::Text(target.clone()), Vec::new()))
+            };
+            match self
+                .confirm_own_probes(
+                    check,
+                    requester,
+                    |typed| self.own_text(&own.with_probes(typed)),
+                    reads_as_before,
+                )
+                .await?
+            {
+                ProbeWait::Shown { shown, at, .. } if shown.is_empty() => {
+                    return Ok(ErasedBack::Restored { at });
+                }
+                ProbeWait::Shown {
+                    shown,
+                    at,
+                    flight: next,
+                    ..
+                } => (seq, count, flight) = (at, shown.len(), next),
+                ProbeWait::NotWritten => return Ok(ErasedBack::OtherWriter { at: seq + 1 }),
+                ProbeWait::OtherWriter { at } => return Ok(ErasedBack::OtherWriter { at }),
+                ProbeWait::RequesterGone { at, flight } => {
+                    return Ok(ErasedBack::RequesterGone { at, flight });
+                }
+                ProbeWait::Undecidable => return Ok(ErasedBack::Undecidable),
+            }
         }
-        let reads_as_before = |observation: &ComposerObservation| {
-            (screen_accepts_write(observation) && target.restored_in(&observation.readout, own))
-                .then_some(())
-        };
-        Ok(Some(
-            self.wait_for_composer(
-                "erase_probe_back_to",
-                Some(seq + 1),
-                requester,
-                reads_as_before,
-            )
-            .await,
-        ))
     }
 
-    /// The body landed and the probe shows behind it (ledger at `seq`).
-    /// Erases the probe and presses the submit key once the composer reads as
+    /// The body landed and `count` probes show behind it (ledger at `seq`).
+    /// Erases them and presses the submit key once the composer reads as
     /// `target` again.
+    // The probes to erase are part of what the caller found.
+    #[allow(clippy::too_many_arguments)]
     async fn erase_probe_then_submit(
         &self,
         line: &ComposerLine,
-        probe: char,
         target: &ShownText,
         submit_step: &SubmitStep,
         seq: u64,
+        count: usize,
+        flight: Flight,
         requester: &mut Requester,
     ) -> PtyResult<SubmitJudgment> {
         if requester.has_left() {
             return self
-                .take_back_for_departed_requester(&line.with_probe(probe), probe, seq)
+                .take_back_for_departed_requester(&line.with_probes(&flight.typed), seq)
                 .await;
         }
-        let after_erase = seq + 1;
         match self
-            .erase_probe_back_to(seq, target, line, requester)
+            .erase_probe_back_to(seq, count, flight, target, line, requester)
             .await?
         {
-            Some(ComposerWait::Done(())) => self.press_submit_key(submit_step, after_erase).await,
-            None => Ok(declined(NotPlacedReason::Interrupted, Some(seq))),
-            Some(ComposerWait::OtherWriter) => {
-                Ok(declined(NotPlacedReason::Interrupted, Some(after_erase)))
-            }
-            Some(ComposerWait::RequesterGone) => {
-                self.take_back_for_departed_requester(&line.with_probe(probe), probe, after_erase)
+            ErasedBack::Restored { at } => self.press_submit_key(submit_step, at).await,
+            ErasedBack::OtherWriter { at } => Ok(declined(NotPlacedReason::Interrupted, Some(at))),
+            ErasedBack::RequesterGone { at, flight } => {
+                self.take_back_for_departed_requester(&line.with_probes(&flight.typed), at)
                     .await
             }
-            Some(ComposerWait::Exited) => Err(crate::pty::PtyError::ChildExited),
+            ErasedBack::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// The receiver dropped the body and shows the probe alone (ledger at
-    /// `seq`): erases the probe and declines once the composer reads empty,
+    /// The receiver dropped the body and shows `count` probes alone (ledger
+    /// at `seq`): erases them and declines once the composer reads empty,
     /// nothing of this call's left behind.
-    async fn erase_dropped_probe(&self, seq: u64) -> PtyResult<SubmitJudgment> {
-        match self.erase_probe(seq).await? {
+    async fn erase_dropped_probe(
+        &self,
+        seq: u64,
+        count: usize,
+        flight: Flight,
+    ) -> PtyResult<SubmitJudgment> {
+        match self.erase_probe(seq, count, flight).await? {
             ProbeErased::Emptied(..) => Ok(declined(NotPlacedReason::NotReflected, None)),
             ProbeErased::Interrupted(_) => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
+            ProbeErased::Undecidable => Ok(self.declined_undecidable()),
         }
     }
 
-    /// The requester left once this call had written `written` into the
-    /// composer, leaving the ledger at `seq`. Takes it back and answers once
-    /// the composer is confirmed empty, however long the receiver takes,
-    /// holding the window's turn meanwhile so nothing is written on top.
-    /// Without a way to take it back, the body is reported as remaining and
-    /// the degenerate-empty marker stops a later attempt from writing it a
-    /// second time.
+    /// The requester left once this call had written `written` (its line and
+    /// the probes typed behind it) into the composer, leaving the ledger at
+    /// `seq`. Takes it back and answers once the composer is confirmed empty,
+    /// however long the receiver takes, holding the window's turn meanwhile
+    /// so nothing is written on top. Without a way to take it back, the body
+    /// is reported as remaining and the degenerate-empty marker stops a later
+    /// attempt from writing it a second time.
     async fn take_back_for_departed_requester(
         &self,
         written: &str,
-        probe: char,
         seq: u64,
     ) -> PtyResult<SubmitJudgment> {
         if self.input.take_back() == TakeBack::Unavailable {
@@ -3343,14 +4045,14 @@ impl WindowEntry {
             .wait_for_composer_unwatched("take_back_for_departed_requester", seq, |observation| {
                 (screen_accepts_write(observation)
                     && !matches!(observation.readout, ComposerReadout::NotObserved))
-                .then(|| observation.readout.clone())
+                .then(|| observation.clone())
             })
             .await?
         else {
             return Ok(declined(NotPlacedReason::Interrupted, Some(seq)));
         };
         match self
-            .take_back_and_settle(written, probe, seq, &before_take_back)
+            .take_back_and_settle(written, seq, &before_take_back)
             .await?
         {
             TakenBack::Emptied(..) => Ok(declined(NotPlacedReason::NotReflected, None)),
@@ -3366,7 +4068,6 @@ impl WindowEntry {
     async fn take_back_own_residue_then_write(
         &self,
         line: &ComposerLine,
-        probe: char,
         residue: LineResidue<'_>,
         observed: &ComposerObservation,
         stage: SendStage,
@@ -3385,16 +4086,11 @@ impl WindowEntry {
             ));
         }
         match self
-            .take_back_and_settle(
-                residue.line.as_str(),
-                probe,
-                residue.write_seq,
-                &observed.readout,
-            )
+            .take_back_and_settle(residue.line.as_str(), residue.write_seq, observed)
             .await?
         {
             TakenBack::Emptied(settled, seq) => {
-                self.write_fresh_and_decide(line, probe, &settled, seq, stage, requester)
+                self.write_fresh_and_decide(line, &settled, seq, stage, requester)
                     .await
             }
             TakenBack::Declined(judgment) => Ok(judgment),
@@ -3403,15 +4099,14 @@ impl WindowEntry {
 
     /// Writes the take-back of `written` (whose write left the ledger at
     /// `seq_after_written`, and the composer reading as `before_take_back`),
-    /// then the profile's probe, and settles what the composer holds once the
-    /// probe shows (see [`WindowEntry::settle_with_probe`]). A foreign write
-    /// since is a declined judgment that is never taken back.
+    /// then a probe, and settles what the composer holds once the probe
+    /// shows (see [`WindowEntry::settle_with_probe`]). A foreign write since
+    /// is a declined judgment that is never taken back.
     async fn take_back_and_settle(
         &self,
         written: &str,
-        probe: char,
         seq_after_written: u64,
-        before_take_back: &ComposerReadout,
+        before_take_back: &ComposerObservation,
     ) -> PtyResult<TakenBack> {
         // Only a runtime shutting down leaves the size unread, and nothing can
         // be written then either.
@@ -3443,11 +4138,11 @@ impl WindowEntry {
             take_back = ?self.input.take_back(),
             "composer take-back written"
         );
-        self.settle_with_probe(probe, after_take_back, before_take_back, written)
+        self.settle_with_probe(after_take_back, before_take_back, written)
             .await
     }
 
-    /// Writes the probe behind a take-back (ledger at `seq`) and reads until
+    /// Writes a probe behind a take-back (ledger at `seq`) and reads until
     /// the composer ends with it on a screen that accepts a write, with the
     /// take-back reached: the reading differs from `before_take_back` and is
     /// not `written` still showing. The receiver handles input in order, so
@@ -3458,52 +4153,78 @@ impl WindowEntry {
     /// another writer's write meanwhile.
     async fn settle_with_probe(
         &self,
-        probe: char,
         seq: u64,
-        before_take_back: &ComposerReadout,
+        before_take_back: &ComposerObservation,
         written: &str,
     ) -> PtyResult<TakenBack> {
-        let after_probe = seq + 1;
-        if self
-            .write_judged(
-                probe.to_string().as_bytes(),
-                seq,
-                self.own_text(&format!("{written}{probe}")),
-            )
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(TakenBack::Declined(declined(
-                NotPlacedReason::Interrupted,
-                Some(seq),
-            )));
-        }
-        let probe_shown_alone = |observation: &ComposerObservation| match &observation.readout {
-            ComposerReadout::Body(text)
-                if &observation.readout != before_take_back
-                    && screen_accepts_write(observation)
-                    && !reads_as_before_take_back(text, written, probe) =>
-            {
-                text.strip_suffix(probe).map(str::is_empty)
+        let before = &before_take_back.readout;
+        let check = ProbeCheck {
+            route: "settle_with_probe",
+            at: seq,
+            first: FirstWrite::Probe,
+            flight: Flight {
+                typed: Vec::new(),
+                closures: before_take_back.closed_screens,
+            },
+            avoid: readout_end(before)
+                .into_iter()
+                .chain(last_visible(split_own_probes(written).0))
+                .collect(),
+            expected: None,
+            counted: false,
+            unconfirmed: None,
+        };
+        let probe_shown = |observation: &ComposerObservation, typed: &[char]| {
+            let probe = *typed.last()?;
+            match &observation.readout {
+                ComposerReadout::Body(text)
+                    if &observation.readout != before
+                        && screen_accepts_write(observation)
+                        && !reads_as_before_take_back(text, written) =>
+                {
+                    let front = text.strip_suffix(probe)?;
+                    let behind = if front.is_empty() {
+                        BehindProbe::Alone
+                    } else {
+                        BehindProbe::Text(ShownText::Body(front.to_string()))
+                    };
+                    Some((behind, vec![probe]))
+                }
+                ComposerReadout::Body(_)
+                | ComposerReadout::Empty
+                | ComposerReadout::NotObserved
+                | ComposerReadout::Tail(_) => None,
             }
-            ComposerReadout::Body(_)
-            | ComposerReadout::Empty
-            | ComposerReadout::NotObserved
-            | ComposerReadout::Tail(_) => None,
+        };
+        let registration = |typed: &[char]| {
+            let mut text = written.to_string();
+            text.extend(typed);
+            self.own_text(&text)
         };
         match self
-            .wait_for_composer_unwatched("settle_with_probe", after_probe, probe_shown_alone)
+            .confirm_own_probes(check, &mut Requester::none(), registration, probe_shown)
             .await?
         {
-            Some(true) => {
-                let erased = self.erase_probe(after_probe).await?;
+            ProbeWait::Shown {
+                behind: BehindProbe::Alone,
+                shown,
+                at,
+                flight,
+                ..
+            } => {
+                let erased = self.erase_probe(at, shown.len(), flight).await?;
                 Ok(self.taken_back_once(erased))
             }
-            Some(false) => {
-                // Input is handled in order, so this erases the probe behind
+            ProbeWait::Shown {
+                behind: BehindProbe::Text(_),
+                shown,
+                at,
+                ..
+            } => {
+                // Input is handled in order, so this erases the probes behind
                 // whatever the take-back left.
                 match self
-                    .write_judged(&self.input.erase, after_probe, self.own_text(written))
+                    .write_judged(&self.erase_keys(shown.len()), at, self.own_text(written))
                     .await?
                 {
                     GuardedWrite::Written => Ok(TakenBack::Declined(
@@ -3514,72 +4235,125 @@ impl WindowEntry {
                     ))),
                 }
             }
-            None => Ok(TakenBack::Declined(declined_unvouched(
+            ProbeWait::NotWritten => Ok(TakenBack::Declined(declined(
                 NotPlacedReason::Interrupted,
+                Some(seq),
             ))),
+            ProbeWait::OtherWriter { .. } | ProbeWait::RequesterGone { .. } => Ok(
+                TakenBack::Declined(declined_unvouched(NotPlacedReason::Interrupted)),
+            ),
+            ProbeWait::Undecidable => Ok(TakenBack::Declined(self.declined_undecidable())),
         }
     }
 
-    /// A take-back's outcome once its probe has been erased.
+    /// A take-back's outcome once its probes have been erased.
     fn taken_back_once(&self, erased: ProbeErased) -> TakenBack {
         match erased {
             ProbeErased::Emptied(settled, seq) => TakenBack::Emptied(settled, seq),
             ProbeErased::Interrupted(after_erase) => {
                 TakenBack::Declined(declined(NotPlacedReason::Interrupted, Some(after_erase)))
             }
+            ProbeErased::Undecidable => TakenBack::Declined(self.declined_undecidable()),
         }
     }
 
-    /// Erases a probe that shows alone in the composer, with the ledger at
-    /// `seq` and nothing else written since, and reads until the composer is
-    /// empty on a screen that accepts a write, or another writer moves the
-    /// ledger. Erasing its own probe is cleanup, so no requester stops it.
-    async fn erase_probe(&self, seq: u64) -> PtyResult<ProbeErased> {
-        let after_erase = seq + 1;
-        if self
-            .write_judged(&self.input.erase, seq, TakeBackRegistration::Empty)
-            .await?
-            == GuardedWrite::Moved
-        {
-            return Ok(ProbeErased::Interrupted(seq));
-        }
-        let emptied = |observation: &ComposerObservation| {
-            (matches!(observation.readout, ComposerReadout::Empty)
-                && screen_accepts_write(observation))
-            .then(|| observation.clone())
-        };
-        match self
-            .wait_for_composer_unwatched("erase_probe", after_erase, emptied)
-            .await?
-        {
-            Some(settled) => {
-                *lock_recover(&self.unanswered_probe) = None;
-                *lock_recover(&self.degenerate_since) = None;
-                Ok(ProbeErased::Emptied(settled, after_erase))
+    /// Erases `count` probes that show alone in the composer, with the ledger
+    /// at `seq` and nothing else written since, and reads until the composer
+    /// is empty on a screen that accepts a write, or another writer moves the
+    /// ledger. Probes a dialog kept from being erased are counted behind the
+    /// next probe and erased again. Erasing its own probes is cleanup, so no
+    /// requester stops it.
+    async fn erase_probe(&self, seq: u64, count: usize, flight: Flight) -> PtyResult<ProbeErased> {
+        let (mut seq, mut count, mut flight) = (seq, count, flight);
+        loop {
+            if self
+                .write_judged(&self.erase_keys(count), seq, TakeBackRegistration::Empty)
+                .await?
+                == GuardedWrite::Moved
+            {
+                return Ok(ProbeErased::Interrupted(seq));
             }
-            None => Ok(ProbeErased::Interrupted(after_erase)),
+            let check = ProbeCheck {
+                route: "erase_probe",
+                at: seq + 1,
+                first: FirstWrite::Written,
+                flight,
+                avoid: Vec::new(),
+                expected: None,
+                counted: false,
+                unconfirmed: None,
+            };
+            let emptied = |observation: &ComposerObservation, _: &[char]| {
+                (matches!(observation.readout, ComposerReadout::Empty)
+                    && screen_accepts_write(observation))
+                .then(|| (BehindProbe::Alone, Vec::new()))
+            };
+            match self
+                .confirm_own_probes(
+                    check,
+                    &mut Requester::none(),
+                    |_| TakeBackRegistration::Empty,
+                    emptied,
+                )
+                .await?
+            {
+                ProbeWait::Shown {
+                    behind: BehindProbe::Alone,
+                    shown,
+                    at,
+                    observation,
+                    ..
+                } if shown.is_empty() => {
+                    *lock_recover(&self.unanswered_probe) = None;
+                    *lock_recover(&self.degenerate_since) = None;
+                    return Ok(ProbeErased::Emptied(observation, at));
+                }
+                ProbeWait::Shown {
+                    behind: BehindProbe::Alone,
+                    shown,
+                    at,
+                    flight: next,
+                    ..
+                } => (seq, count, flight) = (at, shown.len(), next),
+                ProbeWait::Shown {
+                    behind: BehindProbe::Text(_),
+                    ..
+                }
+                | ProbeWait::Undecidable => return Ok(ProbeErased::Undecidable),
+                ProbeWait::NotWritten => return Ok(ProbeErased::Interrupted(seq + 1)),
+                ProbeWait::OtherWriter { at } | ProbeWait::RequesterGone { at, .. } => {
+                    return Ok(ProbeErased::Interrupted(at));
+                }
+            }
         }
     }
 
-    /// Settles a probe an earlier call left unanswered, when the
-    /// composer now holds it alone on a screen that accepts a write and
-    /// nothing was written since: whatever was written before it has been
-    /// handled and nothing else remains, so the probe is erased and the window
-    /// may be written to again.
+    /// Settles probes an earlier call left unanswered, when the composer now
+    /// holds them alone -- the last one typed showing -- on a screen that
+    /// accepts a write and nothing was written since: whatever was written
+    /// before them has been handled and nothing else remains, so they are
+    /// erased and the window may be written to again.
     async fn settle_unanswered_probe(
         &self,
         text: &str,
-        probe: char,
         observed: &ComposerObservation,
     ) -> PtyResult<Option<TakenBack>> {
-        let Some(seq) = *lock_recover(&self.unanswered_probe) else {
+        let Some((seq, probes, _)) = lock_recover(&self.unanswered_probe).clone() else {
             return Ok(None);
         };
-        let probe_alone = text == probe.to_string();
-        if !probe_alone || !screen_accepts_write(observed) || self.write_seq() != seq {
+        if !screen_accepts_write(observed) || self.write_seq() != seq {
             return Ok(None);
         }
-        let erased = self.erase_probe(seq).await?;
+        let Some((BehindProbe::Alone, shown)) =
+            count_own_probes(&ComposerReadout::Body(text.to_string()), &probes, None)
+        else {
+            return Ok(None);
+        };
+        let flight = Flight {
+            typed: probes,
+            closures: observed.closed_screens,
+        };
+        let erased = self.erase_probe(seq, shown.len(), flight).await?;
         Ok(Some(self.taken_back_once(erased)))
     }
 
@@ -3590,6 +4364,13 @@ impl WindowEntry {
     fn decline_unconfirmed_take_back(&self, reason: NotPlacedReason) -> SubmitJudgment {
         *lock_recover(&self.degenerate_since) = Some(self.write_seq());
         declined_unvouched(reason)
+    }
+
+    /// The decline for [`ProbeWait::Undecidable`] on every route: where the
+    /// write went cannot be told from the screen, so it is handled as a
+    /// take-back that could not be confirmed.
+    fn declined_undecidable(&self) -> SubmitJudgment {
+        self.decline_unconfirmed_take_back(NotPlacedReason::NotAccepting)
     }
 
     /// Presses the plan's own submit key once the composer has been
@@ -3756,8 +4537,9 @@ impl WindowEntry {
         }
     }
 
-    /// Whether this window currently has a detector attached (`false` once
-    /// `Exited` teardown has run).
+    /// Whether this window currently has a detector attached: `false` once
+    /// [`WindowEntry::confirm_exited`] has taken it, which happens before
+    /// `Exited` is published.
     pub fn has_detector(&self) -> bool {
         lock_recover(&self.detector).is_some()
     }
@@ -3778,8 +4560,8 @@ impl WindowEntry {
     /// window's teardown has released every holder.
     ///
     /// A driver task that died on its own does not release the handle, so it
-    /// is not seen here; [`publish_detector_loss`] reports that window as
-    /// `unknown` instead.
+    /// is not seen here; the status forwarder reports that window as
+    /// `unknown` instead, until its exit is confirmed.
     pub fn detector_task_alive(&self) -> bool {
         self.detector_weak.strong_count() > 0
     }
@@ -3793,13 +4575,13 @@ impl WindowEntry {
     /// would report the window's *current* generation, which may already be
     /// newer than the change being forwarded.
     pub fn subscribe_status(&self) -> broadcast::Receiver<StatusAt> {
-        self.status_changes.subscribe()
+        self.status_gate.subscribe()
     }
 
     /// The current confirmed status together with the instant it became the
     /// confirmed status, read as one value so the two can never disagree.
     pub fn status_snapshot(&self) -> StatusAt {
-        *self.current_status.borrow()
+        self.status_gate.snapshot()
     }
 
     /// The current confirmed status, projected to [`WindowStatus`] (see
@@ -3821,7 +4603,7 @@ impl WindowEntry {
     /// under load. Used by [`crate::waiter::wait_for_status`], which holds
     /// only the receiver and never a reference back to this entry.
     pub fn watch_status(&self) -> watch::Receiver<StatusAt> {
-        self.current_status.subscribe()
+        self.status_gate.watch()
     }
 
     /// What this window's *current* published pair says about its startup
@@ -3829,46 +4611,102 @@ impl WindowEntry {
     /// [`StartupEvidence::Building`] may wait for the hold to complete; a
     /// caller that gets [`StartupEvidence::Absent`] has nothing to wait for.
     pub fn startup_evidence(&self) -> StartupEvidence {
-        self.ready_hold
-            .observe(self.status_snapshot(), tokio::time::Instant::now())
+        self.status_gate.startup_evidence()
     }
 
     /// Records what a completed hold wait proved, so the next handoff into
     /// this window does not wait again.
     pub fn note_left_startup_phase(&self) {
-        self.ready_hold.latch();
+        self.status_gate.note_left_startup_phase();
+    }
+
+    /// Publishes a status the detector confirmed. A confirmed `Exited` goes
+    /// through [`WindowEntry::confirm_exited`], like every other `Exited`.
+    fn publish_confirmed(&self, confirmed: ConfirmedStatus) {
+        if confirmed.status == DetectedStatus::Exited {
+            let _ = self.confirm_exited();
+        } else {
+            self.status_gate.publish(&self.window_id, confirmed);
+        }
+    }
+
+    /// Fails this window's status back to `Unknown(DetectorStopped)` once its
+    /// detection stopped reporting, unless it has already exited.
+    fn publish_detector_loss(&self) {
+        self.status_gate.publish_loss(&self.window_id);
+    }
+
+    /// Waits, at most `grace`, until the window's holder has ended, then
+    /// publishes an observed exit as [`WindowEntry::confirm_exited`] does. The
+    /// exit is read only after the wait, so a close that ended the child
+    /// reports it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExitUnobserved`] when the session has not reported the
+    /// child's exit by then.
+    pub(crate) async fn settle_close(
+        &self,
+        grace: Duration,
+    ) -> Result<ExitConfirmed, ExitUnobserved> {
+        if !self.session.wait_until_released(grace).await {
+            tracing::warn!(
+                window_id = self.window_id.as_str(),
+                "the window's holder had not ended within the close grace"
+            );
+        }
+        self.confirm_exited()
+    }
+
+    /// Publishes `Exited` if the child's exit has been observed, and returns
+    /// the proof of it; publishes nothing otherwise. Idempotent: a window
+    /// that already reports `Exited` is left as it is and still yields
+    /// [`ExitConfirmed`].
+    ///
+    /// The detector is taken before `Exited` is published, so a reader that
+    /// has seen `Exited` never finds one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExitUnobserved`] while the session has not reported the
+    /// child's exit.
+    fn confirm_exited(&self) -> Result<ExitConfirmed, ExitUnobserved> {
+        if self.session.exit_status().is_none() {
+            return Err(ExitUnobserved { _private: () });
+        }
+        let detector = lock_recover(&self.detector).take();
+        drop(detector);
+        let published = self.status_gate.publish(
+            &self.window_id,
+            ConfirmedStatus {
+                status: DetectedStatus::Exited,
+                evidence_since: tokio::time::Instant::now(),
+            },
+        );
+        if published == Publication::BecameExited {
+            self.participation.raise();
+        }
+        Ok(ExitConfirmed { _private: () })
     }
 
     /// Registers this caller as the (new) attach holder, superseding any
-    /// previous holder (which is notified via the returned generation's
-    /// predecessor's kick channel).
-    pub async fn register_attach(&self) -> (u64, oneshot::Receiver<()>) {
-        let generation = self.attach_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let (kick_tx, kick_rx) = oneshot::channel();
-        {
-            let mut slot = lock_recover(&self.current_attach);
-            if let Some((_, old_kick_tx)) = slot.take() {
-                let _ = old_kick_tx.send(());
-            }
-            *slot = Some((generation, kick_tx));
-        }
-        (generation, kick_rx)
+    /// previous holder, whose receiver then resolves. The attach lives in
+    /// the window's session, with its view (see [`PtySession::show_view`]).
+    pub async fn register_attach(&self) -> (AttachGeneration, oneshot::Receiver<()>) {
+        self.session.attach_view()
     }
 
     /// Clears the attach slot if it is still held by `generation` (a stale
     /// disconnect/reattach must not clobber a newer holder).
-    pub async fn clear_attach_if(&self, generation: u64) {
-        let mut slot = lock_recover(&self.current_attach);
-        if matches!(slot.as_ref(), Some((g, _)) if *g == generation) {
-            *slot = None;
-        }
+    pub async fn clear_attach_if(&self, generation: AttachGeneration) {
+        self.session.detach_view(generation);
     }
 
     /// Whether some connection currently holds this window's attach slot.
     /// Used by [`WindowRegistry`] to decide which `Exited` entries are safe
     /// to evict.
     fn is_attached(&self) -> bool {
-        lock_recover(&self.current_attach).is_some()
+        self.session.is_view_attached()
     }
 
     /// This window's current display name.
@@ -3953,6 +4791,22 @@ impl WindowEntry {
             connections: Arc::clone(&self.mcp_connections),
         }
     }
+}
+
+/// Proof that a window's child exit was observed and its confirmed status
+/// is `Exited`. Only the window itself makes one, as it
+/// publishes or checks `Exited`.
+#[derive(Debug)]
+pub struct ExitConfirmed {
+    _private: (),
+}
+
+/// The child's exit had not been observed, so `Exited` was not published;
+/// the exit watcher publishes it once the exit is reported. Only the window
+/// itself makes one.
+#[derive(Debug)]
+pub struct ExitUnobserved {
+    _private: (),
 }
 
 /// One connection's identification as a window, held for as long as the
@@ -4045,10 +4899,11 @@ pub struct WindowRegistry {
     /// limits are enforced atomically rather than raced past.
     open_lock: AsyncMutex<()>,
     next_id: AtomicU64,
-    /// Per-instance suffix appended to every assigned `window_id`, so that
+    /// What every window's holder is started in. Its boot value is the
+    /// per-instance suffix appended to every assigned `window_id`, so that
     /// the sequence restarting at 1 in a new daemon cannot make an old
     /// client's stale identifier resolve to a different window.
-    boot_nonce: String,
+    holder_host: Arc<HolderHost>,
     /// The one `StatusEvent` auth token every window must adopt, when
     /// [`DaemonConfig::status_token_override`] supplied a well-formed value.
     /// `None` -- the production setting -- means each window gets its own
@@ -4121,13 +4976,14 @@ impl WindowRegistry {
         };
 
         let workspace_walks = tokio::sync::Semaphore::new(config.max_windows);
+        let holder_host = HolderHost::from_config(&config);
 
         Self {
             config,
             entries: Mutex::new(Vec::new()),
             open_lock: AsyncMutex::new(()),
             next_id: AtomicU64::new(0),
-            boot_nonce: boot_nonce(),
+            holder_host,
             status_token_override,
             store_sender: Mutex::new(None),
             window_opened_hook: Mutex::new(None),
@@ -4304,22 +5160,24 @@ impl WindowRegistry {
             prepared.push(self.prepare_injection(injection).await);
         }
 
-        // Re-checked as the binding decision: only a check inside the lock
-        // that is held through registration can count what is really there.
-        let _open_guard = self.open_lock.lock().await;
+        // The binding decision: the limits and the name are decided under the
+        // lock every open and rename takes, and the open in progress holds its
+        // seat and its name from here on, so the lock is not held while the
+        // window's holder starts.
+        let open_guard = self.open_lock.lock().await;
         self.enforce_limits_before_open()?;
-
-        // Decided under the lock every open and rename takes, so two windows
-        // cannot be given one name.
-        let name = claim_name(&lock_recover(&self.entries), &name, on_name_taken)?;
+        let name = {
+            let entries = lock_recover(&self.entries);
+            let opening = lock_recover(&self.opening);
+            claim_name(&entries, &opening, &name, on_name_taken)?
+        };
 
         // Generate window ID and status token early so they can be injected
         // into the child environment before spawn.
         let window_id = self.allocate_window_id();
         let status_token = self.acquire_status_token();
-        // Declared after `_open_guard`, so it is released on every return
-        // path, and only once registration (if any) has already happened.
-        let _opening = self.begin_opening(&window_id);
+        let opening = self.begin_opening(&window_id, &name);
+        drop(open_guard);
 
         let palette = self.default_palette_for(vendor.as_deref());
         let (session, hooks_injected) = self
@@ -4382,7 +5240,13 @@ impl WindowRegistry {
             provenance,
         );
 
-        self.register_window(&session, entry.clone(), detector_handle, detected_rx)?;
+        self.register_window(
+            &session,
+            entry.clone(),
+            detector_handle,
+            detected_rx,
+            &opening,
+        )?;
         // Registered above, so a hook that spawns a watcher observes an entry
         // the registry can already look up by id.
         if let Some(hook) = lock_recover(&self.window_opened_hook).as_ref() {
@@ -4406,7 +5270,8 @@ impl WindowRegistry {
     /// unattached `Exited` entry first and only rejects if none exists.
     fn enforce_limits_before_open(&self) -> Result<(), WindowOpenError> {
         let mut entries = lock_recover(&self.entries);
-        if let Some(index) = self.slot_for_new_entry(&entries)? {
+        let opening = lock_recover(&self.opening).len();
+        if let Some(index) = self.slot_for_new_entry(&entries, opening)? {
             let evicted = entries.remove(index);
             // The last reference to the entry is not let go under the lock.
             drop(entries);
@@ -4415,22 +5280,26 @@ impl WindowRegistry {
         Ok(())
     }
 
-    /// Where a new entry fits among `entries`: `Ok(None)` when it fits as it
-    /// is, `Ok(Some(index))` when the entry at `index` must be evicted first.
+    /// Where a new entry fits among `entries` and the `opening` opens in
+    /// progress, each of which counts as a living window: `Ok(None)` when it
+    /// fits as it is, `Ok(Some(index))` when the entry at `index` must be
+    /// evicted first.
     fn slot_for_new_entry(
         &self,
         entries: &[Arc<WindowEntry>],
+        opening: usize,
     ) -> Result<Option<usize>, WindowOpenError> {
         let living = entries
             .iter()
             .filter(|entry| entry.current_status() != WindowStatus::Exited)
-            .count();
+            .count()
+            + opening;
         if living >= self.config.max_windows {
             return Err(WindowOpenError::ResourceExhausted);
         }
 
         let total_cap = self.config.max_windows.saturating_mul(2);
-        if entries.len() < total_cap {
+        if entries.len() + opening < total_cap {
             return Ok(None);
         }
         entries
@@ -4473,12 +5342,13 @@ impl WindowRegistry {
             detection,
         )?;
         let entries = lock_recover(&self.entries);
-        self.slot_for_new_entry(&entries)?;
+        let opening = lock_recover(&self.opening);
+        self.slot_for_new_entry(&entries, opening.len())?;
         // Only an early refusal, so an approver is not asked about a name
         // that would be refused anyway; the open decides under its lock.
         if name_supplied
             && on_name_taken == OnNameTaken::Refuse
-            && let Some(refusal) = name_refusal(&entries, &validated.name, None)
+            && let Some(refusal) = name_refusal(&entries, &opening, &validated.name, None)
         {
             return Err(refusal.into());
         }
@@ -4506,7 +5376,11 @@ impl WindowRegistry {
     ) -> Result<String, WindowRenameError> {
         validate_window_name(name)?;
         let _open_guard = self.open_lock.lock().await;
-        if let Some(refusal) = name_refusal(&lock_recover(&self.entries), name, Some(entry)) {
+        let refusal = {
+            let entries = lock_recover(&self.entries);
+            name_refusal(&entries, &lock_recover(&self.opening), name, Some(entry))
+        };
+        if let Some(refusal) = refusal {
             return Err(refusal.into());
         }
         Ok(entry.store_name(name))
@@ -4724,13 +5598,17 @@ impl WindowRegistry {
         } else {
             &[]
         };
-        let session = PtySession::spawn_with_palette(
-            &spawn_argv,
-            Some(resolved_cwd),
-            &extra_env,
-            removed_env,
-            Some(palette),
+        let session = PtySession::spawn_window(
+            WindowSpawn {
+                window_id,
+                argv: &spawn_argv,
+                cwd: Some(resolved_cwd),
+                extra_env: &extra_env,
+                removed_env,
+                palette: Some(palette),
+            },
             &self.config,
+            &self.holder_host,
         )
         .await
         .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
@@ -4838,7 +5716,7 @@ impl WindowRegistry {
     /// window ids rather than from a second, independently generated one.
     #[must_use]
     pub fn boot_nonce(&self) -> &str {
-        &self.boot_nonce
+        self.holder_host.boot()
     }
 
     /// Allocates a new window ID by incrementing the sequence and combining
@@ -4848,7 +5726,7 @@ impl WindowRegistry {
         format!(
             "w{}-{}",
             self.next_id.fetch_add(1, Ordering::SeqCst) + 1,
-            self.boot_nonce
+            self.holder_host.boot()
         )
     }
 
@@ -4883,7 +5761,6 @@ impl WindowRegistry {
         detection_warning: Option<String>,
         provenance: WindowProvenance,
     ) -> Arc<WindowEntry> {
-        let (status_changes, _) = broadcast::channel(STATUS_BROADCAST_CAPACITY);
         // The same rule the engine itself applies at
         // construction -- a resolved definition means nothing has been
         // judged yet, no definition at all pins the window to that reason
@@ -4893,14 +5770,11 @@ impl WindowRegistry {
         } else {
             DetectedStatus::Unknown(UnknownReason::NoDefinition)
         };
-        let opened_at = tokio::time::Instant::now();
-        let (current_status_tx, _) = watch::channel(StatusAt {
-            status: initial_status,
-            changed_at: opened_at,
-            evidence_since: opened_at,
-            generation: 0,
-        });
-        let ready_hold = ReadyHoldLatch::new(input.ready_hold);
+        let status_gate = StatusGate::new(
+            initial_status,
+            tokio::time::Instant::now(),
+            ReadyHoldLatch::new(input.ready_hold),
+        );
         let delivery_spec = provenance
             .delivery
             .as_ref()
@@ -4908,7 +5782,7 @@ impl WindowRegistry {
         let inbox = Inbox::new(
             self.config().inbox_capacity,
             delivery_spec,
-            current_status_tx.subscribe(),
+            status_gate.watch(),
         );
         let detector_weak = Arc::downgrade(&detector_handle);
 
@@ -4927,11 +5801,7 @@ impl WindowRegistry {
             session,
             detector: Mutex::new(Some(detector_handle)),
             detector_weak,
-            status_changes,
-            current_status: current_status_tx,
-            ready_hold,
-            current_attach: Mutex::new(None),
-            attach_generation: AtomicU64::new(0),
+            status_gate,
             status_token,
             input,
             composer_access,
@@ -4964,15 +5834,26 @@ impl WindowRegistry {
         entry: Arc<WindowEntry>,
         detector_handle: Arc<DetectorHandle>,
         detected_rx: mpsc::UnboundedReceiver<ConfirmedStatus>,
+        opening: &OpeningWindow<'_>,
     ) -> Result<(), WindowOpenError> {
         // The output pump is already running (started right after the
         // detector was created, see `open_impl`); exactly `entry` and this
         // watcher task hold a strong `Arc<DetectorHandle>` from here on.
-        spawn_exit_watcher(session.clone(), detector_handle.clone());
+        spawn_exit_watcher(
+            session.clone(),
+            detector_handle.clone(),
+            Arc::downgrade(&entry),
+        );
         spawn_status_forwarder(Arc::downgrade(&entry), detected_rx);
         drop(detector_handle);
 
-        lock_recover(&self.entries).push(entry);
+        {
+            // Under the entries lock, so a count never sees the window both
+            // as an entry and as an open in progress, nor as neither.
+            let mut entries = lock_recover(&self.entries);
+            entries.push(entry);
+            opening.hand_over();
+        }
         self.participation.raise();
         Ok(())
     }
@@ -5039,9 +5920,10 @@ impl WindowRegistry {
         infos
     }
 
-    /// Marks `window_id` as being opened until the returned value is dropped.
-    pub(crate) fn begin_opening(&self, window_id: &str) -> OpeningWindow<'_> {
-        open_in_progress(&self.opening, window_id)
+    /// Marks `window_id` as being opened under `name` until the returned
+    /// value is dropped or the window is registered.
+    pub(crate) fn begin_opening(&self, window_id: &str, name: &str) -> OpeningWindow<'_> {
+        open_in_progress(&self.opening, window_id, name)
     }
 
     /// Looks up a window by ID, first waiting out an open of that ID that
@@ -5203,21 +6085,40 @@ impl WindowRegistry {
         self.request_snapshot();
     }
 
-    /// Terminates every window's child process. Statuses converge to
-    /// `Exited` asynchronously as each session's exit is observed; this
-    /// method does not wait for that convergence.
+    /// Terminates every window's child process, then waits, at most
+    /// `close_grace_ms` for all of them together, for every window's holder
+    /// process to end. Statuses converge to `Exited`
+    /// asynchronously as each session's exit is observed; this method does
+    /// not wait for that convergence.
     pub async fn terminate_all(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
-        for entry in entries {
+        for entry in &entries {
             entry.session.terminate();
+        }
+        let limit = Duration::from_millis(self.config.close_grace_ms);
+        let deadline = tokio::time::Instant::now() + limit;
+        for entry in &entries {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !entry.session.wait_until_released(left).await {
+                tracing::warn!(
+                    window_id = entry.window_id(),
+                    "a window's holder had not ended within the close grace"
+                );
+            }
         }
     }
 }
 
-/// Each in-progress open's window id, mapped to a receiver that closes when
-/// that open finishes.
-type OpeningWindows = Mutex<HashMap<String, watch::Receiver<()>>>;
+/// Each in-progress open's window id, mapped to what it holds.
+type OpeningWindows = Mutex<HashMap<String, Opening>>;
+
+/// An open in progress: a seat under the window limits and its name.
+struct Opening {
+    name: String,
+    /// Closes when the open finishes.
+    released: watch::Receiver<()>,
+}
 
 /// One open in progress, from [`WindowRegistry::begin_opening`] until drop.
 /// Dropping it removes the id first and then closes the channel, so a waiter
@@ -5228,13 +6129,31 @@ pub(crate) struct OpeningWindow<'a> {
     _released: watch::Sender<()>,
 }
 
-fn open_in_progress<'a>(opening: &'a OpeningWindows, window_id: &str) -> OpeningWindow<'a> {
+fn open_in_progress<'a>(
+    opening: &'a OpeningWindows,
+    window_id: &str,
+    name: &str,
+) -> OpeningWindow<'a> {
     let (released, pending) = watch::channel(());
-    lock_recover(opening).insert(window_id.to_string(), pending);
+    lock_recover(opening).insert(
+        window_id.to_string(),
+        Opening {
+            name: name.to_string(),
+            released: pending,
+        },
+    );
     OpeningWindow {
         opening,
         window_id: window_id.to_string(),
         _released: released,
+    }
+}
+
+impl OpeningWindow<'_> {
+    /// Gives up the seat and the name to the registered entry; a waiter is
+    /// still woken only on drop.
+    fn hand_over(&self) {
+        lock_recover(self.opening).remove(&self.window_id);
     }
 }
 
@@ -5255,7 +6174,9 @@ async fn lookup_once_opened<T>(
     if let Some(found) = lookup() {
         return Some(found);
     }
-    let pending = lock_recover(opening).get(window_id).cloned();
+    let pending = lock_recover(opening)
+        .get(window_id)
+        .map(|open| open.released.clone());
     if let Some(mut pending) = pending {
         // Nothing is ever sent, so this returns only once the sender is gone.
         let _closed = pending.changed().await;
@@ -5579,10 +6500,12 @@ fn write_injected_config_dir(dir: &InjectedConfigDir) -> std::io::Result<()> {
 }
 
 /// Why `name` cannot go to a window other than `except`, if it cannot: it is
-/// a reserved mention, or a running window (any state but `Exited`) already
-/// carries a name the mention rule treats as the same.
+/// a reserved mention, or a running window (any state but `Exited`) or an
+/// open in progress already carries a name the mention rule treats as the
+/// same.
 fn name_refusal(
     entries: &[Arc<WindowEntry>],
+    opening: &HashMap<String, Opening>,
     name: &str,
     except: Option<&WindowEntry>,
 ) -> Option<NameRefusal> {
@@ -5590,12 +6513,13 @@ fn name_refusal(
         return Some(NameRefusal::Reserved(name.to_string()));
     }
     let key = mention_key(name);
-    entries
+    let running = entries
         .iter()
         .filter(|entry| except.is_none_or(|except| entry.window_id() != except.window_id()))
         .filter(|entry| entry.current_status() != WindowStatus::Exited)
-        .any(|entry| mention_key(&lock_recover(&entry.name)) == key)
-        .then(|| NameRefusal::InUse(name.to_string()))
+        .any(|entry| mention_key(&lock_recover(&entry.name)) == key);
+    let opening = opening.values().any(|open| mention_key(&open.name) == key);
+    (running || opening).then(|| NameRefusal::InUse(name.to_string()))
 }
 
 /// The name a new window takes: `requested` itself when free, otherwise a
@@ -5603,10 +6527,11 @@ fn name_refusal(
 /// free `n` from 2.
 fn claim_name(
     entries: &[Arc<WindowEntry>],
+    opening: &HashMap<String, Opening>,
     requested: &str,
     on_name_taken: OnNameTaken,
 ) -> Result<String, NameRefusal> {
-    let Some(refusal) = name_refusal(entries, requested, None) else {
+    let Some(refusal) = name_refusal(entries, opening, requested, None) else {
         return Ok(requested.to_string());
     };
     if on_name_taken == OnNameTaken::Refuse {
@@ -5614,7 +6539,7 @@ fn claim_name(
     }
     (2u64..)
         .map(|n| numbered_name(requested, n))
-        .find(|candidate| name_refusal(entries, candidate, None).is_none())
+        .find(|candidate| name_refusal(entries, opening, candidate, None).is_none())
         .ok_or(refusal)
 }
 
@@ -5802,7 +6727,7 @@ fn definition_composer_access(definition: &Definition) -> ComposerAccess {
         return ComposerAccess::Absent;
     }
     match InputProfile::from_section(definition.input.as_ref()).probe {
-        Some(probe) => ComposerAccess::Judged { probe },
+        Some(_) => ComposerAccess::Judged,
         None => ComposerAccess::RawOnly,
     }
 }
@@ -5982,14 +6907,20 @@ pub(crate) fn spawn_output_pump(session: &PtySession, detector: Weak<DetectorHan
     });
 }
 
-/// Turns the child-exit fact into the detector's highest-priority evidence.
-/// One of the two intended long-lived strong holders of
-/// `Arc<DetectorHandle>`: this task's own clone is dropped when it returns,
-/// right after the exit fact has been handed to the engine.
+/// Turns the child-exit fact into the window's confirmed `Exited`
+/// ([`WindowEntry::confirm_exited`]) and into the detector's
+/// highest-priority evidence. One of the two intended long-lived strong
+/// holders of `Arc<DetectorHandle>`: this task's own clone is dropped when it
+/// returns, so the entry taking its detector never invalidates it.
 ///
-/// The process tree and the PTY are wound down by the session's own exit
-/// monitor ([`PtySession`]), so this task has no teardown of its own.
-pub(crate) fn spawn_exit_watcher(session: Arc<PtySession>, detector: Arc<DetectorHandle>) {
+/// Holds only a [`Weak<WindowEntry>`], so it never keeps an evicted entry
+/// alive. The process tree and the PTY are wound down by the session's own
+/// exit monitor ([`PtySession`]), so this task has no teardown of its own.
+pub(crate) fn spawn_exit_watcher(
+    session: Arc<PtySession>,
+    detector: Arc<DetectorHandle>,
+    entry: Weak<WindowEntry>,
+) {
     let mut exit_rx = session.exit_notified();
     tokio::spawn(async move {
         loop {
@@ -6008,17 +6939,19 @@ pub(crate) fn spawn_exit_watcher(session: Arc<PtySession>, detector: Arc<Detecto
         }
         tracing::info!(
             exit_code = ?session.exit_status(),
-            "child process exited; notifying the detector"
+            "child process exited; confirming the window exited"
         );
         detector.notify_exited();
+        if let Some(entry) = entry.upgrade() {
+            let _ = entry.confirm_exited();
+        }
     });
 }
 
-/// Consumes one window's confirmed-status stream and republishes it as (a)
-/// the current value [`WindowEntry::current_status`] reports and (b) a
-/// fan-out to attach holders. Once a confirmed `Exited` arrives, this is
-/// the task that takes `entry.detector`, dropping the entry's strong
-/// reference to the detector.
+/// Consumes one window's confirmed-status stream and publishes each status
+/// through [`WindowEntry::publish_confirmed`]. Once the stream ends -- the
+/// driver task finished or died -- it fails a window that has not exited
+/// back to `Unknown(DetectorStopped)`.
 ///
 /// Takes only a [`Weak<WindowEntry>`]: this task must never be the thing
 /// keeping an evicted entry alive.
@@ -6031,28 +6964,10 @@ pub(crate) fn spawn_status_forwarder(
             let Some(entry) = entry.upgrade() else {
                 break;
             };
-            publish_status(
-                entry.window_id(),
-                &entry.current_status,
-                &entry.status_changes,
-                &entry.ready_hold,
-                confirmed,
-            );
-            if confirmed.status == DetectedStatus::Exited {
-                *lock_recover(&entry.detector) = None;
-                entry.participation.raise();
-            }
+            entry.publish_confirmed(confirmed);
         }
-        // The stream ended, so no further status can ever be confirmed for this
-        // window -- the driver task finished or died. An entry that has since
-        // been evicted needs nothing, so a failed upgrade is a no-op.
         if let Some(entry) = entry.upgrade() {
-            publish_detector_loss(
-                entry.window_id(),
-                &entry.current_status,
-                &entry.status_changes,
-                &entry.ready_hold,
-            );
+            entry.publish_detector_loss();
         }
     });
 }
@@ -6071,382 +6986,172 @@ pub(crate) fn window_status_wire(status: WindowStatus) -> String {
         .unwrap_or_else(|| format!("{status:?}"))
 }
 
-/// Publishes one confirmed status on a window's status sinks: the current
-/// value and the fan-out to attach holders.
-///
-/// The status and the instant it changed go out as one value, so an observer
-/// that has seen the new status can never read the previous change's age. The
-/// startup latch is offered the *outgoing* pair before that, which is the
-/// only point that sees how long a status actually lasted. Every call is one
-/// confirmed transition, so it logs exactly one `window status confirmed`
-/// info event, carrying `unknown_reason` only when `status` is `Unknown`.
-///
-/// The single implementation both [`spawn_status_forwarder`]'s receive loop
-/// and [`publish_detector_loss`] go through, so the two can never drift into
-/// updating different subsets of the sinks.
-fn publish_status(
-    window_id: &str,
-    current_status: &watch::Sender<StatusAt>,
-    status_changes: &broadcast::Sender<StatusAt>,
-    ready_hold: &ReadyHoldLatch,
-    confirmed: ConfirmedStatus,
-) {
-    let now = tokio::time::Instant::now();
-    let status = confirmed.status;
-    // Never later than `changed_at`.
-    let evidence_since = confirmed.evidence_since.min(now);
-    ready_hold.observe(*current_status.borrow(), now);
-    // Published before the fan-out so a concurrent attach reports the new
-    // status rather than a stale one. `send_modify` (not `send`): no receiver
-    // is kept alive and `send` no-ops when there are none, and the new
-    // generation is derived from the value being replaced while that value's
-    // write lock is held.
-    let mut generation = 0;
-    current_status.send_modify(|slot| {
-        generation = slot.generation.saturating_add(1);
-        *slot = StatusAt {
-            status,
-            changed_at: now,
-            evidence_since,
-            generation,
-        };
-    });
-    // The fan-out carries the pair and its generation as one value, so a
-    // receiver reports the transition it was handed rather than whatever the
-    // window has reached by the time it reads.
-    let _ = status_changes.send(StatusAt {
-        status,
-        changed_at: now,
-        evidence_since,
-        generation,
-    });
-    let wire_status = window_status_wire(status.status());
-    match status.unknown_reason() {
-        Some(reason) => tracing::info!(
-            window_id = %window_id,
-            status = %wire_status,
-            unknown_reason = %reason.as_wire(),
-            "window status confirmed"
-        ),
-        None => tracing::info!(
-            window_id = %window_id,
-            status = %wire_status,
-            "window status confirmed"
-        ),
-    }
-}
-
-/// Fail-safe backstop for a window whose detection stopped reporting:
-/// publishes `Unknown(DetectorStopped)` so the window is not left frozen at
-/// whatever status it happened to hold when its driver task died.
-///
-/// Both guards live here rather than at the call site, so every caller gets
-/// the same behavior: a window that already reached `Exited` keeps that
-/// mechanical fact, and a window already at `Unknown(DetectorStopped)`
-/// publishes nothing, which makes repeated calls idempotent -- a window at a
-/// *different* `Unknown` reason is still overwritten, so the reason this
-/// backstop fired is never masked by whatever reason preceded it. The current value is read back through the
-/// `watch::Sender` itself, since no receiver is kept alive for it.
-///
-/// Takes the four sinks rather than a `WindowEntry` so it can be exercised
-/// against plain channels, and does not touch `entry.detector`: clearing that
-/// is the receive loop's job on a confirmed `Exited` alone. The startup latch
-/// is among them because the fail-safe transition is still a status ending,
-/// and the status it ends may be the one that proves this window left its
-/// startup phase.
-fn publish_detector_loss(
-    window_id: &str,
-    current_status: &watch::Sender<StatusAt>,
-    status_changes: &broadcast::Sender<StatusAt>,
-    ready_hold: &ReadyHoldLatch,
-) {
-    let current = current_status.borrow().status;
-    let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
-    if current == DetectedStatus::Exited || current == stopped {
-        return;
-    }
-    tracing::warn!(
-        "the detection driver stopped reporting for a live window; failing its status back to \
-         unknown"
-    );
-    publish_status(
-        window_id,
-        current_status,
-        status_changes,
-        ready_hold,
-        ConfirmedStatus {
-            status: stopped,
-            evidence_since: tokio::time::Instant::now(),
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
 
-    // =================================================================
-    // `publish_detector_loss`, exercised on plain channels so no PTY,
-    // detector or forwarder task is involved.
-    // =================================================================
-
-    /// The sinks `publish_detector_loss` writes to, plus a subscriber on the
-    /// fan-out, so a test can assert on all of them at once.
-    struct StatusSinks {
-        window_id: String,
-        current: watch::Sender<StatusAt>,
-        changes: broadcast::Sender<StatusAt>,
-        ready_hold: ReadyHoldLatch,
-        fanout: broadcast::Receiver<StatusAt>,
-        /// The instant the published pair carried before the call under test,
-        /// set well in the past so that "the timestamp moved" is decidable
-        /// regardless of the clock's resolution.
-        initial_changed_at: tokio::time::Instant,
-    }
-
-    impl StatusSinks {
-        fn new(current_status: DetectedStatus) -> Self {
-            let initial_changed_at = tokio::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(60))
-                .expect("the test clock must support a 60s offset into the past");
-            let (current, _) = watch::channel(StatusAt {
-                status: current_status,
-                changed_at: initial_changed_at,
-                evidence_since: initial_changed_at,
-                generation: 0,
-            });
-            let (changes, fanout) = broadcast::channel(STATUS_BROADCAST_CAPACITY);
-            Self {
-                window_id: "w-test".to_string(),
-                current,
-                changes,
-                ready_hold: ReadyHoldLatch::new(std::time::Duration::ZERO),
-                fanout,
-                initial_changed_at,
-            }
-        }
-
-        fn publish_loss(&self) {
-            publish_detector_loss(
-                &self.window_id,
-                &self.current,
-                &self.changes,
-                &self.ready_hold,
-            );
-        }
-
-        /// The status of the next value on the fan-out, if any: the pair's
-        /// other fields are the publisher's own bookkeeping, not what these
-        /// cases are about.
-        fn fanned_out_status(&mut self) -> Option<DetectedStatus> {
-            self.fanout.try_recv().ok().map(|at| at.status)
-        }
-
-        fn timestamp_moved(&self) -> bool {
-            self.current.borrow().changed_at > self.initial_changed_at
-        }
-    }
-
-    #[test]
-    fn publish_detector_loss_fails_a_live_window_back_to_unknown() {
-        // All three sinks are written.
-        let mut sinks = StatusSinks::new(DetectedStatus::Running);
-
-        sinks.publish_loss();
-
-        let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
-        assert_eq!(sinks.current.borrow().status, stopped);
-        assert_eq!(sinks.fanned_out_status(), Some(stopped));
-        assert!(
-            sinks.timestamp_moved(),
-            "the fail-safe transition is a status change and must move the change instant"
-        );
-    }
-
-    #[test]
-    fn publish_detector_loss_never_overwrites_an_exited_window() {
-        // `Exited` is a mechanical fact that outranks the backstop.
-        let mut sinks = StatusSinks::new(DetectedStatus::Exited);
-
-        sinks.publish_loss();
-
-        assert_eq!(sinks.current.borrow().status, DetectedStatus::Exited);
-        assert_eq!(sinks.fanned_out_status(), None, "nothing may be fanned out");
-        assert!(!sinks.timestamp_moved(), "the change instant must stay put");
-    }
-
-    #[test]
-    fn publish_detector_loss_is_idempotent_once_the_window_is_already_unknown() {
-        // A repeated call publishes nothing, so the backstop cannot spam
-        // subscribers with identical transitions.
-        let mut sinks = StatusSinks::new(DetectedStatus::Running);
-
-        sinks.publish_loss();
-        let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
-        assert_eq!(sinks.fanned_out_status(), Some(stopped));
-
-        sinks.publish_loss();
-
-        assert_eq!(sinks.current.borrow().status, stopped);
-        assert_eq!(
-            sinks.fanned_out_status(),
-            None,
-            "a second call at Unknown(DetectorStopped) must fan out nothing"
-        );
-    }
-
-    // =================================================================
-    // publish_status must hand the *outgoing* pair to the ready-hold latch
-    // before publishing the new status, so a window that already held a ready
-    // status for the full hold latches even though the status it is
-    // transitioning to is not itself ready.
-    // =================================================================
-
-    #[test]
-    fn publish_status_passes_the_outgoing_pair_to_the_ready_hold_latch() {
-        use crate::handoff::ReadyHoldLatch;
-        use crate::waiter::StatusAt;
-
-        let hold = std::time::Duration::from_millis(1000);
-        let ready_hold = ReadyHoldLatch::new(hold);
-        let past = tokio::time::Instant::now()
-            .checked_sub(std::time::Duration::from_millis(1500))
-            .expect("the test clock must support a 1500ms offset into the past");
-        let (current, _rx) = watch::channel(StatusAt {
-            status: DetectedStatus::WaitingInput,
-            changed_at: past,
-            evidence_since: past,
-            generation: 0,
-        });
-        let (changes, _fanout) = broadcast::channel(STATUS_BROADCAST_CAPACITY);
-
-        publish_status(
-            "w-test",
-            &current,
-            &changes,
-            &ready_hold,
-            ConfirmedStatus {
-                status: DetectedStatus::Running,
-                evidence_since: tokio::time::Instant::now(),
-            },
-        );
-
-        assert!(
-            ready_hold.is_latched(),
-            "publish_status must observe the outgoing pair against the ready-hold latch \
-             before publishing the new status, so a window that held ready for the full \
-             duration latches even though the new status is not itself ready"
-        );
-    }
+    /// On a paused clock, reached only once nothing else can run: a lookup
+    /// that has not finished by then is waiting on something other than time.
+    const UNTIL_IDLE: Duration = Duration::from_secs(3600);
 
     #[tokio::test(start_paused = true)]
-    async fn publish_status_restarts_the_age_at_every_transition_on_the_paused_clock() {
-        use crate::handoff::ReadyHoldLatch;
-        use crate::waiter::StatusAt;
-
-        let opened_at = tokio::time::Instant::now();
-        let (current, _rx) = watch::channel(StatusAt {
-            status: DetectedStatus::Running,
-            changed_at: opened_at,
-            evidence_since: opened_at,
-            generation: 0,
-        });
-        let (changes, mut fanout) = broadcast::channel(STATUS_BROADCAST_CAPACITY);
-        let ready_hold = ReadyHoldLatch::new(std::time::Duration::ZERO);
-        let publish = |status: DetectedStatus| {
-            publish_status(
-                "w-test",
-                &current,
-                &changes,
-                &ready_hold,
-                ConfirmedStatus {
-                    status,
-                    evidence_since: tokio::time::Instant::now(),
-                },
-            );
-        };
-
-        tokio::time::advance(std::time::Duration::from_secs(5)).await;
-        assert_eq!(
-            current.borrow().since_ms(tokio::time::Instant::now()),
-            5_000,
-            "the age of the opening status grows with the clock"
-        );
-
-        publish(DetectedStatus::Idle);
-        assert_eq!(current.borrow().since_ms(tokio::time::Instant::now()), 0);
-        tokio::time::advance(std::time::Duration::from_millis(250)).await;
-        assert_eq!(current.borrow().since_ms(tokio::time::Instant::now()), 250);
-
-        publish(DetectedStatus::Running);
-        assert_eq!(
-            current.borrow().since_ms(tokio::time::Instant::now()),
-            0,
-            "a new transition must restart the age"
-        );
-        let fanned_out = fanout.try_recv().and_then(|_| fanout.try_recv());
-        assert_eq!(
-            fanned_out.map(|at| at.since_ms(tokio::time::Instant::now())),
-            Ok(0),
-            "the fan-out value must carry the same restarted age"
-        );
-    }
-
-    /// Long enough for a lookup that does not wait to have finished.
-    const STILL_WAITING: Duration = Duration::from_millis(50);
-
-    #[tokio::test]
     async fn a_lookup_waits_for_an_open_in_progress_and_then_finds_the_registered_window() {
         let opening = OpeningWindows::default();
         let registered: Mutex<Option<&str>> = Mutex::new(None);
-        let guard = open_in_progress(&opening, "w-pending");
+        let guard = open_in_progress(&opening, "w-pending", "pending");
 
         let lookup = lookup_once_opened(&opening, "w-pending", || *lock_recover(&registered));
         tokio::pin!(lookup);
         assert!(
-            tokio::time::timeout(STILL_WAITING, &mut lookup)
-                .await
-                .is_err(),
+            tokio::time::timeout(UNTIL_IDLE, &mut lookup).await.is_err(),
             "a lookup must wait while the open of that id is still in progress"
         );
 
         *lock_recover(&registered) = Some("entry");
         drop(guard);
-        assert_eq!(lookup.await, Some("entry"));
+        let found = tokio::time::timeout(UNTIL_IDLE, lookup)
+            .await
+            .expect("the lookup must end once the open ends");
+        assert_eq!(found, Some("entry"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_lookup_for_an_open_that_fails_finds_nothing_once_it_ends() {
         let opening = OpeningWindows::default();
-        let guard = open_in_progress(&opening, "w-pending");
+        let guard = open_in_progress(&opening, "w-pending", "pending");
 
         let lookup = lookup_once_opened(&opening, "w-pending", || None::<&str>);
         tokio::pin!(lookup);
         assert!(
-            tokio::time::timeout(STILL_WAITING, &mut lookup)
-                .await
-                .is_err(),
+            tokio::time::timeout(UNTIL_IDLE, &mut lookup).await.is_err(),
             "a lookup must wait while the open of that id is still in progress"
         );
 
         drop(guard);
-        assert_eq!(lookup.await, None);
+        let found = tokio::time::timeout(UNTIL_IDLE, lookup)
+            .await
+            .expect("the lookup must end once the open ends");
+        assert_eq!(found, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dropping_an_open_in_progress_always_removes_it() {
         let registry = WindowRegistry::new(DaemonConfig::default());
-        let guard = registry.begin_opening("w-pending");
+        let guard = registry.begin_opening("w-pending", "pending");
         assert!(lock_recover(&registry.opening).contains_key("w-pending"));
 
         drop(guard);
         assert!(lock_recover(&registry.opening).is_empty());
-        let settled = tokio::time::timeout(STILL_WAITING, registry.get_after_open("w-pending"))
+        let settled = tokio::time::timeout(UNTIL_IDLE, registry.get_after_open("w-pending"))
             .await
             .expect("no open is in progress, so the lookup must not wait");
         assert!(settled.is_none());
+    }
+
+    fn named_echo_child_request(name: &str) -> OpenWindowRequest {
+        OpenWindowRequest {
+            command: yagura_test_support::process::echo_child_command(),
+            cwd: None,
+            name: Some(name.to_string()),
+            vendor: None,
+            detection: None,
+            on_name_taken: OnNameTaken::Refuse,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_open_in_progress_holds_its_name_against_another_open_and_a_rename() {
+        let registry = WindowRegistry::new(DaemonConfig::default());
+        let other = registry
+            .open(named_echo_child_request("other"))
+            .await
+            .expect("an echo_child window must open");
+        let held = registry.begin_opening("w-held", "held");
+
+        let reopened = registry
+            .open(named_echo_child_request("held"))
+            .await
+            .map(|opened| opened.name);
+        let renamed = registry.rename_window(&other.entry, "held").await;
+        drop(held);
+        let renamed_once_ended = registry.rename_window(&other.entry, "held").await;
+        // Before the asserts, so a refusal that failed leaves no child behind.
+        registry.terminate_all().await;
+
+        assert!(
+            matches!(
+                reopened,
+                Err(WindowOpenError::NameTaken(NameRefusal::InUse(_)))
+            ),
+            "an open must not take the name of an open still in progress: {reopened:?}"
+        );
+        assert!(
+            matches!(
+                renamed,
+                Err(WindowRenameError::NameTaken(NameRefusal::InUse(_)))
+            ),
+            "a rename must not take the name of an open still in progress: {renamed:?}"
+        );
+        assert_eq!(
+            renamed_once_ended.ok().as_deref(),
+            Some("held"),
+            "once the open in progress ends, its name is free again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_is_counted_once_from_the_moment_it_is_handed_over() {
+        let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
+        let counted: Arc<Mutex<Option<(usize, usize)>>> = Arc::default();
+        let hook_registry = Arc::downgrade(&registry);
+        let hook_counted = Arc::clone(&counted);
+        // Runs after the hand-over and before the open's guard drops.
+        registry.set_window_opened_hook(Box::new(move |_entry| {
+            let Some(registry) = hook_registry.upgrade() else {
+                return;
+            };
+            let entries = lock_recover(&registry.entries).len();
+            let opening = lock_recover(&registry.opening).len();
+            *lock_recover(&hook_counted) = Some((entries, opening));
+        }));
+
+        registry
+            .open(named_echo_child_request("counted"))
+            .await
+            .expect("an echo_child window must open");
+        registry.terminate_all().await;
+
+        assert_eq!(
+            *lock_recover(&counted),
+            Some((1, 0)),
+            "a registered window must be one entry and no longer an open in progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_in_progress_holds_a_seat_against_the_window_limit() {
+        let registry = WindowRegistry::new(DaemonConfig {
+            max_windows: 1,
+            ..DaemonConfig::default()
+        });
+        let request = named_echo_child_request("next");
+        let before = registry.check_open_request(&request).map(|_| ());
+
+        let held = registry.begin_opening("w-held", "held");
+        let while_held = registry.check_open_request(&request).map(|_| ());
+        drop(held);
+
+        assert!(
+            before.is_ok(),
+            "with no window and no open in progress, one window fits under a limit of one: \
+             {before:?}"
+        );
+        assert!(
+            matches!(while_held, Err(WindowOpenError::ResourceExhausted)),
+            "an open in progress takes the only seat a limit of one has: {while_held:?}"
+        );
     }
 
     #[test]
@@ -6551,9 +7256,10 @@ mod tests {
         let marker = yagura_test_support::detection::CONTROL_READY_MARKER;
         let command = yagura_test_support::process::ready_child_command(marker);
         let argv: Vec<&str> = command.iter().map(String::as_str).collect();
-        let session = PtySession::spawn_with_command(&argv, &config)
-            .await
-            .expect("a ready_child session must spawn");
+        let session =
+            PtySession::spawn_with_command(&argv, &config, &HolderHost::from_config(&config))
+                .await
+                .expect("a ready_child session must spawn");
 
         // The pump starts only once the marker is in the model, so nothing
         // but its look at what arrived before it can report the marker.
@@ -6599,5 +7305,188 @@ mod tests {
             matches!(behind, Some(BehindProbe::Alone)),
             "whitespace in front of the probe is no body that arrived: {behind:?}"
         );
+    }
+
+    // =================================================================
+    // Reading the daemon's own probes once a dialog may have taken one.
+    // =================================================================
+
+    fn body(text: &str) -> ComposerReadout {
+        ComposerReadout::Body(text.to_string())
+    }
+
+    fn front_of(counted: Option<(BehindProbe, Vec<char>)>) -> Option<(String, Vec<char>)> {
+        counted.map(|(behind, shown)| {
+            let front = match behind {
+                BehindProbe::Alone => String::new(),
+                BehindProbe::Text(ShownText::Body(text)) => format!("body:{text}"),
+                BehindProbe::Text(ShownText::Tail(text)) => format!("tail:{text}"),
+            };
+            (front, shown)
+        })
+    }
+
+    fn open_reading(readout: ComposerReadout, closed_screens: u64) -> ComposerObservation {
+        ComposerObservation {
+            readout,
+            screen_rule: None,
+            painted: true,
+            closed_screens,
+        }
+    }
+
+    fn probes(chars: &str) -> ProbeChars {
+        ProbeChars::new(chars).expect("distinct probe characters")
+    }
+
+    #[test]
+    fn probes_are_not_read_until_the_last_one_typed_shows() {
+        assert_eq!(
+            front_of(count_own_probes(&body("note x"), &['x', 'z'], None)),
+            None,
+            "an earlier probe showing says nothing of the later one still on its way"
+        );
+        assert_eq!(
+            front_of(count_own_probes(&ComposerReadout::Empty, &['x'], None)),
+            None
+        );
+    }
+
+    #[test]
+    fn probes_are_counted_back_from_the_end_with_any_of_them_missing() {
+        assert_eq!(
+            front_of(count_own_probes(&body("note xv"), &['x', 'z', 'v'], None)),
+            Some(("body:note ".to_string(), vec!['x', 'v'])),
+            "a probe a dialog took is skipped, and the count stops at the text"
+        );
+        assert_eq!(
+            front_of(count_own_probes(&body("note z"), &['x', 'z'], None)),
+            Some(("body:note ".to_string(), vec!['z']))
+        );
+        assert_eq!(
+            front_of(count_own_probes(&body("note zx"), &['x', 'z'], None)),
+            None,
+            "probes out of the order typed end with one that was not typed last"
+        );
+    }
+
+    #[test]
+    fn probes_with_nothing_in_front_show_alone() {
+        assert_eq!(
+            front_of(count_own_probes(&body(" x z"), &['x', 'z'], None)),
+            Some((String::new(), vec!['x', 'z']))
+        );
+    }
+
+    #[test]
+    fn a_tail_is_read_only_with_text_in_front_of_the_probes() {
+        assert_eq!(
+            front_of(count_own_probes(
+                &ComposerReadout::Tail("end of it z".to_string()),
+                &['x', 'z'],
+                None
+            )),
+            Some(("tail:end of it ".to_string(), vec!['z']))
+        );
+        assert_eq!(
+            front_of(count_own_probes(
+                &ComposerReadout::Tail("z".to_string()),
+                &['x', 'z'],
+                None
+            )),
+            None,
+            "probes alone at the end of a taller composer say nothing of what is above"
+        );
+    }
+
+    #[test]
+    fn a_line_on_its_way_in_front_of_the_probes_is_not_decided() {
+        let line = ComposerLine::new("lazy");
+        assert_eq!(
+            front_of(count_own_probes(&body("lazv"), &['x', 'v'], Some(&line))),
+            None,
+            "the part of the line drawn so far is no answer"
+        );
+        assert_eq!(
+            front_of(count_own_probes(&body("lazy v"), &['x', 'v'], Some(&line))),
+            Some(("body:lazy ".to_string(), vec!['v']))
+        );
+        assert_eq!(
+            front_of(count_own_probes(&body("v"), &['x', 'v'], Some(&line))),
+            Some((String::new(), vec!['v'])),
+            "the line dropped altogether is an answer"
+        );
+    }
+
+    #[test]
+    fn a_reopened_screen_with_nothing_read_calls_for_the_next_probe_character() {
+        let flight = Flight {
+            typed: vec!['x'],
+            closures: 2,
+        };
+        let reopened = open_reading(body("note "), 3);
+        assert!(matches!(
+            probe_step(&reopened, &probes("xzv"), &flight, &['z'], None),
+            Some(ProbeStep::Retype('v', 3))
+        ));
+        assert!(
+            probe_step(
+                &open_reading(body("note "), 2),
+                &probes("xzv"),
+                &flight,
+                &[],
+                None
+            )
+            .is_none(),
+            "with no closed screen since, the probe is waited for"
+        );
+        let still_closed = ComposerObservation {
+            screen_rule: Some(DetectedStatus::WaitingApproval),
+            ..reopened.clone()
+        };
+        assert!(
+            probe_step(&still_closed, &probes("xzv"), &flight, &[], None).is_none(),
+            "nothing is typed while the dialog is up"
+        );
+        assert!(matches!(
+            probe_step(
+                &reopened,
+                &probes("xzv"),
+                &flight,
+                &[],
+                Some((BehindProbe::Alone, vec!['x']))
+            ),
+            Some(ProbeStep::Decided(BehindProbe::Alone, _))
+        ));
+    }
+
+    #[test]
+    fn probes_an_earlier_call_left_past_a_closed_screen_are_undecidable_with_no_other_character() {
+        // The record an earlier call left: one probe, typed as of two closed
+        // screens. A dialog has come and gone since.
+        let flight = Flight {
+            typed: vec!['x'],
+            closures: 2,
+        };
+        let reading = open_reading(body("note "), 3);
+        let counted = count_own_probes(&reading.readout, &flight.typed, None);
+        assert!(matches!(
+            probe_step(&reading, &probes("x"), &flight, &[], counted),
+            Some(ProbeStep::Undecidable)
+        ));
+        let every_one_typed = Flight {
+            typed: vec!['x', 'z'],
+            closures: 2,
+        };
+        assert!(matches!(
+            probe_step(&reading, &probes("xz"), &every_one_typed, &[], None),
+            Some(ProbeStep::Undecidable)
+        ));
+    }
+
+    #[test]
+    fn the_probes_behind_a_line_are_split_off_at_its_last_blank() {
+        assert_eq!(split_own_probes("note xz"), ("note ", "xz"));
+        assert_eq!(split_own_probes("note "), ("note ", ""));
     }
 }

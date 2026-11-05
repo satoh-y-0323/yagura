@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin};
-use common::{VALID_TOKEN, launch_args_logged_in, query_status, read_response, send};
+use common::{VALID_TOKEN, launch_args_logged_in, read_response, send};
 use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, argv_probe_path,
@@ -28,7 +28,6 @@ use yagura_test_support::process::{
 
 const WINDOW_ID_VAR: &str = yagura_protocol::WINDOW_ID_ENV;
 const TOKEN_VAR: &str = yagura_protocol::STATUS_TOKEN_ENV;
-const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The tables of a `launch` profile whose hook doors are given the credentials file.
 const LAUNCH_HOOKS: &str = "
@@ -109,7 +108,7 @@ async fn open_reply(
         },
     )
     .await;
-    read_response(&mut daemon.client, Duration::from_secs(15)).await
+    read_response(&mut daemon.client).await
 }
 
 async fn open(daemon: &mut RunningDaemon, profile: &str) -> String {
@@ -120,7 +119,7 @@ async fn open(daemon: &mut RunningDaemon, profile: &str) -> String {
 }
 
 async fn until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !condition() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -263,7 +262,7 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
             },
         )
         .await;
-        let reply = read_response(&mut daemon.client, Duration::from_secs(5)).await;
+        let reply = read_response(&mut daemon.client).await;
         assert_eq!(
             matches!(reply, DaemonMessage::Identified { .. }),
             accepted,
@@ -287,11 +286,18 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
 }
 
 // =============================================================================
-// (c) a window's own hook claims it, a nested CLI cannot
+// (c) a window's own hook claims it
 // =============================================================================
 
+/// The window's own hook door, handed `--credentials`, reports into the window. A CLI
+/// started inside the window cannot: what it inherits is measured by
+/// `a_launch_windows_child_has_no_window_credentials_even_when_the_daemon_inherited_them`,
+/// and an event without the window's credentials is refused by
+/// `a_status_event_without_a_window_id_is_rejected_and_touches_no_window` and
+/// `status_event_with_a_wrong_token_is_rejected_and_leaves_the_status_untouched`
+/// (`ipc_control.rs`).
 #[tokio::test]
-async fn the_windows_own_hook_reports_into_it_and_a_cli_started_inside_it_cannot() {
+async fn the_windows_own_hook_reports_into_it() {
     let sandbox = Sandbox::new("cred-launch-nested");
     let logs = logs_dir(&sandbox, "logs");
     let gate = sandbox.tree.make_dir("gate").join("go");
@@ -319,28 +325,22 @@ async fn the_windows_own_hook_reports_into_it_and_a_cli_started_inside_it_cannot
     })
     .await;
     let nested = logged(&logs, "nested_emit").unwrap();
+    // A door reads its window only from the environment or `--credentials`, and
+    // the nested one is never handed `--credentials`; that the environment holds
+    // neither variable is measured on the child itself by
+    // `a_launch_windows_child_has_no_window_credentials_even_when_the_daemon_inherited_them`.
+    // The door's report goes over a connection of its own with no answer, so no
+    // later event of this daemon is ordered after it.
     assert_eq!(
         nested["code"], 0,
         "a door without a window exits 0: {nested}"
     );
-    let sampled_until = tokio::time::Instant::now() + Duration::from_millis(1500);
-    while tokio::time::Instant::now() < sampled_until {
-        assert_ne!(
-            query_status(&mut daemon.client, &window_id).await,
-            WindowStatus::WaitingApproval,
-            "a report from a CLI that only inherited the window's environment must not \
-             reach the window; daemon log:\n{}",
-            sandbox.daemon_log()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 
     std::fs::write(&gate, b"go").unwrap();
     common::wait_until_status(
         &mut daemon.client,
         &window_id,
         WindowStatus::WaitingApproval,
-        TIMEOUT,
     )
     .await;
 }
@@ -400,7 +400,7 @@ auto_approve = [\"open_window\", \"close_window\"]
         },
     )
     .await;
-    let reply = read_response(&mut daemon.client, Duration::from_secs(15)).await;
+    let reply = read_response(&mut daemon.client).await;
     assert!(
         matches!(reply, DaemonMessage::WindowClosed { .. }),
         "got {reply:?}"
@@ -459,7 +459,6 @@ async fn an_open_that_ends_early_leaves_no_credentials_behind() {
         matches!(named, DaemonMessage::WindowOpened { .. }),
         "{named:?}"
     );
-    let before_refused = tree_of(&mcp_dir(&sandbox));
     let name_taken = open_reply(
         &mut daemon,
         "launch",
@@ -472,39 +471,48 @@ async fn an_open_that_ends_early_leaves_no_credentials_behind() {
         "a taken name must refuse the open; got {name_taken:?}"
     );
 
-    // Give a leaked guard no excuse to be dropped late.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Killed, the daemon neither creates nor removes anything more, so the
+    // tree is final: whatever an open left behind, however late it would
+    // have gone, is still there.
+    drop(daemon);
     let after = tree_of(&mcp_dir(&sandbox));
     assert!(
         before.iter().all(|path| after.contains(path)),
         "the live window's credentials must survive"
     );
-    let unexpected_spawn: Vec<_> = after
-        .iter()
-        .filter(|path| !before_refused.contains(path) && !before.contains(path))
+    let new_folders: Vec<_> = top_level(&after)
+        .into_iter()
+        .filter(|path| !before.contains(path))
         .collect();
-    assert!(
-        unexpected_spawn.is_empty(),
-        "an open that failed must leave nothing under {:?}; found {unexpected_spawn:?}",
+    assert_eq!(
+        new_folders.len(),
+        1,
+        "only the window opened in between keeps a folder; an open that failed must leave \
+         nothing under {:?}; found {new_folders:?}",
         mcp_dir(&sandbox)
     );
+}
+
+/// The entries of `tree` directly under the folder it was read from.
+fn top_level(tree: &[PathBuf]) -> Vec<&PathBuf> {
+    tree.iter()
+        .filter(|path| {
+            !tree
+                .iter()
+                .any(|other| path.starts_with(other) && path != &other)
+        })
+        .collect()
 }
 
 // =============================================================================
 // (e) the names a bridge's `env` lists
 // =============================================================================
 
-/// A copy of the built daemon in a folder of its own, beside a stand-in MCP bridge (and,
-/// on Windows, the vendored pseudoconsole pair it needs).
+/// A copy of the built daemon in a folder of its own, beside a stand-in MCP bridge, the
+/// holder and, on Windows, the pseudoconsole pair.
 fn install_daemon_with_bridge(sandbox: &Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
-    #[cfg(windows)]
-    {
-        let vendored = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/conpty/x64");
-        for name in ["conpty.dll", "OpenConsole.exe"] {
-            std::fs::copy(vendored.join(name), dir.join(name)).unwrap();
-        }
-    }
+    yagura_test_support::process::install_window_runtime(&dir);
     let suffix = std::env::consts::EXE_SUFFIX;
     let bin = dir.join(format!("yagura-daemon{suffix}"));
     std::fs::copy(daemon_bin(), &bin).unwrap();
@@ -613,7 +621,6 @@ async fn a_launch_profile_with_settings_that_ignore_the_credentials_file_still_r
         &mut daemon.client,
         &window_id,
         WindowStatus::WaitingApproval,
-        TIMEOUT,
     )
     .await;
     let emitted = logged(&logs, "emit_start").expect("the report was made");

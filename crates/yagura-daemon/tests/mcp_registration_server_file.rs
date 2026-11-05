@@ -25,8 +25,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-
 const SETTINGS_FILE: &str = ".neutral/settings.json";
 const DEFAULT_HOOKS_FILE: &str = ".neutral/hooks/yagura.json";
 const DEV_HOOKS_FILE: &str = ".neutral/hooks/yagura-dev.json";
@@ -119,12 +117,12 @@ async fn approver_connection(h: &Harness) -> Connection {
 /// that follow the listing (drained so the connection stays in step).
 async fn list_rows(client: &mut Connection, request_id: u64) -> Vec<(String, Vec<String>)> {
     send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
-    let rows = match read_response(client, REPLY_TIMEOUT).await {
+    let rows = match read_response(client).await {
         DaemonMessage::McpRegistrationsListed { rows, .. } => rows,
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     };
     for _ in &rows {
-        match read_response(client, REPLY_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::McpRegistrationStatus { .. } => {}
             other => panic!("expected mcp_registration_status, got {other:?}"),
         }
@@ -143,13 +141,13 @@ async fn status_of(
     request_id: u64,
 ) -> McpRegistrationStatusInfo {
     send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
-    let rows = match read_response(client, REPLY_TIMEOUT).await {
+    let rows = match read_response(client).await {
         DaemonMessage::McpRegistrationsListed { rows, .. } => rows.len(),
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     };
     let mut found = None;
     for _ in 0..rows {
-        match read_response(client, REPLY_TIMEOUT).await {
+        match read_response(client).await {
             DaemonMessage::McpRegistrationStatus { status, .. } if status.profile == profile => {
                 found = Some(status);
             }
@@ -175,11 +173,11 @@ async fn run(
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationRequested { .. } => {}
         other => panic!("expected mcp_registration_requested, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationResult { error, status, .. } => (error, status),
         other => panic!("expected mcp_registration_result, got {other:?}"),
     }

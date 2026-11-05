@@ -8,14 +8,16 @@
 //! be invisible: nothing on stdout or stderr and exit code 0 (a hook that prints or exits
 //! non-zero is surfaced to the user, and exit code 2 would even block the CLI's action).
 //!
-//! Every spawn sets `YAGURA_INSTANCE` to an identifier unique to this process, so the
+//! Every spawn sets `YAGURA_INSTANCE` to an identifier of its own, so the
 //! endpoint it would connect to never belongs to a running daemon, and points the
 //! data, state and config base directories into a temporary directory, so the
 //! instance directories it creates never land in the user's real profile.
 
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use yagura_test_support::ipc::InstanceEndpoint;
 use yagura_test_support::paths::TempDir;
 
 const WINDOW_ID_VAR: &str = "YAGURA_WINDOW_ID";
@@ -28,12 +30,18 @@ fn daemon_bin() -> PathBuf {
 /// Runs `--emit-status running` with exactly the given window variables set; the test
 /// process's own values (it may itself run inside a yagura window) are never inherited.
 fn emit_status(window_id: Option<&str>, token: Option<&str>) -> Output {
-    let instance = format!("emit{:x}", std::process::id());
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let instance = format!(
+        "emit{:x}{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let _endpoint = InstanceEndpoint::new(&instance);
     let bases = TempDir::new("yagura-emit", "bases");
     let mut command = Command::new(daemon_bin());
     command
         .args(["--emit-status", "running", "--source", "hook"])
-        .env("YAGURA_INSTANCE", instance)
+        .env("YAGURA_INSTANCE", &instance)
         .env_remove("YAGURA_STORE_DB")
         .env_remove(WINDOW_ID_VAR)
         .env_remove(STATUS_TOKEN_VAR)

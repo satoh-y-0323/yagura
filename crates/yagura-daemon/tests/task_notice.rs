@@ -31,10 +31,6 @@ use yagura_test_support::process::{
 /// The fixed marker every task notice starts with.
 const NOTICE_MARKER: &str = "[yagura task]";
 
-/// How long a case waits for a reply, or for the window to log its start, that must
-/// eventually arrive.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// A detection definition the window reaches `waiting_input` under.
 const READY_DETECTION: &str = "tn-ready";
 
@@ -140,7 +136,7 @@ async fn scene(tag: &str, detection: &str) -> Scene {
 
 /// The window's logged start: its argv and the prompt it was handed, once logged.
 async fn started_with(logs: &Path) -> (Vec<String>, Option<String>) {
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let start = std::fs::read_to_string(logs.join("events.jsonl"))
             .unwrap_or_default()
@@ -169,16 +165,31 @@ fn typed(logs: &Path) -> String {
     String::from_utf8_lossy(&std::fs::read(logs.join("input.log")).unwrap_or_default()).into_owned()
 }
 
+/// Asserts that nothing was ever written into `window_id`, once every clock
+/// bound has run out: a write queued for the window becoming ready has been
+/// made by then, and is counted before it is made.
+async fn assert_nothing_typed(h: &Harness, window_id: &str, logs: &Path) {
+    common::let_every_clock_bound_run_out().await;
+    let entry = h.registry.get(window_id).expect("the window is registered");
+    assert_eq!(
+        entry.write_seq(),
+        0,
+        "nothing is typed into a window started with its notice: {:?}",
+        typed(logs)
+    );
+    assert!(!typed(logs).contains(NOTICE_MARKER), "{:?}", typed(logs));
+}
+
 // --- wire round trips -------------------------------------------------------
 
 /// Reads the next *response* frame, skipping `plan_changed` pushes (the same
 /// shape `ipc_plan_assign.rs`'s own `read_ledger_reply` uses).
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -221,7 +232,7 @@ async fn create_ok(client: &mut Connection, title: &str, tasks: Vec<PlanTaskSpec
         },
     )
     .await;
-    match read_ledger_reply(client, Duration::from_secs(5)).await {
+    match read_ledger_reply(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -235,7 +246,7 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> PlanInfo {
         },
     )
     .await;
-    match read_ledger_reply(client, Duration::from_secs(5)).await {
+    match read_ledger_reply(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -302,19 +313,13 @@ async fn a_task_with_no_instruction_is_started_with_no_launch_prompt_and_nothing
     let plan = create_ok(&mut owner, "plan", vec![task("t1", "tn-profile", None)]).await;
 
     send_open_task_window(&mut owner, &plan.plan_id, "t1", "tn1-window").await;
-    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner, REPLY_TIMEOUT).await);
+    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner).await);
 
     let (argv, prompt) = started_with(&logs).await;
     assert_eq!(prompt, None, "{argv:?}");
     assert!(!argv.iter().any(|arg| arg == "--prompt"), "{argv:?}");
-    wait_until_status(
-        &mut owner,
-        &window_id,
-        WindowStatus::WaitingInput,
-        REPLY_TIMEOUT,
-    )
-    .await;
-    assert!(!typed(&logs).contains(NOTICE_MARKER));
+    wait_until_status(&mut owner, &window_id, WindowStatus::WaitingInput).await;
+    assert_nothing_typed(&h, &window_id, &logs).await;
     h.registry.terminate_all().await;
 }
 
@@ -333,7 +338,7 @@ async fn a_task_with_an_instruction_is_started_with_the_fixed_notice_never_the_b
     .await;
 
     send_open_task_window(&mut owner, &plan.plan_id, "t1", "tn2-window").await;
-    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner, REPLY_TIMEOUT).await);
+    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner).await);
 
     let (argv, prompt) = started_with(&logs).await;
     assert_eq!(
@@ -344,18 +349,8 @@ async fn a_task_with_an_instruction_is_started_with_the_fixed_notice_never_the_b
         !argv.iter().any(|arg| arg.contains(secret_token)),
         "the instruction's own body must never reach the window: {argv:?}"
     );
-    wait_until_status(
-        &mut owner,
-        &window_id,
-        WindowStatus::WaitingInput,
-        REPLY_TIMEOUT,
-    )
-    .await;
-    assert!(
-        !typed(&logs).contains(NOTICE_MARKER),
-        "nothing is typed into a window started with its notice: {:?}",
-        typed(&logs)
-    );
+    wait_until_status(&mut owner, &window_id, WindowStatus::WaitingInput).await;
+    assert_nothing_typed(&h, &window_id, &logs).await;
     h.registry.terminate_all().await;
 }
 
@@ -373,7 +368,7 @@ async fn a_task_whose_window_never_becomes_ready_still_starts_with_its_notice_an
     .await;
 
     send_open_task_window(&mut owner, &plan.plan_id, "t1", "tn3-window").await;
-    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner, REPLY_TIMEOUT).await);
+    let window_id = expect_task_window_opened(read_ledger_reply(&mut owner).await);
 
     let (_, prompt) = started_with(&logs).await;
     assert_eq!(
@@ -422,7 +417,7 @@ async fn opening_a_task_window_with_an_instruction_does_not_block_other_requests
     let mut window_list = false;
     let mut task_window_opened = false;
     for _ in 0..2 {
-        match read_ledger_reply(&mut owner, REPLY_TIMEOUT).await {
+        match read_ledger_reply(&mut owner).await {
             DaemonMessage::WindowList { .. } if !window_list => window_list = true,
             DaemonMessage::TaskWindowOpened { .. } if !task_window_opened => {
                 task_window_opened = true;
@@ -450,7 +445,7 @@ async fn opening_a_task_window_with_an_instruction_replies_without_waiting_for_t
     // The window never becomes ready, so a reply that waited for it to accept
     // input would never come.
     send_open_task_window(&mut owner, &plan.plan_id, "t1", "nq1-window").await;
-    expect_task_window_opened(read_ledger_reply(&mut owner, REPLY_TIMEOUT).await);
+    expect_task_window_opened(read_ledger_reply(&mut owner).await);
     h.registry.terminate_all().await;
 }
 
@@ -467,7 +462,7 @@ async fn a_task_notice_is_delivered_with_a_time_once_its_window_has_started() {
     .await;
 
     send_open_task_window(&mut owner, &plan.plan_id, "t1", "nq2-window").await;
-    expect_task_window_opened(read_ledger_reply(&mut owner, REPLY_TIMEOUT).await);
+    expect_task_window_opened(read_ledger_reply(&mut owner).await);
 
     let notice = instruction_notice(&mut owner, &plan.plan_id, "t1").await;
     assert_eq!(

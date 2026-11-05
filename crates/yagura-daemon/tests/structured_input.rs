@@ -9,8 +9,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{
     Harness, assert_hex_echo_receives, attach, contains_subsequence, expect_error, hex_echo_path,
     hex_of, output_after_marker, read_response, send, wait_until_model_shows,
@@ -24,7 +22,6 @@ use yagura_protocol::{
 use yagura_test_support::ipc::Connection;
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 const DECCKM: &[u8] = b"\x1b[?1h";
 const BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
@@ -47,16 +44,15 @@ async fn attached_window(tag: &str, modes: &[&[u8]]) -> (Harness, String, Connec
     ];
     command.extend(modes.iter().map(|mode| hex_of(mode)));
     let window_id = h.open(command, None).await;
-    h.wait_for_scrollback(&window_id, EMITTED_MARKER, RECEIVE_TIMEOUT)
-        .await;
-    wait_until_model_shows(&h, &window_id, EMITTED_MARKER, RECEIVE_TIMEOUT).await;
+    h.wait_for_scrollback(&window_id, EMITTED_MARKER).await;
+    wait_until_model_shows(&h, &window_id, EMITTED_MARKER).await;
     let mut client = h.connect().await;
     attach(&mut client, &window_id).await;
     (h, window_id, client)
 }
 
 async fn assert_child_receives(h: &Harness, window_id: &str, expected: &[u8]) {
-    assert_hex_echo_receives(h, window_id, EMITTED_MARKER, expected, RECEIVE_TIMEOUT).await;
+    assert_hex_echo_receives(h, window_id, EMITTED_MARKER, expected).await;
 }
 
 fn key(named: NamedKey) -> ClientMessage {
@@ -70,7 +66,7 @@ fn key(named: NamedKey) -> ClientMessage {
 /// answered first.
 async fn assert_no_error_before_pong(client: &mut Connection) {
     send(client, &ClientMessage::Ping).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::Pong => {}
         other => panic!("expected the input to be taken silently, got {other:?}"),
     }
@@ -363,10 +359,7 @@ async fn structured_input_without_an_attachment_is_refused() {
         ClientMessage::Focus { focused: true },
     ] {
         send(&mut client, &msg).await;
-        expect_error(
-            read_response(&mut client, Duration::from_secs(5)).await,
-            "not_attached",
-        );
+        expect_error(read_response(&mut client).await, "not_attached");
     }
 }
 
@@ -393,10 +386,7 @@ async fn text_over_the_limit_is_refused_and_writes_nothing() {
         },
     )
     .await;
-    expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut client).await, "invalid_argument");
     assert_child_received_nothing_before_sentinel(&h, &window_id, &mut client, "71717171").await;
 }
 
@@ -410,10 +400,7 @@ async fn paste_over_the_limit_is_refused_and_writes_nothing() {
         },
     )
     .await;
-    expect_error(
-        read_response(&mut client, Duration::from_secs(10)).await,
-        "invalid_argument",
-    );
+    expect_error(read_response(&mut client).await, "invalid_argument");
     assert_child_received_nothing_before_sentinel(&h, &window_id, &mut client, "71717171").await;
 }
 
@@ -432,10 +419,7 @@ async fn wheel_over_the_line_limit_is_refused_and_writes_nothing() {
             }),
         )
         .await;
-        expect_error(
-            read_response(&mut client, Duration::from_secs(5)).await,
-            "invalid_argument",
-        );
+        expect_error(read_response(&mut client).await, "invalid_argument");
     }
     assert_child_received_nothing_before_sentinel(&h, &window_id, &mut client, "1b5b").await;
 }

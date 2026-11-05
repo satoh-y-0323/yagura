@@ -88,6 +88,8 @@ tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 # Shared test fixtures. Dev-only: `publish = false` and absent from
 # the normal dependency graph, so it never reaches the shipped binaries.
 yagura-test-support = { path = "../yagura-test-support" }
+# The holder's own constants, so a test sized by them follows the holder.
+yagura-holder = { path = "../yagura-holder" }
 
 # Windows-only, tests-only: the conhost-reaping regression test enumerates
 # conhost.exe process IDs directly (via Toolhelp32Snapshot) as an independent

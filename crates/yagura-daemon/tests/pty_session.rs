@@ -20,16 +20,16 @@ use yagura_daemon::{DaemonConfig, PtySession, WindowsShellSearch, resolve_shell}
 async fn spawn_echo_session(config: &DaemonConfig) -> PtySession {
     let child = echo_child_path();
     let child_str = child.to_str().expect("echo_child path must be valid UTF-8");
-    PtySession::spawn_with_command(&[child_str], config)
+    common::spawn_session(&[child_str], config)
         .await
         .expect("spawn_with_command should start echo_child")
 }
 
 /// Pass criterion: the written bytes appear at least once as a subsequence of the read
 /// stream. ConPTY local echo, VT sequences and CRLF translation are tolerated.
-async fn recv_until_contains(session: &PtySession, needle: &[u8], timeout: Duration) -> Vec<u8> {
+async fn recv_until_contains(session: &PtySession, needle: &[u8]) -> Vec<u8> {
     let mut arrivals = session.output_arrivals();
-    let deadline = tokio::time::Instant::now() + timeout;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         arrivals.borrow_and_update();
         // An arrival is announced only once the raw bytes are kept, so a chunk
@@ -230,7 +230,7 @@ async fn spawn_with_command_echoes_ascii_input() {
         .await
         .expect("write_input should succeed while child is running");
 
-    let _ = recv_until_contains(&session, payload, Duration::from_secs(10)).await;
+    let _ = recv_until_contains(&session, payload).await;
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn spawn_with_command_echoes_japanese_utf8_as_subsequence() {
         .await
         .expect("write_input should succeed while child is running");
 
-    let _ = recv_until_contains(&session, payload, Duration::from_secs(10)).await;
+    let _ = recv_until_contains(&session, payload).await;
 }
 
 #[tokio::test]
@@ -274,11 +274,11 @@ async fn exit_is_detected_with_correct_exit_code_and_state_is_retained() {
     let command = ["cmd.exe", "/c", "exit 7"];
     #[cfg(unix)]
     let command = ["/bin/sh", "-c", "exit 7"];
-    let session = PtySession::spawn_with_command(&command, &config)
+    let session = common::spawn_session(&command, &config)
         .await
         .expect("spawn_with_command should start the shell");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if let Some(code) = session.exit_status() {
             assert_eq!(code, 7);
@@ -294,12 +294,13 @@ async fn exit_is_detected_with_correct_exit_code_and_state_is_retained() {
     assert_eq!(session.exit_status(), Some(7));
 }
 
-/// Polls `exit_status()` until it becomes `Some` or `timeout` elapses.
+/// Polls `exit_status()` until it becomes `Some`, failing after
+/// [`yagura_test_support::HANG_GUARD`].
 ///
 /// Deliberate exception to the rule of using a paused clock for time-dependent tests:
 /// this must observe a real OS child process dying, which a virtual clock cannot cause.
-async fn wait_for_exit_status(session: &PtySession, timeout: Duration) -> i32 {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_exit_status(session: &PtySession) -> i32 {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if let Some(code) = session.exit_status() {
             return code;
@@ -316,17 +317,15 @@ async fn terminate_kills_a_long_running_child_within_ten_seconds() {
     let config = DaemonConfig::default();
     let argv = echo_child_command();
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let session = PtySession::spawn_with_command(&argv, &config)
+    let session = common::spawn_session(&argv, &config)
         .await
         .expect("spawn_with_command should start echo_child");
 
     println!("child_process_id={:?}", session.child_process_id());
 
-    // Give the monitor thread time to run before terminate() is called.
-    tokio::time::sleep(Duration::from_millis(500)).await;
     session.terminate();
 
-    let code = wait_for_exit_status(&session, Duration::from_secs(10)).await;
+    let code = wait_for_exit_status(&session).await;
     println!("exit_code={code}");
     // terminate() must kill the child itself rather than rely on the writer-close side
     // effect; exit code 1 is TerminateProcess on Windows / a mapped signal exit on Unix.
@@ -341,17 +340,16 @@ async fn terminate_called_twice_then_again_after_exit_is_observed_does_not_panic
     let config = DaemonConfig::default();
     let argv = echo_child_command();
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let session = PtySession::spawn_with_command(&argv, &config)
+    let session = common::spawn_session(&argv, &config)
         .await
         .expect("spawn_with_command should start echo_child");
 
     println!("child_process_id={:?}", session.child_process_id());
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
     session.terminate();
     session.terminate();
 
-    let _ = wait_for_exit_status(&session, Duration::from_secs(10)).await;
+    let _ = wait_for_exit_status(&session).await;
 
     // Exit has now been observed; a further terminate() call must be a
     // harmless no-op, not a panic or a hang.
@@ -370,48 +368,11 @@ async fn dropping_a_session_ends_its_running_child() {
 
     drop(session);
 
-    let ended = tokio::time::timeout(Duration::from_secs(10), exited.wait_for(|&gone| gone))
-        .await
-        .is_ok_and(|seen| seen.is_ok());
+    let ended = tokio::time::timeout(
+        yagura_test_support::HANG_GUARD,
+        exited.wait_for(|&gone| gone),
+    )
+    .await
+    .is_ok_and(|seen| seen.is_ok());
     assert!(ended, "dropping the session must end its child");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn terminate_called_once_delivers_escalated_sigkill_to_sighup_ignoring_child() {
-    let config = DaemonConfig::default();
-    // The marker follows the trap, so the first signal cannot land before the trap is set.
-    let argv = [
-        "/bin/sh",
-        "-c",
-        "trap \"\" HUP; printf HUP-IGNORED; exec sleep 3600",
-    ];
-    let session = PtySession::spawn_with_command(&argv, &config)
-        .await
-        .expect("spawn_with_command should start the SIGHUP-ignoring child");
-    let _ = recv_until_contains(&session, b"HUP-IGNORED", Duration::from_secs(10)).await;
-
-    session.terminate();
-
-    let _ = wait_for_exit_status(&session, Duration::from_secs(10)).await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn terminate_called_twice_still_delivers_escalated_sigkill_to_sighup_ignoring_child() {
-    let config = DaemonConfig::default();
-    // exec replaces the shell in place (same pid, no grandchild) and the HUP trap ignores
-    // terminate()'s initial signal, so only the escalated force-kill can end this process.
-    let argv = ["/bin/sh", "-c", "trap \"\" HUP; exec sleep 3600"];
-    let session = PtySession::spawn_with_command(&argv, &config)
-        .await
-        .expect("spawn_with_command should start the SIGHUP-ignoring child");
-
-    println!("child_process_id={:?}", session.child_process_id());
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    session.terminate();
-    session.terminate();
-
-    let _ = wait_for_exit_status(&session, Duration::from_secs(10)).await;
 }

@@ -12,7 +12,6 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, expect_error, identify, read_response, register_approver,
@@ -24,9 +23,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::echo_child_path;
-
-/// Fails a request that never gets its reply; not a speed bound.
-const REPLY_GUARD: Duration = Duration::from_secs(60);
 
 // --- fixtures ----------------------------------------------------------
 
@@ -96,7 +92,7 @@ fn task(task_id: &str) -> PlanTaskSpec {
 async fn request(client: &mut Connection, msg: ClientMessage) -> DaemonMessage {
     send(client, &msg).await;
     loop {
-        match read_response(client, REPLY_GUARD).await {
+        match read_response(client).await {
             DaemonMessage::PlanChanged { .. }
             | DaemonMessage::TicketChanged { .. }
             | DaemonMessage::ChatChanged { .. } => continue,
@@ -351,7 +347,7 @@ async fn making_a_plan_from_a_ticket_leaves_its_state_fields_and_results_as_they
 async fn ticket_pushes_until(approver: &mut Connection, sentinel: i64) -> Vec<i64> {
     let mut seen = Vec::new();
     loop {
-        match read_response(approver, REPLY_GUARD).await {
+        match read_response(approver).await {
             DaemonMessage::TicketChanged { workspace_id } if workspace_id == sentinel => {
                 return seen;
             }
@@ -382,7 +378,7 @@ async fn making_or_deleting_a_plan_of_a_ticket_pushes_ticket_changed_and_a_plain
     let mut b = window_in(&h, &repo_b).await;
 
     expect_ticket(request(&mut b, create_ticket("b one")).await);
-    let id_b = match read_response(&mut appr, REPLY_GUARD).await {
+    let id_b = match read_response(&mut appr).await {
         DaemonMessage::TicketChanged { workspace_id } => workspace_id,
         other => panic!("expected ticket_changed, got {other:?}"),
     };

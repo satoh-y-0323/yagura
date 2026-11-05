@@ -119,7 +119,7 @@ async fn write_as_another_writer(h: &Harness, window: &Window, bytes: &[u8]) {
 }
 
 async fn wait_for_the_dialog(h: &Harness, window: &Window) {
-    wait_until_model_shows(h, &window.id, APPROVAL_HEADING.as_bytes(), HANG_GUARD).await;
+    wait_until_model_shows(h, &window.id, APPROVAL_HEADING.as_bytes()).await;
 }
 
 /// What the call answered, once it has.
@@ -145,7 +145,7 @@ fn not_placed(result: PtyResult<SubmitJudgment>) -> NotPlaced {
 /// read before it.
 async fn read_log(h: &Harness, window: &Window) -> Vec<u8> {
     write_as_another_writer(h, window, MARKER).await;
-    let mut read = wait_until_input_log_contains(&window.log, MARKER, HANG_GUARD).await;
+    let mut read = wait_until_input_log_contains(&window.log, MARKER).await;
     let at = read
         .windows(MARKER.len())
         .rposition(|w| w == MARKER)
@@ -192,7 +192,7 @@ async fn a_body_left_beside_a_dialog_is_taken_back_again_once_the_dialog_is_gone
         "the body was seen alone once the dialog was gone and taken back behind a probe, so the \
          composer is empty"
     );
-    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty, HANG_GUARD).await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty).await;
 
     let read = read_log(&h, &window).await;
     let after = after_the_body(&read);
@@ -251,13 +251,7 @@ async fn a_body_the_call_read_back_is_gone_when_another_writers_keystroke_is_all
         !not_placed.envelope_remains,
         "the call had read its body back and the screen no longer shows it, so it is gone"
     );
-    wait_until_composer_is(
-        &h,
-        &window.id,
-        &ComposerReadout::Body("h".to_string()),
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Body("h".to_string())).await;
 
     let read = read_log(&h, &window).await;
     let after = after_the_body(&read);
@@ -305,13 +299,7 @@ async fn a_body_with_another_writers_keystroke_behind_it_is_left_alone_and_repor
         not_placed.envelope_remains,
         "the body and another writer's keystroke show together, so the call cannot vouch for it"
     );
-    wait_until_composer_is(
-        &h,
-        &window.id,
-        &ComposerReadout::Body(format!("{BODY} h")),
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Body(format!("{BODY} h"))).await;
 
     let read = read_log(&h, &window).await;
     let (rest, run) = take_back_in_front_of(after_the_body(&read), b"h");
@@ -348,13 +336,7 @@ async fn a_body_that_survives_the_interrupt_keys_is_taken_back_after_them() {
     .await;
 
     let call = start_delivery(&h, &window, None);
-    wait_until_composer_is(
-        &h,
-        &window.id,
-        &ComposerReadout::Body(BODY.to_string()),
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Body(BODY.to_string())).await;
     write_as_another_writer(&h, &window, &[CTRL_C]).await;
     let_every_clock_bound_run_out().await;
 
@@ -365,7 +347,7 @@ async fn a_body_that_survives_the_interrupt_keys_is_taken_back_after_them() {
         "the receiver kept the body through the interrupt keys; the call took it back and saw the \
          composer empty"
     );
-    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty, HANG_GUARD).await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty).await;
 
     let read = read_log(&h, &window).await;
     let after = after_the_body(&read);
@@ -411,7 +393,6 @@ async fn start_delivery_into_a_folding_receiver(
         &h,
         &window.id,
         &ComposerReadout::Body(FOLD_PLACEHOLDER.to_string()),
-        HANG_GUARD,
     )
     .await;
     (h, window, call)
@@ -435,7 +416,7 @@ async fn a_folded_body_that_survives_the_interrupt_keys_is_taken_back_after_them
         "only the interrupt keys reached the composer besides the body, so the call takes the \
          folded body back and sees the composer empty"
     );
-    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty, HANG_GUARD).await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Empty).await;
 
     let read = read_log(&h, &window).await;
     let after = after_the_body(&read);
@@ -471,13 +452,7 @@ async fn a_folded_body_with_another_writers_keystroke_is_left_alone_and_reported
         not_placed.envelope_remains,
         "another writer typed into the composer, so the call cannot vouch for what is left"
     );
-    wait_until_composer_is(
-        &h,
-        &window.id,
-        &ComposerReadout::Body("h".to_string()),
-        HANG_GUARD,
-    )
-    .await;
+    wait_until_composer_is(&h, &window.id, &ComposerReadout::Body("h".to_string())).await;
 
     let read = read_log(&h, &window).await;
     let (rest, run) = take_back_in_front_of(after_the_body(&read), b"h");

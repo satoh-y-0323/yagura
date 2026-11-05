@@ -14,7 +14,6 @@ mod common;
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
 
 use common::{
     CONTROL_DETECTION_NAME, ChatPlaybook, Harness, chat_config, identify, read_message,
@@ -22,9 +21,6 @@ use common::{
 };
 use yagura_protocol::{ChatParticipant, ChatRoomInfo, ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
-
-/// How long a case waits for something that must happen.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A chat-enabled daemon whose playbook also lets any connection close a window.
 async fn start(tag: &str, dir: &Path) -> Harness {
@@ -54,14 +50,14 @@ async fn open_participant(h: &Harness, cwd: Option<&Path>) -> String {
 /// Reads the approver connection up to and including the next
 /// `chat_participants_changed`, skipping the other pushes an approver is sent.
 async fn next_participants_changed(approver: &mut Connection) {
-    let deadline = tokio::time::Instant::now() + EVENT_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
             !remaining.is_zero(),
             "timed out waiting for chat_participants_changed"
         );
-        match read_message(approver, remaining).await {
+        match read_message(approver).await {
             DaemonMessage::ChatParticipantsChanged => return,
             DaemonMessage::ChatChanged { .. } | DaemonMessage::PlanChanged { .. } => continue,
             other => panic!("expected chat_participants_changed, got {other:?}"),
@@ -72,7 +68,7 @@ async fn next_participants_changed(approver: &mut Connection) {
 /// Reads the reply to a request made on the approver connection, skipping every push.
 async fn approver_reply(approver: &mut Connection) -> DaemonMessage {
     loop {
-        match read_response(approver, EVENT_TIMEOUT).await {
+        match read_response(approver).await {
             DaemonMessage::ChatParticipantsChanged
             | DaemonMessage::ChatChanged { .. }
             | DaemonMessage::PlanChanged { .. } => continue,
@@ -143,7 +139,7 @@ async fn close(client: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_response(client, EVENT_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -158,7 +154,7 @@ async fn rename(client: &mut Connection, window_id: &str, name: &str) {
         },
     )
     .await;
-    match read_response(client, EVENT_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::WindowRenamed { name: stored, .. } => assert_eq!(stored, name),
         other => panic!("expected window_renamed, got {other:?}"),
     }
@@ -289,7 +285,7 @@ async fn a_participant_in_a_workspace_with_no_room_yet_is_listed_in_its_new_room
         },
     )
     .await;
-    match read_response(&mut own, EVENT_TIMEOUT).await {
+    match read_response(&mut own).await {
         DaemonMessage::ChatMessages {
             room_id: own_room, ..
         } => assert_eq!(

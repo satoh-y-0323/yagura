@@ -21,7 +21,6 @@ use yagura_protocol::{ClientMessage, Key, KeyInput, Modifiers, NamedKey};
 const CHILD: &str = "key_record_child";
 const READY: &str = "KEY-RECORDS-READY";
 const TAB_RECORD: &str = "KEYDOWN-VK-0009-CTRL-";
-const TIMEOUT: Duration = Duration::from_secs(15);
 const LEFT_CTRL_PRESSED: u32 = 0x0008;
 
 /// Runs `child` from this binary as a window's command.
@@ -54,7 +53,7 @@ fn key_record_child() {
     }
     // A child left waiting on input after a failed test must not outlive it for long.
     std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(yagura_test_support::HANG_GUARD);
         std::process::exit(2);
     });
     // SAFETY: GetStdHandle only reads this process's standard handle table.
@@ -100,9 +99,8 @@ fn tab_control_state(text: &str) -> Option<u32> {
 async fn ctrl_tab_reaches_a_console_child_as_vk_tab_with_left_ctrl() {
     let h = Harness::start("conpty-key-records", DaemonConfig::default()).await;
     let window_id = h.open(child_command(CHILD), None).await;
-    h.wait_for_scrollback(&window_id, READY.as_bytes(), TIMEOUT)
-        .await;
-    wait_until_model_shows(&h, &window_id, READY.as_bytes(), TIMEOUT).await;
+    h.wait_for_scrollback(&window_id, READY.as_bytes()).await;
+    wait_until_model_shows(&h, &window_id, READY.as_bytes()).await;
 
     // The PTY host asks for Win32 Input Mode before the child prints anything.
     let session = h
@@ -111,7 +109,7 @@ async fn ctrl_tab_reaches_a_console_child_as_vk_tab_with_left_ctrl() {
         .expect("window must exist in registry")
         .session()
         .clone();
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !session.input_state().modes.win32_input {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -134,7 +132,7 @@ async fn ctrl_tab_reaches_a_console_child_as_vk_tab_with_left_ctrl() {
         }),
     )
     .await;
-    h.wait_for_scrollback(&window_id, TAB_RECORD.as_bytes(), TIMEOUT)
+    h.wait_for_scrollback(&window_id, TAB_RECORD.as_bytes())
         .await;
     let text = h.flattened_scrollback(&window_id);
     let state = tab_control_state(&text)

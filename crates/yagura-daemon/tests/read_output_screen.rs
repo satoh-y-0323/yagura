@@ -9,8 +9,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::real_daemon::Sandbox;
 use common::{read_response, send};
 use yagura_protocol::{ClientMessage, DaemonMessage};
@@ -72,7 +70,7 @@ LONG_VALUE = '{value}'
         },
     )
     .await;
-    let summary = match read_response(&mut daemon.client, Duration::from_secs(5)).await {
+    let summary = match read_response(&mut daemon.client).await {
         DaemonMessage::WindowStatus {
             last_output_summary,
             ..
@@ -110,7 +108,7 @@ async fn the_status_summary_counts_its_500_characters_not_bytes() {
         },
     )
     .await;
-    let summary = match read_response(&mut daemon.client, Duration::from_secs(5)).await {
+    let summary = match read_response(&mut daemon.client).await {
         DaemonMessage::WindowStatus {
             last_output_summary,
             ..

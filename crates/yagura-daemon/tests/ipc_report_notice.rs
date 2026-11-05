@@ -14,33 +14,26 @@ use std::time::Duration;
 
 use common::{
     Harness, SubmitDefinitionInput, VALID_TOKEN, approver_base_config, call_open_window, identify,
-    open_submit_child_window_with_composer, policy, read_response, register_approver, send,
-    text_tail, unique_temp_dir, wait_until_status,
+    let_every_clock_bound_run_out, open_submit_child_window_with_composer, policy, read_response,
+    register_approver, send, text_tail, unique_temp_dir, wait_until_status,
 };
 
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::detector::engine::TURN_ACTIVE_QUIET;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReceivedReport, ReportOutcome, WindowStatus};
-use yagura_test_support::ipc::{Connection, try_read_daemon_message};
+use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::echo_child_command;
 
 /// The parent's `[input] ready_hold_ms`: how long the notice path must see
 /// the parent hold a status that accepts input before it writes.
 const READY_HOLD_MS: u64 = 200;
 
-/// Upper bound for a notice that is expected to be written. The notice path
-/// needs the ready hold and the submit delay; the rest is headroom for a loaded
-/// parallel test run.
-const NOTICE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long a case watches for a notice that must not be written. A notice
-/// that is going to be written lands after the ready hold plus the submit
-/// delay (a quarter of a second here), so this is more than ten times that.
-const ABSENCE_WINDOW: Duration = Duration::from_secs(3);
-
-/// How long the delivery-lock re-check case waits, holding the parent's delivery lock, before it
-/// changes anything: the notice path reaches that lock only after the ready
-/// hold, so this leaves it several times that to be queued on the lock.
-const LOCK_QUEUE_SETTLE: Duration = Duration::from_millis(1500);
+/// How far the stopped clock is moved while a parent reported `running` is
+/// watched: past every clock-bound step the notice path takes before its
+/// first write (the ready hold), yet short of the quiet time after which the
+/// detector itself closes the reported turn and the parent may be typed into.
+const RUNNING_WATCH: Duration = Duration::from_millis(READY_HOLD_MS * 5);
+const _: () = assert!(RUNNING_WATCH.as_millis() < TURN_ACTIVE_QUIET.as_millis());
 
 const PARENT_MARKER: &str = "nt-parent-ready";
 
@@ -143,7 +136,7 @@ async fn pin_status(probe: &mut Connection, window_id: &str, status: WindowStatu
         },
     )
     .await;
-    wait_until_status(probe, window_id, status, Duration::from_secs(10)).await;
+    wait_until_status(probe, window_id, status).await;
 }
 
 async fn report(child_conn: &mut Connection, summary: &str, path: Option<&str>) {
@@ -156,7 +149,7 @@ async fn report(child_conn: &mut Connection, summary: &str, path: Option<&str>) 
         },
     )
     .await;
-    match read_response(child_conn, Duration::from_secs(5)).await {
+    match read_response(child_conn).await {
         DaemonMessage::ReportSent { .. } => {}
         other => panic!("expected report_sent, got {other:?}"),
     }
@@ -168,7 +161,7 @@ async fn drain_inbox(parent_conn: &mut Connection) -> Vec<ReceivedReport> {
         &ClientMessage::WaitForReport { timeout_sec: 0 },
     )
     .await;
-    match read_response(parent_conn, Duration::from_secs(5)).await {
+    match read_response(parent_conn).await {
         DaemonMessage::Reports {
             reports,
             awaiting: _,
@@ -180,7 +173,7 @@ async fn drain_inbox(parent_conn: &mut Connection) -> Vec<ReceivedReport> {
 // --- reading what reached the parent's input ------------------------------------
 
 async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str, times: usize) {
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if h.submitted_count(window_id, text) >= times {
             return;
@@ -197,23 +190,64 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str, times: usi
     }
 }
 
-/// Watches the parent for [`ABSENCE_WINDOW`], failing as soon as it accepts
-/// more lines than `allowed`.
-async fn assert_no_more_submissions(h: &Harness, window_id: &str, allowed: usize, what: &str) {
-    let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
-    loop {
-        let seen = h.submitted_count(window_id, "");
+/// The parent's write count once its delivery agent has finished exactly
+/// `attempts` notice attempts: an attempt is counted only after its own
+/// writes are, so the count read here holds all of them.
+async fn writes_after_attempts(h: &Harness, window_id: &str, attempts: u64) -> u64 {
+    let entry = h.registry.get(window_id).expect("the parent is registered");
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while entry.notice_attempts() < attempts {
         assert!(
-            seen <= allowed,
-            "{what}: the parent accepted {seen} line(s), expected at most {allowed}; \
-             flattened scrollback tail: {:?}",
-            text_tail(&h.flattened_scrollback(window_id)),
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for notice attempt {attempts}; finished so far: {}",
+            entry.notice_attempts()
         );
-        if tokio::time::Instant::now() >= deadline {
-            return;
-        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(
+        entry.notice_attempts(),
+        attempts,
+        "the parent's delivery agent made more notice attempts than expected"
+    );
+    entry.write_seq()
+}
+
+/// Lets every clock-bound step the notice path could still take (ready hold,
+/// submit delay, a declined attempt's retry) run out, then fails if anything
+/// was written into the parent since its count read `writes`, or another
+/// notice attempt was made. A write is counted before the clock can move on,
+/// so nothing the agent does within the clock's run is missed.
+async fn assert_nothing_more_written(
+    h: &Harness,
+    window_id: &str,
+    writes: u64,
+    attempts: u64,
+    what: &str,
+) {
+    let_every_clock_bound_run_out().await;
+    assert_written_since(h, window_id, writes, attempts, what);
+}
+
+fn assert_written_since(h: &Harness, window_id: &str, writes: u64, attempts: u64, what: &str) {
+    let entry = h.registry.get(window_id).expect("the parent is registered");
+    assert_eq!(
+        entry.write_seq(),
+        writes,
+        "{what}: something was written into the parent; flattened scrollback tail: {:?}",
+        text_tail(&h.flattened_scrollback(window_id)),
+    );
+    assert_eq!(
+        entry.notice_attempts(),
+        attempts,
+        "{what}: the parent's delivery agent made another notice attempt"
+    );
+}
+
+/// Moves the stopped clock by `span`, so every step due within it runs.
+async fn let_the_clock_run_for(span: Duration) {
+    tokio::time::pause();
+    tokio::time::sleep(span).await;
+    tokio::time::resume();
 }
 
 // --- One report to a ready parent ----------------------------------------------
@@ -226,15 +260,11 @@ async fn a_report_to_a_parent_that_accepts_input_types_the_notice_exactly_once()
     report(&mut s.child_conn, "done", None).await;
 
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
-    assert_no_more_submissions(&s.h, &s.parent, 1, "after the first notice").await;
-    assert_eq!(s.h.submitted_count(&s.parent, &expected_notice(1)), 1);
-    // Once the notice is typed nothing is due, so the agent must not keep
-    // attempting through the absence window above.
-    let parent =
-        s.h.registry
-            .get(&s.parent)
-            .expect("the parent is registered");
-    assert_eq!(parent.notice_attempts(), 1);
+    // Once the notice is typed nothing is due, so the agent must neither
+    // write nor attempt again, whatever the clock does.
+    let writes = writes_after_attempts(&s.h, &s.parent, 1).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 1, "after the first notice").await;
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
     s.h.registry.terminate_all().await;
 }
 
@@ -244,15 +274,18 @@ async fn a_report_to_a_parent_that_accepts_input_types_the_notice_exactly_once()
 async fn reports_to_a_running_parent_are_announced_once_it_accepts_input_with_the_count_then() {
     let mut s = scene("notice-running-then-ready", notice_config).await;
     pin_status(&mut s.probe, &s.parent, WindowStatus::Running).await;
+    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
 
     report(&mut s.child_conn, "first", None).await;
     report(&mut s.child_conn, "second", None).await;
-    assert_no_more_submissions(&s.h, &s.parent, 0, "while the parent is running").await;
+    let_the_clock_run_for(RUNNING_WATCH).await;
+    assert_written_since(&s.h, &s.parent, before, 0, "while the parent is running");
 
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(2), 1).await;
-    assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
-    assert_eq!(s.h.submitted_count(&s.parent, &expected_notice(2)), 1);
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
+    let writes = writes_after_attempts(&s.h, &s.parent, 1).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 1, "after the notice").await;
     s.h.registry.terminate_all().await;
 }
 
@@ -264,18 +297,13 @@ async fn reports_to_a_parent_in_unknown_are_never_announced() {
     // The fixture's way out of a ready status: filler that pushes the marker
     // out of the detection window, with the input box left empty.
     s.h.write_input(&s.parent, &[0x03]).await;
-    wait_until_status(
-        &mut s.probe,
-        &s.parent,
-        WindowStatus::Unknown,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut s.probe, &s.parent, WindowStatus::Unknown).await;
+    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
 
     report(&mut s.child_conn, "first", None).await;
     report(&mut s.child_conn, "second", None).await;
 
-    assert_no_more_submissions(&s.h, &s.parent, 0, "while the parent is Unknown").await;
+    assert_nothing_more_written(&s.h, &s.parent, before, 0, "while the parent is Unknown").await;
     s.h.registry.terminate_all().await;
 }
 
@@ -294,13 +322,14 @@ async fn a_report_handed_to_a_waiting_wait_for_report_is_never_announced() {
     // Frames on one connection are handled in order, so the pong proves the
     // wait above is already parked before the report is sent.
     send(&mut s.parent_conn, &ClientMessage::Ping).await;
-    match read_response(&mut s.parent_conn, Duration::from_secs(5)).await {
+    match read_response(&mut s.parent_conn).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong, got {other:?}"),
     }
+    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
 
     report(&mut s.child_conn, "handed over", None).await;
-    match read_response(&mut s.parent_conn, Duration::from_secs(5)).await {
+    match read_response(&mut s.parent_conn).await {
         DaemonMessage::Reports {
             reports,
             awaiting: _,
@@ -311,9 +340,10 @@ async fn a_report_handed_to_a_waiting_wait_for_report_is_never_announced() {
         other => panic!("expected reports, got {other:?}"),
     }
 
-    assert_no_more_submissions(
+    assert_nothing_more_written(
         &s.h,
         &s.parent,
+        before,
         0,
         "after a report went straight to the waiting call",
     )
@@ -325,16 +355,22 @@ async fn a_report_handed_to_a_waiting_wait_for_report_is_never_announced() {
 
 #[tokio::test]
 async fn a_report_arriving_before_the_inbox_is_emptied_does_not_type_a_second_notice() {
-    let mut s = scene("notice-no-second", notice_config).await;
+    let ready_again = common::ready_pattern_with_redraw(PARENT_MARKER);
+    let mut s = scene_ready_on("notice-no-second", notice_config, &ready_again).await;
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     report(&mut s.child_conn, "first", None).await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
+    // Ready again, so only the inbox's stretch holds a second notice back.
+    common::redraw_screen(&s.h, &s.parent, &ready_again).await;
+    wait_until_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
+    let writes = writes_after_attempts(&s.h, &s.parent, 1).await;
 
     report(&mut s.child_conn, "second", None).await;
-    assert_no_more_submissions(
+    assert_nothing_more_written(
         &s.h,
         &s.parent,
+        writes,
         1,
         "after a second report while the first is unread",
     )
@@ -354,17 +390,13 @@ async fn a_report_arriving_after_the_inbox_was_emptied_types_a_fresh_notice() {
     // The typed notice left the parent's screen running; it is ready for the
     // next one once it has redrawn its prompt.
     common::redraw_screen(&s.h, &s.parent, &ready_again).await;
-    wait_until_status(
-        &mut s.probe,
-        &s.parent,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     report(&mut s.child_conn, "after draining", None).await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 2).await;
-    assert_no_more_submissions(&s.h, &s.parent, 2, "after the fresh notice").await;
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 2);
+    let writes = writes_after_attempts(&s.h, &s.parent, 2).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 2, "after the fresh notice").await;
     s.h.registry.terminate_all().await;
 }
 
@@ -385,7 +417,8 @@ async fn the_notice_carries_only_the_count_never_the_childs_summary_or_path() {
     report(&mut s.child_conn, &summary, Some(&path)).await;
 
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
-    assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
+    let writes = writes_after_attempts(&s.h, &s.parent, 1).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 1, "after the notice").await;
 
     let flattened = s.h.flattened_scrollback(&s.parent);
     for needle in ["99 pending", summary_token, path_token, "xxxxxxxxxx"] {
@@ -409,25 +442,38 @@ async fn the_notice_is_typed_without_an_approval_request_under_a_playbook_that_g
 
     report(&mut s.child_conn, "done", None).await;
 
-    let deadline = tokio::time::Instant::now() + ABSENCE_WINDOW;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        if let Some(DaemonMessage::ApprovalRequested { request }) =
-            try_read_daemon_message(&mut approver, remaining).await
-        {
-            panic!("the notice must not ask for approval, got {request:?}");
-        }
-    }
-
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
     assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
+    // A request the notice raised would be pushed to the approver before the
+    // notice could be typed, so ahead of the pong.
+    send(&mut approver, &ClientMessage::Ping).await;
+    loop {
+        match read_response(&mut approver).await {
+            DaemonMessage::Pong => break,
+            DaemonMessage::ApprovalRequested { request } => {
+                panic!("the notice must not ask for approval, got {request:?}")
+            }
+            _ => {}
+        }
+    }
     s.h.registry.terminate_all().await;
 }
 
 // --- The notice re-checks under the delivery lock ------------------------------
+
+/// Lets the clock run out while the test holds `entry`'s delivery lock: the
+/// notice has then passed its ready hold and waits on the lock, a wait with no
+/// clock. Its parcel is out of the inbox from that point, which shows that the
+/// re-check under the lock is the one the case exercises.
+async fn queue_on_the_held_lock(entry: &yagura_daemon::window::WindowEntry) {
+    let_every_clock_bound_run_out().await;
+    assert_eq!(
+        entry.inbox().pending_count(),
+        0,
+        "the notice must be queued on the delivery lock before the case changes anything"
+    );
+    assert_eq!(entry.notice_attempts(), 0);
+}
 
 #[tokio::test]
 async fn a_notice_queued_on_the_delivery_lock_is_not_typed_once_the_parent_started_running() {
@@ -435,23 +481,25 @@ async fn a_notice_queued_on_the_delivery_lock_is_not_typed_once_the_parent_start
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     let entry = s.h.registry.get(&s.parent).expect("parent window entry");
+    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
     let guard = entry.lock_delivery().await;
     report(&mut s.child_conn, "queued", None).await;
-    tokio::time::sleep(LOCK_QUEUE_SETTLE).await;
+    queue_on_the_held_lock(&entry).await;
     pin_status(&mut s.probe, &s.parent, WindowStatus::Running).await;
     drop(guard);
 
-    assert_no_more_submissions(
-        &s.h,
-        &s.parent,
-        0,
-        "after the lock was released to a running parent",
-    )
-    .await;
+    // The queued attempt ends, unwritten, with the parent running.
+    assert_eq!(
+        writes_after_attempts(&s.h, &s.parent, 1).await,
+        before,
+        "the notice queued on the lock was written into a parent that started running"
+    );
 
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
-    assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
+    let writes = writes_after_attempts(&s.h, &s.parent, 2).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 2, "after the notice").await;
     s.h.registry.terminate_all().await;
 }
 
@@ -462,16 +510,23 @@ async fn a_notice_queued_on_the_delivery_lock_is_not_typed_once_wait_for_report_
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     let entry = s.h.registry.get(&s.parent).expect("parent window entry");
+    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
     let guard = entry.lock_delivery().await;
     report(&mut s.child_conn, "queued", None).await;
-    tokio::time::sleep(LOCK_QUEUE_SETTLE).await;
+    queue_on_the_held_lock(&entry).await;
     assert_eq!(drain_inbox(&mut s.parent_conn).await.len(), 1);
     drop(guard);
 
-    assert_no_more_submissions(
+    assert_eq!(
+        writes_after_attempts(&s.h, &s.parent, 1).await,
+        before,
+        "the notice queued on the lock was written after wait_for_report emptied the inbox"
+    );
+    assert_nothing_more_written(
         &s.h,
         &s.parent,
-        0,
+        before,
+        1,
         "after the lock was released with the inbox already emptied",
     )
     .await;
@@ -489,7 +544,7 @@ async fn a_notice_declined_by_foreign_text_in_the_input_is_typed_once_the_input_
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     s.h.write_input(&s.parent, FOREIGN_DRAFT.as_bytes()).await;
-    let deadline = tokio::time::Instant::now() + NOTICE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !s.h.flattened_scrollback(&s.parent).contains(FOREIGN_DRAFT) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -499,12 +554,23 @@ async fn a_notice_declined_by_foreign_text_in_the_input_is_typed_once_the_input_
     }
 
     report(&mut s.child_conn, "done", None).await;
-    // Long past the ready hold: the notice has been tried against the
-    // foreign draft and must have been declined, never typed over it.
-    assert_no_more_submissions(&s.h, &s.parent, 0, "while foreign text fills the input").await;
+    // The notice is tried against the foreign draft and declined, and is not
+    // tried again until the draft or the status changes.
+    let declined = writes_after_attempts(&s.h, &s.parent, 1).await;
+    assert_nothing_more_written(
+        &s.h,
+        &s.parent,
+        declined,
+        1,
+        "while foreign text fills the input",
+    )
+    .await;
 
     s.h.write_input(&s.parent, b"\x15").await;
     wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
-    assert_no_more_submissions(&s.h, &s.parent, 1, "after the notice").await;
+    // A notice typed over the draft would have been accepted ahead of this one.
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
+    let writes = writes_after_attempts(&s.h, &s.parent, 2).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 2, "after the notice").await;
     s.h.registry.terminate_all().await;
 }

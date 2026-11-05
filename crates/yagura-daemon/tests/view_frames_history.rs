@@ -10,7 +10,7 @@
 mod common;
 
 use common::Harness;
-use common::views::{CATCH_UP, numbered_lines, open_script_window, script_write_and_wait};
+use common::views::{numbered_lines, open_script_window, script_write_and_wait};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
     CellPosition, ClientMessage, Key, KeyInput, Modifiers, NamedKey, TerminalSize, WheelInput,
@@ -59,10 +59,8 @@ async fn view_with_history(
         "HIST-FILL",
     )
     .await;
-    view.pump_until("the filled screen", CATCH_UP, |grid| {
-        grid.contains_text("HIST-FILL")
-    })
-    .await;
+    view.pump_until("the filled screen", |grid| grid.contains_text("HIST-FILL"))
+        .await;
     (h, window_id, view)
 }
 
@@ -90,7 +88,7 @@ async fn the_wheel_moves_the_view_into_history_and_back() {
     assert!(view.grid.view.history_rows > 0);
 
     view.send_wheel(wheel(-3)).await;
-    view.pump_until("the view three rows back", CATCH_UP, |grid| {
+    view.pump_until("the view three rows back", |grid| {
         grid.view.display_offset == 3
     })
     .await;
@@ -102,7 +100,7 @@ async fn the_wheel_moves_the_view_into_history_and_back() {
     );
 
     view.send_wheel(wheel(3)).await;
-    view.pump_until("the view back at the bottom", CATCH_UP, |grid| {
+    view.pump_until("the view back at the bottom", |grid| {
         grid.view.display_offset == 0
     })
     .await;
@@ -116,7 +114,7 @@ async fn shift_page_up_and_shift_page_down_page_the_view() {
     let live = view.grid.screen_text();
 
     view.send_key(shifted(NamedKey::PageUp)).await;
-    view.pump_until("a page back", CATCH_UP, |grid| grid.view.display_offset > 0)
+    view.pump_until("a page back", |grid| grid.view.display_offset > 0)
         .await;
     let offset = view.grid.view.display_offset as usize;
     assert!(
@@ -126,10 +124,8 @@ async fn shift_page_up_and_shift_page_down_page_the_view() {
     assert_shifted_down(&live, &view.grid.screen_text(), offset);
 
     view.send_key(shifted(NamedKey::PageDown)).await;
-    view.pump_until("back at the bottom", CATCH_UP, |grid| {
-        grid.view.display_offset == 0
-    })
-    .await;
+    view.pump_until("back at the bottom", |grid| grid.view.display_offset == 0)
+        .await;
     assert_eq!(view.grid.screen_text(), live);
 }
 
@@ -140,21 +136,19 @@ async fn the_scroll_view_message_moves_the_view_and_is_clamped_to_the_history() 
     let history = view.grid.view.history_rows;
 
     view.send(&ClientMessage::ScrollView { lines: 5 }).await;
-    view.pump_until("five rows back", CATCH_UP, |grid| {
-        grid.view.display_offset == 5
-    })
-    .await;
+    view.pump_until("five rows back", |grid| grid.view.display_offset == 5)
+        .await;
 
     view.send(&ClientMessage::ScrollView { lines: i32::MAX })
         .await;
-    view.pump_until("the top of the history", CATCH_UP, |grid| {
+    view.pump_until("the top of the history", |grid| {
         grid.view.display_offset == history
     })
     .await;
 
     view.send(&ClientMessage::ScrollView { lines: i32::MIN })
         .await;
-    view.pump_until("the bottom", CATCH_UP, |grid| grid.view.display_offset == 0)
+    view.pump_until("the bottom", |grid| grid.view.display_offset == 0)
         .await;
 }
 
@@ -170,7 +164,7 @@ async fn a_wheel_the_program_asked_to_receive_does_not_move_the_view() {
         "TRACKING",
     )
     .await;
-    view.pump_until("the mouse-reporting state", CATCH_UP, |grid| {
+    view.pump_until("the mouse-reporting state", |grid| {
         grid.view.mouse_reporting
     })
     .await;
@@ -178,7 +172,6 @@ async fn a_wheel_the_program_asked_to_receive_does_not_move_the_view() {
     view.send_wheel(wheel(-3)).await;
     view.assert_no_frame(
         "the wheel was reported to the program, which owns it, and the view did not move",
-        std::time::Duration::from_millis(300),
     )
     .await;
     assert_eq!(view.grid.view.display_offset, 0);
@@ -201,10 +194,8 @@ async fn a_view_scrolled_back_in_a_full_history_keeps_showing_the_same_rows_as_o
         "HIST-FILL-2",
     )
     .await;
-    view.pump_until("the second fill", CATCH_UP, |grid| {
-        grid.contains_text("HIST-FILL-2")
-    })
-    .await;
+    view.pump_until("the second fill", |grid| grid.contains_text("HIST-FILL-2"))
+        .await;
     assert!(full > 0);
     assert_eq!(
         view.grid.view.history_rows, full,
@@ -212,10 +203,8 @@ async fn a_view_scrolled_back_in_a_full_history_keeps_showing_the_same_rows_as_o
     );
 
     view.send(&ClientMessage::ScrollView { lines: 10 }).await;
-    view.pump_until("ten rows back", CATCH_UP, |grid| {
-        grid.view.display_offset == 10
-    })
-    .await;
+    view.pump_until("ten rows back", |grid| grid.view.display_offset == 10)
+        .await;
     let before = view.grid.screen_text();
 
     // A line whose wide last character cannot fit the last column and wraps
@@ -233,7 +222,7 @@ async fn a_view_scrolled_back_in_a_full_history_keeps_showing_the_same_rows_as_o
     // above is in the model, so it shows where the view really stood.
     view.send(&ClientMessage::ScrollView { lines: 1 }).await;
     let expected_before = before.clone();
-    view.pump_until("one more row back", CATCH_UP, |grid| {
+    view.pump_until("one more row back", |grid| {
         grid.screen_text() != expected_before
     })
     .await;

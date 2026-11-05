@@ -19,7 +19,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
 use common::{Harness, approver_base_config, write_profile};
@@ -1022,8 +1021,7 @@ async fn the_prompt_arrives_in_the_childs_argv_after_every_other_injection_and_v
         .expect("the window opens");
     let window_id = opened.window_id;
 
-    h.wait_for_scrollback(&window_id, b"<<argv[3]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[3]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert_eq!(sentinel(&text, "argv[1]").as_deref(), Some("--hooks-arg"));
     assert_eq!(sentinel(&text, "argv[2]").as_deref(), Some("--"));

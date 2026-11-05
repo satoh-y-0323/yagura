@@ -10,11 +10,10 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{
-    Harness, approver_base_config, call_open_window, call_send_handoff_from_profile_within,
-    empty_lookup, expect_error, expect_handoff_sent, handoff_profile_config, identify,
+    Harness, approver_base_config, call_open_window, call_send_handoff_from_profile, empty_lookup,
+    expect_error, expect_handoff_sent, handoff_profile_config, identify,
     launch_prompt_profile_source, policy, read_response, register_approver, send, unique_temp_dir,
     write_profile,
 };
@@ -113,12 +112,12 @@ async fn approver_connection(h: &Harness) -> Connection {
 /// Reads the next *response* frame, skipping `plan_changed` pushes the same
 /// way `ipc_plan_assign.rs`'s own helper does: a connection that is also a
 /// registered approver may be pushed to while its own request is in flight.
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -139,7 +138,7 @@ async fn create_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -150,7 +149,7 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn update_plan(
@@ -167,7 +166,7 @@ async fn update_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -178,7 +177,7 @@ async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn set_plan_owner(client: &mut Connection, plan_id: &str, window_id: &str) -> DaemonMessage {
@@ -190,7 +189,7 @@ async fn set_plan_owner(client: &mut Connection, plan_id: &str, window_id: &str)
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str) -> DaemonMessage {
@@ -203,7 +202,7 @@ async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str)
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(10)).await
+    read_ledger_reply(client).await
 }
 
 fn expect_plan_detail(msg: DaemonMessage) -> PlanInfo {
@@ -245,7 +244,7 @@ async fn create_ok(
 }
 
 async fn expect_plan_changed(client: &mut Connection, plan_id: &str) {
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::PlanChanged { plan_id: pushed } => assert_eq!(pushed, plan_id),
         other => panic!("expected plan_changed, got {other:?}"),
     }
@@ -260,7 +259,7 @@ async fn close_window(closer: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_response(closer, Duration::from_secs(10)).await {
+    match read_response(closer).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -283,20 +282,24 @@ async fn call_send_report(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 async fn call_wait_for_report(client: &mut Connection, timeout_sec: u64) -> DaemonMessage {
-    call_wait_for_report_with_timeout(client, timeout_sec, Duration::from_secs(5)).await
+    send(client, &ClientMessage::WaitForReport { timeout_sec }).await;
+    read_response(client).await
 }
 
-async fn call_wait_for_report_with_timeout(
-    client: &mut Connection,
-    timeout_sec: u64,
-    read_timeout: Duration,
-) -> DaemonMessage {
+/// Sends `wait_for_report` and returns once the wait is parked: frames on one
+/// connection are handled in order, so the pong after it proves the handler
+/// already registered the waiter.
+async fn park_wait_for_report(client: &mut Connection, timeout_sec: u64) {
     send(client, &ClientMessage::WaitForReport { timeout_sec }).await;
-    read_response(client, read_timeout).await
+    send(client, &ClientMessage::Ping).await;
+    match read_response(client).await {
+        DaemonMessage::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
 }
 
 fn expect_report_sent(msg: DaemonMessage) -> (Option<String>, Option<ReportTaskRef>) {
@@ -392,7 +395,7 @@ async fn a_window_opened_from_a_profile_by_an_identified_connection_becomes_its_
         },
     )
     .await;
-    let window_b = match read_response(&mut a, Duration::from_secs(5)).await {
+    let window_b = match read_response(&mut a).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     };
@@ -428,14 +431,13 @@ async fn a_window_opened_via_a_profile_addressed_send_handoff_becomes_its_opener
     let mut a = h.connect().await;
     identify(&mut a, &window_a).await;
 
-    let msg = call_send_handoff_from_profile_within(
+    let msg = call_send_handoff_from_profile(
         &mut a,
         "report-handoff-profile",
         None,
         None,
         "src/foo.rs",
         "look here",
-        Duration::from_secs(20),
     )
     .await;
     let (window_b, _opened, _delivery) = expect_handoff_sent(msg);
@@ -1006,9 +1008,7 @@ async fn wait_for_report_returns_as_soon_as_a_report_arrives_and_empty_on_a_bare
 
     let mut idle = h.connect().await;
     identify(&mut idle, &window_a).await;
-    let empty = expect_reports(
-        call_wait_for_report_with_timeout(&mut idle, 1, Duration::from_secs(5)).await,
-    );
+    let empty = expect_reports(call_wait_for_report(&mut idle, 1).await);
     assert!(empty.is_empty());
 
     let window_b = call_open_window(&mut idle, echo_child_command()).await;
@@ -1017,12 +1017,7 @@ async fn wait_for_report_returns_as_soon_as_a_report_arrives_and_empty_on_a_bare
 
     let mut waiter = h.connect().await;
     identify(&mut waiter, &window_a).await;
-    let wait_handle = tokio::spawn(async move {
-        expect_reports(
-            call_wait_for_report_with_timeout(&mut waiter, 10, Duration::from_secs(15)).await,
-        )
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    park_wait_for_report(&mut waiter, 10).await;
     expect_report_sent(
         call_send_report(
             &mut b,
@@ -1033,7 +1028,7 @@ async fn wait_for_report_returns_as_soon_as_a_report_arrives_and_empty_on_a_bare
         .await,
     );
 
-    let reports = wait_handle.await.expect("the waiting task must not panic");
+    let reports = expect_reports(read_response(&mut waiter).await);
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].summary, "arrived while waiting");
 }
@@ -1094,7 +1089,7 @@ async fn wait_for_report_shares_its_connections_waiter_budget_with_wait_for_stat
     // Frames on one connection are handled in order, so the pong proves the
     // wait above is already parked.
     send(&mut a, &ClientMessage::Ping).await;
-    match read_response(&mut a, Duration::from_secs(5)).await {
+    match read_response(&mut a).await {
         DaemonMessage::Pong => {}
         other => panic!("expected pong, got {other:?}"),
     }
@@ -1115,10 +1110,9 @@ async fn a_report_that_arrives_after_its_waiting_connection_disconnects_is_not_l
     identify(&mut a1, &window_a).await;
     let window_b = call_open_window(&mut a1, echo_child_command()).await;
 
-    send(&mut a1, &ClientMessage::WaitForReport { timeout_sec: 30 }).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    park_wait_for_report(&mut a1, 30).await;
     drop(a1);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    common::wait_until_no_connection_claims(&h.registry, &window_a).await;
 
     let mut b = h.connect().await;
     identify(&mut b, &window_b).await;
@@ -1142,12 +1136,7 @@ async fn a_report_handed_directly_to_a_waiter_never_also_sits_in_the_inbox() {
     identify(&mut a1, &window_a).await;
     let window_b = call_open_window(&mut a1, echo_child_command()).await;
 
-    let wait_handle = tokio::spawn(async move {
-        expect_reports(
-            call_wait_for_report_with_timeout(&mut a1, 10, Duration::from_secs(15)).await,
-        )
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    park_wait_for_report(&mut a1, 10).await;
 
     let mut b = h.connect().await;
     identify(&mut b, &window_b).await;
@@ -1155,7 +1144,7 @@ async fn a_report_handed_directly_to_a_waiter_never_also_sits_in_the_inbox() {
         call_send_report(&mut b, ReportOutcome::Succeeded, "direct handoff", None).await,
     );
 
-    let reports = wait_handle.await.expect("the waiting task must not panic");
+    let reports = expect_reports(read_response(&mut a1).await);
     assert_eq!(reports.len(), 1);
 
     let mut a2 = h.connect().await;

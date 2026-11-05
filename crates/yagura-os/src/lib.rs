@@ -23,6 +23,9 @@ pub mod bundled_conpty;
 mod bundled_conpty_pins;
 pub mod capture;
 pub mod file_replace;
+// Only Unix escalates; Windows keeps the module for its tests alone.
+#[cfg(any(not(windows), test))]
+mod force_kill;
 pub mod hook_path;
 pub mod instance;
 pub mod locale;
@@ -263,6 +266,163 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
     }
 }
 
+/// Where the standard error of a process started by
+/// [`spawn_detached_process`] goes.
+#[derive(Debug)]
+pub enum DetachedStderr {
+    /// This process's own standard error (the null device when it has none).
+    Inherit,
+    /// The null device.
+    Null,
+    /// An open file, such as a log opened for appending.
+    File(std::fs::File),
+}
+
+/// A process started by [`spawn_detached_process`]: its process id, the
+/// caller's ends of its standard input and output, and the means to wait for
+/// and to end it.
+#[derive(Debug)]
+pub struct DetachedProcess {
+    #[cfg(windows)]
+    child: platform_windows::ChildProcess,
+    #[cfg(not(windows))]
+    child: std::process::Child,
+    pid: u32,
+    used_fallback: bool,
+    stdin: Option<std::fs::File>,
+    stdout: Option<std::fs::File>,
+}
+
+impl DetachedProcess {
+    #[cfg(windows)]
+    pub(crate) fn new(
+        child: platform_windows::ChildProcess,
+        used_fallback: bool,
+        stdin: std::fs::File,
+        stdout: std::fs::File,
+    ) -> Self {
+        let pid = child.id();
+        Self {
+            child,
+            pid,
+            used_fallback,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn new(
+        child: std::process::Child,
+        stdin: Option<std::fs::File>,
+        stdout: Option<std::fs::File>,
+    ) -> Self {
+        let pid = child.id();
+        Self {
+            child,
+            pid,
+            used_fallback: false,
+            stdin,
+            stdout,
+        }
+    }
+
+    /// The process id.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Whether the strongest detachment was refused, as for
+    /// [`DetachedSpawn::used_fallback`]: on Windows the process then stays in
+    /// the caller's job and ends with it.
+    #[must_use]
+    pub fn used_fallback(&self) -> bool {
+        self.used_fallback
+    }
+
+    /// The writing end of the process's standard input; `None` once taken.
+    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
+        self.stdin.take()
+    }
+
+    /// The reading end of the process's standard output; `None` once taken.
+    pub fn take_stdout(&mut self) -> Option<std::fs::File> {
+        self.stdout.take()
+    }
+
+    /// Blocks until the process has ended and returns its exit code; `None`
+    /// on Unix when a signal ended it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the wait fails.
+    pub fn wait(&mut self) -> std::io::Result<Option<i32>> {
+        #[cfg(windows)]
+        {
+            self.child
+                .wait()
+                .map(|code| Some(i32::from_ne_bytes(code.to_ne_bytes())))
+        }
+        #[cfg(not(windows))]
+        {
+            self.child.wait().map(|status| status.code())
+        }
+    }
+
+    /// Ends the process at once. A process that has already ended is not an
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when a running process cannot be
+    /// ended.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+}
+
+/// Starts `path` with `args`, detached from the caller as
+/// [`spawn_daemon_detached`] starts the daemon (Windows: no console and, when
+/// allowed, outside the caller's job; Unix: a new session), with pipes as its
+/// standard input and output, `stderr` as its standard error, and no other
+/// handle inherited. It runs in `cwd` and the caller's environment.
+///
+/// `args` is passed as an argument vector, never through a shell (CWE-78).
+///
+/// # Errors
+///
+/// Returns [`OsError::Io`] when the pipes cannot be made or `path` cannot be
+/// started even in the weaker mode.
+pub fn spawn_detached_process(
+    path: &Path,
+    args: &[&OsStr],
+    cwd: Option<&Path>,
+    stderr: DetachedStderr,
+) -> Result<DetachedProcess, OsError> {
+    #[cfg(windows)]
+    {
+        platform_windows::spawn_detached_process(path, args, cwd, &stderr)
+    }
+    #[cfg(not(windows))]
+    {
+        platform_unix::spawn_detached_process(path, args, cwd, stderr)
+    }
+}
+
+/// The directory the executables shipped beside `exe` are in: `exe`'s own
+/// directory, or the build output directory above it when that is a Cargo
+/// `deps` directory (where `cargo test` puts a test binary). Empty when `exe`
+/// has no parent.
+#[must_use]
+pub fn sibling_executable_dir(exe: &Path) -> PathBuf {
+    let mut dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    if dir.file_name().and_then(OsStr::to_str) == Some("deps") {
+        dir.pop();
+    }
+    dir
+}
+
 /// Asks for `pid` to be force-terminated once `grace` has elapsed, unless
 /// `exited` has been set in the meantime.
 ///
@@ -412,13 +572,14 @@ pub fn default_endpoint_owning(user_id: &str, namespace: &InstanceNamespace) -> 
 /// The endpoint the holder of window `window_id` listens on, for `user_id` in
 /// `namespace`, with its holders in `holders_dir`:
 /// `\\.\pipe\{namespace}-{user_id}-holder-{dir_id}-{window_id}` on Windows, and
-/// `{holders_dir}/{window_id}.sock` on Unix, moved to
-/// `{dir_id}-{window_id}.sock` in a short owner-only directory under the OS
-/// temp directory when it would not fit in `sockaddr_un.sun_path`.
+/// `{holders_dir}/{window_id}.sock` on Unix, moved to a fixed-length name in a
+/// short owner-only directory under the OS temp directory when it would not
+/// fit in `sockaddr_un.sun_path`.
 ///
-/// `dir_id` is derived from `holders_dir` as spelled (no file system access),
-/// so holders of the same window in two directories never share an endpoint,
-/// and one spelling of a directory always gives the same endpoint.
+/// `dir_id` and the fixed-length name are derived from `holders_dir` as
+/// spelled (no file system access), so holders of the same window in two
+/// directories never share an endpoint, and one spelling of a directory
+/// always gives the same endpoint.
 ///
 /// # Errors
 ///
@@ -443,7 +604,7 @@ pub fn holder_endpoint(
         Ok(format!(
             r"\\.\pipe\{}-{user_id}-holder-{}-{window_id}",
             namespace.name(),
-            holders_dir_id(holders_dir)
+            short_hash(&[holders_dir.as_os_str().as_encoded_bytes()])
         ))
     }
     #[cfg(not(windows))]
@@ -458,13 +619,17 @@ pub fn holder_endpoint(
     }
 }
 
-/// A short name for `holders_dir` (FNV-1a 64 of its bytes): stable across
-/// builds, since an endpoint is found again through the name a holder recorded.
-pub(crate) fn holders_dir_id(holders_dir: &Path) -> String {
+/// FNV-1a 64 of `parts` joined by NUL, as 16 hex digits: stable across builds,
+/// since an endpoint is found again through the name a holder recorded. None
+/// of the parts holds a NUL, so different parts never join to the same bytes.
+pub(crate) fn short_hash(parts: &[&[u8]]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in holders_dir.as_os_str().as_encoded_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for (index, part) in parts.iter().enumerate() {
+        let separator: &[u8] = if index == 0 { &[] } else { &[0] };
+        for byte in separator.iter().chain(part.iter()) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     format!("{hash:016x}")
 }

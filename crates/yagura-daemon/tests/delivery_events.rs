@@ -18,16 +18,17 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, count_marker, input_log_read_so_far,
-    let_every_clock_bound_run_out, let_every_clock_bound_run_out_while_a_thread_is_awaited, policy,
-    read_composer_now, read_response, report_status, send, settled_marker_count,
-    settled_submitted_count, unique_temp_dir, wait_until_composer_is, wait_until_frame_satisfies,
-    wait_until_input_log_contains, wait_until_status, write_submit_definition,
+    ChildInput, Harness, SubmitDefinitionInput, approver_base_config, count_marker,
+    input_log_read_so_far, let_every_clock_bound_run_out,
+    let_every_clock_bound_run_out_while_a_thread_is_awaited, line_ends_outside_paste, policy,
+    read_composer_now, read_response, report_status, send, unique_temp_dir, wait_until_composer_is,
+    wait_until_frame_satisfies, wait_until_input_log_contains, wait_until_status,
+    write_submit_definition,
 };
 use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::input::{BRACKETED_PASTE_END, BRACKETED_PASTE_START, ComposerLine};
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment,
     SubmitPlacement, WindowEntry,
@@ -37,8 +38,7 @@ use yagura_protocol::{ClientMessage, DaemonMessage, WindowStatus};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
 
-/// The longest any single case may take before it is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(180);
+use yagura_test_support::HANG_GUARD;
 
 fn detection_config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
@@ -97,13 +97,7 @@ async fn open_window(
         );
     }
     let window_id = h.open(command, Some(name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -126,6 +120,18 @@ fn start_delivery(
     (leave, call)
 }
 
+/// The bytes a judged delivery writes for `body`'s line under this file's
+/// definitions (`bracketed_paste = true`): counted whole, a body that is a
+/// prefix or a suffix of another is never counted in the other's write.
+fn pasted_line(body: &str) -> Vec<u8> {
+    [
+        BRACKETED_PASTE_START,
+        ComposerLine::new(body).as_str().as_bytes(),
+        BRACKETED_PASTE_END,
+    ]
+    .concat()
+}
+
 fn not_placed_of(judgment: &SubmitJudgment, what: &str) -> NotPlaced {
     match &judgment.placement {
         SubmitPlacement::NotPlaced(not_placed) => *not_placed,
@@ -143,6 +149,7 @@ fn not_placed_of(judgment: &SubmitJudgment, what: &str) -> NotPlaced {
 #[tokio::test]
 async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() {
     let dir = unique_temp_dir("events-late-screen");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-late-screen", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -154,7 +161,7 @@ async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() 
         "\\u0015",
         "3000",
         "",
-        None,
+        Some(&log),
     )
     .await;
 
@@ -170,10 +177,13 @@ async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() 
         SubmitPlacement::Placed(_) => {}
         other => panic!("a body that shows late must be placed, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED BODY", 1).await,
+        read.count(&pasted_line("BODY")),
         1,
-        "the body reaches the receiver exactly once"
+        "the body reaches the receiver exactly once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -187,6 +197,7 @@ async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() 
 #[tokio::test]
 async fn a_delivery_waits_for_a_held_model_and_places_the_body_once_it_is_let_go() {
     let dir = unique_temp_dir("events-held-model");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-held-model", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -198,7 +209,7 @@ async fn a_delivery_waits_for_a_held_model_and_places_the_body_once_it_is_let_go
         "\\u0015",
         "0",
         "",
-        None,
+        Some(&log),
     )
     .await;
 
@@ -225,9 +236,13 @@ async fn a_delivery_waits_for_a_held_model_and_places_the_body_once_it_is_let_go
         SubmitPlacement::Placed(_) => {}
         other => panic!("the body must be placed once the model is let go, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED BODY", 1).await,
-        1
+        read.count(&pasted_line("BODY")),
+        1,
+        "the body reaches the receiver exactly once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -276,12 +291,16 @@ async fn a_body_the_receiver_drops_is_not_reflected_leaves_nothing_and_never_get
         ComposerReadout::Empty,
         "the probe must have been erased before the call answered"
     );
-    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert!(
         !received.contains(&b'\r'),
         "the submit key must never have been written; the receiver read {received:?}"
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "nothing may be submitted; the receiver read {received:?}"
+    );
 }
 
 // =====================================================================
@@ -314,8 +333,7 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
     .await;
 
     let (_leave, call) = start_delivery(&h, &window_id, "BODY");
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     let mut observer = h.connect().await;
     report_status(&mut observer, &window_id, WindowStatus::Running).await;
     report_status(&mut observer, &window_id, WindowStatus::WaitingInput).await;
@@ -342,7 +360,7 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
 
     let declined = not_placed_of(&judgment, "a body that never showed must not be placed");
     assert_eq!(declined.reason, NotPlacedReason::Interrupted);
-    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert!(
         received.contains(&b'Q'),
         "the other writer's byte was written; the receiver read {received:?}"
@@ -366,7 +384,11 @@ async fn a_receiver_that_shows_nothing_is_waited_on_through_status_changes_and_r
         "neither the submit key nor any other clear may have been written; the receiver read \
          {received:?}"
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "nothing may be submitted; the receiver read {received:?}"
+    );
 }
 
 // =====================================================================
@@ -392,8 +414,7 @@ async fn a_child_that_exits_while_the_delivery_waits_ends_it_with_child_exited()
     .await;
 
     let (_leave, call) = start_delivery(&h, &window_id, "BODY");
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     entry(&h, &window_id).session().terminate();
 
     let result = tokio::time::timeout(HANG_GUARD, call)
@@ -414,6 +435,7 @@ async fn a_child_that_exits_while_the_delivery_waits_ends_it_with_child_exited()
 #[tokio::test]
 async fn a_requester_that_has_already_left_gets_nothing_written() {
     let dir = unique_temp_dir("events-requester-gone-first");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-requester-gone-first", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -425,7 +447,7 @@ async fn a_requester_that_has_already_left_gets_nothing_written() {
         "\\u0015",
         "0",
         "",
-        None,
+        Some(&log),
     )
     .await;
 
@@ -451,7 +473,13 @@ async fn a_requester_that_has_already_left_gets_nothing_written() {
         seq,
         "nothing was written"
     );
-    assert_eq!(count_marker(&h, &window_id, "PASTE "), 0);
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
+    assert_eq!(
+        read.count(BRACKETED_PASTE_START),
+        0,
+        "the body must not reach the receiver; the child read {:?}",
+        read.bytes()
+    );
 }
 
 /// A requester that leaves once the body is in: the submit key is not written,
@@ -480,8 +508,7 @@ async fn a_requester_that_leaves_after_the_body_gets_it_taken_back_and_the_compo
     .await;
 
     let (leave, call) = start_delivery(&h, &window_id, "BODY");
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     leave.send(true).expect("the call holds its receiver");
     let judgment = tokio::time::timeout(HANG_GUARD, call)
         .await
@@ -500,7 +527,7 @@ async fn a_requester_that_leaves_after_the_body_gets_it_taken_back_and_the_compo
         ComposerReadout::Empty,
         "the composer must read empty by the time the call answers"
     );
-    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert!(
         received.contains(&0x15),
         "the take-back's clear sequence must have been written; the receiver read {received:?}"
@@ -509,7 +536,11 @@ async fn a_requester_that_leaves_after_the_body_gets_it_taken_back_and_the_compo
         !received.contains(&b'\r'),
         "the submit key must never have been written; the receiver read {received:?}"
     );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED"), 0);
+    assert_eq!(
+        line_ends_outside_paste(&received),
+        0,
+        "nothing may be submitted; the receiver read {received:?}"
+    );
 }
 
 /// A requester that leaves once the body is in, and no clear sequence to take
@@ -536,8 +567,7 @@ async fn a_requester_that_leaves_when_nothing_can_take_the_body_back_leaves_a_ma
     .await;
 
     let (leave, call) = start_delivery(&h, &window_id, "BODY");
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     leave.send(true).expect("the call holds its receiver");
     let first = tokio::time::timeout(HANG_GUARD, call)
         .await
@@ -576,7 +606,7 @@ async fn a_requester_that_leaves_when_nothing_can_take_the_body_back_leaves_a_ma
         seq,
         "the next delivery must write nothing"
     );
-    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     let pastes = received
         .windows(b"\x1b[200~BODY".len())
         .filter(|window| *window == b"\x1b[200~BODY")
@@ -594,6 +624,7 @@ async fn a_requester_that_leaves_when_nothing_can_take_the_body_back_leaves_a_ma
 #[tokio::test]
 async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
     let dir = unique_temp_dir("events-probe-character");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-probe-character", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -605,7 +636,7 @@ async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
         "\\u0015",
         "0",
         "",
-        None,
+        Some(&log),
     )
     .await;
 
@@ -621,10 +652,16 @@ async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
             SubmitPlacement::Placed(_) => {}
             other => panic!("{body:?} must be placed, got {other:?}"),
         }
+        h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
+            .await;
+    }
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
+    for body in ["x", "xx", "xylophone"] {
         assert_eq!(
-            settled_submitted_count(&h, &window_id, body, 1).await,
+            read.count(&pasted_line(body)),
             1,
-            "{body:?} reaches the receiver exactly once"
+            "{body:?} reaches the receiver exactly once; the child read {:?}",
+            read.bytes()
         );
     }
 }
@@ -639,6 +676,7 @@ async fn bodies_made_of_or_starting_with_the_probe_character_are_placed() {
 #[tokio::test]
 async fn a_body_too_long_to_read_back_is_placed_when_only_the_calls_own_writes_were_made() {
     let dir = unique_temp_dir("events-long-body");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-long-body", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -650,7 +688,7 @@ async fn a_body_too_long_to_read_back_is_placed_when_only_the_calls_own_writes_w
         "\\u0015",
         "0",
         "",
-        None,
+        Some(&log),
     )
     .await;
     let body = "the retry budget for this delivery has not been reached yet and the receiver \
@@ -670,10 +708,14 @@ async fn a_body_too_long_to_read_back_is_placed_when_only_the_calls_own_writes_w
         SubmitPlacement::Placed(_) => {}
         other => panic!("the body must be placed, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED the retry budget")
+        .await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED the retry budget", 1).await,
+        read.count(&pasted_line(&body)),
         1,
-        "the body reaches the receiver exactly once"
+        "the body reaches the receiver exactly once; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -714,17 +756,8 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
     .expect("the first attempt must be decided")
     .expect("write must not fail at the PTY level");
     assert!(matches!(first.placement, SubmitPlacement::Placed(_)));
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED BODY", 1).await,
-        1
-    );
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
 
     let residue = first.residue_write_seq.map(|write_seq| ComposerResidue {
         body: "BODY",
@@ -742,12 +775,9 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
         SubmitPlacement::Placed(_) => {}
         other => panic!("the body must be written fresh and placed, got {other:?}"),
     }
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED BODY", 2).await,
-        2,
-        "the resend reaches the receiver as one more submission"
-    );
-    let received = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    h.wait_for_scrollback_occurrences(&window_id, "SUBMITTED BODY", 2)
+        .await;
+    let received = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     let pastes = received
         .windows(b"[200~BODY".len())
         .filter(|window| *window == b"[200~BODY")
@@ -768,6 +798,7 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
 #[tokio::test]
 async fn a_requester_leaving_ends_the_wait_on_a_detector_that_does_not_answer_and_frees_the_turn() {
     let dir = unique_temp_dir("events-detector-silent");
+    let log = dir.join("child-input.log");
     let h = Harness::start("events-detector-silent", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let window_id = open_window(
@@ -779,7 +810,7 @@ async fn a_requester_leaving_ends_the_wait_on_a_detector_that_does_not_answer_an
         "\\u0015",
         "0",
         "",
-        None,
+        Some(&log),
     )
     .await;
 
@@ -819,9 +850,13 @@ async fn a_requester_leaving_ends_the_wait_on_a_detector_that_does_not_answer_an
         SubmitPlacement::Placed(_) => {}
         other => panic!("the next delivery must place its body, got {other:?}"),
     }
+    h.wait_for_scrollback(&window_id, b"SUBMITTED SECOND").await;
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED SECOND", 1).await,
-        1
+        read.count(&pasted_line("SECOND")),
+        1,
+        "the body reaches the receiver exactly once; the child read {:?}",
+        read.bytes()
     );
     assert_eq!(count_marker(&h, &window_id, "SUBMITTED FIRST"), 0);
 }
@@ -894,8 +929,7 @@ async fn a_window_carrying_an_unconfirmed_write_declines_the_next_delivery_at_on
     )
     .await;
     let (leave, call) = start_delivery(&h, &window_id, "FIRST");
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     leave.send(true).expect("the call holds its receiver");
     tokio::time::timeout(HANG_GUARD, call)
         .await
@@ -939,9 +973,6 @@ async fn a_window_carrying_an_unconfirmed_write_declines_the_next_delivery_at_on
 // The cases that need the receiver to hold something use files the test
 // creates, never a delay, and the confirmation window is let run out with
 // `let_every_clock_bound_run_out`, never a sleep.
-
-/// How long a `handoff_sent` reply may take before the case is called hung.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
@@ -1019,13 +1050,7 @@ async fn open_receiving_window(
     command.push("0".to_string()); // paste_enter_window_ms
     command.push(window.receive_mode.to_string());
     let window_id = h.open_delivering(command, Some(window.name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -1049,7 +1074,7 @@ async fn request_handoff(client: &mut Connection, window_id: &str, note: &str) {
 
 /// The handoff's answer as its wire string.
 async fn handoff_reply(client: &mut Connection) -> String {
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::HandoffSent { delivery, .. } => serde_json::to_value(delivery)
             .expect("a delivery encodes")
             .as_str()
@@ -1061,7 +1086,7 @@ async fn handoff_reply(client: &mut Connection) -> String {
 
 /// Waits until the receiver has read a submit key: the delivery has pressed it.
 async fn wait_for_the_submit_key(input_log: &Path) {
-    wait_until_input_log_contains(input_log, b"\r", HANG_GUARD).await;
+    wait_until_input_log_contains(input_log, b"\r").await;
 }
 
 async fn wait_until_confirmed_status(entry: &WindowEntry, wanted: WindowStatus) {
@@ -1087,7 +1112,6 @@ async fn wait_until_the_held_envelope_is_drawn_unfinished(h: &Harness, window_id
         h,
         window_id,
         "the envelope in an unfinished frame",
-        HANG_GUARD,
         |readout, unfinished| {
             unfinished
                 && matches!(readout, ComposerReadout::Body(text) if text.contains("[yagura handoff]"))
@@ -1147,8 +1171,7 @@ async fn a_body_taller_than_the_screen_is_taken_once_its_composer_empties_after_
     request_handoff(&mut client, &window_id, &note_taller_than_the_screen()).await;
     // The child holds the probe unread behind the pasted body: the delivery
     // waits for it to show while the body, taller than the screen, stands alone.
-    h.wait_for_scrollback(&window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     wait_until_confirmed_status(&entry(&h, &window_id), WindowStatus::Unknown).await;
     create_signal_file(&probe_read);
 
@@ -1157,7 +1180,7 @@ async fn a_body_taller_than_the_screen_is_taken_once_its_composer_empties_after_
         "taken",
         "the composer emptied after the submit key, whatever the status before it was"
     );
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
     assert_eq!(count_of(&read, b"\r"), 1, "the submit key is pressed once");
 }
@@ -1186,7 +1209,7 @@ async fn a_receiver_that_keeps_the_envelope_gets_only_the_submit_key_again() {
         "taken",
         "a submitted envelope is taken however its submission was judged"
     );
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
     assert_eq!(
         count_of(&read, b"\r"),
@@ -1222,7 +1245,7 @@ async fn a_receiver_that_empties_its_composer_without_reacting_is_not_written_to
     request_handoff(&mut client, &window_id, "look here").await;
 
     let delivery = handoff_reply(&mut client).await;
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         count_of(&read, PASTE_START),
         1,
@@ -1261,13 +1284,7 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
             .await
             .expect("the other writer's bytes must not fail");
     }
-    wait_until_composer_is(
-        &h,
-        &window_id,
-        &ComposerReadout::Empty,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
     let_every_clock_bound_run_out().await;
 
     assert_eq!(
@@ -1275,7 +1292,7 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
         "taken",
         "a submitted envelope is taken however its submission was judged"
     );
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         count_of(&read, PASTE_START),
         1,
@@ -1309,7 +1326,7 @@ async fn a_composer_that_empties_only_after_the_confirmation_window_is_taken_wit
     create_signal_file(&take_now);
 
     let delivery = handoff_reply(&mut client).await;
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         count_of(&read, PASTE_START),
         1,
@@ -1351,7 +1368,7 @@ async fn a_handoff_whose_key_was_pressed_is_answered_taken_when_its_bound_runs_o
     assert_eq!(delivery, "taken", "the submit key reached the receiver");
     // Let the push finish, so nothing is left running.
     create_signal_file(&take_now);
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
 }
 
@@ -1389,7 +1406,7 @@ async fn another_writer_between_the_submit_key_and_the_empty_composer_does_not_g
         "taken",
         "a submitted envelope is taken however its submission was judged"
     );
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         count_of(&read, PASTE_START),
         1,
@@ -1443,7 +1460,7 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
     // answers instead has no attempt left to interrupt, and is judged on its
     // answer alone.
     let answered_early = tokio::select! {
-        _ = wait_until_input_log_contains(&log, b"Qx", HANG_GUARD) => None,
+        _ = wait_until_input_log_contains(&log, b"Qx") => None,
         delivery = &mut reply => Some(delivery.expect("the reply task must not panic")),
     };
     let delivery = match answered_early {
@@ -1460,7 +1477,7 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
         }
     };
 
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         count_of(&read, PASTE_START),
         1,
@@ -1501,7 +1518,6 @@ async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_
         &h,
         &window_id,
         "the envelope and the other writer's byte in a finished frame",
-        HANG_GUARD,
         |readout, unfinished| {
             !unfinished
                 && matches!(readout, ComposerReadout::Body(text) if text.trim_end().ends_with('Q'))
@@ -1511,7 +1527,7 @@ async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_
     let_every_clock_bound_run_out().await;
 
     let delivery = handoff_reply(&mut client).await;
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         read_after_the_submit_key(&read),
         b"Q",
@@ -1551,7 +1567,7 @@ async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_wri
     create_signal_file(&take_now);
 
     let delivery = handoff_reply(&mut client).await;
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         read_after_the_submit_key(&read),
         b"",
@@ -1644,7 +1660,6 @@ async fn folded_envelope_taken_by_the_resend_probe(
         &h,
         &window_id,
         "the folded envelope in a finished frame",
-        HANG_GUARD,
         |readout, unfinished| {
             !unfinished
                 && matches!(readout, ComposerReadout::Body(text) if text == FOLD_PLACEHOLDER)
@@ -1657,8 +1672,8 @@ async fn folded_envelope_taken_by_the_resend_probe(
 
     let delivery = handoff_reply(&mut client).await;
     // Before the sentinel below, which this receiver paints as typed text.
-    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty, HANG_GUARD).await;
-    let read = input_log_read_so_far(&entry(&h, &window_id), &log, HANG_GUARD).await;
+    wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
+    let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
         delivery, "taken",
         "the probe the receiver read after the submit key showed alone: the envelope was taken; the receiver read {read:?}"

@@ -58,7 +58,7 @@ bracketed_paste = true
 submit = "\r"
 submit_delay_ms = 800       # an Enter about 0.1s after the text added a row instead of sending (1.4.12)
 clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.4.12)
-probe = "x"                 # shows as typed, erased by DEL, triggers nothing, and replaces the hint (1.4.12)
+probe = "xzv"               # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.4.14, Windows, Linux and macOS); x replaces the hint (1.4.12)
 # First character taken as a key: `!` runs a shell command, `?` opens the help
 # (in-app help; checked on 1.4.12, no public docs).
 leading_keys = ["!", "?"]

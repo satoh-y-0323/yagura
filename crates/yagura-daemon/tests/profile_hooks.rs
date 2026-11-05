@@ -14,7 +14,6 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
 use common::{Harness, empty_lookup, launch_args_logged_in, read_response, send, write_profile};
@@ -45,7 +44,7 @@ fn daemon_config(profiles_dir: PathBuf, config_dir: Option<&Path>) -> DaemonConf
 
 async fn call_list_profiles(client: &mut Connection) -> (Vec<ProfileInfo>, Vec<String>) {
     send(client, &ClientMessage::ListProfiles).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ProfileList { profiles, warnings } => (profiles, warnings),
         other => panic!("expected profile_list, got {other:?}"),
     }
@@ -413,7 +412,7 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
         },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::WindowOpened { .. } => {}
         other => panic!("expected window_opened, got {other:?}"),
     }

@@ -182,7 +182,7 @@ async fn a_locale_the_daemon_inherited_is_kept_whatever_other_variables_it_inher
 mod unix {
     use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tracing_test::traced_test;
     use yagura_daemon::child_env::{
@@ -190,17 +190,28 @@ mod unix {
         filter_login_env, read_login_shell_env, resolve_child_base_env,
     };
     use yagura_daemon::profile::ProfileOs;
+    use yagura_test_support::HANG_GUARD;
     use yagura_test_support::paths::TempDir;
 
     use super::{limits, logged_word, value, words};
 
     const SHELL: &str = "/bin/sh";
 
-    /// How much longer than its own timeout a read may take to return before
-    /// the test gives up on it.
-    const RETURN_SLACK: Duration = Duration::from_secs(3);
-
     const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// A read timeout no case reaches before [`HANG_GUARD`] fails it: a read
+    /// that waited for something other than its own end marker hangs instead
+    /// of ending as a timeout.
+    const NO_TIMEOUT: Duration = Duration::from_secs(3600);
+
+    /// A `.profile` line that holds on until `release` exists in `HOME` (at
+    /// most two minutes, so a failed case leaves nothing running for long).
+    const HOLD_UNTIL_RELEASED: &str =
+        "i=0; while [ ! -e \"$HOME/release\" ] && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done";
+
+    fn release(home: &TempDir) {
+        home.write_file("release", "");
+    }
 
     /// Variables that would point the shell at the developer's own rc files
     /// instead of the fixture's.
@@ -247,14 +258,12 @@ mod unix {
     }
 
     /// Runs `run` on its own thread and runtime, failing the test when it has
-    /// not returned within `outer`, so a read that never ends cannot hang the
-    /// suite.
-    fn run_within<T: Send + 'static>(
-        outer: Duration,
+    /// not returned within [`HANG_GUARD`], so a read that never ends cannot
+    /// hang the suite.
+    fn run_guarded<T: Send + 'static>(
         run: impl std::future::Future<Output = T> + Send + 'static,
-    ) -> (T, Duration) {
+    ) -> T {
         let (tx, rx) = std::sync::mpsc::channel::<T>();
-        let started = Instant::now();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -262,9 +271,9 @@ mod unix {
                 .expect("build a runtime for the read");
             let _ = tx.send(runtime.block_on(run));
         });
-        match rx.recv_timeout(outer) {
-            Ok(value) => (value, started.elapsed()),
-            Err(_) => panic!("the read had not returned after {outer:?}"),
+        match rx.recv_timeout(HANG_GUARD) {
+            Ok(value) => value,
+            Err(_) => panic!("the read had not returned after {HANG_GUARD:?}"),
         }
     }
 
@@ -272,11 +281,9 @@ mod unix {
         shell: &Path,
         env: Vec<(OsString, OsString)>,
         timeout: Duration,
-    ) -> (Result<LoginShellEnv, LoginEnvError>, Duration) {
+    ) -> Result<LoginShellEnv, LoginEnvError> {
         let shell: PathBuf = shell.to_path_buf();
-        run_within(timeout + RETURN_SLACK, async move {
-            read_login_shell_env(&shell, env, limits(timeout)).await
-        })
+        run_guarded(async move { read_login_shell_env(&shell, env, limits(timeout)).await })
     }
 
     fn expect_read(result: Result<LoginShellEnv, LoginEnvError>) -> LoginShellEnv {
@@ -301,7 +308,7 @@ mod unix {
         );
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, _) = read(Path::new(SHELL), env, READ_TIMEOUT);
+        let result = read(Path::new(SHELL), env, READ_TIMEOUT);
         let read = expect_read(result);
 
         assert_eq!(
@@ -318,7 +325,7 @@ mod unix {
         let elsewhere_dir = elsewhere.path().to_str().unwrap();
         let env = env_with_home(home.path(), &[], &[("LOGIN_OTHER_DIR", elsewhere_dir)]);
 
-        let (result, _) = read(Path::new(SHELL), env, READ_TIMEOUT);
+        let result = read(Path::new(SHELL), env, READ_TIMEOUT);
         let read = expect_read(result);
 
         let home_dir = std::fs::canonicalize(home.path()).unwrap();
@@ -338,7 +345,7 @@ mod unix {
         );
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, _) = read(Path::new(SHELL), env, READ_TIMEOUT);
+        let result = read(Path::new(SHELL), env, READ_TIMEOUT);
         let read = expect_read(result);
 
         assert_eq!(
@@ -349,24 +356,22 @@ mod unix {
 
     #[test]
     fn a_background_process_holding_stdout_does_not_hold_up_the_read() {
-        // The sleep outlives the timeout, so a read that waited for stdout to
-        // close would time out; it still ends on its own.
+        // The background process keeps stdout open until the test releases it
+        // after the read, and no timeout ends the read first: a read that
+        // waited for stdout to close would never return.
         let home = home_with_profile(
             "background",
-            "sleep 20 &\nexport LOGIN_PROBE_VALUE=after-background\n",
+            &format!("( {HOLD_UNTIL_RELEASED} ) &\nexport LOGIN_PROBE_VALUE=after-background\n"),
         );
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, took) = read(Path::new(SHELL), env, READ_TIMEOUT);
+        let result = read(Path::new(SHELL), env, NO_TIMEOUT);
+        release(&home);
         let read = expect_read(result);
 
         assert_eq!(
             var(&read.vars, "LOGIN_PROBE_VALUE"),
             Some(OsStr::new("after-background"))
-        );
-        assert!(
-            took < READ_TIMEOUT / 2,
-            "the read completes at the end marker, well before its timeout (took {took:?})"
         );
     }
 
@@ -381,7 +386,7 @@ mod unix {
         let marker_file = home.path().join("exit-trap-ran");
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, _) = read(Path::new(SHELL), env, READ_TIMEOUT);
+        let result = read(Path::new(SHELL), env, READ_TIMEOUT);
         let read = expect_read(result);
 
         assert!(
@@ -393,19 +398,18 @@ mod unix {
 
     #[test]
     fn a_profile_slower_than_the_timeout_times_out_within_its_bound() {
+        // The profile holds on until the test releases it after the read: a
+        // timed-out read that went on waiting for the shell would never return.
         let timeout = Duration::from_secs(2);
-        let home = home_with_profile("slow", "sleep 30\n");
+        let home = home_with_profile("slow", &format!("{HOLD_UNTIL_RELEASED}\n"));
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, took) = read(Path::new(SHELL), env, timeout);
+        let result = read(Path::new(SHELL), env, timeout);
+        release(&home);
         let error = expect_error(result);
 
         assert!(matches!(error, LoginEnvError::TimedOut));
         assert_eq!(error.kind(), "timed_out");
-        assert!(
-            took < timeout + RETURN_SLACK,
-            "a timed-out read returns shortly after its timeout (took {took:?})"
-        );
     }
 
     #[test]
@@ -416,7 +420,7 @@ mod unix {
         let home = home_with_profile("no-markers", "");
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, _) = read(silent, env, READ_TIMEOUT);
+        let result = read(silent, env, READ_TIMEOUT);
 
         assert_eq!(expect_error(result).kind(), "no_markers");
     }
@@ -427,7 +431,7 @@ mod unix {
         let missing = home.path().join("no-such-shell");
         let env = env_with_home(home.path(), &[], &[]);
 
-        let (result, _) = read(&missing, env, READ_TIMEOUT);
+        let result = read(&missing, env, READ_TIMEOUT);
 
         assert_eq!(expect_error(result).kind(), "spawn_failed");
     }
@@ -461,8 +465,7 @@ mod unix {
             limits: limits(READ_TIMEOUT),
         };
 
-        let (base, _): (ChildBaseEnv, Duration) =
-            run_within(READ_TIMEOUT + RETURN_SLACK, resolve_child_base_env(inputs));
+        let base: ChildBaseEnv = run_guarded(resolve_child_base_env(inputs));
 
         assert_eq!(
             value(&base, "SEEN_PLAIN_PROBE"),

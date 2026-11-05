@@ -234,13 +234,16 @@ clear = ""                     # one key that takes text back out of the
                                # the daemon repeats it to retract a write it
                                # could not confirm. 0..=8 bytes; empty means
                                # "send nothing". Default: ""
-probe = "x"                    # one printable, non-blank character other
-                               # than "[", typed to learn that everything
-                               # before it was handled: behind every line
-                               # the daemon writes, before writing into a
-                               # composer that reads empty, and after a
-                               # retraction. Omitted, the daemon writes no
-                               # line of its own into the window.
+probe = "xzv"                  # 1..=8 distinct printable, non-blank
+                               # characters, none of them "[" or one of
+                               # leading_keys. Each is one probe, typed on
+                               # its own to learn that everything before it
+                               # was handled: behind every line the daemon
+                               # writes, before writing into a composer that
+                               # reads empty, and after a retraction; the
+                               # next one is typed when a dialog may have
+                               # taken the last. Omitted, the daemon writes
+                               # no line of its own into the window.
                                # Default: none
 erase = "\u007f"               # the key that erases one character, used to
                                # take the probe back out. 1..=8 bytes.
@@ -426,16 +429,37 @@ takes another write:
 - Nothing shows yet: the CLI has not got to its input. The daemon keeps
   waiting, for as long as that takes. A screen that stops accepting input
   meanwhile -- an approval dialog -- is waited out the same way rather than
-  refused. Only another writer's input into the window (typing, `send_keys`,
+  refused. A dialog may take the probe as its own input, so once the rules
+  have read a screen as an approval prompt or `unknown` and the screen
+  accepts input again with the probe still not shown, the daemon types the
+  next character of `probe` behind it. Once the last character it typed
+  shows, the probes at the end of the composer are its own, counted back
+  from the end (one a dialog took is simply missing), and the daemon erases
+  that many. A dialog that took no probe costs one probe typed and erased.
+  When every character of `probe` has been typed, the daemon declines the
+  write instead (`not_written`), and writes nothing more into that window
+  until someone else does, since its probes may still be in the composer.
+  Only another writer's input into the window (typing, `send_keys`,
   `interrupt_window`), the child exiting (`close_window` included), or the
-  requester cancelling the call or disconnecting ends the wait without an
-  answer from the screen.
+  requester cancelling the call or disconnecting ends the wait otherwise
+  without an answer from the screen.
+
+The probe behind the body is typed only on a screen that accepts input: a
+dialog that comes up as the body lands is waited out before it, so the
+closed screens of that dialog are not taken for one that took the probe.
 
 So a CLI that stops handling its input -- a dialog this definition has no rule
 for, for instance -- holds a write into its window until one of those events
 comes; see [`send_message`'s Maximum wait](../../../docs/mcp-setup.md#send_message)
-for how to end one. This is also why the daemon writes no line of its own
-into a window whose definition names no `probe` (see
+for how to end one. A dialog is counted only on a screen the daemon's detector
+reads, so one drawn and gone between two of its readings that took the probe
+holds the write the same way. Two more cases are not covered: a dialog that
+takes part of the body while it is still being pasted and closes, which
+leaves the rest of the body and the probe to show and the shortened body to be
+submitted; and a draft the screen has not drawn yet, in a composer that read
+empty, ending in a character the dialog took as a probe, which the daemon may
+count as its own and erase. This is also why the daemon writes no line of its
+own into a window whose definition names no `probe` (see
 [`[composer]`](#composer)): nothing would say whether the line showed.
 
 `reflect_wait_ms`, which earlier definitions set to bound how long the daemon
@@ -509,7 +533,10 @@ does the same when someone else wrote into the window since its last attempt,
 and presses the key only when the probe shows right behind the envelope. A
 requester that leaves before such a probe shows leaves it to the next write
 into the window, which erases it once it shows alone with nothing written
-since.
+since. Until then, that next write types another character of `probe` behind
+it and decides by which of them show at the end of the composer. With a
+one-character `probe` it waits for the earlier probe instead, and declines
+when a dialog came and went since that probe was typed.
 
 #### Choosing `probe` for a CLI
 
@@ -522,34 +549,48 @@ command is never typed daemon-composed text, so its definition needs a
 to find out which of these applies, is in
 [Adding a CLI](../../../docs/adding-a-cli.md).
 
-`probe` is a character the daemon types into the CLI's composer, so it has
-to be harmless there. Check a candidate on the CLI itself, with an empty
-composer, before putting it in a definition:
+`probe` names the characters the daemon types into the CLI's composer, each
+on its own, so every one of them has to be harmless there. Check each
+candidate on the CLI itself, with an empty composer, before putting it in a
+definition:
 
-1. Typed alone, it shows in the composer as that one character, and typed
-   behind text already there, it shows at the end of it.
-2. It triggers nothing: no command menu, completion list, mode switch or
-   shortcut. Characters that start commands or mentions at the beginning of
-   a line (`/`, `@`, `!`, `#`, `?`) are poor choices; `~` disconnected Claude
-   Code from its editor integration.
-3. `erase` (DEL unless the definition says otherwise) removes it and leaves
-   the composer empty.
+1. Typed alone it shows in the composer as that one character; typed behind
+   text already there, or behind another of the characters, it shows at the
+   end.
+2. It triggers nothing, in any of those places: no command menu, completion
+   list, mode switch or shortcut. Characters that start commands or mentions
+   at the beginning of a line (`/`, `@`, `!`, `#`, `?`) are poor choices; `~`
+   disconnected Claude Code from its editor integration.
+3. `erase` (DEL unless the definition says otherwise) removes exactly that
+   one character.
+4. The characters are all different, printable and not blank, and none is
+   `[` or one of `leading_keys`; a definition breaking this fails to load.
+5. Where possible, none is a key an approval dialog of the CLI answers to
+   (`y`, `n`, `a`, digits, `q`, `e`, `h`, `j`, `k`, `l`, `r`, `i`).
 
-`[` is never accepted as `probe`, and a definition naming it fails to load:
-every line the daemon types of its own accord -- a `[yagura handoff] `
-envelope, and the chat, task, plan and report lines -- starts with `[`, so such a probe
-showing alone could not be told apart from one of those lines beginning to
-show.
+`[` is never accepted: every line the daemon types of its own accord -- a
+`[yagura handoff] ` envelope, and the chat, task, plan and report lines --
+starts with `[`, so such a probe showing alone could not be told apart from
+one of those lines beginning to show. A character of `leading_keys` is never
+accepted either, since a probe may be typed into an empty composer on its own.
 
-The bundled definitions use `x`, checked as above on each of their CLIs and
-on PowerShell 5.1. If a CLI -- or a later version of one -- treats `x`
-differently, change `probe` in that definition to another character that
-passes the same three checks; nothing else in the daemon depends on which
-character it is. The probe only means "everything before me was handled"
-while the composer takes typed text: in a dialog, or in an editor mode where
-keys are commands (vim's normal mode, for instance), it is read as
-something else, never shows where the daemon looks for it, and the write
-waits as described above.
+The daemon starts with the first character that differs from both the end of
+the text in front of it and the probes still on their way, and types the
+next such character only after a dialog may have taken one. Three characters
+are enough for the dialogs the bundled CLIs show; a one-character `probe`
+still loads, but a write whose probe a dialog may have taken can then only be
+declined, never checked again.
+
+The bundled definitions use `xzv`, each character checked as above on each of
+their CLIs, on Windows, Linux and macOS. If a CLI -- or a later version of
+one -- treats one of them differently, replace it in that definition with
+another character that passes the same checks; nothing else in the daemon
+depends on which characters they are. A probe only means "everything before
+me was handled" while the composer takes typed text: in a dialog, or in an
+editor mode where keys are commands (vim's normal mode, for instance), it is
+read as something else and never shows where the daemon looks for it. After
+a dialog the next character is typed as described above; in an editor mode
+with no rule, the write waits.
 
 An empty `clear` cannot retract anything -- the body the daemon wrote for a
 requester that left, or in front of which another writer typed, is left

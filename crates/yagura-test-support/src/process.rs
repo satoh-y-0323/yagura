@@ -1,5 +1,5 @@
-//! Child-process command fixtures, the running test binary's own path, and
-//! output-file growth assertions.
+//! Child-process command fixtures, the running test binary's own path,
+//! the wait on an output file's growth, and the wait on a process's end.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -18,10 +18,10 @@ pub fn file_len(path: &Path) -> u64 {
 ///
 /// # Panics
 ///
-/// Panics if the file has not grown within `timeout`, which means the fixture
-/// never established its precondition.
-pub async fn wait_until_file_grows(path: &Path, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
+/// Panics if the file has not grown within [`crate::HANG_GUARD`], which means
+/// the fixture never established its precondition.
+pub async fn wait_until_file_grows(path: &Path) {
+    let deadline = tokio::time::Instant::now() + crate::HANG_GUARD;
     let start = file_len(path);
     loop {
         if file_len(path) > start {
@@ -37,31 +37,113 @@ pub async fn wait_until_file_grows(path: &Path, timeout: Duration) {
     }
 }
 
-/// Stage 2 of the grandchild observation: after teardown, the file's size must
-/// stay put. Size is the signal (not mtime), sampled by polling over a
-/// generous window.
+/// Whether process `pid` is still running.
 ///
-/// `context` names the teardown route the caller exercised and is reported
-/// verbatim on failure, so the failure text says which route leaked.
+/// On Windows a process whose id still opens (a handle to it is held
+/// elsewhere) but which has exited is not running. On Unix a process that has
+/// exited but is not yet reaped by its parent still counts as running.
 ///
 /// # Panics
 ///
-/// Panics if the file grows during the observation window, which means an
-/// orphaned descendant survived the teardown.
-pub async fn assert_file_len_stable(path: &Path, observation: Duration, context: &str) {
-    // One in-flight iteration may still land right after the kill.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let baseline = file_len(path);
-    let deadline = tokio::time::Instant::now() + observation;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let current = file_len(path);
-        assert_eq!(
-            current,
-            baseline,
-            "{} kept growing {context}: an orphaned descendant survived",
-            path.display()
+/// Panics if `pid` is `0` or out of the platform's range, or if the probe
+/// fails for a reason other than the process not existing: a probe that
+/// cannot answer must not read as "gone".
+#[must_use]
+pub fn process_is_running(pid: u32) -> bool {
+    assert!(pid != 0, "process id 0 names no single process");
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{
+            CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+        // The process object is signaled only once the process has fully
+        // ended; its exit code is set earlier, while termination is under way.
+        // SAFETY: the handle is opened for waiting only, waited on once with no
+        // timeout on this thread and closed before returning.
+        unsafe {
+            match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => false,
+                Err(error) => panic!("OpenProcess({pid}) failed unexpectedly: {error}"),
+                Ok(handle) => {
+                    let state = WaitForSingleObject(handle, 0);
+                    let _ = CloseHandle(handle);
+                    match state {
+                        WAIT_TIMEOUT => true,
+                        WAIT_OBJECT_0 => false,
+                        other => {
+                            panic!("WaitForSingleObject({pid}) failed unexpectedly: {other:?}")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let id = libc::pid_t::try_from(pid)
+            .unwrap_or_else(|_| panic!("process id {pid} is out of range"));
+        // SAFETY: signal 0 delivers nothing; it only checks that `id` names a
+        // process this one may signal.
+        if unsafe { libc::kill(id, 0) } == 0 {
+            return true;
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => false,
+            Some(libc::EPERM) => true,
+            _ => panic!("kill({pid}, 0) failed unexpectedly: {error}"),
+        }
+    }
+}
+
+/// Returns once none of `pids` is a running process (see
+/// [`process_is_running`]), checking again every 20 ms.
+///
+/// The wait runs on a blocking thread against the wall clock, so a test on
+/// tokio's paused clock does not reach the guard at once.
+///
+/// # Panics
+///
+/// Panics, with `explain` applied to the ids still running, if one still runs
+/// after [`crate::HANG_GUARD`]; panics as [`process_is_running`] does.
+pub async fn wait_processes_gone(
+    pids: &[u32],
+    explain: impl Fn(&[u32]) -> String + Send + 'static,
+) {
+    let pids = pids.to_vec();
+    match tokio::task::spawn_blocking(move || wait_processes_gone_blocking(&pids, explain)).await {
+        Ok(()) => {}
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("the wait on the processes was cancelled: {error}"),
+    }
+}
+
+/// [`wait_processes_gone`] for a caller outside an async runtime.
+///
+/// # Panics
+///
+/// Panics as [`wait_processes_gone`] does.
+pub fn wait_processes_gone_blocking(pids: &[u32], explain: impl Fn(&[u32]) -> String) {
+    let deadline = std::time::Instant::now() + crate::HANG_GUARD;
+    loop {
+        let running: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|&pid| process_is_running(pid))
+            .collect();
+        if running.is_empty() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "processes still running after {:?}: {}",
+            crate::HANG_GUARD,
+            explain(&running)
         );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -243,12 +325,7 @@ fn fixture_bin_path(stem: &str) -> PathBuf {
 /// The directory holding the plain bin targets of the profile `exe` was
 /// built in: `exe`'s own directory, or the one above it when that is `deps`.
 fn fixture_bin_dir(exe: &Path) -> PathBuf {
-    let mut dir = exe.to_path_buf();
-    dir.pop();
-    if dir.file_name().and_then(|n| n.to_str()) == Some("deps") {
-        dir.pop();
-    }
-    dir
+    yagura_os::sibling_executable_dir(exe)
 }
 
 /// Path to the `echo_child` fixture binary that belongs to the test binary
@@ -357,6 +434,47 @@ pub fn env_probe_path() -> PathBuf {
 #[must_use]
 pub fn argv_probe_path() -> PathBuf {
     fixture_bin_path("argv_probe")
+}
+
+/// Path to the `yagura-holder` binary of the profile the running test binary
+/// was built in: the holder a daemon started from that profile runs a window
+/// in.
+///
+/// # Panics
+///
+/// Panics if the running executable's own path cannot be resolved, or if the
+/// holder is not built -- build it with `cargo build -p yagura-holder --bins`
+/// first.
+#[must_use]
+pub fn holder_path() -> PathBuf {
+    let exe =
+        std::env::current_exe().expect("current_exe should resolve for a running test binary");
+    let path = fixture_bin_dir(&exe).join(format!("yagura-holder{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.exists(),
+        "yagura-holder is missing at {}: run `cargo build -p yagura-holder --bins` before the \
+         tests that open a window",
+        path.display()
+    );
+    path
+}
+
+/// Copies into `dir` what a daemon installed there needs beside it to open a
+/// window: the holder and, on Windows, the bundled pseudoconsole pair placed
+/// beside the built holder.
+///
+/// # Panics
+///
+/// Panics under the same conditions as [`holder_path`], or if a copy fails.
+pub fn install_window_runtime(dir: &Path) {
+    let holder = holder_path();
+    let name = holder.file_name().expect("the holder path names a file");
+    std::fs::copy(&holder, dir.join(name)).expect("copy yagura-holder");
+    #[cfg(windows)]
+    for pair in ["conpty.dll", "OpenConsole.exe"] {
+        std::fs::copy(holder.with_file_name(pair), dir.join(pair))
+            .unwrap_or_else(|error| panic!("copy {pair} beside the holder: {error}"));
+    }
 }
 
 /// Path to the `capture_child` fixture binary that belongs to the test binary

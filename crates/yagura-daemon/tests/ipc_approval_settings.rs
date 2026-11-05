@@ -20,7 +20,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use common::{
     Harness, approver_base_config, detection_config, expect_error, identify, live_playbook_config,
@@ -36,13 +36,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::ready_child_profile_source;
-
-/// Upper bound for a reply that is expected to arrive.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How long a case that must observe "no further matching log line appears"
-/// waits before checking.
-const NEGATIVE_LOG_OBSERVATION: Duration = Duration::from_millis(500);
 
 const NO_AUTO_APPROVE_PLAYBOOK: &str = "[approval]\nauto_approve = []\n";
 
@@ -63,7 +56,7 @@ async fn identified_window(h: &Harness) -> (Connection, String) {
 
 async fn call_get_approval_settings(client: &mut Connection) -> DaemonMessage {
     send(client, &ClientMessage::GetApprovalSettings {}).await;
-    read_approver_reply(client, REPLY_TIMEOUT).await
+    read_approver_reply(client).await
 }
 
 async fn call_set_auto_approve(
@@ -79,12 +72,12 @@ async fn call_set_auto_approve(
         },
     )
     .await;
-    read_approver_reply(client, REPLY_TIMEOUT).await
+    read_approver_reply(client).await
 }
 
 async fn call_set_plan_approval_required(client: &mut Connection, required: bool) -> DaemonMessage {
     send(client, &ClientMessage::SetPlanApprovalRequired { required }).await;
-    read_approver_reply(client, REPLY_TIMEOUT).await
+    read_approver_reply(client).await
 }
 
 fn expect_approval_settings(reply: DaemonMessage) -> ApprovalSettingsInfo {
@@ -178,14 +171,14 @@ async fn deny_and_confirm(
         },
     )
     .await;
-    let reply: DaemonMessage = read_approver_reply(approver, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_approver_reply(approver).await;
     match reply {
         DaemonMessage::ApprovalResolved { request_id } => {
             assert_eq!(request_id, request.request_id);
         }
         other => panic!("expected approval_resolved, got {other:?}"),
     }
-    let reply: DaemonMessage = read_response(requester, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(requester).await;
     expect_error(reply, "approval_denied");
 }
 
@@ -251,7 +244,7 @@ async fn the_three_requests_from_a_window_identified_connection_are_auth_failed_
         },
     )
     .await;
-    let request: ApprovalRequest = match read_approver_reply(&mut approver, REPLY_TIMEOUT).await {
+    let request: ApprovalRequest = match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
@@ -302,7 +295,7 @@ async fn the_three_requests_from_an_unidentified_connection_are_auth_failed_and_
         },
     )
     .await;
-    let request: ApprovalRequest = match read_approver_reply(&mut approver, REPLY_TIMEOUT).await {
+    let request: ApprovalRequest = match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
@@ -647,7 +640,7 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
         },
     )
     .await;
-    let request: ApprovalRequest = match read_approver_reply(&mut approver, REPLY_TIMEOUT).await {
+    let request: ApprovalRequest = match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
@@ -663,7 +656,7 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
         },
     )
     .await;
-    let reply: DaemonMessage = read_response(&mut requester, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(&mut requester).await;
     match reply {
         DaemonMessage::WindowClosed { window_id } => assert_eq!(window_id, second_window),
         other => panic!("expected window_closed without approval, got {other:?}"),
@@ -727,7 +720,7 @@ async fn switching_a_tool_to_match_a_manually_cleared_files_off_value_changes_on
         },
     )
     .await;
-    let request: ApprovalRequest = match read_approver_reply(&mut approver, REPLY_TIMEOUT).await {
+    let request: ApprovalRequest = match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
@@ -801,7 +794,7 @@ async fn switching_a_tool_to_match_a_manually_added_files_on_value_changes_only_
         },
     )
     .await;
-    let reply: DaemonMessage = read_response(&mut requester, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(&mut requester).await;
     match reply {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected keys_sent without approval, got {other:?}"),
@@ -860,7 +853,7 @@ async fn create_plan(owner: &mut Connection, task_id: &str) -> PlanInfo {
         },
     )
     .await;
-    let reply: DaemonMessage = read_approver_reply(owner, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_approver_reply(owner).await;
     expect_plan_detail(reply)
 }
 
@@ -1042,8 +1035,8 @@ async fn switching_a_tool_on_logs_once_and_a_repeat_of_the_same_value_logs_nothi
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
     assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(true));
 
-    tokio::time::sleep(NEGATIVE_LOG_OBSERVATION).await;
-
+    // The switch is answered only once its file write and its log line are
+    // done, both on the request's own path.
     let after: Vec<u8> = fs::read(&path).expect("read after the no-op");
     assert_eq!(
         before, after,
@@ -1092,8 +1085,8 @@ async fn switching_plan_review_off_logs_once_and_a_repeat_of_the_same_value_logs
     let settings: ApprovalSettingsInfo = expect_plan_approval_required_set(reply);
     assert!(!settings.plans_require_approval);
 
-    tokio::time::sleep(NEGATIVE_LOG_OBSERVATION).await;
-
+    // The switch is answered only once its file write and its log line are
+    // done, both on the request's own path.
     let after: Vec<u8> = fs::read(&path).expect("read after the no-op");
     assert_eq!(
         before, after,

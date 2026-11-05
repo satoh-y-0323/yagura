@@ -12,7 +12,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{
     Harness, VALID_TOKEN, approver_base_config, call_open_window, empty_lookup, read_response,
@@ -84,7 +83,7 @@ async fn open_from_profile(client: &mut Connection, profile: &str, model: Option
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     }
@@ -126,8 +125,7 @@ async fn a_hooks_table_appends_its_args_after_launch_options_and_mcp_with_the_fi
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "argv-probe", Some("alpha")).await;
-    h.wait_for_scrollback(&window_id, b"<<argv[6]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[6]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
 
     assert_eq!(
@@ -193,8 +191,7 @@ async fn a_hooks_table_is_injected_without_an_mcp_bridge_and_equal_content_maps_
     let mut paths = Vec::new();
     for profile in ["argv-probe", "argv-probe", "other"] {
         let window_id = open_from_profile(&mut client, profile, None).await;
-        h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-            .await;
+        h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
         let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
         assert_eq!(
             sentinel(&text, "argv[1]").as_deref(),
@@ -238,8 +235,7 @@ async fn a_hooks_config_dir_is_written_as_a_directory_of_exactly_the_declared_fi
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "argv-probe", None).await;
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
 
     assert_eq!(
@@ -295,8 +291,7 @@ async fn hooks_args_without_a_config_file_are_passed_through_as_written() {
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "argv-probe", None).await;
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert_eq!(
         sentinel(&text, "argv[1]").as_deref(),
@@ -328,8 +323,7 @@ async fn a_hooks_table_needing_a_file_opens_the_window_without_hooks_when_no_dir
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "argv-probe", None).await;
-    h.wait_until_child_exited(&window_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         !text.contains("<<argv[1]="),
@@ -360,8 +354,7 @@ async fn a_profile_without_a_hooks_table_gets_no_hooks_argv_even_when_mcp_is_inj
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "argv-probe", None).await;
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(
         !text.contains("<<argv[3]="),
@@ -394,8 +387,7 @@ async fn a_raw_open_window_gets_no_hooks_argv() {
         ],
     )
     .await;
-    h.wait_for_scrollback(&window_id, b"<<argv[1]=own>>", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[1]=own>>").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
     assert!(!text.contains("<<argv[2]="), "{text:?}");
 }
@@ -525,8 +517,7 @@ async fn a_host_paths_converter_replaces_the_daemon_side_hooks_path_in_the_argv(
     let mut client = h.connect().await;
 
     let window_id = open_from_profile(&mut client, "converted", None).await;
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
 
     assert_eq!(
@@ -644,8 +635,7 @@ mod shim {
         let mut client = h.connect().await;
 
         let window_id = open_from_profile(&mut client, "shim", None).await;
-        h.wait_for_scrollback(&window_id, b"<<argv[3]=", Duration::from_secs(10))
-            .await;
+        h.wait_for_scrollback(&window_id, b"<<argv[3]=").await;
         let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
         assert_eq!(
             sentinel(&text, "argv[1]").as_deref(),
@@ -686,8 +676,7 @@ mod shim {
         let mut client = h.connect().await;
 
         let window_id = open_from_profile(&mut client, "shim", None).await;
-        h.wait_for_scrollback(&window_id, b"<<argv[3]=", Duration::from_secs(10))
-            .await;
+        h.wait_for_scrollback(&window_id, b"<<argv[3]=").await;
         let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();
         assert_eq!(
             sentinel(&text, "argv[1]").as_deref(),

@@ -16,8 +16,6 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::{ProfileParseError, parse_profile};
 use yagura_protocol::{ClientMessage, DaemonMessage, McpRegistrationRow};
 
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-
 fn table(notice_line: &str) -> String {
     format!(
         "[mcp_registration]\n\
@@ -64,7 +62,7 @@ async fn list_rows(profile_sources: &[(&str, String)]) -> Vec<McpRegistrationRow
         &ClientMessage::ListMcpRegistrations { request_id: 1 },
     )
     .await;
-    let reply: DaemonMessage = read_response(&mut client, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(&mut client).await;
     match reply {
         DaemonMessage::McpRegistrationsListed { rows, .. } => rows,
         other => panic!("expected mcp_registrations_listed, got {other:?}"),

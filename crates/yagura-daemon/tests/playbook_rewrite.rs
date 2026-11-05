@@ -84,9 +84,9 @@ const BODY_SENTINEL: &str = "leaked-secret-value";
 const UNKNOWN_KEY_TOML: &str =
     "[approval]\nauto_approve = [\"send_chat\"]\nbogus_key = \"leaked-secret-value\"\n";
 
-/// How long a case waits between writing a file and calling the operation, so
-/// a rewrite would move the file's modification time.
-const MTIME_OBSERVATION: Duration = Duration::from_millis(1500);
+/// A modification time well in the past that any rewrite moves away from, so
+/// a case sees a rewrite without waiting for the clock to tick.
+const PINNED_MTIME_SECS: u64 = 1_000_000_000;
 
 // --- fixture plumbing ------------------------------------------------------------
 
@@ -121,6 +121,23 @@ fn modified(path: &Path) -> SystemTime {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .expect("modification time should be readable")
+}
+
+/// Sets the file's modification time to [`PINNED_MTIME_SECS`] and returns it
+/// as read back, so the caller compares against what the file system stores.
+fn pin_modified(path: &Path) -> SystemTime {
+    let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(PINNED_MTIME_SECS);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(pinned))
+        .expect("modification time should be settable");
+    let read_back = modified(path);
+    assert_eq!(
+        read_back, pinned,
+        "the file system should keep the pinned time"
+    );
+    read_back
 }
 
 fn entry_names(dir: &Path) -> Vec<String> {
@@ -530,8 +547,7 @@ fn turning_plan_approval_off_with_no_plans_table_creates_one() {
 fn a_request_matching_the_current_auto_approve_state_writes_nothing() {
     let (_tree, path) = write_playbook("noop-auto-approve", REAL_PLAYBOOK);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let outcome: PlaybookWrite = written(set_auto_approve(&path, DestructiveTool::SendChat, true));
 
@@ -547,8 +563,7 @@ fn a_request_matching_the_current_auto_approve_state_writes_nothing() {
 fn a_request_matching_the_current_plan_approval_state_writes_nothing() {
     let (_tree, path) = write_playbook("noop-plan-approval", REAL_PLAYBOOK);
     let before = read_bytes(&path);
-    let mtime_before = modified(&path);
-    std::thread::sleep(MTIME_OBSERVATION);
+    let mtime_before = pin_modified(&path);
 
     let outcome: PlaybookWrite = written(set_plan_approval_required(&path, true));
 

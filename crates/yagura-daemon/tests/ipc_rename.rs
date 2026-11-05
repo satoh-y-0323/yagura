@@ -16,7 +16,6 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use yagura_test_support::ipc::{
     Connection, connect_with_retry, read_status_skipping_message, send_client_message,
@@ -41,7 +40,7 @@ async fn start_daemon_and_connect(tag: &str) -> Connection {
     let endpoint = unique_endpoint_name("yagura-test-rename", tag);
     let server = Arc::new(IpcServer::new(registry, endpoint.clone(), config));
     let _server_task = tokio::spawn(server.run());
-    connect_with_retry(&endpoint, Duration::from_secs(5)).await
+    connect_with_retry(&endpoint).await
 }
 
 /// Opens an `echo_child` window via IPC `OpenWindow` and returns its `window_id`.
@@ -62,7 +61,7 @@ async fn open_window_via_ipc(client: &mut Connection) -> String {
         },
     )
     .await;
-    let response = read_status_skipping_message(client, Duration::from_secs(5))
+    let response = read_status_skipping_message(client)
         .await
         .expect_message("WindowOpened response");
     match response {
@@ -74,7 +73,7 @@ async fn open_window_via_ipc(client: &mut Connection) -> String {
 /// Sends `ListWindows` and returns the full window list.
 async fn list_windows_via_ipc(client: &mut Connection) -> Vec<yagura_protocol::WindowInfo> {
     send_client_message(client, &ClientMessage::ListWindows).await;
-    let response = read_status_skipping_message(client, Duration::from_secs(5))
+    let response = read_status_skipping_message(client)
         .await
         .expect_message("WindowList response");
     match response {
@@ -116,7 +115,7 @@ async fn rename_of_unknown_window_id_returns_window_not_found() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window error response for an unknown window_id");
     match response {
@@ -145,7 +144,7 @@ async fn rename_success_is_reflected_in_list_windows_name() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window success response");
     let renamed_name = match response {
@@ -198,7 +197,7 @@ async fn rename_of_exited_window_succeeds_without_child_exited_error() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window response for an Exited window");
     match response {
@@ -238,7 +237,7 @@ async fn rename_rejects_empty_name_as_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window error response for an empty name");
     match response {
@@ -263,7 +262,7 @@ async fn rename_rejects_name_exceeding_max_bytes_as_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window error response for an over-length name");
     match response {
@@ -289,7 +288,7 @@ async fn rename_rejects_forbidden_control_char_as_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("rename_window error response for a name containing a control char");
     match response {
@@ -322,7 +321,7 @@ async fn open_window_rejects_forbidden_char_name_as_invalid_argument() {
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response for a name containing a control char");
     match response {
@@ -371,7 +370,7 @@ async fn open_window_without_name_rejects_forbidden_char_in_command_file_stem() 
     )
     .await;
 
-    let response = read_status_skipping_message(&mut client, Duration::from_secs(5))
+    let response = read_status_skipping_message(&mut client)
         .await
         .expect_message("open_window error response for a forbidden-char default name");
     match response {

@@ -87,7 +87,10 @@ jobs:
       # sidecar that this workflow does not prepare.
       - name: Pre-build the test scope
         shell: bash
-        run: cargo test --locked --no-run -p "$PACKAGE" ${TEST_TARGET:+--test "$TEST_TARGET"}
+        # A daemon window runs in a yagura-holder found next to the test binaries.
+        run: |
+          cargo build --locked -p yagura-holder --bins
+          cargo test --locked --no-run -p "$PACKAGE" ${TEST_TARGET:+--test "$TEST_TARGET"}
 
       # The macOS runner ships bash 3.2 and a BSD userland, so this script stays inside POSIX shell
       # and POSIX tool options; a GNU-only form here would break macOS runs only.

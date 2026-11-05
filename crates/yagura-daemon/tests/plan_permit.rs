@@ -6,12 +6,15 @@
 //!
 //! Every issuing function here reads the real `WindowRegistry` liveness predicate and a
 //! real `PlanStore`; nothing in this file hands an issuing function a caller-supplied
-//! fact to build a permit from. Children are `echo_child` or `sleepy_command`, never a
+//! fact to build a permit from. Children are `echo_child`, never a
 //! real vendor CLI.
 
 mod common;
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use tokio::time::sleep;
@@ -23,7 +26,7 @@ use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
 use yagura_protocol::WindowStatus;
-use yagura_test_support::process::{echo_child_path, sleepy_command};
+use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
     common::unique_temp_dir(tag).join("plan.db")
@@ -46,20 +49,6 @@ fn echo_request() -> OpenWindowRequest {
     }
 }
 
-/// A window whose direct child stays alive for roughly two seconds and then exits on
-/// its own: enough time for an "alive" observation to land before the later "exited"
-/// observation, without an explicit per-window kill (`WindowRegistry` exposes none).
-fn short_lived_request() -> OpenWindowRequest {
-    OpenWindowRequest {
-        command: sleepy_command("3"),
-        cwd: None,
-        name: None,
-        vendor: None,
-        detection: None,
-        on_name_taken: Default::default(),
-    }
-}
-
 async fn open_window(registry: &WindowRegistry) -> String {
     registry
         .open(echo_request())
@@ -68,12 +57,19 @@ async fn open_window(registry: &WindowRegistry) -> String {
         .window_id
 }
 
-async fn open_short_lived_window(registry: &WindowRegistry) -> String {
+/// Ends `window_id`'s child while the window stays registered, so it reads as dead.
+fn end_child(registry: &WindowRegistry, window_id: &str) {
     registry
-        .open(short_lived_request())
-        .await
-        .expect("open should succeed")
-        .window_id
+        .get(window_id)
+        .expect("the window is registered")
+        .session()
+        .terminate();
+}
+
+/// Polls `future` once, with a waker nothing listens to: what it answers
+/// without waiting for anything else to happen.
+fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
 /// Polls a registry-held entry until it reports `Exited`; panics on timeout. Mirrors
@@ -153,7 +149,8 @@ async fn issuing_a_create_permit_requires_the_calling_window_to_be_alive() {
         "a window with a running child must be able to create a plan"
     );
 
-    let dying = open_short_lived_window(&registry).await;
+    let dying = open_window(&registry).await;
+    end_child(&registry, &dying);
     wait_for_exited(&registry, &dying).await;
     assert!(
         matches!(
@@ -330,15 +327,15 @@ async fn change_authorization_treats_a_dead_owner_the_same_as_a_bound_non_owner(
         store_registry_and_owned_plan("plan-permit-change-dying-owner").await;
     let dying_table = LockTable::new();
 
-    // Replace the alive owner in this second fixture with a short-lived one by nominating
+    // Replace the alive owner in this second fixture with one the test ends by nominating
     // it: exercises the same "owner window id" field write path the real flow uses, so the
     // window that eventually dies really is the plan's owner_window value.
-    let short_lived = open_short_lived_window(&dying_registry).await;
+    let ending_owner = open_window(&dying_registry).await;
     let nominate_guard = dying_table.lock(&dying_plan_id).await;
     let nominate_permit = plan_permit::issue_nominate(
         &RequestOrigin::Approver,
         nominate_guard,
-        &short_lived,
+        &ending_owner,
         &dying_registry,
     )
     .expect("an approver must be able to nominate an alive window as owner");
@@ -349,7 +346,7 @@ async fn change_authorization_treats_a_dead_owner_the_same_as_a_bound_non_owner(
     let alive_guard = dying_table.lock(&dying_plan_id).await;
     assert!(
         plan_permit::issue_change(
-            &RequestOrigin::Window(short_lived.clone()),
+            &RequestOrigin::Window(ending_owner.clone()),
             ChangeKind::UpdatePlan,
             alive_guard,
             &dying_store,
@@ -359,11 +356,12 @@ async fn change_authorization_treats_a_dead_owner_the_same_as_a_bound_non_owner(
         "the newly nominated owner must be authorized while its child is still running"
     );
 
-    wait_for_exited(&dying_registry, &short_lived).await;
+    end_child(&dying_registry, &ending_owner);
+    wait_for_exited(&dying_registry, &ending_owner).await;
 
     let dead_guard = dying_table.lock(&dying_plan_id).await;
     let dead_result = plan_permit::issue_change(
-        &RequestOrigin::Window(short_lived),
+        &RequestOrigin::Window(ending_owner),
         ChangeKind::UpdatePlan,
         dead_guard,
         &dying_store,
@@ -488,7 +486,7 @@ async fn read_authorization_admits_owner_bound_and_approver_but_not_out_of_range
         .is_ok(),
         "the owner must be able to read its own plan while alive"
     );
-    let dying_window_id = open_short_lived_window(&dying_registry).await;
+    let dying_window_id = open_window(&dying_registry).await;
     let dying_table = LockTable::new();
     let nominate_guard = dying_table.lock(&dying_plan_id).await;
     let nominate_permit = plan_permit::issue_nominate(
@@ -502,6 +500,7 @@ async fn read_authorization_admits_owner_bound_and_approver_but_not_out_of_range
     dying_store
         .set_owner(nominate_permit)
         .expect("set_owner must persist the nominated owner");
+    end_child(&dying_registry, &dying_window_id);
     wait_for_exited(&dying_registry, &dying_window_id).await;
     assert!(
         plan_permit::issue_read(
@@ -566,22 +565,20 @@ async fn a_plan_lock_admits_one_guard_at_a_time_and_different_plans_are_independ
     let table = LockTable::new();
 
     let first = table.lock("plan-a").await;
-    let blocked = tokio::time::timeout(Duration::from_millis(200), table.lock("plan-a")).await;
+    let mut queued = pin!(table.lock("plan-a"));
     assert!(
-        blocked.is_err(),
+        poll_once(queued.as_mut()).is_pending(),
         "a second lock attempt on the same plan must not resolve while the first is held"
     );
 
-    let independent = tokio::time::timeout(Duration::from_millis(200), table.lock("plan-b")).await;
     assert!(
-        independent.is_ok(),
+        poll_once(pin!(table.lock("plan-b"))).is_ready(),
         "a lock on a different plan must not wait on plan-a's guard"
     );
 
     drop(first);
-    let queued = tokio::time::timeout(Duration::from_millis(1000), table.lock("plan-a")).await;
     assert!(
-        queued.is_ok(),
+        poll_once(queued.as_mut()).is_ready(),
         "releasing the first guard must let a queued lock on the same plan proceed"
     );
 }

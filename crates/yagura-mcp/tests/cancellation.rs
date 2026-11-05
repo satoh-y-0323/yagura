@@ -43,10 +43,9 @@ use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::{own_canonical_exe, submit_child_command_with_composer};
 use yagura_test_support::scan::contains_subsequence;
 
-use common::{LINE_TIMEOUT, McpChild, tool_reply};
+use common::{McpChild, tool_reply};
 
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(30);
+use yagura_test_support::HANG_GUARD;
 
 const FIXTURE_PREFIX: &str = "yagura-mcp-cancellation";
 
@@ -669,7 +668,7 @@ async fn a_bridge_holds_at_most_four_daemon_connections_and_the_next_call_procee
         }
     }
 
-    let response = tokio::time::timeout(LINE_TIMEOUT, bridge.response_to(status))
+    let response = tokio::time::timeout(HANG_GUARD, bridge.response_to(status))
         .await
         .expect("the waiting call must answer once it reached the daemon");
     let (is_error, text) = tool_reply(&response);

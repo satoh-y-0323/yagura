@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::sleep;
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::paths::{
     strip_extended_length_prefix, unique_detection_dir, unique_temp_dir, write_definition,
 };
@@ -939,12 +940,10 @@ async fn registry_attach_slot_replacement_kicks_previous_holder() {
     let (_gen1, mut rx1) = entry.register_attach().await;
     let (_gen2, _rx2) = entry.register_attach().await;
 
-    tokio::select! {
-        _ = &mut rx1 => {}
-        _ = sleep(Duration::from_millis(500)) => {
-            panic!("the first attach generation must be kicked when a second register_attach occurs");
-        }
-    }
+    tokio::time::timeout(HANG_GUARD, &mut rx1)
+        .await
+        .map(|_| ())
+        .expect("the first attach generation must be kicked when a second register_attach occurs");
 
     registry.terminate_all().await;
 }

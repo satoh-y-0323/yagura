@@ -104,7 +104,7 @@ fn ledger_config(dir: &Path, profiles_dir: PathBuf, roles_path: Option<PathBuf>)
 
 async fn call_list_profiles(client: &mut Connection) -> Vec<ProfileInfo> {
     send(client, &ClientMessage::ListProfiles).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ProfileList { profiles, .. } => profiles,
         other => panic!("expected profile_list, got {other:?}"),
     }
@@ -123,7 +123,7 @@ async fn call_open_window_from_profile(client: &mut Connection, profile: &str) -
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 async fn call_set_profile_enabled(
@@ -139,7 +139,7 @@ async fn call_set_profile_enabled(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_window_opened(msg: DaemonMessage) -> String {
@@ -232,7 +232,7 @@ async fn create_plan(client: &mut Connection, title: &str, tasks: Vec<PlanTaskSp
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -251,7 +251,7 @@ async fn save_roles(
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str) -> DaemonMessage {
@@ -264,7 +264,7 @@ async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str)
         },
     )
     .await;
-    read_response(client, Duration::from_secs(10)).await
+    read_response(client).await
 }
 
 async fn get_plan(client: &mut Connection, plan_id: &str) -> PlanInfo {
@@ -275,7 +275,7 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> PlanInfo {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -612,36 +612,6 @@ fn touch_profile_source(display_name: &str, marker_path: &Path, enabled: Option<
     )
 }
 
-async fn wait_until_marker_appears(marker: &Path, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if marker.exists() {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for the marker file to appear at {}",
-                marker.display()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// How long a case that must observe "no listing command started" waits
-/// before checking, the same budget `ipc_model_aliases.rs`'s own
-/// `NEGATIVE_OBSERVATION` uses.
-const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(500);
-
-async fn assert_marker_absent_after(marker: &Path, observation: Duration) {
-    tokio::time::sleep(observation).await;
-    assert!(
-        !marker.exists(),
-        "no listing command must have started: marker file exists at {}",
-        marker.display()
-    );
-}
-
 async fn call_list_model_choices(
     client: &mut Connection,
     profile: &str,
@@ -655,11 +625,11 @@ async fn call_list_model_choices(
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ModelChoicesRequested { .. } => {}
         other => panic!("expected model_choices_requested, got {other:?}"),
     }
-    match read_response(client, Duration::from_secs(10)).await {
+    match read_response(client).await {
         DaemonMessage::ModelChoices {
             source,
             choices,
@@ -709,14 +679,24 @@ async fn list_model_choices_for_a_disabled_profile_reports_unavailable_and_start
          disabled profile"
     );
 
-    assert_marker_absent_after(&marker, NEGATIVE_OBSERVATION).await;
+    // The list is pushed once the listing ended, so a command it started has
+    // run by now.
+    assert!(
+        !marker.exists(),
+        "no listing command must have started: marker file exists at {}",
+        marker.display()
+    );
 
     // Control: the same shape, enabled, actually starts the listing command
-    // (the parsed result is not this test's concern -- `touch`'s own empty
-    // stdout need not match `format = "lines"`; only that the command ran).
+    // by the time its list is pushed (the parsed result is not this test's
+    // concern -- `touch`'s own empty stdout need not match `format = "lines"`;
+    // only that the command ran).
     let (source, ..) = call_list_model_choices(&mut approver, "enabled", 2).await;
     assert!(source.is_some());
-    wait_until_marker_appears(&enabled_marker, Duration::from_secs(10)).await;
+    assert!(
+        enabled_marker.exists(),
+        "the enabled profile's listing command ran"
+    );
 }
 
 // =============================================================================

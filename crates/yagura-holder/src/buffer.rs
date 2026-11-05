@@ -1,6 +1,9 @@
 //! The output a holder keeps: the latest checkpoint and every byte the child
 //! wrote after it. Nothing in it is dropped for want of room; the holder stops
-//! reading instead (see [`OutputState::reader_must_wait`]).
+//! reading instead (see [`OutputState::read_permit`]).
+
+use std::io::{self, Read};
+use std::num::NonZeroUsize;
 
 use yagura_protocol::MAX_WINDOW_DIMENSION;
 use yagura_protocol::holder::HolderCheckpoint;
@@ -25,8 +28,12 @@ const _: () = assert!(
 /// reallocate on every read.
 const MIN_CAPACITY: usize = 64 * 1024;
 
-/// How far reading may run ahead of the connected daemon's `Ack`.
-pub(crate) const ACK_WINDOW: u64 = 256 * 1024;
+/// How far reading may run ahead of the connected daemon's `Ack`, in bytes;
+/// the holder names it to the daemon in its `Welcome`.
+pub const ACK_WINDOW: u64 = 256 * 1024;
+
+/// Bytes the reader takes from the terminal at a time, at most.
+const READ_CHUNK: usize = 8192;
 
 /// The checkpoint and the bytes after it.
 #[derive(Default)]
@@ -117,16 +124,21 @@ pub(crate) struct OutputState {
 }
 
 impl OutputState {
-    /// Whether the reader is to stop reading the PTY for now. Once the child
-    /// has exited everything left is read.
-    pub(crate) fn reader_must_wait(&self) -> bool {
-        if self.exit.is_some() {
-            return false;
-        }
-        let window_full = self
-            .ack_floor
-            .is_some_and(|floor| self.buffer.end().saturating_sub(floor) >= ACK_WINDOW);
-        window_full || self.buffer.pending() >= MAX_PENDING
+    /// How much the reader may read now: no more than keeps the output within
+    /// the connected daemon's window and within [`MAX_PENDING`], or `None`
+    /// when it is to wait. Once the child has exited everything left is read.
+    pub(crate) fn read_permit(&self) -> Option<ReadPermit> {
+        let room = if self.exit.is_some() {
+            READ_CHUNK
+        } else {
+            let kept_room = MAX_PENDING.saturating_sub(self.buffer.pending());
+            let window_room = self.ack_floor.map_or(usize::MAX, |floor| {
+                let ahead = self.buffer.end().saturating_sub(floor);
+                usize::try_from(ACK_WINDOW.saturating_sub(ahead)).unwrap_or(usize::MAX)
+            });
+            READ_CHUNK.min(kept_room).min(window_room)
+        };
+        NonZeroUsize::new(room).map(|len| ReadPermit { len })
     }
 
     /// Moves the acknowledged position forward, never past what was read.
@@ -134,5 +146,116 @@ impl OutputState {
         if let Some(floor) = self.ack_floor.as_mut() {
             *floor = (*floor).max(seq.min(self.buffer.end()));
         }
+    }
+}
+
+/// Leave to read up to [`ReadPermit::len`] bytes from the terminal; only
+/// [`OutputState::read_permit`] makes one.
+pub(crate) struct ReadPermit {
+    len: NonZeroUsize,
+}
+
+impl ReadPermit {
+    /// The bytes that may be read, at least one.
+    pub(crate) fn len(&self) -> usize {
+        self.len.get()
+    }
+}
+
+/// The terminal's output, read only with a [`ReadPermit`], so no read can
+/// skip the decision on how much to take.
+pub(crate) struct PtyReader {
+    reader: Box<dyn Read + Send>,
+    buf: Vec<u8>,
+}
+
+impl PtyReader {
+    pub(crate) fn new(reader: Box<dyn Read + Send>) -> Self {
+        Self {
+            reader,
+            buf: vec![0u8; READ_CHUNK],
+        }
+    }
+
+    /// Reads at most what `permit` allows; an empty slice is the end of output.
+    pub(crate) fn read(&mut self, permit: ReadPermit) -> io::Result<&[u8]> {
+        let len = permit.len().min(self.buf.len());
+        let read = self.reader.read(&mut self.buf[..len])?;
+        Ok(&self.buf[..read.min(len)])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(state: &mut OutputState, len: usize) {
+        state.buffer.append(&vec![b'x'; len]);
+    }
+
+    fn window_bytes() -> usize {
+        usize::try_from(ACK_WINDOW).unwrap_or(usize::MAX)
+    }
+
+    /// How much the reader may read now; `0` when it must wait.
+    fn allowed(state: &OutputState) -> usize {
+        state.read_permit().map_or(0, |permit| permit.len())
+    }
+
+    #[test]
+    fn a_connected_reader_may_read_up_to_the_window_past_the_ack_and_no_further() {
+        let mut state = OutputState {
+            ack_floor: Some(0),
+            ..OutputState::default()
+        };
+        let fresh = allowed(&state);
+        assert!(
+            (1..=window_bytes()).contains(&fresh),
+            "an empty window allows {fresh} bytes"
+        );
+
+        read(&mut state, window_bytes() - 1);
+        assert_eq!(allowed(&state), 1, "the last byte of the window");
+
+        read(&mut state, 1);
+        assert!(state.read_permit().is_none(), "read on past the window");
+
+        state.acknowledge(1);
+        assert_eq!(allowed(&state), 1, "an ack of one byte allows one byte");
+    }
+
+    #[test]
+    fn a_reader_with_no_daemon_may_read_up_to_the_kept_output_bound_and_no_further() {
+        let mut state = OutputState::default();
+        read(&mut state, window_bytes());
+        assert!(
+            allowed(&state) >= 1,
+            "the ack window held a reader with no daemon connected"
+        );
+
+        read(&mut state, MAX_PENDING - 1 - window_bytes());
+        assert_eq!(allowed(&state), 1, "the last byte before MAX_PENDING");
+
+        read(&mut state, 1);
+        assert!(state.read_permit().is_none(), "read on past MAX_PENDING");
+    }
+
+    #[test]
+    fn after_the_child_exited_the_reader_reads_everything_left() {
+        let mut state = OutputState {
+            ack_floor: Some(0),
+            ..OutputState::default()
+        };
+        read(&mut state, MAX_PENDING);
+        assert!(
+            state.read_permit().is_none(),
+            "the full state did not stop it"
+        );
+
+        state.exit = Some(None);
+        assert!(
+            allowed(&state) >= 1,
+            "a reader was held after the child exited"
+        );
     }
 }

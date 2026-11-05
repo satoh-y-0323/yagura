@@ -27,10 +27,9 @@ use std::time::Duration;
 use common::{
     CONTROL_INPUT_TABLE, Harness, READY_MARKER, SUBMIT_CHILD_PROBE, VALID_TOKEN,
     approver_base_config, call_list_windows, call_open_window, call_send_handoff_from_profile,
-    call_send_handoff_from_profile_within, composer_section_toml, detection_config, empty_lookup,
-    expect_approval_requested, expect_error, expect_handoff_sent, handoff_profile_config, identify,
-    policy, read_response, register_approver, send, unique_temp_dir, wait_until_status,
-    write_profile,
+    composer_section_toml, detection_config, empty_lookup, expect_approval_requested, expect_error,
+    expect_handoff_sent, handoff_profile_config, identify, let_every_clock_bound_run_out, policy,
+    read_response, register_approver, send, unique_temp_dir, wait_until_status, write_profile,
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
@@ -60,15 +59,36 @@ const DRAWN: &str = "drawn-shell";
 /// daemon may type into its composer but cannot judge whether a line showed.
 const RAW_ONLY: &str = "raw-only-shell";
 
-/// How long a body that must never be written is watched for in the child's
-/// output. The positive control on a composer-declaring window shows an
-/// echoed body well within this, so an absence over this span is not merely
-/// a slow echo.
-const ABSENCE_OBSERVATION: Duration = Duration::from_millis(1500);
+/// Writes a line of the test's own into `window_id` and waits for it to show
+/// in the child's output. Bytes reach the child in the order they are
+/// written, so anything written into the window before it shows there by
+/// then.
+async fn write_marker_and_see_it(h: &Harness, window_id: &str, marker: &str) {
+    h.write_input(window_id, format!("{marker}\r").as_bytes())
+        .await;
+    h.wait_for_scrollback(window_id, marker.as_bytes()).await;
+}
 
-/// Upper bound for a body that must be written to show up in the child's
-/// output.
-const PRESENCE_TIMEOUT: Duration = Duration::from_secs(10);
+/// The number in a window id (`w<n>-<boot>`): the registry numbers every
+/// open it starts in turn, a failed one included, so an open's number tells
+/// how many opens were started before it.
+fn open_number(window_id: &str) -> u64 {
+    window_id
+        .strip_prefix('w')
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
+}
+
+/// The highest open number among the windows `client` lists, 0 for none.
+async fn highest_open_number(client: &mut Connection) -> u64 {
+    call_list_windows(client)
+        .await
+        .iter()
+        .map(|window| open_number(&window.window_id))
+        .max()
+        .unwrap_or(0)
+}
 
 fn write_definitions(dir: &Path) {
     std::fs::write(
@@ -130,13 +150,7 @@ async fn open_ready_running(h: &Harness, detection: &str, command: Vec<String>) 
     let mut client = h.connect().await;
     let window_id = h.open(command, Some(detection)).await;
     h.write_input(&window_id, READY_MARKER).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
     window_id
 }
 
@@ -176,13 +190,7 @@ async fn open_ready_delivering(h: &Harness, detection: &str, command: Vec<String
         .expect("registry.open_with_extra_env should spawn the child")
         .window_id;
     h.write_input(&window_id, READY_MARKER).await;
-    wait_until_status(
-        &mut client,
-        &window_id,
-        WindowStatus::Idle,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
     window_id
 }
 
@@ -255,11 +263,6 @@ async fn neither_writing_entry_point_writes_into_a_window_that_declares_no_compo
         "a raw body must be declined for the missing composer itself"
     );
     assert_eq!(raw.residue_write_seq, None);
-    assert_eq!(
-        silent.write_seq(),
-        seq_before,
-        "a declined window must not have taken a single write"
-    );
 
     let control_seq_before: u64 = drawn.write_seq();
     let control: SubmitJudgment = drawn
@@ -275,10 +278,9 @@ async fn neither_writing_entry_point_writes_into_a_window_that_declares_no_compo
         drawn.write_seq() > control_seq_before,
         "the control write must be counted, or an unchanged count proves nothing"
     );
-    h.wait_for_scrollback(&drawn_id, b"drawn-raw-body", PRESENCE_TIMEOUT)
-        .await;
+    h.wait_for_scrollback(&drawn_id, b"drawn-raw-body").await;
 
-    tokio::time::sleep(ABSENCE_OBSERVATION).await;
+    write_marker_and_see_it(&h, &silent_id, "silent-marker").await;
     assert!(
         !scrollback_contains(&h, &silent_id, "silent-judged-body"),
         "the judged body must never reach the child"
@@ -287,7 +289,11 @@ async fn neither_writing_entry_point_writes_into_a_window_that_declares_no_compo
         !scrollback_contains(&h, &silent_id, "silent-raw-body"),
         "the raw body must never reach the child"
     );
-    assert_eq!(silent.write_seq(), seq_before);
+    assert_eq!(
+        silent.write_seq(),
+        seq_before + 1,
+        "a declined window must not have taken a single write besides the marker"
+    );
 
     h.registry.terminate_all().await;
 }
@@ -313,9 +319,7 @@ async fn a_window_records_whether_its_definition_declares_a_composer() {
         (
             drawn_id.as_str(),
             "a composer and a probe",
-            ComposerAccess::Judged {
-                probe: probe_char(),
-            },
+            ComposerAccess::Judged,
         ),
         (
             undefined_id.as_str(),
@@ -400,7 +404,7 @@ async fn a_user_layer_definition_of_the_same_name_that_declares_a_composer_is_wr
         "a window whose definition declares a composer must take the body, got {:?}",
         written.placement
     );
-    h.wait_for_scrollback(&window_id, b"user-layer-raw-body", PRESENCE_TIMEOUT)
+    h.wait_for_scrollback(&window_id, b"user-layer-raw-body")
         .await;
 
     h.registry.terminate_all().await;
@@ -423,6 +427,7 @@ async fn send_message_to_a_composerless_window_is_refused_with_no_composer_from_
     let mut owner = h.connect().await;
     identify(&mut owner, &window_id).await;
     let mut external = h.connect().await;
+    let seq_before = entry.write_seq();
 
     for (form, text) in [
         ("a terminated line", "hello\r"),
@@ -433,7 +438,6 @@ async fn send_message_to_a_composerless_window_is_refused_with_no_composer_from_
             ("an external caller", &mut external),
             ("the window identified as itself", &mut owner),
         ] {
-            let seq_before = entry.write_seq();
             send(
                 client,
                 &ClientMessage::SendText {
@@ -442,10 +446,7 @@ async fn send_message_to_a_composerless_window_is_refused_with_no_composer_from_
                 },
             )
             .await;
-            let message = expect_error(
-                read_response(client, Duration::from_secs(5)).await,
-                "no_composer",
-            );
+            let message = expect_error(read_response(client).await, "no_composer");
             assert!(
                 message.contains("send_keys") && message.contains("open_window"),
                 "the refusal for {form} from {origin_label} must name send_keys and \
@@ -456,16 +457,15 @@ async fn send_message_to_a_composerless_window_is_refused_with_no_composer_from_
                 "the refusal must not read as an invitation to reopen the window with a \
                  detection definition, got {message:?}"
             );
-            assert_eq!(
-                entry.write_seq(),
-                seq_before,
-                "a refused send_message ({form} from {origin_label}) must not have written \
-                 anything, own-window relief included"
-            );
         }
     }
 
-    tokio::time::sleep(ABSENCE_OBSERVATION).await;
+    write_marker_and_see_it(&h, &window_id, "refused-marker").await;
+    assert_eq!(
+        entry.write_seq(),
+        seq_before + 1,
+        "a refused send_message must not have written anything, own-window relief included"
+    );
     assert!(
         !scrollback_contains(&h, &window_id, "hello"),
         "no form of the refused body may have reached the child"
@@ -495,15 +495,16 @@ async fn send_handoff_to_a_window_that_declares_no_delivery_is_undelivered_and_f
     for attempt in 1..=2 {
         send(&mut client, &handoff_to(&window_id)).await;
         assert_eq!(
-            delivery_wire(read_response(&mut client, Duration::from_secs(5)).await),
+            delivery_wire(read_response(&mut client).await),
             "undelivered_no_delivery",
             "attempt {attempt}: a window opened from a raw argv declares no way to deliver, \
              whatever its definition declares"
         );
     }
+    write_marker_and_see_it(&h, &window_id, "undelivered-marker").await;
     assert_eq!(
         entry.write_seq(),
-        seq_before,
+        seq_before + 1,
         "nothing is typed into a window a handoff cannot be delivered to"
     );
 
@@ -527,14 +528,11 @@ async fn a_window_with_no_definition_refuses_send_message_as_unknown_and_a_hando
         },
     )
     .await;
-    expect_error(
-        read_response(&mut client, Duration::from_secs(5)).await,
-        "status_unknown",
-    );
+    expect_error(read_response(&mut client).await, "status_unknown");
 
     send(&mut client, &handoff_to(&window_id)).await;
     assert_eq!(
-        delivery_wire(read_response(&mut client, Duration::from_secs(5)).await),
+        delivery_wire(read_response(&mut client).await),
         "undelivered_no_delivery",
         "a handoff is never typed: a window that declares no delivery is answered so, \
          whatever its status"
@@ -567,10 +565,6 @@ const RAW_LAUNCH_INPUT_TABLE: &str = "\n[input]\nsubmit_delay_ms = 40\ndelivery_
 /// A detection name no layer defines, so the definition cannot be read
 /// before the window opens.
 const UNDEFINED_LAUNCH: &str = "undefined-launch";
-
-/// Upper bound for a reply that is expected to arrive once a window opened
-/// for it reaches readiness.
-const LAUNCH_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The two launch definitions differ only in the composer table; both keep
 /// the confirm-free `[input]` table so the positive control answers as soon
@@ -716,6 +710,7 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
     let mut client = h.connect().await;
 
     let before: usize = window_count(&mut client).await;
+    let highest_before = highest_open_number(&mut client).await;
     let msg =
         call_send_handoff_from_profile(&mut client, "silent-profile", None, None, "r", "t").await;
     let message = expect_error(msg, "no_composer");
@@ -726,26 +721,20 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
         "a handoff known to be refused must not have opened a window for it, even one it \
          closes again before answering"
     );
-    // Watched past the reply, so a launch left running behind an early
-    // answer would still be seen.
-    tokio::time::sleep(ABSENCE_OBSERVATION).await;
-    assert_eq!(window_count(&mut client).await, before);
 
-    let control = call_send_handoff_from_profile_within(
-        &mut client,
-        "prompted-profile",
-        None,
-        None,
-        "r",
-        "t",
-        LAUNCH_REPLY_TIMEOUT,
-    )
-    .await;
-    let (_window_id, opened, delivery) = expect_handoff_sent(control);
+    let control =
+        call_send_handoff_from_profile(&mut client, "prompted-profile", None, None, "r", "t").await;
+    let (control_id, opened, delivery) = expect_handoff_sent(control);
     assert!(
         opened,
         "a launch under a definition with no composer that hands the envelope over at launch \
          must open"
+    );
+    assert_eq!(
+        open_number(&control_id),
+        highest_before + 1,
+        "the control must be the first open started after the refusal: a launch started for \
+         the refused handoff, even one left running behind the answer, would have come first"
     );
     assert_eq!(
         serde_json::to_value(delivery).expect("a delivery encodes"),
@@ -772,6 +761,7 @@ async fn the_composer_refusal_follows_the_launch_content_check_and_precedes_the_
     let (h, dir) = start_launch(tag, Some(playbook), None).await;
     let mut client = h.connect().await;
     let before: usize = window_count(&mut client).await;
+    let highest_before = highest_open_number(&mut client).await;
 
     let missing_cwd = dir.join("cwd-that-does-not-exist");
     let missing_cwd = missing_cwd.to_string_lossy().into_owned();
@@ -805,6 +795,13 @@ async fn the_composer_refusal_follows_the_launch_content_check_and_precedes_the_
         before,
         "none of these refusals may have opened a window"
     );
+    let marker = h.open(echo_child_command(), None).await;
+    assert_eq!(
+        open_number(&marker),
+        highest_before + 1,
+        "no refusal may have started an open, even one left running behind its answer"
+    );
+    h.registry.terminate_all().await;
 }
 
 // --- open_task_window --------------------------------------------------------
@@ -832,12 +829,12 @@ async fn start_ledger(tag: &str) -> Harness {
 }
 
 /// Reads the next response frame, skipping `plan_changed` pushes.
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -875,7 +872,7 @@ async fn create_plan(owner: &mut Connection, tasks: Vec<PlanTaskSpec>) -> PlanIn
         },
     )
     .await;
-    match read_ledger_reply(owner, Duration::from_secs(5)).await {
+    match read_ledger_reply(owner).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     }
@@ -889,7 +886,7 @@ async fn stored_task(owner: &mut Connection, plan_id: &str, task_id: &str) -> Pl
         },
     )
     .await;
-    let plan = match read_ledger_reply(owner, Duration::from_secs(5)).await {
+    let plan = match read_ledger_reply(owner).await {
         DaemonMessage::PlanDetail { plan } => plan,
         other => panic!("expected plan_detail, got {other:?}"),
     };
@@ -914,7 +911,7 @@ async fn open_task_window(
         },
     )
     .await;
-    read_ledger_reply(owner, LAUNCH_REPLY_TIMEOUT).await
+    read_ledger_reply(owner).await
 }
 
 fn expect_task_window_opened(msg: DaemonMessage, context: &str) -> String {
@@ -949,6 +946,7 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
     .await;
 
     let before: usize = window_count(&mut owner).await;
+    let highest_before = highest_open_number(&mut owner).await;
     let msg = open_task_window(&mut owner, &plan.plan_id, "instructed", "instructed-window").await;
     let message = expect_error(msg, "no_composer");
     assert_no_composer_guidance(&message, "an instructed task window");
@@ -958,8 +956,6 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         "an instructed task whose window could never be told its instruction must not start a \
          child"
     );
-    tokio::time::sleep(ABSENCE_OBSERVATION).await;
-    assert_eq!(windows_named(&mut owner, "instructed-window").await, 0);
 
     let refused = stored_task(&mut owner, &plan.plan_id, "instructed").await;
     assert_eq!(
@@ -976,6 +972,13 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         bare,
         "the same profile with nothing to tell the window must open",
     );
+    assert_eq!(
+        open_number(&bare_window),
+        highest_before + 1,
+        "the control must be the first open started after the refusal: a child started for the \
+         refused task, even one left running behind the answer, would have come first"
+    );
+    assert_eq!(windows_named(&mut owner, "instructed-window").await, 0);
     let prompted = open_task_window(&mut owner, &plan.plan_id, "prompted", "prompted-window").await;
     let prompted_window: String = expect_task_window_opened(
         prompted,
@@ -1027,11 +1030,10 @@ async fn an_instructed_task_whose_definition_cannot_be_read_leaves_no_window_run
         .map(|window| window.window_id)
         .collect();
     for window_id in &started {
-        h.wait_until_child_exited(window_id, LAUNCH_REPLY_TIMEOUT)
-            .await;
+        h.wait_until_child_exited(window_id).await;
     }
 
-    let deadline = tokio::time::Instant::now() + LAUNCH_REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let notice = stored_task(&mut owner, &plan.plan_id, "instructed")
             .await
@@ -1074,12 +1076,6 @@ async fn an_instructed_task_whose_definition_cannot_be_read_leaves_no_window_run
 /// present only once `attempt_notice` was actually dispatched for a window.
 const NOTICE_ATTEMPT_LOG: &str = "notice delivery attempt finished";
 
-/// How long the delivery agent is watched for a periodic attempt on a
-/// composerless window. Several times the agent's own retry spacing, so an
-/// agent that spins on the composer check rather than going idle at
-/// `next_notice` would have logged at least once within this span.
-const NOTICE_SPIN_OBSERVATION: Duration = Duration::from_secs(6);
-
 async fn call_send_report(client: &mut Connection, summary: &str) -> DaemonMessage {
     send(
         client,
@@ -1090,7 +1086,7 @@ async fn call_send_report(client: &mut Connection, summary: &str) -> DaemonMessa
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_report_sent(msg: DaemonMessage) {
@@ -1102,7 +1098,7 @@ fn expect_report_sent(msg: DaemonMessage) {
 
 async fn call_wait_for_report(client: &mut Connection, timeout_sec: u64) -> Vec<ReceivedReport> {
     send(client, &ClientMessage::WaitForReport { timeout_sec }).await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::Reports { reports, .. } => reports,
         other => panic!("expected reports, got {other:?}"),
     }
@@ -1141,7 +1137,7 @@ async fn a_composerless_windows_report_notice_is_never_attempted() {
 
     // Control: the composer-declaring parent's report notice must actually
     // be dispatched, or the negative assertions below would prove nothing.
-    let deadline = tokio::time::Instant::now() + PRESENCE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while drawn_entry.notice_attempts() == 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -1160,7 +1156,10 @@ async fn a_composerless_windows_report_notice_is_never_attempted() {
          attempt, or the negative assertion below proves nothing"
     );
 
-    tokio::time::sleep(NOTICE_SPIN_OBSERVATION).await;
+    // Every retry the agent could make on its own clock runs out first, so an
+    // agent that spins on the composer check rather than going idle at
+    // `next_notice` would have attempted and logged by now.
+    let_every_clock_bound_run_out().await;
     assert_eq!(
         silent_entry.notice_attempts(),
         0,
@@ -1210,14 +1209,13 @@ async fn a_composerless_windows_report_inbox_is_discarded_once_it_ends() {
         },
     )
     .await;
-    match read_response(&mut approver, Duration::from_secs(10)).await {
+    match read_response(&mut approver).await {
         DaemonMessage::WindowClosed { window_id } => assert_eq!(window_id, silent_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
-    h.wait_until_child_exited(&silent_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&silent_id).await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let mut probe = h.connect().await;
         identify(&mut probe, &silent_id).await;
@@ -1243,13 +1241,6 @@ async fn a_composerless_windows_report_inbox_is_discarded_once_it_ends() {
 // through.
 // =====================================================================
 
-fn probe_char() -> char {
-    SUBMIT_CHILD_PROBE
-        .chars()
-        .next()
-        .expect("the probe is one character")
-}
-
 async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> DaemonMessage {
     send(
         client,
@@ -1259,7 +1250,7 @@ async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> Daem
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 #[tokio::test]
@@ -1305,7 +1296,7 @@ async fn a_judged_line_is_declined_before_writing_into_a_composer_without_a_prob
          got {:?}",
         raw.placement
     );
-    h.wait_for_scrollback(&window_id, b"raw-only-raw-body", PRESENCE_TIMEOUT)
+    h.wait_for_scrollback(&window_id, b"raw-only-raw-body")
         .await;
     // Written after the declined call returned: anything that call had written
     // would already be in the child's output ahead of this body.
@@ -1376,11 +1367,13 @@ async fn a_one_line_send_message_to_a_composer_without_a_probe_is_refused_before
         vec![Some(drawn_id.clone())],
         "the refused lines must not have left a request pending"
     );
+    write_marker_and_see_it(&h, &raw_id, "raw-only-marker").await;
     assert_eq!(
         raw.write_seq(),
-        seq_before,
+        seq_before + 1,
         "a refused line must not have written anything"
     );
+    assert!(!scrollback_contains(&h, &raw_id, "hello"));
 
     h.registry.terminate_all().await;
 }
@@ -1404,7 +1397,7 @@ async fn a_send_message_with_no_line_to_judge_is_written_into_a_composer_without
             ),
         }
     }
-    h.wait_for_scrollback(&window_id, b"raw-only-unterminated", PRESENCE_TIMEOUT)
+    h.wait_for_scrollback(&window_id, b"raw-only-unterminated")
         .await;
 
     h.registry.terminate_all().await;
@@ -1421,22 +1414,26 @@ async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_chi
     let mut client = h.connect().await;
 
     let before: usize = window_count(&mut client).await;
-    let msg = call_send_handoff_from_profile_within(
-        &mut client,
-        "raw-profile",
-        None,
-        None,
-        "r",
-        "t",
-        LAUNCH_REPLY_TIMEOUT,
-    )
-    .await;
+    let highest_before = highest_open_number(&mut client).await;
+    let msg =
+        call_send_handoff_from_profile(&mut client, "raw-profile", None, None, "r", "t").await;
     let message = expect_error(msg, "no_composer");
     assert_no_composer_guidance(&message, "a profile-addressed handoff without a probe");
     assert_eq!(
         window_count(&mut client).await,
         before,
         "a handoff known to be refused must not have opened a window for it"
+    );
+
+    let control =
+        call_send_handoff_from_profile(&mut client, "prompted-profile", None, None, "r", "t").await;
+    let (control_id, opened, _) = expect_handoff_sent(control);
+    assert!(opened, "the control handoff must open its window");
+    assert_eq!(
+        open_number(&control_id),
+        highest_before + 1,
+        "the control must be the first open started after the refusal: a launch started for \
+         the refused handoff, even one left running behind the answer, would have come first"
     );
 
     h.registry.terminate_all().await;
@@ -1458,6 +1455,7 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_names_no_prob
     .await;
 
     let before: usize = window_count(&mut owner).await;
+    let highest_before = highest_open_number(&mut owner).await;
     let msg = open_task_window(&mut owner, &plan.plan_id, "instructed", "instructed-window").await;
     let message = expect_error(msg, "no_composer");
     assert_no_composer_guidance(&message, "an instructed task window without a probe");
@@ -1475,6 +1473,12 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_names_no_prob
     let bare_window: String = expect_task_window_opened(
         bare,
         "the same profile with nothing to tell the window must open",
+    );
+    assert_eq!(
+        open_number(&bare_window),
+        highest_before + 1,
+        "the control must be the first open started after the refusal: a child started for the \
+         refused task, even one left running behind the answer, would have come first"
     );
     assert_eq!(
         stored_task(&mut owner, &plan.plan_id, "bare")

@@ -929,7 +929,7 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_that_is_the_current_revision() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_two() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
@@ -942,5 +942,5 @@ fn run_hook_requires_revision_thirty_one_and_that_is_the_current_revision() {
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 31);
+    assert_eq!(PROTOCOL_REVISION, 32);
 }

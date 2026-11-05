@@ -26,8 +26,7 @@ use yagura_daemon::DaemonConfig;
 use yagura_protocol::{ChatMessage, ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
 
-/// The longest any single step may take before the case is called hung.
-const HANG_GUARD: Duration = Duration::from_secs(60);
+use yagura_test_support::HANG_GUARD;
 
 const EXHAUSTED: &str = "undelivered_exhausted";
 
@@ -57,6 +56,7 @@ async fn open_stuck_window(h: &Harness, client: &mut Connection, dir: &Path) -> 
         &window_input(),
         0,
         "frozen:",
+        None,
     )
     .await
 }
@@ -72,6 +72,7 @@ async fn open_healthy_window(h: &Harness, client: &mut Connection, dir: &Path) -
         &window_input(),
         0,
         "",
+        None,
     )
     .await
 }
@@ -98,7 +99,7 @@ fn chat_spec<'a>(intro: Option<&'a str>, chat_delivery_max: u64) -> ChatPlaybook
 /// overtake it.
 async fn read_reply(client: &mut Connection) -> DaemonMessage {
     loop {
-        let frame = read_response(client, HANG_GUARD).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::ChatChanged { .. }) {
             return frame;
         }
@@ -241,7 +242,7 @@ async fn posts_beyond_the_chat_budget_to_a_stuck_window_do_not_keep_another_wind
     let mut poster = open_poster(&h, &mut client).await;
 
     post(&mut poster, &format!("@{stuck} first"), &stuck).await;
-    h.wait_for_scrollback(&stuck, b"PASTE 1", HANG_GUARD).await;
+    h.wait_for_scrollback(&stuck, b"PASTE 1").await;
     for index in 0..3 {
         post(
             &mut poster,
@@ -277,7 +278,7 @@ async fn posts_past_a_stuck_windows_inbox_are_turned_away_for_that_window_alone(
     post(&mut poster, &format!("@{stuck} first"), &stuck).await;
     // The first post is being typed into the stuck window: the four after it wait in
     // its inbox, which holds two.
-    h.wait_for_scrollback(&stuck, b"PASTE 1", HANG_GUARD).await;
+    h.wait_for_scrollback(&stuck, b"PASTE 1").await;
     let mut stuck_seqs = Vec::new();
     for index in 0..4 {
         stuck_seqs.push(
@@ -364,7 +365,7 @@ async fn spawn_handoff(
     send_handoff(&mut connection, window_id, note).await;
     let replies = replies.clone();
     tokio::spawn(async move {
-        let reply = read_response(&mut connection, HANG_GUARD * 3).await;
+        let reply = read_response(&mut connection).await;
         let _ = replies.send(reply);
     });
 }
@@ -389,7 +390,7 @@ async fn handoffs_beyond_the_daemon_budget_to_a_stuck_window_leave_another_windo
     let (sender, mut replies) = tokio::sync::mpsc::unbounded_channel();
 
     spawn_handoff(&h, &stuck, "holds the turn", &sender).await;
-    h.wait_for_scrollback(&stuck, b"PASTE 1", HANG_GUARD).await;
+    h.wait_for_scrollback(&stuck, b"PASTE 1").await;
     spawn_handoff(&h, &stuck, "waits for the turn", &sender).await;
     spawn_handoff(&h, &stuck, "past the waiters", &sender).await;
 
@@ -401,7 +402,7 @@ async fn handoffs_beyond_the_daemon_budget_to_a_stuck_window_leave_another_windo
 
     let mut other = h.connect().await;
     send_handoff(&mut other, &healthy, "for the other window").await;
-    match read_response(&mut other, HANG_GUARD).await {
+    match read_response(&mut other).await {
         DaemonMessage::HandoffSent { window_id, .. } => assert_eq!(window_id, healthy),
         reply => panic!(
             "a handoff to another window must be delivered while a stuck window holds its \

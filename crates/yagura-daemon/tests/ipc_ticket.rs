@@ -13,7 +13,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{
     Harness, approver_base_config, expect_error, identify, read_response, register_approver,
@@ -27,9 +27,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::echo_child_path;
-
-/// Fails a request that never gets its reply; not a speed bound.
-const REPLY_GUARD: Duration = Duration::from_secs(30);
 
 // --- fixtures ----------------------------------------------------------
 
@@ -104,7 +101,7 @@ fn now_ms() -> u64 {
 /// push. A `ticket_changed` is *not* skipped: a window must never be sent one.
 async fn request(client: &mut Connection, msg: ClientMessage) -> DaemonMessage {
     send(client, &msg).await;
-    read_response(client, REPLY_GUARD).await
+    read_response(client).await
 }
 
 /// [`request`] on an approver connection, skipping the pushes an approver is
@@ -112,7 +109,7 @@ async fn request(client: &mut Connection, msg: ClientMessage) -> DaemonMessage {
 async fn approver_request(client: &mut Connection, msg: ClientMessage) -> DaemonMessage {
     send(client, &msg).await;
     loop {
-        match read_response(client, REPLY_GUARD).await {
+        match read_response(client).await {
             DaemonMessage::TicketChanged { .. }
             | DaemonMessage::PlanChanged { .. }
             | DaemonMessage::ChatChanged { .. } => continue,
@@ -125,7 +122,7 @@ async fn approver_request(client: &mut Connection, msg: ClientMessage) -> Daemon
 /// pushes. Anything else (an approval request in particular) fails the case.
 async fn next_ticket_changed(approver: &mut Connection) -> i64 {
     loop {
-        match read_response(approver, REPLY_GUARD).await {
+        match read_response(approver).await {
             DaemonMessage::TicketChanged { workspace_id } => return workspace_id,
             DaemonMessage::PlanChanged { .. } | DaemonMessage::ChatChanged { .. } => continue,
             other => panic!("expected ticket_changed, got {other:?}"),
@@ -881,16 +878,16 @@ async fn ticket_writes_never_ask_for_approval_even_when_the_playbook_approves_no
     // The approver's next frame after each write is the push, never a request.
     send(&mut a, &create("t", "b")).await;
     next_ticket_changed(&mut appr).await;
-    let created = expect_detail(read_response(&mut a, REPLY_GUARD).await);
+    let created = expect_detail(read_response(&mut a).await);
     send(&mut a, &update(created.number, Some("in-progress"), &[])).await;
     next_ticket_changed(&mut appr).await;
-    expect_detail(read_response(&mut a, REPLY_GUARD).await);
+    expect_detail(read_response(&mut a).await);
     send(&mut a, &add_result(created.number, "r")).await;
     next_ticket_changed(&mut appr).await;
-    expect_detail(read_response(&mut a, REPLY_GUARD).await);
+    expect_detail(read_response(&mut a).await);
     send(&mut a, &set_milestone("m1", "Milestone one")).await;
     next_ticket_changed(&mut appr).await;
-    expect_milestone(read_response(&mut a, REPLY_GUARD).await);
+    expect_milestone(read_response(&mut a).await);
 }
 
 // --- 11. what a summary carries for the board card ---------------------

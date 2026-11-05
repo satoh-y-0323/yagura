@@ -29,13 +29,6 @@ use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 /// every other test file's so their endpoints never collide.
 const PIPE_PREFIX: &str = "yagura-mcp-eager-identify";
 
-/// Settling delay before reading a counter for a "must NOT have grown"
-/// assertion, so the connection under test has had time to act if it were
-/// going to.
-const SETTLE: Duration = Duration::from_millis(400);
-
-const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// A scripted server that answers `GetProtocolRevision` with the current
 /// revision, `Identify` with `Identified`, and everything else with `Pong`,
 /// counting accepted connections and identify requests received.
@@ -57,8 +50,8 @@ impl ScriptedServer {
 
     /// Waits until the accept counter reaches `target`, panicking on timeout
     /// so a missing connection fails loudly instead of hanging.
-    async fn await_accepted(&self, target: usize, timeout: Duration) {
-        let deadline = tokio::time::Instant::now() + timeout;
+    async fn await_accepted(&self, target: usize) {
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
         while self.accepted() < target {
             if tokio::time::Instant::now() >= deadline {
                 panic!(
@@ -232,27 +225,24 @@ async fn eager_identify_with_an_identity_connects_and_identifies_once_and_the_ne
     let server = spawn_scripted_server("with-identity");
     let transport = EndpointTransport::new(server.endpoint.clone(), Some(sample_identity()));
 
-    reply_within(WAIT_TIMEOUT, "eager_identify", transport.eager_identify())
+    reply_within("eager_identify", transport.eager_identify())
         .await
         .expect("eager_identify must succeed against a live daemon");
 
-    server.await_accepted(1, WAIT_TIMEOUT).await;
+    server.await_accepted(1).await;
     assert_eq!(
         server.identify_count(),
         1,
         "eager_identify must send exactly one identify request up front"
     );
 
-    let reply = reply_within(
-        WAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("the caller's own first round trip must succeed");
+    let reply = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("the caller's own first round trip must succeed");
     assert_eq!(reply, DaemonMessage::Pong);
 
-    tokio::time::sleep(SETTLE).await;
+    // A connection the round trip opened got its reply only after it was
+    // accepted, so the count already holds it.
     assert_eq!(
         server.accepted(),
         1,
@@ -273,16 +263,22 @@ async fn eager_identify_with_no_identity_never_connects() {
     let server = spawn_scripted_server("no-identity");
     let transport = EndpointTransport::new(server.endpoint.clone(), None);
 
-    reply_within(WAIT_TIMEOUT, "eager_identify", transport.eager_identify())
+    reply_within("eager_identify", transport.eager_identify())
         .await
         .expect("eager_identify with no identity must not fail");
 
-    tokio::time::sleep(SETTLE).await;
+    // The server accepts in arrival order, so a connection eager_identify
+    // opened is counted before a later client's request is answered.
+    let probe = EndpointTransport::new(server.endpoint.clone(), None);
+    let reply = reply_within("a round trip", probe.round_trip(ClientMessage::Ping))
+        .await
+        .expect("a later client must reach the scripted server");
+    assert_eq!(reply, DaemonMessage::Pong);
     assert_eq!(
         server.accepted(),
-        0,
+        1,
         "eager_identify must not open a connection at all when this transport carries no \
-         identity"
+         identity: only the later client's connection may have been accepted"
     );
 }
 
@@ -295,7 +291,7 @@ async fn eager_identify_fails_when_the_daemon_is_absent_but_a_later_round_trip_s
     let endpoint = unique_endpoint_name(PIPE_PREFIX, "absent-daemon");
     let transport = EndpointTransport::new(endpoint.clone(), Some(sample_identity()));
 
-    let outcome = reply_within(WAIT_TIMEOUT, "eager_identify", transport.eager_identify()).await;
+    let outcome = reply_within("eager_identify", transport.eager_identify()).await;
     assert!(
         outcome.is_err(),
         "eager_identify must report an error when no daemon is listening, got {outcome:?}"
@@ -305,12 +301,8 @@ async fn eager_identify_fails_when_the_daemon_is_absent_but_a_later_round_trip_s
     // left the transport unable to connect on its own, ordinary lazy path.
     let _server = spawn_scripted_server_at(endpoint);
 
-    let reply = reply_within(
-        WAIT_TIMEOUT,
-        "a round trip",
-        transport.round_trip(ClientMessage::Ping),
-    )
-    .await
-    .expect("a later round trip must still connect lazily, exactly as before this feature");
+    let reply = reply_within("a round trip", transport.round_trip(ClientMessage::Ping))
+        .await
+        .expect("a later round trip must still connect lazily, exactly as before this feature");
     assert_eq!(reply, DaemonMessage::Pong);
 }

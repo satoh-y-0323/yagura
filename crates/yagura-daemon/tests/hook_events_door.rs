@@ -19,7 +19,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 use yagura_daemon::inbox::Parcel;
 use yagura_daemon::profile::parse_profile;
@@ -281,13 +280,7 @@ async fn a_hook_without_the_skip_value_records_status_and_session_and_prints_in_
     assert_eq!(setup.entry().inbox().pending_count(), 0);
     assert_eq!(setup.entry().session_id().as_deref(), Some("sess-7"));
     let mut client = setup.h.connect().await;
-    wait_until_status(
-        &mut client,
-        &setup.window_id,
-        WindowStatus::Running,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::Running).await;
 }
 
 #[tokio::test]

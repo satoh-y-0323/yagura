@@ -1,5 +1,7 @@
 //! What keeps this daemon from doing its job, as `get_daemon_health` reports it.
 
+use std::path::Path;
+
 use yagura_protocol::{DaemonProblem, DaemonProblemKind};
 
 /// Decides the problems to report from what the daemon knows.
@@ -17,12 +19,18 @@ pub fn daemon_problems(conpty_fault: Option<&str>) -> Vec<DaemonProblem> {
         .collect()
 }
 
-/// Blocking: runs the bundled pseudoconsole check beside the running
-/// executable and returns the failure's text, `None` when it passes (always
-/// off Windows).
+/// Blocking: runs the bundled pseudoconsole check beside `holder_exe`, the
+/// holder that loads it, and returns the failure's text, `None` when it
+/// passes (always off Windows).
 #[must_use]
-pub fn conpty_fault_now() -> Option<String> {
-    yagura_os::bundled_conpty::verify_beside_executable()
+pub fn conpty_fault_now(holder_exe: Option<&Path>) -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let Some(dir) = holder_exe.and_then(Path::parent) else {
+        return Some("the window holder executable is not located".to_string());
+    };
+    yagura_os::bundled_conpty::verify_beside(dir)
         .err()
         .map(|err| err.to_string())
 }

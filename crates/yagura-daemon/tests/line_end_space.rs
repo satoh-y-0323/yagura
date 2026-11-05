@@ -13,7 +13,7 @@ mod common;
 use std::path::{Path, PathBuf};
 
 use common::{
-    HANG_GUARD, Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, policy,
+    Harness, SUBMIT_CHILD_PROBE, SubmitDefinitionInput, approver_base_config, policy,
     read_response, send, unique_temp_dir, wait_until_input_log_contains,
 };
 use yagura_daemon::DaemonConfig;
@@ -80,7 +80,7 @@ fn write_end() -> Vec<u8> {
 
 /// Everything the child read up to the end of the judged write.
 async fn read_through_the_write(receiver: &Receiver, end: &[u8]) -> Vec<u8> {
-    let mut read = wait_until_input_log_contains(&receiver.log, end, HANG_GUARD).await;
+    let mut read = wait_until_input_log_contains(&receiver.log, end).await;
     let at = read
         .windows(end.len())
         .position(|window| window == end)
@@ -121,7 +121,7 @@ async fn send_message(client: &mut Connection, window_id: &str, text: &str) {
         },
     )
     .await;
-    match read_response(client, HANG_GUARD).await {
+    match read_response(client).await {
         DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
@@ -232,7 +232,7 @@ async fn a_handoff_envelope_ends_with_the_daemons_space_inside_the_paste() {
         },
     )
     .await;
-    match read_response(&mut client, HANG_GUARD).await {
+    match read_response(&mut client).await {
         DaemonMessage::HandoffSent { window_id, .. } => assert_eq!(window_id, receiver.window_id),
         other => panic!("expected handoff_sent, got {other:?}"),
     }

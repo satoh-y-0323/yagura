@@ -18,7 +18,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, expect_error, identify, read_response, register_approver, send,
@@ -118,12 +117,12 @@ async fn approver_connection(h: &Harness) -> Connection {
 /// Reads the next *response* frame, skipping `plan_changed` pushes: a
 /// connection that is also a registered approver may be pushed to while its
 /// own request is in flight.
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -144,7 +143,7 @@ async fn create_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn update_plan(
@@ -161,7 +160,7 @@ async fn update_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -172,12 +171,12 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn list_plans(client: &mut Connection) -> DaemonMessage {
     send(client, &ClientMessage::ListPlans).await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str) -> DaemonMessage {
@@ -190,7 +189,7 @@ async fn open_task_window(client: &mut Connection, plan_id: &str, task_id: &str)
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(10)).await
+    read_ledger_reply(client).await
 }
 
 async fn send_report(client: &mut Connection, summary: &str) -> DaemonMessage {
@@ -203,7 +202,7 @@ async fn send_report(client: &mut Connection, summary: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 fn expect_plan_detail(msg: DaemonMessage) -> PlanInfo {

@@ -17,36 +17,28 @@ use std::time::Duration;
 use common::real_daemon::{RunningDaemon, Sandbox, daemon_bin, shell_path};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::{ClientMessage, DaemonMessage, MCP_BRIDGE_ENV};
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
 use yagura_test_support::paths::strip_extended_length_prefix;
-use yagura_test_support::process::env_probe_path;
+use yagura_test_support::process::{env_probe_path, install_window_runtime};
 
-#[cfg(windows)]
-const DLL: &str = "conpty.dll";
 #[cfg(windows)]
 const HOST: &str = "OpenConsole.exe";
 
-/// A copy of the built daemon in a folder of its own; on Windows beside a copy of the
-/// vendored pseudoconsole pair, without which it opens no window.
+/// A copy of the built daemon in a folder of its own, beside the holder and, on Windows,
+/// the pseudoconsole pair, without which it opens no window.
 fn install_copy(sandbox: &Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
-    #[cfg(windows)]
-    {
-        let vendored =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/conpty/x64");
-        for name in [DLL, HOST] {
-            std::fs::copy(vendored.join(name), dir.join(name)).unwrap();
-        }
-    }
+    install_window_runtime(&dir);
     let bin = dir.join(format!("yagura-daemon{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(daemon_bin(), &bin).unwrap();
     bin
 }
 
-/// Waits for `child` to exit on its own; one still running after `limit` is killed and
-/// fails the test.
-async fn exit_status_within(child: &mut Child, limit: Duration, sandbox: &Sandbox) -> ExitStatus {
-    let deadline = tokio::time::Instant::now() + limit;
+/// Waits for `child` to exit on its own; one still running after [`HANG_GUARD`] is killed
+/// and fails the test.
+async fn wait_for_exit(child: &mut Child, sandbox: &Sandbox) -> ExitStatus {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
@@ -55,7 +47,7 @@ async fn exit_status_within(child: &mut Child, limit: Duration, sandbox: &Sandbo
             let _ = child.kill();
             let _ = child.wait();
             panic!(
-                "the process was still running after {limit:?}; daemon log:\n{}",
+                "the process was still running after {HANG_GUARD:?}; daemon log:\n{}",
                 sandbox.daemon_log()
             );
         }
@@ -85,7 +77,7 @@ async fn the_session_store_is_kept_under_the_users_data_directory() {
     let _daemon = sandbox.start().await;
     let store = sandbox.data_root().join("yagura.db");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     while !store.is_file() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -121,7 +113,7 @@ async fn profiles_are_read_from_the_users_config_directory() {
 /// The windows the daemon lists, as `(window_id, cwd)` pairs.
 async fn listed_windows(daemon: &mut RunningDaemon) -> Vec<(String, String)> {
     common::send(&mut daemon.client, &ClientMessage::ListWindows).await;
-    match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+    match common::read_response(&mut daemon.client).await {
         DaemonMessage::WindowList { windows } => windows
             .into_iter()
             .map(|window| (window.window_id, window.cwd))
@@ -159,7 +151,7 @@ async fn a_status_event_without_a_window_id_is_rejected() {
     )
     .await;
 
-    match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+    match common::read_response(&mut daemon.client).await {
         DaemonMessage::Error { code, .. } => assert_eq!(code, "invalid_argument"),
         other => panic!("expected error(invalid_argument), got {other:?}"),
     }
@@ -186,7 +178,7 @@ async fn a_window_opened_without_a_cwd_starts_in_the_home_directory() {
         },
     )
     .await;
-    let window_id = match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+    let window_id = match common::read_response(&mut daemon.client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!(
             "expected window_opened, got {other:?}; daemon log:\n{}",
@@ -221,7 +213,7 @@ async fn a_second_daemon_for_a_served_instance_exits_as_a_success_and_the_first_
     let mut first = sandbox.start().await;
 
     let mut second = sandbox.spawn_bin(&daemon_bin());
-    let status = exit_status_within(&mut second, Duration::from_secs(30), &sandbox).await;
+    let status = wait_for_exit(&mut second, &sandbox).await;
 
     assert!(
         status.success(),
@@ -230,7 +222,7 @@ async fn a_second_daemon_for_a_served_instance_exits_as_a_success_and_the_first_
         sandbox.daemon_log()
     );
     common::send(&mut first.client, &ClientMessage::Ping).await;
-    let reply = common::read_response(&mut first.client, Duration::from_secs(5)).await;
+    let reply = common::read_response(&mut first.client).await;
     assert!(matches!(reply, DaemonMessage::Pong), "got {reply:?}");
 }
 
@@ -291,7 +283,7 @@ async fn a_second_daemon_exits_as_a_success_while_the_first_holds_its_endpoint_w
         .expect("claim the instance's endpoint");
 
     let mut second = sandbox.spawn_bin(&daemon_bin());
-    let status = exit_status_within(&mut second, Duration::from_secs(30), &sandbox).await;
+    let status = wait_for_exit(&mut second, &sandbox).await;
 
     assert!(
         status.success(),
@@ -308,7 +300,7 @@ async fn a_daemon_serves_the_instance_once_the_one_before_it_was_killed() {
 
     let mut next = sandbox.start().await;
     common::send(&mut next.client, &ClientMessage::Ping).await;
-    let reply = common::read_response(&mut next.client, Duration::from_secs(5)).await;
+    let reply = common::read_response(&mut next.client).await;
     assert!(matches!(reply, DaemonMessage::Pong), "got {reply:?}");
 }
 
@@ -318,7 +310,7 @@ async fn a_daemon_whose_endpoint_is_held_by_a_non_daemon_exits_as_a_failure() {
     let _squatter = squat(&owned_endpoint(&sandbox));
 
     let mut daemon = sandbox.spawn_bin(&daemon_bin());
-    let status = exit_status_within(&mut daemon, Duration::from_secs(30), &sandbox).await;
+    let status = wait_for_exit(&mut daemon, &sandbox).await;
 
     assert!(
         !status.success(),
@@ -334,17 +326,15 @@ async fn shutdown_stops_the_daemon_serving_the_instance() {
     let mut daemon = sandbox.start().await;
 
     let mut shutdown = sandbox.spawn_with_args(&["--shutdown"]);
-    let status = exit_status_within(&mut shutdown, Duration::from_secs(30), &sandbox).await;
+    let status = wait_for_exit(&mut shutdown, &sandbox).await;
     assert!(
         status.success(),
         "--shutdown must succeed against a running daemon, got {status:?}"
     );
 
     // The daemon's exit closes every connection it served.
-    let closed = tokio::time::timeout(Duration::from_secs(30), async {
-        while let ReadOutcome::Message(_) =
-            read_daemon_frame(&mut daemon.client, Duration::from_secs(60)).await
-        {}
+    let closed = tokio::time::timeout(HANG_GUARD, async {
+        while let ReadOutcome::Message(_) = read_daemon_frame(&mut daemon.client).await {}
     })
     .await;
     assert!(
@@ -383,7 +373,6 @@ async fn windows_are_handed_the_mcp_bridge_installed_beside_the_daemon() {
 #[cfg(windows)]
 mod bundled_pair {
     use std::path::Path;
-    use std::time::Duration;
 
     use yagura_protocol::{ClientMessage, DaemonMessage, DaemonProblemKind};
 
@@ -413,7 +402,7 @@ mod bundled_pair {
             },
         )
         .await;
-        common::read_response(&mut daemon.client, Duration::from_secs(15)).await
+        common::read_response(&mut daemon.client).await
     }
 
     #[tokio::test]
@@ -441,7 +430,7 @@ mod bundled_pair {
 
         let mut daemon = sandbox.start_bin(&bin).await;
         common::send(&mut daemon.client, &ClientMessage::GetDaemonHealth).await;
-        match common::read_response(&mut daemon.client, Duration::from_secs(15)).await {
+        match common::read_response(&mut daemon.client).await {
             DaemonMessage::DaemonHealth { problems } => {
                 assert_eq!(problems.len(), 1, "{problems:?}");
                 assert_eq!(problems[0].kind, DaemonProblemKind::WindowsUnavailable);
@@ -461,7 +450,7 @@ mod bundled_pair {
             },
         )
         .await;
-        let reply = common::read_response(&mut daemon.client, Duration::from_secs(15)).await;
+        let reply = common::read_response(&mut daemon.client).await;
         assert!(
             !matches!(reply, DaemonMessage::WindowOpened { .. }),
             "no window may open beside an altered {HOST}, got {reply:?}"
@@ -509,7 +498,7 @@ mod detached {
             yagura_os::spawn_daemon_detached(&program, &[OsStr::new("sleep"), OsStr::new("30000")])
                 .expect("the detached start must succeed");
 
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
         let pid = loop {
             if let Some(row) = common::children_of(&common::process_table(), own_pid)
                 .into_iter()

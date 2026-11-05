@@ -15,7 +15,7 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
 use common::{
@@ -29,11 +29,9 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_os::program::contains_cmd_metacharacter;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, McpRegistrationAction, McpRegistrationState,
-    McpRegistrationStatusInfo,
+    McpRegistrationStatusInfo, McpRegistrationStep,
 };
 use yagura_test_support::ipc::Connection;
-
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 const HOST_PROFILE: &str = "antigravity-cli";
 const WSL_PROFILE: &str = "wsl-antigravity-cli";
@@ -274,12 +272,30 @@ async fn approver_connection(h: &Harness) -> Connection {
     client
 }
 
-/// Runs a registration change and returns its result's error and status.
+/// The steps of a registration change, for a failure message: which step
+/// failed (the last one), how it ran, how it exited and what it printed.
+struct Steps(Vec<McpRegistrationStep>);
+
+impl std::fmt::Display for Steps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "the steps that ran, the failed one last:")?;
+        for step in &self.0 {
+            writeln!(
+                f,
+                "  argv {:?}, exit code {:?}, output {:?}",
+                step.argv, step.exit_code, step.output
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Runs a registration change and returns its result's error, status and steps.
 async fn run_action(
     client: &mut Connection,
     action: McpRegistrationAction,
     request_id: u64,
-) -> (Option<String>, McpRegistrationStatusInfo) {
+) -> (Option<String>, McpRegistrationStatusInfo, Steps) {
     send(
         client,
         &ClientMessage::RunMcpRegistration {
@@ -289,12 +305,17 @@ async fn run_action(
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationRequested { .. } => {}
         other => panic!("expected mcp_registration_requested, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
-        DaemonMessage::McpRegistrationResult { error, status, .. } => (error, status),
+    match read_response(client).await {
+        DaemonMessage::McpRegistrationResult {
+            error,
+            status,
+            steps,
+            ..
+        } => (error, status, Steps(steps)),
         other => panic!("expected mcp_registration_result, got {other:?}"),
     }
 }
@@ -307,13 +328,13 @@ async fn listed_state(client: &mut Connection, request_id: u64) -> McpRegistrati
 /// The status a fresh listing pushes for the one profile.
 async fn listed_status(client: &mut Connection, request_id: u64) -> McpRegistrationStatusInfo {
     send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationsListed { rows, .. } => {
             assert_eq!(rows.len(), 1, "{rows:?}");
         }
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationStatus { status, .. } => status,
         other => panic!("expected mcp_registration_status, got {other:?}"),
     }
@@ -458,8 +479,9 @@ async fn register_then_remove_case(profile: &str, tag: &str) {
     let original = parse(SEED_HOOKS);
     let original_keys = key_sequence(SEED_HOOKS);
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
 
     let registered_text = layout.read_hooks();
@@ -483,8 +505,8 @@ async fn register_then_remove_case(profile: &str, tag: &str) {
         1
     );
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
-    assert_eq!(error, None);
+    let (error, status, steps) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
+    assert_eq!(error, None, "{steps}");
     assert_eq!(
         status.state,
         McpRegistrationState::NotRegistered,
@@ -516,16 +538,17 @@ async fn creates_the_file_case(profile: &str, tag: &str) {
     let h = start(tag, profile, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
 
-    assert_eq!(error, None);
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let created = layout.hooks_value();
     assert_eq!(keys_of(&created), set_of(&["yagura"]));
     assert_yagura_entry(&created, profile, &layout.expected_daemon(profile));
 
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
-    assert_eq!(error, None);
+    let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
+    assert_eq!(error, None, "{steps}");
     if layout.hooks_path().exists() {
         assert!(
             layout
@@ -552,9 +575,9 @@ async fn a_newly_created_hooks_file_is_readable_and_writable_by_its_owner_only()
     let h = start("agy-hooks-create-mode", HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
 
-    assert_eq!(error, None);
+    assert_eq!(error, None, "{steps}");
     let mode = std::fs::metadata(layout.hooks_path())
         .unwrap()
         .permissions()
@@ -577,9 +600,10 @@ async fn replaces_a_stale_entry_case(profile: &str, tag: &str) {
     let h = start(tag, profile, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
 
-    assert_eq!(error, None);
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let registered = layout.hooks_value();
     assert_yagura_entry(&registered, profile, &layout.expected_daemon(profile));
@@ -603,7 +627,7 @@ async fn broken_file_case(profile: &str, tag: &str) {
     let h = start(tag, profile, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, status, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
 
     assert!(
         error.is_some(),
@@ -640,8 +664,8 @@ async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_sh
         let layout = Layout::new(tag);
         let h = start(tag, profile, &layout).await;
         let mut approver = approver_connection(&h).await;
-        let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-        assert_eq!(error, None, "{profile}");
+        let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+        assert_eq!(error, None, "{profile}: {steps}");
 
         let file = layout.hooks_value();
         let command = file["yagura"]["PreInvocation"][0]["command"]
@@ -698,8 +722,9 @@ async fn state_follows_entry_case(profile: &str, tag: &str) {
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, profile, &layout).await;
     let mut approver = approver_connection(&h).await;
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let registered_text = layout.read_hooks();
     assert_eq!(
@@ -840,8 +865,9 @@ async fn missing_hooks_file_case(profile: &str, tag: &str) {
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, profile, &layout).await;
     let mut approver = approver_connection(&h).await;
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
 
     std::fs::remove_file(layout.hooks_path()).expect("remove the hooks file");
@@ -876,7 +902,7 @@ async fn without_a_report_folder_the_entry_cannot_be_written_and_the_row_differs
     let h = start_with(tag, HOST_PROFILE, &layout, config).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, _, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
     assert!(
         error.is_some(),
         "no daemon path can be written into the hooks file"
@@ -908,10 +934,14 @@ async fn a_report_folder_whose_path_holds_a_space_is_written_by_a_spaceless_name
     let h = start(tag, HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
 
-    let (error, status) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    let (error, status, steps) =
+        run_action(&mut approver, McpRegistrationAction::Register, 1).await;
     match yagura_os::spaceless_path(&daemon) {
         Ok(spaceless) => {
-            assert_eq!(error, None, "a daemon with a spaceless name is registered");
+            assert_eq!(
+                error, None,
+                "a daemon with a spaceless name is registered: {steps}"
+            );
             let command = layout.hooks_value()["yagura"]["PreInvocation"][0]["command"]
                 .as_str()
                 .expect("a command string")
@@ -953,13 +983,13 @@ async fn removing_fails_when_the_hooks_file_exists_but_cannot_be_read() {
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
 
     // A directory where the file belongs: present, but not readable as a file.
     std::fs::remove_file(layout.hooks_path()).expect("remove the hooks file");
     std::fs::create_dir(layout.hooks_path()).expect("create a directory at the hooks path");
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
+    let (error, _, _) = run_action(&mut approver, McpRegistrationAction::Remove, 2).await;
     assert!(
         error.is_some(),
         "an unreadable hooks file is not a file that is already gone"
@@ -984,39 +1014,29 @@ async fn open_window(client: &mut Connection) -> String {
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     }
 }
 
 /// Opens a window from the profile with a CLI that stays alive for a while,
-/// and reports whether the daemon expects it to send status reports. An
-/// expectation set after the open is waited for only when it is claimed.
+/// and reports whether the daemon expects it to send status reports. The
+/// expectation is settled before the open is answered, so it is read once.
 async fn window_expects_reports(
     h: &Harness,
     client: &mut Connection,
     profile: &str,
     layout: &Layout,
-    claimed: bool,
 ) -> bool {
     place_profile(profile, layout, Some(WINDOW_ALIVE_MS));
     let window_id = open_window(client).await;
     let entry = h.registry.get(&window_id).expect("the window is listed");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let expected = loop {
-        if entry.reports_expected() || !claimed || Instant::now() >= deadline {
-            break entry.reports_expected();
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    if !claimed {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(
-            h.registry.get(&window_id).is_some(),
-            "the window must still be open for the answer to mean anything"
-        );
-    }
+    let expected = entry.reports_expected();
+    assert!(
+        entry.has_detector(),
+        "the window must still be running for the answer to mean anything"
+    );
     place_profile(profile, layout, None);
     expected
 }
@@ -1028,16 +1048,16 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
     let mut client = approver_connection(&h).await;
 
     assert!(
-        !window_expects_reports(&h, &mut client, profile, &layout, false).await,
+        !window_expects_reports(&h, &mut client, profile, &layout).await,
         "nothing is registered, so no report is to be expected"
     );
 
-    let (error, status) = run_action(&mut client, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, status, steps) = run_action(&mut client, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     assert_eq!(status.state, McpRegistrationState::Registered, "{status:?}");
     let registered_text = layout.read_hooks();
     assert!(
-        window_expects_reports(&h, &mut client, profile, &layout, true).await,
+        window_expects_reports(&h, &mut client, profile, &layout).await,
         "the entry is in place, so the CLI will run it"
     );
 
@@ -1059,7 +1079,7 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
 
     layout.write_hooks(&registered_text);
     assert!(
-        window_expects_reports(&h, &mut client, profile, &layout, true).await,
+        window_expects_reports(&h, &mut client, profile, &layout).await,
         "restoring the entry restores the expectation"
     );
 
@@ -1067,13 +1087,13 @@ async fn expectation_follows_entry_case(profile: &str, tag: &str) {
     // being gone does not take it away.
     std::fs::remove_file(layout.mcp_path()).expect("remove the MCP settings file");
     assert!(
-        window_expects_reports(&h, &mut client, profile, &layout, true).await,
+        window_expects_reports(&h, &mut client, profile, &layout).await,
         "the hooks entry is complete whatever the MCP registration says"
     );
 
     std::fs::remove_file(layout.hooks_path()).expect("remove the hooks file");
     assert!(
-        !window_expects_reports(&h, &mut client, profile, &layout, false).await,
+        !window_expects_reports(&h, &mut client, profile, &layout).await,
         "without the file there is no hook to wait for"
     );
 }
@@ -1117,8 +1137,8 @@ async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_wind
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
     let mut client = approver_connection(&h).await;
-    let (error, _) = run_action(&mut client, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, _, steps) = run_action(&mut client, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     layout.write_hooks(&older_form(&layout.read_hooks()));
 
     place_profile(HOST_PROFILE, &layout, Some(WINDOW_ALIVE_MS));
@@ -1137,10 +1157,6 @@ async fn opening_a_window_rewrites_this_instances_out_of_date_entry_and_the_wind
     );
     let entry = h.registry.get(&window_id).expect("the window is listed");
     assert!(entry.delivers(), "the window takes delivery");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !entry.reports_expected() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
     assert!(entry.reports_expected(), "the window is expected to report");
 }
 
@@ -1151,8 +1167,8 @@ async fn listing_rewrites_this_instances_out_of_date_entry_and_still_shows_a_bri
     layout.write_hooks(SEED_HOOKS);
     let h = start(tag, HOST_PROFILE, &layout).await;
     let mut approver = approver_connection(&h).await;
-    let (error, _) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
-    assert_eq!(error, None);
+    let (error, _, steps) = run_action(&mut approver, McpRegistrationAction::Register, 1).await;
+    assert_eq!(error, None, "{steps}");
     let older = older_form(&layout.read_hooks());
 
     layout.write_hooks(&older);

@@ -36,6 +36,8 @@ tauri-build.workspace = true
 # Shared test fixtures. Dev-only: `publish = false` and absent from
 # the normal dependency graph, so it never reaches the shipped app.
 yagura-test-support = { path = "../../crates/yagura-test-support" }
+# `test-util` enables the paused clock (`start_paused`) the connect-retry test uses.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

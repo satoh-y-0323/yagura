@@ -779,6 +779,26 @@ pub fn spawn_daemon_detached(path: &Path, args: &[&OsStr]) -> Result<DetachedSpa
     })
 }
 
+/// Windows branch of [`crate::spawn_detached_process`]: the same two creation
+/// modes as [`spawn_daemon_detached`], and the three standard handles as the
+/// only handles the process inherits.
+///
+/// # Errors
+///
+/// As for [`crate::spawn_detached_process`].
+pub fn spawn_detached_process(
+    path: &Path,
+    args: &[&OsStr],
+    cwd: Option<&Path>,
+    stderr: &crate::DetachedStderr,
+) -> Result<crate::DetachedProcess, OsError> {
+    let piped = |flags| spawn::spawn_detached_piped(path.as_os_str(), args, cwd, stderr, flags);
+    if let Ok(started) = piped(DETACHED_SPAWN_FLAGS) {
+        return Ok(started.into_process(false));
+    }
+    Ok(piped(DETACHED_SPAWN_FLAGS_NO_BREAKAWAY)?.into_process(true))
+}
+
 fn spawn_detached(
     path: &Path,
     args: &[&OsStr],

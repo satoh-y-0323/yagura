@@ -23,9 +23,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{
-    Harness, SUBMIT_CHILD_PROBE, approver_base_config, composer_section_toml,
-    let_every_clock_bound_run_out, open_submit_child_window_with_clear_scope, read_composer_now,
-    settled_marker_count, unique_temp_dir, wait_until_composer_is, wait_until_status,
+    ChildInput, Harness, SUBMIT_CHILD_PROBE, approver_base_config, composer_section_toml,
+    let_every_clock_bound_run_out, read_composer_now, unique_temp_dir, wait_until_composer_is,
+    wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::screen::ComposerReadout;
@@ -94,8 +94,7 @@ async fn start_delivery(
             .submit_message(body, None, SendStage::BeforeSubmitKey, Some(requester))
             .await
     });
-    h.wait_for_scrollback(window_id, b"PASTE 1", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(window_id, b"PASTE 1").await;
     (leave, call)
 }
 
@@ -114,7 +113,7 @@ async fn leave_and_take_the_judgment(
 /// Polls `input_log` until it holds `needle`: the hang guard only bounds a
 /// failure, it never decides an outcome.
 async fn wait_for_child_input_containing(input_log: &Path, needle: u8) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if std::fs::read(input_log)
             .unwrap_or_default()
@@ -136,7 +135,8 @@ async fn a_clear_byte_typed_as_caret_u_literals_leaves_a_residue_that_never_matc
     let dir = unique_temp_dir("takeback-literal");
     let h = Harness::start("takeback-literal", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
+    let log = dir.join("child-input.log");
+    let window_id = open_window_with_clear_raised_approval(
         &h,
         &mut client,
         &dir,
@@ -145,6 +145,8 @@ async fn a_clear_byte_typed_as_caret_u_literals_leaves_a_residue_that_never_matc
         &fixed_clear_input_toml(),
         PAINT_AT_ONCE_MS,
         "held:literal-clear",
+        None,
+        Some(&log),
     )
     .await;
     let body = "hi";
@@ -170,11 +172,6 @@ async fn a_clear_byte_typed_as_caret_u_literals_leaves_a_residue_that_never_matc
         "a take-back whose residue could not be confirmed must not hand a follow-up a \
          baseline to match against"
     );
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0,
-        "a mismatched residue must never reach the receiver as a submission"
-    );
     match read_composer_now(&h, &window_id).await {
         ComposerReadout::Body(text) => assert!(
             text.starts_with(body) && text.contains("^U"),
@@ -183,6 +180,13 @@ async fn a_clear_byte_typed_as_caret_u_literals_leaves_a_residue_that_never_matc
         ),
         other => panic!("expected the literal caret-u residue on screen, got {other:?}"),
     }
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
+    assert_eq!(
+        read.submit_keys(),
+        0,
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
+    );
 }
 
 #[tokio::test]
@@ -191,7 +195,8 @@ async fn a_clear_byte_that_only_erases_the_last_character_leaves_a_residue_that_
     let dir = unique_temp_dir("takeback-partial");
     let h = Harness::start("takeback-partial", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
+    let log = dir.join("child-input.log");
+    let window_id = open_window_with_clear_raised_approval(
         &h,
         &mut client,
         &dir,
@@ -200,6 +205,8 @@ async fn a_clear_byte_that_only_erases_the_last_character_leaves_a_residue_that_
         &fixed_clear_input_toml(),
         PAINT_AT_ONCE_MS,
         "held:partial-clear",
+        None,
+        Some(&log),
     )
     .await;
     let body = "abcdefghijklmnopqrstuvwxyz";
@@ -225,11 +232,6 @@ async fn a_clear_byte_that_only_erases_the_last_character_leaves_a_residue_that_
         "a take-back whose residue could not be confirmed must not hand a follow-up a \
          baseline to match against"
     );
-    assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0,
-        "a mismatched residue must never reach the receiver as a submission"
-    );
     match read_composer_now(&h, &window_id).await {
         ComposerReadout::Body(text) => {
             let remnant = text.strip_suffix(SUBMIT_CHILD_PROBE).unwrap_or(&text);
@@ -241,6 +243,13 @@ async fn a_clear_byte_that_only_erases_the_last_character_leaves_a_residue_that_
         }
         other => panic!("expected the partially-cleared residue on screen, got {other:?}"),
     }
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
+    assert_eq!(
+        read.submit_keys(),
+        0,
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
+    );
 }
 
 #[tokio::test]
@@ -249,7 +258,8 @@ async fn a_retry_that_carries_forward_what_a_declined_takeback_actually_returned
     let dir = unique_temp_dir("takeback-retry");
     let h = Harness::start("takeback-retry", detection_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_submit_child_window_with_clear_scope(
+    let log = dir.join("child-input.log");
+    let window_id = open_window_with_clear_raised_approval(
         &h,
         &mut client,
         &dir,
@@ -258,6 +268,8 @@ async fn a_retry_that_carries_forward_what_a_declined_takeback_actually_returned
         &fixed_clear_input_toml(),
         PAINT_AT_ONCE_MS,
         "held:literal-clear",
+        None,
+        Some(&log),
     )
     .await;
     let body = "hi";
@@ -275,7 +287,7 @@ async fn a_retry_that_carries_forward_what_a_declined_takeback_actually_returned
         .residue_write_seq
         .map(|write_seq| ComposerResidue { body, write_seq });
     let second: SubmitJudgment = tokio::time::timeout(
-        Duration::from_secs(20),
+        yagura_test_support::HANG_GUARD,
         entry(&h, &window_id).submit_message(body, residue, SendStage::BeforeSubmitKey, None),
     )
     .await
@@ -294,10 +306,12 @@ async fn a_retry_that_carries_forward_what_a_declined_takeback_actually_returned
         write_seq_before_retry,
         "the retry must not write anything on top of the residue it could not vouch for"
     );
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
+        read.submit_keys(),
         0,
-        "nothing must ever reach the receiver as a submission"
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -356,13 +370,12 @@ async fn a_takeback_whose_probe_never_shows_is_waited_on_until_another_writer_en
         "a receiver that never shows the probe gives no sign it handled the body or the \
          take-back, so something of this call's own write may remain"
     );
-    assert!(
-        !std::fs::read(&log).unwrap_or_default().contains(&b'\r'),
-        "the submit key must never have been written"
-    );
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0
+        read.submit_keys(),
+        0,
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -463,13 +476,7 @@ async fn open_window_with_clear_raised_approval(
         );
     }
     let window_id = h.open(command, Some(name)).await;
-    wait_until_status(
-        client,
-        &window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
 
@@ -477,6 +484,7 @@ async fn open_window_with_clear_raised_approval(
 async fn a_takebacks_own_clear_write_that_lands_beside_an_approval_dialog_leaves_no_residue_baseline_for_a_later_attempt()
  {
     let dir = unique_temp_dir("takeback-dialog");
+    let log = dir.join("child-input.log");
     let h = Harness::start("takeback-dialog", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let body = "hi";
@@ -527,17 +535,13 @@ async fn a_takebacks_own_clear_write_that_lands_beside_an_approval_dialog_leaves
         PAINT_AT_ONCE_MS,
         "held:literal-clear",
         Some("clear:beside"),
-        None,
+        Some(&log),
     )
     .await;
     let (leave, call) = start_delivery(&h, &window_id, body).await;
     leave.send(true).expect("the call holds its receiver");
-    h.wait_for_scrollback(
-        &window_id,
-        CLEAR_RAISED_APPROVAL_HEADING.as_bytes(),
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, CLEAR_RAISED_APPROVAL_HEADING.as_bytes())
+        .await;
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),
@@ -575,7 +579,7 @@ async fn a_takebacks_own_clear_write_that_lands_beside_an_approval_dialog_leaves
         .residue_write_seq
         .map(|write_seq| ComposerResidue { body, write_seq });
     let retry: SubmitJudgment = tokio::time::timeout(
-        Duration::from_secs(20),
+        yagura_test_support::HANG_GUARD,
         entry(&h, &window_id).submit_message(body, residue, SendStage::BeforeSubmitKey, None),
     )
     .await
@@ -593,9 +597,12 @@ async fn a_takebacks_own_clear_write_that_lands_beside_an_approval_dialog_leaves
         write_seq_before_retry,
         "the retry must not write anything on top of the dialog's own residue"
     );
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0
+        read.submit_keys(),
+        0,
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }
 
@@ -607,6 +614,7 @@ async fn a_probe_that_shows_alone_while_the_screen_reads_as_approval_is_not_eras
     let mut client = h.connect().await;
     let body = "hi";
     let approval_gone = dir.join("approval-gone");
+    let log = dir.join("child-input.log");
     // Drawn on the take-back's own clear, headed like an approval prompt, but
     // swallowing no input: the probe still lands in the composer and shows
     // alone while the screen reads as not accepting a write.
@@ -621,23 +629,18 @@ async fn a_probe_that_shows_alone_while_the_screen_reads_as_approval_is_not_eras
         PAINT_AT_ONCE_MS,
         "held:",
         Some(&overlay),
-        None,
+        Some(&log),
     )
     .await;
 
     let (leave, call) = start_delivery(&h, &window_id, body).await;
     leave.send(true).expect("the call holds its receiver");
-    h.wait_for_scrollback(
-        &window_id,
-        CLEAR_RAISED_APPROVAL_HEADING.as_bytes(),
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, CLEAR_RAISED_APPROVAL_HEADING.as_bytes())
+        .await;
     wait_until_composer_is(
         &h,
         &window_id,
         &ComposerReadout::Body(SUBMIT_CHILD_PROBE.to_string()),
-        Duration::from_secs(10),
     )
     .await;
     let_every_clock_bound_run_out().await;
@@ -671,8 +674,11 @@ async fn a_probe_that_shows_alone_while_the_screen_reads_as_approval_is_not_eras
         read_composer_now(&h, &window_id).await,
         ComposerReadout::Empty
     );
+    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        settled_marker_count(&h, &window_id, "SUBMITTED", 0).await,
-        0
+        read.submit_keys(),
+        0,
+        "nothing may ever reach the receiver as a submission; the child read {:?}",
+        read.bytes()
     );
 }

@@ -12,10 +12,11 @@ mod common;
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use common::views::{CATCH_UP, cr_burst_payload, grid_differs_from_model, model_screen};
+use common::views::{cr_burst_payload, grid_differs_from_model, model_screen};
 use common::{Harness, expect_error, read_response, send};
 use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_protocol::{CellColor, CellFlag, ClientMessage, TerminalSize};
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::frame::Grid;
 use yagura_test_support::view::ViewClient;
 
@@ -23,6 +24,8 @@ const NO_LIMIT: usize = usize::MAX;
 const ALTERNATE_CHILD: &str = "alternate_screen_child";
 const EXITING_CHILD: &str = "exiting_child";
 const MARKER: &str = "ALT-SNAPSHOT-MARKER";
+/// What [`alternate_screen_child`] writes last.
+const LAST_TEXT: &str = "second row";
 const EXIT_MARKER: &str = "EXITING-CHILD-MARKER";
 /// More than the 2 MiB the daemon used to keep of a window's raw output.
 const FILLER_BYTES: usize = 5 * 1024 * 1024 / 2;
@@ -67,7 +70,10 @@ fn alternate_screen_child() {
     }
     out.extend_from_slice(b"\x1b[H\x1b[2J\x1b[1;35m");
     out.extend_from_slice(MARKER.as_bytes());
-    out.extend_from_slice(b"\x1b[0m\x1b[3;4Hsecond row\x1b[?2004h\x1b[?25l");
+    // The modes come before the last text, so a model that shows the last
+    // text already holds everything this child writes.
+    out.extend_from_slice(b"\x1b[0m\x1b[?2004h\x1b[?25l\x1b[3;4H");
+    out.extend_from_slice(LAST_TEXT.as_bytes());
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&out).unwrap();
     stdout.flush().unwrap();
@@ -100,22 +106,21 @@ fn session(h: &Harness, window_id: &str) -> std::sync::Arc<PtySession> {
         .clone()
 }
 
-/// Waits until the window's text holds `needle` and has stopped changing.
-async fn wait_for_settled_text(session: &PtySession, needle: &str) -> (String, bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    let mut previous: Option<(String, bool)> = None;
+/// Waits until the window's text is `expected`. The text only moves towards
+/// what the child last wrote, so reaching `expected` is an event.
+async fn wait_until_window_text_is(session: &PtySession, expected: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
-        let now = session.text_tail(NO_LIMIT, NO_LIMIT).await.unwrap();
-        if now.0.contains(needle) && previous.as_ref() == Some(&now) {
-            return now;
+        let now = session.text_tail(NO_LIMIT, NO_LIMIT).await.unwrap().0;
+        if now == expected {
+            return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the window never settled on {needle:?}; last text ends {:?}",
-            now.0.chars().rev().take(200).collect::<String>()
+            "the window's text never became the grid's; last text ends {:?}",
+            now.chars().rev().take(200).collect::<String>()
         );
-        previous = Some(now);
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -132,7 +137,7 @@ fn text_of(grid: &Grid) -> String {
 async fn open_alternate_screen_window(h: &Harness) -> (String, std::sync::Arc<PtySession>) {
     let window_id = h.open(child_command(ALTERNATE_CHILD), None).await;
     let session = session(h, &window_id);
-    wait_for_settled_text(&session, "second row").await;
+    common::wait_until_model_shows(h, &window_id, LAST_TEXT.as_bytes()).await;
     (window_id, session)
 }
 
@@ -158,7 +163,7 @@ async fn attaching_without_a_size_shows_what_the_window_shows_and_keeps_its_size
     assert_eq!(session.text_tail(NO_LIMIT, NO_LIMIT).await.unwrap(), shown);
     assert!(!grid.cursor.visible, "the hidden cursor must stay hidden");
     assert!(grid.view.alt_screen);
-    assert_eq!(grid.row_text(2), "   second row");
+    assert_eq!(grid.row_text(2), format!("   {LAST_TEXT}"));
 
     let marker_cell = grid.cell(0, 0);
     assert_eq!(marker_cell.text, "A");
@@ -187,10 +192,7 @@ async fn attaching_with_a_size_resizes_the_window_before_drawing_it() {
     let grid = &view.grid;
     assert_eq!((grid.cols, grid.rows), (asked.cols, asked.rows));
     assert!(grid.contains_text(MARKER), "{}", grid.dump());
-    assert_eq!(
-        text_of(grid),
-        wait_for_settled_text(&session, MARKER).await.0
-    );
+    wait_until_window_text_is(&session, &text_of(grid)).await;
     assert!(!grid.cursor.visible);
 }
 
@@ -199,10 +201,9 @@ async fn attaching_to_an_exited_window_keeps_its_size_and_still_draws_it() {
     let h = Harness::start("attach-snapshot-exited", DaemonConfig::default()).await;
     let window_id = h.open(child_command(EXITING_CHILD), None).await;
     let session = session(&h, &window_id);
-    wait_for_settled_text(&session, EXIT_MARKER).await;
+    common::wait_until_model_shows(&h, &window_id, EXIT_MARKER.as_bytes()).await;
     h.write_input(&window_id, b"q\r").await;
-    h.wait_until_child_exited(&window_id, Duration::from_secs(30))
-        .await;
+    h.wait_until_child_exited(&window_id).await;
     let size_before = session.size().await.unwrap();
 
     let view = ViewClient::attach(
@@ -245,7 +246,7 @@ async fn attaching_at_a_size_out_of_range_is_invalid_argument_and_changes_nothin
             },
         )
         .await;
-        let reply = read_response(&mut client, Duration::from_secs(30)).await;
+        let reply = read_response(&mut client).await;
         expect_error(reply, "invalid_argument");
         assert_eq!(
             session.size().await.unwrap(),
@@ -268,15 +269,12 @@ async fn a_burst_that_outruns_the_acknowledgements_ends_on_the_latest_screen() {
         text: String::from_utf8(cr_burst_payload("burst-tail;")).unwrap(),
     })
     .await;
-    common::wait_until_model_shows(&h, &window_id, b"burst-tail;", Duration::from_secs(60)).await;
-    view.assert_no_frame(
-        "the first frame is unacknowledged however much the window wrote",
-        Duration::from_millis(300),
-    )
-    .await;
+    common::wait_until_model_shows(&h, &window_id, b"burst-tail;").await;
+    view.assert_no_frame("the first frame is unacknowledged however much the window wrote")
+        .await;
 
     view.ack(first).await;
-    view.next_complete_frame(CATCH_UP).await;
+    view.next_complete_frame().await;
     assert!(
         view.grid.contains_text("burst-tail;"),
         "{}",
@@ -318,10 +316,7 @@ async fn a_failed_attach_leaves_both_connections_and_the_window_as_they_were() {
         },
     )
     .await;
-    expect_error(
-        read_response(&mut mover.conn, Duration::from_secs(30)).await,
-        "internal",
-    );
+    expect_error(read_response(&mut mover.conn).await, "internal");
     assert_eq!(
         held_session.size().await.unwrap(),
         size_before,
@@ -331,7 +326,7 @@ async fn a_failed_attach_leaves_both_connections_and_the_window_as_they_were() {
     // The holder is not superseded and still receives its window's output.
     h.write_input(&held, b"to-held\r").await;
     holder
-        .pump_until("the holder's window output", CATCH_UP, |grid| {
+        .pump_until("the holder's window output", |grid| {
             grid.contains_text("to-held")
         })
         .await;
@@ -344,7 +339,7 @@ async fn a_failed_attach_leaves_both_connections_and_the_window_as_they_were() {
         })
         .await;
     mover
-        .pump_until("the mover's window output", CATCH_UP, |grid| {
+        .pump_until("the mover's window output", |grid| {
             grid.contains_text("from-mover")
         })
         .await;

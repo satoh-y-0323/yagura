@@ -1,6 +1,6 @@
 //! The process group that owns a child's whole process tree on Unix.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::OsError;
@@ -21,7 +21,9 @@ pub(crate) const DEFAULT_TERM_GRACE: Duration = Duration::from_millis(150);
 #[derive(Debug)]
 pub struct UnixProcessGroup {
     pgid: libc::pid_t,
-    terminated: AtomicBool,
+    /// Set by the first `terminate`, which holds the lock until it has sent
+    /// everything, so every later call waits for it.
+    terminated: Mutex<bool>,
     grace: Duration,
 }
 
@@ -60,23 +62,32 @@ impl UnixProcessGroup {
         }
         Ok(Self {
             pgid,
-            terminated: AtomicBool::new(false),
+            terminated: Mutex::new(false),
             grace,
         })
     }
 
-    /// Ends every process in the group: `SIGTERM`, then `SIGKILL` once the
-    /// grace period has passed. Idempotent: only the first call signals.
+    /// Ends every process in the group and returns once the signals are sent:
+    /// `SIGTERM`, then, if a live member received it, `SIGKILL` after the
+    /// grace period. The group need not be empty on return -- the signals are
+    /// delivered, the processes' exits are the kernel's. Idempotent: only the
+    /// first call signals, and every call returns only after the first one
+    /// has finished.
+    ///
+    /// Blocks for the grace period when a live member received `SIGTERM`;
+    /// callers on an async runtime run it on a thread of their own.
     ///
     /// # Errors
     ///
-    /// Returns [`OsError::Security`] when a live member cannot be signalled
-    /// by the initial request (or by the forced kill when the grace period is
-    /// zero), or the group's members cannot be enumerated. With a non-zero
-    /// grace period the forced kill is sent by a detached thread and its
-    /// outcome is not reported.
+    /// Returns [`OsError::Security`] when a live member cannot be signalled,
+    /// or the group's members cannot be enumerated. Only the first call
+    /// reports it.
     pub fn terminate(&self) -> Result<(), OsError> {
-        if self.terminated.swap(true, Ordering::SeqCst) {
+        let mut terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if std::mem::replace(&mut *terminated, true) {
             return Ok(());
         }
         let pgid = self.pgid;
@@ -86,24 +97,21 @@ impl UnixProcessGroup {
             // was even sent; nothing is left to escalate.
             return Ok(());
         }
-
-        if self.grace.is_zero() {
-            send_signal(pgid, libc::SIGKILL)?;
-            return Ok(());
+        if !self.grace.is_zero() {
+            std::thread::sleep(self.grace);
         }
-
-        let grace = self.grace;
-        std::thread::spawn(move || {
-            std::thread::sleep(grace);
-            let _ = send_signal(pgid, libc::SIGKILL);
-        });
+        send_signal(pgid, libc::SIGKILL)?;
         Ok(())
     }
 }
 
 impl Drop for UnixProcessGroup {
     fn drop(&mut self) {
-        if self.terminated.load(Ordering::SeqCst) {
+        if *self
+            .terminated
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
             return;
         }
         // No grace period here: a group dropped without an explicit

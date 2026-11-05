@@ -68,32 +68,12 @@ pub struct DaemonConfig {
     /// overriding this through a playbook's `[limits]`.
     pub interrupt_bytes: Vec<u8>,
 
-    /// How long a graceful `close_window` waits for the child's exit
-    /// notification before the Job Object is torn down.
-    /// Defaults to 500 ms.
+    /// How long `close_window` waits, at most, for each of two things: on a
+    /// graceful close, the child's exit notification before its process tree
+    /// is ended, and then the window's holder process to end. A safety bound
+    /// only: the reply never waits on the window's status, so a window stuck
+    /// in `Unknown` cannot hold it up. Defaults to 500 ms.
     pub close_grace_ms: u64,
-
-    /// Upper bound `handle_close_window` waits, after the process tree is
-    /// already torn down, for the window's *confirmed* status
-    /// ([`crate::window::WindowEntry::current_status`]) to settle to `Exited`
-    /// before replying `WindowClosed`. Overridable via the
-    /// `YAGURA_CLOSE_SETTLE_MS` environment variable (see
-    /// [`resolve_close_settle_ms`]).
-    ///
-    /// The GUI drops a closed window's pane without re-querying
-    /// `list_windows`, while its periodic poll reopens a pane for any window
-    /// it still sees as something other than `Exited` (`planPanes` in
-    /// `gui/src/session/pane-plan.ts`). Waiting for the confirmed status --
-    /// produced by a chain of tasks that can lag the reply -- makes that
-    /// revival unlikely. It is a best-effort mitigation: reaching the bound
-    /// never turns the reply into an error (fail-safe), and a window stuck in
-    /// `Unknown` waits out the full bound.
-    ///
-    /// Defaults to 200 ms, which covers the observed settle latency (a
-    /// sub-millisecond typical case, single-digit milliseconds at worst) with
-    /// a wide margin while keeping the worst-case added reply latency
-    /// (`close_grace_ms` + `close_settle_ms`) under a second.
-    pub close_settle_ms: u64,
 
     /// How long after an interactive, non-submitting PTY write output is
     /// attributed to that input's echo and therefore not counted as
@@ -426,6 +406,25 @@ pub struct DaemonConfig {
     /// `mcp_registration_timeout` because the window waits on it. Defaults to
     /// 10 seconds, which covers a WSL distribution's cold start.
     pub mcp_listing_timeout: Duration,
+
+    /// The `yagura-holder` executable every window is kept by. The daemon
+    /// binary sets the one beside it; the default is beside the running
+    /// executable, or above Cargo's `deps` directory for a test binary (see
+    /// [`yagura_os::sibling_executable_dir`]). `None` opens no window.
+    pub holder_exe: Option<PathBuf>,
+
+    /// Where the windows' holders keep their files and whom they let in. The
+    /// daemon binary sets its own endpoint and its instance's `holders`
+    /// directory; `None` (the default) has the window registry make a place
+    /// of its own on its first open (see [`crate::HolderHost`]).
+    pub holder_place: Option<crate::holder_host::HolderPlace>,
+}
+
+/// The holder beside the running executable, under the rule for a test
+/// binary (see [`DaemonConfig::holder_exe`]).
+fn default_holder_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(yagura_os::sibling_executable_dir(&exe).join(crate::holder_host::holder_file_name()))
 }
 
 /// A configuration value whose contents must never reach a `Debug` rendering.
@@ -466,11 +465,6 @@ impl std::fmt::Debug for RedactedString {
 
 /// Default value of [`DaemonConfig::max_windows`] when nothing overrides it.
 const DEFAULT_MAX_WINDOWS: usize = 32;
-
-/// Default value of [`DaemonConfig::close_settle_ms`] when nothing overrides
-/// it. See that field's doc comment for the measurement this margin is
-/// derived from.
-const DEFAULT_CLOSE_SETTLE_MS: u64 = 200;
 
 /// Default value of [`DaemonConfig::input_echo_window_ms`].
 const DEFAULT_INPUT_ECHO_WINDOW_MS: u64 = 150;
@@ -562,8 +556,6 @@ pub struct StartupParts {
     pub detection_name: Option<String>,
     /// Becomes [`DaemonConfig::max_windows`].
     pub max_windows: usize,
-    /// Becomes [`DaemonConfig::close_settle_ms`].
-    pub close_settle_ms: u64,
     /// Becomes [`DaemonConfig::input_echo_window_ms`].
     pub input_echo_window_ms: u64,
     /// Becomes [`DaemonConfig::resize_redraw_window_ms`].
@@ -602,7 +594,6 @@ impl DaemonConfig {
             bundled_definitions,
             detection_name,
             max_windows,
-            close_settle_ms,
             input_echo_window_ms,
             resize_redraw_window_ms,
             playbook,
@@ -623,7 +614,6 @@ impl DaemonConfig {
             bundled_definitions,
             detection_name: detection_name.unwrap_or(defaults.detection_name),
             max_windows,
-            close_settle_ms,
             input_echo_window_ms,
             resize_redraw_window_ms,
             playbook,
@@ -653,7 +643,6 @@ impl Default for DaemonConfig {
             max_windows: DEFAULT_MAX_WINDOWS,
             interrupt_bytes: vec![CTRL_C],
             close_grace_ms: 500,
-            close_settle_ms: DEFAULT_CLOSE_SETTLE_MS,
             input_echo_window_ms: DEFAULT_INPUT_ECHO_WINDOW_MS,
             resize_redraw_window_ms: DEFAULT_RESIZE_REDRAW_WINDOW_MS,
             wait_timeout_max_secs: 600,
@@ -710,6 +699,8 @@ impl Default for DaemonConfig {
             mcp_registration_max_output_bytes: DEFAULT_MCP_REGISTRATION_MAX_OUTPUT_BYTES,
             mcp_registration_status_max_concurrent: DEFAULT_MCP_REGISTRATION_STATUS_MAX_CONCURRENT,
             mcp_listing_timeout: Duration::from_secs(DEFAULT_MCP_LISTING_TIMEOUT_SECS),
+            holder_exe: default_holder_exe(),
+            holder_place: None,
         }
     }
 }
@@ -876,19 +867,9 @@ fn resolve_env_u64(raw: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Parses the `YAGURA_CLOSE_SETTLE_MS` environment variable value.
-///
-/// Same fail-safe shape as [`resolve_max_windows`]: a missing value, one
-/// that fails to parse as a `u64`, or `0` (which would make the settle wait
-/// a no-op and reopen the stale-read race [`DaemonConfig::close_settle_ms`]
-/// exists to close) all fall back to `default`.
-pub fn resolve_close_settle_ms(raw: Option<&str>, default: u64) -> u64 {
-    resolve_env_u64(raw, default)
-}
-
 /// Parses the `YAGURA_INPUT_ECHO_WINDOW_MS` environment variable value.
 ///
-/// Same fail-safe shape as [`resolve_close_settle_ms`]: a missing value, one
+/// Same fail-safe shape as [`resolve_max_windows`]: a missing value, one
 /// that fails to parse as a `u64`, or `0` all fall back to `default`.
 pub fn resolve_input_echo_window_ms(raw: Option<&str>, default: u64) -> u64 {
     resolve_env_u64(raw, default)
@@ -980,7 +961,6 @@ mod tests {
             bundled_definitions: false,
             detection_name: None,
             max_windows: 1,
-            close_settle_ms: 1,
             input_echo_window_ms: 1,
             resize_redraw_window_ms: 1,
             playbook: None,
@@ -1010,7 +990,6 @@ mod tests {
             bundled_definitions: !defaults.bundled_definitions,
             detection_name: Some("named-definition".to_string()),
             max_windows: defaults.max_windows + 1,
-            close_settle_ms: defaults.close_settle_ms + 1,
             input_echo_window_ms: defaults.input_echo_window_ms + 1,
             resize_redraw_window_ms: defaults.resize_redraw_window_ms + 1,
             playbook: path("playbook.toml"),
@@ -1037,7 +1016,6 @@ mod tests {
         assert_eq!(config.bundled_definitions, !defaults.bundled_definitions);
         assert_eq!(config.detection_name, "named-definition");
         assert_eq!(config.max_windows, defaults.max_windows + 1);
-        assert_eq!(config.close_settle_ms, defaults.close_settle_ms + 1);
         assert_eq!(
             config.input_echo_window_ms,
             defaults.input_echo_window_ms + 1

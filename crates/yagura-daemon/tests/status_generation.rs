@@ -19,25 +19,31 @@ use tokio::io::AsyncReadExt;
 use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::{DaemonConfig, WindowEntry};
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
-use yagura_test_support::ipc::{Connection, try_read_daemon_message};
+use yagura_test_support::ipc::{Connection, read_daemon_frame};
 use yagura_test_support::paths::{unique_detection_dir, write_definition};
 
 /// Reads exactly one frame and decodes its body as a bare JSON value, so a
 /// case can assert on the presence or absence of a wire key without going
 /// through the typed [`DaemonMessage`] decode (which cannot distinguish "the
 /// key is absent" from "the field decoded to `None`").
-async fn read_raw_json_frame(client: &mut Connection, timeout: Duration) -> serde_json::Value {
+async fn read_raw_json_frame(client: &mut Connection) -> serde_json::Value {
     let mut len_buf = [0u8; 4];
-    tokio::time::timeout(timeout, client.read_exact(&mut len_buf))
-        .await
-        .expect("timed out waiting for a frame length prefix")
-        .expect("connection closed while reading a frame length prefix");
+    tokio::time::timeout(
+        yagura_test_support::HANG_GUARD,
+        client.read_exact(&mut len_buf),
+    )
+    .await
+    .expect("timed out waiting for a frame length prefix")
+    .expect("connection closed while reading a frame length prefix");
     let len = u32::from_le_bytes(len_buf) as usize;
     let mut body = vec![0u8; len];
-    tokio::time::timeout(timeout, client.read_exact(&mut body))
-        .await
-        .expect("timed out waiting for a frame body")
-        .expect("connection closed while reading a frame body");
+    tokio::time::timeout(
+        yagura_test_support::HANG_GUARD,
+        client.read_exact(&mut body),
+    )
+    .await
+    .expect("timed out waiting for a frame body")
+    .expect("connection closed while reading a frame body");
     serde_json::from_slice(&body).expect("daemon must only ever emit well-formed JSON frames")
 }
 
@@ -76,12 +82,8 @@ fn two_rule_config(tag: &str) -> DaemonConfig {
 /// Polls `entry`'s confirmed status until it matches `expected`, returning
 /// the [`StatusAt`] pair observed at that point (carrying the generation the
 /// transition into `expected` was assigned).
-async fn wait_for_confirmed(
-    entry: &WindowEntry,
-    expected: WindowStatus,
-    timeout: Duration,
-) -> StatusAt {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_confirmed(entry: &WindowEntry, expected: WindowStatus) -> StatusAt {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let at = entry.status_snapshot();
         if at.status.status() == expected {
@@ -101,12 +103,8 @@ async fn wait_for_confirmed(
 /// projection: `Unknown(NotYetJudged)` and `Unknown(NoRuleMatched)` project
 /// to the same `WindowStatus::Unknown`, so [`wait_for_confirmed`] could not
 /// tell a window that has been judged from one that has not.
-async fn wait_for_detected(
-    entry: &WindowEntry,
-    expected: DetectedStatus,
-    timeout: Duration,
-) -> StatusAt {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn wait_for_detected(entry: &WindowEntry, expected: DetectedStatus) -> StatusAt {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let at = entry.status_snapshot();
         if at.status == expected {
@@ -135,7 +133,7 @@ async fn generation_increases_after_a_confirmed_transition() {
     let baseline = entry.status_snapshot().generation;
 
     common::write_window_input(&harness.registry, entry.window_id(), b"RUN-MARK\r\n").await;
-    let after = wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let after = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     assert!(
         after.generation > baseline,
@@ -163,8 +161,7 @@ async fn generation_increases_again_when_a_status_already_seen_recurs() {
         entry.record_status_event(WindowStatus::Running),
         "a living window must accept a structured-source status event"
     );
-    let first_running =
-        wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let first_running = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     common::write_window_input(
         &harness.registry,
@@ -173,7 +170,7 @@ async fn generation_increases_again_when_a_status_already_seen_recurs() {
 ",
     )
     .await;
-    let idle = wait_for_confirmed(&entry, WindowStatus::Idle, Duration::from_secs(10)).await;
+    let idle = wait_for_confirmed(&entry, WindowStatus::Idle).await;
     assert!(
         idle.generation > first_running.generation,
         "moving to idle must increase the generation past the first running: \
@@ -189,8 +186,7 @@ async fn generation_increases_again_when_a_status_already_seen_recurs() {
 ",
     )
     .await;
-    let second_running =
-        wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let second_running = wait_for_confirmed(&entry, WindowStatus::Running).await;
     assert!(
         second_running.generation > idle.generation,
         "re-confirming a status already seen once must still strictly increase the \
@@ -223,16 +219,11 @@ async fn generation_is_independent_across_windows() {
     // it reads input and this definition has no time-based deadline, so b is
     // only ever judged once fed output.
     common::write_window_input(&harness.registry, b.window_id(), b"no-match-here\r\n").await;
-    wait_for_detected(
-        &b,
-        DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_for_detected(&b, DetectedStatus::Unknown(UnknownReason::NoRuleMatched)).await;
     let b_baseline = b.status_snapshot().generation;
 
     assert!(a.record_status_event(WindowStatus::Running));
-    wait_for_confirmed(&a, WindowStatus::Running, Duration::from_secs(10)).await;
+    wait_for_confirmed(&a, WindowStatus::Running).await;
 
     assert_eq!(
         b.status_snapshot().generation,
@@ -256,7 +247,7 @@ async fn window_list_reports_the_status_rev_matching_the_entrys_generation() {
     let window_id = entry.window_id().to_string();
 
     common::write_window_input(&harness.registry, &window_id, b"RUN-MARK\r\n").await;
-    let at = wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let at = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     let mut client = harness.connect().await;
     let windows = common::call_list_windows(&mut client).await;
@@ -287,7 +278,7 @@ async fn status_changed_frames_carry_a_strictly_increasing_status_rev() {
     // why the first transition comes from a report and the second from a
     // rule's marker.
     assert!(entry.record_status_event(WindowStatus::Running));
-    let running = wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let running = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     common::write_window_input(
         &harness.registry,
@@ -296,24 +287,30 @@ async fn status_changed_frames_carry_a_strictly_increasing_status_rev() {
 ",
     )
     .await;
-    let idle = wait_for_confirmed(&entry, WindowStatus::Idle, Duration::from_secs(10)).await;
+    let idle = wait_for_confirmed(&entry, WindowStatus::Idle).await;
 
-    // Drains every frame the daemon has already queued for this connection,
-    // stopping once no frame arrives within the idle window (not once a
-    // fixed count is reached): the exact number of StatusChanged frames
-    // buffered ahead of the two transitions this case caused (the post-
-    // attach snapshot, and possibly the two transitions themselves) is not
+    // Reads up to the push of the idle transition, the first `Idle` this
+    // window publishes: how many StatusChanged frames come ahead of it (the
+    // post-attach snapshot, and possibly the running transition) is not
     // pinned by the contract, only their content is.
     let mut seen_revs = Vec::new();
-    while let Some(msg) = try_read_daemon_message(&mut client, Duration::from_millis(500)).await {
-        match msg {
-            DaemonMessage::StatusChanged { status_rev, .. } => {
+    loop {
+        match read_daemon_frame(&mut client)
+            .await
+            .expect_message("a StatusChanged push up to the idle transition")
+        {
+            DaemonMessage::StatusChanged {
+                status, status_rev, ..
+            } => {
                 if let Some(rev) = status_rev {
                     seen_revs.push(rev);
                 }
+                if status == WindowStatus::Idle {
+                    break;
+                }
             }
             DaemonMessage::Frame(_) => {}
-            other => panic!("unexpected frame while draining StatusChanged: {other:?}"),
+            other => panic!("unexpected frame while reading StatusChanged: {other:?}"),
         }
     }
 
@@ -356,7 +353,7 @@ async fn get_window_status_response_carries_no_generation() {
     )
     .await;
     let value = loop {
-        let value = read_raw_json_frame(&mut client, Duration::from_secs(5)).await;
+        let value = read_raw_json_frame(&mut client).await;
         let kind = value.get("type").and_then(serde_json::Value::as_str);
         if kind == Some("window_status") {
             break value;
@@ -405,8 +402,7 @@ async fn subscribe_status_delivers_the_pair_and_generation_together_in_one_value
     let mut rx = entry.subscribe_status();
 
     common::write_window_input(&harness.registry, &window_id, b"RUN-MARK\r\n").await;
-    let confirmed =
-        wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let confirmed = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     // Read that transition's own value off the fan-out, picked by generation;
     // an earlier transition may still be queued ahead of it. Everything a
@@ -456,8 +452,7 @@ async fn status_changed_fields_are_derivable_from_the_fan_out_value_alone() {
     let mut rx = entry.subscribe_status();
 
     common::write_window_input(&harness.registry, &window_id, b"RUN-MARK\r\n").await;
-    let ground_truth =
-        wait_for_confirmed(&entry, WindowStatus::Running, Duration::from_secs(10)).await;
+    let ground_truth = wait_for_confirmed(&entry, WindowStatus::Running).await;
 
     // An earlier transition may still be queued ahead of the confirmed one.
     let received: StatusAt = loop {

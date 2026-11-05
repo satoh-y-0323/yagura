@@ -11,11 +11,10 @@
 mod common;
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use common::Harness;
 use common::views::{
-    CATCH_UP, assert_converges_to_model, numbered_lines, open_script_window, script_write,
+    assert_converges_to_model, numbered_lines, open_script_window, script_write,
     script_write_and_wait,
 };
 use yagura_daemon::DaemonConfig;
@@ -50,11 +49,9 @@ async fn wide_emoji_and_combining_characters_arrive_as_cells_of_the_widths_the_d
         "END-1",
     )
     .await;
-    view.pump_until("the wide line", CATCH_UP, |grid| {
-        grid.contains_text("END-1")
-    })
-    .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "wide line", CATCH_UP).await;
+    view.pump_until("the wide line", |grid| grid.contains_text("END-1"))
+        .await;
+    assert_converges_to_model(&mut view, &h, &window_id, "wide line").await;
 
     let grid = &view.grid;
     for (name, text) in [("CJK", "\u{5168}"), ("emoji", "\u{1F600}")] {
@@ -100,11 +97,9 @@ async fn a_wide_character_that_does_not_fit_the_last_column_wraps_and_leaves_a_b
         "TAIL-1",
     )
     .await;
-    view.pump_until("the wrapped wide line", CATCH_UP, |grid| {
-        grid.contains_text("TAIL-1")
-    })
-    .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "wrapped wide", CATCH_UP).await;
+    view.pump_until("the wrapped wide line", |grid| grid.contains_text("TAIL-1"))
+        .await;
+    assert_converges_to_model(&mut view, &h, &window_id, "wrapped wide").await;
 
     let grid = &view.grid;
     let (row, col) = grid.find_cell("\u{5168}").expect("the wide cell");
@@ -136,15 +131,13 @@ async fn a_resize_on_the_main_screen_is_followed_by_a_full_frame_that_matches_th
         "END-A",
     )
     .await;
-    view.pump_until("the long line", CATCH_UP, |grid| {
-        grid.contains_text("END-A")
-    })
-    .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "before resize", CATCH_UP).await;
+    view.pump_until("the long line", |grid| grid.contains_text("END-A"))
+        .await;
+    assert_converges_to_model(&mut view, &h, &window_id, "before resize").await;
 
     for (cols, rows) in [(40u16, 24u16), (120, 30), (80, 24), (50, 10)] {
         view.send(&ClientMessage::Resize { cols, rows }).await;
-        view.pump_until("the resized grid", CATCH_UP, |grid| {
+        view.pump_until("the resized grid", |grid| {
             (grid.cols, grid.rows) == (cols, rows)
         })
         .await;
@@ -153,7 +146,6 @@ async fn a_resize_on_the_main_screen_is_followed_by_a_full_frame_that_matches_th
             &h,
             &window_id,
             &format!("after resize to {cols}x{rows}"),
-            CATCH_UP,
         )
         .await;
     }
@@ -181,22 +173,22 @@ async fn a_resize_on_the_alternate_screen_and_the_return_to_the_main_screen_matc
         "ALT-END",
     )
     .await;
-    view.pump_until("the alternate screen", CATCH_UP, |grid| {
+    view.pump_until("the alternate screen", |grid| {
         grid.view.alt_screen && grid.contains_text("ALT-END")
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "alternate screen", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "alternate screen").await;
 
     view.send(&ClientMessage::Resize {
         cols: 100,
         rows: 30,
     })
     .await;
-    view.pump_until("the resized alternate screen", CATCH_UP, |grid| {
+    view.pump_until("the resized alternate screen", |grid| {
         (grid.cols, grid.rows) == (100, 30)
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "alt after resize", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "alt after resize").await;
 
     script_write_and_wait(
         &h,
@@ -205,11 +197,11 @@ async fn a_resize_on_the_alternate_screen_and_the_return_to_the_main_screen_matc
         "BACK-MAIN",
     )
     .await;
-    view.pump_until("the main screen again", CATCH_UP, |grid| {
+    view.pump_until("the main screen again", |grid| {
         !grid.view.alt_screen && grid.contains_text("BACK-MAIN")
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "back on main", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "back on main").await;
 }
 
 #[tokio::test]
@@ -223,11 +215,11 @@ async fn output_that_scrolls_the_screen_is_followed_row_for_row() {
         "SCROLL-END",
     )
     .await;
-    view.pump_until("the scrolled screen", CATCH_UP, |grid| {
+    view.pump_until("the scrolled screen", |grid| {
         grid.contains_text("SCROLL-END")
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "scrolled", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "scrolled").await;
     assert!(
         view.grid.contains_text("LINE-0100"),
         "the newest line is on screen:\n{}",
@@ -250,12 +242,10 @@ async fn several_bursts_written_back_to_back_end_in_the_models_picture() {
         bytes.extend_from_slice(format!("BURST-END-{burst}").as_bytes());
         script_write(&h, &window_id, &bytes).await;
     }
-    common::wait_until_model_shows(&h, &window_id, b"BURST-END-4", CATCH_UP).await;
-    view.pump_until("the last burst", CATCH_UP, |grid| {
-        grid.contains_text("BURST-END-4")
-    })
-    .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "bursts", CATCH_UP).await;
+    common::wait_until_model_shows(&h, &window_id, b"BURST-END-4").await;
+    view.pump_until("the last burst", |grid| grid.contains_text("BURST-END-4"))
+        .await;
+    assert_converges_to_model(&mut view, &h, &window_id, "bursts").await;
 }
 
 #[tokio::test]
@@ -269,17 +259,13 @@ async fn a_change_confined_to_one_row_sends_only_that_row() {
         "SETTLED",
     )
     .await;
-    view.pump_until("the settled screen", CATCH_UP, |grid| {
-        grid.contains_text("SETTLED")
-    })
-    .await;
+    view.pump_until("the settled screen", |grid| grid.contains_text("SETTLED"))
+        .await;
     let frames_before = view.completed.len();
 
     script_write_and_wait(&h, &window_id, b"\x1b[2;1HROW-X", "ROW-X").await;
-    view.pump_until("the changed row", CATCH_UP, |grid| {
-        grid.contains_text("ROW-X")
-    })
-    .await;
+    view.pump_until("the changed row", |grid| grid.contains_text("ROW-X"))
+        .await;
 
     let later = &view.completed[frames_before..];
     assert!(!later.is_empty());
@@ -293,7 +279,7 @@ async fn a_change_confined_to_one_row_sends_only_that_row() {
             "only the changed row travels: {frame:?}"
         );
     }
-    assert_converges_to_model(&mut view, &h, &window_id, "after the diff", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "after the diff").await;
 }
 
 #[tokio::test]
@@ -304,10 +290,8 @@ async fn colors_and_flags_are_carried_as_the_model_holds_them() {
 \x1b[48;5;21mB\x1b[0m\x1b[38;2;10;20;30mT\x1b[0m\x1b[1;3;4;7mF\x1b[0m\
 \x1b[2;9;8mH\x1b[0mD END-C";
     script_write_and_wait(&h, &window_id, &bytes_of(&[CLEAR, styled]), "END-C").await;
-    view.pump_until("the styled line", CATCH_UP, |grid| {
-        grid.contains_text("END-C")
-    })
-    .await;
+    view.pump_until("the styled line", |grid| grid.contains_text("END-C"))
+        .await;
 
     let grid = &view.grid;
     let attr_of = |text: &str| {
@@ -353,7 +337,7 @@ async fn the_cursor_position_visibility_and_shape_follow_the_model() {
     let (h, window_id, mut view) = attached_script_window("view-cursor").await;
 
     script_write_and_wait(&h, &window_id, &bytes_of(&[CLEAR, b"abc"]), "abc").await;
-    view.pump_until("the cursor after abc", CATCH_UP, |grid| {
+    view.pump_until("the cursor after abc", |grid| {
         grid.contains_text("abc") && grid.cursor.col == 3
     })
     .await;
@@ -361,21 +345,21 @@ async fn the_cursor_position_visibility_and_shape_follow_the_model() {
     assert!(view.grid.cursor.visible);
 
     script_write_and_wait(&h, &window_id, b"\x1b[?25lHIDDEN", "HIDDEN").await;
-    view.pump_until("the hidden cursor", CATCH_UP, |grid| !grid.cursor.visible)
+    view.pump_until("the hidden cursor", |grid| !grid.cursor.visible)
         .await;
 
     script_write_and_wait(&h, &window_id, b"\x1b[?25h\x1b[4 qUNDERLINE", "UNDERLINE").await;
-    view.pump_until("the underline cursor", CATCH_UP, |grid| {
+    view.pump_until("the underline cursor", |grid| {
         grid.cursor.visible && grid.cursor.shape == CursorShape::Underline
     })
     .await;
 
     script_write_and_wait(&h, &window_id, b"\x1b[6 qBAR", "BAR").await;
-    view.pump_until("the bar cursor", CATCH_UP, |grid| {
+    view.pump_until("the bar cursor", |grid| {
         grid.cursor.shape == CursorShape::Bar
     })
     .await;
-    assert_converges_to_model(&mut view, &h, &window_id, "cursor", CATCH_UP).await;
+    assert_converges_to_model(&mut view, &h, &window_id, "cursor").await;
 }
 
 #[tokio::test]
@@ -388,7 +372,7 @@ async fn a_color_the_program_sets_over_the_theme_travels_until_the_program_reset
         b"\x1b]11;rgb:ff/00/00\x1b\\\x1b]4;3;rgb:01/02/03\x1b\\\x1b]10;rgb:04/05/06\x1b\\\x1b]12;rgb:07/08/09\x1b\\",
     )
     .await;
-    view.pump_until("the overrides", CATCH_UP, |grid| grid.overrides.len() == 4)
+    view.pump_until("the overrides", |grid| grid.overrides.len() == 4)
         .await;
     let find = |slot: PaletteSlot| {
         view.grid
@@ -408,10 +392,8 @@ async fn a_color_the_program_sets_over_the_theme_travels_until_the_program_reset
         b"\x1b]111\x1b\\\x1b]104;3\x1b\\\x1b]110\x1b\\\x1b]112\x1b\\",
     )
     .await;
-    view.pump_until("the overrides gone", CATCH_UP, |grid| {
-        grid.overrides.is_empty()
-    })
-    .await;
+    view.pump_until("the overrides gone", |grid| grid.overrides.is_empty())
+        .await;
 }
 
 #[tokio::test]
@@ -419,13 +401,10 @@ async fn nothing_but_a_ping_comes_back_while_the_screen_does_not_change() {
     let (h, window_id, mut view) = attached_script_window("view-quiet").await;
 
     script_write_and_wait(&h, &window_id, &bytes_of(&[CLEAR, b"STILL"]), "STILL").await;
-    view.pump_until("the screen", CATCH_UP, |grid| grid.contains_text("STILL"))
+    view.pump_until("the screen", |grid| grid.contains_text("STILL"))
         .await;
-    view.assert_no_frame(
-        "nothing was written since the last frame",
-        Duration::from_millis(300),
-    )
-    .await;
+    view.assert_no_frame("nothing was written since the last frame")
+        .await;
 }
 
 #[tokio::test]
@@ -448,7 +427,7 @@ async fn attr_grid_cells_carry_the_colors_listed_by_hand() {
         .await;
     let mut view = ViewClient::attach(h.connect().await, &window_id, Some(size)).await;
     view.send_text("g").await;
-    view.pump_until("the last cell painted", CATCH_UP, |grid| {
+    view.pump_until("the last cell painted", |grid| {
         grid.cell(size.rows - 1, size.cols - 1).text == "x"
     })
     .await;
@@ -486,5 +465,5 @@ async fn a_bang_inside_a_script_command_is_ignored_and_does_not_end_the_child() 
     input.extend(common::hex_of(b"BANG-OK").into_bytes());
     input.push(b'>');
     h.write_input(&window_id, &input).await;
-    common::wait_until_model_shows(&h, &window_id, b"BANG-OK", CATCH_UP).await;
+    common::wait_until_model_shows(&h, &window_id, b"BANG-OK").await;
 }

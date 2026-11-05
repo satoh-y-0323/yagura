@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    Harness, approver_base_config, call_send_handoff_from_profile_within, empty_lookup,
+    Harness, approver_base_config, call_send_handoff_from_profile, empty_lookup,
     expect_handoff_sent, handoff_profile_config, launch_args_logged_in, mcp_cli_stub_path, policy,
     read_response, registration_dirs, send, write_profile,
 };
@@ -27,8 +27,6 @@ use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::{
     COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR,
 };
-
-const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What a launch window's hook settings hold: the credentials file inside a command,
 /// and a `${...}` reference the CLI itself expands, which must stay as written.
@@ -114,14 +112,14 @@ async fn open(client: &mut Connection, profile: &str) -> String {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(15)).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened for {profile}, got {other:?}"),
     }
 }
 
 async fn until(what: &str, mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !condition() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -418,7 +416,7 @@ async fn a_location_with_a_quote_opens_the_window_without_hooks_and_the_bridge_b
 
 /// The command lines the daemon recorded for its windows, once it has written them.
 async fn recorded_commands(db: &Path) -> Vec<Vec<String>> {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if let Ok(conn) = yagura_daemon::store::open_readonly(db)
             && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
@@ -459,16 +457,9 @@ async fn launch_args_come_before_the_launch_prompt_and_stay_out_of_every_other_c
     yagura_daemon::store::wire_into(&h.registry, Some(db.clone()));
     let mut client = h.connect().await;
 
-    let reply = call_send_handoff_from_profile_within(
-        &mut client,
-        "args",
-        None,
-        None,
-        "src/foo.rs",
-        "look here",
-        Duration::from_secs(10),
-    )
-    .await;
+    let reply =
+        call_send_handoff_from_profile(&mut client, "args", None, None, "src/foo.rs", "look here")
+            .await;
     let (window_id, _, _) = expect_handoff_sent(reply);
     let args = launch_args_logged_in(&logs).await;
 

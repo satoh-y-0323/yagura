@@ -164,6 +164,12 @@ pub struct ComposerObservation {
     /// shown and no synchronized update is open. Always `false` for a screen
     /// that is not trusted to reflect what the program drew.
     pub painted: bool,
+    /// How many screens the detector has read, up to and including this one,
+    /// that a rule closes the write gate on (an approval prompt or a rule's
+    /// explicit `unknown` declaration). Only ever grows, so a larger count
+    /// than an earlier observation's says a dialog may have come and gone in
+    /// between, even one no composer query happened to see.
+    pub closed_screens: u64,
 }
 
 impl ComposerObservation {
@@ -177,6 +183,7 @@ impl ComposerObservation {
             readout: ComposerReadout::NotObserved,
             screen_rule: Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown)),
             painted: false,
+            closed_screens: 0,
         }
     }
 }
@@ -262,6 +269,8 @@ pub struct DetectionEngine {
     /// When a rule of the screen first confirmed `Running`; a turn a report
     /// opened does not count.
     first_screen_running_at: Option<Instant>,
+    /// See [`ComposerObservation::closed_screens`].
+    closed_screens: u64,
 }
 
 /// How long output must pause, with the cursor still hidden, before the
@@ -364,6 +373,7 @@ impl DetectionEngine {
             report_watch: Arc::new(ReportWatch::default()),
             reports_seen: false,
             first_screen_running_at: None,
+            closed_screens: 0,
         }
     }
 
@@ -624,6 +634,9 @@ impl DetectionEngine {
     ///
     /// Synchronous and free of I/O; waits for the model's lock for at most
     /// one slice of output being fed, so it belongs on a blocking thread.
+    /// The daemon itself asks through [`DetectorHandle::query_composer`]: this
+    /// reading is not recorded, so a dialog it reads does not move
+    /// [`ComposerObservation::closed_screens`].
     #[must_use]
     pub fn query_composer(&self) -> ComposerObservation {
         self.observe(&self.take_reading(true))
@@ -641,6 +654,7 @@ impl DetectionEngine {
             readout,
             screen_rule: reading.rule.map(declare_status),
             painted: trusted && !reading.cursor_hidden && !reading.sync_open,
+            closed_screens: self.closed_screens,
         }
     }
 
@@ -703,10 +717,18 @@ impl DetectionEngine {
     }
 
     /// Reads the model once and remembers its generation, so the next
-    /// reading only reports a rebuild that happened after this one.
+    /// reading only reports a rebuild that happened after this one, and
+    /// counts it when a rule closes the write gate on it.
     fn read_screen(&mut self, with_composer: bool) -> ScreenReading {
         let reading = self.take_reading(with_composer);
         self.screen_generation = reading.generation;
+        if matches!(
+            reading.rule.map(declare_status),
+            Some(DetectedStatus::WaitingApproval)
+                | Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown))
+        ) {
+            self.closed_screens += 1;
+        }
         reading
     }
 
@@ -1460,5 +1482,73 @@ region = "bottom"
              report that change to its caller"
         );
         assert_eq!(engine.status(), WindowStatus::Unknown);
+    }
+
+    const GATED_DEF: &str = r#"
+schema_version = 1
+name = "test-gated"
+
+[debounce]
+confirm_ms = 300
+
+[[rules]]
+status = "waiting_approval"
+pattern = 'ALLOW\?'
+priority = 20
+region = "bottom"
+
+[[rules]]
+status = "unknown"
+pattern = 'HALTED'
+priority = 15
+region = "bottom"
+
+[[rules]]
+status = "waiting_input"
+pattern = 'READY>'
+priority = 10
+region = "bottom"
+"#;
+
+    #[tokio::test]
+    async fn only_readings_a_rule_closes_the_gate_on_move_the_closed_screen_count() {
+        let config = DaemonConfig::default();
+        let definition = parse_definition(GATED_DEF).expect("the fixture definition parses");
+        let mut engine = DetectionEngine::new(
+            Some(definition),
+            &config,
+            VtScreen::new(80, 24).into_shared(),
+        );
+        let show = |engine: &mut DetectionEngine, line: &str| {
+            engine
+                .screen()
+                .lock()
+                .feed(format!("[2J[H{line}").as_bytes());
+            engine.on_output();
+            engine.query_composer().closed_screens
+        };
+
+        assert_eq!(
+            show(&mut engine, "READY>"),
+            0,
+            "an open screen is not counted"
+        );
+        assert_eq!(
+            show(&mut engine, "ALLOW?"),
+            1,
+            "an approval prompt is counted"
+        );
+        assert_eq!(
+            show(&mut engine, "HALTED"),
+            2,
+            "a declared unknown is counted"
+        );
+        assert_eq!(show(&mut engine, "READY>"), 2, "the count never moves back");
+        engine.screen().lock().feed(b"[2J[HALLOW?");
+        assert_eq!(
+            engine.query_composer().closed_screens,
+            2,
+            "a synchronous query does not record its reading"
+        );
     }
 }

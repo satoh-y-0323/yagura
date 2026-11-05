@@ -36,8 +36,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-
 const HOST_PROFILE: &str = "codex-cli";
 const WSL_PROFILE: &str = "wsl-codex-cli";
 
@@ -513,11 +511,11 @@ async fn run_action(
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationRequested { .. } => {}
         other => panic!("expected mcp_registration_requested, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationResult { error, status, .. } => (error, status),
         other => panic!("expected mcp_registration_result, got {other:?}"),
     }
@@ -526,13 +524,13 @@ async fn run_action(
 /// The state a fresh listing reports for the one profile.
 async fn listed_state(client: &mut Connection, request_id: u64) -> McpRegistrationState {
     send(client, &ClientMessage::ListMcpRegistrations { request_id }).await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationsListed { rows, .. } => {
             assert_eq!(rows.len(), 1, "{rows:?}");
         }
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     }
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::McpRegistrationStatus { status, .. } => status.state,
         other => panic!("expected mcp_registration_status, got {other:?}"),
     }
@@ -910,11 +908,11 @@ async fn open_in_and_read_launch(
         },
     )
     .await;
-    match read_response(client, REPLY_TIMEOUT).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { .. } => {}
         other => panic!("expected window_opened, got {other:?}"),
     }
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let all = launches(&layout.log);
         if all.len() >= expected_launches {

@@ -14,9 +14,9 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 use common::{
-    Harness, approver_base_config, call_list_windows, call_open_window, expect_error, identify,
-    policy, read_response, register_approver, send, unique_temp_dir, wait_until_status,
-    write_profile,
+    Harness, approver_base_config, call_list_windows, call_open_window, expect_approval_requested,
+    expect_error, identify, policy, read_response, register_approver, send, unique_temp_dir,
+    wait_until_status, write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -31,9 +31,6 @@ use yagura_test_support::process::{
 
 /// Well-formed, but not the token the harness injects into its windows.
 const WRONG_TOKEN: &str = "fedcba9876543210fedcba9876543210";
-
-/// How long a connection's end may take to reach the daemon's record.
-const SETTLE: Duration = Duration::from_secs(5);
 
 // --- observation helpers -------------------------------------------------------
 
@@ -54,7 +51,7 @@ async fn status_mcp_connected(client: &mut Connection, window_id: &str) -> Optio
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowStatus { mcp_connected, .. } => mcp_connected,
         other => panic!("expected window_status, got {other:?}"),
     }
@@ -77,7 +74,7 @@ async fn assert_mcp_connected(observer: &mut Connection, window_id: &str, expect
 /// Polls both read paths until they report `expected`, because a closed
 /// connection is only noticed by the daemon asynchronously.
 async fn wait_for_mcp_connected(observer: &mut Connection, window_id: &str, expected: bool) {
-    let deadline = tokio::time::Instant::now() + SETTLE;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let listed = listed_mcp_connected(observer, window_id).await;
         let status = status_mcp_connected(observer, window_id).await;
@@ -98,7 +95,7 @@ async fn wait_for_mcp_connected(observer: &mut Connection, window_id: &str, expe
 /// not race the daemon's own teardown of the connection.
 async fn expect_closed_by_daemon(client: &mut Connection) {
     let mut buf = [0u8; 256];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(
@@ -124,14 +121,14 @@ async fn send_identify(client: &mut Connection, window_id: &str, token: &str) ->
         },
     )
     .await;
-    read_response(client, Duration::from_secs(5)).await
+    read_response(client).await
 }
 
 // --- report helpers ------------------------------------------------------------
 
 async fn call_wait_for_report(client: &mut Connection, timeout_sec: u64) -> DaemonMessage {
     send(client, &ClientMessage::WaitForReport { timeout_sec }).await;
-    read_response(client, Duration::from_secs(timeout_sec + 5)).await
+    read_response(client).await
 }
 
 fn expect_reports(
@@ -167,7 +164,7 @@ async fn call_send_report(client: &mut Connection, summary: &str) {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::ReportSent { .. } => {}
         other => panic!("expected report_sent, got {other:?}"),
     }
@@ -196,7 +193,7 @@ fn ledger_config(dir: &Path) -> DaemonConfig {
 /// Reads the next reply that is not a `plan_changed` push.
 async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
     loop {
-        let frame = read_response(client, Duration::from_secs(10)).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
@@ -310,7 +307,10 @@ async fn an_identified_connection_the_daemon_disconnects_stops_marking_its_windo
 async fn a_window_stays_marked_until_its_last_identified_connection_closes() {
     let h = Harness::start("mcp-presence-two-connections", approver_base_config()).await;
     let window_id = h.open(echo_child_command(), None).await;
+    let other_window = h.open(echo_child_command(), None).await;
     let mut observer = h.connect().await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
 
     let mut first = h.connect().await;
     identify(&mut first, &window_id).await;
@@ -318,10 +318,31 @@ async fn a_window_stays_marked_until_its_last_identified_connection_closes() {
     identify(&mut second, &window_id).await;
     assert_mcp_connected(&mut observer, &window_id, true).await;
 
+    // `first` leaves a request waiting for approval, which its end withdraws.
+    send(
+        &mut first,
+        &ClientMessage::CloseWindow {
+            window_id: other_window,
+            force: None,
+        },
+    )
+    .await;
+    let request = expect_approval_requested(&mut approver).await;
     drop(first);
-    // Give the daemon the same time it gets to notice a close elsewhere, then
-    // require the remaining connection to still count.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // A connection's end tells its waiting requests their requester is gone
+    // and then drops its identification without yielding in between, so on
+    // this single-threaded runtime the withdrawal comes after `first` stopped
+    // counting.
+    loop {
+        match read_response(&mut approver).await {
+            DaemonMessage::ApprovalWithdrawn { request_id, .. }
+                if request_id == request.request_id =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
     assert_mcp_connected(&mut observer, &window_id, true).await;
 
     drop(second);
@@ -392,13 +413,7 @@ async fn an_empty_wait_for_report_lists_the_callers_live_children_with_their_mar
     identify(&mut child_bridge, &bridged_child).await;
 
     let mut observer = h.connect().await;
-    wait_until_status(
-        &mut observer,
-        &exited_child,
-        WindowStatus::Exited,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_until_status(&mut observer, &exited_child, WindowStatus::Exited).await;
     let listed = call_list_windows(&mut observer).await;
 
     for timeout_sec in [0, 1] {

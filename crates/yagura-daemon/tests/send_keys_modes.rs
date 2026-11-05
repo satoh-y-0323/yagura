@@ -5,8 +5,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{
     CONTROL_DETECTION_NAME, Harness, approval_config, approver_base_config,
     assert_hex_echo_receives, decide, detection_config, expect_approval_requested, hex_echo_path,
@@ -16,7 +14,6 @@ use common::{
 use yagura_protocol::{ClientMessage, ControlKey, DaemonMessage, WindowStatus};
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
-const TIMEOUT: Duration = Duration::from_secs(10);
 const DECCKM: &[u8] = b"\x1b[?1h";
 
 fn hex_echo_command(mode: &str, sequences: &[&[u8]]) -> Vec<String> {
@@ -53,16 +50,16 @@ async fn send_keys_up_reaches_a_child_in_cursor_keys_mode_as_ss3() {
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    wait_until_status(&mut client, &window_id, WindowStatus::Idle, TIMEOUT).await;
-    wait_until_model_shows(&h, &window_id, EMITTED_MARKER, TIMEOUT).await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
+    wait_until_model_shows(&h, &window_id, EMITTED_MARKER).await;
     identify(&mut client, &window_id).await;
 
     send(&mut client, &send_up(&window_id)).await;
-    match read_response(&mut client, Duration::from_secs(5)).await {
+    match read_response(&mut client).await {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected keys_sent, got {other:?}"),
     }
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1bOA", TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1bOA").await;
 }
 
 #[tokio::test]
@@ -78,19 +75,19 @@ async fn send_keys_up_is_encoded_with_the_modes_at_approval_not_at_request() {
             Some(CONTROL_DETECTION_NAME),
         )
         .await;
-    wait_until_status(&mut requester, &window_id, WindowStatus::Idle, TIMEOUT).await;
+    wait_until_status(&mut requester, &window_id, WindowStatus::Idle).await;
 
     send(&mut requester, &send_up(&window_id)).await;
     let request = expect_approval_requested(&mut approver).await;
 
     // The child sets cursor keys mode while the request waits for its decision.
     h.write_input(&window_id, b"!").await;
-    wait_until_model_shows(&h, &window_id, EMITTED_MARKER, TIMEOUT).await;
+    wait_until_model_shows(&h, &window_id, EMITTED_MARKER).await;
 
     decide(&mut approver, &request.request_id, true).await;
-    match read_response(&mut requester, Duration::from_secs(5)).await {
+    match read_response(&mut requester).await {
         DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
         other => panic!("expected keys_sent, got {other:?}"),
     }
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1bOA", TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1bOA").await;
 }

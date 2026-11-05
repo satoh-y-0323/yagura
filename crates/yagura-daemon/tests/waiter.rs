@@ -8,9 +8,9 @@
 //! only here: the eviction condition makes an integration test finish with
 //! `ChildExited` first, so `Detached` cannot be constructed from one.
 //!
-//! Time-dependent cases run under `#[tokio::test(start_paused = true)]`: the virtual
-//! clock keeps the timeout paths deterministic and the assertions check elapsed
-//! virtual time instead of racing wall-clock sleeps.
+//! Every case without a real window runs under `#[tokio::test(start_paused = true)]`:
+//! the virtual clock keeps the timeout and hold paths deterministic, and the
+//! assertions check elapsed virtual time instead of racing wall-clock sleeps.
 
 use std::time::Duration;
 
@@ -392,7 +392,7 @@ async fn wait_for_status_delegates_to_wait_for_any_with_a_single_element_slice()
 // have kept, once, before the wait settles.
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_with_zero_hold_reaches_immediately_like_wait_for_any() {
     let (_tx, rx) = watch::channel(StatusAt {
         status: DetectedStatus::Running,
@@ -400,6 +400,7 @@ async fn wait_for_any_held_with_zero_hold_reaches_immediately_like_wait_for_any(
         evidence_since: Instant::now(),
         generation: 0,
     });
+    let start = Instant::now();
 
     let outcome = wait_for_any_held(
         rx,
@@ -414,9 +415,14 @@ async fn wait_for_any_held_with_zero_hold_reaches_immediately_like_wait_for_any(
         "a zero hold must behave like wait_for_any: reach immediately on an \
          already-satisfied status, got {outcome:?}"
     );
+    assert_eq!(
+        start.elapsed(),
+        Duration::ZERO,
+        "a zero hold must not wait on the paused clock at all"
+    );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_reaches_even_with_a_zero_timeout_when_the_hold_is_already_satisfied() {
     let hold = Duration::from_millis(50);
     let now = Instant::now();
@@ -439,62 +445,49 @@ async fn wait_for_any_held_reaches_even_with_a_zero_timeout_when_the_hold_is_alr
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_restarts_the_hold_when_the_status_leaves_the_targets() {
     let hold = Duration::from_millis(300);
-    let fresh_ready = StatusAt {
-        status: DetectedStatus::WaitingInput,
-        changed_at: Instant::now(),
-        evidence_since: Instant::now(),
-        generation: 0,
-    };
-    let (tx, rx) = watch::channel(fresh_ready);
-    let mut handle: tokio::task::JoinHandle<WaitOutcome> = tokio::spawn(wait_for_any_held(
+    let (tx, rx) = watch::channel(just_changed(DetectedStatus::WaitingInput));
+    let handle: tokio::task::JoinHandle<WaitOutcome> = tokio::spawn(wait_for_any_held(
         rx,
         READY_STATUSES,
         hold,
         Duration::from_secs(10),
     ));
 
-    // 80% of the hold elapses while ready, then the status leaves the target set.
+    // 80% of the hold passes while ready, then the status leaves the target set.
     tokio::time::sleep(Duration::from_millis(240)).await;
-    tx.send(StatusAt {
-        status: DetectedStatus::Running,
-        changed_at: Instant::now(),
-        evidence_since: Instant::now(),
-        generation: 0,
-    })
-    .expect("the waiter still holds a receiver");
+    tx.send(just_changed(DetectedStatus::Running))
+        .expect("the waiter still holds a receiver");
 
     // The total time since the window first became ready now exceeds the hold, but
     // the continuous ready run was interrupted, so the wait must not settle yet.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let still_pending = tokio::time::timeout(Duration::from_millis(10), &mut handle).await;
     assert!(
-        still_pending.is_err(),
-        "an interrupted ready run must not settle the wait just because the total \
-         elapsed time since the first ready observation exceeds the hold"
+        !handle.is_finished(),
+        "an interrupted ready run must not settle the wait just because the total elapsed time since the first ready observation exceeds the hold"
     );
 
     // The status returns to ready; only holding for the full duration again may
     // settle the wait.
-    tx.send(StatusAt {
-        status: DetectedStatus::WaitingInput,
-        changed_at: Instant::now(),
-        evidence_since: Instant::now(),
-        generation: 0,
-    })
-    .expect("the waiter still holds a receiver");
+    tx.send(just_changed(DetectedStatus::WaitingInput))
+        .expect("the waiter still holds a receiver");
+    let ready_again_at = Instant::now();
 
     let outcome = handle.await.expect("the waiter task must not panic");
     assert!(
         matches!(outcome, WaitOutcome::Reached),
-        "returning to a ready status must eventually reach once it holds for the full \
-         duration again, got {outcome:?}"
+        "returning to a ready status must reach once it holds for the full duration again, got {outcome:?}"
+    );
+    assert_eq!(
+        ready_again_at.elapsed(),
+        hold,
+        "the hold must restart from the return to ready, not count the earlier ready run"
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_never_reaches_while_stuck_on_unknown_even_with_an_old_changed_at() {
     let hold = Duration::from_millis(50);
     let now = Instant::now();
@@ -522,7 +515,7 @@ async fn wait_for_any_held_never_reaches_while_stuck_on_unknown_even_with_an_old
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_reports_child_exited_when_the_status_becomes_exited() {
     let hold = Duration::from_millis(300);
     let (tx, rx) = watch::channel(StatusAt {
@@ -559,7 +552,7 @@ async fn wait_for_any_held_reports_child_exited_when_the_status_becomes_exited()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_times_out_when_the_hold_is_never_satisfied_within_the_deadline() {
     let hold = Duration::from_secs(60);
     let (_tx, rx) = watch::channel(StatusAt {
@@ -578,14 +571,14 @@ async fn wait_for_any_held_times_out_when_the_hold_is_never_satisfied_within_the
             panic!("a hold that never accumulates within the deadline must time out, got {other:?}")
         }
     }
-    assert!(
-        start.elapsed() >= Duration::from_millis(100),
-        "the wait must run to the deadline, elapsed {:?}",
-        start.elapsed()
+    assert_eq!(
+        start.elapsed(),
+        Duration::from_millis(100),
+        "the wait must run to the deadline and end there"
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_any_held_reports_detached_when_the_status_sender_is_dropped() {
     let hold = Duration::from_millis(300);
     let (tx, rx) = watch::channel(StatusAt {
@@ -619,7 +612,7 @@ async fn wait_for_any_held_reports_detached_when_the_status_sender_is_dropped() 
 // caller's submit key, so a reaction confirmed while settling still counts.
 // =============================================================================
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_reports_reacted_when_an_accepted_status_arrives() {
     let (tx, rx) = broadcast::channel(16);
     let handle = tokio::spawn(async move {
@@ -644,7 +637,7 @@ async fn wait_for_reaction_reports_reacted_when_an_accepted_status_arrives() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_keeps_waiting_through_unknown_and_reacts_on_the_later_running() {
     let (tx, rx) = broadcast::channel(16);
     let handle = tokio::spawn(async move {
@@ -705,7 +698,7 @@ async fn wait_for_reaction_does_not_settle_on_a_round_trip_between_ready_statuse
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_reports_exited_when_the_window_exits() {
     let (tx, rx) = broadcast::channel(16);
     let handle = tokio::spawn(async move {
@@ -748,7 +741,7 @@ async fn wait_for_reaction_reports_quiet_when_nothing_arrives_before_the_deadlin
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_does_not_miss_a_brief_running_immediately_overwritten() {
     let (tx, rx) = broadcast::channel(16);
     let handle = tokio::spawn(async move {
@@ -911,7 +904,7 @@ async fn wait_for_reaction_counts_a_change_whose_evidence_starts_at_the_submit_k
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_can_be_called_twice_in_a_row_with_the_same_receiver() {
     let (tx, rx) = broadcast::channel(16);
     let handle = tokio::spawn(async move {
@@ -951,7 +944,7 @@ async fn wait_for_reaction_can_be_called_twice_in_a_row_with_the_same_receiver()
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_reports_unobservable_when_lagged_during_the_wait() {
     let (tx, rx) = broadcast::channel(1);
     let handle = tokio::spawn(async move {
@@ -982,7 +975,7 @@ async fn wait_for_reaction_reports_unobservable_when_lagged_during_the_wait() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn wait_for_reaction_lagged_during_the_initial_discard_does_not_become_unobservable() {
     let (tx, rx) = broadcast::channel(1);
     // The receiver has read nothing yet, so it is already lagged by the time
@@ -1092,7 +1085,7 @@ async fn window_entry_watch_status_observes_a_status_transition() {
         .await
         .expect("write_input to the echo child");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if rx.borrow_and_update().status.status() == WindowStatus::Running {
             break;
@@ -1113,7 +1106,7 @@ async fn window_entry_watch_status_observes_a_status_transition() {
 }
 
 #[tokio::test]
-async fn window_entry_terminate_tree_succeeds_and_the_child_converges_to_exited() {
+async fn window_entry_terminate_tree_makes_the_child_converge_to_exited() {
     let registry = WindowRegistry::new(DaemonConfig::default());
     let id = registry
         .open(echo_request(None))
@@ -1126,12 +1119,9 @@ async fn window_entry_terminate_tree_succeeds_and_the_child_converges_to_exited(
         "test precondition: the child must still be running before terminate_tree()"
     );
 
-    assert!(
-        entry.session().terminate_tree().is_ok(),
-        "terminate_tree() must succeed for an opened window"
-    );
+    entry.session().terminate_tree();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         if entry.session().exit_status().is_some() {
             break;

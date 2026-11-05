@@ -17,7 +17,6 @@ use yagura_daemon::DaemonConfig;
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
 const FLOODED_MARKER: &[u8] = b"QUERIES-FLOODED";
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const DA1: &[u8] = b"\x1b[c";
 const DA2: &[u8] = b"\x1b[>c";
@@ -41,22 +40,14 @@ fn hex_echo_command(mode: &str, args: &[String]) -> Vec<String> {
 async fn open_emitting_window(h: &Harness, queries: &[&[u8]]) -> String {
     let args: Vec<String> = queries.iter().map(|query| hex_of(query)).collect();
     let window_id = h.open(hex_echo_command("--emit", &args), None).await;
-    h.wait_for_scrollback(&window_id, EMITTED_MARKER, REPLY_TIMEOUT)
-        .await;
+    h.wait_for_scrollback(&window_id, EMITTED_MARKER).await;
     window_id
 }
 
 async fn assert_query_answered(tag: &str, queries: &[&[u8]], expected_reply: &[u8]) {
     let h = Harness::start(tag, DaemonConfig::default()).await;
     let window_id = open_emitting_window(&h, queries).await;
-    assert_hex_echo_receives(
-        &h,
-        &window_id,
-        EMITTED_MARKER,
-        expected_reply,
-        REPLY_TIMEOUT,
-    )
-    .await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, expected_reply).await;
 }
 
 #[tokio::test]
@@ -184,7 +175,7 @@ async fn mode_report_says_not_recognized_for_an_unknown_mode() {
 async fn replies_are_not_counted_as_the_users_writes() {
     let h = Harness::start("query-not-a-write", DaemonConfig::default()).await;
     let window_id = open_emitting_window(&h, &[DA1]).await;
-    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1b[?1;2c", REPLY_TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, EMITTED_MARKER, b"\x1b[?1;2c").await;
     let writes = h
         .registry
         .get(&window_id)
@@ -208,7 +199,7 @@ async fn a_child_flooding_queries_without_reading_does_not_stop_the_reader() {
         .await;
     // The echo of the replies that follows the marker outgrows the scrollback
     // tail, so the marker is looked for in everything the child wrote.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while !contains_subsequence(&h.captured_output(&window_id), FLOODED_MARKER) {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -216,5 +207,5 @@ async fn a_child_flooding_queries_without_reading_does_not_stop_the_reader() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_hex_echo_receives(&h, &window_id, FLOODED_MARKER, b"\x1b[?1;2c", REPLY_TIMEOUT).await;
+    assert_hex_echo_receives(&h, &window_id, FLOODED_MARKER, b"\x1b[?1;2c").await;
 }

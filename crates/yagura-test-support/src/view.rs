@@ -2,15 +2,14 @@
 //! applies the frames the daemon sends into a [`Grid`], and acknowledges them
 //! the way a renderer does.
 
-use std::time::Duration;
-
 use tokio::time::Instant;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, Frame, KeyInput, PointerInput, TerminalSize, WheelInput,
 };
 
+use crate::HANG_GUARD;
 use crate::frame::Grid;
-use crate::ipc::{Connection, send_client_message, try_read_daemon_message};
+use crate::ipc::{Connection, ReadOutcome, read_next_frame, send_client_message};
 
 /// What was received for one completed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +45,6 @@ pub struct ViewClient {
     open_rows: usize,
     open_reset: bool,
 }
-
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
 
 impl ViewClient {
     /// Attaches to `window_id` (at `size` when given), reads the `Attached`
@@ -113,8 +110,9 @@ impl ViewClient {
             },
         )
         .await;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
-            match self.read_non_status(ATTACH_TIMEOUT).await {
+            match self.read_non_status(deadline, "`attached`").await {
                 Some(DaemonMessage::Attached {
                     child_exited,
                     exit_code,
@@ -128,7 +126,7 @@ impl ViewClient {
                 other => panic!("expected `attached` after attach_view, got {other:?}"),
             }
         }
-        let parts = self.next_complete_frame(ATTACH_TIMEOUT).await;
+        let parts = self.next_complete_frame().await;
         assert!(
             parts.first().is_some_and(|part| part.reset),
             "the frame right after attach must replace the whole grid (reset)"
@@ -136,37 +134,50 @@ impl ViewClient {
     }
 
     /// Reads the next message that is not a `StatusChanged` push; `None` when
-    /// nothing arrives within `timeout` or the connection closed. A pushed
-    /// `Exit` is recorded and also returned.
-    async fn read_non_status(&mut self, timeout: Duration) -> Option<DaemonMessage> {
-        let deadline = Instant::now() + timeout;
+    /// the connection closed. A pushed `Exit` is recorded and also returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics, naming `waiting_for` and showing the grid, if nothing arrives
+    /// before `deadline`.
+    async fn read_non_status(
+        &mut self,
+        deadline: Instant,
+        waiting_for: &str,
+    ) -> Option<DaemonMessage> {
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match try_read_daemon_message(&mut self.conn, remaining).await? {
-                DaemonMessage::StatusChanged { .. } => continue,
-                DaemonMessage::Exit { exit_code } => {
+            let outcome = tokio::time::timeout_at(deadline, read_next_frame(&mut self.conn))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "gave up waiting for {waiting_for} after {HANG_GUARD:?}; the grid shows\n{}",
+                        self.grid.dump()
+                    )
+                });
+            match outcome {
+                ReadOutcome::Closed => return None,
+                ReadOutcome::Message(DaemonMessage::StatusChanged { .. }) => continue,
+                ReadOutcome::Message(DaemonMessage::Exit { exit_code }) => {
                     self.exited = Some(exit_code);
                     return Some(DaemonMessage::Exit { exit_code });
                 }
-                message => return Some(message),
+                ReadOutcome::Message(message) => return Some(message),
             }
         }
     }
 
     /// Reads one part of a frame, skipping status pushes and a pushed exit.
-    /// `None` when nothing arrives within `timeout`.
     ///
     /// # Panics
     ///
     /// Panics if a message other than a frame, a status push or an exit
-    /// arrives.
-    async fn read_part(&mut self, timeout: Duration) -> Option<Frame> {
-        let deadline = Instant::now() + timeout;
+    /// arrives, if the connection closed, or as [`ViewClient::read_non_status`]
+    /// does.
+    async fn read_part(&mut self, deadline: Instant, waiting_for: &str) -> Frame {
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.read_non_status(remaining).await? {
-                DaemonMessage::Frame(frame) => return Some(frame),
-                DaemonMessage::Exit { .. } => continue,
+            match self.read_non_status(deadline, waiting_for).await {
+                Some(DaemonMessage::Frame(frame)) => return frame,
+                Some(DaemonMessage::Exit { .. }) => continue,
                 other => panic!("expected a frame part, got {other:?}"),
             }
         }
@@ -202,38 +213,23 @@ impl ViewClient {
     ///
     /// # Panics
     ///
-    /// Panics if nothing arrives within `timeout`, or a part breaks a wire rule.
-    pub async fn next_complete_frame(&mut self, timeout: Duration) -> Vec<Frame> {
-        self.try_next_complete_frame(timeout)
+    /// Panics if the frame has not completed within [`HANG_GUARD`], or a part
+    /// breaks a wire rule.
+    pub async fn next_complete_frame(&mut self) -> Vec<Frame> {
+        self.complete_frame_until(Instant::now() + HANG_GUARD, "a frame")
             .await
-            .unwrap_or_else(|| {
-                panic!(
-                    "no frame within {timeout:?}; the grid shows\n{}",
-                    self.grid.dump()
-                )
-            })
     }
 
-    /// [`ViewClient::next_complete_frame`], but `None` when the first part
-    /// does not arrive within `timeout`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a frame began but its last part did not arrive within
-    /// `ATTACH_TIMEOUT`, or a part breaks a wire rule.
-    pub async fn try_next_complete_frame(&mut self, timeout: Duration) -> Option<Vec<Frame>> {
-        let first = self.read_part(timeout).await?;
+    async fn complete_frame_until(&mut self, deadline: Instant, waiting_for: &str) -> Vec<Frame> {
         let mut parts = Vec::new();
-        let mut complete = self.apply_part(&first);
-        parts.push(first);
-        while !complete {
-            let part = self.read_part(ATTACH_TIMEOUT).await.unwrap_or_else(|| {
-                panic!("a frame began but its last part never came");
-            });
-            complete = self.apply_part(&part);
+        loop {
+            let part = self.read_part(deadline, waiting_for).await;
+            let complete = self.apply_part(&part);
             parts.push(part);
+            if complete {
+                return parts;
+            }
         }
-        Some(parts)
     }
 
     /// Acknowledges frame `seq`.
@@ -275,25 +271,14 @@ impl ViewClient {
     /// # Panics
     ///
     /// Panics, with `what` and the grid, if `done` does not hold within
-    /// `timeout`.
-    pub async fn pump_until(
-        &mut self,
-        what: &str,
-        timeout: Duration,
-        mut done: impl FnMut(&Grid) -> bool,
-    ) {
-        let deadline = Instant::now() + timeout;
+    /// [`HANG_GUARD`].
+    pub async fn pump_until(&mut self, what: &str, mut done: impl FnMut(&Grid) -> bool) {
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if done(&self.grid) {
                 return;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let Some(parts) = self.try_next_complete_frame(remaining).await else {
-                panic!(
-                    "gave up waiting for {what} after {timeout:?}; the grid shows\n{}",
-                    self.grid.dump()
-                );
-            };
+            let parts = self.complete_frame_until(deadline, what).await;
             if let Some(last) = parts.last() {
                 self.ack(last.seq).await;
             }
@@ -309,10 +294,9 @@ impl ViewClient {
     /// Panics if the pong does not come, or anything unexpected arrives.
     pub async fn sync(&mut self) {
         self.send(&ClientMessage::Ping).await;
-        let deadline = Instant::now() + ATTACH_TIMEOUT;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.read_non_status(remaining).await {
+            match self.read_non_status(deadline, "the pong").await {
                 Some(DaemonMessage::Pong) => return,
                 Some(DaemonMessage::Exit { .. }) => continue,
                 Some(DaemonMessage::Frame(frame)) => {
@@ -336,10 +320,9 @@ impl ViewClient {
     /// arrives.
     pub async fn copy_selection(&mut self) -> Option<String> {
         self.send(&ClientMessage::CopySelection).await;
-        let deadline = Instant::now() + ATTACH_TIMEOUT;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.read_non_status(remaining).await {
+            match self.read_non_status(deadline, "selection_text").await {
                 Some(DaemonMessage::SelectionText { text }) => return text,
                 Some(DaemonMessage::Exit { .. }) => continue,
                 Some(DaemonMessage::Frame(frame)) => {
@@ -353,29 +336,28 @@ impl ViewClient {
         }
     }
 
-    /// Asserts that no frame arrives: a `Ping` is answered (everything the
-    /// daemon had ready before it has been sent by then), and nothing more
-    /// follows within `grace`.
+    /// Asserts that no frame comes before the answer to a `Ping`: the daemon
+    /// queues the `pong` after the frames for everything this attached
+    /// window's feeder had received when it reached the ping (see
+    /// [`ClientMessage::Ping`]), so a frame that is due comes first. What
+    /// follows the pong is left unread.
     ///
     /// # Panics
     ///
-    /// Panics if a frame part, or anything but the pong, arrives.
-    pub async fn assert_no_frame(&mut self, why: &str, grace: Duration) {
+    /// Panics if a frame part, or anything but the pong or a pushed exit,
+    /// arrives before the pong.
+    pub async fn assert_no_frame(&mut self, why: &str) {
         self.send(&ClientMessage::Ping).await;
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
-            match self.read_non_status(ATTACH_TIMEOUT).await {
-                Some(DaemonMessage::Pong) => break,
+            match self.read_non_status(deadline, "the pong").await {
+                Some(DaemonMessage::Pong) => return,
                 Some(DaemonMessage::Exit { .. }) => continue,
                 Some(DaemonMessage::Frame(frame)) => {
                     panic!("a frame (seq {}) arrived but {why}", frame.seq)
                 }
                 other => panic!("expected the pong, got {other:?}"),
             }
-        }
-        if let Some(message) = self.read_non_status(grace).await
-            && !matches!(message, DaemonMessage::Exit { .. })
-        {
-            panic!("{message:?} arrived after the pong but {why}");
         }
     }
 }

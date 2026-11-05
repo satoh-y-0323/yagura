@@ -18,7 +18,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{
     Harness, approver_base_config, expect_error, identify, read_response, register_approver, send,
@@ -166,7 +165,7 @@ async fn close_window(closer: &mut Connection, window_id: &str) {
         },
     )
     .await;
-    match read_response(closer, Duration::from_secs(10)).await {
+    match read_response(closer).await {
         DaemonMessage::WindowClosed { window_id: closed } => assert_eq!(closed, window_id),
         other => panic!("expected window_closed, got {other:?}"),
     }
@@ -175,32 +174,30 @@ async fn close_window(closer: &mut Connection, window_id: &str) {
 /// Reads the next *response* frame, skipping `plan_changed` pushes the same
 /// way `ipc_plan.rs`'s own helper does: a connection that is also a
 /// registered approver may be pushed to while its own request is in flight.
-async fn read_ledger_reply(client: &mut Connection, timeout: Duration) -> DaemonMessage {
-    let deadline = tokio::time::Instant::now() + timeout;
+async fn read_ledger_reply(client: &mut Connection) -> DaemonMessage {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for a reply");
-        let frame = read_response(client, remaining).await;
+        let frame = read_response(client).await;
         if !matches!(frame, DaemonMessage::PlanChanged { .. }) {
             return frame;
         }
     }
 }
 
-/// Asserts no frame (a reply or a push, `plan_changed` included) arrives on
-/// `client` within `wait`. Reads the raw next frame via `read_response`
-/// rather than `read_ledger_reply`: the latter's own `plan_changed`-skipping
-/// loop would keep waiting past a `plan_changed` push instead of surfacing
-/// it, which would make this assertion pass even when one arrived. The
-/// inner read is given a much longer timeout than `wait` so the outer race
-/// is decided by `wait`, not by the inner call's own panic-on-timeout.
-async fn expect_no_message_within(client: &mut Connection, wait: Duration) {
-    let outcome = tokio::time::timeout(wait, read_response(client, Duration::from_secs(30))).await;
-    assert!(
-        outcome.is_err(),
-        "expected no message to arrive within {wait:?}, but got {:?}",
-        outcome.ok()
-    );
+/// Sends a `Ping` on `client` and returns every message read ahead of its
+/// `Pong`, `plan_changed` pushes included: a connection serves one frame at a
+/// time, so whatever a request it handled earlier queued comes first.
+async fn messages_before_pong(client: &mut Connection) -> Vec<DaemonMessage> {
+    send(client, &ClientMessage::Ping).await;
+    let mut seen = Vec::new();
+    loop {
+        match read_response(client).await {
+            DaemonMessage::Pong => return seen,
+            other => seen.push(other),
+        }
+    }
 }
 
 // --- wire round trips ----------------------------------------------------
@@ -219,7 +216,7 @@ async fn create_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn update_plan(
@@ -236,7 +233,7 @@ async fn update_plan(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -247,12 +244,12 @@ async fn get_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn list_plans(client: &mut Connection) -> DaemonMessage {
     send(client, &ClientMessage::ListPlans).await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
@@ -263,7 +260,7 @@ async fn delete_plan(client: &mut Connection, plan_id: &str) -> DaemonMessage {
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn set_task_assignment(
@@ -281,7 +278,7 @@ async fn set_task_assignment(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn clear_task_assignment(
@@ -297,7 +294,7 @@ async fn clear_task_assignment(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn set_plan_owner(client: &mut Connection, plan_id: &str, window_id: &str) -> DaemonMessage {
@@ -309,12 +306,12 @@ async fn set_plan_owner(client: &mut Connection, plan_id: &str, window_id: &str)
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn list_roles(client: &mut Connection) -> DaemonMessage {
     send(client, &ClientMessage::ListRoles).await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn save_roles(client: &mut Connection, roles: Vec<RoleEntry>) -> DaemonMessage {
@@ -326,7 +323,7 @@ async fn save_roles(client: &mut Connection, roles: Vec<RoleEntry>) -> DaemonMes
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(5)).await
+    read_ledger_reply(client).await
 }
 
 async fn open_task_window(
@@ -344,7 +341,7 @@ async fn open_task_window(
         },
     )
     .await;
-    read_ledger_reply(client, Duration::from_secs(10)).await
+    read_ledger_reply(client).await
 }
 
 fn expect_plan_detail(msg: DaemonMessage) -> PlanInfo {
@@ -902,8 +899,7 @@ async fn open_task_window_success_launches_the_resolved_assignment_and_binds_the
         Some("assign-profile")
     );
 
-    h.wait_for_scrollback(&window_id, b"<<argv[2]=fast>>", Duration::from_secs(10))
-        .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=fast>>").await;
     assert!(
         common::contains_subsequence(&h.scrollback(&window_id), b"<<argv[4]=tier=high>>"),
         "the effort option must reach the child argv too"
@@ -1115,8 +1111,7 @@ async fn reopening_a_task_is_refused_while_its_window_is_alive_and_allowed_once_
     let (_, _, window_3, _) = expect_task_window_opened(
         open_task_window(&mut owner, &plan.plan_id, "self-exiting", None).await,
     );
-    h.wait_until_child_exited(&window_3, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&window_3).await;
     let (_, _, window_4, _) = expect_task_window_opened(
         open_task_window(&mut owner, &plan.plan_id, "self-exiting", None).await,
     );
@@ -1169,12 +1164,8 @@ async fn open_task_window_uses_the_operator_override_over_the_planning_windows_p
         assignment.assignment.as_ref().map(|a| a.profile.as_str()),
         Some("profile-b")
     );
-    h.wait_for_scrollback(
-        &window_id,
-        b"<<argv[2]=override-model>>",
-        Duration::from_secs(10),
-    )
-    .await;
+    h.wait_for_scrollback(&window_id, b"<<argv[2]=override-model>>")
+        .await;
     assert!(
         common::contains_subsequence(&h.scrollback(&window_id), b"<<argv[1]=--via-b>>"),
         "the override's own flag must reach the child argv"
@@ -1294,8 +1285,7 @@ async fn a_failed_binding_write_leaves_the_opened_window_dead_and_the_task_unbou
          diagnosed, but must not leave a second one behind on retry"
     );
     let orphan_id = new_windows[0].window_id.clone();
-    h.wait_until_child_exited(&orphan_id, Duration::from_secs(10))
-        .await;
+    h.wait_until_child_exited(&orphan_id).await;
 
     let detail = expect_plan_detail(get_plan(&mut owner, &plan.plan_id).await);
     assert_eq!(
@@ -1374,8 +1364,8 @@ async fn two_concurrent_opens_of_the_same_task_produce_exactly_one_success() {
     )
     .await;
 
-    let reply_a = read_ledger_reply(&mut owner_a, Duration::from_secs(10)).await;
-    let reply_a2 = read_ledger_reply(&mut owner_a2, Duration::from_secs(10)).await;
+    let reply_a = read_ledger_reply(&mut owner_a).await;
+    let reply_a2 = read_ledger_reply(&mut owner_a2).await;
 
     let opened = [&reply_a, &reply_a2]
         .into_iter()
@@ -1454,7 +1444,7 @@ async fn every_structural_assignment_change_pushes_plan_changed() {
 }
 
 async fn expect_plan_changed(client: &mut Connection, plan_id: &str) {
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::PlanChanged { plan_id: pushed } => assert_eq!(pushed, plan_id),
         other => panic!("expected plan_changed, got {other:?}"),
     }
@@ -1488,13 +1478,25 @@ async fn saving_roles_never_pushes_plan_changed() {
     )
     .await;
 
-    expect_no_message_within(&mut watcher, Duration::from_millis(300)).await;
+    // `save_roles` is answered from inside `actor`'s handler; once `actor`
+    // answers a later `Ping`, anything that handler pushed is queued on
+    // `watcher` ahead of `watcher`'s own `Pong`.
+    messages_before_pong(&mut actor).await;
+    let pushed = messages_before_pong(&mut watcher).await;
+    assert!(
+        pushed.is_empty(),
+        "saving roles must push nothing, got {pushed:?}"
+    );
 }
 
-// --- a held plan lock delays every operator write ----------------------
+// --- an operator write takes the daemon's own lock for its plan ----------
 
+/// A write needs a permit only a `PlanGuard` issues (`plan_permit`), and
+/// `plan_permit.rs` shows a held guard keeps a second one out. What is left
+/// is that the handler draws its guard from the daemon's lock table: the
+/// table's entry for the plan, removed beforehand, is back once it answers.
 #[tokio::test]
-async fn a_held_plan_lock_delays_every_operator_write() {
+async fn an_operator_write_takes_its_plans_lock_from_the_daemons_lock_table() {
     let dir = unique_temp_dir("plan-assign-lock-delays-operator");
     let profiles_dir = dir.join("profiles");
     std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
@@ -1515,23 +1517,26 @@ async fn a_held_plan_lock_delays_every_operator_write() {
     .await;
     let mut approver = approver_connection(&h).await;
 
-    let held = locks.lock(&plan.plan_id).await;
-    send(
-        &mut approver,
-        &ClientMessage::SetTaskAssignment {
-            plan_id: plan.plan_id.clone(),
-            task_id: "t1".to_string(),
-            assignment: TaskAssignment {
+    locks.remove(&plan.plan_id);
+    assert_eq!(locks.len(), 0, "no other plan holds an entry");
+    expect_plan_detail(
+        set_task_assignment(
+            &mut approver,
+            &plan.plan_id,
+            "t1",
+            TaskAssignment {
                 profile: "assign-profile".to_string(),
                 model: None,
                 effort: None,
             },
-        },
-    )
-    .await;
-    expect_no_message_within(&mut approver, Duration::from_millis(300)).await;
-    drop(held);
-    expect_plan_detail(read_ledger_reply(&mut approver, Duration::from_secs(10)).await);
+        )
+        .await,
+    );
+    assert_eq!(
+        locks.len(),
+        1,
+        "the write must have locked its plan through the daemon's lock table"
+    );
 }
 
 // --- a nomination target's liveness is re-checked inside the lock -------
@@ -1565,13 +1570,14 @@ async fn a_nomination_targets_liveness_is_checked_inside_the_held_lock() {
         },
     )
     .await;
-    expect_no_message_within(&mut approver, Duration::from_millis(300)).await;
 
+    // Whenever the request reaches the lock, it is granted only after the
+    // close: `issue_nominate` reads the candidate's liveness with the guard in hand.
     let mut closer = approver_connection(&h).await;
     close_window(&mut closer, &candidate).await;
 
     drop(held);
-    let reply = read_ledger_reply(&mut approver, Duration::from_secs(10)).await;
+    let reply = read_ledger_reply(&mut approver).await;
     expect_error(reply, "invalid_state");
 
     let unchanged = expect_plan_detail(get_plan(&mut closer, &plan.plan_id).await);

@@ -74,42 +74,29 @@ fn config_with_daemon_confirm(dir: &Path, daemon_confirm_ms: u64) -> DaemonConfi
     }
 }
 
-/// Samples `entry.current_status()` over the whole `observation` window and
-/// panics on the first sample that is not `Unknown`, so a real (non-vacuous)
-/// transition away from `Unknown` is caught at the moment it happens rather
-/// than only at the end of the window.
-async fn assert_stays_unknown(registry: &WindowRegistry, window_id: &str, observation: Duration) {
-    let deadline = tokio::time::Instant::now() + observation;
-    loop {
-        let entry = registry.get(window_id).expect("window must exist");
-        assert_eq!(
-            entry.current_status(),
-            WindowStatus::Unknown,
-            "window {window_id} must stay Unknown for the whole observation window: a \
-             definition whose input.submit_delay_ms does not outlast the effective \
-             confirm_ms must be treated as a load failure, same as an unparseable one"
-        );
-        if tokio::time::Instant::now() >= deadline {
-            return;
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
+/// Asserts that `window_id` runs no detection definition: the engine it was
+/// given has no rule to leave `Unknown` with, so it stays `Unknown` whatever
+/// the window prints (the engine's own
+/// `missing_definition_keeps_confirmed_status_unknown`).
+fn assert_runs_no_definition(registry: &WindowRegistry, window_id: &str) {
+    let entry = registry.get(window_id).expect("window must exist");
+    assert_eq!(
+        entry.detection_definition(),
+        None,
+        "window {window_id} must run no definition: a definition whose \
+         input.submit_delay_ms does not outlast the effective confirm_ms must be treated \
+         as a load failure, same as an unparseable one"
+    );
+    assert_eq!(entry.current_status(), WindowStatus::Unknown);
 }
 
-/// Polls `entry.current_status()` until it reports `target` and returns the
-/// elapsed time.
-async fn wait_for_status(
-    registry: &WindowRegistry,
-    window_id: &str,
-    target: WindowStatus,
-    timeout: Duration,
-) -> Duration {
-    let start = tokio::time::Instant::now();
-    let deadline = start + timeout;
+/// Polls `entry.current_status()` until it reports `target`.
+async fn wait_for_status(registry: &WindowRegistry, window_id: &str, target: WindowStatus) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         let entry = registry.get(window_id).expect("window must exist");
         if entry.current_status() == target {
-            return start.elapsed();
+            return;
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
@@ -148,15 +135,17 @@ async fn a_definition_without_debounce_reaches_waiting_input_when_the_daemon_def
         opened.detection_warning
     );
 
+    assert!(
+        registry
+            .get(&opened.window_id)
+            .expect("window must exist")
+            .detection_definition()
+            .is_some(),
+        "the definition loads, so the window runs it"
+    );
+
     common::write_window_input(&registry, &opened.window_id, MARKER_LINE).await;
-    let elapsed = wait_for_status(
-        &registry,
-        &opened.window_id,
-        WindowStatus::WaitingInput,
-        Duration::from_secs(10),
-    )
-    .await;
-    println!("contrast case measured transition time: {elapsed:?}");
+    wait_for_status(&registry, &opened.window_id, WindowStatus::WaitingInput).await;
 }
 
 /// The failing case: the daemon's own `confirm_ms`
@@ -207,6 +196,5 @@ async fn a_definition_without_debounce_stays_unknown_when_the_daemon_default_con
          instead), got: {warning}"
     );
 
-    common::write_window_input(&registry, &opened.window_id, MARKER_LINE).await;
-    assert_stays_unknown(&registry, &opened.window_id, Duration::from_secs(2)).await;
+    assert_runs_no_definition(&registry, &opened.window_id);
 }

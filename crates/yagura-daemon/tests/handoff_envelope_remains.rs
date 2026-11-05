@@ -10,18 +10,14 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::{
-    Harness, call_list_windows, call_send_handoff_from_profile_within, empty_lookup,
-    expect_handoff_sent, handoff_profile_config, policy, unique_temp_dir, write_profile,
+    Harness, call_list_windows, call_send_handoff_from_profile, empty_lookup, expect_handoff_sent,
+    handoff_profile_config, identify, policy, unique_temp_dir, write_profile,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::DaemonMessage;
 use yagura_test_support::process;
-
-/// Upper bound on a `handoff_sent` reply: a profile launch.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A config resolving profiles from `profiles_dir` against `detection_dir`,
 /// with `send_handoff` auto-approved so no approver connection is needed.
@@ -83,17 +79,14 @@ async fn a_window_that_took_its_envelope_at_launch_stays_open_after_the_requeste
         profile_config(profiles_dir, &detection_dir),
     )
     .await;
+    // Identified as a window of its own, so the daemon's having finished with
+    // the requester's connection is observable.
+    let requester_window = h.open(process::echo_child_command(), None).await;
     let mut requester = h.connect().await;
-    let reply = call_send_handoff_from_profile_within(
-        &mut requester,
-        "launch",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-        REPLY_TIMEOUT,
-    )
-    .await;
+    identify(&mut requester, &requester_window).await;
+    let reply =
+        call_send_handoff_from_profile(&mut requester, "launch", None, None, "src/foo.rs", "look")
+            .await;
     let (window_id, opened, delivery) = expect_handoff_sent(reply);
     assert!(opened);
     assert_eq!(
@@ -101,6 +94,7 @@ async fn a_window_that_took_its_envelope_at_launch_stays_open_after_the_requeste
         "taken"
     );
     drop(requester);
+    common::wait_until_no_connection_claims(&h.registry, &requester_window).await;
 
     // A later connection's view: the requester's departure tore nothing down.
     let mut observer = h.connect().await;
@@ -144,22 +138,35 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
     )
     .await;
     let mut requester = h.connect().await;
-    let reply = call_send_handoff_from_profile_within(
-        &mut requester,
-        "drawn",
-        None,
-        None,
-        "src/foo.rs",
-        "look",
-        REPLY_TIMEOUT,
-    )
-    .await;
+    let reply =
+        call_send_handoff_from_profile(&mut requester, "drawn", None, None, "src/foo.rs", "look")
+            .await;
     assert!(
         matches!(reply, DaemonMessage::Error { .. }),
         "a profile with no launch prompt cannot be handed the envelope, got {reply:?}"
     );
-    assert!(
-        call_list_windows(&mut requester).await.is_empty(),
+    // The registry numbers every open it starts in turn, a failed one
+    // included: an open started after the refusal is the first, so the
+    // refusal started none, not even one still on its way.
+    let control = h.open(process::echo_child_command(), None).await;
+    assert_eq!(
+        open_number(&control),
+        1,
         "nothing starts for a handoff that cannot be handed over"
     );
+    assert_eq!(
+        call_list_windows(&mut requester).await.len(),
+        1,
+        "only the control window is open"
+    );
+}
+
+/// The number in a window id (`w<n>-<boot>`): the registry numbers every
+/// open it starts in turn, a failed one included.
+fn open_number(window_id: &str) -> u64 {
+    window_id
+        .strip_prefix('w')
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
 }

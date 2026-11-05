@@ -5647,6 +5647,7 @@ dependencies = [
  "windows 0.52.0",
  "yagura-build-support",
  "yagura-daemon",
+ "yagura-holder",
  "yagura-os",
  "yagura-protocol",
  "yagura-test-support",
@@ -5731,9 +5732,11 @@ dependencies = [
 name = "yagura-test-support"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "serde_json",
  "tokio",
  "toml 0.8.2",
+ "windows 0.52.0",
  "yagura-os",
  "yagura-protocol",
 ]

@@ -8,11 +8,13 @@
 //! Both are driven through a real `Harness` over a real IPC endpoint. The
 //! mark is produced the way it happens in use: a window launched with hooks
 //! whose screen shows a running turn for the grace time without one report.
+//! The grace is passed on the test's clock once both children have shown all
+//! they will; its length and the mark's other rules are measured on a paused
+//! clock in `detector_report_gap.rs`.
 
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::docs::read_doc_verbatim;
 use common::{
@@ -21,7 +23,6 @@ use common::{
     wait_until_status, write_profile,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::engine::REPORT_GAP_GRACE;
 use yagura_daemon::profile::ProfileOs;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, McpRegistrationEntry, McpRegistrationRow, WindowInfo,
@@ -78,7 +79,7 @@ async fn open_from_profile(client: &mut Connection, profile: &str) -> String {
         },
     )
     .await;
-    match read_response(client, Duration::from_secs(5)).await {
+    match read_response(client).await {
         DaemonMessage::WindowOpened { window_id, .. } => window_id,
         other => panic!("expected window_opened, got {other:?}"),
     }
@@ -125,49 +126,23 @@ async fn list_windows_marks_only_the_window_whose_expected_reports_never_came() 
     let hooked = open_from_profile(&mut client, "hooked").await;
     let plain = open_from_profile(&mut client, "plain").await;
     for id in [&hooked, &plain] {
-        wait_until_status(
-            &mut client,
-            id,
-            WindowStatus::Running,
-            Duration::from_secs(10),
-        )
-        .await;
+        wait_until_status(&mut client, id, WindowStatus::Running).await;
     }
 
-    // Inside the grace nothing is missing yet, for either window.
+    // Both children printed their only line and now wait for input, so nothing
+    // is on its way: every clock bound, the grace among them, can run out.
+    common::let_every_clock_bound_run_out().await;
+
     assert_eq!(
         listed(&mut client, &hooked).await.status_reports_missing,
-        Some(false)
+        Some(true),
+        "a window launched with hooks that showed a running turn past the grace without a \
+         report must be listed with status_reports_missing = Some(true)"
     );
     assert_eq!(
         listed(&mut client, &plain).await.status_reports_missing,
-        Some(false)
-    );
-
-    let deadline = tokio::time::Instant::now() + REPORT_GAP_GRACE + Duration::from_secs(15);
-    loop {
-        if listed(&mut client, &hooked).await.status_reports_missing == Some(true) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "a window launched with hooks that showed a running turn past the grace without a \
-             report must be listed with status_reports_missing = Some(true)"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    let hooked_info = listed(&mut client, &hooked).await;
-    let plain_info = listed(&mut client, &plain).await;
-    assert_eq!(
-        plain_info.status_reports_missing,
         Some(false),
         "a window not launched with hooks expects no reports, so it is never marked"
-    );
-    assert_eq!(
-        hooked_info.status,
-        WindowStatus::Running,
-        "the mark never changes the confirmed status"
     );
 }
 
@@ -233,7 +208,7 @@ async fn listed_rows(tag: &str, profiles: &[&str]) -> Vec<McpRegistrationRow> {
         &ClientMessage::ListMcpRegistrations { request_id: 1 },
     )
     .await;
-    match read_response(&mut client, Duration::from_secs(20)).await {
+    match read_response(&mut client).await {
         DaemonMessage::McpRegistrationsListed { rows, .. } => rows,
         other => panic!("expected mcp_registrations_listed, got {other:?}"),
     }

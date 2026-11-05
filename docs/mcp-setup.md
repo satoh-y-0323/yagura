@@ -972,6 +972,8 @@ Terminate the window and its whole process tree, then release the PTY. On Window
 
 Closing an already-`exited` window succeeds idempotently (grandchildren may still be running even after the direct child has exited).
 
+When the call returns and the daemon has observed the child's exit, the window already reports `exited` to every later read (`list_windows`, `get_window_status`, status events). If the exit was not observed within the grace period, the window keeps its current status until the exit is reported.
+
 ### wait_for_status
 
 Block until the window reaches `target_status`, or until `timeout_sec` elapses, or until the outcome can be determined never to occur. This is a non-destructive, read-only wait and is not subject to the approval gate.

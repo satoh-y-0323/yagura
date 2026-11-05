@@ -57,12 +57,9 @@ impl TempFile {
 /// and any other window id reads as "somebody else's window".
 const TARGET: &str = "w1-abc";
 
-/// The probe a window whose definition names one brings to the gate.
-const PROBE: char = 'x';
-
 /// A window that takes a judged write: its definition declares a composer and
 /// a probe.
-const JUDGED: ComposerAccess = ComposerAccess::Judged { probe: PROBE };
+const JUDGED: ComposerAccess = ComposerAccess::Judged;
 
 /// Every value a window's composer access can take.
 const ALL_ACCESS: [ComposerAccess; 3] = [ComposerAccess::Absent, ComposerAccess::RawOnly, JUDGED];
@@ -703,7 +700,7 @@ fn expected_verdict(
     }
     // 2. composer gate: a judged write needs a probe, an unjudged one only a
     //    composer, and a handoff is always judged.
-    let judged = matches!(access, ComposerAccess::Judged { .. });
+    let judged = matches!(access, ComposerAccess::Judged);
     let refused = match tool {
         DestructiveTool::SendHandoff => !judged,
         DestructiveTool::SendMessage => match write {

@@ -3,12 +3,9 @@
 
 //! A window's pseudoconsole host process is reaped on every end of the window:
 //! `close_window`, the child exiting on its own, and `close_window` while the
-//! child floods output. The host is a sibling direct child of the daemon, not a
-//! descendant of the target command, so it needs its own teardown.
-//!
-//! A host is told apart by a before/after diff of this process's host
-//! children. The tests in this file take one lock, and no other test shares
-//! the binary, so no other window opens inside that diff.
+//! child floods output. The host is a child of the window's `yagura-holder`
+//! beside the target command, not a descendant of it, so it needs its own
+//! teardown.
 
 mod common;
 
@@ -37,22 +34,35 @@ async fn open_window(command: Vec<String>) -> (Arc<WindowRegistry>, String) {
     (registry, window_id)
 }
 
-/// Opens a long-lived window, waits for its host to appear, closes the window
+/// The pseudoconsole hosts of the window whose child is `child_pid`; a window
+/// that opened has one.
+fn window_host_pids(child_pid: u32) -> Vec<u32> {
+    let hosts: Vec<u32> = common::window_pty_hosts(child_pid)
+        .into_iter()
+        .map(|row| row.pid)
+        .collect();
+    assert!(
+        !hosts.is_empty(),
+        "an open window must have a pseudoconsole host under its holder"
+    );
+    hosts
+}
+
+/// Opens a long-lived window, finds its host, closes the window
 /// and waits for that host to be gone.
 async fn open_and_close_one_window() {
-    let before = common::pty_host_child_pids();
     let (registry, window_id) = open_window(common::sleepy_command("30")).await;
     let entry = registry
         .get(&window_id)
         .expect("window must exist in registry");
 
-    let host_pids = common::wait_for_new_pty_host_pids(&before, Duration::from_secs(10)).await;
+    let host_pids = window_host_pids(entry.session().child_process_id());
 
     yagura_daemon::control::close_window(&entry, false, Duration::from_secs(5))
         .await
         .expect("close_window should not error");
 
-    common::wait_processes_gone(&host_pids, Duration::from_secs(10)).await;
+    common::wait_processes_gone(&host_pids).await;
 }
 
 #[tokio::test]
@@ -76,15 +86,14 @@ async fn repeated_open_close_does_not_accumulate_pty_host_processes() {
 #[tokio::test]
 async fn pty_host_is_reaped_when_the_child_exits_on_its_own() {
     let _serial = SERIAL.lock().await;
-    let before = common::pty_host_child_pids();
     let (registry, window_id) = open_window(common::sleepy_command("3")).await;
     let entry = registry
         .get(&window_id)
         .expect("window must exist in registry");
 
-    let host_pids = common::wait_for_new_pty_host_pids(&before, Duration::from_secs(10)).await;
+    let host_pids = window_host_pids(entry.session().child_process_id());
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.session().exit_status().is_none() {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -93,7 +102,7 @@ async fn pty_host_is_reaped_when_the_child_exits_on_its_own() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    common::wait_processes_gone(&host_pids, Duration::from_secs(10)).await;
+    common::wait_processes_gone(&host_pids).await;
 }
 
 /// The grandchild's PID: the `capture_child` heartbeat's `tick` process, a
@@ -113,7 +122,6 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
     let tmp = yagura_test_support::paths::TempDir::new("yagura-teardown-pty-host", "flood");
     let tick_path = tmp.path().join("tick.log");
 
-    let before = common::pty_host_child_pids();
     let command = vec![
         yagura_test_support::process::capture_child_path()
             .to_str()
@@ -131,10 +139,10 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
         .get(&window_id)
         .expect("window must exist in registry");
 
-    let host_pids = common::wait_for_new_pty_host_pids(&before, Duration::from_secs(10)).await;
-    common::wait_until_file_grows(Path::new(&tick_path), Duration::from_secs(10)).await;
+    let host_pids = window_host_pids(entry.session().child_process_id());
+    yagura_test_support::process::wait_until_file_grows(Path::new(&tick_path)).await;
 
-    let flood_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let flood_deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     while entry.session().captured_output().is_empty() {
         assert!(
             tokio::time::Instant::now() < flood_deadline,
@@ -151,7 +159,7 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
     );
 
     tokio::time::timeout(
-        Duration::from_secs(15),
+        yagura_test_support::HANG_GUARD,
         yagura_daemon::control::close_window(&entry, false, Duration::from_secs(5)),
     )
     .await
@@ -161,5 +169,5 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
     let mut all = host_pids;
     all.push(child_pid);
     all.extend(grandchildren);
-    common::wait_processes_gone(&all, Duration::from_secs(10)).await;
+    common::wait_processes_gone(&all).await;
 }

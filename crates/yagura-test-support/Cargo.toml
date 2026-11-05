@@ -15,6 +15,13 @@ yagura-protocol = { path = "../yagura-protocol" }
 serde_json.workspace = true
 tokio.workspace = true
 
+# What the wait on a process id probes a process with.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true
 

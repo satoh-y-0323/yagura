@@ -1,27 +1,29 @@
 //! The holder's core: the child on its terminal, the output kept for it, and
 //! the one daemon connected at a time.
 
-use std::io::{Read, Write};
+use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn, PtySpawnError};
 use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup};
 use yagura_protocol::holder::{
-    HOLDER_PROTOCOL, HolderEnvOp, HolderExit, HolderFrame, HolderLaunch, HolderRecord,
-    HolderSpawnFailure, MAX_HELLO_DEADLINE_MS, encode_holder_frame,
+    HolderEnvOp, HolderExit, HolderFrame, HolderLaunch, HolderSpawnFailure, MAX_HELLO_DEADLINE_MS,
 };
 use yagura_protocol::window_size_within_limit;
 
-use crate::buffer::OutputState;
-use crate::endpoint::{self, Place};
+use crate::buffer::{OutputState, PtyReader};
+use crate::conn::{Conn, Reply, Welcome};
+use crate::endpoint::Place;
 use crate::peer::{self, Accepted};
-use crate::record;
+use crate::record::{self, RecordFile};
+
+pub(crate) use provisional::{ExitKept, Provisional};
 
 /// How long the output is still read after the child's exit, for an end of
 /// output that may never come (something else keeping the terminal open).
@@ -30,12 +32,6 @@ const POST_EXIT_DRAIN: Duration = Duration::from_secs(2);
 /// How long the child has to act on the first, refusable kill before the OS
 /// boundary forces it down (a no-op on Windows, whose kill cannot be refused).
 const TERMINATE_ESCALATION_GRACE: Duration = Duration::from_millis(250);
-
-/// Bytes the reader takes from the terminal at a time.
-const READ_CHUNK: usize = 8192;
-
-/// The most output one `Output` frame carries.
-const OUTPUT_FRAME_BYTES: u64 = 64 * 1024;
 
 /// The longest the holder waits, on its way out, for its last frames to be
 /// taken by a daemon that stopped reading.
@@ -73,90 +69,11 @@ impl Shared {
     }
 }
 
-enum Event {
+pub(crate) enum Event {
     Accepted(Accepted),
     Frame { conn: u64, frame: HolderFrame },
     Closed { conn: u64 },
     WriteDone { conn: u64, id: u64, written: bool },
-}
-
-/// The connected daemon.
-struct Conn {
-    id: u64,
-    out: mpsc::UnboundedSender<Vec<u8>>,
-    writer: JoinHandle<()>,
-    reader: JoinHandle<()>,
-    /// The end of the replay this connection was offered in its `Welcome`.
-    replay_end: u64,
-    /// How far output has been sent; `None` until the daemon asks for the replay.
-    sent: Option<u64>,
-}
-
-impl Conn {
-    fn open(
-        accepted: Accepted,
-        id: u64,
-        replay_end: u64,
-        events: mpsc::UnboundedSender<Event>,
-    ) -> Self {
-        let (mut read, mut write) = tokio::io::split(accepted.connection);
-        let (out, mut outgoing) = mpsc::unbounded_channel::<Vec<u8>>();
-        let writer = tokio::spawn(async move {
-            while let Some(bytes) = outgoing.recv().await {
-                if write.write_all(&bytes).await.is_err() {
-                    return;
-                }
-            }
-            let _ = write.shutdown().await;
-        });
-        let mut frames = accepted.frames;
-        let reader = tokio::spawn(async move {
-            let mut chunk = vec![0u8; 64 * 1024];
-            loop {
-                loop {
-                    match frames.next_frame() {
-                        Ok(Some(frame)) => {
-                            if events.send(Event::Frame { conn: id, frame }).is_err() {
-                                return;
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(_) => {
-                            let _ = events.send(Event::Closed { conn: id });
-                            return;
-                        }
-                    }
-                }
-                match read.read(&mut chunk).await {
-                    Ok(0) | Err(_) => {
-                        let _ = events.send(Event::Closed { conn: id });
-                        return;
-                    }
-                    Ok(read) => frames.push(&chunk[..read]),
-                }
-            }
-        });
-        Self {
-            id,
-            out,
-            writer,
-            reader,
-            replay_end,
-            sent: None,
-        }
-    }
-
-    fn send(&self, frame: &HolderFrame) {
-        let _ = self.out.send(encode_holder_frame(frame));
-    }
-
-    /// Stops reading and closes the connection once what was sent so far is
-    /// written; returns the task doing that.
-    fn close(self) -> JoinHandle<()> {
-        self.reader.abort();
-        drop(self.out);
-        self.writer
-    }
 }
 
 struct WriteJob {
@@ -175,6 +92,7 @@ struct Child {
     /// `None` once the input has been let go of.
     writes: Option<std::sync::mpsc::Sender<WriteJob>>,
     force_kill_scheduled: bool,
+    tree_end_started: bool,
 }
 
 impl Child {
@@ -192,12 +110,27 @@ impl Child {
                 );
             }
         }
-        if tree && let Err(error) = self.group.terminate() {
-            crate::log(format_args!(
-                "failed to end the child's process tree: {error}"
-            ));
+        if tree && !self.tree_end_started {
+            self.tree_end_started = true;
+            // Ending the tree waits out the escalation grace, which the core
+            // must not do; the exit monitor waits for this same call.
+            let group = Arc::clone(&self.group);
+            let started = spawn_thread("holder-tree", move || end_tree(&group));
+            if let Err(error) = started {
+                crate::log(format_args!("cannot start the tree-ending thread: {error}"));
+            }
         }
         self.writes = None;
+    }
+}
+
+/// Ends the child's process tree, escalating as the group does. Blocks until
+/// the signals are sent, and so until any other caller's call has finished.
+fn end_tree(group: &ProcessGroup) {
+    if let Err(error) = group.terminate() {
+        crate::log(format_args!(
+            "failed to end the child's process tree: {error}"
+        ));
     }
 }
 
@@ -277,7 +210,7 @@ fn spawn_child(
 
     let started = spawn_thread("holder-read", {
         let shared = Arc::clone(shared);
-        move || read_output(&shared, reader)
+        move || read_output(&shared, PtyReader::new(reader))
     })
     .and_then(|()| {
         spawn_thread("holder-exit", {
@@ -287,19 +220,16 @@ fn spawn_child(
             let exited = Arc::clone(&exited);
             move || {
                 // The monitor is the child's only waiter. After the exit the
-                // order is fixed: publish it, end the tree, then close the
-                // terminal so its output can end.
+                // order is fixed: end the tree, close the terminal so its
+                // output can end, then publish the exit. A published exit
+                // therefore means the tree has been ended.
                 let code = child.wait().ok();
                 exited.store(true, Ordering::SeqCst);
+                end_tree(&group);
+                control.close();
                 shared.state().exit = Some(code);
                 shared.wake_reader();
                 shared.core_wake.notify_one();
-                if let Err(error) = group.terminate() {
-                    crate::log(format_args!(
-                        "failed to end the exited child's tree: {error}"
-                    ));
-                }
-                control.close();
             }
         })
     })
@@ -321,28 +251,31 @@ fn spawn_child(
         exited,
         writes: Some(writes),
         force_kill_scheduled: false,
+        tree_end_started: false,
     })
 }
 
 /// Reads the terminal until its output ends, never dropping a byte: when the
 /// kept output is full, or the connected daemon is a window behind, it stops
 /// reading and the child is held up in its write instead.
-fn read_output(shared: &Shared, mut reader: Box<dyn Read + Send>) {
-    let mut buf = vec![0u8; READ_CHUNK];
+fn read_output(shared: &Shared, mut reader: PtyReader) {
     loop {
-        {
+        let permit = {
             let mut state = shared.state();
-            while state.reader_must_wait() {
+            loop {
+                if let Some(permit) = state.read_permit() {
+                    break permit;
+                }
                 state = shared
                     .reader_wake
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             }
-        }
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+        };
+        match reader.read(permit) {
+            Ok([]) | Err(_) => break,
             Ok(read) => {
-                shared.state().buffer.append(&buf[..read]);
+                shared.state().buffer.append(read);
                 shared.core_wake.notify_one();
             }
         }
@@ -369,10 +302,11 @@ fn write_input(
 
 /// A window's holder before its first accepted `Hello`.
 pub(crate) struct Window {
-    pub(crate) window_id: String,
     pub(crate) launch: HolderLaunch,
     pub(crate) place: Place,
-    pub(crate) record: HolderRecord,
+    /// Dropped with the core, after its connection is closed.
+    pub(crate) record: RecordFile,
+    pub(crate) provisional: Provisional,
 }
 
 /// How the holder ended.
@@ -395,8 +329,12 @@ struct Core {
     size: (u16, u16),
     terminating: bool,
     exit_seen: Option<Instant>,
-    exit_reported: bool,
-    provisional: Provisional,
+    /// The exit is settled (in the exit file when one is kept) and no daemon
+    /// is let in any more; `Exited` reaches the connection once it is replayed.
+    exit_recorded: bool,
+    /// The writes handed to the child's input and not yet reported done, in
+    /// the order the input takes them (connection, id).
+    unanswered_writes: VecDeque<(u64, u64)>,
 }
 
 /// Serves the window until the holder is to end.
@@ -415,10 +353,6 @@ pub(crate) async fn serve(
         Duration::from_millis(window.launch.hello_deadline_ms.min(MAX_HELLO_DEADLINE_MS));
     let hello_deadline = Instant::now() + hello_wait;
     let size = (window.launch.cols, window.launch.rows);
-    let provisional = Provisional {
-        end_child_on_disconnect: window.launch.end_child_on_disconnect,
-        discarding: false,
-    };
     let mut core = Core {
         window,
         shared: Arc::new(Shared::default()),
@@ -429,30 +363,33 @@ pub(crate) async fn serve(
         size,
         terminating: false,
         exit_seen: None,
-        exit_reported: false,
-        provisional,
+        exit_recorded: false,
+        unanswered_writes: VecDeque::new(),
     };
     let ending = loop {
         let output_ended = core.shared.state().reader_done;
         if let Some(seen) = core.exit_seen
-            && !core.exit_reported
-            && (output_ended || Instant::now() >= seen + POST_EXIT_DRAIN)
+            && !core.exit_recorded
+            && ((output_ended && core.unanswered_writes.is_empty())
+                || Instant::now() >= seen + POST_EXIT_DRAIN)
         {
-            // The exit file is written while the endpoint is still held, so a
+            // An exit file is written while the endpoint is still held, so a
             // next holder of this window starts only after it and clears it.
-            core.report_exit();
-            Acceptor::stop(&mut acceptor, &core.window.place).await;
+            core.record_exit();
+            core.fail_unanswered_writes();
+            core.send_exited();
+            Acceptor::stop(&mut acceptor).await;
             if core.terminating || core.conn.is_none() {
                 break Ending::ChildExited;
             }
         }
         let drain_deadline = core
             .exit_seen
-            .filter(|_| !core.exit_reported)
+            .filter(|_| !core.exit_recorded)
             .map(|seen| seen + POST_EXIT_DRAIN);
         tokio::select! {
             () = tokio::time::sleep_until(hello_deadline), if core.child.is_none() => {
-                record::remove_record(&core.window.place, &core.window.window_id);
+                core.window.record.remove();
                 break Ending::NoHello;
             }
             () = tokio::time::sleep_until(drain_deadline.unwrap_or(hello_deadline)),
@@ -466,8 +403,10 @@ pub(crate) async fn serve(
             }
         }
     };
-    Acceptor::stop(&mut acceptor, &core.window.place).await;
+    Acceptor::stop(&mut acceptor).await;
     core.close_conn().await;
+    // The core, dropped here after the close (or by an unwind), removes a
+    // provisional holder's record.
     ending
 }
 
@@ -523,20 +462,14 @@ impl Acceptor {
         Self { stop, task }
     }
 
-    /// Stops accepting and gives up the endpoint. A Unix socket file is
-    /// removed before the listener, and the lock with it, is let go of, so it
-    /// is never a next holder's socket that gets removed.
-    async fn stop(acceptor: &mut Option<Self>, place: &Place) {
+    /// Stops accepting and gives up the endpoint; the listener removes what
+    /// it left on disk as it is dropped.
+    async fn stop(acceptor: &mut Option<Self>) {
         let Some(Self { stop, task }) = acceptor.take() else {
             return;
         };
         let _ = stop.send(());
-        // A task that did not hand the listener back has already dropped it,
-        // so the file may be someone else's by now and is left alone.
-        if let Ok(listener) = task.await {
-            endpoint::remove_endpoint_file(place);
-            drop(listener);
-        }
+        drop(task.await);
     }
 }
 
@@ -561,31 +494,41 @@ impl Core {
                 }
                 self.shared.state().ack_floor = None;
                 self.shared.wake_reader();
-                if self.exit_reported {
+                if self.exit_recorded {
                     return Some(Ending::ChildExited);
                 }
-                if self.provisional.on_lost_connection(self.child.as_mut()) {
+                if self
+                    .window
+                    .provisional
+                    .on_lost_connection(self.child.as_mut())
+                {
                     self.terminating = true;
                 }
             }
-            Event::WriteDone { conn, id, written } if self.is_current(conn) => {
-                self.answer_write(id, written);
+            Event::WriteDone { conn, id, written } => {
+                // Counted whichever connection asked, and only if still owed
+                // an answer: a write failed at the settle is answered already.
+                if self.unanswered_writes.pop_front().is_some() && self.is_current(conn) {
+                    self.answer_write(id, written);
+                }
             }
-            Event::Frame { .. } | Event::Closed { .. } | Event::WriteDone { .. } => {}
+            Event::Frame { .. } | Event::Closed { .. } => {}
         }
         None
     }
 
     fn is_current(&self, conn: u64) -> bool {
-        self.conn.as_ref().is_some_and(|current| current.id == conn)
+        self.conn
+            .as_ref()
+            .is_some_and(|current| current.id() == conn)
     }
 
     fn answer_write(&self, id: u64, written: bool) {
         let Some(conn) = &self.conn else { return };
         if written {
-            conn.send(&HolderFrame::Written { id });
+            conn.send(Reply::Written { id });
         } else {
-            conn.send(&HolderFrame::WriteFailed {
+            conn.send(Reply::WriteFailed {
                 id,
                 reason: "the write to the child's input failed".to_owned(),
             });
@@ -595,16 +538,18 @@ impl Core {
     /// Lets a daemon in: the previous one is told it was displaced, the child
     /// starts on the first one, and the newcomer is welcomed.
     async fn accept(&mut self, accepted: Accepted) -> Option<Ending> {
-        if self.exit_reported {
+        if self.exit_recorded {
             return None;
         }
         if let Some(previous) = self.conn.take() {
-            previous.send(&HolderFrame::Displaced);
+            previous.send(Reply::Displaced);
             drop(previous.close());
         }
         let id = self.next_conn;
         self.next_conn += 1;
-        if self.child.is_none() {
+        let child_pid = if let Some(child) = &self.child {
+            child.pid
+        } else {
             let launch = self.window.launch.clone();
             let shared = Arc::clone(&self.shared);
             let events = self.events.clone();
@@ -612,13 +557,12 @@ impl Core {
                 tokio::task::spawn_blocking(move || spawn_child(&launch, &shared, &events)).await;
             match spawned {
                 Ok(Ok(child)) => {
-                    self.window.record.child_pid = Some(child.pid);
+                    let pid = child.pid;
                     self.child = Some(child);
-                    if let Err(error) =
-                        record::write_record(&self.window.place, &self.window.record)
-                    {
+                    if let Err(error) = self.window.record.set_child_pid(pid) {
                         crate::log(format_args!("cannot update the holder record: {error}"));
                     }
+                    pid
                 }
                 Ok(Err(error)) => return Some(self.spawn_failed(accepted, id, &error)),
                 Err(error) => {
@@ -626,25 +570,21 @@ impl Core {
                     return Some(self.spawn_failed(accepted, id, &error));
                 }
             }
-        }
-        let (welcome, replay_end) = {
+        };
+        let welcome = {
             let mut state = self.shared.state();
             state.ack_floor = Some(state.buffer.start());
-            let replay_end = state.buffer.end();
-            let welcome = HolderFrame::Welcome {
-                protocol: HOLDER_PROTOCOL,
+            Welcome {
                 record: self.window.launch.record.clone(),
                 cols: self.size.0,
                 rows: self.size.1,
                 exited: state.exit.is_some(),
                 checkpoint_seq: state.buffer.checkpoint().map(|checkpoint| checkpoint.seq),
-                replay_end_seq: replay_end,
-            };
-            (welcome, replay_end)
+                replay_end_seq: state.buffer.end(),
+                child_pid,
+            }
         };
-        let conn = Conn::open(accepted, id, replay_end, self.events.clone());
-        conn.send(&welcome);
-        self.conn = Some(conn);
+        self.conn = Some(Conn::welcome(accepted, id, welcome, self.events.clone()));
         self.shared.wake_reader();
         None
     }
@@ -653,21 +593,23 @@ impl Core {
     /// `Exited`, in place of a `Welcome`.
     fn spawn_failed(&mut self, accepted: Accepted, id: u64, error: &SpawnError) -> Ending {
         crate::log(format_args!("cannot start the child: {}", error.detail));
-        let exit = HolderExit {
-            code: None,
-            checkpoint: None,
-            output: Vec::new(),
-            end_seq: 0,
-        };
-        if let Err(error) = record::write_exit(&self.window.place, &self.window.window_id, &exit) {
-            crate::log(format_args!("cannot write the exit file: {error}"));
+        if let Some(kept) = self.window.provisional.keeps_exit() {
+            let exit = HolderExit {
+                code: None,
+                checkpoint: None,
+                output: Vec::new(),
+                end_seq: 0,
+            };
+            if let Err(error) = record::write_exit(&self.window.record, kept, &exit) {
+                crate::log(format_args!("cannot write the exit file: {error}"));
+            }
         }
-        let conn = Conn::open(accepted, id, 0, self.events.clone());
-        conn.send(&HolderFrame::SpawnFailed {
-            reason: error.reason,
-        });
-        conn.send(&HolderFrame::Exited { code: None });
-        self.conn = Some(conn);
+        self.conn = Some(Conn::refuse_spawn(
+            accepted,
+            id,
+            error.reason,
+            self.events.clone(),
+        ));
         Ending::SpawnFailed
     }
 
@@ -678,7 +620,7 @@ impl Core {
                 {
                     let mut state = self.shared.state();
                     state.acknowledge(seq);
-                    self.provisional.on_ack(&mut state);
+                    self.window.provisional.on_ack(&mut state);
                 }
                 self.shared.wake_reader();
             }
@@ -693,7 +635,7 @@ impl Core {
                 if let Some(child) = self.child.as_mut() {
                     child.terminate(tree);
                 }
-                if self.exit_reported {
+                if self.exit_recorded {
                     return Some(Ending::ChildExited);
                 }
             }
@@ -713,9 +655,10 @@ impl Core {
         None
     }
 
-    fn write(&self, id: u64, bytes: Vec<u8>) {
+    fn write(&mut self, id: u64, bytes: Vec<u8>) {
         let Some(conn) = &self.conn else { return };
-        let exited = self.exit_reported || self.shared.state().exit.is_some();
+        let conn_id = conn.id();
+        let exited = self.exit_recorded || self.shared.state().exit.is_some();
         let queued = !exited
             && self
                 .child
@@ -724,14 +667,16 @@ impl Core {
                 .is_some_and(|writes| {
                     writes
                         .send(WriteJob {
-                            conn: conn.id,
+                            conn: conn_id,
                             id,
                             bytes,
                         })
                         .is_ok()
                 });
-        if !queued {
-            conn.send(&HolderFrame::WriteFailed {
+        if queued {
+            self.unanswered_writes.push_back((conn_id, id));
+        } else {
+            conn.send(Reply::WriteFailed {
                 id,
                 reason: "the child has exited or its input is closed".to_owned(),
             });
@@ -753,38 +698,28 @@ impl Core {
         let answer = match resized {
             Ok(()) => {
                 self.size = (cols, rows);
-                HolderFrame::Resized { cols, rows }
+                Reply::Resized { cols, rows }
             }
-            Err(reason) => HolderFrame::ResizeFailed { cols, rows, reason },
+            Err(reason) => Reply::ResizeFailed { cols, rows, reason },
         };
         if let Some(conn) = &self.conn {
-            conn.send(&answer);
+            conn.send(answer);
         }
     }
 
-    /// Sends the checkpoint and the output up to the `Welcome`'s
-    /// `replay_end_seq`, then everything read since, once per connection.
+    /// Answers the daemon's `Replay`, once per connection, and follows it with
+    /// `Exited` when the exit is already recorded.
     fn replay(&mut self) {
         let Some(conn) = self.conn.as_mut() else {
             return;
         };
-        if conn.sent.is_some() {
+        let state = self.shared.state();
+        let Some(replayed) = conn.replay(&state) else {
             return;
+        };
+        if self.exit_recorded {
+            replayed.exited(&state, state.exit.flatten());
         }
-        {
-            let state = self.shared.state();
-            if let Some(checkpoint) = state.buffer.checkpoint() {
-                conn.send(&HolderFrame::Checkpoint {
-                    seq: checkpoint.seq,
-                    bytes: checkpoint.bytes.clone(),
-                });
-            }
-            let from = state.buffer.start();
-            let to = conn.replay_end.max(from);
-            send_output(conn, &state, from, to);
-            conn.sent = Some(to);
-        }
-        self.flush();
     }
 
     /// Sends what was read after what has been sent, once the replay is done.
@@ -792,43 +727,57 @@ impl Core {
         let Some(conn) = self.conn.as_mut() else {
             return;
         };
-        let Some(sent) = conn.sent else {
+        let state = self.shared.state();
+        if let Some(mut replayed) = conn.replayed() {
+            replayed.flush(&state);
+        }
+    }
+
+    /// Settles the exit. When it is kept, the exit and the kept output go to
+    /// the exit file as soon as the exit is known, so a daemon that ends right
+    /// after `Exited` loses nothing.
+    fn record_exit(&mut self) {
+        if let Some(kept) = self.window.provisional.keeps_exit() {
+            let exit = {
+                let state = self.shared.state();
+                HolderExit {
+                    code: state.exit.flatten(),
+                    checkpoint: state.buffer.checkpoint().cloned(),
+                    output: state
+                        .buffer
+                        .range(state.buffer.start(), state.buffer.end())
+                        .to_vec(),
+                    end_seq: state.buffer.end(),
+                }
+            };
+            if let Err(error) = record::write_exit(&self.window.record, kept, &exit) {
+                crate::log(format_args!("cannot write the exit file: {error}"));
+            }
+        }
+        self.exit_recorded = true;
+    }
+
+    /// Answers `WriteFailed` to the connection for each write it was owed an
+    /// answer for, before `Exited`: they will not be reported done in time.
+    fn fail_unanswered_writes(&mut self) {
+        let owed = std::mem::take(&mut self.unanswered_writes);
+        for (conn, id) in owed {
+            if self.is_current(conn) {
+                self.answer_write(id, false);
+            }
+        }
+    }
+
+    /// Tells a replayed connection the child exited; one still waiting for
+    /// its replay is told right after it, by [`Core::replay`].
+    fn send_exited(&mut self) {
+        let Some(conn) = self.conn.as_mut() else {
             return;
         };
         let state = self.shared.state();
-        let from = sent.max(state.buffer.start());
-        let to = state.buffer.end();
-        send_output(conn, &state, from, to);
-        conn.sent = Some(to.max(from));
-    }
-
-    /// Writes the exit and the kept output to the exit file first, so a daemon
-    /// that ends right after `Exited` loses nothing, then tells the daemon.
-    fn report_exit(&mut self) {
-        self.flush();
-        let exit = {
-            let state = self.shared.state();
-            HolderExit {
-                code: state.exit.flatten(),
-                checkpoint: state.buffer.checkpoint().cloned(),
-                output: state
-                    .buffer
-                    .range(state.buffer.start(), state.buffer.end())
-                    .to_vec(),
-                end_seq: state.buffer.end(),
-            }
-        };
-        if !self.provisional.keeps_exit() {
-            record::remove_record(&self.window.place, &self.window.window_id);
-        } else if let Err(error) =
-            record::write_exit(&self.window.place, &self.window.window_id, &exit)
-        {
-            crate::log(format_args!("cannot write the exit file: {error}"));
+        if let Some(replayed) = conn.replayed() {
+            replayed.exited(&state, state.exit.flatten());
         }
-        if let Some(conn) = &self.conn {
-            conn.send(&HolderFrame::Exited { code: exit.code });
-        }
-        self.exit_reported = true;
     }
 
     /// Closes the connection after what was sent on it, waiting a bounded
@@ -841,58 +790,63 @@ impl Core {
 }
 
 /// Provisional, removed with [`HolderLaunch::end_child_on_disconnect`] once
-/// holders outlive the daemon: the one place that flag takes effect. A daemon that left will not come
-/// back for the window, so its output is not kept for one and nothing raw is
-/// left on disk for nobody to read.
-struct Provisional {
-    end_child_on_disconnect: bool,
-    /// The connection was lost and the child's tree is being ended.
-    discarding: bool,
-}
+/// holders outlive the daemon: the one place that flag takes effect. A daemon
+/// that left will not come back for the window, so its output is not kept for
+/// one, and nobody reads an exit file or the record once the holder ends:
+/// none is written, and the holder removes its record itself.
+mod provisional {
+    use yagura_protocol::holder::{HolderLaunch, HolderRecord};
 
-impl Provisional {
-    /// Frees the output the connected daemon has acknowledged.
-    fn on_ack(&self, state: &mut OutputState) {
-        if self.end_child_on_disconnect
-            && let Some(floor) = state.ack_floor
-        {
-            state.buffer.release(floor);
-        }
+    use super::Child;
+    use crate::buffer::OutputState;
+    use crate::endpoint::Place;
+    use crate::record::RecordFile;
+
+    pub(crate) struct Provisional {
+        end_child_on_disconnect: bool,
     }
 
-    /// Ends the child's tree when the connection was lost other than by this
-    /// holder closing it on a displacement; returns whether it did.
-    fn on_lost_connection(&mut self, child: Option<&mut Child>) -> bool {
-        if !self.end_child_on_disconnect {
-            return false;
-        }
-        self.discarding = true;
-        if let Some(child) = child {
-            child.terminate(true);
-        }
-        true
-    }
+    /// Leave to write an exit file. Only [`Provisional::keeps_exit`] makes
+    /// one, so a provisional holder has no way to write it.
+    pub(crate) struct ExitKept(());
 
-    /// Whether the child's exit is left in an exit file, with the record.
-    fn keeps_exit(&self) -> bool {
-        !self.discarding
-    }
-}
-
-/// Sends the kept output from `from` to `to` as `Output` frames.
-fn send_output(conn: &Conn, state: &OutputState, from: u64, to: u64) {
-    let mut at = from;
-    while at < to {
-        let bytes = state
-            .buffer
-            .range(at, to.min(at.saturating_add(OUTPUT_FRAME_BYTES)));
-        if bytes.is_empty() {
-            return;
+    impl Provisional {
+        pub(crate) fn new(launch: &HolderLaunch) -> Self {
+            Self {
+                end_child_on_disconnect: launch.end_child_on_disconnect,
+            }
         }
-        at += bytes.len() as u64;
-        conn.send(&HolderFrame::Output {
-            seq: at,
-            bytes: bytes.to_vec(),
-        });
+
+        /// The holder's record, removed when dropped while provisional.
+        pub(crate) fn own_record(&self, place: &Place, record: HolderRecord) -> RecordFile {
+            RecordFile::new(place, record, self.end_child_on_disconnect)
+        }
+
+        /// Frees the output the connected daemon has acknowledged.
+        pub(super) fn on_ack(&self, state: &mut OutputState) {
+            if self.end_child_on_disconnect
+                && let Some(floor) = state.ack_floor
+            {
+                state.buffer.release(floor);
+            }
+        }
+
+        /// Ends the child's tree when the connection was lost other than by
+        /// this holder closing it on a displacement; returns whether it did.
+        pub(super) fn on_lost_connection(&self, child: Option<&mut Child>) -> bool {
+            if !self.end_child_on_disconnect {
+                return false;
+            }
+            if let Some(child) = child {
+                child.terminate(true);
+            }
+            true
+        }
+
+        /// Leave to write the exit file for a next daemon; `None` while
+        /// provisional.
+        pub(super) fn keeps_exit(&self) -> Option<ExitKept> {
+            (!self.end_child_on_disconnect).then_some(ExitKept(()))
+        }
     }
 }

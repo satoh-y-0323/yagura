@@ -23,6 +23,14 @@
 //!   and SIGHUP on Unix; console control events, the console close included,
 //!   on Windows), prints [`IGNORING_MARKER`] and stays alive, past stdin's end
 //!   too. Only a kill that cannot be refused ends it.
+//! - `stubborn-tree <pid_file> [<gate_file>]`: like `tree`, but the grandchild
+//!   also ignores SIGTERM on Unix, so only a kill that cannot be refused ends
+//!   it. Prints [`TREE_MARKER`]; with `gate_file`, exits with 0 once that file
+//!   exists, otherwise stays alive until stdin ends.
+//! - `escaped-holder <pid_file>` (Unix): starts a grandchild in a session of
+//!   its own that keeps the terminal open and never reads it, writes its
+//!   process id to `pid_file`, prints [`ESCAPED_MARKER`] and idles until a
+//!   Ctrl+C on the terminal ends it.
 
 // Test-only fixture binary, not the holder's production spawn path: it spawns
 // its own descendant to observe tree teardown.
@@ -37,6 +45,8 @@ const READY_MARKER: &[u8] = b"HOLDER-CHILD-READY\r\n";
 const FLOODED_MARKER: &[u8] = b"\r\nHOLDER-CHILD-FLOODED\r\n";
 const TREE_MARKER: &[u8] = b"HOLDER-CHILD-TREE\r\n";
 const IGNORING_MARKER: &[u8] = b"HOLDER-CHILD-IGNORING\r\n";
+#[cfg(unix)]
+const ESCAPED_MARKER: &[u8] = b"HOLDER-CHILD-ESCAPED\r\n";
 const HEX: &[u8; 16] = b"0123456789abcdef";
 const FLOOD_BLOCK: usize = 8192;
 /// How often `size` and `exit` look again. The fixture has no event for either
@@ -54,10 +64,14 @@ fn main() -> io::Result<()> {
         "tree" => tree(Path::new(arg(1))),
         "exit" => exit_with(arg(1), args.get(2).map(Path::new)),
         "ignore-end" => ignore_end(),
+        "stubborn-tree" => stubborn_tree(Path::new(arg(1)), args.get(2).map(Path::new)),
+        #[cfg(unix)]
+        "escaped-holder" => escaped_holder(Path::new(arg(1))),
         _ => {
             eprintln!(
                 "usage: holder_child size | hex | flood <count_file> [<total_bytes>] \
-                 | tree <pid_file> | exit <code> [<gate_file>] | ignore-end"
+                 | tree <pid_file> | exit <code> [<gate_file>] | ignore-end \
+                 | stubborn-tree <pid_file> [<gate_file>] | escaped-holder <pid_file>"
             );
             std::process::exit(2);
         }
@@ -152,6 +166,45 @@ fn tree(pid_file: &Path) -> io::Result<()> {
     stay_alive()
 }
 
+fn stubborn_tree(pid_file: &Path, gate_file: Option<&Path>) -> io::Result<()> {
+    let grandchild = spawn_stubborn_grandchild()?;
+    std::fs::write(pid_file, grandchild.to_string())?;
+    let mut stdout = io::stdout();
+    stdout.write_all(TREE_MARKER)?;
+    stdout.flush()?;
+    let Some(gate_file) = gate_file else {
+        return stay_alive();
+    };
+    while !gate_file.exists() {
+        std::thread::sleep(POLL);
+    }
+    std::process::exit(0)
+}
+
+/// The grandchild holds the terminal from another session, so neither the
+/// child's process group nor the end of the child's session reaches it.
+#[cfg(unix)]
+fn escaped_holder(pid_file: &Path) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(std::env::current_exe()?);
+    command.arg("--grandchild");
+    // SAFETY: setsid is async-signal-safe and touches only the forked child.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let grandchild = command.spawn()?;
+    std::fs::write(pid_file, grandchild.id().to_string())?;
+    let mut stdout = io::stdout();
+    stdout.write_all(ESCAPED_MARKER)?;
+    stdout.flush()?;
+    idle()
+}
+
 fn exit_with(code: &str, gate_file: Option<&Path>) -> io::Result<()> {
     let Ok(code) = code.parse::<i32>() else {
         eprintln!("holder_child: exit code {code:?} is not an integer");
@@ -243,6 +296,25 @@ fn spawn_surviving_grandchild() -> io::Result<u32> {
     let spawned = grandchild_command().and_then(|mut command| command.spawn());
     // SAFETY: restores the disposition read above.
     unsafe { libc::signal(libc::SIGHUP, previous) };
+    Ok(spawned?.id())
+}
+
+#[cfg(windows)]
+fn spawn_stubborn_grandchild() -> io::Result<u32> {
+    spawn_surviving_grandchild()
+}
+
+#[cfg(unix)]
+fn spawn_stubborn_grandchild() -> io::Result<u32> {
+    let ignored = [libc::SIGTERM, libc::SIGHUP];
+    // SAFETY: `signal` only changes this process's dispositions; no handler
+    // function is installed.
+    let previous = ignored.map(|signal| unsafe { libc::signal(signal, libc::SIG_IGN) });
+    let spawned = grandchild_command().and_then(|mut command| command.spawn());
+    for (signal, disposition) in ignored.into_iter().zip(previous) {
+        // SAFETY: restores the disposition read above.
+        unsafe { libc::signal(signal, disposition) };
+    }
     Ok(spawned?.id())
 }
 

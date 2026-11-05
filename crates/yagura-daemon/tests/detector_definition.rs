@@ -749,14 +749,18 @@ fn rejects_resend_max_over_its_range() {
 }
 
 /// The probe and erase keys are written into the child as they are, so only
-/// a single visible character may serve as the probe and an erase key must
-/// stay within the input sequence bound.
+/// distinct visible characters may serve as probes and an erase key must stay
+/// within the input sequence bound. Each probe character may be typed into an
+/// empty composer on its own, so none may be one of the leading keys.
 #[test]
 fn probe_and_erase_keys_outside_their_shapes_fail_the_definition() {
     let input = |extra: &str| format!("[input]\nclear = \"\\u0015\"\n{extra}");
     for (extra, key) in [
         (r#"probe = """#, "input.probe"),
-        (r#"probe = "xy""#, "input.probe"),
+        (r#"probe = "xzx""#, "input.probe"),
+        (r#"probe = "abcdefghi""#, "input.probe"),
+        (r#"probe = "x z""#, "input.probe"),
+        ("leading_keys = [\"!\"]\nprobe = \"x!\"", "input.probe"),
         (r#"probe = " ""#, "input.probe"),
         (r#"probe = "\u0003""#, "input.probe"),
         (r#"probe = "\u001b""#, "input.probe"),
@@ -772,6 +776,9 @@ fn probe_and_erase_keys_outside_their_shapes_fail_the_definition() {
 
     for (extra, probe, erase) in [
         (r#"probe = "x""#, Some("x"), None),
+        (r#"probe = "xy""#, Some("xy"), None),
+        (r#"probe = "xzv""#, Some("xzv"), None),
+        ("leading_keys = [\"!\"]\nprobe = \"xzv\"", Some("xzv"), None),
         (r#"probe = "é""#, Some("é"), None),
         (
             "probe = \"x\"\nerase = \"\\u0008\"",

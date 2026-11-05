@@ -37,6 +37,7 @@ use yagura_os::{
     secure_owned_dir, secure_owned_file, seed_config_file,
 };
 
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::paths::{TempDir, short_tmp_dir};
 
 // =====================================================================
@@ -131,10 +132,10 @@ fn spawn_own_group_child_ready(script_after_ready: &str) -> Child {
         let _ = tx.send(stdout.read_exact(&mut byte));
     });
 
-    match rx.recv_timeout(Duration::from_secs(5)) {
+    match rx.recv_timeout(HANG_GUARD) {
         Ok(Ok(())) => {}
         Ok(Err(_)) => panic!("the ignore-TERM fixture exited before it armed its trap"),
-        Err(_) => panic!("the ignore-TERM fixture did not report readiness within 5s"),
+        Err(_) => panic!("the ignore-TERM fixture did not report readiness within {HANG_GUARD:?}"),
     }
 
     child
@@ -173,19 +174,25 @@ fn own_pgrp() -> i32 {
 }
 
 /// Polls `child.try_wait()` (which reaps on success, so a zombie is never
-/// mistaken for "still alive") until it reports an exit or `timeout` elapses.
-fn wait_until_exited(child: &mut Child, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
+/// mistaken for "still alive") until it reports an exit, and returns how it
+/// ended. The children here outlive [`HANG_GUARD`], so only a signal ends one
+/// within it.
+fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
-        if child
+        if let Some(status) = child
             .try_wait()
             .expect("try_wait must not error for a child we own")
-            .is_some()
         {
-            return true;
+            return status;
         }
         if Instant::now() >= deadline {
-            return false;
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the child (pid {}) had not exited after {HANG_GUARD:?}",
+                child.id()
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -193,7 +200,7 @@ fn wait_until_exited(child: &mut Child, timeout: Duration) -> bool {
 
 /// Blocks until `pid` has exited but is not yet reaped (a zombie), confirmed
 /// via `waitid(P_PID, .., WEXITED | WNOWAIT)`, which observes the exit
-/// without consuming it -- unlike [`wait_until_exited`]'s `try_wait`, which
+/// without consuming it -- unlike [`wait_for_exit`]'s `try_wait`, which
 /// would reap the child and hide the exact "group exists, no live member,
 /// nothing reaped" state this file's `killpg`/EPERM tests need to construct.
 fn wait_until_zombie(pid: u32) {
@@ -612,13 +619,11 @@ async fn bind_unlinks_and_rebinds_a_stale_dead_socket() {
     let endpoint = dir.path().join("e.sock");
     let endpoint_str = endpoint.to_str().expect("utf8 path");
 
-    let first_security = ipc
-        .endpoint_security()
-        .expect("endpoint_security should succeed");
-    let first_listener = ipc
-        .bind(endpoint_str, first_security)
-        .await
-        .expect("first bind must succeed");
+    // A listener that died without cleaning up: its socket and its lock file
+    // stay, the lock released with the process.
+    let first_listener =
+        std::os::unix::net::UnixListener::bind(&endpoint).expect("first bind must succeed");
+    drop(hold_endpoint_lock(&endpoint));
     drop(first_listener);
     assert!(
         std::fs::symlink_metadata(&endpoint).is_ok(),
@@ -952,59 +957,68 @@ fn led_by_rejects_our_own_process_group_and_pid_zero() {
 
 #[test]
 fn terminate_group_terminates_a_cooperating_child() {
-    let mut child = spawn_own_group_child("exec sleep 30");
-    let group = UnixProcessGroup::led_by(child.id(), Duration::from_secs(5))
+    let mut child = spawn_own_group_child("exec sleep 3600");
+    // A grace period past the guard: only the SIGTERM can end the child here.
+    let group = UnixProcessGroup::led_by(child.id(), 2 * HANG_GUARD)
         .expect("led_by should succeed for a group leader");
 
-    group.terminate().expect("terminate_group should succeed");
-    assert!(
-        wait_until_exited(&mut child, Duration::from_secs(2)),
-        "a plain child (default DEFAULT_TERM_GRACE_MS) must be terminated"
+    // `terminate` returns only after the escalation grace, so it runs on a
+    // thread this test does not wait for.
+    std::thread::spawn(move || group.terminate().expect("terminate_group should succeed"));
+    let status = wait_for_exit(&mut child);
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "a plain child must be ended by the SIGTERM; status: {status:?}"
     );
 }
 
 #[test]
 fn terminate_group_escalates_to_sigkill_after_the_injected_grace_period() {
-    let mut child = spawn_own_group_child_ready("sleep 30");
+    let mut child = spawn_own_group_child_ready("sleep 3600");
     let group = UnixProcessGroup::led_by(child.id(), Duration::from_millis(50))
         .expect("led_by should succeed for a group leader");
 
     group.terminate().expect("terminate_group should succeed");
-    assert!(
-        wait_until_exited(&mut child, Duration::from_secs(2)),
+    let status = wait_for_exit(&mut child);
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
         "a child that ignores SIGTERM must still die once the injected grace period elapses \
-         and SIGKILL is sent"
+         and SIGKILL is sent; status: {status:?}"
     );
 }
 
 #[test]
 fn terminate_group_with_zero_grace_kills_immediately() {
-    let mut child = spawn_own_group_child_ready("sleep 30");
+    let mut child = spawn_own_group_child_ready("sleep 3600");
     let group = UnixProcessGroup::led_by(child.id(), Duration::ZERO)
         .expect("led_by should succeed for a group leader");
 
-    let started = Instant::now();
     group.terminate().expect("terminate_group should succeed");
-    assert!(
-        wait_until_exited(&mut child, Duration::from_millis(500)),
-        "a zero grace must skip straight to SIGKILL, even for a child that ignores SIGTERM"
-    );
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "ZERO grace must not wait out any grace period before escalating"
+    let status = wait_for_exit(&mut child);
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "a zero grace must skip straight to SIGKILL, even for a child that ignores SIGTERM; \
+         status: {status:?}"
     );
 }
 
 #[test]
 fn terminate_group_is_idempotent_on_a_second_call() {
-    let mut child = spawn_own_group_child("exec sleep 5");
+    let mut child = spawn_own_group_child("exec sleep 3600");
     let group = UnixProcessGroup::led_by(child.id(), Duration::from_millis(50))
         .expect("led_by should succeed for a group leader");
 
     group
         .terminate()
         .expect("first terminate_group call should succeed");
-    assert!(wait_until_exited(&mut child, Duration::from_secs(2)));
+    let status = wait_for_exit(&mut child);
+    assert!(
+        status.signal().is_some(),
+        "the first call must end the child by a signal; status: {status:?}"
+    );
 
     group.terminate().expect(
         "a second terminate_group call on an already-terminated group must be a no-op, not \
@@ -1063,16 +1077,18 @@ fn terminate_group_reports_success_when_every_member_has_exited_and_been_reaped(
 
 #[test]
 fn dropping_an_unterminated_group_kills_its_process() {
-    let mut child = spawn_own_group_child("exec sleep 30");
+    let mut child = spawn_own_group_child("exec sleep 3600");
     let group = UnixProcessGroup::led_by(child.id(), Duration::from_millis(50))
         .expect("led_by should succeed for a group leader");
 
     drop(group);
 
-    assert!(
-        wait_until_exited(&mut child, Duration::from_secs(2)),
+    let status = wait_for_exit(&mut child);
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
         "dropping a group that was never explicitly terminated must still kill its process \
-         (Drop)"
+         (Drop); status: {status:?}"
     );
 }
 
@@ -1382,7 +1398,9 @@ fn seed_config_file_writes_nothing_through_a_symlinked_config_directory() {
 // schedule_force_kill. The child is spawned through this file's own
 // spawn_own_group_child helper: `exec` keeps the pid stable and
 // grandchild-free, and no SIGHUP suppression is needed because this function
-// only ever sends SIGKILL.
+// only ever sends SIGKILL. The grace and `exited` decisions are tested
+// without a clock in `force_kill.rs`; this test keeps the real wait and the
+// real signal wired to them.
 // =====================================================================
 
 #[cfg(unix)]
@@ -1406,51 +1424,6 @@ fn schedule_force_kill_sigkills_the_child_after_the_grace_period_when_exit_was_n
         "schedule_force_kill must SIGKILL the child once the grace period elapses with \
          `exited` still false; status: {status:?}"
     );
-}
-
-#[test]
-fn schedule_force_kill_does_not_kill_before_the_grace_period_has_passed() {
-    const GRACE: Duration = Duration::from_millis(300);
-    let mut child = spawn_own_group_child("exec sleep 3600");
-    let started = Instant::now();
-
-    yagura_os::schedule_force_kill(child.id(), GRACE, Arc::new(AtomicBool::new(false)));
-
-    let status = child
-        .wait()
-        .expect("wait must not error for a child we own");
-    assert_eq!(status.signal(), Some(libc::SIGKILL), "status: {status:?}");
-    assert!(
-        started.elapsed() >= GRACE,
-        "the child was killed {:?} after the call, before the {GRACE:?} grace period",
-        started.elapsed()
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn schedule_force_kill_does_not_kill_when_exited_is_already_true() {
-    let mut child = spawn_own_group_child("exec sleep 3600");
-    let pid = child.id();
-
-    yagura_os::schedule_force_kill(
-        pid,
-        Duration::from_millis(50),
-        Arc::new(AtomicBool::new(true)),
-    );
-
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(
-        child
-            .try_wait()
-            .expect("try_wait must not error for a child we own")
-            .is_none(),
-        "schedule_force_kill must not send SIGKILL once `exited` is already true (the \
-         self-observed-exit suppression branch)"
-    );
-
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 // =====================================================================
@@ -1482,7 +1455,7 @@ fn spawn_daemon_detached_starts_the_program_as_the_leader_of_a_new_session() {
     });
     // Only a hang guard: the read returns as soon as the child has written.
     let pid: libc::pid_t = rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(HANG_GUARD)
         .expect("the detached child never reported its pid")
         .expect("read the fifo")
         .trim()
@@ -1646,6 +1619,90 @@ mod sun_path_limit {
         assert!(
             result.is_err(),
             "a candidate one byte over the sun_path limit must be rejected: {result:?}"
+        );
+    }
+}
+
+// A holder's endpoint is made and given up once per window, so a listener that
+// ends must not leave its socket or its lock file behind.
+#[tokio::test]
+async fn a_listener_that_ends_leaves_neither_its_socket_nor_its_lock() {
+    let ipc = UnixIpc;
+    let dir = secure_dir();
+    let endpoint = dir.path().join("e.sock");
+    let security = ipc
+        .endpoint_security()
+        .expect("endpoint_security should succeed");
+    let listener = ipc
+        .bind(endpoint.to_str().expect("utf8 path"), security)
+        .await
+        .expect("bind must succeed for a fresh endpoint");
+
+    drop(listener);
+
+    assert!(
+        std::fs::symlink_metadata(&endpoint).is_err(),
+        "the socket file was left behind"
+    );
+    assert!(
+        std::fs::symlink_metadata(endpoint_lock_path(&endpoint)).is_err(),
+        "the lock file was left behind"
+    );
+}
+
+/// The longest parts a holder's fallback endpoint is built from: macOS's
+/// 49-byte `TMPDIR`, a 16-byte instance id, a 64-byte window id and a holders
+/// directory too long for the first place.
+#[test]
+fn the_holder_fallback_endpoint_fits_sun_path_for_the_longest_parts() {
+    use std::os::unix::fs::DirBuilderExt as _;
+    // macOS's limit, the smaller of the two, whichever OS runs this.
+    const MACOS_SUN_PATH_MAX_LEN: usize = 103;
+    // Short names, so the base stays under 49 bytes to pad up to it.
+    let base = short_tmp_dir("os", "hf");
+    let base_len = base.path().to_str().expect("utf8 path").len();
+    assert!(
+        base_len < 48,
+        "fixture: the base is too long to pad to 49 bytes"
+    );
+    let tmp_root = base.path().join("t".repeat(49 - base_len - 1));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&tmp_root)
+        .expect("create the padded tmp root");
+    assert_eq!(tmp_root.to_str().expect("utf8 path").len(), 49);
+    let namespace = resolve_instance_from(Some(OsStr::new("abcdefghijklmnop"))).unwrap();
+    let other_namespace = resolve_instance_from(Some(OsStr::new("abcdefghijklmnoq"))).unwrap();
+    let holders = std::path::PathBuf::from(format!("/{}", "h".repeat(200)));
+    let other_holders = std::path::PathBuf::from(format!("/{}", "g".repeat(200)));
+    let window = "w".repeat(64);
+    let other_window = format!("{}v", "w".repeat(63));
+    let user = "4294967294";
+    let path = |namespace: &yagura_os::InstanceNamespace,
+                holders: &std::path::Path,
+                window: &str| {
+        yagura_os::platform_unix::holder_socket_path(user, namespace, holders, &tmp_root, window)
+    };
+
+    let endpoint = path(&namespace, &holders, &window).expect("the fallback must resolve");
+
+    assert!(
+        endpoint.len() <= MACOS_SUN_PATH_MAX_LEN,
+        "the fallback endpoint is {} bytes: {endpoint}",
+        endpoint.len()
+    );
+    for (what, other) in [
+        (
+            "holders directory",
+            path(&namespace, &other_holders, &window),
+        ),
+        ("window", path(&namespace, &holders, &other_window)),
+        ("instance", path(&other_namespace, &holders, &window)),
+    ] {
+        assert_ne!(
+            other.expect("the other fallback must resolve"),
+            endpoint,
+            "another {what} must get another endpoint"
         );
     }
 }

@@ -284,10 +284,14 @@ mod unix_stage_names {
     #[test]
     fn stage3_fits_the_longest_identifier_under_a_macos_length_tmpdir() {
         const MACOS_TMPDIR_LEN: usize = 48;
-        let base = secure_dir();
+        // The shortest fixture name: the run directory's name grows with the
+        // pid, and the root below needs at least one byte of its own.
+        let base = short_tmp_dir("i", "s");
+        std::fs::set_permissions(base.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod fixture dir to 0700");
         let base_len = base.path().to_str().expect("utf8 path").len();
         assert!(
-            base_len < MACOS_TMPDIR_LEN,
+            base_len + 1 < MACOS_TMPDIR_LEN,
             "the fixture base must leave room"
         );
         let root = base

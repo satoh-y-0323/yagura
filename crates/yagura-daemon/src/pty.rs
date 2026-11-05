@@ -1,27 +1,39 @@
-//! PTY session management on top of [`yagura_os::pty`].
+//! A window's terminal as the daemon holds it: the terminal model and the
+//! order of writes, with the PTY and the child kept by the window's holder
+//! (`yagura-holder`, reached through [`holder_link`]).
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, oneshot, watch};
+use yagura_protocol::holder::is_plain_window_id;
 
 use crate::child_env::ChildBaseEnv;
 use crate::config::DaemonConfig;
+use crate::detector::screen_view::View;
 use crate::detector::{SharedScreen, VtScreen};
+use crate::holder_host::HolderHost;
 use crate::input_encode::InputModes;
-use crate::terminal_identity;
 
+mod env;
+mod feeder;
 mod focus;
+mod holder_link;
 mod reply_queue;
+mod views;
 
+use feeder::{ModelFeed, feed_model};
 pub use focus::FocusInterval;
+use holder_link::{ExitReport, Feed, Link};
 use reply_queue::ReplyQueue;
+pub use views::AttachGeneration;
+use views::ViewSlot;
+pub(crate) use views::{EncodedFrame, FrameSend, FrameSink, SendKey, ViewNote};
 
 /// Error type for PTY operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -41,36 +53,6 @@ pub enum PtyError {
 }
 
 pub type PtyResult<T> = Result<T, PtyError>;
-
-/// How long `reader_loop` keeps draining PTY output after the child's exit has
-/// been confirmed, before it gives up waiting for an EOF that may never come.
-///
-/// Well above the graceful close budget (`close_grace_ms` + `close_settle_ms`,
-/// 700 ms with both at their defaults), so an ordinary close is never cut
-/// short by it; it only bounds the reader's lifetime when something else keeps
-/// the PTY open and producing output after the child is gone.
-const POST_EXIT_DRAIN: Duration = Duration::from_secs(2);
-
-/// How long [`PtySession::terminate`] gives the child to act on the first,
-/// refusable kill before asking the OS boundary to force it down
-/// ([`yagura_os::schedule_force_kill`], which is a no-op on Windows because the
-/// first kill there already cannot be refused).
-///
-/// Sized against the graceful close budget: the escalation must fire well
-/// inside `close_grace_ms` while still leaving a child that handles the signal
-/// a chance to shut itself down. A smaller `close_grace_ms` is allowed and
-/// simply means the process-group teardown reaches the child first. Not
-/// exposed as a setting: it describes the kill mechanism, not an operator's
-/// policy.
-const TERMINATE_ESCALATION_GRACE: Duration = Duration::from_millis(250);
-
-/// Output is fed to the terminal model this many bytes at a time.
-const MODEL_SLICE_BYTES: usize = 1024;
-
-/// How long the reader keeps the model's lock before it publishes what it has
-/// fed and offers the lock to a waiting reader. A hold is therefore never much
-/// longer than this plus one slice's bounded work.
-const MODEL_LOCK_HOLD: Duration = Duration::from_millis(2);
 
 /// How many blocking threads may wait on one window's model at once. Every
 /// one of them waits on the same lock, so more would only queue there.
@@ -463,63 +445,39 @@ impl PublishedInput {
     }
 }
 
-/// Everything the reader thread updates as output arrives.
-struct ModelFeed {
-    screen: SharedScreen,
-    input: Arc<PublishedInput>,
-    /// Where the model's replies to the child's queries go.
-    replies: Arc<ReplyQueue>,
-    raw_capture: RawCapture,
-    arrivals: watch::Sender<u64>,
+/// The window's attach slot and the way to wake its feeder for it.
+#[derive(Clone)]
+struct Views {
+    slot: Arc<ViewSlot>,
+    feed: std::sync::mpsc::Sender<Feed>,
 }
 
-impl ModelFeed {
-    /// Feeds `output` to the model one slice at a time.
-    ///
-    /// Every release is fair: a reader waiting for the lock gets it before
-    /// this thread can take it back for the next chunk, so a child that never
-    /// stops writing cannot starve the readers. Mid-chunk the lock is offered
-    /// after a hold of [`MODEL_LOCK_HOLD`] and kept when nobody is waiting.
-    ///
-    /// The model's replies to queries in `output` are taken under the lock and
-    /// queued after it is released, never written here. The input state is
-    /// published before every release, so it never lags what a reader that
-    /// takes the lock sees.
-    ///
-    /// The arrival is announced last, once both the model and the raw capture
-    /// hold `output`, so whoever it wakes finds the chunk in either.
-    fn feed(&self, output: &[u8]) {
-        let Self {
-            screen,
-            input,
-            replies,
-            raw_capture,
-            arrivals,
-        } = self;
-        let mut guard = screen.lock();
-        let mut held_since = Instant::now();
-        for slice in output.chunks(MODEL_SLICE_BYTES) {
-            if held_since.elapsed() >= MODEL_LOCK_HOLD {
-                input.publish(&guard);
-                parking_lot::MutexGuard::bump(&mut guard);
-                held_since = Instant::now();
-            }
-            guard.feed(slice);
+impl Views {
+    fn wake_if(&self, wake: bool) {
+        if wake {
+            let _ = self.feed.send(Feed::View);
         }
-        // Counted under the lock, so the count announced never runs ahead of
-        // what the screen holds.
-        let arrival = guard.note_output();
-        input.publish(&guard);
-        let (queued, dropped) = guard.take_replies();
-        parking_lot::MutexGuard::unlock_fair(guard);
-        replies.push(queued, dropped);
-        raw_capture.record(output);
-        arrivals.send_replace(arrival);
-        replies.note_output();
     }
 }
 
-/// Represents a PTY session holding a child process.
+/// What [`PtySession::spawn_window`] opens.
+pub(crate) struct WindowSpawn<'a> {
+    /// Names the holder's files and endpoint: a
+    /// [plain](is_plain_window_id) identifier.
+    pub(crate) window_id: &'a str,
+    pub(crate) argv: &'a [&'a str],
+    /// `None`, or a directory that does not exist, is the user's home
+    /// directory (see [`yagura_os::pty::PtyCommand::cwd`]).
+    pub(crate) cwd: Option<&'a Path>,
+    pub(crate) extra_env: &'a [(&'a str, &'a str)],
+    pub(crate) removed_env: &'a [&'a str],
+    /// Answers color queries from the child's first output on; `None` leaves
+    /// them unanswered until a palette is set.
+    pub(crate) palette: Option<yagura_protocol::Palette>,
+}
+
+/// A window's terminal: its model and the order of writes in the daemon, its
+/// PTY and child in the window's holder process.
 pub struct PtySession {
     /// Test seam; see [`RawCapture`].
     #[cfg(feature = "fault-injection")]
@@ -546,7 +504,8 @@ pub struct PtySession {
     key_records_flattened: bool,
 
     /// Orders resizes, so the model and the PTY always end at the size of the
-    /// same request. Held across the PTY call, which readers never wait on.
+    /// same request. Held across the holder's answer, which readers never
+    /// wait on.
     resize_order: tokio::sync::Mutex<()>,
 
     /// Counts the chunks of output fed to `screen`; changes once the screen
@@ -557,16 +516,13 @@ pub struct PtySession {
     /// `screen` follows it (see [`VtScreen::follow_writes`]).
     input_writes: Arc<watch::Sender<u64>>,
 
-    /// Resizes and closes the PTY. The exit monitor closes it once the child
-    /// has exited.
-    control: Arc<yagura_os::pty::PtyControl>,
+    /// The window's attach and its view, whose frames the feeder reads.
+    views: Views,
 
-    /// The child's process tree, which exists from before the child runs its
-    /// first instruction. Shared with the exit monitor, which ends it when
-    /// the child exits.
-    group: Arc<yagura_os::ProcessGroup>,
+    /// The way to the window's holder.
+    link: Link,
 
-    /// Writer handle to PTY slave
+    /// The child's input, written through the holder.
     writer: Arc<WriterSlot>,
 
     /// Every write [`PtySession::write_input`] made, counted while holding
@@ -576,41 +532,26 @@ pub struct PtySession {
     /// Replies to the child's terminal queries, written by their own thread.
     replies: Arc<ReplyQueue>,
 
-    /// Kills the child.
-    ///
-    /// Kill and wait are held through *separate* handles: sharing one owner
-    /// would let whichever of [`PtySession::terminate`] and the exit-monitor
-    /// thread reached it first take the child from the other, so a terminate
-    /// that lost that race would send no kill at all. The killer and the
-    /// waiting child act on the same process without either owning it
-    /// exclusively.
-    killer: yagura_os::pty::PtyKiller,
-
-    /// OS process ID of the child, captured at spawn time.
+    /// OS process ID of the child, as the holder's record names it.
     child_process_id: u32,
 
-    /// Exit status
+    /// Exit status, published as soon as the holder reports it, whatever the
+    /// model is doing.
     exit_code: Arc<AtomicI32>,
     is_exited: Arc<AtomicBool>,
 
-    /// Set once [`PtySession::terminate`] has scheduled the
-    /// [`yagura_os::schedule_force_kill`] escalation, so a repeat call (e.g.
-    /// from both an explicit close and `Drop`) does not keep spawning more of
-    /// its detached escalation threads. `terminate`'s own kill is re-sent
-    /// unconditionally on every call regardless of this flag, since it is
-    /// cheap and idempotent.
-    force_kill_scheduled: AtomicBool,
-
-    /// Child-exit notification, published once the child-monitor thread has
-    /// finalized `exit_code` / `is_exited`.
-    ///
-    /// The monitor thread is the authoritative send point because it is the
-    /// only place the exit code becomes known; `reader_loop` observes EOF
-    /// without an exit code and therefore never sends here.
+    /// `true` once the child has exited (see [`PtySession::exit_notified`]).
     exit_notify_rx: watch::Receiver<bool>,
 
-    /// Reader thread handle
-    _reader_thread: Option<std::thread::JoinHandle<()>>,
+    /// `true` once every output the holder sent before the end is in the
+    /// model.
+    drained: watch::Receiver<bool>,
+
+    /// `true` once the holder's process has ended.
+    released: watch::Receiver<bool>,
+
+    /// Outlives every window opened through it.
+    _host: Arc<HolderHost>,
 }
 
 impl PtySession {
@@ -623,8 +564,16 @@ impl PtySession {
     ///
     /// Convenience wrapper around [`PtySession::spawn_with_command_in`] with
     /// `cwd = None`.
-    pub async fn spawn_with_command(argv: &[&str], config: &DaemonConfig) -> PtyResult<Self> {
-        Self::spawn_with_command_in(argv, None, config).await
+    ///
+    /// # Errors
+    ///
+    /// As [`PtySession::spawn_with_command_in_env`].
+    pub async fn spawn_with_command(
+        argv: &[&str],
+        config: &DaemonConfig,
+        host: &Arc<HolderHost>,
+    ) -> PtyResult<Self> {
+        Self::spawn_with_command_in(argv, None, config, host).await
     }
 
     /// Spawn a child process with the given command in a new PTY, optionally
@@ -636,153 +585,84 @@ impl PtySession {
     /// [`crate::window::WindowRegistry::open`] validates that a `Some` `cwd`
     /// exists and is a directory at its entry point, before this function is
     /// ever reached.
+    ///
+    /// # Errors
+    ///
+    /// As [`PtySession::spawn_with_command_in_env`].
     pub async fn spawn_with_command_in(
         argv: &[&str],
         cwd: Option<&Path>,
         config: &DaemonConfig,
+        host: &Arc<HolderHost>,
     ) -> PtyResult<Self> {
-        Self::spawn_with_command_in_env(argv, cwd, &[], config).await
+        Self::spawn_with_command_in_env(argv, cwd, &[], config, host).await
     }
 
-    /// Spawn a child process with the given command in a new PTY, optionally
-    /// in a specific working directory, with additional environment
-    /// variables merged into the child's environment; this is how
-    /// `YAGURA_STATUS_TOKEN` reaches a spawned window's child process.
+    /// Spawn a child process with the given command in a new PTY kept by a
+    /// holder of `host`, optionally in a specific working directory, with
+    /// additional environment variables merged into the child's environment;
+    /// this is how `YAGURA_STATUS_TOKEN` reaches a spawned window's child
+    /// process.
     ///
     /// The child's environment is layered, later layers winning for a name
-    /// they share: the base environment of [`yagura_os::pty::spawn`] (the
-    /// daemon's own, plus the registry's variables on Windows), then
-    /// [`DaemonConfig::child_base_env`], then
+    /// they share: the holder's own (the daemon's, plus the registry's
+    /// variables on Windows), then [`DaemonConfig::child_base_env`], then
     /// the launching terminal's own variables taken away and
-    /// [`terminal_identity::DECLARED_TERMINAL`] set, then `extra_env`, where
+    /// [`crate::terminal_identity::DECLARED_TERMINAL`] set, then `extra_env`, where
     /// a name given more than once keeps its last value.
-    /// [`PtySession::spawn_with_command_in`] is this function with an empty
-    /// `extra_env`.
+    ///
+    /// # Errors
+    ///
+    /// [`PtyError::BundledConptyUnavailable`] when the holder cannot use the
+    /// pseudoconsole bundled beside it; [`PtyError::SpawnFailed`] when the
+    /// holder or the child cannot be started.
     pub async fn spawn_with_command_in_env(
         argv: &[&str],
         cwd: Option<&Path>,
         extra_env: &[(&str, &str)],
         config: &DaemonConfig,
+        host: &Arc<HolderHost>,
     ) -> PtyResult<Self> {
-        Self::spawn_with_palette(argv, cwd, extra_env, &[], None, config).await
+        let window_id = host.anonymous_window_id();
+        Self::spawn_window(
+            WindowSpawn {
+                window_id: &window_id,
+                argv,
+                cwd,
+                extra_env,
+                removed_env: &[],
+                palette: None,
+            },
+            config,
+            host,
+        )
+        .await
     }
 
-    /// [`PtySession::spawn_with_command_in_env`], with the window's terminal
-    /// answering color queries with `palette` from the child's first output
-    /// on. With `None` it leaves them unanswered until a palette is set.
-    /// Each of `removed_env` (compared without regard to case) is taken out of
-    /// the child's environment last, whether the daemon's own environment or
-    /// the base environment carried it.
-    pub async fn spawn_with_palette(
-        argv: &[&str],
-        cwd: Option<&Path>,
-        extra_env: &[(&str, &str)],
-        removed_env: &[&str],
-        palette: Option<yagura_protocol::Palette>,
+    /// Opens `spawn` through a holder of `host`. The model is ready, palette
+    /// included, before the holder is let in, so the child's first query is
+    /// answered too.
+    pub(crate) async fn spawn_window(
+        spawn: WindowSpawn<'_>,
         config: &DaemonConfig,
+        host: &Arc<HolderHost>,
     ) -> PtyResult<Self> {
-        let Some(program) = argv.first() else {
+        let Some(program) = spawn.argv.first() else {
             return Err(PtyError::SpawnFailed);
         };
+        if !is_plain_window_id(spawn.window_id) {
+            return Err(PtyError::SpawnFailed);
+        }
         let key_records_flattened = config.host_os.flattens_key_records(program);
-
-        let spawned = tokio::task::spawn_blocking({
-            let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
-            let cwd = cwd.map(Path::to_path_buf);
-            let extra_env: Vec<(String, String)> = extra_env
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-                .collect();
-            let removed_env: Vec<String> = removed_env.iter().map(|s| s.to_string()).collect();
-            let child_base_env = config.child_base_env.clone();
-            move || {
-                use yagura_os::pty::EnvOp;
-
-                // The window's terminal is yagura's, so what the launching
-                // terminal or a login shell says about one goes, while an
-                // explicit `extra_env` entry still wins.
-                let mut env: Vec<EnvOp> = child_base_env
-                    .iter()
-                    .map(|(name, value)| EnvOp::Set(name.to_os_string(), value.to_os_string()))
-                    .collect();
-                let inherited: Vec<OsString> = std::env::vars_os().map(|(name, _)| name).collect();
-                let launcher_names = terminal_identity::launcher_terminal_names(
-                    inherited
-                        .iter()
-                        .map(OsString::as_os_str)
-                        .chain(child_base_env.iter().map(|(name, _)| name)),
-                );
-                env.extend(
-                    launcher_names
-                        .iter()
-                        .map(|name| EnvOp::Remove(name.to_os_string())),
-                );
-                env.extend(
-                    terminal_identity::DECLARED_TERMINAL
-                        .iter()
-                        .map(|(name, value)| {
-                            EnvOp::Set(OsString::from(name), OsString::from(value))
-                        }),
-                );
-                env.extend(
-                    extra_env
-                        .iter()
-                        .map(|(key, value)| EnvOp::Set(OsString::from(key), OsString::from(value))),
-                );
-                let is_removed = |name: &std::ffi::OsStr| {
-                    removed_env
-                        .iter()
-                        .any(|removed| name.eq_ignore_ascii_case(removed))
-                };
-                let mut taken_out: Vec<OsString> = removed_env.iter().map(OsString::from).collect();
-                for name in inherited
-                    .iter()
-                    .map(OsString::as_os_str)
-                    .chain(child_base_env.iter().map(|(name, _)| name))
-                {
-                    if is_removed(name) && !taken_out.iter().any(|seen| seen == name) {
-                        taken_out.push(name.to_os_string());
-                    }
-                }
-                env.extend(taken_out.into_iter().map(EnvOp::Remove));
-
-                yagura_os::pty::spawn(
-                    &yagura_os::pty::PtyCommand { argv, cwd, env },
-                    yagura_os::pty::PtySize {
-                        cols: Self::INITIAL_COLS,
-                        rows: Self::INITIAL_ROWS,
-                    },
-                )
-                .map_err(|error| match error {
-                    yagura_os::pty::PtySpawnError::BundledConptyUnavailable(reason) => {
-                        tracing::error!(
-                            %reason,
-                            "bundled ConPTY unavailable; refusing to open a window"
-                        );
-                        PtyError::BundledConptyUnavailable
-                    }
-                    yagura_os::pty::PtySpawnError::Spawn(error) => {
-                        tracing::debug!(%error, "failed to start the window's child");
-                        PtyError::SpawnFailed
-                    }
-                })
-            }
-        })
-        .await
-        .map_err(|_| PtyError::SpawnFailed)??;
-        let yagura_os::pty::PtySpawn {
-            child,
-            killer,
-            group,
-            control,
-            reader,
-            writer,
-        } = spawned;
-
-        let exit_code = Arc::new(AtomicI32::new(0));
-        let is_exited = Arc::new(AtomicBool::new(false));
-
-        let raw_capture = RawCapture::default();
+        let launch = holder_link::Launch {
+            window_id: spawn.window_id.to_owned(),
+            argv: spawn.argv.iter().map(|arg| (*arg).to_owned()).collect(),
+            cwd: spawn.cwd.map(Path::to_path_buf),
+            env: env::window_env(&config.child_base_env, spawn.extra_env, spawn.removed_env),
+            cols: Self::INITIAL_COLS,
+            rows: Self::INITIAL_ROWS,
+        };
+        let context = host.link_context().await?;
 
         let (input_writes, writes_seen) = watch::channel(0u64);
         let mut screen = VtScreen::with_history(
@@ -791,71 +671,73 @@ impl PtySession {
             config.read_output_max_lines,
         );
         screen.follow_writes(writes_seen);
-        // Before the reader thread starts, so no query the child already
-        // wrote is read without it.
-        if let Some(palette) = palette {
+        if let Some(palette) = spawn.palette {
             screen.set_palette(palette);
         }
         let screen = screen.into_shared();
         let input = Arc::new(PublishedInput::of(&screen.lock()));
         let (arrivals_tx, output_arrivals) = watch::channel(0u64);
 
-        let control = Arc::new(control);
-        let group = Arc::new(group);
+        let exit_code = Arc::new(AtomicI32::new(0));
+        let is_exited = Arc::new(AtomicBool::new(false));
+        let (exit_notify_tx, exit_notify_rx) = watch::channel(false);
+        let (feed_tx, feed_rx) = std::sync::mpsc::channel();
+        let views = Views {
+            slot: Arc::default(),
+            feed: feed_tx.clone(),
+        };
+        let holder_link::Started {
+            link,
+            opened,
+            released,
+        } = holder_link::start(
+            context,
+            launch,
+            holder_link::Sink {
+                feed: feed_tx,
+                exit: ExitReport {
+                    code: Arc::clone(&exit_code),
+                    exited: Arc::clone(&is_exited),
+                    notify: exit_notify_tx,
+                },
+            },
+        )?;
+        let holder_link::Opened {
+            child_pid: child_process_id,
+            ack_step,
+        } = opened.await.map_err(|_| PtyError::SpawnFailed)??;
 
-        let writer = Arc::new(WriterSlot::new(writer));
-
+        let raw_capture = RawCapture::default();
+        let writer = Arc::new(WriterSlot::new(link.writer()));
         let replies = Arc::new(ReplyQueue::default());
-        {
+        let (drained_tx, drained) = watch::channel(false);
+        let feed = ModelFeed {
+            screen: screen.clone(),
+            input: Arc::clone(&input),
+            replies: Arc::clone(&replies),
+            raw_capture: raw_capture.clone(),
+            arrivals: arrivals_tx,
+            views: Arc::clone(&views.slot),
+            exited: Arc::clone(&is_exited),
+        };
+        let started = spawn_thread("window-replies", {
             let replies = Arc::clone(&replies);
             let writer = Arc::clone(&writer);
             let input = Arc::clone(&input);
             let outputs = output_arrivals.clone();
-            thread::spawn(move || replies.write_all_to(&writer, &input, &outputs));
+            move || replies.write_all_to(&writer, &input, &outputs)
+        })
+        .and_then(|()| {
+            spawn_thread("window-feed", {
+                let link = link.clone();
+                move || feed_model(&feed, &feed_rx, &|seq| link.ack(seq), ack_step, &drained_tx)
+            })
+        });
+        if started.is_err() {
+            replies.close();
+            link.terminate(true);
+            return Err(PtyError::SpawnFailed);
         }
-
-        let reader_thread = {
-            let feed = ModelFeed {
-                screen: screen.clone(),
-                input: Arc::clone(&input),
-                replies: Arc::clone(&replies),
-                raw_capture: raw_capture.clone(),
-                arrivals: arrivals_tx,
-            };
-            let is_exited = is_exited.clone();
-
-            thread::spawn(move || {
-                Self::reader_loop(&feed, reader, &is_exited);
-            })
-        };
-
-        let child_process_id = child.process_id();
-
-        let (exit_notify_tx, exit_notify_rx) = watch::channel(false);
-
-        let _child_monitor_thread = {
-            let exit_code = exit_code.clone();
-            let is_exited = is_exited.clone();
-            let group = Arc::clone(&group);
-            let control = Arc::clone(&control);
-
-            // This thread is the child's only waiter; terminate() reaches the same
-            // process through the killer. After the exit the wind-down order is
-            // fixed: publish the exit, end the whole tree, then close the PTY.
-            // The close comes last so the kill, not the close, decides the exit
-            // code; the reader keeps reading (or is dropped), which lets the PTY's
-            // host finish.
-            thread::spawn(move || {
-                let code = child.wait().unwrap_or(-1);
-                exit_code.store(code, Ordering::SeqCst);
-                is_exited.store(true, Ordering::SeqCst);
-                let _ = exit_notify_tx.send(true);
-                if let Err(error) = group.terminate() {
-                    tracing::warn!(%error, "failed to end the exited child's process tree");
-                }
-                control.close();
-            })
-        };
 
         Ok(Self {
             #[cfg(feature = "fault-injection")]
@@ -868,59 +750,19 @@ impl PtySession {
             resize_order: tokio::sync::Mutex::new(()),
             output_arrivals,
             input_writes: Arc::new(input_writes),
-            control,
-            group,
+            views,
+            link,
             writer,
             write_ledger: Arc::new(WriteLedger::default()),
             replies,
-            killer,
             child_process_id,
             exit_code,
             is_exited,
-            force_kill_scheduled: AtomicBool::new(false),
             exit_notify_rx,
-            _reader_thread: Some(reader_thread),
+            drained,
+            released,
+            _host: Arc::clone(host),
         })
-    }
-
-    /// Reader thread: reads PTY output and feeds it to the terminal model.
-    ///
-    /// Reads `is_exited` but writes neither it nor `exit_code`: the
-    /// child-monitor thread is the sole writer of both, so their
-    /// `exit_code` -> `is_exited` store order is never raced by this thread
-    /// observing PTY EOF on its own.
-    fn reader_loop(
-        feed: &ModelFeed,
-        mut reader: Box<dyn Read + Send>,
-        is_exited: &Arc<AtomicBool>,
-    ) {
-        let mut buf = vec![0u8; 8192];
-        let mut drain_deadline: Option<Instant> = None;
-
-        loop {
-            // Never stop on a termination request alone: on macOS a force-killed
-            // PTY session leader stalls in the kernel's exit path unless the master
-            // is drained. Only a confirmed exit starts the bounded POST_EXIT_DRAIN.
-            if is_exited.load(Ordering::SeqCst) {
-                let deadline =
-                    *drain_deadline.get_or_insert_with(|| Instant::now() + POST_EXIT_DRAIN);
-                if Instant::now() >= deadline {
-                    break;
-                }
-            }
-
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    break;
-                }
-                Ok(n) => {
-                    feed.feed(&buf[0..n]);
-                }
-                Err(_) => {
-                    break;
-                }
-            }
-        }
     }
 
     /// Runs `access` with the window's model on a blocking thread, admitted
@@ -935,6 +777,12 @@ impl PtySession {
         &self,
         access: impl FnOnce(&SharedScreen) -> R + Send + 'static,
     ) -> Option<R> {
+        // Once the exit is known, a read sees everything the child wrote
+        // before it.
+        if self.is_exited.load(Ordering::SeqCst) {
+            let mut drained = self.drained.clone();
+            let _ = drained.wait_for(|drained| *drained).await;
+        }
         let permit = Arc::clone(&self.model_access).acquire_owned().await.ok()?;
         let screen = self.screen.clone();
         tokio::task::spawn_blocking(move || {
@@ -979,15 +827,76 @@ impl PtySession {
         self.output_arrivals.clone()
     }
 
-    /// A receiver whose value changes each time something is written to the
-    /// child's input ([`PtySession::write_input`]).
-    pub(crate) fn input_writes(&self) -> watch::Receiver<u64> {
-        self.input_writes.subscribe()
+    /// Counts one write to the child's input, before it is made; the write
+    /// may end a synchronized update that holds the view.
+    fn count_input_write(input_writes: &watch::Sender<u64>, views: &Views) {
+        input_writes.send_modify(|count| *count = count.wrapping_add(1));
+        views.wake_if(views.slot.note_write());
     }
 
-    /// Counts one write to the child's input, before it is made.
-    fn count_input_write(input_writes: &watch::Sender<u64>) {
-        input_writes.send_modify(|count| *count = count.wrapping_add(1));
+    /// Takes the window's attach for a connection, superseding the one
+    /// before, whose receiver then resolves.
+    pub(crate) fn attach_view(&self) -> (AttachGeneration, oneshot::Receiver<()>) {
+        self.views.slot.attach()
+    }
+
+    /// Lets go of the attach if `generation` still holds it.
+    pub(crate) fn detach_view(&self, generation: AttachGeneration) {
+        self.views.slot.detach(generation);
+    }
+
+    /// Resolves once the feeder has taken in everything sent to it before
+    /// this call: the output received, and the notes and writes told to the
+    /// view, with the frames for them handed to the view's connection. Ends
+    /// unanswered (an error) at once when the feeder has ended, since no
+    /// frame comes from it after that.
+    pub(crate) fn settled(&self) -> oneshot::Receiver<()> {
+        let (settle, settled) = oneshot::channel();
+        let _ = self.views.feed.send(Feed::Settle(settle));
+        settled
+    }
+
+    /// Whether some connection holds the window's attach.
+    pub(crate) fn is_view_attached(&self) -> bool {
+        self.views.slot.is_attached()
+    }
+
+    /// Tells the view of attach `generation` what changed; a note from an
+    /// attach that was superseded is dropped.
+    pub(crate) fn note_view(&self, generation: AttachGeneration, note: ViewNote) {
+        self.views.wake_if(self.views.slot.note(generation, note));
+    }
+
+    /// Gives attach `generation` a new view and sends `sink` every row of it
+    /// (whatever was unacknowledged or held before). The view is placed
+    /// under the same hold of the model's lock the rows are read under, so
+    /// the feeder's next frame for it waits for this one's acknowledgement.
+    pub(crate) async fn show_view(&self, generation: AttachGeneration, sink: Arc<dyn FrameSink>) {
+        let placed = {
+            let slot = Arc::clone(&self.views.slot);
+            let sink = Arc::clone(&sink);
+            let exited = Arc::clone(&self.is_exited);
+            self.with_model(move |screen| {
+                // Read under the model's lock: an exit not yet seen here
+                // reaches the feeder's end after this view is placed.
+                let child_exited = exited.load(Ordering::SeqCst);
+                let mut view = View::new();
+                let capture = view.capture(screen, child_exited, true);
+                (capture, slot.place(generation, view, sink))
+            })
+            .await
+        };
+        let Some((capture, wake)) = placed else {
+            return;
+        };
+        self.views.wake_if(wake);
+        if let Some(capture) = capture {
+            let slot = Arc::clone(&self.views.slot);
+            let _ = tokio::task::spawn_blocking(move || {
+                slot.deliver(generation, sink.as_ref(), capture);
+            })
+            .await;
+        }
     }
 
     /// Runs `read` against the window's model as it stands, the way a reader
@@ -1115,7 +1024,7 @@ impl PtySession {
             return Err(PtyError::ChildExited);
         }
 
-        Self::count_input_write(&self.input_writes);
+        Self::count_input_write(&self.input_writes, &self.views);
         let data = data.to_vec();
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
@@ -1174,6 +1083,7 @@ impl PtySession {
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
         let input_writes = Arc::clone(&self.input_writes);
+        let views = self.views.clone();
         let input = Arc::clone(&self.input);
         let replies = Arc::clone(&self.replies);
         let outputs = self.output_arrivals.clone();
@@ -1182,7 +1092,7 @@ impl PtySession {
             let mut entered = false;
             let outcome = if *ledger.count.borrow() == expected_seq {
                 before_write();
-                Self::count_input_write(&input_writes);
+                Self::count_input_write(&input_writes, &views);
                 ledger.count();
                 entered = true;
                 let lead = replies.focus_before_input(input.load().modes, &outputs);
@@ -1276,14 +1186,8 @@ impl PtySession {
             .ok_or(PtyError::ResizeFailed)?;
 
         // Outside the model's permit: readers of the model never wait on the
-        // PTY call, and output keeps flowing into the model meanwhile.
-        let control = Arc::clone(&self.control);
-        let injected_failure = self.resize_fault.take();
-        let refused = tokio::task::spawn_blocking(move || {
-            injected_failure || control.resize(cols, rows).is_err()
-        })
-        .await
-        .unwrap_or(true);
+        // holder's answer, and output keeps flowing into the model meanwhile.
+        let refused = self.resize_fault.take() || !self.link.resize(cols, rows).await;
         if refused {
             let input = Arc::clone(&self.input);
             self.with_model(move |model| {
@@ -1342,78 +1246,47 @@ impl PtySession {
 }
 
 impl PtySession {
-    /// Terminate the child process and release the PTY writer. Takes `&self` so
-    /// it can run from `Drop` and from synchronous close handlers; nothing
-    /// here sleeps or waits for a writer lock.
+    /// Asks the holder to end the child and releases the writer. Takes `&self`
+    /// so it can run from `Drop` and from synchronous close handlers; nothing
+    /// here waits.
     ///
-    /// The reader thread keeps running (it ends on EOF or a read error only),
-    /// so the master stays drained while the child is killed: a force-killed
-    /// PTY session leader otherwise stalls in the macOS kernel's exit path.
-    ///
-    /// The kill is sent explicitly and *before* the writer is closed, because
-    /// closing the writer is itself a console-close kill on Windows. Ordering
-    /// the explicit kill first keeps it, not the console close, deciding the
-    /// exit code, and a console close is not guaranteed to reach a child under
-    /// load. Once the child is gone the monitor thread ends its whole process
-    /// tree and closes the PTY, so this reaches descendants too;
-    /// [`PtySession::terminate_tree`] ends the tree without waiting for that.
-    ///
-    /// Returns as soon as the kill has been *sent*; the exit itself is observed
-    /// by the monitor thread, and on Unix the escalation to an uncatchable
-    /// signal happens on a thread inside [`yagura_os::schedule_force_kill`].
+    /// The holder ends the child's whole tree once the child has gone and
+    /// reports the exit after the child's last output, which is when
+    /// [`PtySession::exit_notified`] turns `true`;
+    /// [`PtySession::terminate_tree`] ends the tree without waiting for the
+    /// child. A writer stuck inside a write is not waited for: its write fails
+    /// once the child or the holder is gone.
     pub fn terminate(&self) {
-        // A child whose exit has already been observed must not be signalled:
-        // its process id may by then belong to an unrelated process. On Unix a
-        // narrow window remains, inherent to addressing a process by id.
         if !self.is_exited.load(Ordering::SeqCst) {
-            // The result is discarded: a failed signal on Unix means the child
-            // is already gone.
-            let _ = self.killer.kill();
-
-            // Scheduled once per session: a repeat terminate() call (Drop
-            // after an explicit close, for example) must not keep spawning
-            // more detached escalation threads for the same child.
-            if !self.force_kill_scheduled.swap(true, Ordering::SeqCst) {
-                yagura_os::schedule_force_kill(
-                    self.child_process_id,
-                    TERMINATE_ESCALATION_GRACE,
-                    self.is_exited.clone(),
-                );
-            }
+            self.link.terminate(false);
         }
-
         self.replies.close();
-        // Released after the kill above (even when the child had already
-        // exited) so that the kill, not this close, decides the exit code on
-        // Windows. A writer stuck inside a write is not waited for: it drops
-        // the writer when its write fails or ends, which happens once the
-        // process tree is gone.
         self.writer.request_release();
     }
-}
 
-impl PtySession {
     /// Ends the child's whole process tree now: the child and everything it
-    /// started. Idempotent. The monitor thread does the same once the child
-    /// has exited, so this is only needed to end the tree while the child is
-    /// still running.
-    ///
-    /// # Errors
-    ///
-    /// Returns the OS boundary's error when the tree cannot be ended; a later
-    /// call tries again.
-    pub fn terminate_tree(&self) -> Result<(), yagura_os::OsError> {
-        self.group.terminate()
+    /// started. Idempotent. The holder does the same once the child has
+    /// exited, so this is only needed to end the tree while the child is
+    /// still running. Nothing can fail here: the request goes to the holder,
+    /// and a holder that is already gone has ended the tree with the child.
+    pub fn terminate_tree(&self) {
+        self.link.terminate(true);
+    }
+
+    /// Waits, at most `limit`, until the window's holder process has ended;
+    /// returns whether it got there.
+    pub async fn wait_until_released(&self, limit: Duration) -> bool {
+        let mut released = self.released.clone();
+        matches!(
+            tokio::time::timeout(limit, released.wait_for(|released| *released)).await,
+            Ok(Ok(_))
+        )
     }
 }
 
 impl Drop for PtySession {
     fn drop(&mut self) {
         self.terminate();
-
-        // Detach the reader thread handle without blocking: the child was
-        // killed above, so the reader ends on the resulting EOF.
-        let _ = self._reader_thread.take();
     }
 }
 
@@ -1425,6 +1298,14 @@ impl std::fmt::Debug for PtySession {
             .field("exit_code", &self.exit_code.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
+}
+
+fn spawn_thread(name: &str, body: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(body)
+        .map(drop)
+        .inspect_err(|error| tracing::error!(%error, "cannot start a window's thread"))
 }
 
 #[cfg(test)]
@@ -1441,31 +1322,5 @@ mod tests {
         assert!(input.contains_cell(79, 23));
         assert!(!input.contains_cell(80, 0));
         assert!(!input.contains_cell(0, 24));
-    }
-
-    #[test]
-    fn the_reader_still_feeds_output_left_in_the_pty_once_the_exit_is_known() {
-        let screen = VtScreen::with_history(80, 24, 100).into_shared();
-        let input = Arc::new(PublishedInput::of(&screen.lock()));
-        let (arrivals, _arrivals_rx) = watch::channel(0u64);
-        let feed = ModelFeed {
-            screen: screen.clone(),
-            input,
-            replies: Arc::new(ReplyQueue::default()),
-            raw_capture: RawCapture::default(),
-            arrivals,
-        };
-        // The child's last words are still unread when its exit is observed.
-        let is_exited = Arc::new(AtomicBool::new(true));
-        let left_in_pty: Box<dyn Read + Send> =
-            Box::new(std::io::Cursor::new(b"LAST-WORDS".to_vec()));
-
-        PtySession::reader_loop(&feed, left_in_pty, &is_exited);
-
-        let (text, _) = screen.lock().text_tail(24, 4096);
-        assert!(
-            text.contains("LAST-WORDS"),
-            "output written before the exit must still reach the model; it shows {text:?}"
-        );
     }
 }

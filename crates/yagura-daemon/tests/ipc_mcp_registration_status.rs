@@ -35,17 +35,9 @@ use yagura_protocol::{
     ClientMessage, DaemonMessage, McpRegistrationCommand, McpRegistrationRow, McpRegistrationState,
     McpRegistrationStatusInfo, McpRegistrationTomlSet, McpRegistrationTomlValue, ProfileInfo,
 };
-use yagura_test_support::ipc::{Connection, try_read_daemon_message};
+use yagura_test_support::ipc::{Connection, read_daemon_frame};
 
 // --- timing -------------------------------------------------------------------
-
-/// How long any single reply or push may take before a case gives up. Far
-/// above a fixture spawn, so it only bounds a hang.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How long a case that must observe "no push arrives" waits. Its positive
-/// control shows that the same row's push does arrive once a bridge is set.
-const NEGATIVE_OBSERVATION: Duration = Duration::from_millis(2000);
 
 // --- fixture layout -----------------------------------------------------------
 
@@ -343,7 +335,7 @@ async fn collect_statuses(
 ) -> BTreeMap<String, McpRegistrationStatusInfo> {
     let mut statuses: BTreeMap<String, McpRegistrationStatusInfo> = BTreeMap::new();
     while statuses.len() < count {
-        let push: DaemonMessage = read_response(client, REPLY_TIMEOUT).await;
+        let push: DaemonMessage = read_response(client).await;
         match push {
             DaemonMessage::McpRegistrationStatus {
                 request_id: pushed_for,
@@ -371,16 +363,54 @@ async fn list_and_collect(
     request_id: u64,
 ) -> (Listed, BTreeMap<String, McpRegistrationStatusInfo>) {
     send_list(client, request_id).await;
-    let reply: DaemonMessage = read_response(client, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(client).await;
     let listed = expect_listed(reply, request_id);
     let count = listed.rows.len();
     let statuses = collect_statuses(client, request_id, count).await;
     (listed, statuses)
 }
 
+/// [`list_and_collect`] once the listing slot is free: a listing's slot is
+/// given back just after its last push, so the next one may still find it
+/// taken. Request ids from `first_request_id` on are used for the retries.
+async fn list_once_admitted(
+    client: &mut Connection,
+    first_request_id: u64,
+) -> (Listed, BTreeMap<String, McpRegistrationStatusInfo>) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    let mut request_id = first_request_id;
+    loop {
+        send_list(client, request_id).await;
+        let reply: DaemonMessage = read_response(client).await;
+        match reply {
+            DaemonMessage::McpRegistrationsListed { .. } => {
+                let listed = expect_listed(reply, request_id);
+                let count = listed.rows.len();
+                let statuses = collect_statuses(client, request_id, count).await;
+                return (listed, statuses);
+            }
+            DaemonMessage::Error { ref code, .. }
+                if code == "resource_exhausted" && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                request_id += 1;
+            }
+            other => panic!("expected the listing slot to be freed, got {other:?}"),
+        }
+    }
+}
+
+/// How many fixture invocations the call log at `log` holds.
+fn log_line_count(log: &Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
 async fn list_profile_ids(client: &mut Connection) -> Vec<String> {
     send(client, &ClientMessage::ListProfiles).await;
-    let reply: DaemonMessage = read_response(client, REPLY_TIMEOUT).await;
+    let reply: DaemonMessage = read_response(client).await;
     match reply {
         DaemonMessage::ProfileList { profiles, .. } => profiles
             .into_iter()
@@ -479,32 +509,32 @@ async fn a_window_connection_and_an_unidentified_connection_are_refused_and_star
     let mut window_client = h.connect().await;
     identify(&mut window_client, &window_id).await;
     send_list(&mut window_client, 1).await;
-    expect_error(
-        read_response(&mut window_client, REPLY_TIMEOUT).await,
-        "auth_failed",
-    );
+    expect_error(read_response(&mut window_client).await, "auth_failed");
 
     let mut unidentified = h.connect().await;
     send_list(&mut unidentified, 2).await;
-    expect_error(
-        read_response(&mut unidentified, REPLY_TIMEOUT).await,
-        "auth_failed",
-    );
+    expect_error(read_response(&mut unidentified).await, "auth_failed");
 
-    tokio::time::sleep(NEGATIVE_OBSERVATION).await;
-    assert!(
-        !log.exists(),
-        "a refused listing must not start the registration CLI"
-    );
-
-    // Control: an approver's listing of the same profile does start it.
+    // Control, and the point after which a refused listing's children are all
+    // in the log: the listing slot is free only once a listing holding it has
+    // read every row, so an approver's listing is accepted only then.
     let mut approver = approver_connection(&h).await;
     let (listed, statuses) = list_and_collect(&mut approver, 3).await;
     assert_eq!(listed.rows.len(), 1);
     assert_eq!(statuses.len(), 1);
+    let first = log_line_count(&log);
     assert!(
-        log.exists(),
+        first > 0,
         "the approver's listing must have run the fixture"
+    );
+
+    // A second listing of the same row starts as many children as the first,
+    // so the first count holds none of a refused listing's.
+    list_once_admitted(&mut approver, 4).await;
+    assert_eq!(
+        log_line_count(&log),
+        2 * first,
+        "a refused listing must not start the registration CLI"
     );
 
     h.registry.terminate_all().await;
@@ -588,7 +618,7 @@ async fn rows_cover_listed_profiles_with_a_table_in_listing_order_with_full_argv
         .collect();
 
     send_list(&mut approver, 7).await;
-    let listed = expect_listed(read_response(&mut approver, REPLY_TIMEOUT).await, 7);
+    let listed = expect_listed(read_response(&mut approver).await, 7);
     assert_eq!(listed.bridge.as_deref(), Some(bridge.as_str()));
 
     let row_ids: Vec<String> = listed.rows.iter().map(|row| row.profile.clone()).collect();
@@ -1373,7 +1403,7 @@ async fn without_a_bridge_rows_are_listed_with_placeholders_and_no_state_is_push
     let mut approver = approver_connection(&h).await;
 
     send_list(&mut approver, 31).await;
-    let listed = expect_listed(read_response(&mut approver, REPLY_TIMEOUT).await, 31);
+    let listed = expect_listed(read_response(&mut approver).await, 31);
     assert_eq!(listed.bridge, None);
     assert_eq!(
         row_of(&listed.rows, "alpha").add,
@@ -1382,12 +1412,28 @@ async fn without_a_bridge_rows_are_listed_with_placeholders_and_no_state_is_push
             0
         ))
     );
-    let unexpected: Option<DaemonMessage> =
-        try_read_daemon_message(&mut approver, NEGATIVE_OBSERVATION).await;
-    assert!(
-        unexpected.is_none(),
-        "no state is read without a bridge: {unexpected:?}"
-    );
+    // A listing gives its slot back only after its last push, so once a later
+    // listing on this connection is admitted, every push of this one has been
+    // read ahead of that answer.
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    let mut request_id = 33;
+    send_list(&mut approver, request_id).await;
+    loop {
+        match read_response(&mut approver).await {
+            DaemonMessage::McpRegistrationsListed {
+                request_id: answered,
+                ..
+            } if answered == request_id => break,
+            DaemonMessage::Error { ref code, .. }
+                if code == "resource_exhausted" && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                request_id += 1;
+                send_list(&mut approver, request_id).await;
+            }
+            other => panic!("no state is read without a bridge: {other:?}"),
+        }
+    }
 
     // Control: the same profile with a bridge gets its push. The push is an
     // event, so it is waited for up to the reply ceiling.
@@ -1398,10 +1444,12 @@ async fn without_a_bridge_rows_are_listed_with_placeholders_and_no_state_is_push
     .await;
     let mut control = approver_connection(&with_bridge).await;
     send_list(&mut control, 32).await;
-    expect_listed(read_response(&mut control, REPLY_TIMEOUT).await, 32);
-    let push: Option<DaemonMessage> = try_read_daemon_message(&mut control, REPLY_TIMEOUT).await;
+    expect_listed(read_response(&mut control).await, 32);
+    let push: DaemonMessage = read_daemon_frame(&mut control)
+        .await
+        .expect_message("the state push");
     assert!(
-        matches!(push, Some(DaemonMessage::McpRegistrationStatus { .. })),
+        matches!(push, DaemonMessage::McpRegistrationStatus { .. }),
         "with a bridge the state push arrives: {push:?}"
     );
 }
@@ -1422,7 +1470,7 @@ async fn without_a_profiles_directory_the_listing_is_unsupported() {
     .await;
     let mut control = approver_connection(&with_dir).await;
     send_list(&mut control, 41).await;
-    expect_listed(read_response(&mut control, REPLY_TIMEOUT).await, 41);
+    expect_listed(read_response(&mut control).await, 41);
 
     let config = DaemonConfig {
         profiles_dir: None,
@@ -1431,10 +1479,7 @@ async fn without_a_profiles_directory_the_listing_is_unsupported() {
     let h = Harness::start("mcpreg-no-profiles", config).await;
     let mut approver = approver_connection(&h).await;
     send_list(&mut approver, 42).await;
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "unsupported",
-    );
+    expect_error(read_response(&mut approver).await, "unsupported");
 }
 
 // =============================================================================
@@ -1574,27 +1619,24 @@ async fn a_second_listing_while_one_runs_is_resource_exhausted_and_the_slot_free
     let mut approver = approver_connection(&h).await;
 
     send_list(&mut approver, 61).await;
-    expect_listed(read_response(&mut approver, REPLY_TIMEOUT).await, 61);
+    expect_listed(read_response(&mut approver).await, 61);
     send_list(&mut approver, 62).await;
 
     // The first listing's row read is held, so the second listing's answer
     // comes first.
-    expect_error(
-        read_response(&mut approver, REPLY_TIMEOUT).await,
-        "resource_exhausted",
-    );
+    expect_error(read_response(&mut approver).await, "resource_exhausted");
     std::fs::write(&release, b"").expect("release the held fixture calls");
-    match read_response(&mut approver, REPLY_TIMEOUT).await {
+    match read_response(&mut approver).await {
         DaemonMessage::McpRegistrationStatus { request_id, .. } => assert_eq!(request_id, 61),
         other => panic!("expected the first listing's push, got {other:?}"),
     }
 
     // Control: once the first listing has finished, a new one is admitted.
-    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     let mut request_id = 63;
     loop {
         send_list(&mut approver, request_id).await;
-        let reply: DaemonMessage = read_response(&mut approver, REPLY_TIMEOUT).await;
+        let reply: DaemonMessage = read_response(&mut approver).await;
         match reply {
             DaemonMessage::McpRegistrationsListed { .. } => {
                 expect_listed(reply, request_id);
@@ -1752,7 +1794,7 @@ async fn the_status_output_reaches_neither_a_push_nor_the_log() {
     let mut approver = approver_connection(&h).await;
 
     send_list(&mut approver, 81).await;
-    let listed_reply: DaemonMessage = read_response(&mut approver, REPLY_TIMEOUT).await;
+    let listed_reply: DaemonMessage = read_response(&mut approver).await;
     let listed_text = String::from_utf8(yagura_protocol::encode_daemon_message(&listed_reply))
         .expect("frames are UTF-8");
     let listed = expect_listed(listed_reply, 81);
@@ -1760,7 +1802,7 @@ async fn the_status_output_reaches_neither_a_push_nor_the_log() {
 
     let mut pushes: Vec<McpRegistrationStatusInfo> = Vec::new();
     while pushes.len() < listed.rows.len() {
-        let push: DaemonMessage = read_response(&mut approver, REPLY_TIMEOUT).await;
+        let push: DaemonMessage = read_response(&mut approver).await;
         let text = String::from_utf8(yagura_protocol::encode_daemon_message(&push))
             .expect("frames are UTF-8");
         assert!(

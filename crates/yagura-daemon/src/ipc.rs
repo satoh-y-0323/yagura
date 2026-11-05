@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
-use tokio::sync::{MutexGuard as AsyncMutexGuard, Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{
+    MutexGuard as AsyncMutexGuard, Notify, Semaphore, broadcast, mpsc, oneshot, watch,
+};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
@@ -58,7 +60,7 @@ use crate::control::{
 };
 use crate::detector::VtScreen;
 use crate::detector::layers::DetectionLayers;
-use crate::detector::screen_view::{self, View};
+use crate::detector::screen_view::{self, FrameCapture};
 use crate::handoff::{
     DELIVERY_REACTION_STATUSES, EnvelopeFrom, READY_STATUSES, StartupEvidence, check_envelope_len,
     compose_envelope, compose_task_notice, is_ready,
@@ -73,7 +75,9 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
-use crate::pty::{InputState, PtyError};
+use crate::pty::{
+    AttachGeneration, EncodedFrame, FrameSend, FrameSink, InputState, PtyError, SendKey, ViewNote,
+};
 use crate::store::{self, SnapshotWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
@@ -180,29 +184,24 @@ enum FrameOutcome {
 /// generation it holds in that window's attach slot.
 struct Attachment {
     entry: Arc<WindowEntry>,
-    generation: u64,
+    generation: AttachGeneration,
 }
 
 /// Everything one connection owns for the duration of its session: the
-/// attachment (at most one window), its view, and the subscriptions that feed
-/// the connection's `select!` branches. None of them is live until the
+/// attachment (at most one window) and the subscriptions that feed the
+/// connection's `select!` branches. None of them is live until the
 /// connection attaches, which is what keeps frames and status changes away
-/// from unattached connections.
+/// from unattached connections. The view itself lives in the attached
+/// window, whose feeder sends its frames.
 struct ConnectionState {
     /// Names this connection in the approval ledger, which is what lets a
     /// pending request be counted against the connection that asked for it
     /// and decided only by a connection that registered as an approver.
     conn_id: u64,
     attachment: Option<Attachment>,
-    /// What this connection was shown of the attached window. Made anew by
-    /// every attach, because a `frame` names no window.
-    view: View,
-    /// Changes once output reached the attached window's model.
-    arrivals: Option<watch::Receiver<u64>>,
-    /// Changes once the attached window's child exited.
-    exit_rx: Option<watch::Receiver<bool>>,
-    /// Changes once something was written to the attached window's child.
-    writes_rx: Option<watch::Receiver<u64>>,
+    /// Woken by the attached window when a frame could not be queued, so
+    /// the loop sees the connection broken.
+    frames_failed: Arc<Notify>,
     status_rx: Option<broadcast::Receiver<StatusAt>>,
     kick_rx: Option<oneshot::Receiver<()>>,
     /// Handles of this connection's outstanding `wait_for_status` tasks. Owned
@@ -250,10 +249,7 @@ impl ConnectionState {
         Self {
             conn_id,
             attachment: None,
-            view: View::new(),
-            arrivals: None,
-            exit_rx: None,
-            writes_rx: None,
+            frames_failed: Arc::new(Notify::new()),
             status_rx: None,
             kick_rx: None,
             waiters: Vec::new(),
@@ -265,6 +261,17 @@ impl ConnectionState {
             closed: watch::channel(false).0,
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             open_sends: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Tells the attached window's view what changed; nothing without an
+    /// attachment.
+    fn note_view(&self, note: ViewNote) {
+        if let Some(attachment) = &self.attachment {
+            attachment
+                .entry
+                .session()
+                .note_view(attachment.generation, note);
         }
     }
 
@@ -816,7 +823,8 @@ fn size_out_of_range_msg() -> DaemonMessage {
 ///   A message that cannot be queued therefore marks the connection broken
 ///   and it is closed at the next checkpoint (fail-closed) -- a client that
 ///   stops reading while it keeps issuing requests cannot be served
-///   correctly.
+///   correctly. A frame is queued by the window's feeder ([`ViewFrames`]),
+///   which wakes the connection when it could not.
 ///
 /// A closed queue (the writer task exited after a write error) is likewise
 /// terminal and closes the connection.
@@ -875,15 +883,55 @@ impl Outbound {
         }
     }
 
-    /// Queues an already encoded wire frame, as [`Outbound::reply`] does.
-    fn reply_encoded(&self, frame: Vec<u8>) {
-        if self.tx.try_send(frame).is_err() {
-            self.broken.store(true, Ordering::Relaxed);
-        }
-    }
-
     fn is_broken(&self) -> bool {
         self.broken.load(Ordering::Relaxed)
+    }
+
+    /// Where the attached window sends this connection's frames; `failed`
+    /// is woken when one could not be queued.
+    fn view_frames(&self, failed: Arc<Notify>) -> Arc<dyn FrameSink> {
+        Arc::new(ViewFrames {
+            tx: self.tx.clone(),
+            broken: Arc::clone(&self.broken),
+            failed,
+        })
+    }
+}
+
+/// A connection's frames, sent by its window's feeder: the one place a view's
+/// frame is laid out and queued.
+struct ViewFrames {
+    tx: mpsc::Sender<Vec<u8>>,
+    broken: Arc<AtomicBool>,
+    failed: Arc<Notify>,
+}
+
+impl FrameSink for ViewFrames {
+    fn encode(&self, capture: FrameCapture) -> EncodedFrame {
+        EncodedFrame(
+            capture
+                .into_parts()
+                .into_iter()
+                .map(|part| encode_frame(&DaemonMessage::Frame(part)))
+                .collect(),
+        )
+    }
+
+    fn try_send(&self, frame: EncodedFrame, _key: &SendKey) -> FrameSend {
+        for part in frame.0 {
+            let failed = match self.tx.try_send(part) {
+                Ok(()) => continue,
+                Err(mpsc::error::TrySendError::Full(_)) => FrameSend::Full,
+                Err(mpsc::error::TrySendError::Closed(_)) => FrameSend::Closed,
+            };
+            self.broken.store(true, Ordering::Relaxed);
+            return failed;
+        }
+        FrameSend::Sent
+    }
+
+    fn wake(&self) {
+        self.failed.notify_one();
     }
 }
 
@@ -1270,36 +1318,9 @@ impl IpcServer {
                 break 'conn;
             }
 
-            // The one place a frame is sent after a change: the change, or the
-            // acknowledgement of the last frame, brought the loop round.
-            self.push_frames(&outbound, &mut state, false).await;
-            if outbound.is_broken() {
-                break 'conn;
-            }
-
             tokio::select! {
-                changed = next_change(&mut state.arrivals) => {
-                    if !changed {
-                        state.arrivals = None;
-                    }
-                    state.view.note_change();
-                }
-
-                changed = next_change(&mut state.exit_rx) => {
-                    if !changed {
-                        state.exit_rx = None;
-                    }
-                    state.view.note_change();
-                }
-
-                // A write releases a synchronized update; nothing else here
-                // needs to hear of one.
-                changed = next_change(&mut state.writes_rx), if state.view.is_held() => {
-                    if !changed {
-                        state.writes_rx = None;
-                    }
-                    state.view.note_change();
-                }
+                // Brings the loop round to the broken check above.
+                () = state.frames_failed.notified() => {}
 
                 status = recv_status(&mut state.status_rx) => {
                     match status {
@@ -1432,7 +1453,7 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::FrameAck { seq }) => {
-                state.view.acknowledge(seq);
+                state.note_view(ViewNote::Ack(seq));
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::SetPalette(palette)) => {
@@ -1449,7 +1470,7 @@ impl IpcServer {
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::SetVisible { visible }) => {
-                state.view.set_visible(visible);
+                state.note_view(ViewNote::Visible(visible));
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::CopySelection) => {
@@ -1469,7 +1490,7 @@ impl IpcServer {
                         .session()
                         .with_model(screen_view::clear_selection)
                         .await;
-                    state.view.note_change();
+                    state.note_view(ViewNote::Changed);
                 }
                 FrameOutcome::Continue
             }
@@ -1479,11 +1500,18 @@ impl IpcServer {
                         .session()
                         .with_model(move |screen| screen_view::scroll_view(screen, lines))
                         .await;
-                    state.view.note_change();
+                    state.note_view(ViewNote::Changed);
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::Ping) => {
+                // Awaited here, not spawned, so the Pong keeps its place after
+                // the replies before it. Unbounded: the feeder's queue is
+                // bounded by the holder's ack window, and a stuck feeder
+                // withholding the Pong is the liveness answer.
+                if let Some(entry) = state.attached_entry() {
+                    let _ = entry.session().settled().await;
+                }
                 outbound.reply(&DaemonMessage::Pong);
                 FrameOutcome::Continue
             }
@@ -1763,11 +1791,14 @@ impl IpcServer {
             // learn why the daemon cannot open windows before it has any.
             Ok(ClientMessage::GetDaemonHealth) => {
                 let conpty_fault = match self.health_checks.acquire().await {
-                    Ok(_permit) => tokio::task::spawn_blocking(health::conpty_fault_now)
-                        .await
-                        .unwrap_or_else(|err| {
-                            Some(format!("the pseudoconsole check did not finish: {err}"))
-                        }),
+                    Ok(_permit) => tokio::task::spawn_blocking({
+                        let holder_exe = self.config.holder_exe.clone();
+                        move || health::conpty_fault_now(holder_exe.as_deref())
+                    })
+                    .await
+                    .unwrap_or_else(|err| {
+                        Some(format!("the pseudoconsole check did not finish: {err}"))
+                    }),
                     Err(_) => None,
                 };
                 outbound.reply(&DaemonMessage::DaemonHealth {
@@ -2454,12 +2485,7 @@ impl IpcServer {
             entry: entry.clone(),
             generation,
         });
-        // Subscribed before the frame is read, so a change after it is heard.
         let session = entry.session();
-        state.view = View::new();
-        state.arrivals = Some(seen(session.output_arrivals()));
-        state.exit_rx = Some(session.exit_notified());
-        state.writes_rx = Some(seen(session.input_writes()));
 
         let exit = session.exit_status();
         let msg = DaemonMessage::Attached {
@@ -2467,7 +2493,12 @@ impl IpcServer {
             exit_code: exit,
         };
         outbound.reply(&msg);
-        self.push_frames(outbound, state, true).await;
+        session
+            .show_view(
+                generation,
+                outbound.view_frames(Arc::clone(&state.frames_failed)),
+            )
+            .await;
 
         // The current status follows as a separate `StatusChanged`, since
         // `Attached` carries none. Subscribing before reading the current value
@@ -4050,7 +4081,7 @@ impl IpcServer {
                 .session()
                 .with_model(move |screen| action.apply(screen))
                 .await;
-            state.view.note_change();
+            state.note_view(ViewNote::Changed);
             return;
         }
         if is_exited_for_pty_write(&entry) {
@@ -4089,7 +4120,7 @@ impl IpcServer {
             .await
             .unwrap_or(false)
         {
-            state.view.note_change();
+            state.note_view(ViewNote::Changed);
         }
         let written = entry
             .write_client_input(&write, InputOrigin::Interactive)
@@ -4136,55 +4167,7 @@ impl IpcServer {
         // Detection reads the resized model itself; it only learns whether
         // the resize had to rebuild it.
         entry.propagate_resize();
-        state.view.note_change();
-    }
-
-    /// Sends the attached window's next frame, if one is due (see
-    /// [`View::capture`]); `full` sends every row whatever is awaited or
-    /// held. The model's lock is held only to read the rows that changed;
-    /// laying them out and encoding them happens away from it.
-    async fn push_frames(&self, outbound: &Outbound, state: &mut ConnectionState, full: bool) {
-        if !full && !state.view.wants_frame() {
-            return;
-        }
-        let Some(entry) = state.attached_entry() else {
-            return;
-        };
-        let session = entry.session();
-        let child_exited = session.exit_status().is_some();
-        let mut view = std::mem::take(&mut state.view);
-        let read = session
-            .with_model(move |screen| {
-                let capture = view.capture(screen, child_exited, full);
-                (view, capture)
-            })
-            .await;
-        let Some((view, capture)) = read else {
-            // The runtime is shutting down; a fresh view would start over.
-            state.view = View::new();
-            return;
-        };
-        state.view = view;
-        let Some(capture) = capture else {
-            return;
-        };
-        let encoded = tokio::task::spawn_blocking(move || {
-            capture
-                .into_parts()
-                .into_iter()
-                .map(|part| encode_frame(&DaemonMessage::Frame(part)))
-                .collect::<Vec<_>>()
-        })
-        .await;
-        match encoded {
-            Ok(parts) => {
-                for part in parts {
-                    outbound.reply_encoded(part);
-                }
-            }
-            // Nothing was sent, so nothing awaits an acknowledgement.
-            Err(_) => state.view = View::new(),
-        }
+        state.note_view(ViewNote::Changed);
     }
 }
 
@@ -4319,21 +4302,6 @@ async fn recv_kick(rx: &mut Option<oneshot::Receiver<()>>) {
         }
         None => std::future::pending().await,
     }
-}
-
-/// Awaits the next change of `rx` if it is `Some`: `true` on a change,
-/// `false` once its sender is gone. Never resolves without a receiver.
-async fn next_change<T>(rx: &mut Option<watch::Receiver<T>>) -> bool {
-    match rx {
-        Some(receiver) => receiver.changed().await.is_ok(),
-        None => std::future::pending().await,
-    }
-}
-
-/// `rx` with its current value marked as seen.
-fn seen<T>(mut rx: watch::Receiver<T>) -> watch::Receiver<T> {
-    rx.mark_unchanged();
-    rx
 }
 
 /// The window this connection is attached to, or `None` after refusing the
@@ -4781,19 +4749,12 @@ async fn execute_interrupt(
 
 /// Terminates an approved window's whole process tree and answers the caller.
 ///
-/// The GUI drops this window's pane as soon as this replies, without
-/// re-querying `list_windows`, while its periodic poll reopens a pane for any
-/// window it still sees as something other than `Exited`. Once the process
-/// tree is torn down, this therefore waits (bounded by
-/// [`DaemonConfig::close_settle_ms`]) for the *confirmed* status to settle to
-/// `Exited` before replying. It is a best-effort mitigation: reaching the
-/// bound never turns the reply into an error.
-///
-/// The wait runs inline rather than in a spawned task, because it is bounded
-/// by a small configured budget and blocks only the caller that asked for it.
-/// Spawning it would either send `WindowClosed` before the wait finished --
-/// reopening the very race the wait closes -- or need the same
-/// abort-on-disconnect bookkeeping `wait_for_status` carries.
+/// The reply goes out only after [`control::close_window`] has returned, so
+/// once the child's exit was observed every later read (`list_windows`,
+/// status events) already reports the window `Exited`: the GUI, which drops
+/// the pane on this reply without re-querying, never sees it come back. An
+/// exit not yet observed is published by the exit watcher when it arrives;
+/// the reply does not wait for it.
 ///
 /// The permit is taken by value: only a gate can issue one, so no caller can
 /// reach the teardown without having passed one.
@@ -4805,32 +4766,19 @@ async fn execute_close(
     force: bool,
     _permit: Permit<permit::CloseWindow>,
 ) {
-    if let Err(err) = close_for_cleanup(registry, config, entry, force).await {
-        outbound.reply(&control_error_msg(&err));
-        return;
-    }
-
-    let settle_timeout = Duration::from_millis(config.close_settle_ms);
-    let outcome =
-        waiter::wait_for_status(entry.watch_status(), WindowStatus::Exited, settle_timeout).await;
-    match outcome {
-        WaitOutcome::Reached => {}
-        WaitOutcome::Timeout { current } | WaitOutcome::ChildExited { current } => {
-            tracing::warn!(
-                window_id = entry.window_id(),
-                status = ?current,
-                "close_settle_ms elapsed before the window's confirmed status \
-                 settled to exited; replying window_closed anyway (fail-safe)"
-            );
+    match close_for_cleanup(registry, config, entry, force).await {
+        Ok(closed) => {
+            if closed.exit.is_err() {
+                tracing::warn!(
+                    window_id = entry.window_id(),
+                    "the child's exit was not observed within the close grace; the window keeps \
+                     its status until the exit is reported"
+                );
+            }
         }
-        // Nothing was observed, so no status is named: the window left the
-        // registry while this wait was outstanding.
-        WaitOutcome::Detached => {
-            tracing::warn!(
-                window_id = entry.window_id(),
-                "the window left the registry before its confirmed status settled to \
-                 exited; replying window_closed anyway (fail-safe)"
-            );
+        Err(err) => {
+            outbound.reply(&control_error_msg(&err));
+            return;
         }
     }
     outbound.reply(&DaemonMessage::WindowClosed {
@@ -4855,12 +4803,12 @@ async fn close_for_cleanup(
     config: &DaemonConfig,
     entry: &WindowEntry,
     force: bool,
-) -> Result<(), ControlError> {
+) -> Result<control::Closed, ControlError> {
     let grace = Duration::from_millis(config.close_grace_ms);
-    control::close_window(entry, force, grace).await?;
+    let closed = control::close_window(entry, force, grace).await?;
     entry.mark_closed();
     registry.request_snapshot();
-    Ok(())
+    Ok(closed)
 }
 
 /// Executes one submit request on an agent's behalf: the only point that
@@ -6607,19 +6555,23 @@ mod tests {
     /// Well-formed, so the request reaches the window lookup.
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-    #[tokio::test]
+    /// On a paused clock, reached only once nothing else can run: a handler
+    /// that has not answered by then is waiting on something other than time.
+    const UNTIL_IDLE: Duration = Duration::from_secs(3600);
+
+    #[tokio::test(start_paused = true)]
     async fn identify_waits_for_an_open_in_progress_before_answering() {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
         let (tx, mut rx) = mpsc::channel(8);
         let outbound = Outbound::new(tx);
         let mut state = ConnectionState::new(0, None);
-        let opening = registry.begin_opening("w-pending");
+        let opening = registry.begin_opening("w-pending", "pending");
 
         let identify = server.handle_identify(&outbound, &mut state, "w-pending", TOKEN);
         tokio::pin!(identify);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut identify)
+            tokio::time::timeout(UNTIL_IDLE, &mut identify)
                 .await
                 .is_err(),
             "identify must not answer while the window's open is in progress"
@@ -6627,7 +6579,9 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         drop(opening);
-        let outcome = identify.await;
+        let outcome = tokio::time::timeout(UNTIL_IDLE, identify)
+            .await
+            .expect("identify must answer once the open ends");
         assert!(matches!(outcome, FrameOutcome::Continue));
         assert_eq!(
             rx.try_recv().ok(),
@@ -6635,13 +6589,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_hook_status_event_waits_for_an_open_in_progress_before_answering() {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
         let (tx, mut rx) = mpsc::channel(8);
         let outbound = Outbound::new(tx);
-        let opening = registry.begin_opening("w-pending");
+        let opening = registry.begin_opening("w-pending", "pending");
 
         let event = server.handle_status_event(
             &outbound,
@@ -6652,15 +6606,15 @@ mod tests {
         );
         tokio::pin!(event);
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut event)
-                .await
-                .is_err(),
+            tokio::time::timeout(UNTIL_IDLE, &mut event).await.is_err(),
             "a hook must not be refused while the window's open is in progress"
         );
         assert!(rx.try_recv().is_err());
 
         drop(opening);
-        event.await;
+        tokio::time::timeout(UNTIL_IDLE, event)
+            .await
+            .expect("the hook must be answered once the open ends");
         assert_eq!(
             rx.try_recv().ok(),
             Some(encode_frame(&window_not_found_msg()))

@@ -13,8 +13,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{
     Harness, assert_hex_echo_receives, contains_subsequence, hex_echo_path, hex_of,
     output_after_marker, read_message, send,
@@ -24,7 +22,6 @@ use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{ClientMessage, DaemonMessage, Palette};
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 const QUERY_BACKGROUND: &[u8] = b"\x1b]11;?\x1b\\";
 const QUERY_FOREGROUND: &[u8] = b"\x1b]10;?\x1b\\";
@@ -86,7 +83,7 @@ async fn send_default_palettes(h: &Harness, app: &Palette, vendors: &[(&str, &Pa
         .expect("write the default palettes frame");
     send(&mut client, &ClientMessage::Ping).await;
     loop {
-        match read_message(&mut client, REPLY_TIMEOUT).await {
+        match read_message(&mut client).await {
             DaemonMessage::Pong => return,
             DaemonMessage::Error { code, message, .. } => {
                 panic!("the daemon refused the default palettes: {code}: {message}")
@@ -119,14 +116,7 @@ async fn window_that_asks_at_start(h: &Harness, vendor: Option<&str>) -> String 
         .await
         .expect("registry.open should spawn the child")
         .window_id;
-    assert_hex_echo_receives(
-        h,
-        &window_id,
-        EMITTED_MARKER,
-        DEVICE_STATUS_REPLY,
-        REPLY_TIMEOUT,
-    )
-    .await;
+    assert_hex_echo_receives(h, &window_id, EMITTED_MARKER, DEVICE_STATUS_REPLY).await;
     window_id
 }
 
