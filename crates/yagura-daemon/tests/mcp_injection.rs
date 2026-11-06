@@ -1061,8 +1061,11 @@ fn install_daemon_with_bridge(sandbox: &common::real_daemon::Sandbox) -> PathBuf
     yagura_test_support::process::install_window_runtime(&dir);
     let suffix = std::env::consts::EXE_SUFFIX;
     let bin = dir.join(format!("yagura-daemon{suffix}"));
-    std::fs::copy(common::real_daemon::daemon_bin(), &bin).unwrap();
-    std::fs::copy(env_probe_path(), dir.join(format!("yagura-mcp{suffix}"))).unwrap();
+    yagura_test_support::process::install_exe(&common::real_daemon::daemon_bin(), &bin);
+    yagura_test_support::process::install_exe(
+        &env_probe_path(),
+        &dir.join(format!("yagura-mcp{suffix}")),
+    );
     bin
 }
 

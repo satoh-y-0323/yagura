@@ -66,21 +66,51 @@ pub(crate) fn new_mark() -> io::Result<Vec<u8>> {
     Ok(mark.into_bytes())
 }
 
+/// The open end of a written end mark: the terminal's descriptor, kept so the
+/// terminal stays open until the reader has fixed where the output ends.
+///
+/// Keep it until the mark was read back or the output's end of file was read,
+/// then drop it. Where a terminal's last close waits for its output to be
+/// read (macOS), the close would otherwise wait for a reader that is gone;
+/// dropping sets `O_NONBLOCK` first, which makes that close discard the unread
+/// output instead of waiting. That is lossless only because the reader has
+/// already decided where the output ends: dropping it earlier can discard the
+/// child's last output that the reader has not read yet.
+#[derive(Debug)]
+pub struct EndMarkWriter {
+    terminal: std::fs::File,
+}
+
+impl Drop for EndMarkWriter {
+    fn drop(&mut self) {
+        let fd = self.terminal.as_raw_fd();
+        // SAFETY: the descriptor is open for as long as `self.terminal` lives;
+        // F_GETFL and F_SETFL only read and set its status flags.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
+}
+
 /// Opens the terminal `slave` by its name without making it a controlling
-/// terminal, lets stopped output go on, writes `mark` and closes it.
+/// terminal, lets stopped output go on and writes `mark`, leaving the
+/// terminal open in the returned [`EndMarkWriter`].
 ///
 /// Blocks while the terminal's buffer is full, so its output must be read
 /// meanwhile, by another thread than the caller.
-pub(crate) fn write_mark(slave: &CStr, mark: &[u8]) -> io::Result<()> {
-    let mut terminal = std::fs::OpenOptions::new()
+pub(crate) fn write_mark(slave: &CStr, mark: &[u8]) -> io::Result<EndMarkWriter> {
+    let terminal = std::fs::OpenOptions::new()
         .write(true)
         .custom_flags(libc::O_NOCTTY)
         .open(Path::new(std::ffi::OsStr::from_bytes(slave.to_bytes())))?;
-    // SAFETY: the descriptor is open for as long as `terminal` lives.
-    if unsafe { libc::tcflow(terminal.as_raw_fd(), libc::TCOON) } != 0 {
+    let mut writer = EndMarkWriter { terminal };
+    // SAFETY: the descriptor is open for as long as `writer` lives.
+    if unsafe { libc::tcflow(writer.terminal.as_raw_fd(), libc::TCOON) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    terminal.write_all(mark)?;
-    drop(terminal);
-    Ok(())
+    writer.terminal.write_all(mark)?;
+    Ok(writer)
 }

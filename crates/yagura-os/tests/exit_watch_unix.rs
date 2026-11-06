@@ -138,9 +138,12 @@ fn read_pid(path: &Path) -> u32 {
 }
 
 /// The terminal's writers, a session leader and a member of its group, write
-/// until they are killed while another process keeps the terminal open, so
-/// its output does not end with them; once both are confirmed dead, the end
-/// mark is the last thing the terminal's output holds.
+/// until they are killed while another process keeps the terminal open, and
+/// nothing they wrote comes after the end of the terminal's output. On Linux
+/// the output goes on with them dead, and the end mark written once both are
+/// confirmed dead is the last thing it holds. On macOS the session leader's
+/// exit revokes its controlling terminal: the output ends there, and the
+/// process still holding the terminal can no longer write to it.
 #[test]
 fn nothing_the_dead_writers_wrote_comes_after_the_end_mark() {
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -180,26 +183,46 @@ fn nothing_the_dead_writers_wrote_comes_after_the_end_mark() {
         format!("the group member {left:?} outlived the group's end")
     });
 
-    let mark = spawned
-        .control
-        .write_end_mark()
-        .expect("write the end mark");
-    let mark: &[u8] = mark.as_ref();
-    drop(held);
-    let tail = tail
-        .recv_timeout(HANG_GUARD)
-        .expect("the terminal's output did not end after the end mark");
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write as _;
 
-    assert!(
-        !mark.is_empty() && mark.iter().all(u8::is_ascii_digit),
-        "the end mark is not a run of digits: {mark:?}"
-    );
-    assert!(
-        tail.ends_with(mark),
-        "the output does not end with the end mark {:?}: ...{:?}",
-        String::from_utf8_lossy(mark),
-        String::from_utf8_lossy(&tail[tail.len().saturating_sub(200)..])
-    );
+        tail.recv_timeout(HANG_GUARD)
+            .expect("the terminal's output did not end with its session leader");
+        let refused = (&held)
+            .write_all(b"after the end")
+            .expect_err("the revoked terminal still took a write");
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(libc::EIO),
+            "the revoked terminal refused the write otherwise: {refused}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mark = yagura_os::pty::PtyControl::new_end_mark().expect("make the end mark");
+        let writer = spawned
+            .control
+            .write_mark(&mark)
+            .expect("write the end mark");
+        // This reader reads to the end by itself, so the terminal may close now.
+        drop(writer);
+        drop(held);
+        let tail = tail
+            .recv_timeout(HANG_GUARD)
+            .expect("the terminal's output did not end after the end mark");
+
+        assert!(
+            !mark.is_empty() && mark.iter().all(u8::is_ascii_digit),
+            "the end mark is not a run of digits: {mark:?}"
+        );
+        assert!(
+            tail.ends_with(&mark),
+            "the output does not end with the end mark {:?}: ...{:?}",
+            String::from_utf8_lossy(&mark),
+            String::from_utf8_lossy(&tail[tail.len().saturating_sub(200)..])
+        );
+    }
 }
 
 /// The state `ps` shows for `pid`; `None` once it is gone.

@@ -67,6 +67,10 @@ struct Shared {
     output_ended: AtomicBool,
     /// Bytes read after the end of output and dropped.
     dropped_bytes: AtomicU64,
+    /// The terminal as the end mark was written to it, open until the end of
+    /// output is fixed: closing it earlier can discard output not yet read.
+    #[cfg(unix)]
+    mark_writer: Mutex<Option<yagura_os::pty::EndMarkWriter>>,
     /// The holder's children have changed: some were reaped.
     #[cfg(target_os = "linux")]
     children_changed: ChildChanges,
@@ -81,7 +85,22 @@ impl Shared {
 
     fn end_output(&self) {
         self.output_ended.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        drop(lock(&self.mark_writer).take());
         self.core_wake.notify_one();
+    }
+
+    /// Keeps the written mark's terminal open until the end of output is
+    /// fixed; closes it at once when it already is.
+    #[cfg(unix)]
+    fn hold_mark_writer(&self, writer: yagura_os::pty::EndMarkWriter) {
+        let mut slot = lock(&self.mark_writer);
+        if self.output_ended.load(Ordering::SeqCst) {
+            drop(slot);
+            drop(writer);
+        } else {
+            *slot = Some(writer);
+        }
     }
 }
 
@@ -398,6 +417,7 @@ fn end_output(control: &PtyControl, shared: &Shared) {
         *lock(&shared.cut) = Cut::Mark(mark.clone());
         control.write_mark(&mark)
     });
+    let written = written.map(|writer| shared.hold_mark_writer(writer));
     if let Err(error) = written {
         crate::log(format_args!(
             "cannot mark the end of the child's output, which ends where it was read: {error}"

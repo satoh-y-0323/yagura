@@ -20,7 +20,7 @@ use yagura_protocol::{ClientMessage, DaemonMessage, MCP_BRIDGE_ENV};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
 use yagura_test_support::paths::strip_extended_length_prefix;
-use yagura_test_support::process::{env_probe_path, install_window_runtime};
+use yagura_test_support::process::{env_probe_path, install_exe, install_window_runtime};
 
 #[cfg(windows)]
 const HOST: &str = "OpenConsole.exe";
@@ -31,7 +31,7 @@ fn install_copy(sandbox: &Sandbox) -> PathBuf {
     let dir = sandbox.tree.make_dir("install");
     install_window_runtime(&dir);
     let bin = dir.join(format!("yagura-daemon{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(daemon_bin(), &bin).unwrap();
+    install_exe(&daemon_bin(), &bin);
     bin
 }
 
@@ -349,7 +349,7 @@ async fn windows_are_handed_the_mcp_bridge_installed_beside_the_daemon() {
     let sandbox = Sandbox::new("launch-mcp-bridge");
     let bin = install_copy(&sandbox);
     let bridge = bin.with_file_name(format!("yagura-mcp{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(env_probe_path(), &bridge).unwrap();
+    install_exe(&env_probe_path(), &bridge);
     sandbox.write_var_probe_profile("bridge-probe", MCP_BRIDGE_ENV, "");
     let mut daemon = sandbox.start_bin(&bin).await;
 
@@ -496,7 +496,7 @@ mod detached {
             "detached-start-probe{}",
             std::env::consts::EXE_SUFFIX
         ));
-        std::fs::copy(capture_child_path(), &program).expect("copy the capture_child fixture");
+        yagura_test_support::process::install_exe(&capture_child_path(), &program);
         let image = program.file_name().unwrap().to_string_lossy().to_string();
         let own_pid = std::process::id();
 

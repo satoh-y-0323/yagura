@@ -485,8 +485,8 @@ enum Ending {
     /// own files.
     Served,
     /// The window never opened and the holder has not ended: it may still
-    /// wait for a `Hello`, or overran [`RELEASE_LIMIT`]. It is killed and its
-    /// record is removed here.
+    /// wait for a `Hello`, or overran [`RELEASE_LIMIT`]. It is killed, and its
+    /// record and endpoint are removed here.
     Refused,
 }
 
@@ -557,11 +557,13 @@ fn run(
         Ok(_) => {}
         Err(error) => tracing::warn!(window_id, %error, "cannot wait for the window's holder"),
     }
-    // A killed holder cannot remove its record. Other leftovers (a holder
-    // killed from outside, or ended with the daemon's job) are for the
-    // start-up reconciliation, not a second remover here.
+    // A killed holder cannot remove its record or endpoint. Other leftovers
+    // (a holder killed from outside, or ended with the daemon's job) are for
+    // the start-up reconciliation, not a second remover here.
     if refused {
         remove_holder_record(&holders_dir, window_id);
+        #[cfg(unix)]
+        remove_holder_endpoint(&instance, &holders_dir, window_id);
     }
     drop(keep);
     drop(live);
@@ -711,12 +713,9 @@ fn serve(
     runtime.block_on(async {
         let welcomed = match handshake(holder, endpoint, holder_pid).await {
             Ok(welcomed) => welcomed,
-            Err(Refusal { error, let_in }) => {
+            Err(Refusal { error, leftover }) => {
                 let _ = opened.send(Err(error));
-                return match let_in {
-                    Some(connection) => give_up(connection, RELEASE_LIMIT).await,
-                    None => Ending::Refused,
-                };
+                return let_go(leftover, RELEASE_LIMIT).await;
             }
         };
         let (cols, rows) = welcomed.size;
@@ -749,20 +748,32 @@ fn serve(
     })
 }
 
-/// Why the daemon was not let in, and the connection when the holder may
-/// have started the child on it.
+/// Why the daemon was not let in, and what is left of the holder.
 struct Refusal {
     error: PtyError,
-    let_in: Option<Connection>,
+    leftover: Leftover,
 }
 
 impl From<PtyError> for Refusal {
     fn from(error: PtyError) -> Self {
         Self {
             error,
-            let_in: None,
+            leftover: Leftover::Unknown,
         }
     }
+}
+
+/// What a holder that did not let the daemon in goes on to do.
+enum Leftover {
+    /// Not known, or it goes on waiting for a `Hello` (it closes a refused
+    /// connection and stays): it is killed.
+    Unknown,
+    /// It let the daemon in and may have started the child on the
+    /// connection: it is asked to end the child's tree.
+    LetIn(Connection),
+    /// It answered that it is ending (the child could not start): it closes
+    /// the connection as it ends and removes its own files.
+    Closing(Connection),
 }
 
 /// What a holder's `Welcome` told, with the connection it came on.
@@ -811,7 +822,7 @@ async fn handshake(
             tracing::warn!(window_id, "the window's holder did not answer in time");
             return Err(Refusal {
                 error: PtyError::SpawnFailed,
-                let_in: Some(connection),
+                leftover: Leftover::LetIn(connection),
             });
         };
         match first {
@@ -835,7 +846,10 @@ async fn handshake(
                     window_id,
                     "bundled ConPTY unavailable; refusing to open a window"
                 );
-                return Err(PtyError::BundledConptyUnavailable.into());
+                return Err(Refusal {
+                    error: PtyError::BundledConptyUnavailable,
+                    leftover: Leftover::Closing(connection),
+                });
             }
             Some(
                 HolderFrame::SpawnFailed {
@@ -844,7 +858,10 @@ async fn handshake(
                 | HolderFrame::Exited { .. },
             ) => {
                 tracing::debug!(window_id, "the window's holder could not start the child");
-                return Err(PtyError::SpawnFailed.into());
+                return Err(Refusal {
+                    error: PtyError::SpawnFailed,
+                    leftover: Leftover::Closing(connection),
+                });
             }
             Some(HolderFrame::VersionRejected { protocol }) => {
                 tracing::warn!(
@@ -858,7 +875,7 @@ async fn handshake(
                 tracing::warn!(window_id, frame = ?other, "the window's holder answered out of turn");
                 return Err(Refusal {
                     error: PtyError::SpawnFailed,
-                    let_in: Some(connection),
+                    leftover: Leftover::LetIn(connection),
                 });
             }
             // Closed without a word: tried again while the holder still waits.
@@ -870,15 +887,25 @@ async fn handshake(
     Err(PtyError::SpawnFailed.into())
 }
 
-/// Asks a holder that let the daemon in, for a window that will not open, to
-/// end the child's tree, and waits for the connection to close, which the
-/// holder does as it ends. A holder still there at `limit` ([`RELEASE_LIMIT`]
-/// in production) is killed instead: the kill is only the bound, since a
-/// killed holder cannot end the child's tree on Unix.
-async fn give_up(mut connection: Connection, limit: Duration) -> Ending {
-    let terminate = encode_holder_frame(&HolderFrame::Terminate { tree: true });
+/// Lets go of a holder whose window will not open. One that let the daemon
+/// in is asked to end the child's tree; one that is ending is only waited
+/// for. Either closes the connection as it ends, which is waited for; a holder
+/// still there at `limit` ([`RELEASE_LIMIT`] in production) is killed
+/// instead. The kill is only the bound: a killed holder cannot end the child's
+/// tree on Unix, nor remove its own files.
+async fn let_go(leftover: Leftover, limit: Duration) -> Ending {
+    let (mut connection, ask) = match leftover {
+        Leftover::Unknown => return Ending::Refused,
+        Leftover::LetIn(connection) => (
+            connection,
+            Some(encode_holder_frame(&HolderFrame::Terminate { tree: true })),
+        ),
+        Leftover::Closing(connection) => (connection, None),
+    };
     let closed = tokio::time::timeout(limit, async {
-        if connection.write_all(&terminate).await.is_err() {
+        if let Some(ask) = ask
+            && connection.write_all(&ask).await.is_err()
+        {
             return;
         }
         let mut chunk = [0u8; 4096];
@@ -1125,6 +1152,33 @@ impl Reader<'_> {
     }
 }
 
+/// Removes the socket and lock of a holder this daemon killed, which it
+/// removes itself as it ends. Named as the holder names them, from its
+/// instance argument; a live listener's are never removed.
+#[cfg(unix)]
+fn remove_holder_endpoint(instance: &OsStr, holders_dir: &Path, window_id: &str) {
+    use yagura_os::PeerAuth;
+
+    // The holder's instance argument: empty for the default instance.
+    let instance = (!instance.is_empty()).then_some(instance);
+    let endpoint = yagura_os::resolve_instance_from(instance)
+        .map_err(|error| error.to_string())
+        .and_then(|namespace| {
+            let user_id = PlatformIpc::default()
+                .current_user_id()
+                .map_err(|error| error.to_string())?;
+            yagura_os::holder_endpoint(&user_id, &namespace, holders_dir, window_id)
+                .map_err(|error| error.to_string())
+        });
+    let removed = endpoint.and_then(|endpoint| {
+        yagura_os::platform_unix::remove_abandoned_endpoint(Path::new(&endpoint))
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = removed {
+        tracing::warn!(window_id, %error, "cannot remove a window holder's endpoint");
+    }
+}
+
 /// Removes the record of a holder this daemon killed. It never wrote an exit
 /// file: a provisional holder writes none.
 fn remove_holder_record(holders_dir: &Path, window_id: &str) {
@@ -1156,13 +1210,25 @@ mod tests {
     enum Step {
         HolderReadTerminateTree,
         HolderClosed,
-        GiveUpReturned,
+        LetGoReturned,
+    }
+
+    /// How a played holder answers the daemon's `Hello`.
+    #[derive(Debug, Clone, Copy)]
+    enum Answer {
+        /// A frame out of turn: the holder let the daemon in and may have
+        /// started the child.
+        OutOfTurn,
+        /// Why the child could not start, then `Exited`, as a holder ending by
+        /// itself answers.
+        SpawnFailed,
     }
 
     /// Plays a holder that takes the daemon's connection and answers the
-    /// `Hello` out of turn.
-    async fn accept_and_answer_out_of_turn(
+    /// `Hello` with `answer`.
+    async fn accept_and_answer(
         mut listener: <PlatformIpc as IpcTransport>::Listener,
+        answer: Answer,
     ) -> (<PlatformIpc as PeerAuth>::Connection, HolderFrameBuffer) {
         let ipc = PlatformIpc::default();
         let mut connection = ipc.accept(&mut listener).await.expect("accept the daemon");
@@ -1172,10 +1238,20 @@ mod tests {
             matches!(hello, Some(HolderFrame::Hello { .. })),
             "the daemon opens with a Hello, got {hello:?}"
         );
+        let reply = match answer {
+            Answer::OutOfTurn => encode_holder_frame(&HolderFrame::Written { id: 0 }),
+            Answer::SpawnFailed => [
+                encode_holder_frame(&HolderFrame::SpawnFailed {
+                    reason: HolderSpawnFailure::Spawn,
+                }),
+                encode_holder_frame(&HolderFrame::Exited { code: None }),
+            ]
+            .concat(),
+        };
         connection
-            .write_all(&encode_holder_frame(&HolderFrame::Written { id: 0 }))
+            .write_all(&reply)
             .await
-            .expect("answer out of turn");
+            .expect("answer the Hello");
         (connection, frames)
     }
 
@@ -1186,7 +1262,7 @@ mod tests {
         listener: <PlatformIpc as IpcTransport>::Listener,
         steps: Arc<Mutex<Vec<Step>>>,
     ) {
-        let (mut connection, mut frames) = accept_and_answer_out_of_turn(listener).await;
+        let (mut connection, mut frames) = accept_and_answer(listener, Answer::OutOfTurn).await;
         loop {
             match next_frame(&mut connection, &mut frames).await {
                 Some(HolderFrame::Terminate { tree }) => {
@@ -1211,26 +1287,31 @@ mod tests {
         (endpoint, listener)
     }
 
-    /// Lets the daemon fail its handshake with the holder at `endpoint` and
-    /// gives up on it with `limit`.
-    async fn handshake_then_give_up(endpoint: &str, limit: Duration) -> Ending {
+    /// Lets the daemon fail its handshake with the holder at `endpoint`,
+    /// which answers with `answer`, and lets go of it with `limit`.
+    async fn handshake_then_let_go(endpoint: &str, answer: Answer, limit: Duration) -> Ending {
         let holders_dir = PathBuf::from("unused-holders-dir");
         let holder = HolderAt {
             holders_dir: &holders_dir,
-            window_id: "w-out-of-turn",
+            window_id: "w-refused",
             daemon_endpoint: "unused-daemon-endpoint",
-            boot: "boot-out-of-turn",
+            boot: "boot-refused",
         };
         tokio::time::timeout(HANG_GUARD, async {
             let refusal = match handshake(&holder, endpoint, std::process::id()).await {
-                Ok(_) => panic!("an out-of-turn answer must not let the daemon in"),
+                Ok(_) => panic!("{answer:?} must not let the daemon in"),
                 Err(refusal) => refusal,
             };
             assert!(matches!(refusal.error, PtyError::SpawnFailed));
-            let connection = refusal
-                .let_in
-                .expect("the holder may have started the child: the connection is handed on");
-            give_up(connection, limit).await
+            match (answer, &refusal.leftover) {
+                (Answer::OutOfTurn, Leftover::LetIn(_))
+                | (Answer::SpawnFailed, Leftover::Closing(_)) => {}
+                _ => panic!(
+                    "{answer:?}: the connection is handed on, to ask the holder to end the child's \
+                     tree when it may have started it and to wait for one that is ending"
+                ),
+            }
+            let_go(refusal.leftover, limit).await
         })
         .await
         .expect("HANG_GUARD")
@@ -1243,8 +1324,8 @@ mod tests {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let holder_task = tokio::spawn(holder_answering_out_of_turn(listener, Arc::clone(&steps)));
 
-        let ending = handshake_then_give_up(&endpoint, RELEASE_LIMIT).await;
-        steps.lock().unwrap().push(Step::GiveUpReturned);
+        let ending = handshake_then_let_go(&endpoint, Answer::OutOfTurn, RELEASE_LIMIT).await;
+        steps.lock().unwrap().push(Step::LetGoReturned);
         tokio::time::timeout(HANG_GUARD, holder_task)
             .await
             .expect("HANG_GUARD")
@@ -1259,48 +1340,85 @@ mod tests {
             [
                 Step::HolderReadTerminateTree,
                 Step::HolderClosed,
-                Step::GiveUpReturned
+                Step::LetGoReturned
             ],
-            "give_up returns only once the holder closed the connection"
+            "the daemon lets go only once the holder closed the connection"
         );
     }
 
-    /// A holder that let the daemon in and never closes the connection,
-    /// whatever it is asked, is refused once the limit passes: it is killed
-    /// rather than waited for. It holds the connection until `give_up` has
-    /// returned, so the outcome does not depend on how fast either side runs.
+    /// A holder that could not start the child ends by itself and closes the
+    /// connection as it does; it is waited for, not killed, so it removes its
+    /// own files.
     #[tokio::test]
-    async fn a_holder_that_never_closes_once_asked_to_end_is_killed_at_the_limit() {
-        let (endpoint, listener) = bind_holder_endpoint("never-closes").await;
+    async fn a_holder_that_could_not_start_the_child_is_waited_for_and_not_killed() {
+        let (endpoint, listener) = bind_holder_endpoint("spawn-failed").await;
         let steps = Arc::new(Mutex::new(Vec::new()));
-        let (release, released) = oneshot::channel::<()>();
         let holder_task = tokio::spawn({
             let steps = Arc::clone(&steps);
             async move {
-                let (connection, _frames) = accept_and_answer_out_of_turn(listener).await;
-                let _ = released.await;
+                let (connection, _frames) = accept_and_answer(listener, Answer::SpawnFailed).await;
                 steps.lock().unwrap().push(Step::HolderClosed);
                 drop(connection);
             }
         });
 
-        let ending = handshake_then_give_up(&endpoint, Duration::from_millis(100)).await;
-        steps.lock().unwrap().push(Step::GiveUpReturned);
-        let _ = release.send(());
+        let ending = handshake_then_let_go(&endpoint, Answer::SpawnFailed, RELEASE_LIMIT).await;
+        steps.lock().unwrap().push(Step::LetGoReturned);
         tokio::time::timeout(HANG_GUARD, holder_task)
             .await
             .expect("HANG_GUARD")
             .expect("the holder's side");
 
         assert!(
-            matches!(ending, Ending::Refused),
-            "a holder that does not close by the limit is killed"
+            matches!(ending, Ending::Served),
+            "a holder ending by itself is not killed"
         );
         assert_eq!(
             *steps.lock().unwrap(),
-            [Step::GiveUpReturned, Step::HolderClosed],
-            "give_up returns while the holder still holds the connection"
+            [Step::HolderClosed, Step::LetGoReturned],
+            "the daemon lets go only once the holder closed the connection"
         );
+    }
+
+    /// A holder that never closes the connection, whether it let the daemon
+    /// in or answered that it is ending, is refused once the limit passes: it
+    /// is killed rather than waited for. It holds the connection until the
+    /// daemon has let go, so the outcome does not depend on how fast either
+    /// side runs.
+    #[tokio::test]
+    async fn a_holder_that_never_closes_once_asked_to_end_is_killed_at_the_limit() {
+        for answer in [Answer::OutOfTurn, Answer::SpawnFailed] {
+            let (endpoint, listener) = bind_holder_endpoint("never-closes").await;
+            let steps = Arc::new(Mutex::new(Vec::new()));
+            let (release, released) = oneshot::channel::<()>();
+            let holder_task = tokio::spawn({
+                let steps = Arc::clone(&steps);
+                async move {
+                    let (connection, _frames) = accept_and_answer(listener, answer).await;
+                    let _ = released.await;
+                    steps.lock().unwrap().push(Step::HolderClosed);
+                    drop(connection);
+                }
+            });
+
+            let ending = handshake_then_let_go(&endpoint, answer, Duration::from_millis(100)).await;
+            steps.lock().unwrap().push(Step::LetGoReturned);
+            let _ = release.send(());
+            tokio::time::timeout(HANG_GUARD, holder_task)
+                .await
+                .expect("HANG_GUARD")
+                .expect("the holder's side");
+
+            assert!(
+                matches!(ending, Ending::Refused),
+                "a holder that does not close by the limit is killed ({answer:?})"
+            );
+            assert_eq!(
+                *steps.lock().unwrap(),
+                [Step::LetGoReturned, Step::HolderClosed],
+                "the daemon lets go while the holder still holds the connection ({answer:?})"
+            );
+        }
     }
 
     mod played {

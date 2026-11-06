@@ -8,6 +8,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty};
 
+pub use super::tty_mark::EndMarkWriter;
 use super::{DEFAULT_TERM_GRACE, UnixProcessGroup, tty_mark};
 use crate::ReapGate;
 use crate::pty::{EnvOp, PtyCommand, PtySize, PtySpawn, PtySpawnError};
@@ -73,18 +74,21 @@ impl PtyControl {
     }
 
     /// Writes `mark` to the terminal by opening the terminal by its name
-    /// (never as a controlling terminal) after letting stopped output go on.
+    /// (never as a controlling terminal) after letting stopped output go on,
+    /// and returns the still open terminal.
     ///
     /// Written once every process that wrote to the terminal has died, the
     /// mark is the last thing the terminal's output holds, even while another
     /// process keeps the terminal open so the output never ends. Blocks while
-    /// the terminal's buffer is full: read the output on another thread.
+    /// the terminal's buffer is full: read the output on another thread. Keep
+    /// the returned writer until the reader has read the mark back or reached
+    /// the end of file (see [`EndMarkWriter`]).
     ///
     /// # Errors
     ///
     /// Returns an error when the terminal has been closed, or cannot be named,
     /// opened or written.
-    pub fn write_mark(&self, mark: &[u8]) -> io::Result<()> {
+    pub fn write_mark(&self, mark: &[u8]) -> io::Result<EndMarkWriter> {
         let slave = {
             let master = lock(&self.master);
             let fd = master
@@ -98,18 +102,6 @@ impl PtyControl {
         };
         // The write may block on a full buffer, so a resize must not wait for it.
         tty_mark::write_mark(&slave, mark)
-    }
-
-    /// Makes a new end mark ([`Self::new_end_mark`]), writes it
-    /// ([`Self::write_mark`]) and returns it.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error either step fails with.
-    pub fn write_end_mark(&self) -> io::Result<Vec<u8>> {
-        let mark = Self::new_end_mark()?;
-        self.write_mark(&mark)?;
-        Ok(mark)
     }
 }
 

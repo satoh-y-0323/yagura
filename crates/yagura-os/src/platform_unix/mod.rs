@@ -497,6 +497,36 @@ impl Drop for SocketListener {
     }
 }
 
+/// Removes the socket at `endpoint` and its lock file, as a [`SocketListener`]
+/// does as it ends, for a listener that died before it could (killed). Both
+/// are removed under the endpoint lock, so a live listener's files are never
+/// removed and no listener binds the endpoint meanwhile. A path that is not a
+/// socket is left in place.
+///
+/// # Errors
+///
+/// Returns [`OsError::EndpointHeld`] when a live listener holds the lock,
+/// [`OsError::Security`] when `endpoint` names something other than a socket
+/// (its lock file is still removed), and [`OsError::Io`] when a file cannot be
+/// read or removed.
+pub fn remove_abandoned_endpoint(endpoint: &Path) -> Result<(), OsError> {
+    let lock = lock_endpoint(endpoint)?;
+    let socket = match std::fs::symlink_metadata(endpoint) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            std::fs::remove_file(endpoint).map_err(OsError::Io)
+        }
+        Ok(_) => Err(OsError::Security(format!(
+            "{} is not a socket; refusing to remove it",
+            endpoint.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(OsError::Io(error)),
+    };
+    let lock_file = std::fs::remove_file(&lock.path).map_err(OsError::Io);
+    drop(lock);
+    socket.and(lock_file)
+}
+
 impl IpcTransport for UnixIpc {
     type Listener = SocketListener;
     type ClientConnection = UnixStream;
@@ -1254,6 +1284,34 @@ mod tests {
             "a lock on a replaced lock file was taken while the current one is held"
         );
         drop(current);
+    }
+
+    // A killed listener leaves its socket and lock behind; they are another
+    // process's to remove only once no live listener holds the lock.
+    #[test]
+    fn an_abandoned_endpoint_is_removed_only_once_its_lock_is_free() {
+        let dir = yagura_test_support::paths::short_tmp_dir("os-unix", "abandoned");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("e.sock");
+        let lock_path = endpoint_lock_path(&endpoint);
+        drop(std::os::unix::net::UnixListener::bind(&endpoint).unwrap());
+        let live = lock_endpoint(&endpoint).unwrap();
+
+        assert!(matches!(
+            remove_abandoned_endpoint(&endpoint),
+            Err(OsError::EndpointHeld(_))
+        ));
+        assert!(
+            endpoint.exists() && lock_path.exists(),
+            "a live listener's files are kept"
+        );
+
+        drop(live);
+        remove_abandoned_endpoint(&endpoint).unwrap();
+        assert!(
+            !endpoint.exists() && !lock_path.exists(),
+            "the files of a listener that is gone are removed"
+        );
     }
 
     // The fallback directory may already exist (a concurrent creator won the

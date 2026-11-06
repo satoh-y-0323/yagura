@@ -481,12 +481,44 @@ pub fn holder_path() -> PathBuf {
 pub fn install_window_runtime(dir: &Path) {
     let holder = holder_path();
     let name = holder.file_name().expect("the holder path names a file");
-    std::fs::copy(&holder, dir.join(name)).expect("copy yagura-holder");
+    install_exe(&holder, &dir.join(name));
     #[cfg(windows)]
     for pair in ["conpty.dll", "OpenConsole.exe"] {
-        std::fs::copy(holder.with_file_name(pair), dir.join(pair))
-            .unwrap_or_else(|error| panic!("copy {pair} beside the holder: {error}"));
+        install_exe(&holder.with_file_name(pair), &dir.join(pair));
     }
+}
+
+/// Copies the executable `from` to `to` for a test to run, without this
+/// process ever holding a descriptor open for writing on `to`. On Unix the
+/// copy is made by a `cp` child: a descriptor open for writing here is
+/// inherited by any child another test thread forks meanwhile, and keeps `to`
+/// busy (`ETXTBSY`) for an exec until that child execs.
+///
+/// # Panics
+///
+/// Panics if the copy fails.
+// The `cp` child is waited for before this returns, so it leaves nothing to
+// tear down; it is the test process's child, not one of the daemon's.
+#[allow(clippy::disallowed_methods)]
+pub fn install_exe(from: &Path, to: &Path) {
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("cp")
+            .arg("--")
+            .arg(from)
+            .arg(to)
+            .status()
+            .unwrap_or_else(|error| panic!("run cp for {}: {error}", from.display()));
+        assert!(
+            status.success(),
+            "cp {} {} failed: {status}",
+            from.display(),
+            to.display()
+        );
+    }
+    #[cfg(not(unix))]
+    std::fs::copy(from, to)
+        .unwrap_or_else(|error| panic!("copy {} to {}: {error}", from.display(), to.display()));
 }
 
 /// Path to the `capture_child` fixture binary that belongs to the test binary

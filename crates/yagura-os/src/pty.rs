@@ -17,6 +17,8 @@ use crate::platform_unix::pty as platform;
 #[cfg(windows)]
 use crate::platform_windows::conpty as platform;
 
+#[cfg(not(windows))]
+pub use platform::EndMarkWriter;
 pub use platform::{PtyChild, PtyControl, PtyKiller};
 
 /// The size of a terminal in character cells.

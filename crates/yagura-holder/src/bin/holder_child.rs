@@ -218,9 +218,10 @@ fn decode_hex(digits: &[u8]) -> Vec<u8> {
         b'0'..=b'9' => digit - b'0',
         _ => digit - b'a' + 10,
     };
-    digits
-        .chunks_exact(2)
-        .map(|pair| (value(pair[0]) << 4) | value(pair[1]))
+    let (pairs, _) = digits.as_chunks::<2>();
+    pairs
+        .iter()
+        .map(|[high, low]| (value(*high) << 4) | value(*low))
         .collect()
 }
 
