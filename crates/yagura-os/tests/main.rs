@@ -20,6 +20,7 @@ mod os_peer_executable;
 mod os_security;
 mod os_unix;
 mod pipe_accept;
+mod process_identity;
 mod program_resolution;
 mod pty_unix;
 mod reap_gate;

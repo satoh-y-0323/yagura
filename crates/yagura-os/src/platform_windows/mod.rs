@@ -16,6 +16,7 @@ mod job;
 mod spawn;
 
 pub use child::ChildProcess;
+pub(crate) use command_line::win32_error_to_io;
 pub use job::JobObject;
 pub(crate) use spawn::spawn_captured;
 

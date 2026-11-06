@@ -8,7 +8,7 @@ use yagura_protocol::holder::HolderLaunch;
 
 /// The places of one window's holder.
 pub(crate) struct Place {
-    /// The record, the exit file and, on Unix, the socket.
+    /// The record and, on Unix, the socket.
     pub(crate) holders_dir: PathBuf,
     /// The endpoint this holder listens on.
     pub(crate) endpoint: String,

@@ -11,12 +11,17 @@
 //! the base of the child's. The holder then listens on its endpoint,
 //! publishes its record in the `holders` directory the launch names, writes
 //! one line to standard output and closes it (a holder that fails before
-//! this writes nothing there), starts the child once the first daemon is let
-//! in, and ends when the child has exited.
+//! this writes nothing there), and starts the child once the first daemon is
+//! let in. It lives as long as the window, past the child's exit: it ends on
+//! `Terminate`, when no daemon comes by the first `Hello`'s deadline, when the
+//! child cannot start, or when a connection is lost and no next daemon will
+//! come.
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderLaunch, HolderRecord, decode_holder_launch, is_plain_window_id,
@@ -53,7 +58,7 @@ pub fn run_fault_injection() -> ExitCode {
 
 fn run_with(faults: session::Faults) -> ExitCode {
     match start(faults) {
-        Ok(session::Ending::ChildExited | session::Ending::NoHello) => ExitCode::SUCCESS,
+        Ok(session::Ending::WindowClosed | session::Ending::NoHello) => ExitCode::SUCCESS,
         Ok(session::Ending::SpawnFailed) => ExitCode::from(3),
         Err(error) => {
             log(format_args!("{error}"));
@@ -65,14 +70,38 @@ fn run_with(faults: session::Faults) -> ExitCode {
 /// The line on standard output that tells the starter the holder is ready.
 const READY_NOTICE: &[u8] = b"yagura-holder ready\n";
 
-/// Writes one line to standard error in one write, so lines of holders
-/// appending to the same log never interleave. A closed or broken standard
-/// error loses the line rather than ending the holder, and with it the child.
-/// Control characters in `message` are escaped: it can carry a path or a
-/// program name, and the log it lands in is the daemon's, read line by line.
+/// The log the launch names, once the launch is read.
+static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Writes one line in one write, so lines of holders appending to the same
+/// log never interleave: to the launch's log, opened for appending for this
+/// line alone so the holder never keeps the daemon's log open, or to standard
+/// error before the launch is read or when it names no log. A missing log or
+/// a broken standard error loses the line rather than ending the holder, and
+/// with it the child. Control characters in `message` are escaped: it can
+/// carry a path or a program name, and the log it lands in is the daemon's,
+/// read line by line.
 pub(crate) fn log(message: std::fmt::Arguments<'_>) {
     let line = log_line(&message.to_string());
-    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+    match LOG_FILE.get() {
+        Some(path) => {
+            if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+        None => {
+            let _ = std::io::stderr().lock().write_all(line.as_bytes());
+        }
+    }
+}
+
+/// Sends the holder's messages, a panic's included, to `log_file` from now
+/// on, when the launch names one.
+fn log_to(log_file: Option<PathBuf>) {
+    if let Some(path) = log_file {
+        let _ = LOG_FILE.set(path);
+        std::panic::set_hook(Box::new(|panic| log(format_args!("{panic}"))));
+    }
 }
 
 fn log_line(message: &str) -> String {
@@ -103,6 +132,7 @@ fn start(faults: session::Faults) -> Result<session::Ending, String> {
     let namespace =
         yagura_os::resolve_instance_from(instance).map_err(|error| error.to_string())?;
     let launch = read_launch()?;
+    log_to(launch.log_file.clone());
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -113,26 +143,28 @@ fn start(faults: session::Faults) -> Result<session::Ending, String> {
         let listener = endpoint::bind(&place)
             .await
             .map_err(|error| format!("cannot listen on the holder endpoint: {error}"))?;
-        let provisional = session::Provisional::new(&launch);
-        let mut record = provisional.own_record(
+        let holder_pid = std::process::id();
+        let mut record = record::RecordFile::new(
             &place,
             HolderRecord {
                 window_id,
                 endpoint: place.endpoint.clone(),
-                holder_pid: std::process::id(),
+                holder_pid,
                 child_pid: None,
                 protocol: HOLDER_PROTOCOL,
+                holder_start: record::start_of(holder_pid),
+                child_start: None,
             },
         );
-        if let Err(error) = publish(&place, &record) {
+        if let Err(error) = publish(&record) {
             record.remove();
             return Err(error);
         }
         let window = session::Window {
+            succession: session::Succession::new(&launch),
             launch,
             place,
             record,
-            provisional,
             faults,
         };
         Ok::<_, String>(session::serve(window, listener).await)
@@ -142,12 +174,9 @@ fn start(faults: session::Faults) -> Result<session::Ending, String> {
     ending
 }
 
-/// Publishes the holder once it owns its endpoint: clears an earlier exit
-/// file, writes the record, then tells the starter on standard output and
-/// lets go of it.
-fn publish(place: &endpoint::Place, record: &record::RecordFile) -> Result<(), String> {
-    record::remove_stale_exit(place, record.window_id())
-        .map_err(|error| format!("cannot remove an earlier exit file: {error}"))?;
+/// Publishes the holder once it owns its endpoint: writes the record, then
+/// tells the starter on standard output and lets go of it.
+fn publish(record: &record::RecordFile) -> Result<(), String> {
     record
         .write()
         .map_err(|error| format!("cannot write the holder record: {error}"))?;

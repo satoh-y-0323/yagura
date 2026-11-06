@@ -190,7 +190,8 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         hello_deadline_ms: 1000,
         holders_dir: PathBuf::from("state").join("holders"),
         daemon_endpoint: "daemon-endpoint".to_owned(),
-        end_child_on_disconnect: true,
+        awaits_successor: true,
+        log_file: Some(PathBuf::from("state").join("daemon.log")),
         history_rows: 1000,
         palette: Some(yagura_protocol::built_in_dark_palette()),
         fault: None,
@@ -207,6 +208,8 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         let faulty = HolderLaunch {
             fault: Some(fault),
             palette: None,
+            awaits_successor: false,
+            log_file: None,
             ..launch.clone()
         };
         assert_eq!(
@@ -231,6 +234,15 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
     };
     let encoded = encode_holder_frame(&welcome);
     assert_eq!(decode_whole(&encoded), welcome);
+    let after_exit = HolderFrame::Welcome {
+        protocol: 3,
+        record: "record".to_owned(),
+        cols: 80,
+        rows: 24,
+        exited: true,
+        child_pid: Some(4242),
+    };
+    assert_eq!(decode_whole(&encode_holder_frame(&after_exit)), after_exit);
 
     let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
     let without_pid = framed(
@@ -246,6 +258,32 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
         }
         other => panic!("expected Welcome, got {other:?}"),
     }
+}
+
+/// The record names the holder's and the child's starts, so a pid taken over by
+/// another process is not mistaken for them; a record written before they
+/// were carried reads as having neither.
+#[test]
+fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without_them() {
+    use yagura_protocol::holder::{HolderRecord, encode_holder_record};
+
+    let record = HolderRecord {
+        window_id: "w1".to_owned(),
+        endpoint: "holder-endpoint".to_owned(),
+        holder_pid: 10,
+        child_pid: Some(11),
+        protocol: 3,
+        holder_start: Some("holder-start".to_owned()),
+        child_start: Some("child-start".to_owned()),
+    };
+    let decoded: HolderRecord = serde_json::from_slice(&encode_holder_record(&record)).unwrap();
+    assert_eq!(decoded, record);
+
+    let older: HolderRecord = serde_json::from_slice(
+        br#"{"window_id":"w1","endpoint":"holder-endpoint","holder_pid":10,"child_pid":11,"protocol":2}"#,
+    )
+    .unwrap();
+    assert_eq!((older.holder_start, older.child_start), (None, None));
 }
 
 /// The frames that carry the terminal kept in the holder: the screen copy and

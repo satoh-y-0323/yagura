@@ -634,7 +634,7 @@ const MCP_CONFIG_DIR_NAME: &str = "mcp";
 const MCP_BRIDGE_EXE_STEM: &str = "yagura-mcp";
 
 /// Directory, under the instance's state directory, the window holders keep
-/// their records and exit files in.
+/// their records in.
 const HOLDERS_DIR_NAME: &str = "holders";
 
 /// The daemon's log file in its log directory.

@@ -125,7 +125,8 @@ impl Rig {
             hello_deadline_ms: NO_DEADLINE_MS,
             holders_dir: self.holders.clone(),
             daemon_endpoint: self.daemon_endpoint(),
-            end_child_on_disconnect: false,
+            awaits_successor: true,
+            log_file: None,
             history_rows: HISTORY_ROWS,
             palette: None,
             fault: None,
@@ -163,6 +164,16 @@ impl Rig {
 
 struct Holder {
     child: Child,
+}
+
+impl Holder {
+    async fn wait_exit(&mut self) {
+        let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the holder is still running");
+            tokio::time::sleep(POLL).await;
+        }
+    }
 }
 
 impl Drop for Holder {
@@ -410,12 +421,19 @@ impl Link {
     /// Connects, is welcomed, and takes the whole copy that must follow the
     /// `Welcome` before any other frame.
     async fn open(endpoint: &str, auto_ack: bool) -> (Self, ScreenPush) {
+        let (link, _, first) = Self::open_welcomed(endpoint, auto_ack).await;
+        (link, first)
+    }
+
+    /// As [`Link::open`], also returning whether the `Welcome` said the child
+    /// had exited.
+    async fn open_welcomed(endpoint: &str, auto_ack: bool) -> (Self, bool, ScreenPush) {
         let mut peer = Peer::connect(endpoint).await;
         peer.send(hello()).await;
-        match peer.frame().await {
-            HolderFrame::Welcome { .. } => {}
+        let exited = match peer.frame().await {
+            HolderFrame::Welcome { exited, .. } => exited,
             other => panic!("expected Welcome, got {other:?}"),
-        }
+        };
         let mut link = Self {
             peer,
             rows: Vec::new(),
@@ -434,7 +452,7 @@ impl Link {
             }
         };
         assert!(first.full, "the first copy after the Welcome is not whole");
-        (link, first)
+        (link, exited, first)
     }
 
     fn id(&mut self) -> u64 {
@@ -940,23 +958,203 @@ async fn a_resize_sends_a_copy_of_its_size_before_resized_and_an_attach_after_it
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_childs_last_output_is_in_a_copy_that_comes_before_exited() {
-    let rig = Rig::new("exited");
+fn files(rig: &Rig) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(&rig.holders)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect()
+}
+
+/// The files in the holders directory besides the window's record and, on
+/// Unix, the holder's socket and its lock.
+fn files_besides_the_record(rig: &Rig, endpoint: &str) -> Vec<std::ffi::OsString> {
+    let record = std::ffi::OsString::from(format!("{}.json", rig.window_id));
+    #[cfg(unix)]
+    let kept = {
+        let mut kept = vec![record];
+        if let Some(socket) = Path::new(endpoint).file_name() {
+            let mut lock = socket.to_owned();
+            lock.push(".lock");
+            kept.extend([socket.to_owned(), lock]);
+        }
+        kept
+    };
+    #[cfg(windows)]
+    let kept = {
+        let _ = endpoint;
+        vec![record]
+    };
+    files(rig)
+        .into_iter()
+        .filter(|name| !kept.contains(name))
+        .collect()
+}
+
+/// A holder whose daemon may have a successor lives as long as its window,
+/// not its child: past the child's exit and the connection's loss it lets the
+/// next daemon in with the last screen, then `Exited`, answers from the model
+/// the child left, and ends on `Terminate`, leaving no file. Nothing but the
+/// record (with the socket) is ever in the holders directory.
+async fn the_last_screen_outlives_the_child_and_the_connection(
+    label: &str,
+    exit_while_connected: bool,
+) {
+    let rig = Rig::new(label);
     let _daemon = hold_daemon_endpoint(&rig).await;
     let gate = rig.file("gate");
-    let _holder = rig.start(&rig.launch(&["exit", "0", path_arg(&gate)]));
+    let mut holder = rig.start(&rig.launch(&["exit", "7", path_arg(&gate)]));
+    let endpoint = rig.record().await.endpoint;
     // No PushAck: the last copy is owed before Exited all the same.
-    let (mut link, _) = Link::open(&rig.record().await.endpoint, false).await;
-
-    std::fs::write(&gate, b"").unwrap();
-    link.until(|frame| matches!(frame, HolderFrame::Exited { .. }))
+    let (mut link, _) = Link::open(&endpoint, false).await;
+    if exit_while_connected {
+        std::fs::write(&gate, b"").unwrap();
+        link.until(|frame| matches!(frame, HolderFrame::Exited { .. }))
+            .await;
+        assert!(
+            link.text().contains("EXITING 7"),
+            "the copies before Exited miss the child's last output: {}",
+            link.text()
+        );
+        let besides = files_besides_the_record(&rig, &endpoint);
+        assert!(
+            besides.is_empty(),
+            "the child's exit left {besides:?} beside the record"
+        );
+    }
+    drop(link);
+    if !exit_while_connected {
+        let child = rig.record().await.child_pid.unwrap();
+        std::fs::write(&gate, b"").unwrap();
+        yagura_test_support::process::wait_processes_gone(&[child], |_| {
+            "the child did not exit while disconnected".to_owned()
+        })
         .await;
+    }
+
+    let (mut link, welcomed_exited, _) = Link::open_welcomed(&endpoint, true).await;
+    let (exited, before) = link
+        .until(|frame| matches!(frame, HolderFrame::Exited { .. }))
+        .await;
+    assert_eq!(exited, HolderFrame::Exited { code: Some(7) });
     assert!(
-        link.text().contains("EXITING 0"),
-        "the copies before Exited miss the child's last output: {}",
+        link.text().contains("EXITING 7"),
+        "the next daemon was not shown the child's last screen: {}",
         link.text()
     );
+    if exit_while_connected {
+        assert!(
+            welcomed_exited,
+            "the Welcome did not say the child had exited"
+        );
+        assert!(
+            before.is_empty(),
+            "more than the whole copy of the last screen came before Exited"
+        );
+    }
+    let (tail, _, _) = link.read_tail(100, 64 * 1024).await;
+    assert!(
+        tail.contains("EXITING 7"),
+        "the tail is not read from the model the child left: {tail:?}"
+    );
+    let besides = files_besides_the_record(&rig, &endpoint);
+    assert!(
+        besides.is_empty(),
+        "the next daemon's connection found {besides:?} beside the record"
+    );
+
+    link.peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
+    let left = files(&rig);
+    assert!(left.is_empty(), "the holder left {left:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_screen_outlives_a_child_that_exited_while_connected() {
+    the_last_screen_outlives_the_child_and_the_connection("lastconn", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_screen_outlives_a_child_that_exited_while_disconnected() {
+    the_last_screen_outlives_the_child_and_the_connection("lastgone", false).await;
+}
+
+/// A holder whose daemon may have a successor keeps the child through a lost
+/// connection and reads on: the child's query is answered once, with nobody
+/// connected, and the next daemon is shown the output of the absence. The
+/// lost connection closed the focus interval it left open and took the view
+/// with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holder_awaiting_a_successor_keeps_the_child_and_reads_on_while_disconnected() {
+    const ABSENT_MARK: &str = "ABSENT-MARK";
+    let rig = Rig::new("absent");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let log = rig.file("input.log");
+    let gate = rig.file("gate");
+    let absent_output: String = [DA1, ABSENT_MARK.as_bytes()]
+        .concat()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut holder =
+        rig.start(&rig.launch(&["script", path_arg(&log), path_arg(&gate), &absent_output]));
+    let endpoint = rig.record().await.endpoint;
+    let (mut link, _) = Link::open(&endpoint, true).await;
+    link.script(b"\x1b[?1004hFOCUS-ON").await;
+    link.copy_with("FOCUS-ON").await;
+    link.attach(1).await;
+    link.peer
+        .send(HolderFrame::SetViewFocus { focused: false })
+        .await;
+    link.peer
+        .send(HolderFrame::FocusInterval { open: true })
+        .await;
+    link.write(b"FIRST-MARK").await;
+    log_with(&log, b"FIRST-MARK").await;
+    drop(link);
+
+    std::fs::write(&gate, b"").unwrap();
+    log_with(&log, DA1_REPLY).await;
+    let (mut link, _) = Link::open(&endpoint, true).await;
+    let mut seen = Vec::new();
+    while !link.text().contains(ABSENT_MARK) {
+        let (_, before) = link.next_copy().await;
+        seen.extend(before);
+    }
+    link.peer
+        .send(HolderFrame::SetViewFocus { focused: false })
+        .await;
+    link.write(b"INPUT-MARK").await;
+    let input = log_with(&log, b"INPUT-MARK").await;
+    seen.extend(link.settle().await);
+
+    let at = |needle: &[u8]| {
+        input
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap()
+    };
+    let first_end = at(b"FIRST-MARK") + b"FIRST-MARK".len();
+    let before_input = &input[..at(b"INPUT-MARK")];
+    assert_eq!(
+        count(before_input, DA1_REPLY),
+        1,
+        "the query made while disconnected was not answered exactly once: {:?}",
+        String::from_utf8_lossy(before_input)
+    );
+    assert!(
+        contains(&before_input[first_end..], b"\x1b[O"),
+        "the focus interval the lost connection left open still holds the focus: {:?}",
+        String::from_utf8_lossy(&before_input[first_end..])
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|seen| matches!(seen, Seen::Other(HolderFrame::ViewFrame { .. }))),
+        "the view attached on the lost connection still gets frames"
+    );
+
+    link.peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

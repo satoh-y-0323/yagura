@@ -31,10 +31,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// A request for the terminal thread, taken in the order it arrived among
 /// the child's output.
 pub(crate) enum Control {
-    /// The connection `conn` was welcomed: its first copy goes whole, now.
+    /// The connection `conn` was welcomed: its first copy goes whole, now,
+    /// answered on `done` once it is sent.
     Connected {
         conn: u64,
+        done: oneshot::Sender<()>,
     },
+    /// The connection was lost or displaced: its view and what its copies
+    /// were made against go with it.
+    Disconnected,
     PushAck {
         number: u64,
     },
@@ -322,8 +327,12 @@ impl Model {
         self.send(&frames);
     }
 
-    /// Sends a copy of the screen as it stands, whatever is awaited.
+    /// Sends a copy of the screen as it stands, whatever is awaited. None is
+    /// made with no connection: the next one's first copy is to go whole.
     fn send_copy(&mut self) {
+        if self.conn.is_none() {
+            return;
+        }
         // A read that panics rebuilds the model blank; the blank one is read.
         let copy = self
             .screen
@@ -339,7 +348,15 @@ impl Model {
 
     fn handle(&mut self, control: Control) {
         match control {
-            Control::Connected { conn } => self.connected(conn),
+            Control::Connected { conn, done } => {
+                self.connected(conn);
+                let _ = done.send(());
+            }
+            Control::Disconnected => {
+                self.conn = None;
+                self.push.reset();
+                self.attached.clear();
+            }
             Control::PushAck { number } => {
                 self.push.acknowledge(number);
                 self.send_due();
@@ -397,13 +414,10 @@ impl Model {
         }
     }
 
+    /// After the child's exit too: the copy is then of its last screen.
     fn connected(&mut self, conn: u64) {
         self.conn = Some(conn);
-        self.push.reset();
-        self.attached.clear();
-        if !self.exited {
-            self.send_copy();
-        }
+        self.send_copy();
         match self.fault.take() {
             Some(HolderFault::StallModel) => self.stall(),
             Some(HolderFault::PoisonModel) => self.screen.poison_after_calls(0),
@@ -519,6 +533,8 @@ enum WriteJob {
     Interval {
         open: bool,
     },
+    /// The connection that opened this many intervals was lost.
+    IntervalsLost(usize),
     /// Output arrived while a focus-out waited for it.
     CheckFocus,
 }
@@ -608,6 +624,14 @@ impl InputWriter {
     pub(crate) fn focus_interval(&self, open: bool) {
         let mut state = self.state();
         self.queue(&mut state, WriteJob::Interval { open });
+    }
+
+    /// Closes the `count` intervals a lost connection left open.
+    pub(crate) fn close_intervals(&self, count: usize) {
+        if count > 0 {
+            let mut state = self.state();
+            self.queue(&mut state, WriteJob::IntervalsLost(count));
+        }
     }
 
     /// Output arrived: a focus-out waiting for it may go now.
@@ -757,6 +781,22 @@ impl InputWriter {
                         } else {
                             state.focus.close_interval(outputs)
                         };
+                        if due {
+                            state.focus.reconcile(published.modes(), outputs)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    write_whole(writer, &report);
+                }
+                WriteJob::IntervalsLost(count) => {
+                    let report = {
+                        let mut state = self.state();
+                        let outputs = published.outputs_fed();
+                        let mut due = false;
+                        for _ in 0..count {
+                            due = state.focus.close_interval(outputs);
+                        }
                         if due {
                             state.focus.reconcile(published.modes(), outputs)
                         } else {

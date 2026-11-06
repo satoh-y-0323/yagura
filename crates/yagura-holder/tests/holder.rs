@@ -18,8 +18,7 @@ use tokio::time::Instant;
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderFault, HolderFrame, HolderFrameBuffer, HolderLaunch, HolderRecord,
-    encode_holder_frame, encode_holder_launch, holder_exit_path, read_holder_exit,
-    read_holder_record,
+    encode_holder_frame, encode_holder_launch, read_holder_record,
 };
 use yagura_test_support::paths::{TempDir, unique_suffix};
 
@@ -132,7 +131,8 @@ impl Rig {
             hello_deadline_ms,
             holders_dir: self.holders_dir(),
             daemon_endpoint: self.daemon_endpoint(),
-            end_child_on_disconnect: false,
+            awaits_successor: true,
+            log_file: None,
             history_rows: 1000,
             palette: None,
             fault: None,
@@ -472,11 +472,44 @@ async fn the_child_starts_only_after_the_first_valid_hello() {
 
     let before = rig.record().await;
     assert_eq!(before.child_pid, None, "the child started before any Hello");
+    assert_eq!(
+        before.child_start, None,
+        "a child's start was recorded before the child started"
+    );
     assert!(!count.exists(), "holder_child ran before any Hello");
+    let holder_start = yagura_os::process_start(before.holder_pid)
+        .unwrap()
+        .expect("the holder is running");
+    assert_eq!(
+        before.holder_start,
+        Some(holder_start.to_string()),
+        "the record does not carry the holder's start as yagura-os reads it"
+    );
 
     let (_peer, _) = Peer::welcomed(&before.endpoint).await;
-    rig.record_where(|record| record.child_pid.is_some()).await;
+    let after = rig
+        .record_where(|record| record.child_start.is_some())
+        .await;
     wait_until("holder_child runs after the Hello", || count.exists()).await;
+    let child_start = yagura_os::process_start(after.child_pid.unwrap())
+        .unwrap()
+        .expect("the child is running");
+    assert_eq!(
+        after.child_start,
+        Some(child_start.to_string()),
+        "the record does not carry the child's start as yagura-os reads it"
+    );
+    assert_eq!(after.holder_start, before.holder_start);
+
+    let daemon_endpoint = rig.daemon_endpoint();
+    let text = std::fs::read_to_string(
+        yagura_protocol::holder::holder_record_path(&rig.holders_dir(), &rig.window_id).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !text.contains(&daemon_endpoint) && !text.contains(&daemon_endpoint.replace('\\', "\\\\")),
+        "the record carries the daemon's endpoint: {text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -573,11 +606,7 @@ async fn a_write_after_the_child_exited_fails() {
     let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
 
     std::fs::write(&gate, b"").unwrap();
-    until_exited(&mut peer).await;
-    // The exit file is written before `Exited` is sent, so it is there now.
-    let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id)
-        .expect("the exit file is readable as soon as Exited arrives");
-    assert_eq!(exit.code, Some(0));
+    assert_eq!(until_exited(&mut peer).await, Some(0));
     peer.send(HolderFrame::Write {
         id: 9,
         bytes: b"x".to_vec(),
@@ -620,21 +649,6 @@ async fn without_a_hello_by_the_deadline_the_holder_ends_and_never_starts_the_ch
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_child_exiting_while_disconnected_leaves_its_result_and_output() {
-    let rig = Rig::new("exit");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let gate = rig.file("gate");
-    let mut holder = rig.start(&rig.launch(&["exit", "7", path_arg(&gate)], NO_DEADLINE_MS));
-    let (peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    drop(peer);
-
-    std::fs::write(&gate, b"").unwrap();
-    holder.wait_exit().await;
-    let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id).expect("read the exit");
-    assert_eq!(exit.code, Some(7));
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn terminate_ends_the_child_tree_and_the_holder() {
     let rig = Rig::new("tree");
     let _daemon = hold_daemon_endpoint(&rig).await;
@@ -674,8 +688,6 @@ async fn terminate_ends_a_child_ignoring_requests_to_end_and_keeps_its_exit() {
     holder.wait_exit().await;
     // 1 is TerminateProcess's code on Windows and a kill by signal on Unix.
     assert_eq!(code, Some(1), "the child was not ended by the kill");
-    let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id).expect("read the exit");
-    assert_eq!(exit.code, Some(1));
 }
 
 /// Kills a descendant the holder is not expected to end (or failed to), so a
@@ -746,7 +758,9 @@ async fn a_stubborn_grandchild_has_ended_by_exited(label: &str, terminate: bool)
     );
     #[cfg(windows)]
     assert_window_processes_end(window).await;
-    drop(peer);
+    if !terminate {
+        peer.send(HolderFrame::Terminate { tree: true }).await;
+    }
     holder.wait_exit().await;
 }
 
@@ -798,7 +812,7 @@ async fn a_write_that_ends_the_child_is_answered_before_exited() {
         matches!(answers.as_slice(), [HolderFrame::WriteFailed { id: 7, .. }]),
         "the write was not answered as failed before Exited: {answers:?}"
     );
-    drop(peer);
+    peer.send(HolderFrame::Terminate { tree: true }).await;
     holder.wait_exit().await;
 }
 
@@ -829,7 +843,7 @@ async fn a_written_write_that_ends_the_child_is_answered_written_before_exited()
         }
     }
     assert_eq!(answers, [HolderFrame::Written { id: 3 }]);
-    drop(peer);
+    peer.send(HolderFrame::Terminate { tree: true }).await;
     holder.wait_exit().await;
 }
 
@@ -970,15 +984,15 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
     );
 }
 
-/// Provisional: goes with the end-child-on-disconnect flag once holders
-/// outlive the daemon.
+/// No daemon comes back for a window whose daemon has no successor, so a lost
+/// connection ends the window.
 #[tokio::test(flavor = "multi_thread")]
-async fn provisional_flag_a_lost_connection_ends_the_tree_and_the_holder_and_leaves_no_file() {
-    let rig = Rig::new("flagend");
+async fn without_a_successor_a_lost_connection_ends_the_tree_and_the_holder_and_leaves_no_file() {
+    let rig = Rig::new("nosucc");
     let _daemon = hold_daemon_endpoint(&rig).await;
     let pid_file = rig.file("grandchild");
     let mut launch = rig.launch(&["tree", path_arg(&pid_file)], NO_DEADLINE_MS);
-    launch.end_child_on_disconnect = true;
+    launch.awaits_successor = false;
     let mut holder = rig.start(&launch);
     let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
     peer.text_until("HOLDER-CHILD-TREE").await;
@@ -992,8 +1006,6 @@ async fn provisional_flag_a_lost_connection_ends_the_tree_and_the_holder_and_lea
     drop(peer);
     holder.wait_exit().await;
     watch.wait_gone().await;
-    // The exit file and the record hold the child's raw output and nobody
-    // would read them.
     let left = files_left(&rig);
     assert!(left.is_empty(), "the holder left {left:?}");
 }
@@ -1015,82 +1027,6 @@ async fn until_exited(peer: &mut Peer) -> Option<i32> {
             other => panic!("unexpected frame before Exited: {other:?}"),
         }
     }
-}
-
-/// A provisional holder of a running `hex` child, connected and replayed,
-/// then told to end the child: returns once `Exited` has arrived.
-async fn provisional_terminated(rig: &Rig) -> (Holder, Peer) {
-    let mut launch = rig.launch(&["hex"], NO_DEADLINE_MS);
-    launch.end_child_on_disconnect = true;
-    let holder = rig.start(&launch);
-    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.text_until("HOLDER-CHILD-READY").await;
-    peer.send(HolderFrame::Terminate { tree: true }).await;
-    until_exited(&mut peer).await;
-    (holder, peer)
-}
-
-fn assert_no_exit_file(rig: &Rig, route: &str) {
-    let exit = holder_exit_path(&rig.holders_dir(), &rig.window_id).unwrap();
-    assert!(
-        !exit.exists(),
-        "{route}: the provisional holder wrote {} although nobody reads it",
-        exit.display()
-    );
-}
-
-/// Provisional: goes with the end-child-on-disconnect flag. Checked on the
-/// arrival of `Exited`, before this side closes, so an exit file written and
-/// removed later still shows.
-#[tokio::test(flavor = "multi_thread")]
-async fn provisional_flag_terminate_writes_no_exit_file_before_exited() {
-    let rig = Rig::new("flagterm");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let (mut holder, peer) = provisional_terminated(&rig).await;
-
-    assert_no_exit_file(&rig, "Terminate");
-    drop(peer);
-    holder.wait_exit().await;
-}
-
-/// Provisional: goes with the end-child-on-disconnect flag. The daemon here
-/// removes nothing, so whatever is left is the holder's.
-#[tokio::test(flavor = "multi_thread")]
-async fn provisional_flag_the_holder_removes_its_files_after_exited_and_the_close() {
-    let rig = Rig::new("flagclean");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let (mut holder, peer) = provisional_terminated(&rig).await;
-
-    drop(peer);
-    holder.wait_exit().await;
-    let left = files_left(&rig);
-    assert!(left.is_empty(), "the holder left {left:?}");
-}
-
-/// Provisional: goes with the end-child-on-disconnect flag.
-#[tokio::test(flavor = "multi_thread")]
-async fn provisional_flag_a_child_that_cannot_start_leaves_no_exit_file_and_no_record() {
-    let rig = Rig::new("flagnospawn");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let mut launch = rig.launch(&[], NO_DEADLINE_MS);
-    launch.argv = vec![path_arg(&rig.file("no-such-program")).to_owned()];
-    launch.end_child_on_disconnect = true;
-    let mut holder = rig.start(&launch);
-    let mut peer = Peer::connect(&rig.record().await.endpoint).await;
-    peer.send(hello(HOLDER_PROTOCOL)).await;
-
-    let reason = peer.frame().await;
-    assert!(
-        matches!(reason, HolderFrame::SpawnFailed { .. }),
-        "expected the reason first, got {reason:?}"
-    );
-    assert_eq!(peer.frame().await, HolderFrame::Exited { code: None });
-    assert_no_exit_file(&rig, "the child not starting");
-
-    drop(peer);
-    holder.wait_exit().await;
-    let left = files_left(&rig);
-    assert!(left.is_empty(), "the holder left {left:?}");
 }
 
 /// The next frame other than a screen copy.
@@ -1154,7 +1090,7 @@ async fn a_child_that_cannot_start_is_reported_with_its_reason_before_any_welcom
     let _daemon = hold_daemon_endpoint(&rig).await;
     let mut launch = rig.launch(&[], NO_DEADLINE_MS);
     launch.argv = vec![path_arg(&rig.file("no-such-program")).to_owned()];
-    let _holder = rig.start(&launch);
+    let mut holder = rig.start(&launch);
     let mut peer = Peer::connect(&rig.record().await.endpoint).await;
     peer.send(hello(HOLDER_PROTOCOL)).await;
 
@@ -1183,6 +1119,11 @@ async fn a_child_that_cannot_start_is_reported_with_its_reason_before_any_welcom
         ),
         "expected the reason, then Exited, and no Welcome: {frames:?}"
     );
+    // A holder ending by itself takes its record with it.
+    drop(peer);
+    holder.wait_exit().await;
+    let left = files_left(&rig);
+    assert!(left.is_empty(), "the holder left {left:?}");
 }
 
 /// A handle on the grandchild taken while it is known to be alive, so its

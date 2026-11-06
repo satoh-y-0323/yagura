@@ -34,6 +34,7 @@ pub mod mcp_bridge;
 pub mod platform_unix;
 #[cfg(windows)]
 pub mod platform_windows;
+mod process_identity;
 pub mod program;
 pub mod pty;
 mod reap_gate;
@@ -50,6 +51,9 @@ pub use instance::{
     resolve_instance_from, resolve_startup_env, store_override_conflicts, validate_instance_id,
 };
 pub use mcp_bridge::{merge_wslenv, resolve_sibling_executable, to_plain_path};
+pub use process_identity::{
+    Liveness, ProcessHandle, ProcessStart, process_liveness, process_start,
+};
 pub use reap_gate::ReapGate;
 
 /// Failure of an operating-system operation behind this boundary.

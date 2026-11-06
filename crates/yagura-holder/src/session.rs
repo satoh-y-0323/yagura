@@ -1,7 +1,7 @@
 //! The holder's core: the child on its terminal and the one daemon connected
-//! at a time. The terminal itself is the terminal thread's (`terminal.rs`);
-//! the core hands it the daemon's requests and the child's writer the
-//! daemon's writes.
+//! at a time, for as long as the window lives. The terminal itself is the
+//! terminal thread's (`terminal.rs`); the core hands it the daemon's requests
+//! and the child's writer the daemon's writes.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,8 +14,7 @@ use tokio::time::Instant;
 use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn, PtySpawnError};
 use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup, ReapGate};
 use yagura_protocol::holder::{
-    HolderEnvOp, HolderExit, HolderFault, HolderFrame, HolderLaunch, HolderSpawnFailure,
-    MAX_HELLO_DEADLINE_MS,
+    HolderEnvOp, HolderFault, HolderFrame, HolderLaunch, HolderSpawnFailure, MAX_HELLO_DEADLINE_MS,
 };
 use yagura_protocol::window_size_within_limit;
 
@@ -23,10 +22,10 @@ use crate::buffer;
 use crate::conn::{Conn, Reply, Welcome};
 use crate::endpoint::Place;
 use crate::peer::{self, Accepted};
-use crate::record::{self, RecordFile};
+use crate::record::{RecordFile, RecordRemoved};
 use crate::terminal::{self, Control, Terminal, TerminalStart};
 
-pub(crate) use provisional::{ExitKept, Provisional};
+pub(crate) use succession::Succession;
 
 /// Bytes the end-of-output reader takes from the terminal at a time.
 const CUT_READ_CHUNK: usize = 8192;
@@ -592,9 +591,9 @@ fn spawn_child(
 pub(crate) struct Window {
     pub(crate) launch: HolderLaunch,
     pub(crate) place: Place,
-    /// Dropped with the core, after its connection is closed.
+    /// Removed after the connection is closed and before the endpoint goes.
     pub(crate) record: RecordFile,
-    pub(crate) provisional: Provisional,
+    pub(crate) succession: Succession,
     pub(crate) faults: Faults,
 }
 
@@ -602,8 +601,9 @@ pub(crate) struct Window {
 pub(crate) enum Ending {
     /// No daemon was let in before the deadline; the child never started.
     NoHello,
-    /// The child exited (on its own or by `Terminate`).
-    ChildExited,
+    /// The window was closed, by `Terminate` or by a lost connection no next
+    /// daemon comes after, and its child has exited.
+    WindowClosed,
     /// The child could not be started.
     SpawnFailed,
 }
@@ -616,15 +616,17 @@ struct Core {
     conn: Option<Conn>,
     next_conn: u64,
     terminating: bool,
-    /// The exit is settled (in the exit file when one is kept) and no daemon
-    /// is let in any more.
-    exit_recorded: bool,
+    /// The child's tree and output have ended and its last copy is sent.
+    exit_settled: bool,
     /// The writer thread has answered its last write.
     writer_done: bool,
     /// Lets the writes in hand finish while the writer thread is waited for.
     input_drain: Option<yagura_os::pty::InputDrain>,
-    /// `Exited` has reached the connection.
+    /// `Exited` has been told; every later connection is told it after its
+    /// whole copy of the last screen.
     exit_told: bool,
+    /// Focus intervals the current connection opened and has not closed.
+    focus_intervals: usize,
 }
 
 /// Serves the window until the holder is to end.
@@ -633,12 +635,12 @@ pub(crate) async fn serve(
     listener: <PlatformIpc as IpcTransport>::Listener,
 ) -> Ending {
     let (events, mut incoming) = mpsc::unbounded_channel();
-    let mut acceptor = Some(Acceptor::spawn(
+    let acceptor = Acceptor::spawn(
         listener,
         events.clone(),
         window.place.daemon_endpoint.clone(),
         window.place.user_id.clone(),
-    ));
+    );
     let hello_wait =
         Duration::from_millis(window.launch.hello_deadline_ms.min(MAX_HELLO_DEADLINE_MS));
     let hello_deadline = Instant::now() + hello_wait;
@@ -650,40 +652,38 @@ pub(crate) async fn serve(
         conn: None,
         next_conn: 0,
         terminating: false,
-        exit_recorded: false,
+        exit_settled: false,
         writer_done: false,
         input_drain: None,
         exit_told: false,
+        focus_intervals: 0,
     };
     let ending = loop {
-        if !core.exit_recorded
+        if !core.exit_settled
             && core.shared.exit().is_some()
             && core.shared.output_ended.load(Ordering::SeqCst)
         {
-            // An exit file is written while the endpoint is still held, so a
-            // next holder of this window starts only after it and clears it.
-            core.record_exit();
+            core.exit_settled = true;
             core.send_last_copy().await;
             core.let_go_of_input();
         }
         // Every write is answered by the writer thread alone, and all its
         // answers are handled before its end is: none is guessed here.
-        if core.exit_recorded && core.writer_done && !core.exit_told {
+        if core.exit_settled && core.writer_done && !core.exit_told {
             core.send_exited();
             core.release_terminal();
-            Acceptor::stop(&mut acceptor).await;
-            if core.terminating || core.conn.is_none() {
-                break Ending::ChildExited;
-            }
+        }
+        // The holder outlives the child: the window ends only once closed.
+        if core.exit_told && core.terminating {
+            break Ending::WindowClosed;
         }
         tokio::select! {
             () = tokio::time::sleep_until(hello_deadline), if core.child.is_none() => {
-                core.window.record.remove();
                 break Ending::NoHello;
             }
             () = core.shared.core_wake.notified() => {}
             event = incoming.recv() => {
-                let Some(event) = event else { break Ending::ChildExited };
+                let Some(event) = event else { break Ending::WindowClosed };
                 if let Some(ending) = core.handle(event).await {
                     break ending;
                 }
@@ -696,10 +696,10 @@ pub(crate) async fn serve(
             core.shared.dropped_bytes.load(Ordering::SeqCst)
         ));
     }
-    Acceptor::stop(&mut acceptor).await;
-    core.close_conn().await;
-    // The core, dropped here after the close (or by an unwind), removes a
-    // provisional holder's record and ends the terminal's threads.
+    // The connection closes, then the record goes, then the endpoint: a
+    // daemon that finds the endpoint free finds nothing of the window left.
+    let removed = core.finish().await;
+    acceptor.stop(removed).await;
     ending
 }
 
@@ -755,14 +755,11 @@ impl Acceptor {
         Self { stop, task }
     }
 
-    /// Stops accepting and gives up the endpoint; the listener removes what
-    /// it left on disk as it is dropped.
-    async fn stop(acceptor: &mut Option<Self>) {
-        let Some(Self { stop, task }) = acceptor.take() else {
-            return;
-        };
-        let _ = stop.send(());
-        drop(task.await);
+    /// Stops accepting and gives up the endpoint once the record is gone;
+    /// the listener removes what it left on disk as it is dropped.
+    async fn stop(self, _removed: RecordRemoved) {
+        let _ = self.stop.send(());
+        drop(self.task.await);
     }
 }
 
@@ -778,7 +775,7 @@ impl Core {
     }
 
     fn child_has_exited(&self) -> bool {
-        self.exit_recorded || self.shared.child_ended.load(Ordering::SeqCst)
+        self.exit_settled || self.shared.child_ended.load(Ordering::SeqCst)
     }
 
     /// Handles one event; returns how the holder ends when it is to end now.
@@ -790,17 +787,11 @@ impl Core {
             }
             Event::Closed { conn } if self.is_current(conn) => {
                 if let Some(conn) = self.conn.take() {
-                    self.close_outlet(&conn);
-                    drop(conn.close());
+                    self.lose(conn);
                 }
-                if self.exit_recorded {
-                    return Some(Ending::ChildExited);
-                }
-                if self
-                    .window
-                    .provisional
-                    .on_lost_connection(self.child.as_mut())
-                {
+                let running = !self.child_has_exited();
+                let child = self.child.as_mut().filter(|_| running);
+                if self.window.succession.on_lost_connection(child) {
                     self.terminating = true;
                 }
             }
@@ -838,15 +829,11 @@ impl Core {
 
     /// Lets a daemon in: the previous one is told it was displaced, the child
     /// starts on the first one, and the newcomer is welcomed and sent a whole
-    /// copy of the screen.
+    /// copy of the screen, followed by `Exited` once the child's exit is told.
     async fn accept(&mut self, accepted: Accepted) -> Option<Ending> {
-        if self.exit_recorded {
-            return None;
-        }
         if let Some(previous) = self.conn.take() {
             previous.send(Reply::Displaced);
-            self.close_outlet(&previous);
-            drop(previous.close());
+            self.lose(previous);
         }
         let id = self.next_conn;
         self.next_conn += 1;
@@ -891,7 +878,7 @@ impl Core {
                         Arc::clone(&self.shared),
                     ));
                     self.child = Some(child);
-                    if let Err(error) = self.window.record.set_child_pid(pid) {
+                    if let Err(error) = self.window.record.set_child(pid) {
                         crate::log(format_args!("cannot update the holder record: {error}"));
                     }
                     pid
@@ -909,14 +896,38 @@ impl Core {
             record: self.window.launch.record.clone(),
             cols,
             rows,
-            exited: self.shared.exit().is_some(),
+            exited: self.exit_told,
             child_pid,
         };
         let conn = Conn::welcome(accepted, id, welcome, self.events.clone());
         terminal.outlet.open(id, conn.sender());
-        terminal.intake.push(Control::Connected { conn: id });
+        let (done, sent) = oneshot::channel();
+        terminal.intake.push(Control::Connected { conn: id, done });
+        // The model is still once the exit is settled, so this copy is its
+        // last screen, and it goes before `Exited`, told now or later.
+        if self.exit_settled {
+            let _ = sent.await;
+        }
+        if self.exit_told {
+            conn.send(Reply::Exited {
+                code: self.shared.exit().flatten(),
+            });
+        }
         self.conn = Some(conn);
         None
+    }
+
+    /// Lets go of a connection that is lost or displaced: what was opened on
+    /// it is closed (its focus intervals, its view, the copies it was sent),
+    /// so the next connection starts from a whole copy.
+    fn lose(&mut self, conn: Conn) {
+        self.close_outlet(&conn);
+        self.to_terminal(Control::Disconnected);
+        let intervals = std::mem::take(&mut self.focus_intervals);
+        if let Some(terminal) = self.terminal() {
+            terminal.input.close_intervals(intervals);
+        }
+        drop(conn.close());
     }
 
     /// Stops the terminal thread's frames to `conn`, so the connection can
@@ -931,12 +942,6 @@ impl Core {
     /// `Exited`, in place of a `Welcome`.
     fn spawn_failed(&mut self, accepted: Accepted, id: u64, error: &SpawnError) -> Ending {
         crate::log(format_args!("cannot start the child: {}", error.detail));
-        if let Some(kept) = self.window.provisional.keeps_exit() {
-            let exit = HolderExit { code: None };
-            if let Err(error) = record::write_exit(&self.window.record, kept, &exit) {
-                crate::log(format_args!("cannot write the exit file: {error}"));
-            }
-        }
         self.conn = Some(Conn::refuse_spawn(
             accepted,
             id,
@@ -962,6 +967,11 @@ impl Core {
                 }
             }
             HolderFrame::FocusInterval { open } => {
+                self.focus_intervals = if open {
+                    self.focus_intervals.saturating_add(1)
+                } else {
+                    self.focus_intervals.saturating_sub(1)
+                };
                 if let Some(terminal) = self.terminal() {
                     terminal.input.focus_interval(open);
                 }
@@ -992,11 +1002,12 @@ impl Core {
             HolderFrame::Settle { id } => self.to_terminal(Control::Settle { id }),
             HolderFrame::Terminate { tree } => {
                 self.terminating = true;
-                if let Some(child) = self.child.as_mut() {
+                let running = !self.child_has_exited();
+                if let Some(child) = self.child.as_mut().filter(|_| running) {
                     child.terminate(tree);
                 }
                 if self.exit_told {
-                    return Some(Ending::ChildExited);
+                    return Some(Ending::WindowClosed);
                 }
             }
             HolderFrame::Hello { .. }
@@ -1054,21 +1065,6 @@ impl Core {
         }
     }
 
-    /// Settles the exit. When it is kept, the exit goes to the exit file as
-    /// soon as the exit is known, so a daemon that ends right after `Exited`
-    /// still finds it.
-    fn record_exit(&mut self) {
-        if let Some(kept) = self.window.provisional.keeps_exit() {
-            let exit = HolderExit {
-                code: self.shared.exit().flatten(),
-            };
-            if let Err(error) = record::write_exit(&self.window.record, kept, &exit) {
-                crate::log(format_args!("cannot write the exit file: {error}"));
-            }
-        }
-        self.exit_recorded = true;
-    }
-
     /// Lets go of the child's input, so the writer thread answers what it
     /// still holds and ends, and lets a write in hand that nobody reads any
     /// more finish its piece meanwhile.
@@ -1098,7 +1094,8 @@ impl Core {
         let _ = sent.await;
     }
 
-    /// Tells the connection the child exited; no copy of the screen follows.
+    /// Tells the connection the child exited; no copy of the screen follows
+    /// on it.
     fn send_exited(&mut self) {
         self.exit_told = true;
         let code = self.shared.exit().flatten();
@@ -1117,63 +1114,46 @@ impl Core {
     }
 
     /// Closes the connection after what was sent on it, waiting a bounded
-    /// time for a daemon that stopped reading.
-    async fn close_conn(&mut self) {
+    /// time for a daemon that stopped reading, then removes the record.
+    async fn finish(&mut self) -> RecordRemoved {
         if let Some(conn) = self.conn.take() {
             self.close_outlet(&conn);
             let _ = tokio::time::timeout(FINAL_SEND_LIMIT, conn.close()).await;
         }
+        self.window.record.remove()
     }
 }
 
-/// Provisional, removed with [`HolderLaunch::end_child_on_disconnect`] once
-/// holders outlive the daemon: the one place that flag takes effect. A daemon
-/// that left will not come back for the window, so nobody reads an exit file
-/// or the record once the holder ends: none is written, and the holder
-/// removes its record itself.
-mod provisional {
-    use yagura_protocol::holder::{HolderLaunch, HolderRecord};
+/// Whether a next daemon comes for the window: the one difference between a
+/// window that outlives its daemon and one that does not.
+mod succession {
+    use yagura_protocol::holder::HolderLaunch;
 
     use super::Child;
-    use crate::endpoint::Place;
-    use crate::record::RecordFile;
 
-    pub(crate) struct Provisional {
-        end_child_on_disconnect: bool,
+    pub(crate) struct Succession {
+        awaited: bool,
     }
 
-    /// Leave to write an exit file. Only [`Provisional::keeps_exit`] makes
-    /// one, so a provisional holder has no way to write it.
-    pub(crate) struct ExitKept(());
-
-    impl Provisional {
+    impl Succession {
         pub(crate) fn new(launch: &HolderLaunch) -> Self {
             Self {
-                end_child_on_disconnect: launch.end_child_on_disconnect,
+                awaited: launch.awaits_successor,
             }
         }
 
-        /// The holder's record, removed when dropped while provisional.
-        pub(crate) fn own_record(&self, place: &Place, record: HolderRecord) -> RecordFile {
-            RecordFile::new(place, record, self.end_child_on_disconnect)
-        }
-
-        /// Ends the child's tree when the connection was lost other than by
-        /// this holder closing it on a displacement; returns whether it did.
+        /// The connection was lost other than by this holder closing it on a
+        /// displacement. With a next daemon to come, the child runs on and
+        /// the holder waits for it; with none, the child's tree (`child`,
+        /// while it runs) is ended. Returns whether the window ends.
         pub(super) fn on_lost_connection(&self, child: Option<&mut Child>) -> bool {
-            if !self.end_child_on_disconnect {
+            if self.awaited {
                 return false;
             }
             if let Some(child) = child {
                 child.terminate(true);
             }
             true
-        }
-
-        /// Leave to write the exit file for a next daemon; `None` while
-        /// provisional.
-        pub(super) fn keeps_exit(&self) -> Option<ExitKept> {
-            (!self.end_child_on_disconnect).then_some(ExitKept(()))
         }
     }
 }

@@ -1,6 +1,6 @@
 //! The context every window's holder is started in: the executable, the
 //! endpoint whose server it lets in, the directory it keeps its files in,
-//! where its standard error goes, and the daemon run it is told of.
+//! the log it writes to, and the daemon run it is told of.
 //!
 //! One [`HolderHost`] serves every window a [`crate::WindowRegistry`] or a
 //! caller of [`crate::PtySession`] opens. A daemon hands it its own endpoint
@@ -52,8 +52,9 @@ pub struct HolderPlace {
     /// The instance's `holders` directory, spelled the one way every launch
     /// names it (a holder's endpoint name is derived from the spelling).
     pub holders_dir: PathBuf,
-    /// The daemon's log, which each holder's standard error is appended to;
-    /// `None` sends it to the null device.
+    /// The daemon's log, which each holder appends its messages to, opening
+    /// it for each line so a holder that outlives the daemon keeps nothing of
+    /// it open; `None` discards them.
     pub log_file: Option<PathBuf>,
 }
 
@@ -100,6 +101,12 @@ pub(crate) struct LinkContext {
     pub(crate) daemon_endpoint: String,
     pub(crate) holders_dir: PathBuf,
     pub(crate) stderr: DetachedStderr,
+    /// The log the holder appends its messages to; `None` leaves them on its
+    /// standard error.
+    pub(crate) log_file: Option<PathBuf>,
+    /// Whether a next daemon may come for the window, so a lost connection
+    /// leaves the window running.
+    pub(crate) awaits_successor: bool,
     /// Set once a holder that could not leave the daemon's job was logged.
     pub(crate) fallback_logged: Arc<AtomicBool>,
     /// Keeps a private place until the holder is gone.
@@ -148,16 +155,15 @@ impl HolderHost {
             tracing::error!("no window holder executable is resolved; refusing to open a window");
             return Err(PtyError::SpawnFailed);
         };
-        let (daemon_endpoint, holders_dir, stderr, keep) = match &self.place {
+        let (daemon_endpoint, holders_dir, stderr, log_file, keep) = match &self.place {
             Place::Daemon(place) => {
                 let holders_dir = place.holders_dir.clone();
-                let log_file = place.log_file.clone();
                 let prepared = tokio::task::spawn_blocking(move || {
-                    yagura_os::ensure_private_dir(&holders_dir).map(|()| holder_stderr(log_file))
+                    yagura_os::ensure_private_dir(&holders_dir)
                 })
                 .await
                 .map_err(|_| PtyError::SpawnFailed)?;
-                let stderr = prepared.map_err(|error| {
+                prepared.map_err(|error| {
                     tracing::error!(
                         %error,
                         dir = %place.holders_dir.display(),
@@ -165,10 +171,13 @@ impl HolderHost {
                     );
                     PtyError::SpawnFailed
                 })?;
+                // Messages go to the log line by line, so the holder holds
+                // no handle to the daemon's log.
                 (
                     place.daemon_endpoint.clone(),
                     place.holders_dir.clone(),
-                    stderr,
+                    DetachedStderr::Null,
+                    place.log_file.clone(),
                     None,
                 )
             }
@@ -184,6 +193,7 @@ impl HolderHost {
                     private.endpoint.clone(),
                     private.holders_dir.clone(),
                     DetachedStderr::Inherit,
+                    None,
                     Some(Arc::clone(private)),
                 )
             }
@@ -196,6 +206,10 @@ impl HolderHost {
             daemon_endpoint,
             holders_dir,
             stderr,
+            log_file,
+            // No daemon comes back for a window yet: every window ends with
+            // the connection to the daemon that opened it.
+            awaits_successor: false,
             fallback_logged: Arc::clone(&self.fallback_logged),
             keep,
             live: LiveLink(Arc::clone(&self.links)),
@@ -221,24 +235,6 @@ impl Drop for HolderHost {
                 running = *count,
                 "window holders were still running when their host was dropped"
             );
-        }
-    }
-}
-
-/// The daemon's log opened for appending, or the null device when there is
-/// none or it cannot be opened.
-fn holder_stderr(log_file: Option<PathBuf>) -> DetachedStderr {
-    let Some(path) = log_file else {
-        return DetachedStderr::Null;
-    };
-    match std::fs::OpenOptions::new().append(true).open(&path) {
-        Ok(file) => DetachedStderr::File(file),
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "cannot open the daemon log for a window holder; its messages are discarded"
-            );
-            DetachedStderr::Null
         }
     }
 }

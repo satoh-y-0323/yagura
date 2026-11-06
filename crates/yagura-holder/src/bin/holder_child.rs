@@ -33,11 +33,12 @@
 //!   its own that keeps the terminal open and never reads it, writes its
 //!   process id to `pid_file`, prints [`ESCAPED_MARKER`] and idles until a
 //!   Ctrl+C on the terminal ends it.
-//! - `script <input_log>`: prints [`SCRIPT_MARKER`], then appends every byte
+//! - `script <input_log> [<gate_file> <hex>]`: prints [`SCRIPT_MARKER`], then appends every byte
 //!   read from stdin to `input_log` as read, so a test sees what reached the
 //!   child and in which order. Lowercase hex digits between `<` and `>` are
 //!   written to stdout decoded; a `<` restarts the command, and everything
-//!   else is only logged.
+//!   else is only logged. With `gate_file` and `hex`, it also writes `hex`
+//!   decoded to stdout once `gate_file` exists, read or not.
 //! - `end-race <info_file> <gate_file> <term_file>` (Unix): starts two
 //!   grandchildren: a member of its process group that ignores SIGHUP and,
 //!   on each SIGTERM, appends `TERMED` to `term_file` and lives on; and one in
@@ -75,8 +76,9 @@ const END_RACE_MARKER: &[u8] = b"HOLDER-CHILD-END-RACE\r\n";
 const ORPHANS: usize = 10;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 const FLOOD_BLOCK: usize = 8192;
-/// How often `size` and `exit` look again. The fixture has no event for either
-/// on every platform; the test waits on the printed line, not on this period.
+/// How often `size`, `exit` and a gated `script` look again. The fixture has
+/// no event for them on every platform; the test waits on what is printed, not
+/// on this period.
 const POLL: Duration = Duration::from_millis(10);
 
 fn main() -> io::Result<()> {
@@ -94,7 +96,12 @@ fn main() -> io::Result<()> {
         "stubborn-tree" => stubborn_tree(Path::new(arg(1)), args.get(2).map(Path::new)),
         #[cfg(unix)]
         "escaped-holder" => escaped_holder(Path::new(arg(1))),
-        "script" => script(Path::new(arg(1))),
+        "script" => script(
+            Path::new(arg(1)),
+            args.get(2)
+                .map(Path::new)
+                .zip(args.get(3).map(String::as_str)),
+        ),
         #[cfg(unix)]
         "end-race" => end_race(Path::new(arg(1)), Path::new(arg(2)), Path::new(arg(3))),
         #[cfg(unix)]
@@ -112,7 +119,7 @@ fn main() -> io::Result<()> {
                 "usage: holder_child size | hex | flood <count_file> [<total_bytes>] \
                  | tree <pid_file> | exit <code> [<gate_file>] | exit-on-input | ignore-end \
                  | stubborn-tree <pid_file> [<gate_file>] | escaped-holder <pid_file> \
-                 | script <input_log> | end-race <info_file> <gate_file> <term_file> \
+                 | script <input_log> [<gate_file> <hex>] | end-race <info_file> <gate_file> <term_file> \
                  | orphans"
             );
             std::process::exit(2);
@@ -173,10 +180,21 @@ fn hex_echo() -> io::Result<()> {
     }
 }
 
-fn script(input_log: &Path) -> io::Result<()> {
+fn script(input_log: &Path, gated: Option<(&Path, &str)>) -> io::Result<()> {
     if let Err(error) = yagura_os::enter_raw_console_input() {
         eprintln!("holder_child: cannot enter raw console input: {error}");
         std::process::exit(2);
+    }
+    if let Some((gate_file, hex)) = gated {
+        let gate_file = gate_file.to_path_buf();
+        let bytes = decode_hex(hex.as_bytes());
+        std::thread::spawn(move || {
+            while !gate_file.exists() {
+                std::thread::sleep(POLL);
+            }
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(&bytes).and_then(|()| stdout.flush());
+        });
     }
     let mut log = std::fs::OpenOptions::new()
         .create(true)

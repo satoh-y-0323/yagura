@@ -505,6 +505,8 @@ fn run(
         daemon_endpoint,
         holders_dir,
         stderr,
+        log_file,
+        awaits_successor,
         fallback_logged,
         keep,
         live,
@@ -538,7 +540,9 @@ fn run(
         daemon_endpoint: &daemon_endpoint,
         boot: &boot,
     };
-    let ending = match holder.become_ready(&mut process, launch) {
+    let ready = holder.become_ready(&mut process, launch, log_file, awaits_successor);
+    let not_ready = ready.is_err();
+    let ending = match ready {
         Ok(endpoint) => serve(&holder, &endpoint, process.id(), link, out_rx, sink, opened),
         Err(error) => {
             let _ = opened.send(Err(error));
@@ -551,6 +555,12 @@ fn run(
         let _ = process.kill();
     }
     match process.wait() {
+        // Whatever the holder could say about it went to its log, if any.
+        Ok(code) if not_ready => tracing::warn!(
+            window_id,
+            code = ?code,
+            "the window's holder ended without becoming ready"
+        ),
         Ok(Some(code)) if code != 0 => {
             tracing::debug!(window_id, code, "the window's holder ended with a failure");
         }
@@ -584,6 +594,8 @@ impl HolderAt<'_> {
         &self,
         process: &mut DetachedProcess,
         launch: &Launch,
+        log_file: Option<PathBuf>,
+        awaits_successor: bool,
     ) -> Result<String, PtyError> {
         let encoded = encode_holder_launch(&HolderLaunch {
             argv: launch.argv.clone(),
@@ -595,7 +607,8 @@ impl HolderAt<'_> {
             hello_deadline_ms: u64::try_from(HELLO_DEADLINE.as_millis()).unwrap_or(u64::MAX),
             holders_dir: self.holders_dir.to_path_buf(),
             daemon_endpoint: self.daemon_endpoint.to_owned(),
-            end_child_on_disconnect: true,
+            awaits_successor,
+            log_file,
             history_rows: launch.history_rows,
             palette: launch.palette.clone(),
             fault: launch.fault,
@@ -614,8 +627,7 @@ impl HolderAt<'_> {
             Notice::Ended => {
                 tracing::warn!(
                     window_id = self.window_id,
-                    "the window's holder ended before it was ready; see its messages in the \
-                     daemon log"
+                    "the window's holder ended before it was ready"
                 );
                 return Err(PtyError::SpawnFailed);
             }
@@ -1179,8 +1191,7 @@ fn remove_holder_endpoint(instance: &OsStr, holders_dir: &Path, window_id: &str)
     }
 }
 
-/// Removes the record of a holder this daemon killed. It never wrote an exit
-/// file: a provisional holder writes none.
+/// Removes the record of a holder this daemon killed.
 fn remove_holder_record(holders_dir: &Path, window_id: &str) {
     let Ok(path) = holder_record_path(holders_dir, window_id) else {
         return;

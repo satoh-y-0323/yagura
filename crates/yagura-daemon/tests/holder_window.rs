@@ -19,7 +19,7 @@ use std::time::Duration;
 use common::real_daemon::{RunningDaemon, Sandbox};
 use yagura_daemon::detector::reading;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowRegistry};
-use yagura_protocol::holder::{holder_exit_path, holder_record_path, read_holder_record};
+use yagura_protocol::holder::read_holder_record;
 use yagura_protocol::{ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::{ReadOutcome, read_daemon_frame};
 use yagura_test_support::process::{capture_child_path, holder_path};
@@ -239,18 +239,18 @@ async fn wait_all_gone(watches: Vec<Watch>) {
     }
 }
 
+/// No file named for the window is left in the holders directory: its
+/// holder's record or any other.
 fn assert_no_holder_files(sandbox: &Sandbox, window_id: &str, route: &str) {
     let dir = holders_dir(sandbox);
-    for path in [
-        holder_record_path(&dir, window_id).unwrap(),
-        holder_exit_path(&dir, window_id).unwrap(),
-    ] {
-        assert!(
-            !path.exists(),
-            "{route} left the holder's {} behind",
-            path.display()
-        );
-    }
+    let prefix = format!("{window_id}.");
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(&prefix))
+        .collect();
+    assert!(left.is_empty(), "{route} left the holder's {left:?} behind");
 }
 
 #[tokio::test]

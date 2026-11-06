@@ -1,5 +1,5 @@
-//! The wire between the daemon and a window's holder, and the files a holder
-//! leaves in the `holders` directory its launch names.
+//! The wire between the daemon and a window's holder, and the record a holder
+//! keeps in the `holders` directory its launch names.
 //!
 //! A frame is a `u32` LE length of what follows, a `u16` LE type and a body.
 //! The body of [`HolderFrame::Write`] is a `u64` LE id followed by the raw
@@ -128,7 +128,8 @@ pub enum HolderFrame {
         cols: u16,
         /// The terminal's rows.
         rows: u16,
-        /// Whether the child has already exited.
+        /// Whether the child has already exited: [`HolderFrame::Exited`]
+        /// follows the whole copy of its last screen.
         exited: bool,
         /// The child's process id. `None` from a holder that does not send
         /// it; the daemon learns the pid here, not from the record, which
@@ -545,9 +546,6 @@ pub enum HolderCodecError {
     /// A holder's launch is not valid.
     #[error("the holder launch is invalid: {0}")]
     Launch(serde_json::Error),
-    /// A holder's exit file does not hold an exit.
-    #[error("the holder exit file is malformed")]
-    MalformedExit,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1178,19 +1176,21 @@ pub struct HolderLaunch {
     /// `Hello` before it ends without starting the child. A value above
     /// [`MAX_HELLO_DEADLINE_MS`] is cut to it.
     pub hello_deadline_ms: u64,
-    /// The directory the holder keeps its record, its exit file and, on Unix,
-    /// its socket in. It must be an absolute path to a directory private to
+    /// The directory the holder keeps its record and, on Unix, its socket in. It must be an absolute path to a directory private to
     /// the user; the holder creates it when only it is missing.
     pub holders_dir: PathBuf,
     /// The endpoint whose server is the daemon: only the process serving it
     /// when a `Hello` arrives is let in.
     pub daemon_endpoint: String,
-    /// Provisional, removed once holders outlive the daemon: a lost
-    /// connection other than [`HolderFrame::Displaced`] ends the child's tree
-    /// and the holder. With it the holder writes no exit file on any path and
-    /// removes its own record before it ends, so a holder that ends by itself
-    /// leaves no file.
-    pub end_child_on_disconnect: bool,
+    /// Whether a next daemon may come for the window. When it may, a lost
+    /// connection other than [`HolderFrame::Displaced`] leaves the child
+    /// running and the holder serving the next `Hello`; when it may not, it
+    /// ends the child's tree and the holder.
+    pub awaits_successor: bool,
+    /// The log the holder appends its messages to, one line per open; `None`
+    /// sends them to its standard error. A missing file is not created, and
+    /// the line is lost.
+    pub log_file: Option<PathBuf>,
     /// Rows the terminal keeps after they scroll off its top, read back by
     /// [`HolderFrame::ReadTail`] and scrolled to by a view.
     pub history_rows: usize,
@@ -1212,7 +1212,8 @@ impl std::fmt::Debug for HolderLaunch {
             .field("hello_deadline_ms", &self.hello_deadline_ms)
             .field("holders_dir", &self.holders_dir)
             .field("daemon_endpoint", &self.daemon_endpoint)
-            .field("end_child_on_disconnect", &self.end_child_on_disconnect)
+            .field("awaits_successor", &self.awaits_successor)
+            .field("log_file", &self.log_file)
             .field("history_rows", &self.history_rows)
             .field("fault", &self.fault)
             .finish_non_exhaustive()
@@ -1230,7 +1231,8 @@ struct LaunchOut<'a> {
     hello_deadline_ms: u64,
     holders_dir: &'a OsStr,
     daemon_endpoint: &'a str,
-    end_child_on_disconnect: bool,
+    awaits_successor: bool,
+    log_file: Option<&'a OsStr>,
     history_rows: usize,
     palette: Option<&'a Palette>,
     fault: Option<HolderFault>,
@@ -1247,7 +1249,9 @@ struct LaunchIn {
     hello_deadline_ms: u64,
     holders_dir: OsString,
     daemon_endpoint: String,
-    end_child_on_disconnect: bool,
+    awaits_successor: bool,
+    #[serde(default)]
+    log_file: Option<OsString>,
     history_rows: usize,
     #[serde(default)]
     palette: Option<Palette>,
@@ -1269,7 +1273,8 @@ pub fn encode_holder_launch(launch: &HolderLaunch) -> Vec<u8> {
         hello_deadline_ms: launch.hello_deadline_ms,
         holders_dir: launch.holders_dir.as_os_str(),
         daemon_endpoint: &launch.daemon_endpoint,
-        end_child_on_disconnect: launch.end_child_on_disconnect,
+        awaits_successor: launch.awaits_successor,
+        log_file: launch.log_file.as_deref().map(Path::as_os_str),
         history_rows: launch.history_rows,
         palette: launch.palette.as_ref(),
         fault: launch.fault,
@@ -1295,7 +1300,8 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         hello_deadline_ms,
         holders_dir,
         daemon_endpoint,
-        end_child_on_disconnect,
+        awaits_successor,
+        log_file,
         history_rows,
         palette,
         fault,
@@ -1310,7 +1316,8 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         hello_deadline_ms,
         holders_dir: PathBuf::from(holders_dir),
         daemon_endpoint,
-        end_child_on_disconnect,
+        awaits_successor,
+        log_file: log_file.map(PathBuf::from),
         history_rows,
         palette,
         fault,
@@ -1331,14 +1338,16 @@ pub struct HolderRecord {
     pub child_pid: Option<u32>,
     /// The holder wire version the holder speaks.
     pub protocol: u32,
-}
-
-/// What a holder leaves when its child has exited, in
-/// `holders/<window_id>.exit`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HolderExit {
-    /// The child's exit code, when known.
-    pub code: Option<i32>,
+    /// The holder's start (`yagura_os::ProcessStart` as a string), so a
+    /// holder pid taken over by another process is not taken for it. `None`
+    /// in a record written before it was carried, or when it could not be
+    /// read.
+    #[serde(default)]
+    pub holder_start: Option<String>,
+    /// The child's start, as for `holder_start`; `None` until the child has
+    /// started, and when its start could not be read.
+    #[serde(default)]
+    pub child_start: Option<String>,
 }
 
 /// Whether `window_id` may name a holder's files and endpoint: ASCII letters,
@@ -1372,15 +1381,6 @@ pub fn holder_record_path(holders_dir: &Path, window_id: &str) -> io::Result<Pat
     holder_file(holders_dir, window_id, "json")
 }
 
-/// The path of the exit file of `window_id`'s holder.
-///
-/// # Errors
-///
-/// As for [`holder_record_path`].
-pub fn holder_exit_path(holders_dir: &Path, window_id: &str) -> io::Result<PathBuf> {
-    holder_file(holders_dir, window_id, "exit")
-}
-
 /// Reads the record of `window_id`'s holder.
 ///
 /// # Errors
@@ -1397,36 +1397,4 @@ pub fn read_holder_record(holders_dir: &Path, window_id: &str) -> io::Result<Hol
 pub fn encode_holder_record(record: &HolderRecord) -> Vec<u8> {
     // Strings and numbers only, which serde_json always encodes.
     serde_json::to_vec(record).unwrap_or_default()
-}
-
-/// Encodes an exit as the content of an exit file: one `Exited` frame.
-#[must_use]
-pub fn encode_holder_exit(exit: &HolderExit) -> Vec<u8> {
-    encode_holder_frame(&HolderFrame::Exited { code: exit.code })
-}
-
-/// Decodes what [`encode_holder_exit`] wrote.
-///
-/// # Errors
-///
-/// The codec's error for a broken frame, and
-/// [`HolderCodecError::MalformedExit`] when the content is not one `Exited`.
-pub fn decode_holder_exit(input: &[u8]) -> Result<HolderExit, HolderCodecError> {
-    match decode_holder_frame(input)? {
-        Some((HolderFrame::Exited { code }, used)) if used == input.len() => {
-            Ok(HolderExit { code })
-        }
-        _ => Err(HolderCodecError::MalformedExit),
-    }
-}
-
-/// Reads the exit file of `window_id`'s holder.
-///
-/// # Errors
-///
-/// The error of reading the file, or [`io::ErrorKind::InvalidData`] when it
-/// is not an exit.
-pub fn read_holder_exit(holders_dir: &Path, window_id: &str) -> io::Result<HolderExit> {
-    let bytes = std::fs::read(holder_exit_path(holders_dir, window_id)?)?;
-    decode_holder_exit(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
