@@ -19,8 +19,8 @@ use common::ScreenFeed;
 use std::time::Duration;
 
 use common::{
-    HANG_GUARD, SCREEN_COLS, SCREEN_ROWS, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle,
-    new_engine, repaint, screen_of, tick_after_ms,
+    CopiedEngine, HANG_GUARD, SCREEN_COLS, SCREEN_ROWS, TIME_BOTH_PROMPT_DEF, advance_ms,
+    feed_handle, new_engine, repaint, screen_of, tick_after_ms,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{
@@ -252,7 +252,7 @@ async fn unmatched_output_keeps_confirmed_status_unknown() {
 async fn missing_definition_keeps_confirmed_status_unknown() {
     tokio::time::pause();
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let mut engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     assert_eq!(engine.feed(b"Do you want to proceed?\r\n"), None);
     assert_eq!(tick_after_ms(&mut engine, 5_000).await, None);
@@ -434,7 +434,7 @@ async fn exited_outranks_later_pattern_matches() {
 async fn detector_handle_publishes_exited_without_debounce() {
     let config = DaemonConfig::default();
     let engine = new_engine(PATTERN_DEF, &config);
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
     let notified_at = tokio::time::Instant::now();
 
     handle.notify_exited();
@@ -908,7 +908,7 @@ async fn on_input_does_not_change_the_no_time_judgement_timeline() {
 async fn on_input_does_not_change_the_no_definition_timeline() {
     tokio::time::pause();
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let mut engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     engine.on_input(InputEcho::EchoOnly);
     assert_eq!(engine.feed(b"Do you want to proceed?\r\n"), None);
@@ -927,7 +927,7 @@ async fn detector_handle_suppresses_echo_before_publishing_activity() {
     };
     let engine = new_engine(TIME_BOTH_DEF, &config);
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
 
     handle.notify_input(InputEcho::EchoOnly);
     feed_handle(&screen, &handle, b"x");
@@ -1226,7 +1226,7 @@ async fn on_resize_started_does_not_change_the_no_time_judgement_timeline() {
 async fn on_resize_started_does_not_change_the_no_definition_timeline() {
     tokio::time::pause();
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let mut engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     engine.on_resize_started();
     assert_eq!(engine.feed(b"Do you want to proceed?\r\n"), None);
@@ -1265,7 +1265,7 @@ async fn detector_handle_suppresses_resize_redraw_before_publishing_activity() {
     };
     let engine = new_engine(TIME_BOTH_DEF, &config);
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
 
     tokio::time::sleep(Duration::from_millis(650)).await;
     assert!(

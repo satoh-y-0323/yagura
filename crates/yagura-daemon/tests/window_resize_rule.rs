@@ -3,12 +3,16 @@
 //! A window's model follows a resize by one rule on every system: the one a
 //! Unix terminal uses. A reference model fed the very bytes the window's child
 //! wrote and resized the same way must show what the window's model shows.
+//! The child is the script fixture, so what it wrote is its ready line and
+//! the bytes the test told it to write.
 
 mod common;
 
 use common::CopiedScreen;
 use common::Harness;
-use common::views::{model_screen, numbered_lines, open_script_window, script_write_and_wait};
+use common::views::{
+    SCRIPT_READY, model_screen, numbered_lines, open_script_window, script_write_and_wait,
+};
 use yagura_daemon::DaemonConfig;
 
 const CLEAR: &[u8] = b"\x1b[H\x1b[2J";
@@ -42,9 +46,10 @@ async fn a_resized_window_shows_what_a_model_with_the_unix_rule_shows() {
     bytes.extend_from_slice(b"TAIL-MARK");
     script_write_and_wait(&h, &window_id, &bytes, "TAIL-MARK").await;
 
-    let captured = h.captured_output(&window_id);
     let mut reference = CopiedScreen::with_history(80, 24, config.read_output_max_lines);
-    reference.feed(&captured);
+    reference.feed(SCRIPT_READY);
+    reference.feed(b"\r\n");
+    reference.feed(&bytes);
 
     let before = model_screen(&h, &window_id).await;
     let shown = reference_shown(&reference);

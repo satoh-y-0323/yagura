@@ -185,6 +185,7 @@ impl VtScreen {
             .map(|(line, row)| ScreenLine {
                 line,
                 cells: copied_cells(&grid[Line(row)], cols),
+                wraps: row_wraps(&grid[Line(row)]),
             })
             .collect();
         let cursor = &grid.cursor;

@@ -1,5 +1,7 @@
-//! `yagura-holder`: the process that keeps one window's PTY and child alive
-//! across daemon restarts. It does not interpret the screen.
+//! `yagura-holder`: the process that keeps one window's PTY, child and
+//! terminal alive across daemon restarts. It feeds the child's output to the
+//! window's terminal model and sends the daemon copies of the screen and the
+//! frames a client is shown; the raw output never leaves it.
 //!
 //! Started as `yagura-holder <window_id> <instance_id>`, with an empty
 //! `<instance_id>` for the default instance; everything else, the child's
@@ -22,20 +24,35 @@ use yagura_protocol::holder::{
 use yagura_protocol::window_size_within_limit;
 
 mod buffer;
-pub use buffer::ACK_WINDOW;
 mod conn;
 mod endpoint;
 mod peer;
+mod push;
 mod record;
 mod session;
+mod terminal;
+mod view;
 
 /// The most a launch may take on standard input.
 const MAX_LAUNCH_BYTES: u64 = 1024 * 1024;
 
-/// Runs the holder with the process's arguments and standard input.
+/// Runs the holder with the process's arguments and standard input. A launch
+/// that names a fault is refused as a child that could not start.
 #[must_use]
 pub fn run() -> ExitCode {
-    match start() {
+    run_with(session::Faults::Refused)
+}
+
+/// Runs the holder as [`run`] does, but acting out the fault its launch
+/// names. For the fault-injecting binary (`holder_fault`) that tests start;
+/// the shipped binary never calls it.
+#[must_use]
+pub fn run_fault_injection() -> ExitCode {
+    run_with(session::Faults::ActedOut)
+}
+
+fn run_with(faults: session::Faults) -> ExitCode {
+    match start(faults) {
         Ok(session::Ending::ChildExited | session::Ending::NoHello) => ExitCode::SUCCESS,
         Ok(session::Ending::SpawnFailed) => ExitCode::from(3),
         Err(error) => {
@@ -71,7 +88,7 @@ fn log_line(message: &str) -> String {
     line
 }
 
-fn start() -> Result<session::Ending, String> {
+fn start(faults: session::Faults) -> Result<session::Ending, String> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let [window_id, instance] = args.as_slice() else {
         return Err("usage: yagura-holder <window_id> <instance_id>".to_owned());
@@ -116,6 +133,7 @@ fn start() -> Result<session::Ending, String> {
             place,
             record,
             provisional,
+            faults,
         };
         Ok::<_, String>(session::serve(window, listener).await)
     });

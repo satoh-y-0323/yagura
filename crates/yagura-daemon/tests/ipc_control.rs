@@ -253,8 +253,8 @@ async fn interrupt_window_acknowledges_and_delivers_configured_bytes_when_approv
     }
 
     // The echo child writes back whatever reaches the PTY input, so the
-    // configured bytes are observable in the scrollback.
-    h.wait_for_scrollback(&window_id, INTERRUPT_MARKER).await;
+    // configured bytes show as a line of the window's text.
+    h.wait_for_scrollback(&window_id, b"INTERRUPT-MARK").await;
 }
 
 #[tokio::test]

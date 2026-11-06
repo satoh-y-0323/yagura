@@ -52,9 +52,6 @@ yagura-protocol = { path = "../yagura-protocol" }
 # The only way this crate reaches the operating system: transport,
 # endpoint protection, peer identity, process groups and randomness.
 yagura-os = { path = "../yagura-os" }
-# The window's terminal. The daemon reads its grid directly until it reads a
-# copy of the screen instead.
-yagura-term = { path = "../yagura-term" }
 tokio.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -62,8 +59,6 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
-alacritty_terminal.workspace = true
-unicode-width.workspace = true
 parking_lot.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
@@ -72,10 +67,13 @@ rusqlite.workspace = true
 sha2.workspace = true
 
 [features]
-# Lets tests make the detection screen panic on demand, to exercise its
-# recovery (see `DetectionEngine::poison_screen_after_calls`), and keeps the raw bytes a
-# window's child wrote for tests that count writes. Enabled for this crate's own
-# tests through the self dev-dependency below; never in a shipped build.
+# The daemon's own test seams, kept out of the shipped daemon's code: a read
+# of the screen copy that panics (`DetectionEngine::poison_reading_after_calls`),
+# a resize that fails (`PtySession::fail_next_resize`), a detection driver that
+# panics (`WindowEntry::inject_detector_driver_panic`) and the fault a window's
+# holder is asked to act out (`DaemonConfig::holder_fault`). Enabled for this
+# crate's own tests through the self dev-dependency below; never in a shipped
+# build. The holder and the terminal model have no such feature.
 fault-injection = []
 
 [build-dependencies]
@@ -91,8 +89,14 @@ tracing-test = { version = "0.2.6", features = ["no-env-filter"] }
 # Shared test fixtures. Dev-only: `publish = false` and absent from
 # the normal dependency graph, so it never reaches the shipped binaries.
 yagura-test-support = { path = "../yagura-test-support" }
-# The holder's own constants, so a test sized by them follows the holder.
-yagura-holder = { path = "../yagura-holder" }
+# The holder's terminal model, so a test can turn bytes into the copy of a
+# screen the way a holder does. Dev-only: the shipped daemon has no terminal
+# model of its own.
+yagura-term = { path = "../yagura-term" }
+# The terminal engine itself, for tests that measure its grid directly.
+alacritty_terminal.workspace = true
+# Character widths, for the tests that check the tables generated for the GUI.
+unicode-width.workspace = true
 
 # Windows-only, tests-only: the conhost-reaping regression test enumerates
 # conhost.exe process IDs directly (via Toolhelp32Snapshot) as an independent

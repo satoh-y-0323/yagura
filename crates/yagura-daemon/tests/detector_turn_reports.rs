@@ -14,14 +14,14 @@
 
 mod common;
 
-use common::ScreenFeed;
+use common::{CopiedEngine, ScreenFeed};
 use std::path::Path;
 use std::time::Duration;
 
 use tokio::time::Instant;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{
-    DetectionEngine, DetectorHandle, InputEcho, TURN_ACTIVE_QUIET, TURN_REPORT_STALE,
+    DetectorHandle, InputEcho, TURN_ACTIVE_QUIET, TURN_REPORT_STALE,
 };
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
@@ -114,12 +114,12 @@ const NO_RULE: DetectedStatus = DetectedStatus::Unknown(UnknownReason::NoRuleMat
 /// engine's next deadline falls due, it is ticked.
 struct Driver {
     start: Instant,
-    engine: DetectionEngine,
+    engine: CopiedEngine,
     samples: Vec<(u64, DetectedStatus)>,
 }
 
 impl Driver {
-    fn new(engine: DetectionEngine) -> Self {
+    fn new(engine: CopiedEngine) -> Self {
         Self {
             start: Instant::now(),
             engine,
@@ -479,7 +479,7 @@ async fn the_driver_task_wakes_at_the_end_of_the_quiet_time() {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(SCREEN_DEF, &config, COLS, ROWS);
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
     common::feed_handle(&screen, &handle, &idle());
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle.record_status_event(WindowStatus::Running);

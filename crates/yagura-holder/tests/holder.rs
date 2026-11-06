@@ -132,6 +132,9 @@ impl Rig {
             holders_dir: self.holders_dir(),
             daemon_endpoint: self.daemon_endpoint(),
             end_child_on_disconnect: false,
+            history_rows: 1000,
+            palette: None,
+            fault: None,
         }
     }
 
@@ -265,25 +268,6 @@ impl Drop for Peer {
 }
 
 impl Peer {
-    /// Connects and is welcomed; returns `replay_end_seq` and the
-    /// `ack_window` the holder steps in.
-    async fn welcomed_with_window(endpoint: &str) -> (Self, u64, u64) {
-        let mut peer = Self::connect(endpoint).await;
-        peer.send(hello(HOLDER_PROTOCOL)).await;
-        match peer.frame().await {
-            HolderFrame::Welcome {
-                replay_end_seq,
-                ack_window,
-                ..
-            } => (
-                peer,
-                replay_end_seq,
-                ack_window.expect("the Welcome names no ack window"),
-            ),
-            other => panic!("expected Welcome, got {other:?}"),
-        }
-    }
-
     async fn connect(endpoint: &str) -> Self {
         let connection = PlatformIpc::default()
             .connect(endpoint)
@@ -325,16 +309,12 @@ impl Peer {
         }
     }
 
-    /// Connects and is welcomed; returns the record and `replay_end_seq`.
-    async fn welcomed(endpoint: &str) -> (Self, String, u64) {
+    /// Connects and is welcomed; returns the record.
+    async fn welcomed(endpoint: &str) -> (Self, String) {
         let mut peer = Self::connect(endpoint).await;
         peer.send(hello(HOLDER_PROTOCOL)).await;
         match peer.frame().await {
-            HolderFrame::Welcome {
-                record,
-                replay_end_seq,
-                ..
-            } => (peer, record, replay_end_seq),
+            HolderFrame::Welcome { record, .. } => (peer, record),
             other => panic!("expected Welcome, got {other:?}"),
         }
     }
@@ -362,19 +342,47 @@ impl Peer {
         }
     }
 
-    /// Reads until the output so far contains `needle`; returns the other
-    /// frames seen on the way.
-    async fn output_until(&mut self, needle: &[u8]) -> Vec<HolderFrame> {
-        let mut output = Vec::new();
+    /// Asks for the holder's text until it shows `needle`; returns the
+    /// other frames seen on the way. Screen copies are not acknowledged, and
+    /// are skipped.
+    async fn text_until(&mut self, needle: &str) -> Vec<HolderFrame> {
         let mut others = Vec::new();
-        while !contains(&output, needle) {
-            match self.frame().await {
-                HolderFrame::Output { bytes, .. } => output.extend_from_slice(&bytes),
-                other => others.push(other),
+        let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
+        for id in 1.. {
+            self.send(HolderFrame::ReadTail {
+                id,
+                max_lines: 100,
+                max_bytes: 64 * 1024,
+            })
+            .await;
+            let text = loop {
+                match self.frame().await {
+                    HolderFrame::Tail {
+                        id: answered, text, ..
+                    } if answered == id => break text,
+                    frame if is_copy(&frame) => {}
+                    other => others.push(other),
+                }
+            };
+            if text.contains(needle) {
+                break;
             }
+            assert!(
+                Instant::now() < deadline,
+                "the holder's text never showed {needle:?}"
+            );
+            tokio::time::sleep(POLL).await;
         }
         others
     }
+}
+
+/// A screen copy's rows or its close.
+fn is_copy(frame: &HolderFrame) -> bool {
+    matches!(
+        frame,
+        HolderFrame::ScreenRows(_) | HolderFrame::ScreenPush(_)
+    )
 }
 
 fn hello(protocol: u32) -> HolderFrame {
@@ -382,12 +390,6 @@ fn hello(protocol: u32) -> HolderFrame {
         protocol,
         daemon_boot: "test-boot".to_owned(),
     }
-}
-
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
 }
 
 fn path_arg(path: &Path) -> &str {
@@ -399,55 +401,6 @@ async fn wait_until(what: &str, satisfied: impl Fn() -> bool) {
     while !satisfied() {
         assert!(Instant::now() < deadline, "never happened: {what}");
         tokio::time::sleep(POLL).await;
-    }
-}
-
-/// Output frames checked to follow one another with no bytes missing: an
-/// `Output`'s `seq` is the stream position just past its bytes.
-struct Stream {
-    end: u64,
-}
-
-impl Stream {
-    fn take(&mut self, seq: u64, len: usize) {
-        let start = seq
-            .checked_sub(len as u64)
-            .expect("seq is before the frame's own start");
-        assert_eq!(
-            start, self.end,
-            "bytes are missing or repeated before seq {seq}"
-        );
-        self.end = seq;
-    }
-}
-
-/// Reads output until it is exactly `window` past `acked`, failing on any
-/// frame that takes it further.
-async fn read_to_the_window(peer: &mut Peer, stream: &mut Stream, acked: u64, window: u64) {
-    while stream.end - acked < window {
-        match peer.frame().await {
-            HolderFrame::Output { seq, bytes } => stream.take(seq, bytes.len()),
-            other => panic!("unexpected frame while flooding: {other:?}"),
-        }
-        assert!(
-            stream.end - acked <= window,
-            "the holder read {} bytes past the acknowledged {acked}, more than its window {window}",
-            stream.end - acked
-        );
-    }
-}
-
-/// Asks the holder something it refuses at once and expects the refusal
-/// before any more output: a holder held at its window reads nothing more.
-async fn assert_held(peer: &mut Peer) {
-    peer.send(HolderFrame::Resize {
-        cols: yagura_protocol::MAX_WINDOW_DIMENSION + 1,
-        rows: 30,
-    })
-    .await;
-    match peer.frame().await {
-        HolderFrame::ResizeFailed { .. } => {}
-        other => panic!("the holder went on without an Ack: {other:?}"),
     }
 }
 
@@ -510,7 +463,7 @@ async fn the_child_starts_only_after_the_first_valid_hello() {
     assert_eq!(before.child_pid, None, "the child started before any Hello");
     assert!(!count.exists(), "holder_child ran before any Hello");
 
-    let (_peer, _, _) = Peer::welcomed(&before.endpoint).await;
+    let (_peer, _) = Peer::welcomed(&before.endpoint).await;
     rig.record_where(|record| record.child_pid.is_some()).await;
     wait_until("holder_child runs after the Hello", || count.exists()).await;
 }
@@ -537,116 +490,8 @@ async fn hello_is_accepted_only_from_the_process_holding_the_daemon_endpoint() {
     );
     assert_eq!(rig.record().await.child_pid, None);
 
-    let (_peer, returned, _) = Peer::welcomed(&record.endpoint).await;
+    let (_peer, returned) = Peer::welcomed(&record.endpoint).await;
     assert_eq!(returned, launch.record);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn connected_output_stops_at_the_unacknowledged_window_and_resumes_on_ack() {
-    let rig = Rig::new("ack");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let count = rig.file("count");
-    let _holder = rig.start(&rig.launch(&["flood", path_arg(&count)], NO_DEADLINE_MS));
-    let (mut peer, _, window) = Peer::welcomed_with_window(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-
-    let mut stream = Stream { end: 0 };
-    let mut acked = 0;
-    for _ in 0..3 {
-        read_to_the_window(&mut peer, &mut stream, acked, window).await;
-        assert_held(&mut peer).await;
-        acked = stream.end;
-        peer.send(HolderFrame::Ack { seq: acked }).await;
-    }
-}
-
-/// The holder keeps the checkpoint and every byte after it while no daemon is
-/// connected, stops reading at its bound instead of dropping, and hands it all
-/// to the next daemon before the live output.
-#[tokio::test(flavor = "multi_thread")]
-async fn replay_hands_over_the_checkpoint_and_every_byte_after_it_then_live_output() {
-    let rig = Rig::new("replay");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let count = rig.file("count");
-    let _holder = rig.start(&rig.launch(&["flood", path_arg(&count)], NO_DEADLINE_MS));
-    let endpoint = rig.record().await.endpoint;
-
-    let (mut first, _, _) = Peer::welcomed(&endpoint).await;
-    first.send(HolderFrame::Replay).await;
-    let checkpoint_seq = loop {
-        if let HolderFrame::Output { seq, .. } = first.frame().await {
-            break seq;
-        }
-    };
-    first
-        .send(HolderFrame::StoreCheckpoint {
-            seq: checkpoint_seq,
-            bytes: b"CHECKPOINT-1".to_vec(),
-        })
-        .await;
-    first
-        .send(HolderFrame::Ack {
-            seq: checkpoint_seq,
-        })
-        .await;
-    drop(first);
-
-    // No daemon: the holder keeps exactly its bound after the checkpoint and
-    // no more. Each look is a connection of its own, which holds the reader
-    // at its window until the connection is dropped.
-    let bound = kept_output_bound();
-    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
-    let (mut second, replay_end_seq, window) = loop {
-        let (peer, replay_end_seq, window) = Peer::welcomed_with_window(&endpoint).await;
-        let kept = replay_end_seq - checkpoint_seq;
-        assert!(
-            kept <= bound,
-            "the holder kept {kept} bytes after the checkpoint, more than its bound {bound}"
-        );
-        if kept == bound {
-            break (peer, replay_end_seq, window);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the holder never came to its bound with no daemon connected ({kept} bytes kept)"
-        );
-        drop(peer);
-        tokio::time::sleep(POLL).await;
-    };
-    second.send(HolderFrame::Replay).await;
-    assert_eq!(
-        second.frame().await,
-        HolderFrame::Checkpoint {
-            seq: checkpoint_seq,
-            bytes: b"CHECKPOINT-1".to_vec(),
-        }
-    );
-    let mut stream = Stream {
-        end: checkpoint_seq,
-    };
-    while stream.end < replay_end_seq {
-        match second.frame().await {
-            HolderFrame::Output { seq, bytes } => stream.take(seq, bytes.len()),
-            other => panic!("unexpected frame during replay: {other:?}"),
-        }
-    }
-    assert_eq!(
-        stream.end, replay_end_seq,
-        "replay did not end on replay_end_seq"
-    );
-
-    second
-        .send(HolderFrame::StoreCheckpoint {
-            seq: replay_end_seq,
-            bytes: b"CHECKPOINT-2".to_vec(),
-        })
-        .await;
-    second
-        .send(HolderFrame::Ack {
-            seq: replay_end_seq,
-        })
-        .await;
-    read_to_the_window(&mut second, &mut stream, replay_end_seq, window).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -656,12 +501,12 @@ async fn a_second_valid_hello_displaces_the_first_connection() {
     let _holder = rig.start(&rig.launch(&["hex"], NO_DEADLINE_MS));
     let endpoint = rig.record().await.endpoint;
 
-    let (mut first, _, _) = Peer::welcomed(&endpoint).await;
-    let (_second, _, _) = Peer::welcomed(&endpoint).await;
+    let (mut first, _) = Peer::welcomed(&endpoint).await;
+    let (_second, _) = Peer::welcomed(&endpoint).await;
     loop {
         match first.next().await {
             Event::Frame(HolderFrame::Displaced) => break,
-            Event::Frame(HolderFrame::Output { .. }) => {}
+            Event::Frame(frame) if is_copy(&frame) => {}
             Event::Frame(other) => panic!("expected Displaced, got {other:?}"),
             Event::Closed => panic!("closed without Displaced"),
             Event::Broken(error) => panic!("the holder sent a broken frame: {error}"),
@@ -678,9 +523,8 @@ async fn writes_reach_the_child_in_order_and_are_acknowledged() {
     let rig = Rig::new("write");
     let _daemon = hold_daemon_endpoint(&rig).await;
     let _holder = rig.start(&rig.launch(&["hex"], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-READY").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-READY").await;
 
     peer.send(HolderFrame::Write {
         id: 1,
@@ -692,11 +536,11 @@ async fn writes_reach_the_child_in_order_and_are_acknowledged() {
         bytes: b"cd".to_vec(),
     })
     .await;
-    let others = peer.output_until(b"61626364").await;
+    let others = peer.text_until("61626364").await;
     let mut written: Vec<HolderFrame> = others;
     while written.len() < 2 {
         match peer.frame().await {
-            HolderFrame::Output { .. } => {}
+            frame if is_copy(&frame) => {}
             other => written.push(other),
         }
     }
@@ -715,32 +559,20 @@ async fn a_write_after_the_child_exited_fails() {
     let _daemon = hold_daemon_endpoint(&rig).await;
     let gate = rig.file("gate");
     let _holder = rig.start(&rig.launch(&["exit", "0", path_arg(&gate)], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
 
     std::fs::write(&gate, b"").unwrap();
-    loop {
-        match peer.frame().await {
-            HolderFrame::Exited { .. } => break,
-            HolderFrame::Output { .. } => {}
-            other => panic!("unexpected frame before Exited: {other:?}"),
-        }
-    }
+    until_exited(&mut peer).await;
     // The exit file is written before `Exited` is sent, so it is there now.
     let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id)
         .expect("the exit file is readable as soon as Exited arrives");
     assert_eq!(exit.code, Some(0));
-    assert!(
-        contains(&exit.output, b"EXITING 0"),
-        "the child's last output is missing: {:?}",
-        String::from_utf8_lossy(&exit.output)
-    );
     peer.send(HolderFrame::Write {
         id: 9,
         bytes: b"x".to_vec(),
     })
     .await;
-    let reply = peer.frame().await;
+    let reply = next_answer(&mut peer).await;
     assert!(
         matches!(reply, HolderFrame::WriteFailed { id: 9, .. }),
         "expected WriteFailed for id 9, got {reply:?}"
@@ -752,16 +584,15 @@ async fn resize_reaches_the_child() {
     let rig = Rig::new("resize");
     let _daemon = hold_daemon_endpoint(&rig).await;
     let _holder = rig.start(&rig.launch(&["size"], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"SIZE 80x24").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("SIZE 80x24").await;
 
     peer.send(HolderFrame::Resize {
         cols: 100,
         rows: 30,
     })
     .await;
-    peer.output_until(b"SIZE 100x30").await;
+    peer.text_until("SIZE 100x30").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -783,53 +614,13 @@ async fn a_child_exiting_while_disconnected_leaves_its_result_and_output() {
     let _daemon = hold_daemon_endpoint(&rig).await;
     let gate = rig.file("gate");
     let mut holder = rig.start(&rig.launch(&["exit", "7", path_arg(&gate)], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
+    let (peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
     drop(peer);
 
     std::fs::write(&gate, b"").unwrap();
     holder.wait_exit().await;
     let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id).expect("read the exit");
     assert_eq!(exit.code, Some(7));
-    assert!(
-        contains(&exit.output, b"EXITING 7"),
-        "the child's last output is missing: {:?}",
-        String::from_utf8_lossy(&exit.output)
-    );
-}
-
-/// A daemon stops reading at `Exited`, so it must come after every byte the
-/// connection is owed, even when the child is gone before the replay is asked for.
-#[tokio::test(flavor = "multi_thread")]
-async fn exited_follows_all_output_when_the_replay_is_asked_for_after_the_exit() {
-    let rig = Rig::new("latereplay");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let mut holder = rig.start(&rig.launch(&["exit", "0"], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    // The exit file is written once the holder has both the exit and the output.
-    wait_until("the holder has the child's exit", || {
-        read_holder_exit(&rig.holders_dir(), &rig.window_id).is_ok()
-    })
-    .await;
-
-    peer.send(HolderFrame::Replay).await;
-    let mut output = Vec::new();
-    let code = loop {
-        match peer.frame().await {
-            HolderFrame::Output { bytes, .. } => output.extend_from_slice(&bytes),
-            HolderFrame::Checkpoint { .. } => {}
-            HolderFrame::Exited { code } => break code,
-            other => panic!("unexpected frame before Exited: {other:?}"),
-        }
-    };
-    assert!(
-        contains(&output, b"EXITING 0"),
-        "Exited came before the child's output: {:?}",
-        String::from_utf8_lossy(&output)
-    );
-    assert_eq!(code, Some(0));
-    drop(peer);
-    holder.wait_exit().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -838,9 +629,8 @@ async fn terminate_ends_the_child_tree_and_the_holder() {
     let _daemon = hold_daemon_endpoint(&rig).await;
     let pid_file = rig.file("grandchild");
     let mut holder = rig.start(&rig.launch(&["tree", path_arg(&pid_file)], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-TREE").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-TREE").await;
     let grandchild: u32 = std::fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
@@ -860,28 +650,16 @@ async fn terminate_ends_a_child_ignoring_requests_to_end_and_keeps_its_exit() {
     let rig = Rig::new("ignore");
     let _daemon = hold_daemon_endpoint(&rig).await;
     let mut holder = rig.start(&rig.launch(&["ignore-end"], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-IGNORING").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-IGNORING").await;
 
     peer.send(HolderFrame::Terminate { tree: false }).await;
-    let code = loop {
-        match peer.frame().await {
-            HolderFrame::Exited { code } => break code,
-            HolderFrame::Output { .. } => {}
-            other => panic!("unexpected frame before Exited: {other:?}"),
-        }
-    };
+    let code = until_exited(&mut peer).await;
     holder.wait_exit().await;
     // 1 is TerminateProcess's code on Windows and a kill by signal on Unix.
     assert_eq!(code, Some(1), "the child was not ended by the kill");
     let exit = read_holder_exit(&rig.holders_dir(), &rig.window_id).expect("read the exit");
     assert_eq!(exit.code, Some(1));
-    assert!(
-        contains(&exit.output, b"HOLDER-CHILD-IGNORING"),
-        "the child's output is missing: {:?}",
-        String::from_utf8_lossy(&exit.output)
-    );
 }
 
 /// Kills a descendant the holder is not expected to end (or failed to), so a
@@ -925,9 +703,8 @@ async fn a_stubborn_grandchild_ends_with_the_holder(label: &str, terminate: bool
         vec!["stubborn-tree", path_arg(&pid_file), path_arg(&gate)]
     };
     let mut holder = rig.start(&rig.launch(&args, NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-TREE").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-TREE").await;
     let grandchild = pid_in(&pid_file);
     let _reaper = Reaper {
         pid: grandchild,
@@ -974,9 +751,8 @@ async fn a_write_that_ends_the_child_is_answered_before_exited() {
     let pid_file = rig.file("escaped");
     let mut holder =
         rig.start(&rig.launch(&["escaped-holder", path_arg(&pid_file)], NO_DEADLINE_MS));
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-ESCAPED").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-ESCAPED").await;
     let _reaper = Reaper {
         pid: pid_in(&pid_file),
         always: true,
@@ -990,9 +766,7 @@ async fn a_write_that_ends_the_child_is_answered_before_exited() {
     let mut answers = Vec::new();
     loop {
         match peer.next().await {
-            Event::Frame(HolderFrame::Output { seq, .. }) => {
-                peer.send(HolderFrame::Ack { seq }).await;
-            }
+            Event::Frame(frame) if is_copy(&frame) => {}
             Event::Frame(HolderFrame::Exited { .. }) => break,
             Event::Frame(other) => answers.push(other),
             Event::Closed => panic!("closed before Exited, after {answers:?}"),
@@ -1042,7 +816,7 @@ async fn the_holder_keeps_its_files_in_the_launch_directory_and_serves_the_launc
         "the socket {} is not in the launch's directory",
         record.endpoint
     );
-    let (_peer, returned, _) = Peer::welcomed(&record.endpoint).await;
+    let (_peer, returned) = Peer::welcomed(&record.endpoint).await;
     assert_eq!(returned, launch.record);
 }
 
@@ -1064,7 +838,7 @@ async fn holders_in_different_directories_have_different_endpoints() {
         launch.holders_dir = dir.clone();
         holders.push(rig.start(&launch));
         let record = record_in(dir, &rig.window_id, |_| true).await;
-        let (peer, returned, _) = Peer::welcomed(&record.endpoint).await;
+        let (peer, returned) = Peer::welcomed(&record.endpoint).await;
         assert_eq!(returned, launch.record);
         peers.push(peer);
     }
@@ -1105,7 +879,7 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
     // Once the notice is out, the record is there and the endpoint answers.
     let record = read_holder_record(&rig.holders_dir(), &rig.window_id)
         .expect("the record is written before the notice");
-    let (_peer, _, _) = Peer::welcomed(&record.endpoint).await;
+    let (_peer, _) = Peer::welcomed(&record.endpoint).await;
     let rest = tokio::time::timeout(
         yagura_test_support::HANG_GUARD,
         tokio::task::spawn_blocking(move || {
@@ -1144,12 +918,6 @@ async fn the_holder_tells_on_stdout_when_it_is_ready_and_a_failed_one_does_not()
     );
 }
 
-/// What the holder keeps after the checkpoint before it stops reading:
-/// `MAX_PENDING` (`buffer.rs`), eight bytes per cell of the largest screen.
-fn kept_output_bound() -> u64 {
-    u64::from(yagura_protocol::MAX_WINDOW_DIMENSION).pow(2) * 8
-}
-
 /// Provisional: goes with the end-child-on-disconnect flag once holders
 /// outlive the daemon.
 #[tokio::test(flavor = "multi_thread")]
@@ -1160,9 +928,8 @@ async fn provisional_flag_a_lost_connection_ends_the_tree_and_the_holder_and_lea
     let mut launch = rig.launch(&["tree", path_arg(&pid_file)], NO_DEADLINE_MS);
     launch.end_child_on_disconnect = true;
     let mut holder = rig.start(&launch);
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-TREE").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-TREE").await;
     let grandchild: u32 = std::fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
@@ -1186,11 +953,12 @@ fn files_left(rig: &Rig) -> Vec<std::ffi::OsString> {
         .collect()
 }
 
-/// Reads past the output to `Exited`, which must be the next other frame.
+/// Reads past the screen copies to `Exited`, which must be the next other
+/// frame.
 async fn until_exited(peer: &mut Peer) -> Option<i32> {
     loop {
         match peer.frame().await {
-            HolderFrame::Output { .. } => {}
+            frame if is_copy(&frame) => {}
             HolderFrame::Exited { code } => return code,
             other => panic!("unexpected frame before Exited: {other:?}"),
         }
@@ -1203,9 +971,8 @@ async fn provisional_terminated(rig: &Rig) -> (Holder, Peer) {
     let mut launch = rig.launch(&["hex"], NO_DEADLINE_MS);
     launch.end_child_on_disconnect = true;
     let holder = rig.start(&launch);
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"HOLDER-CHILD-READY").await;
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-READY").await;
     peer.send(HolderFrame::Terminate { tree: true }).await;
     until_exited(&mut peer).await;
     (holder, peer)
@@ -1274,37 +1041,11 @@ async fn provisional_flag_a_child_that_cannot_start_leaves_no_exit_file_and_no_r
     assert!(left.is_empty(), "the holder left {left:?}");
 }
 
-/// Provisional: goes with the end-child-on-disconnect flag, after which only a
-/// stored checkpoint frees what the holder keeps.
-#[tokio::test(flavor = "multi_thread")]
-async fn provisional_flag_acks_free_the_kept_output_so_it_never_stops() {
-    let rig = Rig::new("flagack");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let count = rig.file("count");
-    let mut launch = rig.launch(&["flood", path_arg(&count)], NO_DEADLINE_MS);
-    launch.end_child_on_disconnect = true;
-    let _holder = rig.start(&launch);
-    let (mut peer, _, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-
-    let past = kept_output_bound() + kept_output_bound() / 4;
-    let mut stream = Stream { end: 0 };
-    while stream.end <= past {
-        match peer.frame().await {
-            HolderFrame::Output { seq, bytes } => {
-                stream.take(seq, bytes.len());
-                peer.send(HolderFrame::Ack { seq }).await;
-            }
-            other => panic!("unexpected frame while flooding: {other:?}"),
-        }
-    }
-}
-
-/// The next frame other than output.
+/// The next frame other than a screen copy.
 async fn next_answer(peer: &mut Peer) -> HolderFrame {
     loop {
         match peer.frame().await {
-            HolderFrame::Output { .. } => {}
+            frame if is_copy(&frame) => {}
             other => return other,
         }
     }
@@ -1316,16 +1057,15 @@ async fn resize_is_answered_and_a_refused_one_leaves_the_size() {
     let _daemon = hold_daemon_endpoint(&rig).await;
     let _holder = rig.start(&rig.launch(&["size"], NO_DEADLINE_MS));
     let endpoint = rig.record().await.endpoint;
-    let (mut peer, _, _) = Peer::welcomed(&endpoint).await;
-    peer.send(HolderFrame::Replay).await;
-    peer.output_until(b"SIZE 80x24").await;
+    let (mut peer, _) = Peer::welcomed(&endpoint).await;
+    peer.text_until("SIZE 80x24").await;
 
     peer.send(HolderFrame::Resize {
         cols: 100,
         rows: 30,
     })
     .await;
-    let others = peer.output_until(b"SIZE 100x30").await;
+    let others = peer.text_until("SIZE 100x30").await;
     let answer = match others.as_slice() {
         [] => next_answer(&mut peer).await,
         [answer] => answer.clone(),

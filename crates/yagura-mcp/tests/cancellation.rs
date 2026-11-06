@@ -237,10 +237,19 @@ impl Daemon {
         }
     }
 
+    /// Polls `window_id`'s text, as `read_output` reads it, until `needle` appears.
     async fn wait_for_output(&self, window_id: &str, needle: &[u8]) {
         let entry = self.entry(window_id);
         let deadline = tokio::time::Instant::now() + HANG_GUARD;
-        while !contains_subsequence(&entry.session().captured_output(), needle) {
+        while !contains_subsequence(
+            &entry
+                .session()
+                .text_tail(100_000, 256 * 1024)
+                .await
+                .map(|(text, _)| text.into_bytes())
+                .unwrap_or_default(),
+            needle,
+        ) {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "window {window_id} never printed {:?}",

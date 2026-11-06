@@ -15,9 +15,15 @@ path = "src/main.rs"
 name = "holder_child"
 path = "src/bin/holder_child.rs"
 
+# Tests only: acts out the fault a launch names. Not shipped.
+[[bin]]
+name = "holder_fault"
+path = "src/bin/holder_fault.rs"
+
 [dependencies]
 yagura-os = { path = "../yagura-os" }
 yagura-protocol = { path = "../yagura-protocol" }
+yagura-term = { path = "../yagura-term" }
 tokio.workspace = true
 
 # `holder_child` only: the test fixture reads its terminal's size directly, so

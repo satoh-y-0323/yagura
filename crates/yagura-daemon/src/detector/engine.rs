@@ -33,7 +33,7 @@ use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 use crate::DaemonConfig;
 use crate::detector::definition::{Definition, Region};
-use crate::detector::reading::{self, ComposerReadout, SharedCopy, SharedLocalScreen};
+use crate::detector::reading::{self, ComposerReadout, CopyCounts, SharedCopy};
 use crate::detector::source::TurnReport;
 use crate::handoff;
 
@@ -193,11 +193,11 @@ impl ComposerObservation {
 /// screen.
 #[derive(Debug)]
 struct ScreenReading {
-    /// The model was replaced, or a read of the copy was lost, since the
-    /// engine last read it, so the screen it judged before is gone.
+    /// The model was replaced, a read of the copy was lost, or a copy was
+    /// refused since the engine last read it, so the screen it judged before
+    /// is gone.
     rebuilt: bool,
-    generation: u64,
-    read_losses: u64,
+    counts: CopyCounts,
     cursor_hidden: bool,
     /// The program has a synchronized update open.
     sync_open: bool,
@@ -226,16 +226,12 @@ struct RuleLines {
 #[derive(Debug)]
 pub struct DetectionEngine {
     definition: Option<Definition>,
-    /// The window's model, which the copy is carried out of. Reached only by
-    /// the tests' seams; the engine reads `copy`.
-    screen: SharedLocalScreen,
     copy: SharedCopy,
-    /// The copy's [`generation`](yagura_protocol::ScreenCopy::generation) as
-    /// of the latest reading.
-    screen_generation: u64,
-    /// The copy's [`read_losses`](crate::detector::CopyRead::read_losses) as
-    /// of the latest reading.
-    read_losses: u64,
+    /// The copy's counts as of the latest reading.
+    counts: CopyCounts,
+    /// Test seam; see [`DetectionEngine::poison_reading_after_calls`].
+    #[cfg(feature = "fault-injection")]
+    poison: PoisonCountdown,
     /// What the latest hook report says about the current turn.
     turn: TurnReport,
     /// The most recent output that was not an echo or a resize redraw; an open
@@ -294,11 +290,51 @@ pub const SETTLE_QUIET: Duration = Duration::from_millis(50);
 /// [`ComposerObservation::painted`].
 pub const SETTLE_CEILING: Duration = Duration::from_millis(250);
 
+/// The countdown behind [`DetectionEngine::poison_reading_after_calls`]:
+/// `0` is disarmed, `n` panics the read after `n - 1` more. Atomic because a
+/// reading takes the engine by shared reference.
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Default)]
+struct PoisonCountdown(std::sync::atomic::AtomicUsize);
+
+#[cfg(feature = "fault-injection")]
+impl PoisonCountdown {
+    fn arm(&self, calls: usize) {
+        self.0.store(calls.saturating_add(1), Ordering::SeqCst);
+    }
+
+    /// Counts one read; `true` when it is this read's turn to panic.
+    fn is_due(&self) -> bool {
+        match self.0.load(Ordering::SeqCst) {
+            0 => false,
+            1 => {
+                self.0.store(0, Ordering::SeqCst);
+                true
+            }
+            left => {
+                self.0.store(left - 1, Ordering::SeqCst);
+                false
+            }
+        }
+    }
+}
+
+/// The seam's failure, kept in its own item so the one `panic!` is reached
+/// only through an armed seam.
+#[cfg(feature = "fault-injection")]
+#[allow(clippy::panic)] // the seam exists to make the read panic
+fn fire_poison_seam() {
+    panic!("poison seam: simulated read panic");
+}
+
 impl DetectionEngine {
-    /// Builds an engine that judges the copy carried out of `screen`, the
-    /// window's own terminal model, so it reads the very screen the window
-    /// shows. Whoever feeds the model reports each arrival with
+    /// Builds an engine that judges `copy`, the copy of the window's screen
+    /// its holder sends, so it reads the very screen the window shows.
+    /// Whoever applies the copies reports each arrival with
     /// [`DetectionEngine::on_output`].
+    ///
+    /// The copy's counts as it stands are the engine's starting point: a
+    /// model rebuilt before the engine existed is not a loss to it.
     ///
     /// The engine's readings wait on the copy's lock, so async code drives it
     /// only through [`DetectorHandle`], which runs it on blocking threads.
@@ -311,11 +347,7 @@ impl DetectionEngine {
     /// are substituted from `config` here, since the definition loader applies
     /// no defaults of its own.
     #[must_use]
-    pub fn new(
-        definition: Option<Definition>,
-        config: &DaemonConfig,
-        screen: SharedLocalScreen,
-    ) -> Self {
+    pub fn new(definition: Option<Definition>, config: &DaemonConfig, copy: SharedCopy) -> Self {
         let confirm_ms = definition
             .as_ref()
             .and_then(|definition| definition.debounce)
@@ -351,16 +383,13 @@ impl DetectionEngine {
             Some(_) => DetectedStatus::Unknown(UnknownReason::NotYetJudged),
             None => DetectedStatus::Unknown(UnknownReason::NoDefinition),
         };
-        let copy = screen.copy().clone();
+        let counts = copy.counts();
         Self {
             definition,
-            screen,
             copy,
-            // Every model starts at generation 0 and every copy at no lost
-            // read, so a loss before the first reading is a loss too, and
-            // building takes no lock.
-            screen_generation: 0,
-            read_losses: 0,
+            counts,
+            #[cfg(feature = "fault-injection")]
+            poison: PoisonCountdown::default(),
             turn: TurnReport::Unreported,
             turn_output_at: now,
             turn_report_at: now,
@@ -599,17 +628,12 @@ impl DetectionEngine {
         self.read_and_evaluate(now)
     }
 
-    /// The window's terminal model whose copy this engine reads.
-    #[must_use]
-    pub fn screen(&self) -> &SharedLocalScreen {
-        &self.screen
-    }
-
-    /// Arms the model's fault-injection seam (see
-    /// [`VtScreen::poison_after_calls`](yagura_term::VtScreen::poison_after_calls)).
-    #[cfg(any(test, feature = "fault-injection"))]
-    pub fn poison_screen_after_calls(&mut self, calls: usize) {
-        self.screen.lock().poison_after_calls(calls);
+    /// Makes the engine's read of the copy panic once `calls` more reads
+    /// have run, inside the read's containment, so that read is lost. A test
+    /// seam (the `fault-injection` feature only).
+    #[cfg(feature = "fault-injection")]
+    pub fn poison_reading_after_calls(&mut self, calls: usize) {
+        self.poison.arm(calls);
     }
 
     /// Returns the confirmed status, projected to [`WindowStatus`] (see
@@ -688,7 +712,13 @@ impl DetectionEngine {
                 .iter()
                 .any(|rule| rule.region == Region::Screen)
         });
+        #[cfg(feature = "fault-injection")]
+        let poisoned = self.poison.is_due();
         let read = self.copy.read(|copy| {
+            #[cfg(feature = "fault-injection")]
+            if poisoned {
+                fire_poison_seam();
+            }
             let lines = has_rules.then(|| {
                 let all = match composer {
                     Some(section) => reading::lines_without_composer(copy, section),
@@ -711,12 +741,15 @@ impl DetectionEngine {
                 .map(|section| reading::read_composer(copy, section));
             ((copy.cursor_hidden, copy.sync_open), lines, readout)
         });
-        let ((cursor_hidden, sync_open), lines, composer) = read.value.unwrap_or_default();
-        ScreenReading {
-            rebuilt: read.generation != self.screen_generation
-                || read.read_losses != self.read_losses,
+        let counts = CopyCounts {
             generation: read.generation,
             read_losses: read.read_losses,
+            refused: read.refused,
+        };
+        let ((cursor_hidden, sync_open), lines, composer) = read.value.unwrap_or_default();
+        ScreenReading {
+            rebuilt: counts != self.counts,
+            counts,
             cursor_hidden,
             sync_open,
             // Matched after the copy is read, so the reader does not hold it
@@ -731,8 +764,7 @@ impl DetectionEngine {
     /// and counts it when a rule closes the write gate on it.
     fn read_screen(&mut self, with_composer: bool) -> ScreenReading {
         let reading = self.take_reading(with_composer);
-        self.screen_generation = reading.generation;
-        self.read_losses = reading.read_losses;
+        self.counts = reading.counts;
         if matches!(
             reading.rule.map(declare_status),
             Some(DetectedStatus::WaitingApproval)
@@ -1429,21 +1461,22 @@ async fn wait_until(deadline: Option<Instant>) {
 
 #[cfg(test)]
 mod tests {
-    //! A resize that rebuilds the model degrades the confirmed status
-    //! immediately. The fixtures are local because `tests/common/mod.rs` is
-    //! not visible from `src`.
-    //!
-    //! The seam panics through the default panic hook, so this module prints
-    //! one panic message to stderr per armed test; that noise is expected.
+    //! A copy whose model was rebuilt degrades the confirmed status
+    //! immediately, and only readings a rule closes the gate on are counted.
+    //! The copies are built by hand, the way a holder sends them, because
+    //! `tests/common/mod.rs` is not visible from `src`.
+
+    use yagura_protocol::{
+        InputModes, ScreenCell, ScreenCursor, ScreenLine, ScreenPush, ScreenRows,
+    };
 
     use super::*;
-    use crate::detector::LocalScreen;
     use crate::detector::definition::parse_definition;
 
     /// Rules-only definition: with neither `[activity]` nor `[quiescence]`,
     /// the confirmed status is decided by rule matching alone, so reaching a
     /// non-`Unknown` confirmed state takes exactly two steps (one matching
-    /// chunk, then `confirm_ms` of paused time) with no time band to race.
+    /// copy, then `confirm_ms` of paused time) with no time band to race.
     const RULES_ONLY_DEF: &str = r#"
 schema_version = 1
 name = "test-rules-only"
@@ -1462,20 +1495,61 @@ region = "bottom"
     const CONFIRM_MS: u64 = 300;
 
     /// The rule-matching prompt that drives the engine to a confirmed `Idle`.
-    const PROMPT: &[u8] = b"PS C:\\work>";
+    const PROMPT: &str = "PS C:\\work>";
+
+    /// Applies a whole copy numbered `number` of a model of `generation`,
+    /// sized `cols` x `rows`, showing `text` on its top row.
+    fn show(copy: &SharedCopy, number: u64, generation: u64, (cols, rows): (u16, u16), text: &str) {
+        let cells: Vec<ScreenCell> = text
+            .chars()
+            .enumerate()
+            .map(|(col, c)| ScreenCell {
+                col: u16::try_from(col).unwrap(),
+                c,
+                zerowidth: Vec::new(),
+                dim: false,
+                wide: false,
+            })
+            .collect();
+        let width = u16::try_from(cells.len()).unwrap();
+        copy.apply(
+            vec![ScreenRows {
+                number,
+                lines: vec![ScreenLine {
+                    line: 0,
+                    cells,
+                    wraps: false,
+                }],
+            }],
+            ScreenPush {
+                number,
+                full: true,
+                cols,
+                rows,
+                cursor: ScreenCursor {
+                    line: 0,
+                    col: width,
+                    input_needs_wrap: false,
+                },
+                cursor_hidden: false,
+                sync_open: false,
+                input_modes: InputModes::default(),
+                generation,
+                outputs_fed: number,
+            },
+        )
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn a_resize_that_rebuilds_the_screen_confirms_unknown_immediately() {
         tokio::time::pause();
         let config = DaemonConfig::default();
         let definition = parse_definition(RULES_ONLY_DEF).expect("the fixture definition parses");
-        let mut engine = DetectionEngine::new(
-            Some(definition),
-            &config,
-            LocalScreen::new(80, 24).into_shared(),
-        );
+        let copy = SharedCopy::default();
+        show(&copy, 1, 0, (80, 24), PROMPT);
+        let mut engine = DetectionEngine::new(Some(definition), &config, copy.clone());
 
-        engine.screen().lock().feed(PROMPT);
         engine.on_output();
         tokio::time::advance(Duration::from_millis(CONFIRM_MS)).await;
         assert_eq!(
@@ -1484,8 +1558,9 @@ region = "bottom"
             "the starting state must be a confirmed non-Unknown status"
         );
 
-        engine.poison_screen_after_calls(0);
-        engine.screen().lock().resize(60, 20);
+        // The screen at the new size comes from a model that had to be
+        // rebuilt blank.
+        show(&copy, 2, 1, (60, 20), "");
         assert_eq!(
             engine.on_resized(),
             Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
@@ -1525,37 +1600,41 @@ region = "bottom"
     async fn only_readings_a_rule_closes_the_gate_on_move_the_closed_screen_count() {
         let config = DaemonConfig::default();
         let definition = parse_definition(GATED_DEF).expect("the fixture definition parses");
-        let mut engine = DetectionEngine::new(
-            Some(definition),
-            &config,
-            LocalScreen::new(80, 24).into_shared(),
-        );
-        let show = |engine: &mut DetectionEngine, line: &str| {
-            engine
-                .screen()
-                .lock()
-                .feed(format!("[2J[H{line}").as_bytes());
+        let copy = SharedCopy::default();
+        show(&copy, 1, 0, (80, 24), "");
+        let mut engine = DetectionEngine::new(Some(definition), &config, copy.clone());
+        let mut number = 1;
+        let mut show_next = |line: &str| {
+            number += 1;
+            show(&copy, number, 0, (80, 24), line);
+        };
+        let mut closed_after = |engine: &mut DetectionEngine, line: &str| {
+            show_next(line);
             engine.on_output();
             engine.query_composer().closed_screens
         };
 
         assert_eq!(
-            show(&mut engine, "READY>"),
+            closed_after(&mut engine, "READY>"),
             0,
             "an open screen is not counted"
         );
         assert_eq!(
-            show(&mut engine, "ALLOW?"),
+            closed_after(&mut engine, "ALLOW?"),
             1,
             "an approval prompt is counted"
         );
         assert_eq!(
-            show(&mut engine, "HALTED"),
+            closed_after(&mut engine, "HALTED"),
             2,
             "a declared unknown is counted"
         );
-        assert_eq!(show(&mut engine, "READY>"), 2, "the count never moves back");
-        engine.screen().lock().feed(b"[2J[HALLOW?");
+        assert_eq!(
+            closed_after(&mut engine, "READY>"),
+            2,
+            "the count never moves back"
+        );
+        show(&copy, 99, 0, (80, 24), "ALLOW?");
         assert_eq!(
             engine.query_composer().closed_screens,
             2,

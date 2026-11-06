@@ -1,41 +1,31 @@
-//! A window's terminal as the daemon holds it: the terminal model and the
-//! order of writes, with the PTY and the child kept by the window's holder
-//! (`yagura-holder`, reached through [`holder_link`]).
+//! A window's terminal as the daemon reaches it: the copy of its screen and
+//! the order of writes, with the PTY, the child and the terminal model kept
+//! by the window's holder (`yagura-holder`, reached through [`holder_link`]).
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Semaphore, oneshot, watch};
-use yagura_protocol::holder::is_plain_window_id;
+use tokio::sync::{oneshot, watch};
+use yagura_protocol::holder::{HolderViewOp, is_plain_window_id};
+use yagura_protocol::{InputModes, Palette, ScreenCopy, ScreenPush};
 
 use crate::child_env::ChildBaseEnv;
 use crate::config::DaemonConfig;
-use crate::detector::{LocalScreen, SharedLocalScreen};
+use crate::detector::SharedCopy;
 use crate::holder_host::HolderHost;
-#[cfg(feature = "fault-injection")]
-use yagura_protocol::ScreenCopy;
-use yagura_protocol::{InputModes, ScreenPush};
-use yagura_term::screen_view::View;
 
 mod env;
-mod feeder;
-mod focus;
 mod holder_link;
-mod reply_queue;
 mod views;
 
-use feeder::{ModelFeed, feed_model};
-pub use focus::FocusInterval;
-use holder_link::{ExitReport, Feed, Link};
-use reply_queue::ReplyQueue;
+use holder_link::{ExitReport, Link, Writer};
 pub use views::AttachGeneration;
 use views::ViewSlot;
-pub(crate) use views::{EncodedFrame, FrameSend, FrameSink, SendKey, ViewNote};
+pub(crate) use views::{FrameSend, FrameSink, SendKey, ViewNote};
 
 /// Error type for PTY operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -55,57 +45,6 @@ pub enum PtyError {
 }
 
 pub type PtyResult<T> = Result<T, PtyError>;
-
-/// How many blocking threads may wait on one window's model at once. Every
-/// one of them waits on the same lock, so more would only queue there.
-const MODEL_ACCESS_PER_WINDOW: usize = 1;
-
-/// The raw bytes a window's child wrote, kept only for tests that must see
-/// what was written rather than what the terminal shows (an echo and the
-/// child's own print of the same line are two writes but one screen line).
-/// Compiled to nothing without the `fault-injection` feature.
-#[derive(Clone, Default)]
-struct RawCapture {
-    #[cfg(feature = "fault-injection")]
-    bytes: Arc<Mutex<Vec<u8>>>,
-}
-
-impl RawCapture {
-    /// The most bytes kept; older ones are dropped.
-    #[cfg(feature = "fault-injection")]
-    const LIMIT: usize = 4 * 1024 * 1024;
-
-    #[cfg(feature = "fault-injection")]
-    fn record(&self, output: &[u8]) {
-        let mut bytes = lock_recover(&self.bytes);
-        bytes.extend_from_slice(output);
-        if bytes.len() > Self::LIMIT {
-            let excess = bytes.len() - Self::LIMIT;
-            bytes.drain(..excess);
-        }
-    }
-
-    #[cfg(not(feature = "fault-injection"))]
-    fn record(&self, _output: &[u8]) {}
-}
-
-/// A window's model lock held by [`PtySession::hold_model`]; dropping it
-/// releases the lock.
-#[cfg(feature = "fault-injection")]
-pub struct ModelHold {
-    release: Option<std::sync::mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-#[cfg(feature = "fault-injection")]
-impl Drop for ModelHold {
-    fn drop(&mut self) {
-        drop(self.release.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
 
 /// Makes the next PTY resize fail, for tests of what a failed resize leaves
 /// behind. Only the `fault-injection` feature can arm it; `take` is the same
@@ -319,18 +258,18 @@ struct TakeBackState {
     registered: Option<Registered>,
 }
 
-/// The write end of a window's PTY, which teardown can hand back without
-/// waiting for a writer that is stuck inside a write.
+/// The write end of a window's child input, which teardown can hand back
+/// without waiting for a writer that is stuck inside a write.
 struct WriterSlot {
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    writer: Mutex<Option<Writer>>,
     release_requested: AtomicBool,
     /// Taken inside `writer`'s lock, never the other way round, and never held
-    /// across a write, so a stuck PTY never holds it.
+    /// across a write, so a stuck write never holds it.
     take_back: Mutex<TakeBackState>,
 }
 
 impl WriterSlot {
-    fn new(writer: Box<dyn Write + Send>) -> Self {
+    fn new(writer: Writer) -> Self {
         Self {
             writer: Mutex::new(Some(writer)),
             release_requested: AtomicBool::new(false),
@@ -371,7 +310,7 @@ impl WriterSlot {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Box<dyn Write + Send>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Writer>> {
         lock_recover(&self.writer)
     }
 
@@ -397,7 +336,7 @@ impl WriterSlot {
 }
 
 /// What input to a window is encoded against: the modes its child set and
-/// the size of its screen, as the model last had them.
+/// the size of its screen, as the copy of its screen last showed them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputState {
     /// The modes that change what input becomes.
@@ -416,24 +355,29 @@ impl InputState {
     }
 }
 
-/// The model's [`InputState`], published by whoever changes the model while
-/// it holds the model's lock, and read without taking that lock: encoding a
-/// key never waits behind a child that floods its window.
+/// The [`InputState`] of the copy last applied, published by the window's
+/// link and read without a lock.
 struct PublishedInput(AtomicU64);
 
 impl PublishedInput {
-    fn of(copy: &ScreenPush) -> Self {
-        let published = Self(AtomicU64::new(0));
-        published.publish(copy);
-        published
+    fn new(cols: u16, rows: u16) -> Self {
+        Self(AtomicU64::new(Self::bits(
+            InputModes::default(),
+            cols,
+            rows,
+        )))
+    }
+
+    fn bits(modes: InputModes, cols: u16, rows: u16) -> u64 {
+        u64::from(modes.to_bits()) | u64::from(cols) << 16 | u64::from(rows) << 32
     }
 
     /// Publishes the modes and size of the copy `copy` closed.
     fn publish(&self, copy: &ScreenPush) {
-        let bits = u64::from(copy.input_modes.to_bits())
-            | u64::from(copy.cols) << 16
-            | u64::from(copy.rows) << 32;
-        self.0.store(bits, Ordering::Release);
+        self.0.store(
+            Self::bits(copy.input_modes, copy.cols, copy.rows),
+            Ordering::Release,
+        );
     }
 
     fn load(&self) -> InputState {
@@ -447,18 +391,16 @@ impl PublishedInput {
     }
 }
 
-/// The window's attach slot and the way to wake its feeder for it.
-#[derive(Clone)]
-struct Views {
-    slot: Arc<ViewSlot>,
-    feed: std::sync::mpsc::Sender<Feed>,
+/// An open stretch in which the daemon is deciding on, or making, writes to a
+/// window; see [`PtySession::open_focus_interval`]. Ends when dropped.
+#[must_use = "the interval ends when this is dropped"]
+pub struct FocusInterval {
+    link: Link,
 }
 
-impl Views {
-    fn wake_if(&self, wake: bool) {
-        if wake {
-            let _ = self.feed.send(Feed::View);
-        }
+impl Drop for FocusInterval {
+    fn drop(&mut self) {
+        self.link.focus_interval(false);
     }
 }
 
@@ -475,28 +417,63 @@ pub(crate) struct WindowSpawn<'a> {
     pub(crate) removed_env: &'a [&'a str],
     /// Answers color queries from the child's first output on; `None` leaves
     /// them unanswered until a palette is set.
-    pub(crate) palette: Option<yagura_protocol::Palette>,
+    pub(crate) palette: Option<Palette>,
 }
 
-/// A window's terminal: its model and the order of writes in the daemon, its
-/// PTY and child in the window's holder process.
-pub struct PtySession {
-    /// Test seam; see [`RawCapture`].
-    #[cfg(feature = "fault-injection")]
-    raw_capture: RawCapture,
+/// What a session shares with its link, made before the link starts.
+struct Shared {
+    copy: SharedCopy,
+    input: Arc<PublishedInput>,
+    output_arrivals: watch::Receiver<u64>,
+    views: Arc<ViewSlot>,
+    exit_code: Arc<AtomicI32>,
+    is_exited: Arc<AtomicBool>,
+    exit_notify_rx: watch::Receiver<bool>,
+}
 
+impl Shared {
+    fn new(cols: u16, rows: u16) -> (Self, holder_link::Sink) {
+        let copy = SharedCopy::default();
+        let input = Arc::new(PublishedInput::new(cols, rows));
+        let (arrivals, output_arrivals) = watch::channel(0u64);
+        let views = Arc::new(ViewSlot::default());
+        let exit_code = Arc::new(AtomicI32::new(0));
+        let is_exited = Arc::new(AtomicBool::new(false));
+        let (exit_notify_tx, exit_notify_rx) = watch::channel(false);
+        let sink = holder_link::Sink {
+            copy: copy.clone(),
+            input: Arc::clone(&input),
+            arrivals,
+            views: Arc::clone(&views),
+            exit: ExitReport {
+                code: Arc::clone(&exit_code),
+                exited: Arc::clone(&is_exited),
+                notify: exit_notify_tx,
+            },
+        };
+        let shared = Self {
+            copy,
+            input,
+            output_arrivals,
+            views,
+            exit_code,
+            is_exited,
+            exit_notify_rx,
+        };
+        (shared, sink)
+    }
+}
+
+/// A window's terminal: the copy of its screen and the order of writes in the
+/// daemon; its PTY, child and terminal model in the window's holder process.
+pub struct PtySession {
     /// Test seam; see [`ResizeFault`].
     resize_fault: ResizeFault,
 
-    /// The output as a terminal shows it, at the PTY's size, and the one
-    /// owner of that size. Locked only on blocking threads (see
-    /// [`PtySession::with_screen`]), never on the async runtime's.
-    screen: SharedLocalScreen,
+    /// The copy of the screen the holder last sent, at the PTY's size.
+    copy: SharedCopy,
 
-    /// Admits the blocking threads that wait on `screen` for async callers.
-    model_access: Arc<Semaphore>,
-
-    /// `screen`'s input state, readable without its lock.
+    /// `copy`'s input state, readable without a lock.
     input: Arc<PublishedInput>,
 
     /// Whether the window's program flattens console key records, decided
@@ -505,21 +482,12 @@ pub struct PtySession {
     /// changes it, so it lives here rather than in `input`'s bits.
     key_records_flattened: bool,
 
-    /// Orders resizes, so the model and the PTY always end at the size of the
-    /// same request. Held across the holder's answer, which readers never
-    /// wait on.
-    resize_order: tokio::sync::Mutex<()>,
-
-    /// Counts the chunks of output fed to `screen`; changes once the screen
-    /// already shows them.
+    /// The holder's count of the chunks of output its model took in, as of
+    /// the copy last applied; changes once the copy shows them.
     output_arrivals: watch::Receiver<u64>,
 
-    /// Counts the writes to the child's input, before each reaches it;
-    /// `screen` follows it (see [`yagura_term::VtScreen::follow_writes`]).
-    input_writes: Arc<watch::Sender<u64>>,
-
-    /// The window's attach and its view, whose frames the feeder reads.
-    views: Views,
+    /// The window's attach.
+    views: Arc<ViewSlot>,
 
     /// The way to the window's holder.
     link: Link,
@@ -531,23 +499,16 @@ pub struct PtySession {
     /// `writer`, so the count's order is the order the bytes reach the child.
     write_ledger: Arc<WriteLedger>,
 
-    /// Replies to the child's terminal queries, written by their own thread.
-    replies: Arc<ReplyQueue>,
-
-    /// OS process ID of the child, as the holder's record names it.
+    /// OS process ID of the child, as the holder's welcome names it.
     child_process_id: u32,
 
-    /// Exit status, published as soon as the holder reports it, whatever the
-    /// model is doing.
+    /// Exit status, published once the holder reports it, after the copy
+    /// holding the child's last output.
     exit_code: Arc<AtomicI32>,
     is_exited: Arc<AtomicBool>,
 
     /// `true` once the child has exited (see [`PtySession::exit_notified`]).
     exit_notify_rx: watch::Receiver<bool>,
-
-    /// `true` once every output the holder sent before the end is in the
-    /// model.
-    drained: watch::Receiver<bool>,
 
     /// `true` once the holder's process has ended.
     released: watch::Receiver<bool>,
@@ -641,9 +602,10 @@ impl PtySession {
         .await
     }
 
-    /// Opens `spawn` through a holder of `host`. The model is ready, palette
-    /// included, before the holder is let in, so the child's first query is
-    /// answered too.
+    /// Opens `spawn` through a holder of `host`. The holder's model has the
+    /// palette from its start, so the child's first query is answered too.
+    /// Returns once the holder let the daemon in and its first copy of the
+    /// screen was taken in.
     pub(crate) async fn spawn_window(
         spawn: WindowSpawn<'_>,
         config: &DaemonConfig,
@@ -663,270 +625,167 @@ impl PtySession {
             env: env::window_env(&config.child_base_env, spawn.extra_env, spawn.removed_env),
             cols: Self::INITIAL_COLS,
             rows: Self::INITIAL_ROWS,
+            history_rows: config.read_output_max_lines,
+            palette: spawn.palette,
+            fault: config.launch_fault(),
         };
         let context = host.link_context().await?;
+        let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
+        let started = holder_link::start(context, launch, sink)?;
+        Self::open(started, shared, key_records_flattened, host).await
+    }
 
-        let (input_writes, writes_seen) = watch::channel(0u64);
-        let mut screen = LocalScreen::with_history(
-            Self::INITIAL_COLS,
-            Self::INITIAL_ROWS,
-            config.read_output_max_lines,
-        );
-        screen
-            .terminal_mut()
-            .follow_writes(move || *writes_seen.borrow());
-        if let Some(palette) = spawn.palette {
-            screen.terminal_mut().set_palette(palette);
-        }
-        let input = Arc::new(PublishedInput::of(screen.carried()));
-        let screen = screen.into_shared();
-        let (arrivals_tx, output_arrivals) = watch::channel(0u64);
+    /// A window over a holder already serving `endpoint` from process
+    /// `holder_pid`, without starting one: the daemon's side of the link
+    /// from `Hello` on.
+    #[cfg(test)]
+    pub(crate) async fn over_holder_endpoint(endpoint: &str, holder_pid: u32) -> PtyResult<Self> {
+        let host = HolderHost::from_config(&DaemonConfig::default());
+        let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
+        let started = holder_link::start_over(
+            endpoint.to_owned(),
+            holder_pid,
+            (Self::INITIAL_COLS, Self::INITIAL_ROWS),
+            sink,
+        )?;
+        Self::open(started, shared, false, &host).await
+    }
 
-        let exit_code = Arc::new(AtomicI32::new(0));
-        let is_exited = Arc::new(AtomicBool::new(false));
-        let (exit_notify_tx, exit_notify_rx) = watch::channel(false);
-        let (feed_tx, feed_rx) = std::sync::mpsc::channel();
-        let views = Views {
-            slot: Arc::default(),
-            feed: feed_tx.clone(),
-        };
+    async fn open(
+        started: holder_link::Started,
+        shared: Shared,
+        key_records_flattened: bool,
+        host: &Arc<HolderHost>,
+    ) -> PtyResult<Self> {
         let holder_link::Started {
             link,
             opened,
             released,
-        } = holder_link::start(
-            context,
-            launch,
-            holder_link::Sink {
-                feed: feed_tx,
-                exit: ExitReport {
-                    code: Arc::clone(&exit_code),
-                    exited: Arc::clone(&is_exited),
-                    notify: exit_notify_tx,
-                },
-            },
-        )?;
+        } = started;
         let holder_link::Opened {
             child_pid: child_process_id,
-            ack_step,
         } = opened.await.map_err(|_| PtyError::SpawnFailed)??;
-
-        let raw_capture = RawCapture::default();
-        let writer = Arc::new(WriterSlot::new(link.writer()));
-        let replies = Arc::new(ReplyQueue::default());
-        let (drained_tx, drained) = watch::channel(false);
-        let feed = ModelFeed {
-            screen: screen.clone(),
-            input: Arc::clone(&input),
-            replies: Arc::clone(&replies),
-            raw_capture: raw_capture.clone(),
-            arrivals: arrivals_tx,
-            views: Arc::clone(&views.slot),
-            exited: Arc::clone(&is_exited),
-        };
-        let started = spawn_thread("window-replies", {
-            let replies = Arc::clone(&replies);
-            let writer = Arc::clone(&writer);
-            let input = Arc::clone(&input);
-            let outputs = output_arrivals.clone();
-            move || replies.write_all_to(&writer, &input, &outputs)
-        })
-        .and_then(|()| {
-            spawn_thread("window-feed", {
-                let link = link.clone();
-                move || feed_model(&feed, &feed_rx, &|seq| link.ack(seq), ack_step, &drained_tx)
-            })
-        });
-        if started.is_err() {
-            replies.close();
-            link.terminate(true);
-            return Err(PtyError::SpawnFailed);
-        }
-
+        let Shared {
+            copy,
+            input,
+            output_arrivals,
+            views,
+            exit_code,
+            is_exited,
+            exit_notify_rx,
+        } = shared;
         Ok(Self {
-            #[cfg(feature = "fault-injection")]
-            raw_capture,
             resize_fault: ResizeFault::default(),
-            screen,
-            model_access: Arc::new(Semaphore::new(MODEL_ACCESS_PER_WINDOW)),
+            copy,
             input,
             key_records_flattened,
-            resize_order: tokio::sync::Mutex::new(()),
             output_arrivals,
-            input_writes: Arc::new(input_writes),
             views,
+            writer: Arc::new(WriterSlot::new(link.writer())),
             link,
-            writer,
             write_ledger: Arc::new(WriteLedger::default()),
-            replies,
             child_process_id,
             exit_code,
             is_exited,
             exit_notify_rx,
-            drained,
             released,
             _host: Arc::clone(host),
         })
     }
 
-    /// Runs `access` with the window's model on a blocking thread, admitted
-    /// by [`MODEL_ACCESS_PER_WINDOW`]: the one way async code reaches the
-    /// model, so waiting for its lock never holds up the async runtime. The
-    /// permit stays with the blocking thread, so a caller that stops waiting
-    /// does not free a slot while the thread still waits on the lock.
+    /// The window's text as a terminal shows it, its last `max_lines`
+    /// logical lines cut to `max_bytes`, as the holder answers it; the flag
+    /// reports that text was left out. Also read after the child exited.
     ///
-    /// Returns `None` when `access` could not run to completion (the runtime
-    /// is shutting down).
-    async fn with_screen<R: Send + 'static>(
-        &self,
-        access: impl FnOnce(&SharedLocalScreen) -> R + Send + 'static,
-    ) -> Option<R> {
-        // Once the exit is known, a read sees everything the child wrote
-        // before it.
-        if self.is_exited.load(Ordering::SeqCst) {
-            let mut drained = self.drained.clone();
-            let _ = drained.wait_for(|drained| *drained).await;
-        }
-        let permit = Arc::clone(&self.model_access).acquire_owned().await.ok()?;
-        let screen = self.screen.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            access(&screen)
-        })
-        .await
-        .ok()
-    }
-
-    /// [`PtySession::with_screen`] for an access that holds the lock
-    /// throughout.
-    pub(crate) async fn with_model<R: Send + 'static>(
-        &self,
-        read: impl FnOnce(&mut LocalScreen) -> R + Send + 'static,
-    ) -> Option<R> {
-        self.with_screen(move |screen| read(&mut screen.lock()))
-            .await
-    }
-
-    /// The window's text as a terminal shows it: see [`yagura_term::VtScreen::text_tail`].
-    ///
-    /// Returns `None` when the blocking read could not run to completion
-    /// (the runtime is shutting down).
+    /// Returns `None` once the holder is gone.
     pub async fn text_tail(&self, max_lines: usize, max_bytes: usize) -> Option<(String, bool)> {
-        self.with_model(move |model| model.terminal_mut().text_tail(max_lines, max_bytes))
-            .await
+        self.link.read_tail(max_lines, max_bytes).await
     }
 
-    /// The window's terminal model, for its
-    /// [`DetectionEngine`](crate::detector::DetectionEngine) alone, which
-    /// [`DetectorHandle`](crate::detector::DetectorHandle) drives on blocking
-    /// threads.
-    pub(crate) fn model_for_detection(&self) -> SharedLocalScreen {
-        self.screen.clone()
+    /// The copy of the window's screen, for its
+    /// [`DetectionEngine`](crate::detector::DetectionEngine).
+    pub(crate) fn model_for_detection(&self) -> SharedCopy {
+        self.copy.clone()
     }
 
-    /// A receiver whose value changes each time output has been fed to the
-    /// model. Its first `borrow_and_update` tells whether any output arrived
-    /// before the call.
+    /// A receiver whose value changes each time a copy holding more of the
+    /// child's output was applied, and each time a copy was refused. Its
+    /// first `borrow_and_update` tells whether any output arrived before the
+    /// call.
     pub fn output_arrivals(&self) -> watch::Receiver<u64> {
         self.output_arrivals.clone()
-    }
-
-    /// Counts one write to the child's input, before it is made; the write
-    /// may end a synchronized update that holds the view.
-    fn count_input_write(input_writes: &watch::Sender<u64>, views: &Views) {
-        input_writes.send_modify(|count| *count = count.wrapping_add(1));
-        views.wake_if(views.slot.note_write());
     }
 
     /// Takes the window's attach for a connection, superseding the one
     /// before, whose receiver then resolves.
     pub(crate) fn attach_view(&self) -> (AttachGeneration, oneshot::Receiver<()>) {
-        self.views.slot.attach()
+        self.views.attach()
     }
 
     /// Lets go of the attach if `generation` still holds it.
     pub(crate) fn detach_view(&self, generation: AttachGeneration) {
-        self.views.slot.detach(generation);
+        if self.views.detach(generation) {
+            self.link.detach(generation.number());
+        }
     }
 
-    /// Resolves once the feeder has taken in everything sent to it before
-    /// this call: the output received, and the notes and writes told to the
-    /// view, with the frames for them handed to the view's connection. Ends
-    /// unanswered (an error) at once when the feeder has ended, since no
-    /// frame comes from it after that.
+    /// Resolves once the holder has taken in the output it read before this
+    /// call and every frame it sent for it has been handed to the view's
+    /// connection. Ends unanswered (an error) once the holder is gone, since
+    /// no frame comes from it after that.
     pub(crate) fn settled(&self) -> oneshot::Receiver<()> {
-        let (settle, settled) = oneshot::channel();
-        let _ = self.views.feed.send(Feed::Settle(settle));
-        settled
+        self.link.settle()
     }
 
     /// Whether some connection holds the window's attach.
     pub(crate) fn is_view_attached(&self) -> bool {
-        self.views.slot.is_attached()
+        self.views.is_attached()
     }
 
     /// Tells the view of attach `generation` what changed; a note from an
     /// attach that was superseded is dropped.
     pub(crate) fn note_view(&self, generation: AttachGeneration, note: ViewNote) {
-        self.views.wake_if(self.views.slot.note(generation, note));
-    }
-
-    /// Gives attach `generation` a new view and sends `sink` every row of it
-    /// (whatever was unacknowledged or held before). The view is placed
-    /// under the same hold of the model's lock the rows are read under, so
-    /// the feeder's next frame for it waits for this one's acknowledgement.
-    pub(crate) async fn show_view(&self, generation: AttachGeneration, sink: Arc<dyn FrameSink>) {
-        let placed = {
-            let slot = Arc::clone(&self.views.slot);
-            let sink = Arc::clone(&sink);
-            let exited = Arc::clone(&self.is_exited);
-            self.with_model(move |screen| {
-                // Read under the model's lock: an exit not yet seen here
-                // reaches the feeder's end after this view is placed.
-                let child_exited = exited.load(Ordering::SeqCst);
-                let mut view = View::new();
-                let capture = view.capture(screen.terminal_mut(), child_exited, true);
-                (capture, slot.place(generation, view, sink))
-            })
-            .await
-        };
-        let Some((capture, wake)) = placed else {
-            return;
-        };
-        self.views.wake_if(wake);
-        if let Some(capture) = capture {
-            let slot = Arc::clone(&self.views.slot);
-            let _ = tokio::task::spawn_blocking(move || {
-                slot.deliver(generation, sink.as_ref(), capture);
-            })
-            .await;
+        if self.views.holds(generation) {
+            self.link.view_note(generation.number(), note.into());
         }
     }
 
+    /// Shows attach `generation` a view of the window: the holder sends its
+    /// frames, the first with every row, and they go to `sink`. The holder
+    /// takes the attach after every resize asked for before it, so the first
+    /// frame has the size the window was last asked for.
+    pub(crate) fn show_view(&self, generation: AttachGeneration, sink: Arc<dyn FrameSink>) {
+        if self.views.place(generation, sink) {
+            self.link.attach(generation.number());
+        }
+    }
+
+    /// Applies `op` to the window's view, without waiting for it.
+    pub(crate) fn view_op(&self, op: HolderViewOp) {
+        self.link.view_op(op);
+    }
+
+    /// The view's selected text; `None` when nothing is selected or the
+    /// holder is gone.
+    pub(crate) async fn selected_text(&self) -> Option<String> {
+        self.link.selected_text().await
+    }
+
+    /// The colors the child's color queries are answered from from now on.
+    pub(crate) fn set_palette(&self, palette: Palette) {
+        self.link.set_palette(palette);
+    }
+
     /// Runs `read` against the copy of the window's screen as it stands, the
-    /// way the detector reads it (see [`SharedCopy::read`]). A test seam (the
-    /// `fault-injection` feature only).
+    /// way the detector reads it (see [`SharedCopy::read`]). Once the exit is
+    /// known, the copy holds everything the child wrote before it.
     ///
-    /// Returns `None` when `read` panicked or could not run to completion
-    /// (the runtime is shutting down).
-    ///
-    /// [`SharedCopy::read`]: crate::detector::SharedCopy::read
-    #[cfg(feature = "fault-injection")]
+    /// Returns `None` before the first copy, or when `read` panicked.
     pub async fn read_screen<R: Send + 'static>(
         &self,
         read: impl FnOnce(&ScreenCopy) -> R + Send + 'static,
     ) -> Option<R> {
-        self.with_screen(move |screen| screen.copy().read(read).value)
-            .await
-            .flatten()
-    }
-
-    /// Up to the last 4 MiB of the raw bytes the child wrote, escape sequences
-    /// and all. A test seam (the `fault-injection` feature only): the daemon
-    /// itself keeps no raw output.
-    #[cfg(feature = "fault-injection")]
-    pub fn captured_output(&self) -> Vec<u8> {
-        lock_recover(&self.raw_capture.bytes).clone()
+        self.copy.read(read).value
     }
 
     /// Makes the next [`PtySession::resize`] fail as if the PTY refused the
@@ -934,28 +793,6 @@ impl PtySession {
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_resize(&self) {
         self.resize_fault.armed.store(true, Ordering::SeqCst);
-    }
-
-    /// Holds the window's model lock on a thread of its own until the returned
-    /// [`ModelHold`] is dropped, for tests of what must not wait on that lock.
-    /// Returns once the lock is held. A test seam (the `fault-injection`
-    /// feature only).
-    #[cfg(feature = "fault-injection")]
-    #[must_use]
-    pub fn hold_model(&self) -> ModelHold {
-        let screen = self.screen.clone();
-        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let thread = std::thread::spawn(move || {
-            let _guard = screen.lock();
-            let _ = held_tx.send(());
-            let _ = release_rx.recv();
-        });
-        let _ = held_rx.recv();
-        ModelHold {
-            release: Some(release_tx),
-            thread: Some(thread),
-        }
     }
 
     /// Get a watch receiver that holds `true` once the child has exited.
@@ -968,20 +805,20 @@ impl PtySession {
     }
 
     /// Sends the child a report it turned on that carries no key or button,
-    /// such as a pointer move, the way replies to its terminal queries go:
-    /// ordered with every other write but not counted in the write ledger,
-    /// since a report never reaches the composer. Dropped once the child is
-    /// gone. Focus is not sent this way; see [`PtySession::set_view_focus`].
+    /// such as a pointer move: ordered with every other write but not counted
+    /// in the write ledger, since a report never reaches the composer. The
+    /// holder drops it once the child is gone. Focus is not sent this way;
+    /// see [`PtySession::set_view_focus`].
     pub fn send_report(&self, report: Vec<u8>) {
-        self.replies.push(report, 0);
+        self.link.report(report);
     }
 
-    /// Records the focus the window's view reported. The child is told it
-    /// when it asked for focus reports and the daemon is not typing into the
-    /// window (see [`PtySession::open_focus_interval`]); only a change is
-    /// ever sent, and never counted in the write ledger.
+    /// Records the focus the window's view reported. The holder tells the
+    /// child when it asked for focus reports and the daemon is not typing
+    /// into the window (see [`PtySession::open_focus_interval`]); only a
+    /// change is ever sent, and never counted in the write ledger.
     pub fn set_view_focus(&self, focused: bool) {
-        self.replies.set_view_focus(focused);
+        self.link.set_view_focus(focused);
     }
 
     /// Opens a stretch in which the daemon decides on, or makes, writes to the
@@ -993,10 +830,9 @@ impl PtySession {
     /// have it. Once the last one ends, the view's focus is told again, after
     /// the child's next output. The stretch ends when the guard is dropped.
     pub fn open_focus_interval(&self) -> FocusInterval {
-        self.replies.open_focus_interval();
+        self.link.focus_interval(true);
         FocusInterval {
-            replies: Arc::clone(&self.replies),
-            outputs: self.output_arrivals.clone(),
+            link: self.link.clone(),
         }
     }
 
@@ -1016,9 +852,10 @@ impl PtySession {
     ///
     /// Under the same lock, the take-back registered by
     /// [`PtySession::write_input_if_unmoved`] is removed and, with
-    /// [`TakeBackPrefix::Apply`], written ahead of `data`, its key count taken
-    /// at the window's width at that moment, so a daemon's unsent text never
-    /// ends up in front of another writer's bytes.
+    /// [`TakeBackPrefix::Apply`], written ahead of `data`, its keys counted
+    /// at the narrowest width the holder may have as it writes them (the
+    /// size it last confirmed or one asked for since), so a daemon's unsent
+    /// text never ends up in front of another writer's bytes.
     ///
     /// # Errors
     ///
@@ -1030,31 +867,28 @@ impl PtySession {
             return Err(PtyError::ChildExited);
         }
 
-        Self::count_input_write(&self.input_writes, &self.views);
         let data = data.to_vec();
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
-        let input = Arc::clone(&self.input);
-        let replies = Arc::clone(&self.replies);
-        let outputs = self.output_arrivals.clone();
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
             let registered = writer.take_registration();
-            let mut lead = replies.focus_before_input(input.load().modes, &outputs);
-            if let (TakeBackPrefix::Apply, Some(registered)) = (prefix, registered) {
-                lead.extend(registered.keys(input.load().cols));
-            }
             match prefix {
                 TakeBackPrefix::Apply => ledger.count(),
                 TakeBackPrefix::Withhold => ledger.count_withheld(),
             }
             let written = match writer_guard.as_mut() {
-                Some(w) => w.write_all(&lead).and_then(|()| w.write_all(&data)),
+                Some(w) => w.write(
+                    |cols| match (prefix, &registered) {
+                        (TakeBackPrefix::Apply, Some(registered)) => registered.keys(cols),
+                        _ => Vec::new(),
+                    },
+                    &data,
+                ),
                 None => Ok(()),
             };
             drop(writer_guard);
             writer.release_if_requested();
-            replies.focus_after_input(&outputs);
             written
         })
         .await
@@ -1088,22 +922,13 @@ impl PtySession {
         let data = data.to_vec();
         let writer = self.writer.clone();
         let ledger = Arc::clone(&self.write_ledger);
-        let input_writes = Arc::clone(&self.input_writes);
-        let views = self.views.clone();
-        let input = Arc::clone(&self.input);
-        let replies = Arc::clone(&self.replies);
-        let outputs = self.output_arrivals.clone();
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
-            let mut entered = false;
             let outcome = if *ledger.count.borrow() == expected_seq {
                 before_write();
-                Self::count_input_write(&input_writes, &views);
                 ledger.count();
-                entered = true;
-                let lead = replies.focus_before_input(input.load().modes, &outputs);
                 let written = match writer_guard.as_mut() {
-                    Some(w) => w.write_all(&lead).and_then(|()| w.write_all(&data)),
+                    Some(w) => w.write(|_| Vec::new(), &data),
                     None => Ok(()),
                 };
                 // Applied even when the write failed: part of `data` may have
@@ -1115,9 +940,6 @@ impl PtySession {
             };
             drop(writer_guard);
             writer.release_if_requested();
-            if entered {
-                replies.focus_after_input(&outputs);
-            }
             outcome
         })
         .await
@@ -1159,9 +981,11 @@ impl PtySession {
         self.write_ledger.count.subscribe()
     }
 
-    /// Resize the window to `cols` x `rows`: the terminal model first, then
-    /// the PTY, the order a terminal view follows, so the child's redraw for
-    /// the new size lands on a model that already has it.
+    /// Resize the window to `cols` x `rows`: the holder resizes its terminal
+    /// model first, then the PTY, the order a terminal view follows, so the
+    /// child's redraw for the new size lands on a model that already has it.
+    /// Returns once the holder answered; a copy of the new size has been
+    /// applied by then. One size is asked for at a time.
     ///
     /// # Errors
     ///
@@ -1170,7 +994,7 @@ impl PtySession {
     /// `MAX_WINDOW_DIMENSION`), with nothing changed;
     /// [`PtyError::ChildExited`] once the child is gone; and
     /// [`PtyError::ResizeFailed`] when the PTY refuses the size, in which case
-    /// the model is put back to its previous size.
+    /// the holder keeps the previous size.
     pub async fn resize(&self, cols: u16, rows: u16) -> PtyResult<()> {
         if !yagura_protocol::window_size_within_limit(cols, rows) {
             return Err(PtyError::SizeOutOfRange);
@@ -1178,36 +1002,14 @@ impl PtySession {
         if self.is_exited.load(Ordering::SeqCst) {
             return Err(PtyError::ChildExited);
         }
-
-        let _order = self.resize_order.lock().await;
-        let input = Arc::clone(&self.input);
-        let previous = self
-            .with_model(move |model| {
-                let previous = model.terminal().size();
-                model.resize(cols, rows);
-                input.publish(model.carried());
-                previous
-            })
-            .await
-            .ok_or(PtyError::ResizeFailed)?;
-
-        // Outside the model's permit: readers of the model never wait on the
-        // holder's answer, and output keeps flowing into the model meanwhile.
-        let refused = self.resize_fault.take() || !self.link.resize(cols, rows).await;
-        if refused {
-            let input = Arc::clone(&self.input);
-            self.with_model(move |model| {
-                model.resize(previous.0, previous.1);
-                input.publish(model.carried());
-            })
-            .await;
+        if self.resize_fault.take() || !self.link.resize(cols, rows).await {
             return Err(PtyError::ResizeFailed);
         }
         Ok(())
     }
 
     /// The modes and size input to this window is encoded against, as the
-    /// model last published them. Never waits on the model's lock.
+    /// copy of its screen last showed them. Never waits.
     #[must_use]
     pub fn input_state(&self) -> InputState {
         let mut state = self.input.load();
@@ -1215,12 +1017,12 @@ impl PtySession {
         state
     }
 
-    /// The window's size as `(cols, rows)`, as its terminal model has it.
+    /// The window's size as `(cols, rows)`, as its holder last confirmed it.
     ///
-    /// Returns `None` when the blocking read could not run to completion
-    /// (the runtime is shutting down).
+    /// Always `Some`; the option is kept for callers that read a size that
+    /// may be missing.
     pub async fn size(&self) -> Option<(u16, u16)> {
-        self.with_model(|model| model.terminal().size()).await
+        Some(self.link.confirmed_size())
     }
 
     /// Get the OS process ID of the child, as captured when it was spawned.
@@ -1252,21 +1054,19 @@ impl PtySession {
 }
 
 impl PtySession {
-    /// Asks the holder to end the child and releases the writer. Takes `&self`
-    /// so it can run from `Drop` and from synchronous close handlers; nothing
-    /// here waits.
+    /// Asks the holder to end the child, and then itself, and releases the
+    /// writer. Takes `&self` so it can run from `Drop` and from synchronous
+    /// close handlers; nothing here waits.
     ///
     /// The holder ends the child's whole tree once the child has gone and
     /// reports the exit after the child's last output, which is when
     /// [`PtySession::exit_notified`] turns `true`;
     /// [`PtySession::terminate_tree`] ends the tree without waiting for the
-    /// child. A writer stuck inside a write is not waited for: its write fails
-    /// once the child or the holder is gone.
+    /// child. A holder whose child already exited stays to answer reads of
+    /// the window until it is told this. A writer stuck inside a write is not
+    /// waited for: its write fails once the child or the holder is gone.
     pub fn terminate(&self) {
-        if !self.is_exited.load(Ordering::SeqCst) {
-            self.link.terminate(false);
-        }
-        self.replies.close();
+        self.link.terminate(false);
         self.writer.request_release();
     }
 
@@ -1304,14 +1104,6 @@ impl std::fmt::Debug for PtySession {
             .field("exit_code", &self.exit_code.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
-}
-
-fn spawn_thread(name: &str, body: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(body)
-        .map(drop)
-        .inspect_err(|error| tracing::error!(%error, "cannot start a window's thread"))
 }
 
 #[cfg(test)]

@@ -914,12 +914,11 @@ pub async fn close_window(
 
 /// Reads `entry`'s text as the window shows it, as its last `lines` logical
 /// lines cut to `max_bytes`; the flag reports that text was left out (see
-/// [`yagura_term::VtScreen::text_tail`]).
+/// [`crate::PtySession::text_tail`]).
 ///
-/// The read runs on a blocking thread, admitted by `permits`, so neither a
-/// flooding window nor many readers at once hold up the async runtime.
-/// Returns `None` when the read could not run (`permits` is closed or the
-/// runtime is shutting down).
+/// The window's holder answers the read; `permits` bounds how many reads
+/// wait on holders at once. Returns `None` when the read could not run
+/// (`permits` is closed or the holder is gone).
 pub async fn read_output(
     entry: &WindowEntry,
     lines: usize,

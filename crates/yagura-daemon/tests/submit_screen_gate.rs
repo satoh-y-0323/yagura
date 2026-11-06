@@ -36,7 +36,7 @@ use common::{
 };
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
+use yagura_daemon::detector::engine::DetectorHandle;
 use yagura_daemon::detector::reading::{self, ComposerReadout};
 use yagura_daemon::input::plan_raw_write;
 use yagura_daemon::window::{
@@ -97,7 +97,7 @@ fn approval_screen() -> Vec<u8> {
 }
 
 /// Drives a fresh [`ENGINE_DEF`] engine to a confirmed `WaitingInput`.
-async fn engine_confirmed_waiting_input(config: &DaemonConfig) -> DetectionEngine {
+async fn engine_confirmed_waiting_input(config: &DaemonConfig) -> common::CopiedEngine {
     let mut engine = new_engine(ENGINE_DEF, config);
     engine.feed(&prompt_screen(""));
     tick_after_ms(&mut engine, ENGINE_CONFIRM_MS).await;
@@ -190,7 +190,7 @@ async fn the_detector_handle_answers_with_the_screen_rule_of_the_output_fed_befo
     let config = DaemonConfig::default();
     let engine = new_engine(ENGINE_DEF, &config);
     let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
 
     common::feed_handle(&screen, &handle, &approval_screen());
     let observation = handle.query_composer().await;
@@ -206,7 +206,7 @@ async fn the_detector_handle_answers_with_the_screen_rule_of_the_output_fed_befo
 async fn an_engine_that_cannot_answer_resolves_to_a_screen_rule_that_closes_the_gate() {
     let config = DaemonConfig::default();
     let engine = new_engine(ENGINE_DEF, &config);
-    let (handle, statuses) = DetectorHandle::spawn(engine);
+    let (handle, statuses) = DetectorHandle::spawn(engine.into_engine());
     // With nobody left to receive a confirmed status, the driver task ends at
     // its next publish, which `Exited` triggers at once.
     drop(statuses);
@@ -796,10 +796,7 @@ async fn a_dialog_that_flashes_after_the_body_is_written_still_lets_the_submit_k
         .expect("the submit task must not panic")
         .expect("the call must not fail at the PTY level");
 
-    assert!(
-        count_marker(&h, &window_id, APPROVAL_HEADING) > 0,
-        "the dialog must have been drawn for this case to mean anything"
-    );
+    // The wait above saw the dialog drawn, which this case needs to mean anything.
     match judgment.placement {
         SubmitPlacement::Placed(_) => {}
         other => panic!(

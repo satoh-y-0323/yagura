@@ -2,21 +2,29 @@
 //! leaves in the `holders` directory its launch names.
 //!
 //! A frame is a `u32` LE length of what follows, a `u16` LE type and a body.
-//! The body of a byte-carrying frame ([`HolderFrame::Checkpoint`],
-//! [`HolderFrame::Output`], [`HolderFrame::StoreCheckpoint`],
-//! [`HolderFrame::Write`]) is a `u64` LE sequence or id followed by the raw
-//! bytes; every other body is a JSON object, to which a later version may add
-//! fields but never remove one or change its meaning.
+//! The body of [`HolderFrame::Write`] is a `u64` LE id followed by the raw
+//! bytes, and the body of [`HolderFrame::Report`] is the raw bytes alone;
+//! every other body is a JSON object.
+//!
+//! The holder keeps the window's terminal: it feeds the child's output to its
+//! model, answers the child's queries, and sends the daemon what the daemon
+//! reads (screen copies, [`ScreenRows`] then [`ScreenPush`]) and what a client
+//! is shown ([`HolderFrame::ViewFrame`]). Raw output never leaves the holder.
+//!
+//! # Changing the wire
+//!
+//! A JSON body, the copies' and the view frames' contents included, only ever
+//! gains fields: a later version may add one but never removes one or
+//! changes its meaning, and a reader keeps decoding the fields it knows. So a
+//! new mark on a copy's cell or a new attribute in a view frame is added
+//! without a new version. [`HOLDER_PROTOCOL`] goes up only for a change that
+//! adding fields cannot express (a frame removed, a field's meaning changed).
 //!
 //! The fixed frames ([`HolderFrame::Hello`], [`HolderFrame::Terminate`],
 //! [`HolderFrame::Exited`], [`HolderFrame::Displaced`],
 //! [`HolderFrame::VersionRejected`]) keep their type numbers and bodies in
 //! every version, so a daemon and a holder of any two versions can still
 //! close a window and learn of its exit.
-//!
-//! A stream position (`seq`) counts the bytes the child has written since it
-//! started. An `Output`'s `seq` is the position just past its bytes; `Ack`,
-//! `Checkpoint` and `StoreCheckpoint` name positions the same way.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -24,8 +32,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Frame, Palette, PointerInput, ScreenPush, ScreenRows};
+
 /// The holder wire version this build speaks.
-pub const HOLDER_PROTOCOL: u32 = 1;
+pub const HOLDER_PROTOCOL: u32 = 2;
 
 /// The largest `length` a frame may declare. A peer declaring more is broken
 /// or hostile, and is refused before anything is buffered for it.
@@ -36,17 +46,21 @@ pub const MAX_HOLDER_FRAME_LEN: usize = 64 * 1024 * 1024;
 /// hours. A longer request is cut to this.
 pub const MAX_HELLO_DEADLINE_MS: u64 = 10 * 60 * 1000;
 
+/// The most text one [`HolderFrame::Tail`] carries; a larger `max_bytes` is
+/// cut to this.
+pub const MAX_TAIL_BYTES: usize = 8 * 1024 * 1024;
+
+// JSON escapes a control character as six bytes, so even a tail of nothing
+// else fits in one frame.
+const _: () = assert!(6 * MAX_TAIL_BYTES + 1024 <= MAX_HOLDER_FRAME_LEN);
+
 const TYPE_HELLO: u16 = 1;
 const TYPE_TERMINATE: u16 = 2;
 const TYPE_EXITED: u16 = 3;
 const TYPE_DISPLACED: u16 = 4;
 const TYPE_VERSION_REJECTED: u16 = 5;
 const TYPE_WELCOME: u16 = 6;
-const TYPE_REPLAY: u16 = 7;
-const TYPE_CHECKPOINT: u16 = 8;
-const TYPE_OUTPUT: u16 = 9;
-const TYPE_ACK: u16 = 10;
-const TYPE_STORE_CHECKPOINT: u16 = 11;
+// 7 to 11 carried the raw output and its checkpoints in version 1.
 const TYPE_WRITE: u16 = 12;
 const TYPE_WRITTEN: u16 = 13;
 const TYPE_WRITE_FAILED: u16 = 14;
@@ -54,6 +68,24 @@ const TYPE_RESIZE: u16 = 15;
 const TYPE_RESIZED: u16 = 16;
 const TYPE_RESIZE_FAILED: u16 = 17;
 const TYPE_SPAWN_FAILED: u16 = 18;
+const TYPE_SCREEN_ROWS: u16 = 19;
+const TYPE_SCREEN_PUSH: u16 = 20;
+const TYPE_PUSH_ACK: u16 = 21;
+const TYPE_SCREEN_RESYNC: u16 = 22;
+const TYPE_REPORT: u16 = 23;
+const TYPE_SET_PALETTE: u16 = 24;
+const TYPE_SET_VIEW_FOCUS: u16 = 25;
+const TYPE_FOCUS_INTERVAL: u16 = 26;
+const TYPE_ATTACH: u16 = 27;
+const TYPE_DETACH: u16 = 28;
+const TYPE_VIEW_NOTE: u16 = 29;
+const TYPE_VIEW_OP: u16 = 30;
+const TYPE_VIEW_OP_DONE: u16 = 31;
+const TYPE_VIEW_FRAME: u16 = 32;
+const TYPE_READ_TAIL: u16 = 33;
+const TYPE_TAIL: u16 = 34;
+const TYPE_SETTLE: u16 = 35;
+const TYPE_SETTLED: u16 = 36;
 
 /// One frame between the daemon (`d`) and a holder (`h`).
 #[derive(Clone, PartialEq, Eq)]
@@ -72,6 +104,7 @@ pub enum HolderFrame {
         tree: bool,
     },
     /// h -> d, fixed: the child has exited, with its exit code when known.
+    /// Every copy of the screen holding the child's output comes before it.
     Exited {
         /// The child's exit code.
         code: Option<i32>,
@@ -84,7 +117,8 @@ pub enum HolderFrame {
         /// The version the holder speaks.
         protocol: u32,
     },
-    /// h -> d: the `Hello` is accepted.
+    /// h -> d: the `Hello` is accepted. A whole copy of the screen follows
+    /// before any other frame.
     Welcome {
         /// The holder wire version.
         protocol: u32,
@@ -96,50 +130,13 @@ pub enum HolderFrame {
         rows: u16,
         /// Whether the child has already exited.
         exited: bool,
-        /// The position of the checkpoint the holder keeps, if any.
-        checkpoint_seq: Option<u64>,
-        /// The end of the replay [`HolderFrame::Replay`] asks for: output up
-        /// to here was read before this connection.
-        replay_end_seq: u64,
         /// The child's process id. `None` from a holder that does not send
         /// it; the daemon learns the pid here, not from the record, which
         /// the holder may already have removed.
         child_pid: Option<u32>,
-        /// How many bytes the holder sends past the daemon's last `Ack`
-        /// before it stops reading. `None` from a holder that does not name
-        /// it; [`AckStep`] then acks every `Output`.
-        ack_window: Option<u64>,
     },
-    /// d -> h: send the checkpoint, every byte after it, then the live output.
-    Replay,
-    /// h -> d: the kept checkpoint.
-    Checkpoint {
-        /// The position the checkpoint describes.
-        seq: u64,
-        /// The checkpoint, opaque to the holder.
-        bytes: Vec<u8>,
-    },
-    /// h -> d: output of the child.
-    Output {
-        /// The position just past `bytes`.
-        seq: u64,
-        /// The bytes, as the terminal produced them.
-        bytes: Vec<u8>,
-    },
-    /// d -> h: output up to `seq` has been taken in.
-    Ack {
-        /// The position taken in.
-        seq: u64,
-    },
-    /// d -> h: keep `bytes` as the checkpoint at `seq`; output before it is
-    /// no longer needed.
-    StoreCheckpoint {
-        /// The position the checkpoint describes.
-        seq: u64,
-        /// The checkpoint, opaque to the holder.
-        bytes: Vec<u8>,
-    },
-    /// d -> h: write `bytes` to the child, after every earlier write.
+    /// d -> h: write `bytes` to the child, after every earlier write. Counts
+    /// as the user's input: it ends a synchronized update that holds a view.
     Write {
         /// Identifies the write in its answer.
         id: u64,
@@ -165,7 +162,8 @@ pub enum HolderFrame {
         /// Rows.
         rows: u16,
     },
-    /// h -> d: the terminal now has the size a `Resize` asked for.
+    /// h -> d: the terminal now has the size a `Resize` asked for. A copy of
+    /// the screen at that size comes before it.
     Resized {
         /// Columns.
         cols: u16,
@@ -188,6 +186,157 @@ pub enum HolderFrame {
         /// Why.
         reason: HolderSpawnFailure,
     },
+    /// h -> d: rows of a copy of the screen; see [`ScreenRows`].
+    ScreenRows(ScreenRows),
+    /// h -> d: the close of a copy of the screen; see [`ScreenPush`]. The
+    /// next ordinary copy waits for its [`HolderFrame::PushAck`].
+    ScreenPush(ScreenPush),
+    /// d -> h: the copy `number` was applied, so the next may come.
+    PushAck {
+        /// The copy's number.
+        number: u64,
+    },
+    /// d -> h: the last copy was refused; the next goes whole. Stands in for
+    /// that copy's [`HolderFrame::PushAck`].
+    ScreenResync,
+    /// d -> h: write `bytes` to the child, after every earlier write, as a
+    /// report the child turned on (not the user's input): it is not counted
+    /// as a write and is not answered.
+    Report {
+        /// The bytes to write.
+        bytes: Vec<u8>,
+    },
+    /// d -> h: the colors the child's color queries are answered from.
+    SetPalette {
+        /// The colors.
+        palette: Palette,
+    },
+    /// d -> h: whether the window's view has the focus.
+    SetViewFocus {
+        /// The view's focus.
+        focused: bool,
+    },
+    /// d -> h: a stretch in which the daemon decides on or makes writes opens
+    /// or closes; while one is open the child is told it has the focus.
+    FocusInterval {
+        /// Opens one (`true`) or closes one (`false`).
+        open: bool,
+    },
+    /// d -> h: a client is shown the window as attach `generation`, which
+    /// supersedes the one before; every row goes in its first frame.
+    Attach {
+        /// The attach.
+        generation: u64,
+    },
+    /// d -> h: attach `generation` is let go of.
+    Detach {
+        /// The attach.
+        generation: u64,
+    },
+    /// d -> h: what the client of attach `generation` told its view.
+    ViewNote {
+        /// The attach.
+        generation: u64,
+        /// What it told.
+        note: HolderViewNote,
+    },
+    /// d -> h: an operation on the view, answered by
+    /// [`HolderFrame::ViewOpDone`].
+    ViewOp {
+        /// Identifies the operation in its answer.
+        id: u64,
+        /// The operation.
+        op: HolderViewOp,
+    },
+    /// h -> d: the view operation `id` is done.
+    ViewOpDone {
+        /// The operation.
+        id: u64,
+        /// The selected text, for [`HolderViewOp::SelectedText`].
+        text: Option<String>,
+        /// Whether the view moved, for [`HolderViewOp::ToBottom`].
+        moved: bool,
+    },
+    /// h -> d: one part of a frame for the client of attach `generation`.
+    ViewFrame {
+        /// The attach.
+        generation: u64,
+        /// The part.
+        frame: Frame,
+    },
+    /// d -> h: the window's text as a terminal shows it, answered by
+    /// [`HolderFrame::Tail`].
+    ReadTail {
+        /// Identifies the read in its answer.
+        id: u64,
+        /// The most logical lines, counted from the end.
+        max_lines: usize,
+        /// The most bytes, cut to [`MAX_TAIL_BYTES`].
+        max_bytes: usize,
+    },
+    /// h -> d: the text a `ReadTail` asked for.
+    Tail {
+        /// The read.
+        id: u64,
+        /// The text.
+        text: String,
+        /// Text was left out before it.
+        truncated: bool,
+    },
+    /// d -> h: answered by [`HolderFrame::Settled`] once the output read
+    /// before it is taken in and the frames for it are sent.
+    Settle {
+        /// Identifies the settle in its answer.
+        id: u64,
+    },
+    /// h -> d: the settle `id` is done.
+    Settled {
+        /// The settle.
+        id: u64,
+    },
+}
+
+/// What a client told its view; see [`HolderFrame::ViewNote`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HolderViewNote {
+    /// The client applied frame `seq`.
+    Ack {
+        /// The frame.
+        seq: u64,
+    },
+    /// The client shows the view or no longer does.
+    Visible {
+        /// Whether it is shown.
+        visible: bool,
+    },
+}
+
+/// An operation on a view; see [`HolderFrame::ViewOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HolderViewOp {
+    /// Moves the view `lines` rows into the history (negative: back).
+    Scroll {
+        /// Rows.
+        lines: i32,
+    },
+    /// Moves the view one screen up into the history or back down.
+    Page {
+        /// Up (`true`) or down.
+        up: bool,
+    },
+    /// A pointer event that selects.
+    Select {
+        /// The event.
+        pointer: PointerInput,
+    },
+    /// Drops the selection.
+    ClearSelection,
+    /// Answers the selected text.
+    SelectedText,
+    /// Brings the view back to the live screen; answers whether it moved.
+    ToBottom,
 }
 
 /// Why a holder could not start its child.
@@ -201,8 +350,23 @@ pub enum HolderSpawnFailure {
     Spawn,
 }
 
-// The window's record carries its token and a write carries what the user
-// typed, so neither is shown; byte frames show their length only.
+/// A fault a test asks the fault-injecting holder (`holder_fault`) to act
+/// out. The shipped holder refuses a launch that names one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HolderFault {
+    /// Once the first whole copy after the `Welcome` is sent, the model's
+    /// work stops: no copy, frame, tail or settle comes after it until the
+    /// child has exited.
+    StallModel,
+    /// Once the first whole copy after the `Welcome` is sent, the model's
+    /// next call panics, so the model is rebuilt blank.
+    PoisonModel,
+}
+
+// The window's record carries its token, a write and a report carry what the
+// user typed, and the screen, the text and the selection carry what the child
+// wrote, so none of them is shown; byte frames show their length only.
 impl std::fmt::Debug for HolderFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -227,10 +391,7 @@ impl std::fmt::Debug for HolderFrame {
                 cols,
                 rows,
                 exited,
-                checkpoint_seq,
-                replay_end_seq,
                 child_pid,
-                ack_window,
             } => f
                 .debug_struct("Welcome")
                 .field("protocol", protocol)
@@ -238,19 +399,13 @@ impl std::fmt::Debug for HolderFrame {
                 .field("cols", cols)
                 .field("rows", rows)
                 .field("exited", exited)
-                .field("checkpoint_seq", checkpoint_seq)
-                .field("replay_end_seq", replay_end_seq)
                 .field("child_pid", child_pid)
-                .field("ack_window", ack_window)
                 .finish(),
-            Self::Replay => f.write_str("Replay"),
-            Self::Checkpoint { seq, bytes } => byte_frame(f, "Checkpoint", "seq", *seq, bytes),
-            Self::Output { seq, bytes } => byte_frame(f, "Output", "seq", *seq, bytes),
-            Self::Ack { seq } => f.debug_struct("Ack").field("seq", seq).finish(),
-            Self::StoreCheckpoint { seq, bytes } => {
-                byte_frame(f, "StoreCheckpoint", "seq", *seq, bytes)
-            }
-            Self::Write { id, bytes } => byte_frame(f, "Write", "id", *id, bytes),
+            Self::Write { id, bytes } => f
+                .debug_struct("Write")
+                .field("id", id)
+                .field("len", &bytes.len())
+                .finish(),
             Self::Written { id } => f.debug_struct("Written").field("id", id).finish(),
             Self::WriteFailed { id, reason } => f
                 .debug_struct("WriteFailed")
@@ -277,21 +432,88 @@ impl std::fmt::Debug for HolderFrame {
                 .debug_struct("SpawnFailed")
                 .field("reason", reason)
                 .finish(),
+            Self::ScreenRows(rows) => f
+                .debug_struct("ScreenRows")
+                .field("number", &rows.number)
+                .field("lines", &rows.lines.len())
+                .finish(),
+            Self::ScreenPush(push) => f
+                .debug_struct("ScreenPush")
+                .field("number", &push.number)
+                .field("full", &push.full)
+                .field("cols", &push.cols)
+                .field("rows", &push.rows)
+                .field("sync_open", &push.sync_open)
+                .field("generation", &push.generation)
+                .field("outputs_fed", &push.outputs_fed)
+                .finish(),
+            Self::PushAck { number } => f.debug_struct("PushAck").field("number", number).finish(),
+            Self::ScreenResync => f.write_str("ScreenResync"),
+            Self::Report { bytes } => f.debug_struct("Report").field("len", &bytes.len()).finish(),
+            Self::SetPalette { .. } => f.write_str("SetPalette"),
+            Self::SetViewFocus { focused } => f
+                .debug_struct("SetViewFocus")
+                .field("focused", focused)
+                .finish(),
+            Self::FocusInterval { open } => {
+                f.debug_struct("FocusInterval").field("open", open).finish()
+            }
+            Self::Attach { generation } => f
+                .debug_struct("Attach")
+                .field("generation", generation)
+                .finish(),
+            Self::Detach { generation } => f
+                .debug_struct("Detach")
+                .field("generation", generation)
+                .finish(),
+            Self::ViewNote { generation, note } => f
+                .debug_struct("ViewNote")
+                .field("generation", generation)
+                .field("note", note)
+                .finish(),
+            Self::ViewOp { id, op } => {
+                // A selection's pointer carries only a cell, no text.
+                f.debug_struct("ViewOp")
+                    .field("id", id)
+                    .field("op", op)
+                    .finish()
+            }
+            Self::ViewOpDone { id, text, moved } => f
+                .debug_struct("ViewOpDone")
+                .field("id", id)
+                .field("text_len", &text.as_ref().map(String::len))
+                .field("moved", moved)
+                .finish(),
+            Self::ViewFrame { generation, frame } => f
+                .debug_struct("ViewFrame")
+                .field("generation", generation)
+                .field("seq", &frame.seq)
+                .field("last", &frame.last)
+                .finish(),
+            Self::ReadTail {
+                id,
+                max_lines,
+                max_bytes,
+            } => f
+                .debug_struct("ReadTail")
+                .field("id", id)
+                .field("max_lines", max_lines)
+                .field("max_bytes", max_bytes)
+                .finish(),
+            Self::Tail {
+                id,
+                text,
+                truncated,
+            } => f
+                .debug_struct("Tail")
+                .field("id", id)
+                .field("text_len", &text.len())
+                .field("truncated", truncated)
+                .finish(),
+            Self::Settle { id } => f.debug_struct("Settle").field("id", id).finish(),
+            Self::Settled { id } => f.debug_struct("Settled").field("id", id).finish(),
         }
     }
-}
-
-fn byte_frame(
-    f: &mut std::fmt::Formatter<'_>,
-    name: &str,
-    key: &str,
-    value: u64,
-    bytes: &[u8],
-) -> std::fmt::Result {
-    f.debug_struct(name)
-        .field(key, &value)
-        .field("len", &bytes.len())
-        .finish()
 }
 
 /// Why a frame, a launch or a holder's file could not be read.
@@ -306,7 +528,7 @@ pub enum HolderCodecError {
     /// The type number is not one this version knows.
     #[error("unknown holder frame type {0}")]
     UnknownType(u16),
-    /// A byte-carrying body is too short to hold its sequence or id.
+    /// A byte-carrying body is too short to hold its id.
     #[error("the body of holder frame type {0} is too short")]
     ShortBody(u16),
     /// A JSON body is not valid for its type.
@@ -356,17 +578,8 @@ struct WelcomeBody {
     cols: u16,
     rows: u16,
     exited: bool,
-    checkpoint_seq: Option<u64>,
-    replay_end_seq: u64,
     #[serde(default)]
     child_pid: Option<u32>,
-    #[serde(default)]
-    ack_window: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SeqBody {
-    seq: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -398,6 +611,70 @@ struct SpawnFailedBody {
     reason: HolderSpawnFailure,
 }
 
+#[derive(Serialize, Deserialize)]
+struct NumberBody {
+    number: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PaletteBody {
+    palette: Palette,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FocusedBody {
+    focused: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OpenBody {
+    open: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GenerationBody {
+    generation: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ViewNoteBody {
+    generation: u64,
+    note: HolderViewNote,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ViewOpBody {
+    id: u64,
+    op: HolderViewOp,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ViewOpDoneBody {
+    id: u64,
+    text: Option<String>,
+    moved: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ViewFrameBody {
+    generation: u64,
+    frame: Frame,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ReadTailBody {
+    id: u64,
+    max_lines: usize,
+    max_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TailBody {
+    id: u64,
+    text: String,
+    truncated: bool,
+}
+
 fn frame(frame_type: u16, body: &[&[u8]]) -> Vec<u8> {
     let body_len: usize = body.iter().map(|part| part.len()).sum();
     // A frame over u32::MAX cannot be read back anyway: the reader refuses
@@ -413,53 +690,11 @@ fn frame(frame_type: u16, body: &[&[u8]]) -> Vec<u8> {
 }
 
 fn json_frame<T: Serialize>(frame_type: u16, body: &T) -> Vec<u8> {
-    // These bodies are plain structs of numbers, strings and options, which
-    // serde_json always serializes; an empty body would be refused by the reader.
+    // These bodies are plain structs of numbers, strings, chars and options,
+    // which serde_json always serializes; an empty body would be refused by
+    // the reader.
     let json = serde_json::to_vec(body).unwrap_or_default();
     frame(frame_type, &[&json])
-}
-
-fn bytes_frame(frame_type: u16, number: u64, bytes: &[u8]) -> Vec<u8> {
-    frame(frame_type, &[&number.to_le_bytes(), bytes])
-}
-
-/// A holder's ack window holds this many steps: the daemon acks once a step
-/// of output has come since its last `Ack`.
-const ACK_STEPS_PER_WINDOW: u64 = 4;
-
-/// When the daemon answers a holder's `Output` with an `Ack`: on the first
-/// `Output`, then once a quarter of the window the holder named in its
-/// [`HolderFrame::Welcome`] has come since the last `Ack`. A step is never
-/// more than the window, so the output left unacked stays below it and the
-/// holder never stops reading for want of an `Ack`. Without a window, or
-/// with one too small to make a step, every `Output` is acked.
-#[derive(Debug, Clone, Copy)]
-pub struct AckStep {
-    step: u64,
-    last_ack: Option<u64>,
-}
-
-impl AckStep {
-    /// Steps for `window`, the [`HolderFrame::Welcome`]'s `ack_window`.
-    #[must_use]
-    pub fn new(window: Option<u64>) -> Self {
-        Self {
-            step: window.map_or(0, |window| window / ACK_STEPS_PER_WINDOW),
-            last_ack: None,
-        }
-    }
-
-    /// Takes in the `Output` ending at `seq`; returns the `seq` to ack, if
-    /// one is due.
-    pub fn on_output(&mut self, seq: u64) -> Option<u64> {
-        let due = self
-            .last_ack
-            .is_none_or(|last| seq.saturating_sub(last) >= self.step);
-        if due {
-            self.last_ack = Some(seq);
-        }
-        due.then_some(seq)
-    }
 }
 
 /// Encodes `frame` for the wire.
@@ -493,10 +728,7 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
             cols,
             rows,
             exited,
-            checkpoint_seq,
-            replay_end_seq,
             child_pid,
-            ack_window,
         } => json_frame(
             TYPE_WELCOME,
             &WelcomeBody {
@@ -505,20 +737,10 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
                 cols: *cols,
                 rows: *rows,
                 exited: *exited,
-                checkpoint_seq: *checkpoint_seq,
-                replay_end_seq: *replay_end_seq,
                 child_pid: *child_pid,
-                ack_window: *ack_window,
             },
         ),
-        HolderFrame::Replay => json_frame(TYPE_REPLAY, &EmptyBody {}),
-        HolderFrame::Checkpoint { seq, bytes } => bytes_frame(TYPE_CHECKPOINT, *seq, bytes),
-        HolderFrame::Output { seq, bytes } => bytes_frame(TYPE_OUTPUT, *seq, bytes),
-        HolderFrame::Ack { seq } => json_frame(TYPE_ACK, &SeqBody { seq: *seq }),
-        HolderFrame::StoreCheckpoint { seq, bytes } => {
-            bytes_frame(TYPE_STORE_CHECKPOINT, *seq, bytes)
-        }
-        HolderFrame::Write { id, bytes } => bytes_frame(TYPE_WRITE, *id, bytes),
+        HolderFrame::Write { id, bytes } => self::frame(TYPE_WRITE, &[&id.to_le_bytes(), bytes]),
         HolderFrame::Written { id } => json_frame(TYPE_WRITTEN, &IdBody { id: *id }),
         HolderFrame::WriteFailed { id, reason } => json_frame(
             TYPE_WRITE_FAILED,
@@ -552,6 +774,88 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
         HolderFrame::SpawnFailed { reason } => {
             json_frame(TYPE_SPAWN_FAILED, &SpawnFailedBody { reason: *reason })
         }
+        HolderFrame::ScreenRows(rows) => json_frame(TYPE_SCREEN_ROWS, rows),
+        HolderFrame::ScreenPush(push) => json_frame(TYPE_SCREEN_PUSH, push),
+        HolderFrame::PushAck { number } => {
+            json_frame(TYPE_PUSH_ACK, &NumberBody { number: *number })
+        }
+        HolderFrame::ScreenResync => json_frame(TYPE_SCREEN_RESYNC, &EmptyBody {}),
+        HolderFrame::Report { bytes } => self::frame(TYPE_REPORT, &[bytes]),
+        HolderFrame::SetPalette { palette } => json_frame(
+            TYPE_SET_PALETTE,
+            &PaletteBody {
+                palette: palette.clone(),
+            },
+        ),
+        HolderFrame::SetViewFocus { focused } => {
+            json_frame(TYPE_SET_VIEW_FOCUS, &FocusedBody { focused: *focused })
+        }
+        HolderFrame::FocusInterval { open } => {
+            json_frame(TYPE_FOCUS_INTERVAL, &OpenBody { open: *open })
+        }
+        HolderFrame::Attach { generation } => json_frame(
+            TYPE_ATTACH,
+            &GenerationBody {
+                generation: *generation,
+            },
+        ),
+        HolderFrame::Detach { generation } => json_frame(
+            TYPE_DETACH,
+            &GenerationBody {
+                generation: *generation,
+            },
+        ),
+        HolderFrame::ViewNote { generation, note } => json_frame(
+            TYPE_VIEW_NOTE,
+            &ViewNoteBody {
+                generation: *generation,
+                note: *note,
+            },
+        ),
+        HolderFrame::ViewOp { id, op } => {
+            json_frame(TYPE_VIEW_OP, &ViewOpBody { id: *id, op: *op })
+        }
+        HolderFrame::ViewOpDone { id, text, moved } => json_frame(
+            TYPE_VIEW_OP_DONE,
+            &ViewOpDoneBody {
+                id: *id,
+                text: text.clone(),
+                moved: *moved,
+            },
+        ),
+        HolderFrame::ViewFrame { generation, frame } => json_frame(
+            TYPE_VIEW_FRAME,
+            &ViewFrameBody {
+                generation: *generation,
+                frame: frame.clone(),
+            },
+        ),
+        HolderFrame::ReadTail {
+            id,
+            max_lines,
+            max_bytes,
+        } => json_frame(
+            TYPE_READ_TAIL,
+            &ReadTailBody {
+                id: *id,
+                max_lines: *max_lines,
+                max_bytes: *max_bytes,
+            },
+        ),
+        HolderFrame::Tail {
+            id,
+            text,
+            truncated,
+        } => json_frame(
+            TYPE_TAIL,
+            &TailBody {
+                id: *id,
+                text: text.clone(),
+                truncated: *truncated,
+            },
+        ),
+        HolderFrame::Settle { id } => json_frame(TYPE_SETTLE, &IdBody { id: *id }),
+        HolderFrame::Settled { id } => json_frame(TYPE_SETTLED, &IdBody { id: *id }),
     }
 }
 
@@ -698,10 +1002,7 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 cols,
                 rows,
                 exited,
-                checkpoint_seq,
-                replay_end_seq,
                 child_pid,
-                ack_window,
             } = json(frame_type, body)?;
             HolderFrame::Welcome {
                 protocol,
@@ -709,31 +1010,8 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
                 cols,
                 rows,
                 exited,
-                checkpoint_seq,
-                replay_end_seq,
                 child_pid,
-                ack_window,
             }
-        }
-        TYPE_REPLAY => {
-            let EmptyBody {} = json(frame_type, body)?;
-            HolderFrame::Replay
-        }
-        TYPE_CHECKPOINT => {
-            let (seq, bytes) = split_number(frame_type, body)?;
-            HolderFrame::Checkpoint { seq, bytes }
-        }
-        TYPE_OUTPUT => {
-            let (seq, bytes) = split_number(frame_type, body)?;
-            HolderFrame::Output { seq, bytes }
-        }
-        TYPE_ACK => {
-            let SeqBody { seq } = json(frame_type, body)?;
-            HolderFrame::Ack { seq }
-        }
-        TYPE_STORE_CHECKPOINT => {
-            let (seq, bytes) = split_number(frame_type, body)?;
-            HolderFrame::StoreCheckpoint { seq, bytes }
         }
         TYPE_WRITE => {
             let (id, bytes) = split_number(frame_type, body)?;
@@ -762,6 +1040,87 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
         TYPE_SPAWN_FAILED => {
             let SpawnFailedBody { reason } = json(frame_type, body)?;
             HolderFrame::SpawnFailed { reason }
+        }
+        TYPE_SCREEN_ROWS => HolderFrame::ScreenRows(json(frame_type, body)?),
+        TYPE_SCREEN_PUSH => HolderFrame::ScreenPush(json(frame_type, body)?),
+        TYPE_PUSH_ACK => {
+            let NumberBody { number } = json(frame_type, body)?;
+            HolderFrame::PushAck { number }
+        }
+        TYPE_SCREEN_RESYNC => {
+            let EmptyBody {} = json(frame_type, body)?;
+            HolderFrame::ScreenResync
+        }
+        TYPE_REPORT => HolderFrame::Report {
+            bytes: body.to_vec(),
+        },
+        TYPE_SET_PALETTE => {
+            let PaletteBody { palette } = json(frame_type, body)?;
+            HolderFrame::SetPalette { palette }
+        }
+        TYPE_SET_VIEW_FOCUS => {
+            let FocusedBody { focused } = json(frame_type, body)?;
+            HolderFrame::SetViewFocus { focused }
+        }
+        TYPE_FOCUS_INTERVAL => {
+            let OpenBody { open } = json(frame_type, body)?;
+            HolderFrame::FocusInterval { open }
+        }
+        TYPE_ATTACH => {
+            let GenerationBody { generation } = json(frame_type, body)?;
+            HolderFrame::Attach { generation }
+        }
+        TYPE_DETACH => {
+            let GenerationBody { generation } = json(frame_type, body)?;
+            HolderFrame::Detach { generation }
+        }
+        TYPE_VIEW_NOTE => {
+            let ViewNoteBody { generation, note } = json(frame_type, body)?;
+            HolderFrame::ViewNote { generation, note }
+        }
+        TYPE_VIEW_OP => {
+            let ViewOpBody { id, op } = json(frame_type, body)?;
+            HolderFrame::ViewOp { id, op }
+        }
+        TYPE_VIEW_OP_DONE => {
+            let ViewOpDoneBody { id, text, moved } = json(frame_type, body)?;
+            HolderFrame::ViewOpDone { id, text, moved }
+        }
+        TYPE_VIEW_FRAME => {
+            let ViewFrameBody { generation, frame } = json(frame_type, body)?;
+            HolderFrame::ViewFrame { generation, frame }
+        }
+        TYPE_READ_TAIL => {
+            let ReadTailBody {
+                id,
+                max_lines,
+                max_bytes,
+            } = json(frame_type, body)?;
+            HolderFrame::ReadTail {
+                id,
+                max_lines,
+                max_bytes,
+            }
+        }
+        TYPE_TAIL => {
+            let TailBody {
+                id,
+                text,
+                truncated,
+            } = json(frame_type, body)?;
+            HolderFrame::Tail {
+                id,
+                text,
+                truncated,
+            }
+        }
+        TYPE_SETTLE => {
+            let IdBody { id } = json(frame_type, body)?;
+            HolderFrame::Settle { id }
+        }
+        TYPE_SETTLED => {
+            let IdBody { id } = json(frame_type, body)?;
+            HolderFrame::Settled { id }
         }
         other => return Err(HolderCodecError::UnknownType(other)),
     })
@@ -825,10 +1184,19 @@ pub struct HolderLaunch {
     pub daemon_endpoint: String,
     /// Provisional, removed once holders outlive the daemon: a lost
     /// connection other than [`HolderFrame::Displaced`] ends the child's tree
-    /// and the holder, and an `Ack` frees the output it acknowledges. With it
-    /// the holder writes no exit file on any path and removes its own record
-    /// before it ends, so a holder that ends by itself leaves no file.
+    /// and the holder. With it the holder writes no exit file on any path and
+    /// removes its own record before it ends, so a holder that ends by itself
+    /// leaves no file.
     pub end_child_on_disconnect: bool,
+    /// Rows the terminal keeps after they scroll off its top, read back by
+    /// [`HolderFrame::ReadTail`] and scrolled to by a view.
+    pub history_rows: usize,
+    /// The colors the child's first color queries are answered from, until
+    /// a [`HolderFrame::SetPalette`].
+    pub palette: Option<Palette>,
+    /// A fault for the fault-injecting holder to act out; the shipped holder
+    /// refuses a launch that names one.
+    pub fault: Option<HolderFault>,
 }
 
 impl std::fmt::Debug for HolderLaunch {
@@ -842,6 +1210,8 @@ impl std::fmt::Debug for HolderLaunch {
             .field("holders_dir", &self.holders_dir)
             .field("daemon_endpoint", &self.daemon_endpoint)
             .field("end_child_on_disconnect", &self.end_child_on_disconnect)
+            .field("history_rows", &self.history_rows)
+            .field("fault", &self.fault)
             .finish_non_exhaustive()
     }
 }
@@ -858,6 +1228,9 @@ struct LaunchOut<'a> {
     holders_dir: &'a OsStr,
     daemon_endpoint: &'a str,
     end_child_on_disconnect: bool,
+    history_rows: usize,
+    palette: Option<&'a Palette>,
+    fault: Option<HolderFault>,
 }
 
 #[derive(Deserialize)]
@@ -872,6 +1245,11 @@ struct LaunchIn {
     holders_dir: OsString,
     daemon_endpoint: String,
     end_child_on_disconnect: bool,
+    history_rows: usize,
+    #[serde(default)]
+    palette: Option<Palette>,
+    #[serde(default)]
+    fault: Option<HolderFault>,
 }
 
 /// Encodes `launch` for a holder's standard input. Paths and environment
@@ -889,6 +1267,9 @@ pub fn encode_holder_launch(launch: &HolderLaunch) -> Vec<u8> {
         holders_dir: launch.holders_dir.as_os_str(),
         daemon_endpoint: &launch.daemon_endpoint,
         end_child_on_disconnect: launch.end_child_on_disconnect,
+        history_rows: launch.history_rows,
+        palette: launch.palette.as_ref(),
+        fault: launch.fault,
     };
     // Only strings, numbers and OS strings, which serde_json always encodes;
     // an empty launch would be refused by the holder.
@@ -912,6 +1293,9 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         holders_dir,
         daemon_endpoint,
         end_child_on_disconnect,
+        history_rows,
+        palette,
+        fault,
     } = serde_json::from_slice(input).map_err(HolderCodecError::Launch)?;
     Ok(HolderLaunch {
         argv,
@@ -924,6 +1308,9 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         holders_dir: PathBuf::from(holders_dir),
         daemon_endpoint,
         end_child_on_disconnect,
+        history_rows,
+        palette,
+        fault,
     })
 }
 
@@ -943,47 +1330,12 @@ pub struct HolderRecord {
     pub protocol: u32,
 }
 
-/// A checkpoint as the holder kept it.
-#[derive(Clone, PartialEq, Eq)]
-pub struct HolderCheckpoint {
-    /// The position it describes.
-    pub seq: u64,
-    /// The checkpoint, opaque to the holder.
-    pub bytes: Vec<u8>,
-}
-
-impl std::fmt::Debug for HolderCheckpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HolderCheckpoint")
-            .field("seq", &self.seq)
-            .field("len", &self.bytes.len())
-            .finish()
-    }
-}
-
 /// What a holder leaves when its child has exited, in
 /// `holders/<window_id>.exit`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HolderExit {
     /// The child's exit code, when known.
     pub code: Option<i32>,
-    /// The checkpoint the holder kept, if any.
-    pub checkpoint: Option<HolderCheckpoint>,
-    /// The output after the checkpoint (all of it when there is none).
-    pub output: Vec<u8>,
-    /// The position just past `output`.
-    pub end_seq: u64,
-}
-
-impl std::fmt::Debug for HolderExit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HolderExit")
-            .field("code", &self.code)
-            .field("checkpoint", &self.checkpoint)
-            .field("output_len", &self.output.len())
-            .field("end_seq", &self.end_seq)
-            .finish()
-    }
 }
 
 /// Whether `window_id` may name a holder's files and endpoint: ASCII letters,
@@ -1044,33 +1396,10 @@ pub fn encode_holder_record(record: &HolderRecord) -> Vec<u8> {
     serde_json::to_vec(record).unwrap_or_default()
 }
 
-/// The most output one `Output` of an exit file carries, well under
-/// [`MAX_HOLDER_FRAME_LEN`] so any amount of output stays readable.
-const EXIT_OUTPUT_FRAME_BYTES: usize = 1024 * 1024;
-
-/// Encodes an exit as the frames of an exit file: `Exited`, the checkpoint if
-/// any, then the output after it as consecutive `Output` frames (one empty
-/// `Output` when there is none, to carry `end_seq`).
+/// Encodes an exit as the content of an exit file: one `Exited` frame.
 #[must_use]
 pub fn encode_holder_exit(exit: &HolderExit) -> Vec<u8> {
-    let mut out = encode_holder_frame(&HolderFrame::Exited { code: exit.code });
-    if let Some(checkpoint) = &exit.checkpoint {
-        out.extend(bytes_frame(
-            TYPE_CHECKPOINT,
-            checkpoint.seq,
-            &checkpoint.bytes,
-        ));
-    }
-    if exit.output.is_empty() {
-        out.extend(bytes_frame(TYPE_OUTPUT, exit.end_seq, &[]));
-        return out;
-    }
-    let mut seq = exit.end_seq.saturating_sub(exit.output.len() as u64);
-    for chunk in exit.output.chunks(EXIT_OUTPUT_FRAME_BYTES) {
-        seq = seq.saturating_add(chunk.len() as u64);
-        out.extend(bytes_frame(TYPE_OUTPUT, seq, chunk));
-    }
-    out
+    encode_holder_frame(&HolderFrame::Exited { code: exit.code })
 }
 
 /// Decodes what [`encode_holder_exit`] wrote.
@@ -1078,52 +1407,14 @@ pub fn encode_holder_exit(exit: &HolderExit) -> Vec<u8> {
 /// # Errors
 ///
 /// The codec's error for a broken frame, and
-/// [`HolderCodecError::MalformedExit`] when the frames are not an exit.
+/// [`HolderCodecError::MalformedExit`] when the content is not one `Exited`.
 pub fn decode_holder_exit(input: &[u8]) -> Result<HolderExit, HolderCodecError> {
-    let mut rest = input;
-    let mut next = || -> Result<Option<HolderFrame>, HolderCodecError> {
-        match decode_holder_frame(rest)? {
-            Some((frame, used)) => {
-                rest = &rest[used..];
-                Ok(Some(frame))
-            }
-            None if rest.is_empty() => Ok(None),
-            None => Err(HolderCodecError::MalformedExit),
+    match decode_holder_frame(input)? {
+        Some((HolderFrame::Exited { code }, used)) if used == input.len() => {
+            Ok(HolderExit { code })
         }
-    };
-    let Some(HolderFrame::Exited { code }) = next()? else {
-        return Err(HolderCodecError::MalformedExit);
-    };
-    let (checkpoint, first) = match next()? {
-        Some(HolderFrame::Checkpoint { seq, bytes }) => {
-            (Some(HolderCheckpoint { seq, bytes }), next()?)
-        }
-        other => (None, other),
-    };
-    let Some(HolderFrame::Output {
-        seq: mut end_seq,
-        bytes: mut output,
-    }) = first
-    else {
-        return Err(HolderCodecError::MalformedExit);
-    };
-    // Each further `Output` continues exactly where the previous one ended.
-    while let Some(frame) = next()? {
-        let HolderFrame::Output { seq, bytes } = frame else {
-            return Err(HolderCodecError::MalformedExit);
-        };
-        if bytes.is_empty() || end_seq.checked_add(bytes.len() as u64) != Some(seq) {
-            return Err(HolderCodecError::MalformedExit);
-        }
-        output.extend_from_slice(&bytes);
-        end_seq = seq;
+        _ => Err(HolderCodecError::MalformedExit),
     }
-    Ok(HolderExit {
-        code,
-        checkpoint,
-        output,
-        end_seq,
-    })
 }
 
 /// Reads the exit file of `window_id`'s holder.

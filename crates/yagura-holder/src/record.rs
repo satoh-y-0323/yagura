@@ -86,7 +86,7 @@ pub(crate) fn remove_stale_exit(place: &Place, window_id: &str) -> io::Result<()
     }
 }
 
-/// Writes the child's exit and the output kept with it, next to `record`.
+/// Writes the child's exit next to `record`.
 /// Only a holder whose exit is kept for a next daemon holds an [`ExitKept`].
 pub(crate) fn write_exit(
     record: &RecordFile,
@@ -105,33 +105,4 @@ fn write_exit_at(holders_dir: &Path, window_id: &str, exit: &HolderExit) -> io::
 /// both the base and the leaf here: nothing above it is touched.
 fn replace_in_holders_dir(holders_dir: &Path, path: &Path, content: Vec<u8>) -> io::Result<()> {
     yagura_os::replace_config_file(holders_dir, holders_dir, &file_name(path)?, content)
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-    use yagura_protocol::holder::read_holder_exit;
-    use yagura_test_support::paths::TempDir;
-
-    // Output over one frame's size is written as several frames; reading must
-    // give back the same bytes, so a wrong position in a later frame fails here.
-    #[test]
-    fn an_exit_with_more_output_than_one_frame_reads_back_unchanged() {
-        let dir = TempDir::new("holder-record", "big-exit");
-        let holders_dir = dir.path().join("holders");
-        let len = 2 * 1024 * 1024 + 12_345;
-        let output: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
-        let exit = HolderExit {
-            code: Some(7),
-            checkpoint: None,
-            output,
-            end_seq: len as u64,
-        };
-
-        write_exit_at(&holders_dir, "w1", &exit).unwrap();
-
-        assert_eq!(read_holder_exit(&holders_dir, "w1").unwrap(), exit);
-    }
 }

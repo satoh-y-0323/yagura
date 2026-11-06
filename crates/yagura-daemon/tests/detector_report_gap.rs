@@ -9,14 +9,13 @@
 
 mod common;
 
-use common::ScreenFeed;
+use common::{CopiedEngine, ScreenFeed, SharedLocalScreen};
 use std::time::Duration;
 
 use tokio::time::Instant;
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::SharedLocalScreen;
-use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle, REPORT_GAP_GRACE};
+use yagura_daemon::detector::engine::{DetectorHandle, REPORT_GAP_GRACE};
 use yagura_protocol::{DetectedStatus, WindowStatus};
 
 const DEF: &str = r#"
@@ -53,7 +52,7 @@ fn idle() -> Vec<u8> {
 
 struct Driver {
     start: Instant,
-    engine: DetectionEngine,
+    engine: CopiedEngine,
     samples: Vec<(u64, DetectedStatus)>,
 }
 
@@ -226,7 +225,7 @@ async fn the_driver_warns_once_when_the_mark_is_raised_by_its_own_deadline() {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(DEF, &config, 60, 8);
     let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
     drain(&screen, &handle, true).await;
     logs_assert(|lines: &[&str]| match warn_lines(lines) {
         1 => Ok(()),
@@ -240,7 +239,7 @@ async fn the_driver_does_not_warn_for_a_window_not_expecting_reports() {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(DEF, &config, 60, 8);
     let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
     drain(&screen, &handle, false).await;
     logs_assert(|lines: &[&str]| match warn_lines(lines) {
         0 => Ok(()),

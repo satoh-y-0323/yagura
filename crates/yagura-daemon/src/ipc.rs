@@ -26,13 +26,13 @@ use tokio::time::Instant;
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
-    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, FrameError,
-    HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, HandoffDelivery, InstructionNoticeState,
-    MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
-    ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
-    decode_client_message, encode_daemon_message, frame_decode, frame_encode, is_valid_source,
-    validate_control_keys, validate_handoff_target, validate_handoff_text,
-    validate_launch_option_value, validate_send_text_body,
+    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, Frame,
+    FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, HandoffDelivery,
+    InstructionNoticeState, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton,
+    PointerInput, PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo,
+    WindowStatus, check_input_bounds, decode_client_message, encode_daemon_message, frame_decode,
+    frame_encode, is_valid_source, validate_control_keys, validate_handoff_target,
+    validate_handoff_text, validate_launch_option_value, validate_send_text_body,
 };
 
 mod approval_settings;
@@ -59,6 +59,7 @@ use crate::control::{
     self, ControlError, DenyReason, DestructiveTool, GateVerdict, RateBucket, RequestOrigin,
 };
 use crate::detector::layers::DetectionLayers;
+use crate::detector::reading;
 use crate::handoff::{
     DELIVERY_REACTION_STATUSES, EnvelopeFrom, READY_STATUSES, StartupEvidence, check_envelope_len,
     compose_envelope, compose_task_notice, is_ready,
@@ -73,9 +74,7 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
-use crate::pty::{
-    AttachGeneration, EncodedFrame, FrameSend, FrameSink, InputState, PtyError, SendKey, ViewNote,
-};
+use crate::pty::{AttachGeneration, FrameSend, FrameSink, InputState, PtyError, SendKey, ViewNote};
 use crate::store::{self, SnapshotWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
@@ -87,8 +86,7 @@ use crate::window::{
     WakeCommand, WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
     WindowRenameError, resolve_existing_dir,
 };
-use yagura_term::VtScreen;
-use yagura_term::screen_view::{self, FrameCapture};
+use yagura_protocol::holder::HolderViewOp;
 
 use permit::{
     ApprovedOutcome, GateOutcome, OpenDescription, OpenPurpose, OpenVerdict, OpenWindow, Permit,
@@ -117,13 +115,9 @@ const IDENTIFY_FAILURE_LIMIT: u8 = 3;
 /// wrong.
 const IDENTIFY_AUTH_FAILED_MESSAGE: &str = "identify token is malformed or does not match";
 
-/// Number of characters of the window's text `get_window_status` returns as
-/// its `last_output_summary` field.
+/// Number of characters of the text the window's screen shows that
+/// `get_window_status` returns as its `last_output_summary` field.
 const LAST_OUTPUT_SUMMARY_MAX_CHARS: usize = 500;
-
-/// Enough of the window's text to hold [`LAST_OUTPUT_SUMMARY_MAX_CHARS`]
-/// characters of any width.
-const LAST_OUTPUT_SUMMARY_MAX_BYTES: usize = LAST_OUTPUT_SUMMARY_MAX_CHARS * 4;
 
 /// The last `max_chars` characters of `text`.
 fn last_chars(text: &str, max_chars: usize) -> String {
@@ -192,7 +186,7 @@ struct Attachment {
 /// connection's `select!` branches. None of them is live until the
 /// connection attaches, which is what keeps frames and status changes away
 /// from unattached connections. The view itself lives in the attached
-/// window, whose feeder sends its frames.
+/// window's holder, whose frames the window's link hands on.
 struct ConnectionState {
     /// Names this connection in the approval ledger, which is what lets a
     /// pending request be counted against the connection that asked for it
@@ -823,7 +817,7 @@ fn size_out_of_range_msg() -> DaemonMessage {
 ///   A message that cannot be queued therefore marks the connection broken
 ///   and it is closed at the next checkpoint (fail-closed) -- a client that
 ///   stops reading while it keeps issuing requests cannot be served
-///   correctly. A frame is queued by the window's feeder ([`ViewFrames`]),
+///   correctly. A frame is queued by the window's link ([`ViewFrames`]),
 ///   which wakes the connection when it could not.
 ///
 /// A closed queue (the writer task exited after a write error) is likewise
@@ -898,8 +892,8 @@ impl Outbound {
     }
 }
 
-/// A connection's frames, sent by its window's feeder: the one place a view's
-/// frame is laid out and queued.
+/// A connection's frames, handed on by its window's link: the one place a
+/// view's frame is encoded and queued.
 struct ViewFrames {
     tx: mpsc::Sender<Vec<u8>>,
     broken: Arc<AtomicBool>,
@@ -907,27 +901,14 @@ struct ViewFrames {
 }
 
 impl FrameSink for ViewFrames {
-    fn encode(&self, capture: FrameCapture) -> EncodedFrame {
-        EncodedFrame(
-            capture
-                .into_parts()
-                .into_iter()
-                .map(|part| encode_frame(&DaemonMessage::Frame(part)))
-                .collect(),
-        )
-    }
-
-    fn try_send(&self, frame: EncodedFrame, _key: &SendKey) -> FrameSend {
-        for part in frame.0 {
-            let failed = match self.tx.try_send(part) {
-                Ok(()) => continue,
-                Err(mpsc::error::TrySendError::Full(_)) => FrameSend::Full,
-                Err(mpsc::error::TrySendError::Closed(_)) => FrameSend::Closed,
-            };
-            self.broken.store(true, Ordering::Relaxed);
-            return failed;
-        }
-        FrameSend::Sent
+    fn try_send(&self, frame: Frame, _key: &SendKey) -> FrameSend {
+        let failed = match self.tx.try_send(encode_frame(&DaemonMessage::Frame(frame))) {
+            Ok(()) => return FrameSend::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => FrameSend::Full,
+            Err(mpsc::error::TrySendError::Closed(_)) => FrameSend::Closed,
+        };
+        self.broken.store(true, Ordering::Relaxed);
+        failed
     }
 
     fn wake(&self) {
@@ -1458,10 +1439,7 @@ impl IpcServer {
             }
             Ok(ClientMessage::SetPalette(palette)) => {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
-                    let _ = entry
-                        .session()
-                        .with_model(move |screen| screen.terminal_mut().set_palette(palette))
-                        .await;
+                    entry.session().set_palette(palette);
                 }
                 FrameOutcome::Continue
             }
@@ -1475,42 +1453,28 @@ impl IpcServer {
             }
             Ok(ClientMessage::CopySelection) => {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
-                    let text = entry
-                        .session()
-                        .with_model(|screen| screen_view::selected_text(screen.terminal_mut()))
-                        .await
-                        .flatten();
+                    let text = entry.session().selected_text().await;
                     outbound.reply(&DaemonMessage::SelectionText { text });
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ClearSelection) => {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
-                    let _ = entry
-                        .session()
-                        .with_model(|screen| screen_view::clear_selection(screen.terminal_mut()))
-                        .await;
-                    state.note_view(ViewNote::Changed);
+                    entry.session().view_op(HolderViewOp::ClearSelection);
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ScrollView { lines }) => {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
-                    let _ = entry
-                        .session()
-                        .with_model(move |screen| {
-                            screen_view::scroll_view(screen.terminal_mut(), lines)
-                        })
-                        .await;
-                    state.note_view(ViewNote::Changed);
+                    entry.session().view_op(HolderViewOp::Scroll { lines });
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::Ping) => {
                 // Awaited here, not spawned, so the Pong keeps its place after
-                // the replies before it. Unbounded: the feeder's queue is
-                // bounded by the holder's ack window, and a stuck feeder
-                // withholding the Pong is the liveness answer.
+                // the replies before it and after the frames for the output the
+                // holder read before it. Unbounded: a holder that withholds
+                // its answer withholds the Pong, which is the liveness answer.
                 if let Some(entry) = state.attached_entry() {
                     let _ = entry.session().settled().await;
                 }
@@ -2495,12 +2459,14 @@ impl IpcServer {
             exit_code: exit,
         };
         outbound.reply(&msg);
-        session
-            .show_view(
-                generation,
-                outbound.view_frames(Arc::clone(&state.frames_failed)),
-            )
-            .await;
+        session.show_view(
+            generation,
+            outbound.view_frames(Arc::clone(&state.frames_failed)),
+        );
+        // The screen the view starts from goes before the status: the holder
+        // sends the attach's first frame before it settles, and the link hands
+        // it on before the answer.
+        let _ = session.settled().await;
 
         // The current status follows as a separate `StatusChanged`, since
         // `Attached` carries none. Subscribing before reading the current value
@@ -3176,22 +3142,19 @@ impl IpcServer {
     ///
     /// `since_ms` is always present (window creation counts as the first
     /// status change); `last_output_summary` is `None` exactly when the
-    /// the window shows no text.
+    /// window's screen shows no text. Everything here is what the daemon
+    /// holds itself, so a holder that does not answer never holds it up.
     async fn handle_get_window_status(&self, outbound: &Outbound, window_id: &str) {
         let Some(entry) = self.registry.get(window_id) else {
             outbound.reply(&window_not_found_msg());
             return;
         };
 
-        let text = control::read_output(
-            &entry,
-            usize::MAX,
-            LAST_OUTPUT_SUMMARY_MAX_BYTES,
-            &self.window_text_reads,
-        )
-        .await
-        .map(|(text, _)| text)
-        .unwrap_or_default();
+        let text = entry
+            .session()
+            .read_screen(reading::screen_text)
+            .await
+            .unwrap_or_default();
         let last_output_summary =
             (!text.is_empty()).then(|| last_chars(&text, LAST_OUTPUT_SUMMARY_MAX_CHARS));
 
@@ -4079,11 +4042,7 @@ impl IpcServer {
                 outbound.reply(&error_msg("invalid_argument", message));
                 return;
             }
-            let _ = entry
-                .session()
-                .with_model(move |screen| action.apply(screen.terminal_mut()))
-                .await;
-            state.note_view(ViewNote::Changed);
+            entry.session().view_op(action.into_op());
             return;
         }
         if is_exited_for_pty_write(&entry) {
@@ -4116,13 +4075,8 @@ impl IpcServer {
         if matches!(
             msg,
             ClientMessage::Key(_) | ClientMessage::Text { .. } | ClientMessage::Paste { .. }
-        ) && entry
-            .session()
-            .with_model(|screen| screen_view::scroll_to_bottom(screen.terminal_mut()))
-            .await
-            .unwrap_or(false)
-        {
-            state.note_view(ViewNote::Changed);
+        ) {
+            entry.session().view_op(HolderViewOp::ToBottom);
         }
         let written = entry
             .write_client_input(&write, InputOrigin::Interactive)
@@ -4166,10 +4120,9 @@ impl IpcServer {
             outbound.reply(&error_msg("internal", "failed to resize the PTY"));
             return;
         }
-        // Detection reads the resized model itself; it only learns whether
-        // the resize had to rebuild it.
+        // Detection reads the resized copy itself; it only learns whether
+        // the resize had to rebuild the model.
         entry.propagate_resize();
-        state.note_view(ViewNote::Changed);
     }
 }
 
@@ -4327,11 +4280,14 @@ enum ViewAction {
 }
 
 impl ViewAction {
-    fn apply(self, screen: &mut VtScreen) {
+    /// The operation the window's holder applies to its view.
+    fn into_op(self) -> HolderViewOp {
         match self {
-            Self::Page(page) => screen_view::page_view(screen, page == ViewPage::Up),
-            Self::Select(pointer) => screen_view::select(screen, &pointer),
-            Self::Scroll(lines) => screen_view::scroll_view(screen, lines),
+            Self::Page(page) => HolderViewOp::Page {
+                up: page == ViewPage::Up,
+            },
+            Self::Select(pointer) => HolderViewOp::Select { pointer },
+            Self::Scroll(lines) => HolderViewOp::Scroll { lines },
         }
     }
 }

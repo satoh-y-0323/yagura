@@ -13,12 +13,14 @@ mod common;
 use common::ScreenFeed;
 use std::time::Duration;
 
-use common::{CopiedScreen, HANG_GUARD, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle};
+use common::{
+    CopiedEngine, CopiedScreen, HANG_GUARD, LocalScreen, TIME_BOTH_PROMPT_DEF, advance_ms,
+    feed_handle,
+};
 use tokio::sync::mpsc;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::LocalScreen;
 use yagura_daemon::detector::definition::parse_definition;
-use yagura_daemon::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle};
+use yagura_daemon::detector::engine::{ConfirmedStatus, DetectorHandle};
 use yagura_daemon::window::WindowRegistry;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
@@ -37,10 +39,10 @@ const CONFIRM_MS: u64 = 300;
 /// `TIME_BOTH_PROMPT_DEF`'s `[quiescence] after_ms`.
 const AFTER_MS: u64 = 2000;
 
-fn new_prompt_engine() -> DetectionEngine {
+fn new_prompt_engine() -> CopiedEngine {
     let definition = parse_definition(TIME_BOTH_PROMPT_DEF).expect("fixture parses");
     let config = DaemonConfig::default();
-    DetectionEngine::new(
+    CopiedEngine::new(
         Some(definition),
         &config,
         LocalScreen::new(80, 24).into_shared(),
@@ -50,7 +52,7 @@ fn new_prompt_engine() -> DetectionEngine {
 /// Builds a `TIME_BOTH_PROMPT_DEF` engine at `(80, 24)`, closes the construction-time
 /// activity band and confirms `Running`. Each contract test adds the degenerate resize
 /// itself.
-async fn engine_confirmed_running() -> DetectionEngine {
+async fn engine_confirmed_running() -> CopiedEngine {
     let mut engine = new_prompt_engine();
 
     advance_ms(WINDOW_MS).await;
@@ -88,11 +90,26 @@ async fn confirmed_status_drops_to_unknown_immediately_when_the_screen_is_rebuil
     let mut engine = engine_confirmed_running().await;
 
     engine.screen().lock().resize(46, 1);
-    engine.poison_screen_after_calls(0);
+    engine.screen().lock().poison_after_calls(0);
     assert_eq!(
         engine.feed(RESIZE_CHUNK),
         Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
         "a Rebuilt screen must confirm Unknown immediately, debounce-exempt"
+    );
+}
+
+/// The daemon's own read of the copy panicking loses that reading, which is
+/// judged like a lost screen.
+#[tokio::test]
+async fn confirmed_status_drops_to_unknown_immediately_when_a_read_of_the_copy_panics() {
+    tokio::time::pause();
+    let mut engine = engine_confirmed_running().await;
+
+    engine.poison_reading_after_calls(0);
+    assert_eq!(
+        engine.feed(CONTINUATION_PROMPT),
+        Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
+        "a lost read must confirm Unknown immediately, debounce-exempt"
     );
 }
 
@@ -103,7 +120,7 @@ async fn a_rebuilt_screen_does_not_override_an_already_exited_status() {
     assert_eq!(engine.on_exit(), Some(DetectedStatus::Exited));
 
     engine.screen().lock().resize(46, 1);
-    engine.poison_screen_after_calls(0);
+    engine.screen().lock().poison_after_calls(0);
     assert_eq!(
         engine.feed(RESIZE_CHUNK),
         None,
@@ -118,7 +135,7 @@ async fn detection_reconverges_once_readable_output_arrives_after_a_rebuild() {
     let mut engine = engine_confirmed_running().await;
 
     engine.screen().lock().resize(46, 1);
-    engine.poison_screen_after_calls(0);
+    engine.screen().lock().poison_after_calls(0);
     engine.feed(RESIZE_CHUNK);
 
     // This stimulus must not exceed the recovered screen width, or it re-triggers
@@ -143,7 +160,7 @@ async fn confirmed_status_reaches_idle_after_after_ms_plus_confirm_ms_following_
     let mut engine = engine_confirmed_running().await;
 
     engine.screen().lock().resize(46, 1);
-    engine.poison_screen_after_calls(0);
+    engine.screen().lock().poison_after_calls(0);
     assert_eq!(
         engine.feed(RESIZE_CHUNK),
         Some(DetectedStatus::Unknown(UnknownReason::ScreenLost))
@@ -172,15 +189,15 @@ async fn confirmed_status_reaches_idle_after_after_ms_plus_confirm_ms_following_
 async fn detector_handle_keeps_publishing_after_the_screen_is_rebuilt() {
     let definition = parse_definition(TIME_BOTH_PROMPT_DEF).expect("fixture parses");
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(
+    let engine = CopiedEngine::new(
         Some(definition),
         &config,
         LocalScreen::new(80, 24).into_shared(),
     );
     // The two feeds and the resize below complete; the feed after them panics.
-    engine.poison_screen_after_calls(3);
+    engine.screen().lock().poison_after_calls(3);
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
 
     // Close the construction-time activity band with nothing else happening.
     tokio::time::sleep(Duration::from_millis(WINDOW_MS + 150)).await;
@@ -230,13 +247,13 @@ region = "bottom"
 async fn a_resize_that_rebuilds_the_screen_degrades_through_the_handle() {
     let definition = parse_definition(RULES_ONLY_DEF).expect("fixture parses");
     let config = DaemonConfig::default();
-    let engine = DetectionEngine::new(
+    let engine = CopiedEngine::new(
         Some(definition),
         &config,
         LocalScreen::new(80, 24).into_shared(),
     );
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
 
     feed_handle(&screen, &handle, CONTINUATION_PROMPT);
     let idle = next_status(&mut statuses).await;

@@ -298,6 +298,16 @@ impl DaemonHarness {
             .unwrap_or_else(|| panic!("window {window_id} must be present in the registry"))
     }
 
+    /// `window_id`'s text: its history and screen, as `read_output` reads them.
+    async fn window_text(&self, window_id: &str) -> Vec<u8> {
+        self.entry(window_id)
+            .session()
+            .text_tail(100_000, 256 * 1024)
+            .await
+            .map(|(text, _)| text.into_bytes())
+            .unwrap_or_default()
+    }
+
     /// Waits until the accept loop has the endpoint listening, so that the
     /// first *asserted* tool call is not racing daemon startup.
     /// `EndpointTransport` connects lazily and does not retry an initial connect
@@ -317,12 +327,12 @@ impl DaemonHarness {
         }
     }
 
-    /// Polls a window's PTY scrollback until `needle` appears.
+    /// Polls a window's text until `needle`, without its line break, appears.
     async fn await_child_output(&self, window_id: &str, needle: &[u8]) {
-        let entry = self.entry(window_id);
+        let needle = needle.trim_ascii_end();
         let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
-            let tail = entry.session().captured_output();
+            let tail = self.window_text(window_id).await;
             if contains_subsequence(&tail, needle) {
                 return;
             }
@@ -496,10 +506,9 @@ impl DaemonHarness {
     /// `[yagura handoff] ` prefix and would otherwise make this wait
     /// vacuously true whether or not the daemon ever wrote the envelope.
     async fn await_accepted_handoff_envelope(&self, window_id: &str) {
-        let entry = self.entry(window_id);
         let deadline = tokio::time::Instant::now() + HANG_GUARD;
         loop {
-            let tail = entry.session().captured_output();
+            let tail = self.window_text(window_id).await;
             let text = String::from_utf8_lossy(&tail).into_owned();
             if find_accepted_handoff_envelope(&text).is_some() {
                 return;
@@ -1840,7 +1849,7 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
     );
 
     harness.await_accepted_handoff_envelope(&window_id).await;
-    let scrollback = harness.entry(&window_id).session().captured_output();
+    let scrollback = harness.window_text(&window_id).await;
     let envelope = extract_accepted_handoff_envelope_json(&scrollback);
     assert_eq!(envelope["reference"], "src/foo.rs");
     assert_eq!(envelope["note"], "Please take a look.");

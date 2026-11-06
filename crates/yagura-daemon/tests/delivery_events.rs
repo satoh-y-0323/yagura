@@ -20,10 +20,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::{
-    ChildInput, Harness, SubmitDefinitionInput, approver_base_config, count_marker,
-    input_log_read_so_far, let_every_clock_bound_run_out,
-    let_every_clock_bound_run_out_while_a_thread_is_awaited, line_ends_outside_paste, policy,
-    read_composer_now, read_response, report_status, send, unique_temp_dir, wait_until_composer_is,
+    ChildInput, Harness, SubmitDefinitionInput, approver_base_config, input_log_read_so_far,
+    let_every_clock_bound_run_out, line_ends_outside_paste, policy, read_composer_now,
+    read_response, report_status, send, unique_temp_dir, wait_until_composer_is,
     wait_until_frame_satisfies, wait_until_input_log_contains, wait_until_status,
     write_submit_definition,
 };
@@ -176,65 +175,6 @@ async fn a_body_the_screen_shows_three_seconds_late_is_placed_not_given_up_on() 
     match judgment.placement {
         SubmitPlacement::Placed(_) => {}
         other => panic!("a body that shows late must be placed, got {other:?}"),
-    }
-    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
-    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
-    assert_eq!(
-        read.count(&pasted_line("BODY")),
-        1,
-        "the body reaches the receiver exactly once; the child read {:?}",
-        read.bytes()
-    );
-}
-
-// =====================================================================
-// a detector that holds the model is waited for
-// =====================================================================
-
-/// While the window's terminal model is held elsewhere nothing can be read
-/// from it. The delivery waits for the model; once it is let go the body is
-/// placed.
-#[tokio::test]
-async fn a_delivery_waits_for_a_held_model_and_places_the_body_once_it_is_let_go() {
-    let dir = unique_temp_dir("events-held-model");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("events-held-model", detection_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_window(
-        &h,
-        &mut client,
-        &dir,
-        "held-model",
-        "held-model-marker",
-        "\\u0015",
-        "0",
-        "",
-        Some(&log),
-    )
-    .await;
-
-    let hold = entry(&h, &window_id).session().hold_model();
-    let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move {
-        sender
-            .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
-            .await
-    });
-    let_every_clock_bound_run_out_while_a_thread_is_awaited().await;
-    assert!(
-        !call.is_finished(),
-        "a delivery to a window whose model is held waits for the model, not for a clock"
-    );
-    drop(hold);
-
-    let judgment = tokio::time::timeout(HANG_GUARD, call)
-        .await
-        .expect("the delivery must go on once the model is let go")
-        .expect("the submit task must not panic")
-        .expect("write must not fail at the PTY level");
-    match judgment.placement {
-        SubmitPlacement::Placed(_) => {}
-        other => panic!("the body must be placed once the model is let go, got {other:?}"),
     }
     h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
     let read = ChildInput::read(&entry(&h, &window_id), &log).await;
@@ -785,122 +725,6 @@ async fn a_resend_whose_envelope_the_receiver_already_took_writes_the_body_fresh
     assert_eq!(
         pastes, 2,
         "the resend writes the body exactly once more; the receiver read {received:?}"
-    );
-}
-
-// =====================================================================
-// a detector that does not answer
-// =====================================================================
-
-/// While the model is held the detector cannot answer. The requester leaving
-/// still ends the wait, and the window's turn is handed on: the next delivery
-/// goes ahead as soon as the model is let go.
-#[tokio::test]
-async fn a_requester_leaving_ends_the_wait_on_a_detector_that_does_not_answer_and_frees_the_turn() {
-    let dir = unique_temp_dir("events-detector-silent");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("events-detector-silent", detection_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_window(
-        &h,
-        &mut client,
-        &dir,
-        "silent",
-        "silent-marker",
-        "\\u0015",
-        "0",
-        "",
-        Some(&log),
-    )
-    .await;
-
-    let hold = entry(&h, &window_id).session().hold_model();
-    let (leave, first) = start_delivery(&h, &window_id, "FIRST");
-    let_every_clock_bound_run_out_while_a_thread_is_awaited().await;
-    assert!(
-        !first.is_finished(),
-        "the call waits for a detector that does not answer"
-    );
-    leave.send(true).expect("the call holds its receiver");
-    let judgment = tokio::time::timeout(HANG_GUARD, first)
-        .await
-        .expect("the requester leaving must end the wait, the model still held")
-        .expect("the submit task must not panic")
-        .expect("write must not fail at the PTY level");
-    not_placed_of(&judgment, "a requester that left must not get a placement");
-
-    let sender = entry(&h, &window_id);
-    let second = tokio::spawn(async move {
-        sender
-            .submit_message("SECOND", None, SendStage::BeforeSubmitKey, None)
-            .await
-    });
-    let_every_clock_bound_run_out_while_a_thread_is_awaited().await;
-    assert!(
-        !second.is_finished(),
-        "the next delivery has the turn and waits for the model"
-    );
-    drop(hold);
-    let judgment = tokio::time::timeout(HANG_GUARD, second)
-        .await
-        .expect("the next delivery must go ahead once the model is let go")
-        .expect("the submit task must not panic")
-        .expect("write must not fail at the PTY level");
-    match judgment.placement {
-        SubmitPlacement::Placed(_) => {}
-        other => panic!("the next delivery must place its body, got {other:?}"),
-    }
-    h.wait_for_scrollback(&window_id, b"SUBMITTED SECOND").await;
-    let read = ChildInput::read(&entry(&h, &window_id), &log).await;
-    assert_eq!(
-        read.count(&pasted_line("SECOND")),
-        1,
-        "the body reaches the receiver exactly once; the child read {:?}",
-        read.bytes()
-    );
-    assert_eq!(count_marker(&h, &window_id, "SUBMITTED FIRST"), 0);
-}
-
-/// The child exiting ends the wait on a detector that does not answer too.
-#[tokio::test]
-async fn a_child_that_exits_ends_the_wait_on_a_detector_that_does_not_answer() {
-    let dir = unique_temp_dir("events-detector-silent-exit");
-    let h = Harness::start("events-detector-silent-exit", detection_config(&dir)).await;
-    let mut client = h.connect().await;
-    let window_id = open_window(
-        &h,
-        &mut client,
-        &dir,
-        "silent-exit",
-        "silent-exit-marker",
-        "\\u0015",
-        "0",
-        "",
-        None,
-    )
-    .await;
-
-    let hold = entry(&h, &window_id).session().hold_model();
-    let sender = entry(&h, &window_id);
-    let call = tokio::spawn(async move {
-        sender
-            .submit_message("BODY", None, SendStage::BeforeSubmitKey, None)
-            .await
-    });
-    let_every_clock_bound_run_out_while_a_thread_is_awaited().await;
-    assert!(
-        !call.is_finished(),
-        "the call waits for a detector that does not answer"
-    );
-    entry(&h, &window_id).session().terminate();
-    let result = tokio::time::timeout(HANG_GUARD, call)
-        .await
-        .expect("the child exiting must end the wait, the model still held")
-        .expect("the submit task must not panic");
-    drop(hold);
-    assert!(
-        matches!(result, Err(PtyError::ChildExited)),
-        "a child that exits ends the wait with ChildExited, got {result:?}"
     );
 }
 

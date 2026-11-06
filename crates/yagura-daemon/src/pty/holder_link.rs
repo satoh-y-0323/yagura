@@ -1,11 +1,16 @@
 //! The daemon's end of one window's holder: starts it, lets itself in, and
-//! carries the window's output, writes, resizes and end over the holder's
-//! endpoint on a thread and runtime of its own, so a blocked caller runtime
-//! never stops the output.
+//! carries the window's screen copies, view frames, writes, requests and end
+//! over the holder's endpoint on a thread and runtime of its own, so a
+//! blocked caller runtime never stops them.
+//!
+//! The link takes the holder's frames in the order they were sent, one at a
+//! time: a copy's rows are held until its close, checked, and applied at once,
+//! so readers only ever see whole copies, and everything the holder sent
+//! before an answer has been taken in when that answer is handed on.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,12 +20,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use yagura_os::{DetachedProcess, IpcTransport, PlatformIpc};
 use yagura_protocol::holder::{
-    AckStep, HOLDER_PROTOCOL, HolderEnvOp, HolderFrame, HolderFrameBuffer, HolderLaunch,
-    HolderSpawnFailure, encode_holder_frame, encode_holder_launch, holder_record_path,
-    read_holder_record,
+    HOLDER_PROTOCOL, HolderEnvOp, HolderFault, HolderFrame, HolderFrameBuffer, HolderLaunch,
+    HolderSpawnFailure, HolderViewNote, HolderViewOp, encode_holder_frame, encode_holder_launch,
+    holder_record_path, read_holder_record,
 };
+use yagura_protocol::{MAX_WINDOW_DIMENSION, Palette, ScreenPush, ScreenRows};
 
-use super::{PtyError, lock_recover};
+use super::views::ViewSlot;
+use super::{PtyError, PublishedInput, lock_recover};
+use crate::detector::SharedCopy;
 use crate::holder_host::LinkContext;
 
 /// How long a holder waits for its first `Hello`; also bounds how long the
@@ -44,6 +52,10 @@ const READY_LIMIT: Duration = HELLO_DEADLINE;
 /// the connection by then.
 const RELEASE_LIMIT: Duration = HELLO_DEADLINE;
 
+/// The most rows one copy may carry: a copy is no taller than the largest
+/// window, and each of its rows comes once.
+const MAX_COPY_ROWS: usize = MAX_WINDOW_DIMENSION as usize;
+
 type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
 
 /// The window a holder is started for.
@@ -54,25 +66,9 @@ pub(super) struct Launch {
     pub(super) env: Vec<HolderEnvOp>,
     pub(super) cols: u16,
     pub(super) rows: u16,
-}
-
-/// What the window's feeder receives, in the order it was sent: the link's
-/// outputs and end, and the window's own wakes and settles.
-pub(super) enum Feed {
-    Output {
-        seq: u64,
-        bytes: Vec<u8>,
-    },
-    /// Nothing more comes: the child exited or the connection ended. Sent
-    /// after the exit is published, so whoever takes it sees the exit.
-    End,
-    /// The window's view may want a frame. Sent only by the window itself,
-    /// at most once while one is still untaken (see `ViewSlot`).
-    View,
-    /// Answered once every item sent before it has been taken in, its frame
-    /// handed to the view's connection and its output acknowledged; dropped
-    /// unanswered when the feeder ends first.
-    Settle(oneshot::Sender<()>),
+    pub(super) history_rows: usize,
+    pub(super) palette: Option<Palette>,
+    pub(super) fault: Option<HolderFault>,
 }
 
 /// Where the child's exit is published.
@@ -85,40 +81,76 @@ pub(super) struct ExitReport {
 impl ExitReport {
     /// The code first, then the flag, then the notification: whoever is woken
     /// reads both. A missing code (the connection was lost, or the OS gave
-    /// none) is `-1`.
+    /// none) is `-1`. Only the first exit is published.
     fn publish(&self, code: Option<i32>) {
+        if self.exited.load(Ordering::SeqCst) {
+            return;
+        }
         self.code.store(code.unwrap_or(-1), Ordering::SeqCst);
         self.exited.store(true, Ordering::SeqCst);
         let _ = self.notify.send(true);
     }
 }
 
-/// Where the link hands what it receives: each output to the feeder, and the
-/// child's exit, published as soon as the holder reports it so a model held
-/// by a reader never hides it. The feeder still sees the end after the last
-/// output, which is what a read after the exit waits for.
+/// Where the link hands what it receives.
 pub(super) struct Sink {
-    pub(super) feed: std::sync::mpsc::Sender<Feed>,
+    /// The copy the window's readers share.
+    pub(super) copy: SharedCopy,
+    /// The input state of the copy last applied.
+    pub(super) input: Arc<PublishedInput>,
+    /// The output count of the copy last applied; sent each time it moves,
+    /// and on a refused copy, whose loss readers are to learn of.
+    pub(super) arrivals: watch::Sender<u64>,
+    /// Where the attached view's frames go.
+    pub(super) views: Arc<ViewSlot>,
     pub(super) exit: ExitReport,
 }
 
-impl Sink {
-    fn output(&self, seq: u64, bytes: Vec<u8>) {
-        let _ = self.feed.send(Feed::Output { seq, bytes });
-    }
-
-    fn end(&self, code: Option<i32>) {
-        self.exit.publish(code);
-        let _ = self.feed.send(Feed::End);
-    }
-}
-
-#[derive(Default)]
+/// What waits for the holder's answers, and the sizes a write's take-back
+/// keys are counted at.
 struct Pending {
     closed: bool,
-    next_write: u64,
+    next_id: u64,
     writes: HashMap<u64, std::sync::mpsc::SyncSender<bool>>,
     resize: Option<oneshot::Sender<bool>>,
+    tails: HashMap<u64, oneshot::Sender<(String, bool)>>,
+    selections: HashMap<u64, oneshot::Sender<Option<String>>>,
+    settles: HashMap<u64, oneshot::Sender<()>>,
+    /// The size the holder last confirmed: its `Welcome`, then each
+    /// `Resized`.
+    confirmed: (u16, u16),
+    /// A size asked for that the holder has not answered yet.
+    asked: Option<(u16, u16)>,
+}
+
+impl Pending {
+    fn new(cols: u16, rows: u16) -> Self {
+        Self {
+            closed: false,
+            next_id: 0,
+            writes: HashMap::new(),
+            resize: None,
+            tails: HashMap::new(),
+            selections: HashMap::new(),
+            settles: HashMap::new(),
+            confirmed: (cols, rows),
+            asked: None,
+        }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        id
+    }
+
+    /// The narrowest width the holder may have as it writes what is sent
+    /// now: frames reach it in order, so it has the size it last confirmed
+    /// or the one asked for since.
+    fn narrowest_cols(&self) -> u16 {
+        self.asked
+            .map_or(self.confirmed.0, |(cols, _)| cols.min(self.confirmed.0))
+    }
 }
 
 /// The window's way to its holder; cheap to clone.
@@ -126,39 +158,165 @@ struct Pending {
 pub(super) struct Link {
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Arc<Mutex<Pending>>,
+    /// Sends one `Resize` at a time, the next only once the last is answered.
+    resizing: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Link {
+    fn new(cols: u16, rows: u16) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (out, out_rx) = mpsc::unbounded_channel();
+        let link = Self {
+            out,
+            pending: Arc::new(Mutex::new(Pending::new(cols, rows))),
+            resizing: Arc::default(),
+        };
+        (link, out_rx)
+    }
+
     fn send(&self, frame: &HolderFrame) {
         let _ = self.out.send(encode_holder_frame(frame));
     }
 
-    pub(super) fn ack(&self, seq: u64) {
-        self.send(&HolderFrame::Ack { seq });
-    }
-
-    /// Asks the holder to end the child (and with `tree`, its whole tree now);
-    /// nothing to do once the holder is gone.
+    /// Asks the holder to end the child (and with `tree`, its whole tree now),
+    /// and then itself; nothing to do once the holder is gone.
     pub(super) fn terminate(&self, tree: bool) {
         self.send(&HolderFrame::Terminate { tree });
     }
 
-    /// Writes `bytes` to the child after every earlier write, and returns
-    /// once the holder answered.
-    fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+    /// Writes `bytes` to the child as a report: after every earlier write,
+    /// not counted and not answered.
+    pub(super) fn report(&self, bytes: Vec<u8>) {
+        self.send(&HolderFrame::Report { bytes });
+    }
+
+    pub(super) fn set_palette(&self, palette: Palette) {
+        self.send(&HolderFrame::SetPalette { palette });
+    }
+
+    pub(super) fn set_view_focus(&self, focused: bool) {
+        self.send(&HolderFrame::SetViewFocus { focused });
+    }
+
+    pub(super) fn focus_interval(&self, open: bool) {
+        self.send(&HolderFrame::FocusInterval { open });
+    }
+
+    pub(super) fn attach(&self, generation: u64) {
+        self.send(&HolderFrame::Attach { generation });
+    }
+
+    pub(super) fn detach(&self, generation: u64) {
+        self.send(&HolderFrame::Detach { generation });
+    }
+
+    pub(super) fn view_note(&self, generation: u64, note: HolderViewNote) {
+        self.send(&HolderFrame::ViewNote { generation, note });
+    }
+
+    /// Asks the holder for an operation on the view without waiting for it.
+    pub(super) fn view_op(&self, op: HolderViewOp) {
+        let id = lock_recover(&self.pending).next_id();
+        self.send(&HolderFrame::ViewOp { id, op });
+    }
+
+    /// The view's selected text, as the holder answers it; `None` when
+    /// nothing is selected or the holder is gone.
+    pub(super) async fn selected_text(&self) -> Option<String> {
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut pending = lock_recover(&self.pending);
+            if pending.closed {
+                return None;
+            }
+            let id = pending.next_id();
+            pending.selections.insert(id, answer);
+            self.send(&HolderFrame::ViewOp {
+                id,
+                op: HolderViewOp::SelectedText,
+            });
+        }
+        answered.await.ok().flatten()
+    }
+
+    /// The window's text as the holder answers it; `None` once the holder is
+    /// gone.
+    pub(super) async fn read_tail(
+        &self,
+        max_lines: usize,
+        max_bytes: usize,
+    ) -> Option<(String, bool)> {
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut pending = lock_recover(&self.pending);
+            if pending.closed {
+                return None;
+            }
+            let id = pending.next_id();
+            pending.tails.insert(id, answer);
+            self.send(&HolderFrame::ReadTail {
+                id,
+                max_lines,
+                max_bytes,
+            });
+        }
+        answered.await.ok()
+    }
+
+    /// Resolves once the holder has taken in the output it read before the
+    /// settle and the link has handed on every frame it sent before its
+    /// answer; ends unanswered (an error) once the holder is gone.
+    pub(super) fn settle(&self) -> oneshot::Receiver<()> {
+        let (answer, answered) = oneshot::channel();
+        let mut pending = lock_recover(&self.pending);
+        if !pending.closed {
+            let id = pending.next_id();
+            pending.settles.insert(id, answer);
+            self.send(&HolderFrame::Settle { id });
+        }
+        answered
+    }
+
+    /// Whether the holder's terminal took the size `cols` x `rows`. One size
+    /// is asked for at a time.
+    pub(super) async fn resize(&self, cols: u16, rows: u16) -> bool {
+        let _one_at_a_time = self.resizing.lock().await;
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut pending = lock_recover(&self.pending);
+            if pending.closed {
+                return false;
+            }
+            pending.asked = Some((cols, rows));
+            pending.resize = Some(answer);
+            self.send(&HolderFrame::Resize { cols, rows });
+        }
+        answered.await.unwrap_or(false)
+    }
+
+    /// The size the holder last confirmed.
+    pub(super) fn confirmed_size(&self) -> (u16, u16) {
+        lock_recover(&self.pending).confirmed
+    }
+
+    /// Writes `lead` and then `data` to the child as one write, after every
+    /// earlier write, and returns once the holder answered. `lead` is made
+    /// from the narrowest width the holder may have as it writes, decided
+    /// under the same lock a resize is sent under.
+    fn write(&self, lead: impl FnOnce(u16) -> Vec<u8>, data: &[u8]) -> std::io::Result<()> {
         let (answer, answered) = std::sync::mpsc::sync_channel(1);
         {
             let mut pending = lock_recover(&self.pending);
             if pending.closed {
                 return Err(std::io::ErrorKind::BrokenPipe.into());
             }
-            let id = pending.next_write;
-            pending.next_write = pending.next_write.wrapping_add(1);
+            let mut bytes = lead(pending.narrowest_cols());
+            bytes.extend_from_slice(data);
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let id = pending.next_id();
             pending.writes.insert(id, answer);
-            self.send(&HolderFrame::Write {
-                id,
-                bytes: bytes.to_vec(),
-            });
+            self.send(&HolderFrame::Write { id, bytes });
         }
         match answered.recv() {
             Ok(true) => Ok(()),
@@ -169,23 +327,9 @@ impl Link {
         }
     }
 
-    /// Whether the holder's terminal took the size `cols` x `rows`.
-    pub(super) async fn resize(&self, cols: u16, rows: u16) -> bool {
-        let (answer, answered) = oneshot::channel();
-        {
-            let mut pending = lock_recover(&self.pending);
-            if pending.closed {
-                return false;
-            }
-            pending.resize = Some(answer);
-            self.send(&HolderFrame::Resize { cols, rows });
-        }
-        answered.await.unwrap_or(false)
-    }
-
-    /// The child's input as a writer, each write answered by the holder.
-    pub(super) fn writer(&self) -> Box<dyn Write + Send> {
-        Box::new(HolderWriter(self.clone()))
+    /// The child's input, each write answered by the holder.
+    pub(super) fn writer(&self) -> Writer {
+        Writer(self.clone())
     }
 
     fn answer_write(&self, id: u64, written: bool) {
@@ -194,62 +338,86 @@ impl Link {
         }
     }
 
-    fn answer_resize(&self, resized: bool) {
-        if let Some(answer) = lock_recover(&self.pending).resize.take() {
-            let _ = answer.send(resized);
+    /// `size` is the size the holder now has, `None` when it kept its size.
+    fn answer_resize(&self, size: Option<(u16, u16)>) {
+        let mut pending = lock_recover(&self.pending);
+        if let Some(size) = size {
+            pending.confirmed = size;
+        }
+        pending.asked = None;
+        if let Some(answer) = pending.resize.take() {
+            let _ = answer.send(size.is_some());
         }
     }
 
-    /// Fails every write and resize waiting for an answer, and every later one.
+    fn answer_tail(&self, id: u64, text: String, truncated: bool) {
+        if let Some(answer) = lock_recover(&self.pending).tails.remove(&id) {
+            let _ = answer.send((text, truncated));
+        }
+    }
+
+    fn answer_view_op(&self, id: u64, text: Option<String>) {
+        if let Some(answer) = lock_recover(&self.pending).selections.remove(&id) {
+            let _ = answer.send(text);
+        }
+    }
+
+    fn answer_settle(&self, id: u64) {
+        if let Some(answer) = lock_recover(&self.pending).settles.remove(&id) {
+            let _ = answer.send(());
+        }
+    }
+
+    fn welcomed(&self, cols: u16, rows: u16) {
+        lock_recover(&self.pending).confirmed = (cols, rows);
+    }
+
+    /// Fails every request waiting for an answer, and every later one.
     fn close(&self) {
         let mut pending = lock_recover(&self.pending);
         pending.closed = true;
         pending.writes.clear();
         pending.resize = None;
+        pending.tails.clear();
+        pending.selections.clear();
+        pending.settles.clear();
     }
 }
 
-struct HolderWriter(Link);
+/// The child's input through the holder.
+pub(super) struct Writer(Link);
 
-impl Write for HolderWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        self.0.write(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+impl Writer {
+    /// See `Link::write`.
+    pub(super) fn write(
+        &mut self,
+        lead: impl FnOnce(u16) -> Vec<u8>,
+        data: &[u8],
+    ) -> std::io::Result<()> {
+        self.0.write(lead, data)
     }
 }
 
-/// What the window learns once its holder let the daemon in.
+/// What the window learns once its holder let the daemon in and sent the
+/// first copy of the screen.
 pub(super) struct Opened {
     pub(super) child_pid: u32,
-    /// When to ack the holder's output, from the window its `Welcome` named.
-    pub(super) ack_step: AckStep,
 }
 
 /// A link whose holder is being started.
 pub(super) struct Started {
     pub(super) link: Link,
-    /// What the holder's `Welcome` told once it let the daemon in, or why
-    /// the window cannot open.
+    /// What the holder's `Welcome` told once it let the daemon in and its
+    /// first copy was taken in, or why the window cannot open.
     pub(super) opened: oneshot::Receiver<Result<Opened, PtyError>>,
     /// `true` once the holder's process has ended.
     pub(super) released: watch::Receiver<bool>,
 }
 
-/// Starts the holder of `launch` on a thread of its own; its output goes to
-/// `feed`.
-pub(super) fn start(context: LinkContext, launch: Launch, feed: Sink) -> Result<Started, PtyError> {
-    let (out, out_rx) = mpsc::unbounded_channel();
-    let link = Link {
-        out,
-        pending: Arc::default(),
-    };
+/// Starts the holder of `launch` on a thread of its own; what it sends goes
+/// to `sink`.
+pub(super) fn start(context: LinkContext, launch: Launch, sink: Sink) -> Result<Started, PtyError> {
+    let (link, out_rx) = Link::new(launch.cols, launch.rows);
     let (opened_tx, opened) = oneshot::channel();
     let (released_tx, released) = watch::channel(false);
     std::thread::Builder::new()
@@ -257,7 +425,7 @@ pub(super) fn start(context: LinkContext, launch: Launch, feed: Sink) -> Result<
         .spawn({
             let link = link.clone();
             move || {
-                run(context, &launch, &link, out_rx, &feed, opened_tx);
+                run(context, &launch, &link, out_rx, &sink, opened_tx);
                 let _ = released_tx.send(true);
             }
         })
@@ -265,6 +433,45 @@ pub(super) fn start(context: LinkContext, launch: Launch, feed: Sink) -> Result<
             tracing::error!(%error, "cannot start the thread of a window's holder");
             PtyError::SpawnFailed
         })?;
+    Ok(Started {
+        link,
+        opened,
+        released,
+    })
+}
+
+/// Lets the daemon into a holder already serving `endpoint` from process
+/// `holder_pid`, without starting one, on a thread of its own.
+#[cfg(test)]
+pub(super) fn start_over(
+    endpoint: String,
+    holder_pid: u32,
+    (cols, rows): (u16, u16),
+    sink: Sink,
+) -> Result<Started, PtyError> {
+    let (link, out_rx) = Link::new(cols, rows);
+    let (opened_tx, opened) = oneshot::channel();
+    let (released_tx, released) = watch::channel(false);
+    std::thread::Builder::new()
+        .name("holder-link".to_owned())
+        .spawn({
+            let link = link.clone();
+            move || {
+                let holders_dir = PathBuf::from("unused-holders-dir");
+                let holder = HolderAt {
+                    holders_dir: &holders_dir,
+                    window_id: "played",
+                    daemon_endpoint: "unused-daemon-endpoint",
+                    boot: "played-boot",
+                };
+                serve(
+                    &holder, &endpoint, holder_pid, &link, out_rx, &sink, opened_tx,
+                );
+                link.close();
+                let _ = released_tx.send(true);
+            }
+        })
+        .map_err(|_| PtyError::SpawnFailed)?;
     Ok(Started {
         link,
         opened,
@@ -288,7 +495,7 @@ fn run(
     launch: &Launch,
     link: &Link,
     out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    feed: &Sink,
+    sink: &Sink,
     opened: oneshot::Sender<Result<Opened, PtyError>>,
 ) {
     let LinkContext {
@@ -332,7 +539,7 @@ fn run(
         boot: &boot,
     };
     let ending = match holder.become_ready(&mut process, launch) {
-        Ok(endpoint) => serve(&holder, &endpoint, process.id(), link, out_rx, feed, opened),
+        Ok(endpoint) => serve(&holder, &endpoint, process.id(), link, out_rx, sink, opened),
         Err(error) => {
             let _ = opened.send(Err(error));
             Ending::Refused
@@ -387,6 +594,9 @@ impl HolderAt<'_> {
             holders_dir: self.holders_dir.to_path_buf(),
             daemon_endpoint: self.daemon_endpoint.to_owned(),
             end_child_on_disconnect: true,
+            history_rows: launch.history_rows,
+            palette: launch.palette.clone(),
+            fault: launch.fault,
         });
         match hand_launch(process, encoded) {
             Notice::Ready => {}
@@ -444,7 +654,7 @@ fn hand_launch(process: &mut DetachedProcess, launch: Vec<u8>) -> Notice {
     let started = std::thread::Builder::new()
         .name("holder-notice".to_owned())
         .spawn(move || {
-            let ready = stdin.write_all(&launch).and_then(|()| {
+            let ready = std::io::Write::write_all(&mut stdin, &launch).and_then(|()| {
                 drop(stdin);
                 read_notice(stdout)
             });
@@ -484,7 +694,7 @@ fn serve(
     holder_pid: u32,
     link: &Link,
     out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    feed: &Sink,
+    sink: &Sink,
     opened: oneshot::Sender<Result<Opened, PtyError>>,
 ) -> Ending {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -499,38 +709,42 @@ fn serve(
         }
     };
     runtime.block_on(async {
-        let (connection, frames, child_pid, ack_step) =
-            match handshake(holder, endpoint, holder_pid).await {
-                Ok(connected) => connected,
-                Err(Refusal { error, let_in }) => {
-                    let _ = opened.send(Err(error));
-                    return match let_in {
-                        Some(connection) => give_up(connection, RELEASE_LIMIT).await,
-                        None => Ending::Refused,
-                    };
-                }
-            };
-        let Some(child_pid) = child_pid else {
-            tracing::warn!(
-                window_id = holder.window_id,
-                "the window's holder named no child in its welcome"
-            );
-            let _ = opened.send(Err(PtyError::SpawnFailed));
-            link.terminate(true);
-            pump(holder.window_id, connection, frames, out_rx, link, feed).await;
-            return Ending::Served;
+        let welcomed = match handshake(holder, endpoint, holder_pid).await {
+            Ok(welcomed) => welcomed,
+            Err(Refusal { error, let_in }) => {
+                let _ = opened.send(Err(error));
+                return match let_in {
+                    Some(connection) => give_up(connection, RELEASE_LIMIT).await,
+                    None => Ending::Refused,
+                };
+            }
         };
-        // Nobody waits for the window any more: it is closed at once.
-        if opened
-            .send(Ok(Opened {
-                child_pid,
-                ack_step,
-            }))
-            .is_err()
-        {
-            link.terminate(true);
-        }
-        pump(holder.window_id, connection, frames, out_rx, link, feed).await;
+        let (cols, rows) = welcomed.size;
+        link.welcomed(cols, rows);
+        let opening = match welcomed.child_pid {
+            Some(child_pid) => Some(Opening { opened, child_pid }),
+            None => {
+                tracing::warn!(
+                    window_id = holder.window_id,
+                    "the window's holder named no child in its welcome"
+                );
+                let _ = opened.send(Err(PtyError::SpawnFailed));
+                link.terminate(true);
+                None
+            }
+        };
+        let mut reader = Reader {
+            window_id: holder.window_id,
+            link,
+            sink,
+            opening,
+            rows: Vec::new(),
+            row_count: 0,
+            outputs_fed: None,
+            exited: false,
+            late_copy_logged: false,
+        };
+        pump(&mut reader, welcomed.connection, welcomed.frames, out_rx).await;
         Ending::Served
     })
 }
@@ -551,15 +765,23 @@ impl From<PtyError> for Refusal {
     }
 }
 
+/// What a holder's `Welcome` told, with the connection it came on.
+struct Welcomed {
+    connection: Connection,
+    frames: HolderFrameBuffer,
+    child_pid: Option<u32>,
+    size: (u16, u16),
+}
+
 /// Connects to the holder's endpoint, checks the holder serves it, and is let
-/// in: `Hello`, then `Replay` once welcomed; returns the child's pid the
-/// `Welcome` names and the ack step its window makes. A holder that could not
-/// start the child answers with why, then `Exited`, in place of a `Welcome`.
+/// in with a `Hello`; returns what its `Welcome` told. A holder that could
+/// not start the child answers with why, then `Exited`, in place of a
+/// `Welcome`.
 async fn handshake(
     holder: &HolderAt<'_>,
     endpoint: &str,
     holder_pid: u32,
-) -> Result<(Connection, HolderFrameBuffer, Option<u32>, AckStep), Refusal> {
+) -> Result<Welcomed, Refusal> {
     let deadline = tokio::time::Instant::now() + HELLO_DEADLINE;
     let window_id = holder.window_id;
     for _ in 0..HELLO_ATTEMPTS {
@@ -595,17 +817,16 @@ async fn handshake(
         match first {
             Some(HolderFrame::Welcome {
                 child_pid,
-                ack_window,
+                cols,
+                rows,
                 ..
             }) => {
-                let replay = encode_holder_frame(&HolderFrame::Replay);
-                if connection.write_all(&replay).await.is_err() {
-                    return Err(Refusal {
-                        error: PtyError::SpawnFailed,
-                        let_in: Some(connection),
-                    });
-                }
-                return Ok((connection, frames, child_pid, AckStep::new(ack_window)));
+                return Ok(Welcomed {
+                    connection,
+                    frames,
+                    child_pid,
+                    size: (cols, rows),
+                });
             }
             Some(HolderFrame::SpawnFailed {
                 reason: HolderSpawnFailure::BundledConptyUnavailable,
@@ -689,15 +910,14 @@ async fn next_frame(
     }
 }
 
-/// Carries frames both ways until the child's exit is known or the
-/// connection ends, then lets go of the connection.
+/// Carries frames both ways until the connection ends; the holder closes it
+/// once it is told to end. Only a frame whose framing is broken ends it from
+/// this side.
 async fn pump(
-    window_id: &str,
+    reader: &mut Reader<'_>,
     connection: Connection,
     mut frames: HolderFrameBuffer,
     mut out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    link: &Link,
-    feed: &Sink,
 ) {
     let (mut read, mut write) = tokio::io::split(connection);
     let mut chunk = vec![0u8; 64 * 1024];
@@ -705,17 +925,25 @@ async fn pump(
     'connection: loop {
         loop {
             match frames.next_frame() {
-                Ok(Some(frame)) => match handle(frame, link, feed) {
-                    None => {}
-                    Some(End::Exited) => return,
-                    Some(End::Displaced) => {
-                        tracing::warn!(window_id, "another daemon took the window's holder over");
-                        feed.end(None);
+                Ok(Some(frame)) => {
+                    if reader.handle(frame) == Flow::Displaced {
+                        tracing::warn!(
+                            window_id = reader.window_id,
+                            "another daemon took the window's holder over"
+                        );
+                        reader.end(None);
                         return;
                     }
-                },
+                }
                 Ok(None) => break,
-                Err(_) => break 'connection,
+                Err(error) => {
+                    tracing::warn!(
+                        window_id = reader.window_id,
+                        %error,
+                        "the window's holder sent a broken frame"
+                    );
+                    break 'connection;
+                }
             }
         }
         tokio::select! {
@@ -733,45 +961,168 @@ async fn pump(
             },
         }
     }
-    tracing::warn!(
-        window_id,
-        "the connection to the window's holder was lost; the window is treated as exited"
-    );
-    feed.end(None);
+    if !reader.exited {
+        tracing::warn!(
+            window_id = reader.window_id,
+            "the connection to the window's holder was lost; the window is treated as exited"
+        );
+    }
+    reader.end(None);
 }
 
-enum End {
-    Exited,
+/// The window still waiting to learn it opened.
+struct Opening {
+    opened: oneshot::Sender<Result<Opened, PtyError>>,
+    child_pid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
     Displaced,
 }
 
-fn handle(frame: HolderFrame, link: &Link, feed: &Sink) -> Option<End> {
-    match frame {
-        HolderFrame::Output { seq, bytes } => {
-            feed.output(seq, bytes);
+/// Takes the holder's frames in, in the order they came.
+struct Reader<'a> {
+    window_id: &'a str,
+    link: &'a Link,
+    sink: &'a Sink,
+    opening: Option<Opening>,
+    /// The rows of the copy not closed yet.
+    rows: Vec<ScreenRows>,
+    row_count: usize,
+    /// The output count of the copy last applied.
+    outputs_fed: Option<u64>,
+    exited: bool,
+    late_copy_logged: bool,
+}
+
+impl Reader<'_> {
+    fn handle(&mut self, frame: HolderFrame) -> Flow {
+        match frame {
+            HolderFrame::ScreenRows(rows) => self.hold_rows(rows),
+            HolderFrame::ScreenPush(push) => self.close_copy(push),
+            HolderFrame::Exited { code } => {
+                self.rows.clear();
+                self.row_count = 0;
+                self.end(code);
+            }
+            HolderFrame::Written { id } => self.link.answer_write(id, true),
+            HolderFrame::WriteFailed { id, .. } => self.link.answer_write(id, false),
+            HolderFrame::Resized { cols, rows } => self.link.answer_resize(Some((cols, rows))),
+            HolderFrame::ResizeFailed { .. } => self.link.answer_resize(None),
+            HolderFrame::ViewFrame { generation, frame } => {
+                if self.sink.views.deliver(generation, frame) {
+                    self.link.detach(generation);
+                }
+            }
+            HolderFrame::ViewOpDone { id, text, .. } => self.link.answer_view_op(id, text),
+            HolderFrame::Tail {
+                id,
+                text,
+                truncated,
+            } => self.link.answer_tail(id, text, truncated),
+            HolderFrame::Settled { id } => self.link.answer_settle(id),
+            HolderFrame::Displaced => return Flow::Displaced,
+            HolderFrame::Hello { .. }
+            | HolderFrame::Terminate { .. }
+            | HolderFrame::VersionRejected { .. }
+            | HolderFrame::Welcome { .. }
+            | HolderFrame::Write { .. }
+            | HolderFrame::Resize { .. }
+            | HolderFrame::SpawnFailed { .. }
+            | HolderFrame::PushAck { .. }
+            | HolderFrame::ScreenResync
+            | HolderFrame::Report { .. }
+            | HolderFrame::SetPalette { .. }
+            | HolderFrame::SetViewFocus { .. }
+            | HolderFrame::FocusInterval { .. }
+            | HolderFrame::Attach { .. }
+            | HolderFrame::Detach { .. }
+            | HolderFrame::ViewNote { .. }
+            | HolderFrame::ViewOp { .. }
+            | HolderFrame::ReadTail { .. }
+            | HolderFrame::Settle { .. } => {}
         }
-        HolderFrame::Exited { code } => {
-            feed.end(code);
-            return Some(End::Exited);
-        }
-        HolderFrame::Written { id } => link.answer_write(id, true),
-        HolderFrame::WriteFailed { id, .. } => link.answer_write(id, false),
-        HolderFrame::Resized { .. } => link.answer_resize(true),
-        HolderFrame::ResizeFailed { .. } => link.answer_resize(false),
-        HolderFrame::Displaced => return Some(End::Displaced),
-        HolderFrame::Hello { .. }
-        | HolderFrame::Terminate { .. }
-        | HolderFrame::VersionRejected { .. }
-        | HolderFrame::Welcome { .. }
-        | HolderFrame::Replay
-        | HolderFrame::Checkpoint { .. }
-        | HolderFrame::Ack { .. }
-        | HolderFrame::StoreCheckpoint { .. }
-        | HolderFrame::Write { .. }
-        | HolderFrame::Resize { .. }
-        | HolderFrame::SpawnFailed { .. } => {}
+        Flow::Continue
     }
-    None
+
+    /// Holds a copy's rows until its close. Rows past what any copy can
+    /// carry are not kept; their copy is refused at its close.
+    fn hold_rows(&mut self, rows: ScreenRows) {
+        if self.exited {
+            return;
+        }
+        self.row_count = self.row_count.saturating_add(rows.lines.len());
+        if self.row_count <= MAX_COPY_ROWS {
+            self.rows.push(rows);
+        }
+    }
+
+    /// Checks the copy `push` closes and applies it whole, or refuses it: a
+    /// refused copy loses the window's screen until a whole one comes, which
+    /// the holder is asked for in place of the acknowledgement. A copy after
+    /// the exit is not applied.
+    fn close_copy(&mut self, push: ScreenPush) {
+        let rows = std::mem::take(&mut self.rows);
+        let row_count = std::mem::replace(&mut self.row_count, 0);
+        if self.exited {
+            if !self.late_copy_logged {
+                self.late_copy_logged = true;
+                tracing::warn!(
+                    window_id = self.window_id,
+                    "the window's holder sent a copy of the screen after the exit; it is not applied"
+                );
+            }
+            return;
+        }
+        let number = push.number;
+        let outputs_fed = push.outputs_fed;
+        let applied = if row_count > MAX_COPY_ROWS {
+            self.sink.copy.refuse();
+            Err(crate::detector::CopyRefused::BadRow)
+        } else {
+            self.sink.copy.apply(rows, push.clone())
+        };
+        match applied {
+            Ok(()) => {
+                self.sink.input.publish(&push);
+                if self.outputs_fed != Some(outputs_fed) {
+                    self.outputs_fed = Some(outputs_fed);
+                    self.sink.arrivals.send_replace(outputs_fed);
+                }
+                self.link.send(&HolderFrame::PushAck { number });
+            }
+            Err(refused) => {
+                tracing::warn!(
+                    window_id = self.window_id,
+                    %refused,
+                    "a copy of the window's screen was refused; the screen is lost until a whole one comes"
+                );
+                self.sink.arrivals.send_modify(|_| {});
+                self.link.send(&HolderFrame::ScreenResync);
+            }
+        }
+        self.tell_opened();
+    }
+
+    /// Publishes the child's exit, once; the window that waited to open
+    /// opens on an exited child.
+    fn end(&mut self, code: Option<i32>) {
+        self.exited = true;
+        self.sink.exit.publish(code);
+        self.tell_opened();
+    }
+
+    fn tell_opened(&mut self) {
+        let Some(Opening { opened, child_pid }) = self.opening.take() else {
+            return;
+        };
+        // Nobody waits for the window any more: it is closed at once.
+        if opened.send(Ok(Opened { child_pid })).is_err() {
+            self.link.terminate(true);
+        }
+    }
 }
 
 /// Removes the record of a holder this daemon killed. It never wrote an exit
@@ -822,7 +1173,7 @@ mod tests {
             "the daemon opens with a Hello, got {hello:?}"
         );
         connection
-            .write_all(&encode_holder_frame(&HolderFrame::Replay))
+            .write_all(&encode_holder_frame(&HolderFrame::Written { id: 0 }))
             .await
             .expect("answer out of turn");
         (connection, frames)
@@ -950,5 +1301,404 @@ mod tests {
             [Step::GiveUpReturned, Step::HolderClosed],
             "give_up returns while the holder still holds the connection"
         );
+    }
+
+    mod played {
+        //! A holder played by the test in its own process, over the holder's
+        //! endpoint, so the daemon's side of the link is driven frame by frame.
+
+        use tokio::io::AsyncWriteExt;
+        use yagura_os::PeerAuth;
+        use yagura_protocol::holder::{
+            HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, encode_holder_frame,
+        };
+        use yagura_protocol::{
+            DetectedStatus, InputModes, ScreenCell, ScreenCursor, ScreenLine, ScreenPush,
+            ScreenRows, UnknownReason,
+        };
+
+        use super::{HANG_GUARD, bind_holder_endpoint};
+        use crate::config::DaemonConfig;
+        use crate::detector::DetectionEngine;
+        use crate::detector::definition::parse_definition;
+        use crate::detector::reading;
+        use crate::pty::{GuardedWrite, PtySession, TakeBackRegistration};
+        use yagura_os::{IpcTransport, PlatformIpc};
+
+        const COLS: u16 = 80;
+        const ROWS: u16 = 24;
+
+        /// Judges `PLAYED-PROMPT>` idle at once, so a status follows each
+        /// reading without a clock.
+        const PROMPT_DEF: &str = r#"
+schema_version = 1
+name = "played-holder"
+
+[debounce]
+confirm_ms = 0
+
+[[rules]]
+status = "idle"
+pattern = 'PLAYED-PROMPT>'
+priority = 1
+region = "bottom"
+"#;
+
+        /// The window's session over the holder this test plays at
+        /// `endpoint`, which this process serves.
+        async fn played_session(endpoint: &str) -> PtySession {
+            PtySession::over_holder_endpoint(endpoint, std::process::id())
+                .await
+                .expect("the played holder lets the daemon in")
+        }
+
+        fn line(index: u16, text: &str) -> ScreenLine {
+            ScreenLine {
+                line: index,
+                cells: text
+                    .chars()
+                    .enumerate()
+                    .map(|(col, c)| ScreenCell {
+                        col: u16::try_from(col).unwrap(),
+                        c,
+                        zerowidth: Vec::new(),
+                        dim: false,
+                        wide: false,
+                    })
+                    .collect(),
+                wraps: false,
+            }
+        }
+
+        struct Holder {
+            connection: <PlatformIpc as PeerAuth>::Connection,
+            frames: HolderFrameBuffer,
+            number: u64,
+            outputs_fed: u64,
+            size: (u16, u16),
+            /// Every frame the daemon sent that the test did not wait for.
+            passed: Vec<HolderFrame>,
+        }
+
+        impl Holder {
+            /// Takes the daemon's connection, answers its `Hello` with a
+            /// `Welcome` of `COLS` x `ROWS`, and sends the whole copy that
+            /// follows a welcome, showing `first`.
+            async fn accept(mut listener: <PlatformIpc as IpcTransport>::Listener) -> Self {
+                let ipc = PlatformIpc::default();
+                let connection = ipc.accept(&mut listener).await.expect("accept the daemon");
+                let mut holder = Self {
+                    connection,
+                    frames: HolderFrameBuffer::new(),
+                    number: 0,
+                    outputs_fed: 0,
+                    size: (COLS, ROWS),
+                    passed: Vec::new(),
+                };
+                let hello = holder.next().await;
+                assert!(
+                    matches!(hello, HolderFrame::Hello { .. }),
+                    "the daemon opens with a Hello, got {hello:?}"
+                );
+                holder
+                    .send(&HolderFrame::Welcome {
+                        protocol: HOLDER_PROTOCOL,
+                        record: "played".to_owned(),
+                        cols: COLS,
+                        rows: ROWS,
+                        exited: false,
+                        child_pid: Some(std::process::id()),
+                    })
+                    .await;
+                holder.push(true, &[line(0, "first output")], 0).await;
+                holder
+            }
+
+            async fn send(&mut self, frame: &HolderFrame) {
+                self.connection
+                    .write_all(&encode_holder_frame(frame))
+                    .await
+                    .expect("send to the daemon");
+            }
+
+            async fn next(&mut self) -> HolderFrame {
+                tokio::time::timeout(
+                    HANG_GUARD,
+                    super::super::next_frame(&mut self.connection, &mut self.frames),
+                )
+                .await
+                .expect("HANG_GUARD")
+                .expect("the daemon kept the connection")
+            }
+
+            /// The next frame `wanted` takes, keeping the others in `passed`.
+            async fn next_of(&mut self, wanted: impl Fn(&HolderFrame) -> bool) -> HolderFrame {
+                loop {
+                    let frame = self.next().await;
+                    if wanted(&frame) {
+                        return frame;
+                    }
+                    self.passed.push(frame);
+                }
+            }
+
+            /// Sends a copy numbered after the last one, taking in one more
+            /// output, and returns its number.
+            async fn push(&mut self, full: bool, lines: &[ScreenLine], generation: u64) -> u64 {
+                self.number += 1;
+                self.outputs_fed += 1;
+                let number = self.number;
+                if !lines.is_empty() {
+                    self.send(&HolderFrame::ScreenRows(ScreenRows {
+                        number,
+                        lines: lines.to_vec(),
+                    }))
+                    .await;
+                }
+                let (cols, rows) = self.size;
+                self.send(&HolderFrame::ScreenPush(ScreenPush {
+                    number,
+                    full,
+                    cols,
+                    rows,
+                    cursor: ScreenCursor::default(),
+                    cursor_hidden: false,
+                    sync_open: false,
+                    input_modes: InputModes::default(),
+                    generation,
+                    outputs_fed: self.outputs_fed,
+                }))
+                .await;
+                number
+            }
+
+            /// Waits for the daemon's answer to copy `number`: its acknowledgement
+            /// or its ask for a whole copy.
+            async fn answer_to_copy(&mut self, number: u64) -> HolderFrame {
+                self.next_of(|frame| match frame {
+                    HolderFrame::PushAck { number: acked } => *acked == number,
+                    HolderFrame::ScreenResync => true,
+                    _ => false,
+                })
+                .await
+            }
+
+            async fn expect_ack(&mut self, number: u64) {
+                let answer = self.answer_to_copy(number).await;
+                assert!(
+                    matches!(answer, HolderFrame::PushAck { .. }),
+                    "copy {number} is applied and acknowledged, got {answer:?}"
+                );
+            }
+
+            /// Answers the next `ReadTail` with `text`.
+            async fn answer_read_tail(&mut self, text: &str) {
+                let asked = self
+                    .next_of(|frame| matches!(frame, HolderFrame::ReadTail { .. }))
+                    .await;
+                let HolderFrame::ReadTail { id, .. } = asked else {
+                    unreachable!()
+                };
+                self.send(&HolderFrame::Tail {
+                    id,
+                    text: text.to_owned(),
+                    truncated: false,
+                })
+                .await;
+            }
+
+            /// Answers the next `Write` as written and returns its bytes.
+            async fn answer_write(&mut self) -> Vec<u8> {
+                let asked = self
+                    .next_of(|frame| matches!(frame, HolderFrame::Write { .. }))
+                    .await;
+                let HolderFrame::Write { id, bytes } = asked else {
+                    unreachable!()
+                };
+                self.send(&HolderFrame::Written { id }).await;
+                bytes
+            }
+
+            /// Takes the next `Resize` without answering it yet.
+            async fn take_resize(&mut self) -> (u16, u16) {
+                let asked = self
+                    .next_of(|frame| matches!(frame, HolderFrame::Resize { .. }))
+                    .await;
+                let HolderFrame::Resize { cols, rows } = asked else {
+                    unreachable!()
+                };
+                (cols, rows)
+            }
+
+            /// Answers the `Resize` taken last the way a holder does: a copy
+            /// of the new size, then `Resized`.
+            async fn finish_resize(&mut self, cols: u16, rows: u16) {
+                self.size = (cols, rows);
+                let number = self.push(true, &[], 0).await;
+                self.send(&HolderFrame::Resized { cols, rows }).await;
+                self.expect_ack(number).await;
+            }
+
+            fn was_told_to_end(&self) -> bool {
+                self.passed
+                    .iter()
+                    .any(|frame| matches!(frame, HolderFrame::Terminate { .. }))
+            }
+        }
+
+        fn shown(session: &PtySession) -> String {
+            session
+                .model_for_detection()
+                .read(|copy| reading::bottom_lines(copy, usize::from(copy.rows)).join("\n"))
+                .value
+                .unwrap_or_default()
+        }
+
+        #[tokio::test]
+        async fn a_copy_that_only_counts_more_output_advances_the_output_arrivals() {
+            let (endpoint, listener) = bind_holder_endpoint("arrival").await;
+            let (session, mut holder) =
+                tokio::join!(played_session(&endpoint), Holder::accept(listener));
+            holder.expect_ack(1).await;
+            // The daemon's link takes the holder's frames in order, so once the
+            // tail is answered the first copy has been taken in entirely.
+            let (tail, ()) = tokio::join!(session.text_tail(1, 64), holder.answer_read_tail(""));
+            assert!(tail.is_some(), "the played holder answered the read");
+
+            let mut arrivals = session.output_arrivals();
+            arrivals.borrow_and_update();
+            let number = holder.push(false, &[], 0).await;
+            tokio::time::timeout(HANG_GUARD, arrivals.changed())
+                .await
+                .expect("a copy with more output taken in is an arrival, rows changed or not")
+                .expect("the arrivals channel stays open while the session lives");
+            holder.expect_ack(number).await;
+        }
+
+        #[tokio::test]
+        async fn a_copy_that_fails_the_check_loses_the_screen_and_asks_for_a_whole_one() {
+            let (endpoint, listener) = bind_holder_endpoint("bad-copy").await;
+            let (session, mut holder) =
+                tokio::join!(played_session(&endpoint), Holder::accept(listener));
+            holder.expect_ack(1).await;
+            let definition = parse_definition(PROMPT_DEF).expect("the definition parses");
+            let mut engine = DetectionEngine::new(
+                Some(definition),
+                &DaemonConfig::default(),
+                session.model_for_detection(),
+            );
+            assert_ne!(
+                engine.on_output(),
+                Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
+                "the copy after the welcome is the screen, not a lost one"
+            );
+
+            let bad = holder
+                .push(false, &[line(ROWS + 5, "below the screen")], 0)
+                .await;
+            let answer = holder.answer_to_copy(bad).await;
+            assert!(
+                matches!(answer, HolderFrame::ScreenResync),
+                "a copy outside its size is answered with an ask for a whole copy, got {answer:?}"
+            );
+            assert_eq!(
+                engine.on_output(),
+                Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
+                "a copy that fails the check loses the window's screen"
+            );
+
+            let whole = holder.push(true, &[line(0, "PLAYED-PROMPT>")], 0).await;
+            holder.expect_ack(whole).await;
+            assert_eq!(
+                engine.on_output(),
+                Some(DetectedStatus::Idle),
+                "a whole copy after the loss is judged again"
+            );
+            assert!(
+                !holder.was_told_to_end(),
+                "a bad copy does not end the child: {:?}",
+                holder.passed
+            );
+            assert_eq!(session.exit_status(), None, "the connection is kept");
+
+            holder.send(&HolderFrame::Exited { code: Some(0) }).await;
+            let late = holder.push(true, &[line(0, "AFTER-EXIT")], 0).await;
+            let mut exited = session.exit_notified();
+            tokio::time::timeout(HANG_GUARD, exited.wait_for(|&gone| gone))
+                .await
+                .expect("the exit is announced")
+                .expect("the exit channel stays open while the session lives");
+            let (tail, ()) = tokio::join!(
+                session.text_tail(5, 1024),
+                holder.answer_read_tail("read after the exit")
+            );
+            assert_eq!(
+                tail.map(|(text, _)| text).as_deref(),
+                Some("read after the exit"),
+                "a copy after the exit is no error of the connection"
+            );
+            let screen = shown(&session);
+            assert!(
+                screen.contains("PLAYED-PROMPT>") && !screen.contains("AFTER-EXIT"),
+                "copy {late} came after the exit and is not applied; the screen shows {screen:?}"
+            );
+        }
+
+        /// The take-back keys ahead of a write are counted at the narrowest
+        /// width the holder may have when it writes them: the size it last
+        /// confirmed or one asked for and not answered yet.
+        #[tokio::test]
+        async fn take_back_keys_are_counted_at_the_narrowest_width_the_holder_may_have() {
+            const CLEAR: u8 = 0x15;
+            let text = "x".repeat(150);
+            let (endpoint, listener) = bind_holder_endpoint("take-back-width").await;
+            let (session, mut holder) =
+                tokio::join!(played_session(&endpoint), Holder::accept(listener));
+            holder.expect_ack(1).await;
+
+            for (asked, narrowest) in [(120u16, COLS), (40, 40)] {
+                let call = session.begin_take_back_call();
+                let registration = TakeBackRegistration::Set {
+                    call,
+                    text: text.clone(),
+                    clear: vec![CLEAR],
+                };
+                let (registered, _) = tokio::join!(
+                    session.write_input_if_unmoved(
+                        text.as_bytes(),
+                        session.writes_recorded(),
+                        registration,
+                        || {}
+                    ),
+                    holder.answer_write()
+                );
+                assert_eq!(
+                    registered.expect("the registering write is made"),
+                    GuardedWrite::Written
+                );
+
+                let (resized, written) = tokio::join!(session.resize(asked, ROWS), async {
+                    let size = holder.take_resize().await;
+                    assert_eq!(size, (asked, ROWS));
+                    let (write, bytes) =
+                        tokio::join!(session.write_input(b"next"), holder.answer_write());
+                    write.expect("the write is made");
+                    holder.finish_resize(asked, ROWS).await;
+                    bytes
+                });
+                resized.expect("the resize is answered");
+
+                let keys = written.iter().take_while(|&&byte| byte == CLEAR).count();
+                assert_eq!(
+                    (keys, &written[keys..]),
+                    (
+                        crate::input::take_back_key_count(&text, narrowest),
+                        b"next".as_slice()
+                    ),
+                    "with {asked} columns asked for and not answered, the keys are counted at \
+                     {narrowest} columns"
+                );
+            }
+        }
     }
 }

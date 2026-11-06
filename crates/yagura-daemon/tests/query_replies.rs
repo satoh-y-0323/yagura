@@ -6,17 +6,14 @@
 //!
 //! The child is `hex_echo --emit <query>...`: it writes the queries to its terminal and
 //! prints every byte it then reads from stdin as hex, so the reply the child received is
-//! read back from the window's raw output.
+//! read back from the window's text.
 
 mod common;
 
-use std::time::Duration;
-
-use common::{Harness, assert_hex_echo_receives, contains_subsequence, hex_echo_path, hex_of};
+use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
 use yagura_daemon::DaemonConfig;
 
 const EMITTED_MARKER: &[u8] = b"QUERIES-EMITTED";
-const FLOODED_MARKER: &[u8] = b"QUERIES-FLOODED";
 
 const DA1: &[u8] = b"\x1b[c";
 const DA2: &[u8] = b"\x1b[>c";
@@ -197,15 +194,9 @@ async fn a_child_flooding_queries_without_reading_does_not_stop_the_reader() {
             None,
         )
         .await;
-    // The echo of the replies that follows the marker outgrows the scrollback
-    // tail, so the marker is looked for in everything the child wrote.
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    while !contains_subsequence(&h.captured_output(&window_id), FLOODED_MARKER) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the child's marker after the flood never showed"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    assert_hex_echo_receives(&h, &window_id, FLOODED_MARKER, b"\x1b[?1;2c").await;
+    // The child echoes nothing before the flood's marker, and the echo of the
+    // replies after it outgrows the window's history, so the reply's hex alone
+    // shows the child read the kept replies once it read again.
+    h.wait_for_scrollback(&window_id, hex_of(b"\x1b[?1;2c").as_bytes())
+        .await;
 }

@@ -747,7 +747,7 @@ Get detailed status and screen content summary for a specific window.
 }
 ```
 
-The `last_output_summary` contains up to 500 characters from the end of the text [`read_output`](#read_output) returns. `mcp_connected` means the same as in [list_windows](#list_windows).
+The `last_output_summary` contains up to 500 characters from the end of the text the window's screen shows, read the way [`read_output`](#read_output) reads it (a line longer than the window is wide is one line) but without the rows that scrolled off its top. `mcp_connected` means the same as in [list_windows](#list_windows).
 
 A window whose `status` is `unknown` carries `unknown_reason` as well, and one running no detection definition carries `detection_warning` -- the same two keys [list_windows](#list_windows) reports, with the same values and the same omission rule:
 

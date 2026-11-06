@@ -3598,8 +3598,9 @@ pub enum DaemonMessage {
         status: WindowStatus,
         /// Milliseconds since the last status change. Always present (non-null).
         since_ms: u64,
-        /// The last characters of the window's text, as `read_output` reads it.
-        /// `None` if the window shows no text or it is unavailable.
+        /// The last characters of the text the window's screen shows, its
+        /// wrapped rows joined as `read_output` reads them. `None` if the
+        /// screen shows no text.
         last_output_summary: Option<String>,
         /// Exit code if the window has exited, `None` if still running.
         exit_code: Option<i32>,

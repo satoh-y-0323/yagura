@@ -17,15 +17,14 @@
 
 mod common;
 
-use common::{ScreenFeed, feed_handle};
+use common::{CopiedEngine, ScreenFeed, SharedLocalScreen, feed_handle};
 use std::path::Path;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::SharedLocalScreen;
-use yagura_daemon::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle};
+use yagura_daemon::detector::engine::{ConfirmedStatus, DetectorHandle};
 use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
@@ -76,13 +75,13 @@ const REST_OF_REPAINT: &[u8] = "\x1b[2;1H› draft body\x1b[3;23H\x1b[?25h".as_b
 /// engine's next deadline falls due, it is ticked.
 struct Driver {
     start: Instant,
-    engine: DetectionEngine,
+    engine: CopiedEngine,
     /// The confirmed status after every step, with the elapsed milliseconds.
     samples: Vec<(u64, WindowStatus)>,
 }
 
 impl Driver {
-    fn new(engine: DetectionEngine) -> Self {
+    fn new(engine: CopiedEngine) -> Self {
         Self {
             start: Instant::now(),
             engine,
@@ -262,7 +261,7 @@ async fn a_composer_query_during_a_repaint_reads_the_finished_screen() {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);
     let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
     feed_handle(&screen, &handle, IDLE_SCREEN);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -332,7 +331,7 @@ async fn idle_handle() -> (
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);
     let screen = engine.screen().clone();
-    let (handle, statuses) = DetectorHandle::spawn(engine);
+    let (handle, statuses) = DetectorHandle::spawn(engine.into_engine());
     feed_handle(&screen, &handle, IDLE_SCREEN);
     tokio::time::sleep(Duration::from_millis(50)).await;
     (handle, statuses, screen)
@@ -396,7 +395,7 @@ async fn a_held_judgement_dates_from_when_its_screen_started_to_be_drawn() {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);
     let screen = engine.screen().clone();
-    let (handle, mut statuses) = DetectorHandle::spawn(engine);
+    let (handle, mut statuses) = DetectorHandle::spawn(engine.into_engine());
     feed_handle(&screen, &handle, IDLE_SCREEN);
     let idle = statuses.recv().await.expect("the idle screen is confirmed");
     assert_eq!(idle.status, DetectedStatus::WaitingInput);

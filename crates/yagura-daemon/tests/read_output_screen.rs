@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! Integration test: `read_output` returns a long value exactly as the window's program
-//! wrote it, on one line, even once it wraps and scrolls the window.
+//! wrote it, on one line, even once it wraps and scrolls the window, and the status
+//! summary is the end of the text the window's screen shows, read the same way.
 //!
 //! Measured through a real daemon process ([`common::real_daemon`]) and a real child
 //! (`env_probe`) on the platform's own pseudo-terminal, whose repaint of wrapped rows is
@@ -43,8 +44,10 @@ async fn a_long_wrapped_value_reads_back_unchanged_on_one_line() {
     );
 }
 
+/// The report wraps over more of the screen than 500 characters, so the last 500
+/// characters the screen shows are the report's last 500, its wrapped rows joined.
 #[tokio::test]
-async fn the_status_summary_is_the_last_500_characters_of_the_same_text() {
+async fn the_status_summary_is_the_last_500_characters_the_screen_shows() {
     let value = long_value();
     let sandbox = Sandbox::new("read-output-summary");
     sandbox.write_var_probe_profile(
@@ -84,7 +87,7 @@ LONG_VALUE = '{value}'
 #[tokio::test]
 async fn the_status_summary_counts_its_500_characters_not_bytes() {
     // One cell but three bytes per euro sign, so a byte budget sized for
-    // ASCII would cut the summary short.
+    // ASCII would cut the summary short. The whole report fits on the screen.
     let value = (0..60)
         .map(|n| format!("{n:02}{}", "\u{20ac}".repeat(6)))
         .collect::<Vec<_>>()

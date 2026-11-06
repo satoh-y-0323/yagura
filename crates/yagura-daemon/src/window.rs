@@ -6882,16 +6882,17 @@ fn summarize_definition_load_failure(rendered: &str) -> String {
         .collect()
 }
 
-/// Tells the detector each time output reaches the window's model,
+/// Tells the detector each time a copy of the window's screen holding more
+/// output was applied (or a copy was refused),
 /// independently of whether a client is attached: detection must keep
-/// converging while the GUI is away. The detector reads the model itself, so
+/// converging while the GUI is away. The detector reads the copy itself, so
 /// arrivals that pile up collapse into one and nothing is lost. Holds only a
 /// [`Weak`] reference to the detector so this task can never be the thing
 /// keeping `Exited` teardown from completing; it upgrades on every arrival
 /// and breaks as soon as that fails.
 pub(crate) fn spawn_output_pump(session: &PtySession, detector: Weak<DetectorHandle>) {
     let mut arrivals = session.output_arrivals();
-    // Output the child wrote before this call is already in the model.
+    // Output the child wrote before this call is already in the copy.
     if *arrivals.borrow_and_update() > 0
         && let Some(detector) = detector.upgrade()
     {

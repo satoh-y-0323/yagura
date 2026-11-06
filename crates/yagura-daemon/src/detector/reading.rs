@@ -4,20 +4,19 @@
 //! to redraw spinners; only a real VT parser reproduces that faithfully.
 //!
 //! The parser runs in the terminal model; what is read here is the model's
-//! copy ([`ScreenCopy`]), so every read is a pure function of a copy and the
-//! definitions' policy. [`HeldCopy`] checks and applies the copies a model
-//! sends, and [`SharedCopy`] is the one a window's readers share.
+//! copy ([`ScreenCopy`]), which the window's holder sends, so every read is a
+//! pure function of a copy and the definitions' policy. [`HeldCopy`] checks
+//! and applies the copies a holder sends, and [`SharedCopy`] is the one a
+//! window's readers share.
 
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use yagura_os::program::HostOs;
 use yagura_protocol::{
     MAX_ZEROWIDTH_PER_CELL, ScreenCopy, ScreenLine, ScreenPush, ScreenRows,
     window_size_within_limit,
 };
-use yagura_term::{Projector, PtyHost, ScreenIntegrity};
 
 use crate::detector::definition::ComposerSection;
 
@@ -184,6 +183,31 @@ fn cursor_position(copy: &ScreenCopy) -> (u16, u16) {
             .col
             .saturating_add(u16::from(cursor.input_needs_wrap)),
     )
+}
+
+/// The text the screen shows, in logical lines: a row the terminal wrapped
+/// ([`ScreenLine::wraps`]) joins the next one, so only a line break the
+/// program wrote ends a line. The spaces after a line's last character and
+/// the blank rows at the bottom are left out. This is the holder's reading of
+/// its history, applied to the visible screen alone.
+#[must_use]
+pub fn screen_text(copy: &ScreenCopy) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for row in &copy.lines {
+        line.push_str(&cells_text(row, 0, usize::from(copy.cols), false).0);
+        if !row.wraps {
+            lines.push(line.trim_end_matches(' ').to_owned());
+            line.clear();
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line.trim_end_matches(' ').to_owned());
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 /// Every screen row as text, covering all contents (dimmed ones too).
@@ -721,6 +745,7 @@ fn blank_lines(rows: u16) -> Vec<ScreenLine> {
         .map(|line| ScreenLine {
             line,
             cells: Vec::new(),
+            wraps: false,
         })
         .collect()
 }
@@ -751,6 +776,20 @@ pub struct CopyRead<R> {
     pub generation: u64,
     /// How many reads of this copy have panicked, this one included.
     pub read_losses: u64,
+    /// How many copies were refused (see [`SharedCopy::apply`]).
+    pub refused: u64,
+}
+
+/// What tells a reader that the screen it read before is gone: the held
+/// copy's rebuild count, the reads that panicked and the copies refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CopyCounts {
+    /// See [`CopyRead::generation`].
+    pub generation: u64,
+    /// See [`CopyRead::read_losses`].
+    pub read_losses: u64,
+    /// See [`CopyRead::refused`].
+    pub refused: u64,
 }
 
 /// The copy of a window's screen, shared by the one that applies copies and
@@ -766,16 +805,43 @@ struct CopySlot {
     /// a reader can tell a lost read from a lost screen and neither hides
     /// the other.
     read_losses: u64,
+    /// Copies that were refused. The copy held stays, but it no longer shows
+    /// what the model shows, so a reader treats it as lost until a whole copy
+    /// replaces it.
+    refused: u64,
 }
 
 impl SharedCopy {
-    /// Applies a copy; see [`HeldCopy::apply`].
+    /// Applies a copy; see [`HeldCopy::apply`]. A refused copy is counted,
+    /// so a reader learns the screen it holds is out of date.
     ///
     /// # Errors
     ///
     /// As [`HeldCopy::apply`].
     pub fn apply(&self, rows: Vec<ScreenRows>, push: ScreenPush) -> Result<(), CopyRefused> {
-        self.0.lock().held.apply(rows, push)
+        let mut slot = self.0.lock();
+        let applied = slot.held.apply(rows, push);
+        if applied.is_err() {
+            slot.refused = slot.refused.wrapping_add(1);
+        }
+        applied
+    }
+
+    /// Counts a copy refused before it reached [`SharedCopy::apply`].
+    pub fn refuse(&self) {
+        let mut slot = self.0.lock();
+        slot.refused = slot.refused.wrapping_add(1);
+    }
+
+    /// The counts as they stand, without reading the copy.
+    #[must_use]
+    pub fn counts(&self) -> CopyCounts {
+        let slot = self.0.lock();
+        CopyCounts {
+            generation: slot.held.copy().map_or(0, |copy| copy.generation),
+            read_losses: slot.read_losses,
+            refused: slot.refused,
+        }
     }
 
     /// Runs `read` on the copy held.
@@ -783,15 +849,16 @@ impl SharedCopy {
     /// Never panics: a panic from `read` is contained, counted in
     /// [`CopyRead::read_losses`], and leaves the copy as it was.
     pub fn read<R>(&self, read: impl FnOnce(&ScreenCopy) -> R) -> CopyRead<R> {
-        let (copy, read_losses) = {
+        let (copy, read_losses, refused) = {
             let slot = self.0.lock();
-            (slot.held.copy.clone(), slot.read_losses)
+            (slot.held.copy.clone(), slot.read_losses, slot.refused)
         };
         let Some(copy) = copy else {
             return CopyRead {
                 value: None,
                 generation: 0,
                 read_losses,
+                refused,
             };
         };
         // `AssertUnwindSafe`: `read` only borrows the copy, which nothing
@@ -801,6 +868,7 @@ impl SharedCopy {
                 value: Some(value),
                 generation: copy.generation,
                 read_losses,
+                refused,
             },
             Err(_) => {
                 let mut slot = self.0.lock();
@@ -813,173 +881,8 @@ impl SharedCopy {
                     value: None,
                     generation: copy.generation,
                     read_losses: slot.read_losses,
+                    refused,
                 }
-            }
-        }
-    }
-}
-
-/// A window's terminal model while the daemon runs it itself, and the copy
-/// carried out of it: every change to the screen made here is carried into
-/// [`LocalScreen::copy`] before the call returns, and the daemon reads only
-/// that copy. It goes once the model runs in the window's holder, which
-/// carries the copy then.
-pub struct LocalScreen {
-    terminal: yagura_term::VtScreen,
-    projector: Projector,
-    copy: SharedCopy,
-    carried: ScreenPush,
-}
-
-impl fmt::Debug for LocalScreen {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.terminal.fmt(f)
-    }
-}
-
-/// A [`LocalScreen`] shared between the one that feeds it and its readers.
-/// The feeder releases the lock fairly and it is never poisoned. Waiting for
-/// it blocks, so it is taken only on threads that may block; the copy is
-/// reached without it.
-#[derive(Debug, Clone)]
-pub struct SharedLocalScreen {
-    screen: Arc<parking_lot::Mutex<LocalScreen>>,
-    copy: SharedCopy,
-}
-
-impl SharedLocalScreen {
-    /// Takes the model's lock.
-    pub fn lock(&self) -> parking_lot::MutexGuard<'_, LocalScreen> {
-        self.screen.lock()
-    }
-
-    /// The copy carried out of the model.
-    #[must_use]
-    pub fn copy(&self) -> &SharedCopy {
-        &self.copy
-    }
-}
-
-impl LocalScreen {
-    /// A blank screen of `cols` x `rows` behind this OS's PTY host; see
-    /// [`yagura_term::VtScreen::new`]. Never panics.
-    #[must_use]
-    pub fn new(cols: u16, rows: u16) -> Self {
-        Self::with_history(cols, rows, 0)
-    }
-
-    /// A blank screen that keeps up to `history_rows` rows scrolled off its
-    /// top; see [`yagura_term::VtScreen::with_history`]. Never panics.
-    #[must_use]
-    pub fn with_history(cols: u16, rows: u16, history_rows: usize) -> Self {
-        let host = PtyHost {
-            requests_win32_input: HostOs::host().pty_host_requests_win32_input(),
-        };
-        let terminal = yagura_term::VtScreen::with_history(cols, rows, history_rows, host);
-        let mut projector = Projector::new();
-        let copy = SharedCopy::default();
-        let (rows, carried) = projector.project(terminal.screen_copy());
-        if let Err(refused) = copy.apply(rows, carried.clone()) {
-            tracing::warn!(%refused, "a blank screen's copy was refused");
-        }
-        Self {
-            terminal,
-            projector,
-            copy,
-            carried,
-        }
-    }
-
-    /// Wraps this screen for sharing between its writer and its readers.
-    #[must_use]
-    pub fn into_shared(self) -> SharedLocalScreen {
-        let copy = self.copy.clone();
-        SharedLocalScreen {
-            screen: Arc::new(parking_lot::Mutex::new(self)),
-            copy,
-        }
-    }
-
-    /// The copy carried out of the model.
-    #[must_use]
-    pub fn copy(&self) -> &SharedCopy {
-        &self.copy
-    }
-
-    /// The close of the copy last carried: the size and modes it shows.
-    #[must_use]
-    pub fn carried(&self) -> &ScreenPush {
-        &self.carried
-    }
-
-    /// The model, for what reads it or changes only its view.
-    #[must_use]
-    pub fn terminal(&self) -> &yagura_term::VtScreen {
-        &self.terminal
-    }
-
-    /// The model, for what reads it or changes only its view; a change to
-    /// the screen goes through [`LocalScreen::feed`] or
-    /// [`LocalScreen::resize`], which carry it.
-    pub fn terminal_mut(&mut self) -> &mut yagura_term::VtScreen {
-        &mut self.terminal
-    }
-
-    /// Feeds `bytes` to the model and carries the screen; see
-    /// [`yagura_term::VtScreen::feed`].
-    pub fn feed(&mut self, bytes: &[u8]) -> ScreenIntegrity {
-        let integrity = self.terminal.feed(bytes);
-        self.carry();
-        integrity
-    }
-
-    /// Feeds `bytes` without carrying the screen, for a feeder that carries
-    /// once after many feeds ([`LocalScreen::note_output`]).
-    pub(crate) fn feed_uncarried(&mut self, bytes: &[u8]) {
-        self.terminal.feed(bytes);
-    }
-
-    /// Counts one chunk of output as taken in and carries the screen with
-    /// the new count, which it returns.
-    pub fn note_output(&mut self) -> u64 {
-        let count = self.terminal.note_output();
-        self.carry();
-        count
-    }
-
-    /// Resizes the model and carries the screen; see
-    /// [`yagura_term::VtScreen::resize`].
-    pub fn resize(&mut self, cols: u16, rows: u16) -> ScreenIntegrity {
-        let integrity = self.terminal.resize(cols, rows);
-        self.carry();
-        integrity
-    }
-
-    /// Arms the model's fault-injection seam; see
-    /// [`yagura_term::VtScreen::poison_after_calls`].
-    pub fn poison_after_calls(&mut self, calls: usize) {
-        self.terminal.poison_after_calls(calls);
-    }
-
-    /// Carries the model's screen into the copy. A copy of its own the copy
-    /// refuses is a defect: it is logged, and the next copy goes whole.
-    fn carry(&mut self) {
-        let screen = self
-            .terminal
-            .read_guarded(yagura_term::VtScreen::screen_copy)
-            .or_else(|| {
-                self.terminal
-                    .read_guarded(yagura_term::VtScreen::screen_copy)
-            });
-        let Some(screen) = screen else {
-            return;
-        };
-        let (rows, push) = self.projector.project(screen);
-        match self.copy.apply(rows, push.clone()) {
-            Ok(()) => self.carried = push,
-            Err(refused) => {
-                tracing::warn!(%refused, "the window's copy refused its own screen");
-                self.projector.resync();
             }
         }
     }
@@ -987,63 +890,45 @@ impl LocalScreen {
 
 #[cfg(test)]
 mod tests {
-    //! The model's guard as the detector reads its copy.
-    //!
-    //! The default panic hook is left in place, so every test that arms the
-    //! seam prints one panic message to stderr; that noise is expected.
+    use yagura_protocol::{InputModes, ScreenCell, ScreenCursor};
 
     use super::*;
 
-    fn bottom(screen: &LocalScreen, n: usize) -> Vec<String> {
-        screen
-            .copy()
-            .read(|copy| bottom_lines(copy, n))
-            .value
-            .unwrap_or_default()
+    fn row(line: u16, text: &str, wraps: bool) -> ScreenLine {
+        ScreenLine {
+            line,
+            cells: text
+                .chars()
+                .enumerate()
+                .map(|(col, c)| ScreenCell {
+                    col: u16::try_from(col).unwrap_or(u16::MAX),
+                    c,
+                    zerowidth: Vec::new(),
+                    dim: false,
+                    wide: false,
+                })
+                .collect(),
+            wraps,
+        }
     }
 
     #[test]
-    fn an_ordinary_feed_and_resize_report_intact() {
-        let mut screen = LocalScreen::new(80, 24);
-
-        assert_eq!(screen.feed(b"ordinary output"), ScreenIntegrity::Intact);
-        assert_eq!(screen.resize(60, 20), ScreenIntegrity::Intact);
-        assert_eq!(screen.terminal().size(), (60, 20));
-        assert!(
-            bottom(&screen, 1)
-                .iter()
-                .any(|line| line.contains("ordinary output")),
-            "an Intact resize must keep the screen contents readable"
-        );
-    }
-
-    #[test]
-    fn a_poisoned_feed_reports_rebuilt_and_recovers_blank_at_the_current_size() {
-        let mut screen = LocalScreen::new(80, 24);
-        screen.feed(b"before the panic");
-
-        screen.poison_after_calls(0);
-        assert_eq!(screen.feed(b"during the panic"), ScreenIntegrity::Rebuilt);
-
-        assert_eq!(screen.terminal().size(), (80, 24));
-        assert!(
-            bottom(&screen, 24).iter().all(String::is_empty),
-            "a rebuilt screen must be blank: everything fed before the panic is lost"
-        );
-    }
-
-    #[test]
-    fn the_screen_stays_usable_after_a_rebuild() {
-        let mut screen = LocalScreen::new(80, 24);
-        screen.poison_after_calls(0);
-        screen.feed(b"during the panic");
-
-        assert_eq!(screen.feed(b"still alive"), ScreenIntegrity::Intact);
-        assert!(
-            bottom(&screen, 1)
-                .iter()
-                .any(|line| line.contains("still alive")),
-            "output fed after a rebuild must reach the new screen"
-        );
+    fn a_space_written_where_the_line_wrapped_stays_between_its_words() {
+        let copy = ScreenCopy {
+            cols: 10,
+            rows: 3,
+            lines: vec![
+                row(0, "AAAAAAAAA ", true),
+                row(1, "BBB  ", false),
+                row(2, "", false),
+            ],
+            cursor: ScreenCursor::default(),
+            cursor_hidden: false,
+            sync_open: false,
+            input_modes: InputModes::default(),
+            generation: 0,
+            outputs_fed: 0,
+        };
+        assert_eq!(screen_text(&copy), "AAAAAAAAA BBB");
     }
 }

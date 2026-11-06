@@ -11,7 +11,7 @@
 mod common;
 
 use common::ScreenFeed;
-use common::{SCREEN_COLS, SCREEN_ROWS, advance_ms, new_engine, screen_of};
+use common::{CopiedEngine, SCREEN_COLS, SCREEN_ROWS, advance_ms, new_engine, screen_of};
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::DetectionEngine;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
@@ -130,7 +130,7 @@ window_ms = 500
 #[tokio::test]
 async fn no_definition_reports_no_definition() {
     let config = DaemonConfig::default();
-    let engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     assert_eq!(
         engine.detected(),
@@ -257,7 +257,7 @@ async fn a_status_event_reporting_unknown_withdraws_itself_and_the_screen_decide
 async fn a_definition_less_engine_stays_no_definition_without_becoming_not_yet_judged() {
     tokio::time::pause();
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let mut engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     assert_eq!(
         engine.detected(),
@@ -327,7 +327,7 @@ async fn a_reason_only_change_confirms_at_confirm_ms_not_before() {
 /// construction-time activity band (no output at all yet), mirroring
 /// `a_freshly_constructed_both_sided_engine_reaches_running_without_any_output`
 /// in `detector_engine.rs`.
-async fn engine_confirmed_running() -> DetectionEngine {
+async fn engine_confirmed_running() -> CopiedEngine {
     let config = DaemonConfig::default();
     let mut engine = new_engine(TIME_BOTH_DEF, &config);
     assert_eq!(engine.on_tick(), None);

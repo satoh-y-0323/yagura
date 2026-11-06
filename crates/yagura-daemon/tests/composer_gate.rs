@@ -2270,8 +2270,11 @@ async fn a_wrap_boundary_space_the_reading_lost_does_not_keep_a_reflected_body_f
         SubmitPlacement::Placed(_) => {}
         other => panic!("a write the fixture reflected must still place, got {other:?}"),
     }
-    h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
-        .await;
+    h.wait_for_scrollback(
+        &window_id,
+        format!("SUBMITTED {}", body.trim_end()).as_bytes(),
+    )
+    .await;
     let read = child_read(&h, &window_id, &dir, "wrapspeed").await;
     assert_eq!(
         read.line_writes(&body),
@@ -2331,8 +2334,11 @@ async fn residue_restored_from_screen_ignores_a_wrap_boundary_space_the_reading_
              resend, got {other:?}"
         ),
     }
-    h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
-        .await;
+    h.wait_for_scrollback(
+        &window_id,
+        format!("SUBMITTED {}", body.trim_end()).as_bytes(),
+    )
+    .await;
     let read = child_read(&h, &window_id, &dir, "wrapres").await;
     assert_eq!(
         read.count(body.as_bytes()),

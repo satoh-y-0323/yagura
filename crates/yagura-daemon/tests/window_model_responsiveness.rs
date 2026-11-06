@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! A window whose terminal model is busy must not hold up anyone else: a read
-//! of that window still gets its turn while the child floods the model, and a
-//! request about another window is answered while this one's model is held.
+//! of that window still gets its turn while the child floods the model, and
+//! the daemon answers what needs no holder while a holder does not answer.
 //!
 //! Each case runs on a single-threaded runtime of its own (see
 //! `run_on_own_runtime`), so anything that waits on a model on the runtime's
@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use common::{Harness, read_response, run_on_own_runtime, send};
 use yagura_daemon::{DaemonConfig, PtySession};
+use yagura_protocol::holder::HolderFault;
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
 /// The flooded screen's size. The cases measure that reads get their turn
@@ -88,60 +89,74 @@ fn reads_get_their_turn_while_the_child_floods_repeat_requests() {
     run_on_own_runtime(|| reads_get_their_turn_during("rep"));
 }
 
-/// Sends `request` about a window whose model is held, then the same request
-/// about another window, which must be answered before the model is released.
-async fn another_window_is_answered_while_one_model_is_held(request: fn(String) -> ClientMessage) {
-    let h = Harness::start("model-responsiveness", DaemonConfig::default()).await;
-    let held_id = h
+/// A daemon whose windows are kept by the fault-injecting holder, which stops
+/// its model's work once the window has opened: it sends no copy, answers no
+/// read of its text and settles nothing after that.
+fn stalled_model_config() -> DaemonConfig {
+    let shipped = DaemonConfig::default()
+        .holder_exe
+        .expect("the test binary has a holder beside it");
+    let holder_exe =
+        shipped.with_file_name(format!("holder_fault{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        holder_exe.exists(),
+        "build the holder's binaries first: {}",
+        holder_exe.display()
+    );
+    DaemonConfig {
+        holder_exe: Some(holder_exe),
+        holder_fault: Some(HolderFault::StallModel),
+        ..DaemonConfig::default()
+    }
+}
+
+/// While a read of one window's text waits on a holder that does not answer,
+/// the daemon still answers what it holds itself: another window's status and
+/// the list of windows.
+async fn the_daemon_answers_while_a_holder_does_not() {
+    let h = Harness::start("model-responsiveness", stalled_model_config()).await;
+    let stalled_id = h
         .open(yagura_test_support::process::echo_child_command(), None)
         .await;
     let other_id = h
         .open(yagura_test_support::process::echo_child_command(), None)
         .await;
-    let held_session = h.registry.get(&held_id).unwrap().session().clone();
 
-    let hold = held_session.hold_model();
-    let mut held_client = h.connect().await;
-    send(&mut held_client, &request(held_id.clone())).await;
+    let mut stalled_client = h.connect().await;
+    send(
+        &mut stalled_client,
+        &ClientMessage::ReadOutput {
+            window_id: stalled_id.clone(),
+            lines: Some(50),
+        },
+    )
+    .await;
 
     let mut other_client = h.connect().await;
     for _ in 0..3 {
-        send(&mut other_client, &request(other_id.clone())).await;
+        send(
+            &mut other_client,
+            &ClientMessage::GetWindowStatus {
+                window_id: other_id.clone(),
+            },
+        )
+        .await;
         let reply = read_response(&mut other_client).await;
-        assert_answers(&reply);
+        assert!(
+            matches!(reply, DaemonMessage::WindowStatus { .. }),
+            "unexpected reply {reply:?}"
+        );
     }
-
-    drop(hold);
-    let reply = read_response(&mut held_client).await;
-    assert_answers(&reply);
+    send(&mut other_client, &ClientMessage::ListWindows).await;
+    let reply = read_response(&mut other_client).await;
+    assert!(
+        matches!(reply, DaemonMessage::WindowList { .. }),
+        "unexpected reply {reply:?}"
+    );
     h.registry.terminate_all().await;
 }
 
-fn assert_answers(reply: &DaemonMessage) {
-    assert!(
-        matches!(
-            reply,
-            DaemonMessage::WindowOutput { .. } | DaemonMessage::WindowStatus { .. }
-        ),
-        "unexpected reply {reply:?}"
-    );
-}
-
 #[test]
-fn read_output_of_another_window_is_answered_while_one_model_is_held() {
-    run_on_own_runtime(|| {
-        another_window_is_answered_while_one_model_is_held(|window_id| ClientMessage::ReadOutput {
-            window_id,
-            lines: Some(50),
-        })
-    });
-}
-
-#[test]
-fn the_status_of_another_window_is_answered_while_one_model_is_held() {
-    run_on_own_runtime(|| {
-        another_window_is_answered_while_one_model_is_held(|window_id| {
-            ClientMessage::GetWindowStatus { window_id }
-        })
-    });
+fn the_daemon_answers_while_one_holder_does_not() {
+    run_on_own_runtime(the_daemon_answers_while_a_holder_does_not);
 }

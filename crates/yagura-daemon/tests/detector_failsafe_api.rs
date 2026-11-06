@@ -1,18 +1,27 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! `LocalScreen::feed` / `LocalScreen::resize` report screen integrity via `ScreenIntegrity`.
+//! `VtScreen::feed` / `VtScreen::resize` report screen integrity via `ScreenIntegrity`.
 //! Kept apart from `tests/detector_failsafe.rs`, which states its contracts without
 //! naming that type.
 
-use yagura_daemon::detector::LocalScreen;
-use yagura_term::ScreenIntegrity;
+use yagura_term::{PtyHost, ScreenIntegrity, VtScreen};
 
 /// Screen-corruption stimulus: fed twice before a degenerate resize.
 const RESIZE_CHUNK: &[u8] = b"redrawn screen chunk";
 
+fn blank_screen() -> VtScreen {
+    VtScreen::new(
+        80,
+        24,
+        PtyHost {
+            requests_win32_input: false,
+        },
+    )
+}
+
 #[test]
 fn canonical_recovery_reports_rebuilt_and_a_plain_call_reports_intact() {
-    let mut screen = LocalScreen::new(80, 24);
+    let mut screen = blank_screen();
     assert_eq!(screen.feed(RESIZE_CHUNK), ScreenIntegrity::Intact);
     assert_eq!(screen.feed(RESIZE_CHUNK), ScreenIntegrity::Intact);
     assert_eq!(screen.resize(46, 1), ScreenIntegrity::Intact);
@@ -23,7 +32,7 @@ fn canonical_recovery_reports_rebuilt_and_a_plain_call_reports_intact() {
         "the canonical resize-then-feed sequence must report Rebuilt once recovery runs"
     );
 
-    let mut plain = LocalScreen::new(80, 24);
+    let mut plain = blank_screen();
     assert_eq!(
         plain.feed(b"ordinary output"),
         ScreenIntegrity::Intact,

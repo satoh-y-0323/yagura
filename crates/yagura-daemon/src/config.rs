@@ -418,6 +418,13 @@ pub struct DaemonConfig {
     /// directory; `None` (the default) has the window registry make a place
     /// of its own on its first open (see [`crate::HolderHost`]).
     pub holder_place: Option<crate::holder_host::HolderPlace>,
+
+    /// A fault every window's holder is asked to act out; only the
+    /// fault-injecting holder (`holder_fault`, set as
+    /// [`DaemonConfig::holder_exe`]) does, and the shipped one refuses such a
+    /// launch. A test seam (the `fault-injection` feature only).
+    #[cfg(feature = "fault-injection")]
+    pub holder_fault: Option<yagura_protocol::holder::HolderFault>,
 }
 
 /// The holder beside the running executable, under the rule for a test
@@ -585,6 +592,16 @@ pub struct StartupParts {
 }
 
 impl DaemonConfig {
+    /// The fault a window's holder launch names: always `None` outside the
+    /// `fault-injection` feature.
+    pub(crate) fn launch_fault(&self) -> Option<yagura_protocol::holder::HolderFault> {
+        #[cfg(feature = "fault-injection")]
+        let fault = self.holder_fault;
+        #[cfg(not(feature = "fault-injection"))]
+        let fault = None;
+        fault
+    }
+
     /// Builds the configuration the daemon binary runs with: every startup
     /// value from `parts`, every other field at its default.
     #[must_use]
@@ -701,6 +718,8 @@ impl Default for DaemonConfig {
             mcp_listing_timeout: Duration::from_secs(DEFAULT_MCP_LISTING_TIMEOUT_SECS),
             holder_exe: default_holder_exe(),
             holder_place: None,
+            #[cfg(feature = "fault-injection")]
+            holder_fault: None,
         }
     }
 }

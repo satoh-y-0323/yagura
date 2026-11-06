@@ -5,7 +5,7 @@
 //! The daemon keeps every window through a `yagura-holder` process: the window's child
 //! runs under the holder, every end of the window (closing it, the daemon's shutdown,
 //! the daemon going away) ends the child's tree and the holder, and none of them leaves
-//! the holder's files -- the window's raw output -- behind.
+//! the holder's files behind.
 //!
 //! Each process is watched from while it is known to be alive, so its end is observed
 //! on the process itself rather than on a reused pid.
@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
+use yagura_daemon::detector::reading;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, WindowRegistry};
 use yagura_protocol::holder::{holder_exit_path, holder_record_path, read_holder_record};
 use yagura_protocol::{ClientMessage, DaemonMessage};
@@ -370,19 +371,29 @@ async fn the_last_output_before_the_exit_is_in_the_model_once_the_exit_is_known(
         "output written before the exit must be in the model once the exit is known; it \
          shows {text:?}"
     );
+    let screen = session
+        .read_screen(|copy| reading::bottom_lines(copy, usize::from(copy.rows)).join("\n"))
+        .await
+        .expect("the screen copy must be readable");
+    assert!(
+        screen.contains("LAST-WORDS"),
+        "output written before the exit must be on the screen the daemon reads once the exit \
+         is known; it shows {screen:?}"
+    );
     assert_eq!(session.exit_status(), Some(7));
 }
 
-const HOLDER_ACK_WINDOW: u64 = yagura_holder::ACK_WINDOW;
+/// Many more small writes than one screen holds.
+const FLOOD_BYTES: u64 = 4 * 1024 * 1024 + 64 * 1024;
 
-/// A child that writes more than four of the holder's windows in small writes and
-/// then a marker, staying alive, has the marker reach the model: the daemon's acks
-/// keep the holder reading however few of them there are.
+/// A child that floods in small writes and then writes a marker, staying alive,
+/// has the marker reach the model and the copy the daemon reads: the copies the
+/// daemon acknowledges keep coming however many writes there are.
 #[tokio::test]
-async fn output_beyond_four_ack_windows_in_small_writes_reaches_the_model() {
+async fn a_flood_in_small_writes_ends_with_its_marker_in_the_model_and_the_copy() {
     let child =
         holder_path().with_file_name(format!("holder_child{}", std::env::consts::EXE_SUFFIX));
-    let total = 4 * HOLDER_ACK_WINDOW + 64 * 1024;
+    let total = FLOOD_BYTES;
     let tmp = yagura_test_support::paths::TempDir::new("yagura-holder-window", "ack-flood");
     let count_file = tmp.path().join("count");
     let command = vec![
@@ -419,10 +430,22 @@ async fn output_beyond_four_ack_windows_in_small_writes_reaches_the_model() {
             })
             .expect("the arrivals channel must stay open while the session lives");
     }
-    assert!(
-        session.captured_output().len() as u64 > 4 * HOLDER_ACK_WINDOW,
-        "the window must have taken in more than four ack windows"
-    );
+    loop {
+        arrivals.borrow_and_update();
+        let screen = session
+            .read_screen(|copy| reading::bottom_lines(copy, usize::from(copy.rows)).join("\n"))
+            .await
+            .expect("the screen copy must be readable");
+        if screen.contains("HOLDER-CHILD-FLOODED") {
+            break;
+        }
+        tokio::time::timeout_at(deadline, arrivals.changed())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("the marker after {total} bytes never reached the copy; it shows {screen:?}")
+            })
+            .expect("the arrivals channel must stay open while the session lives");
+    }
     assert_eq!(session.exit_status(), None, "the child must still be alive");
 
     let _ = yagura_daemon::control::close_window(&entry, true, Duration::from_secs(5)).await;

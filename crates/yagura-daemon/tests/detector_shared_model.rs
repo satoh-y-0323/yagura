@@ -1,9 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Detection reads the window's own terminal model, so it judges the screen the
-//! window actually shows: a burst it did not follow chunk by chunk cannot leave
-//! it with a lost screen, and a window whose model is busy cannot stall the
-//! detection of another.
+//! Detection reads the copy of the window's own terminal model, so it judges the
+//! screen the window actually shows: a burst it did not follow chunk by chunk
+//! cannot leave it with a lost screen.
 
 mod common;
 
@@ -12,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{
-    CONTROL_DETECTION_NAME, HANG_GUARD, Harness, READY_MARKER, read_response, run_on_own_runtime,
-    send, unique_temp_dir, write_control_definition_with_bottom_line_count,
+    CONTROL_DETECTION_NAME, HANG_GUARD, Harness, READY_MARKER, read_response, send,
+    unique_temp_dir, write_control_definition_with_bottom_line_count,
 };
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, PtySession, WindowEntry, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage, DetectedStatus, UnknownReason, WindowStatus};
@@ -207,62 +206,6 @@ async fn detection_judges_the_same_tall_screen_when_nothing_lagged() {
     h.registry.terminate_all().await;
 }
 
-#[test]
-fn detection_in_one_window_goes_on_while_another_window_s_model_is_held() {
-    run_on_own_runtime(detection_goes_on_while_held);
-}
-
-async fn detection_goes_on_while_held() {
-    let dir = unique_temp_dir("shared-model-held");
-    let config = config_with(&dir, None, DaemonConfig::default());
-    let h = Harness::start("shared-model-held", config).await;
-
-    let held_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
-    let quiet_id = h
-        .open(
-            yagura_test_support::process::echo_child_command(),
-            Some(CONTROL_DETECTION_NAME),
-        )
-        .await;
-
-    let held_session = h.registry.get(&held_id).unwrap().session().clone();
-    let hold = held_session.hold_model();
-    // Output arriving at the held window leaves its reader waiting on the held
-    // lock; a resize notice sends its detection to read the model too.
-    h.write_input(&held_id, READY_MARKER).await;
-    h.registry.get(&held_id).unwrap().propagate_resize();
-
-    h.write_input(&quiet_id, READY_MARKER).await;
-    let reached = wait_for_status(&h, &quiet_id, WindowStatus::Idle).await;
-    assert!(
-        reached.is_ok(),
-        "the quiet window stayed at {:?} while the other window's model was held",
-        reached.unwrap_err()
-    );
-    // Pushes the marker out of the matched bottom region.
-    h.write_input(&quiet_id, b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\ng\r\n")
-        .await;
-    let left = wait_for_status(&h, &quiet_id, WindowStatus::Unknown).await;
-    assert!(
-        left.is_ok(),
-        "the quiet window never left idle while the other window's model was held"
-    );
-
-    drop(hold);
-    let released = wait_for_status(&h, &held_id, WindowStatus::Idle).await;
-    assert!(
-        released.is_ok(),
-        "the held window stayed at {:?} after its model was released",
-        released.unwrap_err()
-    );
-    h.registry.terminate_all().await;
-}
-
 /// No time table, so nothing but output or a resize notice makes the detector
 /// read the model.
 const RULES_ONLY_DETECTION_NAME: &str = "rules-only-test";
@@ -280,7 +223,7 @@ async fn wait_for_detected(entry: &WindowEntry, expected: DetectedStatus) {
 }
 
 #[tokio::test]
-async fn a_resize_notice_degrades_a_quiet_window_whose_model_was_rebuilt() {
+async fn a_resize_notice_degrades_a_quiet_window_whose_screen_read_was_lost() {
     let dir = unique_temp_dir("shared-model-resize-rebuilt");
     std::fs::write(
         dir.join(format!("{RULES_ONLY_DETECTION_NAME}.toml")),
@@ -307,11 +250,11 @@ async fn a_resize_notice_degrades_a_quiet_window_whose_model_was_rebuilt() {
     entry.session().write_input(READY_MARKER).await.unwrap();
     wait_for_detected(&entry, DetectedStatus::Idle).await;
 
-    // A read that panics inside the model rebuilds it blank; the detector
-    // learns of it only when it next reads the model.
+    // A read of the window's copy that panics is lost; the detector learns
+    // of it only when it next reads the copy.
     let read = entry
         .session()
-        .read_screen(|_| -> bool { panic!("rebuild the model") })
+        .read_screen(|_| -> bool { panic!("lose this read") })
         .await;
     assert!(
         read.is_none(),

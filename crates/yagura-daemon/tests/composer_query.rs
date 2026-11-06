@@ -7,7 +7,7 @@
 //! Two layers are covered:
 //!
 //! - `DetectionEngine::query_composer` -- a synchronous method on the engine
-//!   itself, which owns the `VtScreen` and can slice it without any I/O, reachable without a
+//!   itself, which reads the window's screen copy without any I/O, reachable without a
 //!   background task.
 //! - `DetectorHandle::query_composer` -- the async round trip a caller outside
 //!   the engine's task actually uses, which must resolve even when the engine
@@ -42,11 +42,11 @@ use common::ScreenFeed;
 use std::time::Duration;
 
 use common::{
-    SCREEN_COLS, SCREEN_ROWS, feed_handle, new_engine, new_engine_sized, repaint, screen_of,
-    tick_after_ms,
+    CopiedEngine, SCREEN_COLS, SCREEN_ROWS, feed_handle, new_engine, new_engine_sized, repaint,
+    screen_of, tick_after_ms,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
+use yagura_daemon::detector::engine::DetectorHandle;
 use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::handoff;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
@@ -168,61 +168,11 @@ async fn query_reflects_the_screen_as_of_the_call_not_a_previously_pushed_value(
     );
 }
 
-// --- A busy model delays the answer; no clock turns it into "cannot tell" ---
-
-/// A model whose lock is held elsewhere (a flood of output being fed, a read of
-/// another request) answers late, and a late answer is still the answer: the
-/// caller is released by the engine ending or by the caller itself, never by a
-/// bound the query carries. The clock is paused, so every duration a bound
-/// could have been is spent before the model is let go.
-#[tokio::test(start_paused = true)]
-async fn a_query_on_a_busy_model_waits_for_the_model_instead_of_giving_up_on_a_clock() {
-    let config = DaemonConfig::default();
-    let mut engine = new_engine(COMPOSER_DEF, &config);
-    engine.feed(&composer_line("draft"));
-    let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
-    let handle = std::sync::Arc::new(handle);
-
-    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let holder = std::thread::spawn(move || {
-        let _model = screen.lock();
-        let _ = held_tx.send(());
-        let _ = release_rx.recv();
-    });
-    held_rx.recv().expect("the model must be held");
-
-    let query = tokio::spawn({
-        let handle = std::sync::Arc::clone(&handle);
-        async move { handle.query_composer().await }
-    });
-    // The query is registered with the engine before the clock moves.
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(3600)).await;
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-    assert!(
-        !query.is_finished(),
-        "a query on a busy model must wait for the model, not resolve once a clock bound passes"
-    );
-
-    release_tx.send(()).expect("release the model");
-    let observation = query.await.expect("the query task must not panic");
-    assert_eq!(
-        observation.readout,
-        ComposerReadout::Body("draft".to_string()),
-        "the answer after the model is let go is the screen as it stands, not a gave-up reading"
-    );
-    holder.join().expect("the holder thread must not panic");
-}
-
 #[tokio::test]
 async fn detector_handle_query_composer_returns_promptly_after_the_engine_task_has_already_ended() {
     let config = DaemonConfig::default();
     let engine = new_engine(COMPOSER_DEF, &config);
-    let (handle, statuses) = DetectorHandle::spawn(engine);
+    let (handle, statuses) = DetectorHandle::spawn(engine.into_engine());
     // Nobody is left to receive a confirmed-status change, so the driver
     // task's next publish attempt fails and it ends -- the engine really has
     // stopped, not merely gone quiet.
@@ -405,7 +355,7 @@ async fn a_rebuilt_screen_withdraws_composer_trust_from_a_status_a_report_confir
     engine.feed(RESIZE_CHUNK);
     engine.feed(RESIZE_CHUNK);
     engine.screen().lock().resize(46, 1);
-    engine.poison_screen_after_calls(0);
+    engine.screen().lock().poison_after_calls(0);
     assert_eq!(
         engine.feed(RESIZE_CHUNK),
         Some(DetectedStatus::Unknown(UnknownReason::ScreenLost)),
@@ -450,7 +400,7 @@ async fn a_definition_without_a_composer_section_never_observes_one() {
 #[tokio::test]
 async fn an_engine_with_no_definition_at_all_never_observes_a_composer() {
     let config = DaemonConfig::default();
-    let mut engine = DetectionEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
+    let mut engine = CopiedEngine::new(None, &config, screen_of(SCREEN_COLS, SCREEN_ROWS));
 
     engine.feed(&composer_line("draft"));
 
@@ -470,7 +420,7 @@ async fn the_answer_says_whether_the_screen_it_was_read_from_was_finished_painti
     let config = DaemonConfig::default();
     let engine = new_engine(COMPOSER_DEF, &config);
     let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine);
+    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
     feed_handle(&screen, &handle, &composer_line("draft"));
 
     let steps: [(&[u8], bool, &str); 4] = [

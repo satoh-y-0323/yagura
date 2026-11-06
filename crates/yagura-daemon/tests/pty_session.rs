@@ -13,7 +13,6 @@ use std::time::Duration;
 #[cfg(windows)]
 use yagura_test_support::paths::strip_extended_length_prefix;
 use yagura_test_support::process::{echo_child_command, echo_child_path};
-use yagura_test_support::scan::contains_subsequence;
 
 use yagura_daemon::{DaemonConfig, PtySession, WindowsShellSearch, resolve_shell};
 
@@ -25,17 +24,19 @@ async fn spawn_echo_session(config: &DaemonConfig) -> PtySession {
         .expect("spawn_with_command should start echo_child")
 }
 
-/// Pass criterion: the written bytes appear at least once as a subsequence of the read
-/// stream. ConPTY local echo, VT sequences and CRLF translation are tolerated.
-async fn recv_until_contains(session: &PtySession, needle: &[u8]) -> Vec<u8> {
+/// Pass criterion: the written text appears at least once in the window's text.
+/// ConPTY local echo is tolerated.
+async fn recv_until_contains(session: &PtySession, needle: &str) -> String {
     let mut arrivals = session.output_arrivals();
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
         arrivals.borrow_and_update();
-        // An arrival is announced only once the raw bytes are kept, so a chunk
-        // is in here by the time its arrival wakes this loop.
-        let collected = session.captured_output();
-        if contains_subsequence(&collected, needle) {
+        let collected = session
+            .text_tail(1000, 64 * 1024)
+            .await
+            .expect("the window's text is readable")
+            .0;
+        if collected.contains(needle) {
             return collected;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -230,7 +231,7 @@ async fn spawn_with_command_echoes_ascii_input() {
         .await
         .expect("write_input should succeed while child is running");
 
-    let _ = recv_until_contains(&session, payload).await;
+    let _ = recv_until_contains(&session, "hello-yagura").await;
 }
 
 #[tokio::test]
@@ -244,7 +245,7 @@ async fn spawn_with_command_echoes_japanese_utf8_as_subsequence() {
         .await
         .expect("write_input should succeed while child is running");
 
-    let _ = recv_until_contains(&session, payload).await;
+    let _ = recv_until_contains(&session, "やぐら日本語テスト").await;
 }
 
 #[tokio::test]

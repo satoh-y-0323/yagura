@@ -2,8 +2,8 @@
 
 //! Integration test: the frames between the daemon and a window's holder.
 //! A frame is a `u32` LE length of what follows, a `u16` LE type and a body;
-//! the body of a byte-carrying frame is a `u64` LE sequence or id followed by
-//! the raw bytes, and every other body is JSON.
+//! the body of a byte-carrying frame is a `u64` LE id followed by the raw
+//! bytes, and every other body is JSON.
 
 use yagura_protocol::holder::{HolderFrame, decode_holder_frame, encode_holder_frame};
 
@@ -30,19 +30,9 @@ fn every_frame_survives_an_encode_decode_round_trip() {
             protocol: 3,
             daemon_boot: "boot-1".to_owned(),
         },
-        HolderFrame::Replay,
-        HolderFrame::Checkpoint {
-            seq: 10,
-            bytes: b"\x1b[2J\x00\xff".to_vec(),
-        },
-        HolderFrame::Output {
-            seq: u64::MAX,
+        HolderFrame::Write {
+            id: u64::MAX,
             bytes: vec![0, 1, 2, 0xff],
-        },
-        HolderFrame::Ack { seq: 42 },
-        HolderFrame::StoreCheckpoint {
-            seq: 7,
-            bytes: Vec::new(),
         },
         HolderFrame::Write {
             id: 5,
@@ -67,7 +57,7 @@ fn every_frame_survives_an_encode_decode_round_trip() {
         let mut stream = encode_holder_frame(&frame);
         let first_len = stream.len();
         // A second frame behind the first must be left for the next call.
-        stream.extend_from_slice(&encode_holder_frame(&HolderFrame::Ack { seq: 1 }));
+        stream.extend_from_slice(&encode_holder_frame(&HolderFrame::Written { id: 1 }));
         let (decoded, consumed) = decode_holder_frame(&stream)
             .expect("decode")
             .expect("complete frame");
@@ -77,10 +67,10 @@ fn every_frame_survives_an_encode_decode_round_trip() {
 }
 
 #[test]
-fn a_byte_frame_carries_its_sequence_and_raw_bytes_outside_json() {
+fn a_byte_frame_carries_its_id_and_raw_bytes_outside_json() {
     let bytes = vec![0x00, 0xff, b'"', b'\\', 0x1b];
-    let encoded = encode_holder_frame(&HolderFrame::Output {
-        seq: 0x0102_0304_0506_0708,
+    let encoded = encode_holder_frame(&HolderFrame::Write {
+        id: 0x0102_0304_0506_0708,
         bytes: bytes.clone(),
     });
     let declared = u32::from_le_bytes(encoded[0..4].try_into().unwrap());
@@ -146,13 +136,13 @@ fn incomplete_input_waits_and_broken_frames_are_errors() {
         );
     }
 
-    // A byte frame whose body is too short to hold its sequence.
-    let encoded = encode_holder_frame(&HolderFrame::Output {
-        seq: 1,
+    // A byte frame whose body is too short to hold its id.
+    let encoded = encode_holder_frame(&HolderFrame::Write {
+        id: 1,
         bytes: Vec::new(),
     });
-    let output_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
-    assert!(decode_holder_frame(&framed(output_type, &[1, 2, 3])).is_err());
+    let write_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
+    assert!(decode_holder_frame(&framed(write_type, &[1, 2, 3])).is_err());
 
     // A JSON body that is not JSON, and one missing a required field.
     assert!(decode_holder_frame(&framed(1, b"{not json")).is_err());
@@ -166,7 +156,7 @@ fn incomplete_input_waits_and_broken_frames_are_errors() {
 fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
     use std::path::PathBuf;
     use yagura_protocol::holder::{
-        HolderLaunch, HolderSpawnFailure, decode_holder_launch, encode_holder_launch,
+        HolderFault, HolderLaunch, HolderSpawnFailure, decode_holder_launch, encode_holder_launch,
     };
 
     let frames = [
@@ -201,11 +191,25 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         holders_dir: PathBuf::from("state").join("holders"),
         daemon_endpoint: "daemon-endpoint".to_owned(),
         end_child_on_disconnect: true,
+        history_rows: 1000,
+        palette: Some(yagura_protocol::built_in_dark_palette()),
+        fault: None,
     };
     assert_eq!(
         decode_holder_launch(&encode_holder_launch(&launch)).unwrap(),
         launch
     );
+    for fault in [HolderFault::StallModel, HolderFault::PoisonModel] {
+        let faulty = HolderLaunch {
+            fault: Some(fault),
+            palette: None,
+            ..launch.clone()
+        };
+        assert_eq!(
+            decode_holder_launch(&encode_holder_launch(&faulty)).unwrap(),
+            faulty
+        );
+    }
 }
 
 /// The daemon learns the child's pid from the `Welcome`, not from the record
@@ -219,10 +223,7 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
         cols: 80,
         rows: 24,
         exited: false,
-        checkpoint_seq: Some(5),
-        replay_end_seq: 9,
         child_pid: Some(4242),
-        ack_window: None,
     };
     let encoded = encode_holder_frame(&welcome);
     assert_eq!(decode_whole(&encoded), welcome);
@@ -230,54 +231,160 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
     let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
     let without_pid = framed(
         welcome_type,
-        br#"{"protocol":3,"record":"record","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9}"#,
+        br#"{"protocol":3,"record":"record","cols":80,"rows":24,"exited":false}"#,
     );
     match decode_whole(&without_pid) {
         HolderFrame::Welcome {
-            child_pid,
-            replay_end_seq,
-            ..
+            child_pid, cols, ..
         } => {
             assert_eq!(child_pid, None);
-            assert_eq!(replay_end_seq, 9);
+            assert_eq!(cols, 80);
         }
         other => panic!("expected Welcome, got {other:?}"),
     }
 }
 
-/// The daemon acks in steps of the window the holder names in its `Welcome`;
-/// a `Welcome` from a holder that does not name one reads as having none.
+/// The frames that carry the terminal kept in the holder: the screen copy and
+/// its acknowledgement, the view, the reads and the settle.
 #[test]
-fn welcome_carries_the_holders_ack_window_and_one_without_it_reads_as_none() {
-    let welcome = HolderFrame::Welcome {
-        protocol: 3,
-        record: "record".to_owned(),
+fn the_frames_of_the_terminal_in_the_holder_round_trip() {
+    use yagura_protocol::holder::{HolderViewNote, HolderViewOp};
+    use yagura_protocol::{
+        CellPosition, CursorShape, CursorState, Frame, InputModes, Modifiers, PointerButton,
+        PointerInput, PointerKind, ScreenCell, ScreenCursor, ScreenLine, ScreenPush, ScreenRows,
+        ViewState,
+    };
+
+    let frame = Frame {
+        seq: 3,
         cols: 80,
         rows: 24,
-        exited: false,
-        checkpoint_seq: None,
-        replay_end_seq: 9,
-        child_pid: Some(4242),
-        ack_window: Some(256 * 1024),
+        reset: true,
+        last: true,
+        attrs: Vec::new(),
+        lines: Vec::new(),
+        cursor: CursorState {
+            row: 1,
+            col: 2,
+            visible: true,
+            shape: CursorShape::Block,
+        },
+        view: ViewState {
+            display_offset: 0,
+            history_rows: 5,
+            mouse_reporting: false,
+            alt_screen: false,
+        },
+        overrides: Vec::new(),
     };
-    let encoded = encode_holder_frame(&welcome);
-    assert_eq!(decode_whole(&encoded), welcome);
-
-    let welcome_type = u16::from_le_bytes(encoded[4..6].try_into().unwrap());
-    let ack_window_of = |json: &[u8]| match decode_whole(&framed(welcome_type, json)) {
-        HolderFrame::Welcome { ack_window, .. } => ack_window,
-        other => panic!("expected Welcome, got {other:?}"),
+    let pointer = PointerInput {
+        kind: PointerKind::Down,
+        button: PointerButton::Left,
+        cell: CellPosition { col: 3, row: 4 },
+        mods: Modifiers::default(),
+        clicks: 2,
     };
-    assert_eq!(
-        ack_window_of(
-            br#"{"protocol":3,"record":"r","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9,"child_pid":4242}"#
-        ),
-        None
-    );
-    assert_eq!(
-        ack_window_of(
-            br#"{"protocol":3,"record":"r","cols":80,"rows":24,"exited":false,"checkpoint_seq":null,"replay_end_seq":9,"child_pid":4242,"ack_window":262144}"#
-        ),
-        Some(262_144)
-    );
+    let frames = [
+        HolderFrame::ScreenRows(ScreenRows {
+            number: 7,
+            lines: vec![ScreenLine {
+                line: 0,
+                cells: vec![ScreenCell {
+                    col: 1,
+                    c: 'a',
+                    zerowidth: vec!['\u{301}'],
+                    dim: true,
+                    wide: false,
+                }],
+                wraps: true,
+            }],
+        }),
+        HolderFrame::ScreenPush(ScreenPush {
+            number: 7,
+            full: true,
+            cols: 80,
+            rows: 24,
+            cursor: ScreenCursor {
+                line: 0,
+                col: 2,
+                input_needs_wrap: false,
+            },
+            cursor_hidden: true,
+            sync_open: true,
+            input_modes: InputModes {
+                focus_reports: true,
+                ..InputModes::default()
+            },
+            generation: 1,
+            outputs_fed: 9,
+        }),
+        HolderFrame::PushAck { number: 7 },
+        HolderFrame::ScreenResync,
+        HolderFrame::Report {
+            bytes: b"\x1b[I".to_vec(),
+        },
+        HolderFrame::SetPalette {
+            palette: yagura_protocol::built_in_dark_palette(),
+        },
+        HolderFrame::SetViewFocus { focused: true },
+        HolderFrame::FocusInterval { open: false },
+        HolderFrame::Attach { generation: 2 },
+        HolderFrame::Detach { generation: 2 },
+        HolderFrame::ViewNote {
+            generation: 2,
+            note: HolderViewNote::Ack { seq: 3 },
+        },
+        HolderFrame::ViewNote {
+            generation: 2,
+            note: HolderViewNote::Visible { visible: false },
+        },
+        HolderFrame::ViewFrame {
+            generation: 2,
+            frame,
+        },
+        HolderFrame::ViewOp {
+            id: 4,
+            op: HolderViewOp::Scroll { lines: -3 },
+        },
+        HolderFrame::ViewOp {
+            id: 5,
+            op: HolderViewOp::Page { up: true },
+        },
+        HolderFrame::ViewOp {
+            id: 6,
+            op: HolderViewOp::Select { pointer },
+        },
+        HolderFrame::ViewOp {
+            id: 7,
+            op: HolderViewOp::ClearSelection,
+        },
+        HolderFrame::ViewOp {
+            id: 8,
+            op: HolderViewOp::SelectedText,
+        },
+        HolderFrame::ViewOp {
+            id: 9,
+            op: HolderViewOp::ToBottom,
+        },
+        HolderFrame::ViewOpDone {
+            id: 8,
+            text: Some("selected".to_owned()),
+            moved: false,
+        },
+        HolderFrame::ReadTail {
+            id: 10,
+            max_lines: 1000,
+            max_bytes: 256 * 1024,
+        },
+        HolderFrame::Tail {
+            id: 10,
+            text: "tail".to_owned(),
+            truncated: true,
+        },
+        HolderFrame::Settle { id: 11 },
+        HolderFrame::Settled { id: 11 },
+    ];
+    for frame in frames {
+        assert_eq!(decode_whole(&encode_holder_frame(&frame)), frame);
+    }
 }

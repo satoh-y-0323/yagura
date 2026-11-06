@@ -88,6 +88,10 @@ pub struct ScreenLine {
     pub line: u16,
     /// The written cells, in increasing column order.
     pub cells: Vec<ScreenCell>,
+    /// The terminal wrapped the row: the line it holds goes on in the next
+    /// row, so the two read as one line.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wraps: bool,
 }
 
 impl ScreenLine {
@@ -142,19 +146,21 @@ impl ScreenCopy {
     #[must_use]
     pub fn lines_resized(&self, cols: u16, rows: u16) -> Vec<ScreenLine> {
         (0..rows)
-            .map(|line| ScreenLine {
-                line,
-                cells: self
-                    .lines
-                    .get(usize::from(line))
-                    .map(|kept| {
-                        kept.cells
-                            .iter()
-                            .filter(|cell| cell.col < cols)
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+            .map(|line| {
+                let kept = self.lines.get(usize::from(line));
+                ScreenLine {
+                    line,
+                    cells: kept
+                        .map(|kept| {
+                            kept.cells
+                                .iter()
+                                .filter(|cell| cell.col < cols)
+                                .cloned()
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    wraps: kept.is_some_and(|kept| kept.wraps),
+                }
             })
             .collect()
     }
@@ -257,6 +263,7 @@ mod tests {
         let line = ScreenLine {
             line: u16::MAX,
             cells: vec![cell; usize::from(crate::MAX_WINDOW_DIMENSION)],
+            wraps: true,
         };
         let rows = ScreenRows {
             number: u64::MAX,

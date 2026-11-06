@@ -142,14 +142,11 @@ async fn close_window_during_an_output_flood_reaps_host_child_and_grandchild() {
     let host_pids = window_host_pids(entry.session().child_process_id());
     yagura_test_support::process::wait_until_file_grows(Path::new(&tick_path)).await;
 
-    let flood_deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    while entry.session().captured_output().is_empty() {
-        assert!(
-            tokio::time::Instant::now() < flood_deadline,
-            "the flooding child produced no output"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let mut arrivals = entry.session().output_arrivals();
+    tokio::time::timeout(yagura_test_support::HANG_GUARD, arrivals.changed())
+        .await
+        .expect("the flooding child produced no output")
+        .expect("the window's output ended before any arrived");
 
     let child_pid = entry.session().child_process_id();
     let grandchildren = grandchild_pids_of(child_pid);

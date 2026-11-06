@@ -111,6 +111,15 @@ fn spaces_painted_after_a_line_are_not_part_of_it() {
     );
 }
 
+#[test]
+fn a_space_written_where_the_line_wrapped_stays_between_its_words() {
+    let mut screen = screen(10, 3, 100, b"AAAAAAAAA BBB\r\n");
+    assert_eq!(
+        screen.text_tail(10, NO_BYTE_LIMIT),
+        ("AAAAAAAAA BBB".to_string(), false)
+    );
+}
+
 const LONG_LINE_LEN: usize = 70;
 
 fn long_line() -> String {

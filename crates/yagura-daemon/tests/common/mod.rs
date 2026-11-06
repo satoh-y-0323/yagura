@@ -22,7 +22,7 @@ use yagura_daemon::detector::definition::{
 };
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
 use yagura_daemon::detector::reading::{self, ComposerReadout};
-use yagura_daemon::detector::{HeldCopy, LocalScreen, SharedLocalScreen};
+use yagura_daemon::detector::{HeldCopy, SharedCopy};
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{
     DaemonConfig, IpcServer, OpenWindowRequest, PtySession, RequestedCwd, WindowRegistry,
@@ -62,7 +62,7 @@ pub const SCREEN_ROWS: u16 = 5;
 
 /// Parses `definition_toml` and builds a `DetectionEngine` at the fixed
 /// `SCREEN_COLS` x `SCREEN_ROWS` geometry.
-pub fn new_engine(definition_toml: &str, config: &DaemonConfig) -> DetectionEngine {
+pub fn new_engine(definition_toml: &str, config: &DaemonConfig) -> CopiedEngine {
     new_engine_sized(definition_toml, config, SCREEN_COLS, SCREEN_ROWS)
 }
 
@@ -73,14 +73,169 @@ pub fn new_engine_sized(
     config: &DaemonConfig,
     cols: u16,
     rows: u16,
-) -> DetectionEngine {
+) -> CopiedEngine {
     let definition = parse_definition(definition_toml).unwrap();
-    DetectionEngine::new(Some(definition), config, screen_of(cols, rows))
+    CopiedEngine::new(Some(definition), config, screen_of(cols, rows))
 }
 
 /// A fresh model of `(cols, rows)` whose copy an engine reads.
 pub fn screen_of(cols: u16, rows: u16) -> SharedLocalScreen {
     LocalScreen::new(cols, rows).into_shared()
+}
+
+/// A window's terminal model as its holder runs it, played in the test's own
+/// process: every change to the screen is carried into [`LocalScreen::copy`]
+/// through the daemon's checked apply before the call returns. A model that
+/// was rebuilt is carried as a whole copy of its new generation, the way a
+/// holder sends it.
+pub struct LocalScreen {
+    terminal: yagura_term::VtScreen,
+    projector: yagura_term::Projector,
+    copy: SharedCopy,
+    generation: u64,
+}
+
+impl std::fmt::Debug for LocalScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.terminal.fmt(f)
+    }
+}
+
+/// A [`LocalScreen`] shared between the one that feeds it and its readers.
+#[derive(Debug, Clone)]
+pub struct SharedLocalScreen {
+    screen: Arc<std::sync::Mutex<LocalScreen>>,
+    copy: SharedCopy,
+}
+
+impl SharedLocalScreen {
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, LocalScreen> {
+        self.screen.lock().unwrap()
+    }
+
+    /// The copy an engine reads.
+    pub fn copy(&self) -> &SharedCopy {
+        &self.copy
+    }
+}
+
+impl LocalScreen {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_history(cols, rows, 0)
+    }
+
+    pub fn with_history(cols: u16, rows: u16, history_rows: usize) -> Self {
+        let host = yagura_term::PtyHost {
+            requests_win32_input: yagura_os::program::HostOs::host()
+                .pty_host_requests_win32_input(),
+        };
+        let terminal = yagura_term::VtScreen::with_history(cols, rows, history_rows, host);
+        let generation = terminal.generation();
+        let mut screen = Self {
+            terminal,
+            projector: yagura_term::Projector::new(),
+            copy: SharedCopy::default(),
+            generation,
+        };
+        screen.carry();
+        screen
+    }
+
+    pub fn into_shared(self) -> SharedLocalScreen {
+        let copy = self.copy.clone();
+        SharedLocalScreen {
+            screen: Arc::new(std::sync::Mutex::new(self)),
+            copy,
+        }
+    }
+
+    pub fn copy(&self) -> &SharedCopy {
+        &self.copy
+    }
+
+    pub fn terminal(&self) -> &yagura_term::VtScreen {
+        &self.terminal
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut yagura_term::VtScreen {
+        &mut self.terminal
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> yagura_term::ScreenIntegrity {
+        let integrity = self.terminal.feed(bytes);
+        self.terminal.note_output();
+        self.carry();
+        integrity
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> yagura_term::ScreenIntegrity {
+        let integrity = self.terminal.resize(cols, rows);
+        self.carry();
+        integrity
+    }
+
+    /// Makes the model panic on its `calls`-th call from now, so it is
+    /// rebuilt blank; see [`yagura_term::VtScreen::poison_after_calls`].
+    pub fn poison_after_calls(&mut self, calls: usize) {
+        self.terminal.poison_after_calls(calls);
+    }
+
+    fn carry(&mut self) {
+        let screen = self.terminal.screen_copy();
+        if screen.generation != self.generation {
+            self.generation = screen.generation;
+            self.projector.resync();
+        }
+        let (rows, push) = self.projector.project(screen);
+        self.copy
+            .apply(rows, push)
+            .expect("the daemon refused the model's own copy");
+    }
+}
+
+/// A [`DetectionEngine`] on the copy of a [`SharedLocalScreen`] the test
+/// feeds, the way a window's engine reads the copy its holder carries.
+pub struct CopiedEngine {
+    engine: DetectionEngine,
+    screen: SharedLocalScreen,
+}
+
+impl CopiedEngine {
+    pub fn new(
+        definition: Option<Definition>,
+        config: &DaemonConfig,
+        screen: SharedLocalScreen,
+    ) -> Self {
+        Self {
+            engine: DetectionEngine::new(definition, config, screen.copy().clone()),
+            screen,
+        }
+    }
+
+    /// The model whose copy the engine reads.
+    pub fn screen(&self) -> &SharedLocalScreen {
+        &self.screen
+    }
+
+    /// The engine alone, for a [`DetectorHandle`] to drive; keep
+    /// [`CopiedEngine::screen`] first to go on feeding it.
+    pub fn into_engine(self) -> DetectionEngine {
+        self.engine
+    }
+}
+
+impl std::ops::Deref for CopiedEngine {
+    type Target = DetectionEngine;
+
+    fn deref(&self) -> &DetectionEngine {
+        &self.engine
+    }
+}
+
+impl std::ops::DerefMut for CopiedEngine {
+    fn deref_mut(&mut self) -> &mut DetectionEngine {
+        &mut self.engine
+    }
 }
 
 /// A screen read the way the daemon reads a window's screen: bytes go into a
@@ -181,14 +336,14 @@ pub trait ScreenFeed {
     fn lose_screen(&mut self) -> Option<DetectedStatus>;
 }
 
-impl ScreenFeed for DetectionEngine {
+impl ScreenFeed for CopiedEngine {
     fn feed(&mut self, bytes: &[u8]) -> Option<DetectedStatus> {
-        self.screen().lock().feed(bytes);
-        self.on_output()
+        self.screen.lock().feed(bytes);
+        self.engine.on_output()
     }
 
     fn lose_screen(&mut self) -> Option<DetectedStatus> {
-        self.poison_screen_after_calls(0);
+        self.screen.lock().poison_after_calls(0);
         self.feed(b"")
     }
 }
@@ -921,26 +1076,16 @@ impl Harness {
             .expect("write_input");
     }
 
-    /// All the raw bytes `window_id`'s child wrote that the session keeps
-    /// (its last 4 MiB), for a reader that must not lose an early marker to
-    /// what followed it.
-    pub fn captured_output(&self, window_id: &str) -> Vec<u8> {
-        self.registry
-            .get(window_id)
-            .expect("window must exist in registry")
-            .session()
-            .captured_output()
-    }
-
-    /// The last 256 KiB of the raw bytes `window_id`'s child wrote.
+    /// The last 256 KiB of `window_id`'s text: its history and screen as
+    /// `read_output` reads them, one line per logical line.
     pub fn scrollback(&self, window_id: &str) -> Vec<u8> {
-        let captured = self
+        let session = self
             .registry
             .get(window_id)
             .expect("window must exist in registry")
             .session()
-            .captured_output();
-        captured[captured.len().saturating_sub(256 * 1024)..].to_vec()
+            .clone();
+        window_text_now(&session).into_bytes()
     }
 
     /// `window_id`'s scrollback with CSI and OSC sequences and line breaks
@@ -1392,14 +1537,39 @@ pub fn env_probe_path() -> PathBuf {
     yagura_test_support::process::env_probe_path()
 }
 
-/// Polls `session`'s scrollback until it contains `needle` and returns the decoded text.
-/// Polling rather than a fixed sleep keeps the test deterministic on a loaded machine.
+/// How much of a window's text [`window_text_now`] asks for.
+const WINDOW_TEXT_LINES: usize = 100_000;
+const WINDOW_TEXT_BYTES: usize = 256 * 1024;
+
+/// `session`'s text (history and screen, as `read_output` reads it), read on
+/// a thread and runtime of its own so a synchronous caller can wait for it:
+/// the read is answered by the window's holder, never by the caller's runtime.
+pub fn window_text_now(session: &PtySession) -> String {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(session.text_tail(WINDOW_TEXT_LINES, WINDOW_TEXT_BYTES))
+            })
+            .join()
+            .expect("the text read must not panic")
+            .map(|(text, _)| text)
+            .unwrap_or_default()
+    })
+}
+
+/// Polls `session`'s text until it contains `needle` and returns it.
 pub async fn wait_for_scrollback_containing(session: &PtySession, needle: &str) -> String {
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
-        let captured = session.captured_output();
-        let text = String::from_utf8_lossy(&captured[captured.len().saturating_sub(64 * 1024)..])
-            .to_string();
+        let text = session
+            .text_tail(WINDOW_TEXT_LINES, 64 * 1024)
+            .await
+            .map(|(text, _)| text)
+            .unwrap_or_default();
         if text.contains(needle) {
             return text;
         }
@@ -3495,9 +3665,9 @@ pub async fn wait_until_model_shows(h: &Harness, window_id: &str, marker: &[u8])
     }
 }
 
-/// What `window_id`'s child wrote after the first `marker`.
+/// `window_id`'s text after the first `marker`.
 pub fn output_after_marker(h: &Harness, window_id: &str, marker: &[u8]) -> Vec<u8> {
-    let output = h.captured_output(window_id);
+    let output = h.scrollback(window_id);
     let start = output
         .windows(marker.len())
         .position(|window| window == marker)
