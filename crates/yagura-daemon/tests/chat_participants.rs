@@ -10,7 +10,7 @@
 //! be taken for the one a later change sends, so a case that measures an instant change
 //! (a rename) makes it twice: one stale push can answer the first, never both.
 
-mod common;
+use crate::common;
 
 use std::collections::HashSet;
 use std::path::Path;

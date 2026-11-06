@@ -9,7 +9,7 @@
 //! Every case drives a real `IpcServer` against `submit_child` in
 //! composer-draw mode. The hang guards only bound a failure.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

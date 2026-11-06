@@ -7,7 +7,7 @@
 //! The child is `hex_echo`, which prints each byte it receives as two hex
 //! digits, so the order and count of the bytes it got are read off the screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

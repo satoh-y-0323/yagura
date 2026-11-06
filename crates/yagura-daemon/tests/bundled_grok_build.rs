@@ -7,7 +7,7 @@
 //! files and run through the daemon's own loader, launch resolution and
 //! registration rendering. No CLI is started.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

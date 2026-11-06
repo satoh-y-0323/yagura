@@ -13,7 +13,7 @@
 //! share `send_text`'s `child_exited` gate. The echoed `WindowRenamed.name` is the value
 //! read back from storage, not a pass-through of the request.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

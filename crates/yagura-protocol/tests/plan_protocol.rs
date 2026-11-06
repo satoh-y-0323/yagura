@@ -7,23 +7,21 @@
 //! `ResolvedAssignment`, `PlanTaskInfo`, `PlanInfo`, `PlanSummary`,
 //! `RoleEntry`).
 //!
-//! Five properties are measured:
+//! Four properties are measured (the revision each message requires is measured
+//! in `required_revision.rs`):
 //!
 //! - every new message round-trips through its documented wire tag
 //! - `AssignmentSource` carries exactly five wire strings and rejects any
 //!   other string outright, rather than falling back to a default
 //! - every new struct's `Option` field serializes with its key present and
 //!   the value `null` when absent, rather than omitting the key
-//! - every new `ClientMessage` variant requires no more than the baseline
-//!   wire revision
 //! - every new wire tag is present in the decoder's own tag tables
 
 use yagura_protocol::{
-    AssignmentSource, ClientMessage, DaemonMessage, PROTOCOL_REVISION_BASELINE, PlanInfo,
-    PlanSummary, PlanTaskInfo, PlanTaskSpec, ResolvedAssignment, RoleEntry, TaskAssignment,
-    client_message_wire_tags, daemon_message_wire_tags, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    AssignmentSource, ClientMessage, DaemonMessage, PlanInfo, PlanSummary, PlanTaskInfo,
+    PlanTaskSpec, ResolvedAssignment, RoleEntry, TaskAssignment, client_message_wire_tags,
+    daemon_message_wire_tags, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -660,67 +658,6 @@ fn role_entry_absent_optionals_serialize_as_null_not_omitted() {
             object.get(key),
             Some(&serde_json::Value::Null),
             "{key} must be present as null when absent, not omitted, got: {value}"
-        );
-    }
-}
-
-// =============================================================================
-// required_protocol_revision: every new ClientMessage variant requires no
-// more than the baseline revision
-// =============================================================================
-
-fn one_instance_of_every_new_client_message() -> Vec<ClientMessage> {
-    vec![
-        ClientMessage::CreatePlan {
-            title: "ship the plan ledger".to_string(),
-            tasks: vec![sample_plan_task_spec()],
-            ticket: None,
-        },
-        ClientMessage::UpdatePlan {
-            plan_id: "p-sample".to_string(),
-            title: Some("renamed plan".to_string()),
-            tasks: vec![sample_plan_task_spec()],
-        },
-        ClientMessage::GetPlan {
-            plan_id: "p-sample".to_string(),
-        },
-        ClientMessage::ListPlans,
-        ClientMessage::DeletePlan {
-            plan_id: "p-sample".to_string(),
-        },
-        ClientMessage::ListRoles,
-        ClientMessage::SaveRoles {
-            roles: vec![sample_role_entry()],
-            default_role: None,
-        },
-        ClientMessage::SetTaskAssignment {
-            plan_id: "p-sample".to_string(),
-            task_id: "t1".to_string(),
-            assignment: sample_task_assignment(),
-        },
-        ClientMessage::ClearTaskAssignment {
-            plan_id: "p-sample".to_string(),
-            task_id: "t1".to_string(),
-        },
-        ClientMessage::SetPlanOwner {
-            plan_id: "p-sample".to_string(),
-            window_id: "w1-abc".to_string(),
-        },
-        ClientMessage::OpenTaskWindow {
-            plan_id: "p-sample".to_string(),
-            task_id: "t1".to_string(),
-            name: Some("tester window".to_string()),
-        },
-    ]
-}
-
-#[test]
-fn every_new_client_message_requires_no_more_than_the_baseline_revision() {
-    for message in one_instance_of_every_new_client_message() {
-        assert_eq!(
-            required_protocol_revision(&message),
-            PROTOCOL_REVISION_BASELINE,
-            "message must require no more than the baseline revision: {message:?}"
         );
     }
 }

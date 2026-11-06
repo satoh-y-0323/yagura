@@ -10,7 +10,7 @@
 //! text, so whether a probe arrived can only be told from what is left once
 //! the user's own keystroke paints it.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

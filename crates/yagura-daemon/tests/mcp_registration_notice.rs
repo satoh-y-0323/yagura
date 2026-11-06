@@ -4,7 +4,7 @@
 //! list a daemon answers, verbatim, and a notice that is not one visible line
 //! makes the table invalid (the `[shim_guidance] text` rule).
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

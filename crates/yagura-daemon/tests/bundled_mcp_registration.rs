@@ -11,7 +11,7 @@
 //! directories), fed to the pure derivation; the Grok Build rows are also run
 //! end to end with their launch command swapped for the `mcp_cli_stub` fixture.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

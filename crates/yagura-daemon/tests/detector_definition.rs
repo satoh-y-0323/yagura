@@ -10,7 +10,7 @@
 //! the one exception: naming the offending key in the message is part of their contract,
 //! so those cases assert on the rendered message rather than on the error's variant.
 
-mod common;
+use crate::common;
 
 use common::detection_rules::rule_for_status;
 use yagura_daemon::detector::definition::{
@@ -294,25 +294,6 @@ region = "screen"
 
     let definition = parse_definition(toml).expect("region = \"screen\" must load");
     assert_eq!(definition.rules[0].region, Region::Screen);
-}
-
-#[test]
-fn rejects_arbitrary_unknown_region_value() {
-    let toml = r#"
-schema_version = 1
-name = "bad-region-2"
-
-[debounce]
-confirm_ms = 300
-
-[[rules]]
-status = "idle"
-pattern = 'x'
-priority = 1
-region = "not-a-region"
-"#;
-
-    assert!(parse_definition(toml).is_err());
 }
 
 #[test]

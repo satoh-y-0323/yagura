@@ -7,6 +7,8 @@ license.workspace = true
 # Desktop application binary shipped as an installer, not a library for
 # downstream crates: it is never released to crates.io.
 publish = false
+# The integration tests are one binary (tests/main.rs) rather than one per file.
+autotests = false
 
 [lib]
 name = "yagura_gui"
@@ -41,3 +43,7 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "gui"
+path = "tests/main.rs"

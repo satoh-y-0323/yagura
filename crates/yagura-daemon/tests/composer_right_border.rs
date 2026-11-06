@@ -7,7 +7,7 @@
 //! composer is drawn with (two-column indent, `│ > ` marker row, `│   `
 //! continuation rows, a truecolor `│` right edge).
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use yagura_daemon::detector::definition::{ComposerSection, DefinitionError, parse_definition};

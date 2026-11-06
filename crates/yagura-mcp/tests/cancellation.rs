@@ -17,7 +17,7 @@
 //! releases its window claim before any task it signalled runs, which is
 //! what lets the reconnect case read the claim after the take-back.
 
-mod common;
+use crate::common;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

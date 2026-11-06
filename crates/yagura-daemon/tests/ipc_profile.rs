@@ -24,7 +24,7 @@
 //! (same discipline as `profile_load.rs`): every program name a profile names
 //! is deliberately unlikely to exist anywhere.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

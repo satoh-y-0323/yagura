@@ -1,6 +1,4 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// Each test binary that includes this module uses only part of it.
-#![allow(dead_code)]
 // These fixtures exist to start the compiled bridge as a real child process,
 // which is what an MCP client does; the PTY spawn path does not apply.
 #![allow(clippy::disallowed_methods)]

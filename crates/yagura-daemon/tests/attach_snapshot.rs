@@ -4,10 +4,10 @@
 //! right after `attached`: the cells of the window's size show what the window shows,
 //! however much the child wrote before, and at the size the GUI asked for.
 //!
-//! The windows run this test binary itself as their child (see [`child_command`]), so
+//! The windows run this test binary itself as their child (see [`common::own_test_child_command`]), so
 //! the child's output is exact on every platform without a shell in the way.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -30,34 +30,15 @@ const EXIT_MARKER: &str = "EXITING-CHILD-MARKER";
 /// More than the 2 MiB the daemon used to keep of a window's raw output.
 const FILLER_BYTES: usize = 5 * 1024 * 1024 / 2;
 
-/// Runs `child` from this binary as a window's command.
-fn child_command(child: &str) -> Vec<String> {
-    let exe = std::env::current_exe().expect("current_exe");
-    vec![
-        exe.to_string_lossy().into_owned(),
-        child.to_string(),
-        "--exact".to_string(),
-        "--ignored".to_string(),
-        "--nocapture".to_string(),
-        "--test-threads=1".to_string(),
-    ]
-}
-
-/// Whether this process was started by [`child_command`] to be `child`.
-fn running_as(child: &str) -> bool {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().any(|a| a == "--exact") && args.iter().any(|a| a == child)
-}
-
 fn wait_for_end_of_input() {
     let mut buf = [0u8; 64];
     while std::io::stdin().lock().read(&mut buf).unwrap_or(0) != 0 {}
 }
 
 #[test]
-#[ignore = "the child of the tests below, started by child_command"]
+#[ignore = "the child of the tests below, started by common::own_test_child_command"]
 fn alternate_screen_child() {
-    if !running_as(ALTERNATE_CHILD) {
+    if !common::running_as_own_test(module_path!(), ALTERNATE_CHILD) {
         return;
     }
     let mut out = b"main before 1\r\nmain before 2\r\n\x1b[?1049h".to_vec();
@@ -82,9 +63,9 @@ fn alternate_screen_child() {
 }
 
 #[test]
-#[ignore = "the child of the tests below, started by child_command"]
+#[ignore = "the child of the tests below, started by common::own_test_child_command"]
 fn exiting_child() {
-    if !running_as(EXITING_CHILD) {
+    if !common::running_as_own_test(module_path!(), EXITING_CHILD) {
         return;
     }
     let mut stdout = std::io::stdout().lock();
@@ -135,7 +116,12 @@ fn text_of(grid: &Grid) -> String {
 }
 
 async fn open_alternate_screen_window(h: &Harness) -> (String, std::sync::Arc<PtySession>) {
-    let window_id = h.open(child_command(ALTERNATE_CHILD), None).await;
+    let window_id = h
+        .open(
+            common::own_test_child_command(module_path!(), ALTERNATE_CHILD),
+            None,
+        )
+        .await;
     let session = session(h, &window_id);
     common::wait_until_model_shows(h, &window_id, LAST_TEXT.as_bytes()).await;
     (window_id, session)
@@ -199,7 +185,12 @@ async fn attaching_with_a_size_resizes_the_window_before_drawing_it() {
 #[tokio::test]
 async fn attaching_to_an_exited_window_keeps_its_size_and_still_draws_it() {
     let h = Harness::start("attach-snapshot-exited", DaemonConfig::default()).await;
-    let window_id = h.open(child_command(EXITING_CHILD), None).await;
+    let window_id = h
+        .open(
+            common::own_test_child_command(module_path!(), EXITING_CHILD),
+            None,
+        )
+        .await;
     let session = session(&h, &window_id);
     common::wait_until_model_shows(&h, &window_id, EXIT_MARKER.as_bytes()).await;
     h.write_input(&window_id, b"q\r").await;

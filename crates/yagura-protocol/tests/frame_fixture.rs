@@ -18,7 +18,7 @@
 //!
 //! The ordinary test below proves the file is what the types serialize today.
 //! `write_frame_sample` writes it; run it by hand when the contract changes:
-//! `FRAME_SAMPLE_WRITE=1 cargo test -p yagura-protocol --test frame_fixture -- --ignored`.
+//! `FRAME_SAMPLE_WRITE=1 cargo test -p yagura-protocol --test protocol -- --ignored frame_fixture::`.
 //! The reference applier in `yagura-test-support` (`frame::Grid`) is held to the
 //! same file by its own test.
 

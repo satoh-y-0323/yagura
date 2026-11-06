@@ -6,7 +6,7 @@
 //! Window sizes enter the daemon through `Resize` (IPC) and
 //! `PtySession::resize`; `open_window` carries no size.
 
-mod common;
+use crate::common;
 
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;

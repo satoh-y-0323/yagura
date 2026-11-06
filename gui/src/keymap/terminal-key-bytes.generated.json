@@ -1,5 +1,5 @@
 {
-  "generated_by": "cargo test -p yagura-daemon --test gui_generated_tables -- --ignored",
+  "generated_by": "cargo test -p yagura-daemon --test daemon -- --ignored gui_generated_tables::",
   "chords": {
     "!": "21",
     "\"": "22",

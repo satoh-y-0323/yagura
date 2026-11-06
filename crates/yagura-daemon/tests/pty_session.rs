@@ -5,7 +5,7 @@
 //! The child under test is the `echo_child` test binary, which writes stdin back to
 //! stdout unmodified; `yagura-test-support` resolves its path and spawns it.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -6,7 +6,7 @@
 //! Every listing command spawns the `capture_child` fixture binary (see
 //! `src/bin/capture_child.rs`), never a real vendor CLI or a shell.
 
-mod common;
+use crate::common;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

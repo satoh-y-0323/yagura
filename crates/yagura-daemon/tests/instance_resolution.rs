@@ -20,8 +20,6 @@
 //! the Unix socket path, never the default instance's, so there is
 //! structurally nobody there to shut down.
 
-mod common;
-
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::Command;

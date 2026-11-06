@@ -13,7 +13,7 @@
 //! looks like in general, on synthetic definitions, lives in
 //! `composer_readout.rs`.
 
-mod common;
+use crate::common;
 
 use yagura_protocol::WindowStatus;
 

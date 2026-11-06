@@ -1,12 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// Compiled once per test binary, and each binary exercises only a subset of these
-// fixtures, so the unused half is structurally dead code in that binary.
-#![allow(dead_code)]
 
-//! Fixtures shared across `yagura-daemon` integration tests.
-//!
-//! Kept here rather than per-binary because Rust integration-test binaries cannot import
-//! each other's items, and forking safety-relevant helpers would let the copies drift.
+//! Fixtures shared across `yagura-daemon` integration tests: one copy, so the
+//! safety-relevant helpers cannot drift apart between the files that use them.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -149,18 +144,6 @@ impl LocalScreen {
         }
     }
 
-    pub fn copy(&self) -> &SharedCopy {
-        &self.copy
-    }
-
-    pub fn terminal(&self) -> &yagura_term::VtScreen {
-        &self.terminal
-    }
-
-    pub fn terminal_mut(&mut self) -> &mut yagura_term::VtScreen {
-        &mut self.terminal
-    }
-
     pub fn feed(&mut self, bytes: &[u8]) -> yagura_term::ScreenIntegrity {
         let integrity = self.terminal.feed(bytes);
         self.terminal.note_output();
@@ -297,10 +280,6 @@ impl CopiedScreen {
         (copy.cols, copy.rows)
     }
 
-    pub fn cursor_hidden(&self) -> bool {
-        self.copy().cursor_hidden
-    }
-
     pub fn cursor_row(&self) -> u16 {
         reading::cursor_row(&self.copy())
     }
@@ -319,10 +298,6 @@ impl CopiedScreen {
 
     pub fn read_composer(&self, section: &ComposerSection) -> ComposerReadout {
         reading::read_composer(&self.copy(), section)
-    }
-
-    pub fn locate_composer(&self, section: &ComposerSection) -> Option<(u16, u16)> {
-        reading::locate_composer(&self.copy(), section)
     }
 }
 
@@ -447,14 +422,6 @@ pub fn grandchild_command(tick_path: &str) -> Vec<String> {
     yagura_test_support::process::grandchild_command(tick_path)
 }
 
-/// Fixture for the `close_window` teardown route: the same grandchild shape with a far
-/// longer-lived direct child. See
-/// [`yagura_test_support::process::surviving_grandchild_command`] for why the two
-/// lifetimes stay two fixtures.
-pub fn surviving_grandchild_command(tick_path: &str) -> Vec<String> {
-    yagura_test_support::process::surviving_grandchild_command(tick_path)
-}
-
 /// A fixed command (not a real vendor CLI) whose direct child stays alive for roughly
 /// `ping_count - 1` seconds and then exits on its own, which is enough to reproduce a
 /// pseudoconsole host-process leak. See [`yagura_test_support::process::sleepy_command`].
@@ -483,45 +450,61 @@ pub async fn spawn_session_in_env(
     yagura_daemon::PtySession::spawn_with_command_in_env(argv, cwd, extra_env, config, &host).await
 }
 
-pub fn file_len(path: &Path) -> u64 {
-    yagura_test_support::process::file_len(path)
-}
-
-/// Installs a permanent, always-enabled, discard-everything `tracing` global default
-/// once per test binary process (idempotent). Called from `store_fixtures::count_warns`
-/// / `capture_warns` so every WARN capture through those helpers is covered.
+/// Installs this test binary's one global `tracing` default (idempotent). Called from
+/// `store_fixtures::count_warns` / `capture_warns` so every WARN capture through those
+/// helpers is covered.
 ///
 /// Why: `tracing`'s per-callsite interest cache is process-global and adopts whichever
 /// thread first touches a call site's ambient dispatcher, which can permanently cache
 /// "never interested" before a scoped `with_default` capture on another thread ever runs.
 pub fn ensure_tracing_default_installed() {
-    static INIT: std::sync::Once = std::sync::Once::new();
+    global_tracing::install();
+}
 
-    struct DiscardEverything;
+/// The argv that runs `child`, an ignored test of the module whose `module_path!()` is
+/// `module_path`, from this test binary as a window's command.
+pub fn own_test_child_command(module_path: &str, child: &str) -> Vec<String> {
+    let exe = std::env::current_exe().expect("current_exe");
+    vec![
+        exe.to_string_lossy().into_owned(),
+        process::libtest_name(module_path, child),
+        "--exact".to_string(),
+        "--ignored".to_string(),
+        "--nocapture".to_string(),
+        "--test-threads=1".to_string(),
+    ]
+}
 
-    impl tracing::Subscriber for DiscardEverything {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
+/// Whether this process was started by [`own_test_child_command`] to be `child`.
+pub fn running_as_own_test(module_path: &str, child: &str) -> bool {
+    let name = process::libtest_name(module_path, child);
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().any(|a| a == "--exact") && args.contains(&name)
+}
+
+/// Polls the registry's window `window_id` until it reports `Exited`, bounded by
+/// [`HANG_GUARD`]. A failure names what each layer last saw, which tells a missed child
+/// exit from a missed status transition.
+pub async fn wait_for_registry_window_exited(registry: &WindowRegistry, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let entry = registry
+            .get(window_id)
+            .expect("window must still be registered while waiting for it to exit");
+        if entry.current_status() == yagura_protocol::WindowStatus::Exited {
+            return;
         }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, _event: &tracing::Event<'_>) {}
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the window to become Exited: raw exit status {:?}, \
+             current status {:?}, detector attached {}, detector task alive {}",
+            entry.session().exit_status(),
+            entry.current_status(),
+            entry.has_detector(),
+            entry.detector_task_alive(),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-
-    INIT.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(DiscardEverything);
-    });
 }
 
 /// One row of a Windows process-table snapshot.
@@ -3042,67 +3025,6 @@ pub fn empty_lookup() -> ProgramLookup {
     }
 }
 
-/// A `submit_child` profile source under its own `detection` definition
-/// ([`write_submit_definition`]'s output), whose `[command]` launches
-/// the fixture in composer-draw mode: the window a profile-addressed
-/// delivery opens paints its composer just as a directly opened one does.
-pub fn submit_child_profile_source_with_detection_and_composer(
-    display_name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    detection: &str,
-    reflect_delay_ms: u64,
-) -> String {
-    with_detection_name(
-        &yagura_test_support::process::submit_child_profile_source_with_composer(
-            display_name,
-            marker,
-            discard_reads,
-            paste_guard_keys,
-            react_on_body,
-            reflect_delay_ms,
-        ),
-        detection,
-    )
-}
-
-/// A profile source launching `submit_child` in composer-draw mode with
-/// `clear_scope` (see the fixture's module doc), under the detection
-/// definition `detection`.
-pub fn submit_child_profile_source_with_detection_and_clear_scope(
-    display_name: &str,
-    marker: &str,
-    detection: &str,
-    clear_scope: &str,
-) -> String {
-    let mut command =
-        yagura_test_support::process::submit_child_command_with_composer(marker, 0, 0, 0, 0);
-    // A profile's argv admits no empty element, so the "no folding" slot is `-`.
-    command.push("-".to_string());
-    command.push(clear_scope.to_string());
-    with_detection_name(
-        &yagura_test_support::process::profile_source(display_name, &command),
-        detection,
-    )
-}
-
-/// `source` with an explicit `detection` name inserted ahead of its
-/// `[command]` table.
-pub fn with_detection_name(source: &str, detection: &str) -> String {
-    let with_detection = source.replacen(
-        "\n\n[command]",
-        &format!("\ndetection = \"{detection}\"\n\n[command]"),
-        1,
-    );
-    assert_ne!(
-        with_detection, source,
-        "a profile source's shape must still contain \"\\n\\n[command]\" exactly once"
-    );
-    with_detection
-}
-
 /// Writes `profile_source` as `{profiles_dir}/{profile_id}.toml`, then sends
 /// a profile-addressed `send_handoff` and returns whatever frame comes back
 /// first on `client` (never assumed to be the reply to *this* request:
@@ -3515,6 +3437,7 @@ pub fn mcp_cli_stub_profile_with_table(
 
 pub mod detection_rules;
 pub mod docs;
+pub mod global_tracing;
 pub mod real_daemon;
 pub mod store_fixtures;
 pub mod views;
@@ -3707,110 +3630,11 @@ pub async fn assert_hex_echo_receives(
 /// survive this; a wait that ends on an event does. Call it only once everything
 /// the child will do has been seen, so no event is still on its way: the paused
 /// clock does not wait for one. The clock moves by itself whenever the runtime
-/// is idle, which a thread the runtime waits on (a held model) prevents: use
-/// [`let_every_clock_bound_run_out_while_a_thread_is_awaited`] there.
+/// is idle, which a thread the runtime waits on (a held model) prevents.
 pub async fn let_every_clock_bound_run_out() {
     tokio::time::pause();
     tokio::time::sleep(Duration::from_secs(3600)).await;
     tokio::time::resume();
-}
-
-/// [`let_every_clock_bound_run_out`] for a wait that is blocked on a thread the
-/// test itself holds, where the clock cannot move by itself: it is moved by
-/// hand, after the waiting call has started and registered what it waits on.
-/// A bound set once an earlier one has run out is a new timer, so the clock goes
-/// on for as many rounds as a chain of such bounds could need.
-pub async fn let_every_clock_bound_run_out_while_a_thread_is_awaited() {
-    tokio::time::pause();
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(3600)).await;
-    }
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-    tokio::time::resume();
-}
-
-// --- requester-departure helpers: a profile-addressed handoff whose
-// requester leaves gets no answer, so these stand in for one -------------
-
-/// The id of the one window a fresh harness ends up holding: the one a
-/// profile-addressed handoff opens.
-pub async fn wait_for_only_window(h: &Harness) -> String {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        if let Some(window) = h.registry.list().into_iter().next() {
-            return window.window_id;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the handoff never opened its window"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// A `submit_child` profile in composer-draw mode that appends every byte it
-/// reads to `input_log`. A profile's argv admits no empty element, so `-`
-/// stands for "none" in the folding, overlay and heading slots.
-pub fn submit_child_profile_source_logging_input(
-    display_name: &str,
-    marker: &str,
-    detection: &str,
-    clear_scope: &str,
-    input_log: &Path,
-) -> String {
-    let mut command =
-        yagura_test_support::process::submit_child_command_with_composer(marker, 0, 0, 0, 0);
-    command.push("-".to_string());
-    command.push(clear_scope.to_string());
-    command.push("-".to_string());
-    command.push("-".to_string());
-    command.push(
-        input_log
-            .to_str()
-            .expect("the input log path must be valid UTF-8")
-            .to_string(),
-    );
-    with_detection_name(
-        &yagura_test_support::process::profile_source(display_name, &command),
-        detection,
-    )
-}
-
-/// Returns once a profile-addressed `send_handoff` of `probe_profile`, sent on
-/// a fresh connection, is no longer refused for the daemon-wide handoff budget
-/// and has been answered. Under `max_open_handoffs = 1` that is the moment the
-/// handoff holding the budget gave it back, which it does only once it has
-/// decided whether to close the window it opened -- the answer its departed
-/// requester can no longer read. The hang guard only bounds a failure.
-pub async fn wait_until_the_handoff_budget_is_given_back(h: &Harness, probe_profile: &str) {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(
-            !remaining.is_zero(),
-            "the handoff never gave its budget back after its requester left"
-        );
-        let mut probe = h.connect().await;
-        send_handoff_from_profile(
-            &mut probe,
-            probe_profile,
-            None,
-            None,
-            "src/probe.rs",
-            "probe",
-        )
-        .await;
-        match read_response(&mut probe).await {
-            DaemonMessage::Error { code, .. } if code == "resource_exhausted" => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            DaemonMessage::HandoffSent { .. } => return,
-            other => panic!("expected the budget probe to be refused or delivered, got {other:?}"),
-        }
-    }
 }
 
 /// Waits until the child's input log holds `needle`, and returns the log.

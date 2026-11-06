@@ -21,7 +21,7 @@
 //! arguments and exit, so no delivery ever reaches them). All three are
 //! covered here.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

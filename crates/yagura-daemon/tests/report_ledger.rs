@@ -20,13 +20,10 @@
 //! Children are `echo_child` or `sleepy_command`, never a real vendor CLI, mirroring
 //! `tests/plan_permit.rs`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use tokio::time::sleep;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
@@ -34,7 +31,7 @@ use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_protocol::{ReportOutcome, WindowStatus};
+use yagura_protocol::ReportOutcome;
 use yagura_test_support::process::{echo_child_path, sleepy_command};
 
 fn db_path(tag: &str) -> PathBuf {
@@ -85,34 +82,6 @@ async fn open_short_lived_window(registry: &WindowRegistry) -> String {
         .await
         .expect("open should succeed")
         .window_id
-}
-
-/// Polls a registry-held entry until it reports `Exited`; panics on timeout. Duplicated
-/// from `tests/plan_permit.rs` rather than shared: each integration-test binary is its own
-/// crate.
-async fn wait_for_exited(registry: &WindowRegistry, window_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let entry = registry
-            .get(window_id)
-            .expect("window must still be registered while waiting for it to exit");
-        if entry.current_status() == WindowStatus::Exited {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            // What each layer last saw tells a missed child exit from a missed
-            // status transition when this fires.
-            panic!(
-                "timed out waiting for the window to become Exited: raw exit status {:?}, \
-                 current status {:?}, detector attached {}, detector task alive {}",
-                entry.session().exit_status(),
-                entry.current_status(),
-                entry.has_detector(),
-                entry.detector_task_alive(),
-            );
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
 }
 
 /// Two independent tasks (`t1`, `t2`), no dependency between them, distinct write targets
@@ -840,7 +809,7 @@ async fn parent_derivation_follows_the_owners_liveness_and_nomination() {
         "once nominated and still alive, the new owner must resolve as the parent"
     );
 
-    wait_for_exited(&registry, &short_lived).await;
+    common::wait_for_registry_window_exited(&registry, &short_lived).await;
 
     assert_eq!(
         plan_permit::resolve_owner_parent(&store, &registry, &plan_id),

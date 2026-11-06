@@ -14,7 +14,7 @@
 //! precondition. Children are `argv_probe`, `ready_child` or a fixed
 //! self-exiting command via a launch profile, never a real vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -8,7 +8,7 @@
 //! status. The streams live under `tests/fixtures/<cli>/composer/`; see the
 //! README next to them for their origin.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::path::Path;

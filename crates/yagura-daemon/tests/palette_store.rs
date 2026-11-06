@@ -4,7 +4,7 @@
 //! palettes the GUI last sent are kept in `yagura.db`, so a daemon started
 //! again answers color queries with them before any GUI is attached.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

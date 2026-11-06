@@ -1,7 +1,7 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// Runs `ps` to see whether the grandchild outlived the window; no window is opening
-// meanwhile, so the spawn cannot be pulled into one.
+// Runs `ps` to see whether the grandchild outlived the window. `ps` exits at once, so a
+// descriptor it takes from a window another test opens meanwhile is held only that long.
 #![allow(clippy::disallowed_methods)]
 
 //! A window whose child never reads its input while a grandchild holds the PTY open
@@ -13,7 +13,7 @@
 //! not make a blocked write to the PTY fail. Windows is not covered: the bundled
 //! OpenConsole keeps draining the input pipe, so no write ever blocks there.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::Command;

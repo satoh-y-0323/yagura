@@ -13,7 +13,7 @@
 //! fixtures that carry a rule list. The empty-rule fixtures always judge by time, and
 //! applying it there would make one test unreachable and another a tautology.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -17,7 +17,7 @@
 //! Seeding uses `rusqlite::Connection::open` directly; every verification read goes
 //! through `store::open_readonly`.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,34 +28,6 @@ use common::{Harness, policy, read_response, send, sleepy_command, unique_temp_d
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd, WindowRegistry};
 use yagura_protocol::{ClientMessage, DaemonMessage};
-
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Polls the current slot until `predicate` holds, then returns the rows that satisfied
-/// it. A read error counts as "not converged yet" (the store thread may be mid-write),
-/// never as a failure, and only the final state is asserted.
-async fn wait_for_current_snapshot(
-    db_path: &Path,
-    label: &str,
-    predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
-) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let mut last: Option<Vec<store::SnapshotWindow>> = None;
-    loop {
-        if let Ok(conn) = store::open_readonly(db_path)
-            && let Ok(rows) = store::read_snapshot_conn(&conn)
-        {
-            if predicate(&rows) {
-                return rows;
-            }
-            last = Some(rows);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for {label}; last observed snapshot: {last:?}");
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-}
 
 fn close_capable_config() -> DaemonConfig {
     DaemonConfig {
@@ -91,18 +63,6 @@ fn sample_rows() -> Vec<store::SnapshotWindow> {
             effort: None,
         },
     ]
-}
-
-/// Creates schema v1 at `path` through the production entry point, releasing the store's
-/// own connection before returning so a seeding connection can take the write lock.
-///
-/// The returned `Store` is deliberately left unbound rather than passed to `drop(..)`:
-/// whether `Store` implements `Drop` is an implementation detail, and an explicit
-/// `drop(..)` of a type that does not would tie this file's lint status to it
-/// (`clippy::drop_non_drop`).
-fn create_schema(path: &Path) {
-    // Kept per-binary: the shared fixtures must not name yagura_daemon::store.
-    store::open_store(path).expect("open_store must succeed on a fresh path");
 }
 
 /// Opens a long-lived window with every snapshot-visible field set explicitly, so the
@@ -150,9 +110,11 @@ async fn opening_a_window_adds_a_fully_populated_row_to_the_current_slot() {
     let window_id =
         open_described_window(&harness.registry, command.clone(), "alpha", "neutral", &cwd).await;
 
-    let rows = wait_for_current_snapshot(&db.path, "the opened window to appear", |rows| {
-        rows.len() == 1
-    })
+    let rows = common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the opened window to appear",
+        |rows| rows.len() == 1,
+    )
     .await;
     let row = &rows[0];
     assert_eq!(row.position, 0, "the only window must be at position 0");
@@ -197,9 +159,11 @@ async fn renaming_a_window_updates_its_snapshot_row() {
         &cwd,
     )
     .await;
-    wait_for_current_snapshot(&db.path, "the opened window to appear", |rows| {
-        rows.len() == 1
-    })
+    common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the opened window to appear",
+        |rows| rows.len() == 1,
+    )
     .await;
 
     send(
@@ -217,9 +181,11 @@ async fn renaming_a_window_updates_its_snapshot_row() {
         other => panic!("expected window_renamed, got {other:?}"),
     }
 
-    let rows = wait_for_current_snapshot(&db.path, "the renamed window to converge", |rows| {
-        rows.len() == 1 && rows[0].name == "after-rename"
-    })
+    let rows = common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the renamed window to converge",
+        |rows| rows.len() == 1 && rows[0].name == "after-rename",
+    )
     .await;
     assert_eq!(rows.len(), 1, "renaming must not add or drop rows");
 
@@ -242,9 +208,11 @@ async fn closing_a_window_removes_it_from_the_snapshot() {
         &cwd,
     )
     .await;
-    wait_for_current_snapshot(&db.path, "the opened window to appear", |rows| {
-        rows.len() == 1
-    })
+    common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the opened window to appear",
+        |rows| rows.len() == 1,
+    )
     .await;
 
     send(
@@ -262,9 +230,11 @@ async fn closing_a_window_removes_it_from_the_snapshot() {
         other => panic!("expected window_closed, got {other:?}"),
     }
 
-    wait_for_current_snapshot(&db.path, "the closed window to disappear", |rows| {
-        rows.is_empty()
-    })
+    common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the closed window to disappear",
+        |rows| rows.is_empty(),
+    )
     .await;
 
     drop(harness);
@@ -298,7 +268,10 @@ async fn a_naturally_exited_window_stays_in_the_snapshot() {
         &cwd,
     )
     .await;
-    wait_for_current_snapshot(&db.path, "both windows to appear", |rows| rows.len() == 2).await;
+    common::store_fixtures::wait_for_current_snapshot(&db.path, "both windows to appear", |rows| {
+        rows.len() == 2
+    })
+    .await;
 
     harness.wait_until_child_exited(&short_lived).await;
 
@@ -315,9 +288,11 @@ async fn a_naturally_exited_window_stays_in_the_snapshot() {
         other => panic!("expected window_renamed, got {other:?}"),
     }
 
-    let rows = wait_for_current_snapshot(&db.path, "the post-exit write to converge", |rows| {
-        rows.iter().any(|r| r.name == "trigger-after-exit")
-    })
+    let rows = common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the post-exit write to converge",
+        |rows| rows.iter().any(|r| r.name == "trigger-after-exit"),
+    )
     .await;
     assert!(
         rows.iter().any(|r| r.name == "exits-on-its-own"),
@@ -368,7 +343,7 @@ fn the_warn_gate_reports_each_failure_axis_once() {
     std::fs::create_dir_all(&init_target.path).expect("the injected directory must be creatable");
 
     let write_target = temp_store_db("store-gate-write");
-    create_schema(&write_target.path);
+    common::store_fixtures::create_schema(&write_target.path);
     let mut read_only =
         store::open_readonly(&write_target.path).expect("open_readonly must succeed");
 
@@ -405,7 +380,7 @@ fn the_warn_gate_reports_each_failure_axis_once() {
 #[test]
 fn reading_a_snapshot_returns_at_most_the_row_limit_in_position_order() {
     let db = temp_store_db("store-read-limit");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let seeded = 300i64;
     {
@@ -440,7 +415,7 @@ fn reading_a_snapshot_returns_at_most_the_row_limit_in_position_order() {
 #[test]
 fn reading_a_snapshot_skips_corrupt_rows_and_warns_once_per_call() {
     let db = temp_store_db("store-read-corrupt");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -492,7 +467,7 @@ fn reading_a_snapshot_skips_corrupt_rows_and_warns_once_per_call() {
 #[test]
 fn a_written_snapshot_round_trips_through_a_reopened_connection() {
     let db = temp_store_db("store-round-trip");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let written = sample_rows();
     {
@@ -518,9 +493,11 @@ async fn wire_into_makes_a_registry_open_land_in_the_current_slot() {
 
     let window_id =
         open_described_window(&registry, sleepy_command("30"), "wired", "neutral", &cwd).await;
-    let rows = wait_for_current_snapshot(&db.path, "the wired open to reach slot 0", |rows| {
-        rows.len() == 1
-    })
+    let rows = common::store_fixtures::wait_for_current_snapshot(
+        &db.path,
+        "the wired open to reach slot 0",
+        |rows| rows.len() == 1,
+    )
     .await;
     assert_eq!(
         rows[0].name.as_str(),
@@ -534,7 +511,7 @@ async fn wire_into_makes_a_registry_open_land_in_the_current_slot() {
 #[tokio::test]
 async fn wire_into_rotates_the_previous_configuration_into_prev() {
     let db = temp_store_db("store-wire-rotate");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let configuration_a = sample_rows();
     {

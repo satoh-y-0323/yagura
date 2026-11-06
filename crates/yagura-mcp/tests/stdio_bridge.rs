@@ -23,7 +23,7 @@ use yagura_protocol::{
 };
 use yagura_test_support::paths::TempDir;
 
-mod common;
+use crate::common;
 
 use common::{LINE_TIMEOUT, McpChild, tool_reply};
 

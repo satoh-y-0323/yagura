@@ -15,8 +15,6 @@
 //! and the operating system is a value in the configuration, so all three
 //! operating systems' rules are measured on whichever host runs this binary.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;

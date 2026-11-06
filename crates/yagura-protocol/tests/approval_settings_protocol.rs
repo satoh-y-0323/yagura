@@ -15,13 +15,13 @@
 //!   (`PlaybookState::Unknown`): an unrecognized string decodes to it rather
 //!   than failing the frame. `ToolAutoApprove.tool` is a plain string, so an
 //!   unrecognized tool name decodes unchanged.
-//! - The three requests require `APPROVAL_SETTINGS_MIN_REVISION` (also see
-//!   `required_revision.rs`'s per-variant corpus).
+//!
+//! The revision the three requests require is measured in `required_revision.rs`.
 
 use yagura_protocol::{
-    APPROVAL_SETTINGS_MIN_REVISION, ApprovalSettingsInfo, ClientMessage, DaemonMessage,
-    MessageError, PlaybookState, ToolAutoApprove, decode_client_message, decode_daemon_message,
-    encode_client_message, encode_daemon_message, required_protocol_revision,
+    ApprovalSettingsInfo, ClientMessage, DaemonMessage, MessageError, PlaybookState,
+    ToolAutoApprove, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -317,22 +317,3 @@ fn an_unrecognized_tool_name_decodes_unchanged() {
 // =============================================================================
 // Revision (also see required_revision.rs)
 // =============================================================================
-
-#[test]
-fn the_three_requests_require_the_approval_settings_threshold() {
-    let messages = [
-        ClientMessage::GetApprovalSettings {},
-        ClientMessage::SetAutoApprove {
-            tool: "send_message".to_string(),
-            auto_approve: true,
-        },
-        ClientMessage::SetPlanApprovalRequired { required: true },
-    ];
-    for msg in messages {
-        assert_eq!(
-            required_protocol_revision(&msg),
-            APPROVAL_SETTINGS_MIN_REVISION,
-            "{msg:?} must require the approval-settings threshold"
-        );
-    }
-}

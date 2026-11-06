@@ -9,7 +9,7 @@
 //! would see. The table's keys are `args` (required), `config_file`
 //! (optional) and the placeholder `{hooks_config_file}`.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

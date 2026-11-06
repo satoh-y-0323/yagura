@@ -19,7 +19,7 @@
 //! daemon's own `confirm_ms`, so the daemon setting is the only variable
 //! under test.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

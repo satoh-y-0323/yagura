@@ -1,6 +1,6 @@
 #![allow(missing_docs, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-mod common;
+use crate::common;
 
 use yagura_daemon::window::RejectedArgument;
 use yagura_daemon::{DaemonConfig, WindowRegistry};

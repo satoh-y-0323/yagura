@@ -9,7 +9,7 @@
 //! input records with `ReadConsoleInputW` and prints each key-down's virtual key and
 //! control key state.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::time::Duration;
@@ -23,32 +23,13 @@ const READY: &str = "KEY-RECORDS-READY";
 const TAB_RECORD: &str = "KEYDOWN-VK-0009-CTRL-";
 const LEFT_CTRL_PRESSED: u32 = 0x0008;
 
-/// Runs `child` from this binary as a window's command.
-fn child_command(child: &str) -> Vec<String> {
-    let exe = std::env::current_exe().expect("current_exe");
-    vec![
-        exe.to_string_lossy().into_owned(),
-        child.to_string(),
-        "--exact".to_string(),
-        "--ignored".to_string(),
-        "--nocapture".to_string(),
-        "--test-threads=1".to_string(),
-    ]
-}
-
-/// Whether this process was started by [`child_command`] to be `child`.
-fn running_as(child: &str) -> bool {
-    let args: Vec<String> = std::env::args().collect();
-    args.iter().any(|a| a == "--exact") && args.iter().any(|a| a == child)
-}
-
 #[test]
-#[ignore = "the child of the test below, started by child_command"]
+#[ignore = "the child of the test below, started by common::own_test_child_command"]
 fn key_record_child() {
     use windows::Win32::System::Console::{
         GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE,
     };
-    if !running_as(CHILD) {
+    if !common::running_as_own_test(module_path!(), CHILD) {
         return;
     }
     // A child left waiting on input after a failed test must not outlive it for long.
@@ -98,7 +79,9 @@ fn tab_control_state(text: &str) -> Option<u32> {
 #[tokio::test]
 async fn ctrl_tab_reaches_a_console_child_as_vk_tab_with_left_ctrl() {
     let h = Harness::start("conpty-key-records", DaemonConfig::default()).await;
-    let window_id = h.open(child_command(CHILD), None).await;
+    let window_id = h
+        .open(common::own_test_child_command(module_path!(), CHILD), None)
+        .await;
     h.wait_for_scrollback(&window_id, READY.as_bytes()).await;
     wait_until_model_shows(&h, &window_id, READY.as_bytes()).await;
 

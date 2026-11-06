@@ -8,7 +8,7 @@
 //! `run_on_own_runtime`), so anything that waits on a model on the runtime's
 //! one thread stops the case instead of passing on a spare worker.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

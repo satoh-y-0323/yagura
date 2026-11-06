@@ -39,7 +39,7 @@
 //!   `"[yagura handoff] "`); [`wait_for_accepted_chat_envelope_json`] is this file's own
 //!   marker-aware reader, mirroring `common::wait_for_accepted_handoff_envelope_json`.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

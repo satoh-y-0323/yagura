@@ -8,6 +8,8 @@ license.workspace = true
 # Test-fixture crate: consumed only through the dev-dependencies of the other
 # workspace members, so it is never released to crates.io.
 publish = false
+# The integration tests are one binary (tests/main.rs) rather than one per file.
+autotests = false
 
 [dependencies]
 yagura-os = { path = "../yagura-os" }
@@ -27,3 +29,7 @@ workspace = true
 
 [dev-dependencies]
 toml.workspace = true
+
+[[test]]
+name = "test_support"
+path = "tests/main.rs"

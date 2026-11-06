@@ -7,7 +7,7 @@
 //! The waits are for events; the assertions that nothing arrives ask the daemon a `ping`,
 //! whose answer comes after every frame due for what the window's feeder had received.
 
-mod common;
+use crate::common;
 
 use common::Harness;
 use common::views::{

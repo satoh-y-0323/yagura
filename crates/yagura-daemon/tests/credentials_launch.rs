@@ -13,7 +13,7 @@
 //! window. The daemon runs under an instance of its own, so a daemon of the user is
 //! never reached.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

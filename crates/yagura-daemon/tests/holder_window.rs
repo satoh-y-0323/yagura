@@ -10,7 +10,7 @@
 //! Each process is watched from while it is known to be alive, so its end is observed
 //! on the process itself rather than on a reused pid.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -10,7 +10,7 @@
 //! subject is the specific profiles the repository ships rather than the
 //! parser's general behaviour.
 
-mod common;
+use crate::common;
 
 use common::docs::read_doc_verbatim;
 use yagura_daemon::profile::{

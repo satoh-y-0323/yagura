@@ -8,7 +8,7 @@
 //! `yagura_protocol::WindowStatus` every readiness / destructive gate
 //! matches on; `detected()` also carries why, when the status is `Unknown`.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use common::{CopiedEngine, SCREEN_COLS, SCREEN_ROWS, advance_ms, new_engine, screen_of};

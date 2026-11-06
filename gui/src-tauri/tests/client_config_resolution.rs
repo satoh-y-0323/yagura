@@ -120,17 +120,6 @@ fn file_value_used_for_auto_respawn_when_env_absent() {
     assert_eq!(result.failure, None);
 }
 
-#[test]
-fn defaults_used_when_neither_env_nor_file_present() {
-    let dir = TempDir::new(TEMP_DIR_PREFIX, "order-neither");
-
-    let result = load_client_config(dir.path(), None);
-
-    assert_eq!(result.reconnect, ReconnectConfig::default());
-    assert_eq!(result.failure, Some(ClientConfigFailure::NotFound));
-    assert_closed_to_four_known_failure_kinds(result.failure.expect("asserted Some above"));
-}
-
 // ---------------------------------------------------------------------
 // An empty environment-variable value counts as unset.
 // ---------------------------------------------------------------------

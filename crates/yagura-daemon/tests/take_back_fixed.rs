@@ -17,7 +17,7 @@
 //! through a take-back at all) is `composer_gate.rs`'s
 //! `row2_resends_the_submit_key_only_when_its_own_envelope_is_still_on_screen_unmodified`.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

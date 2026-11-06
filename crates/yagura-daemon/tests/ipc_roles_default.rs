@@ -7,7 +7,7 @@
 //! Every config here states `plan_approval_required: false` so these cases
 //! keep opening task windows directly whatever the built-in default becomes.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -8,7 +8,7 @@
 //! however fast the window is resized, the frames a view applies show the
 //! model, and the cursor the child reads back is the model's.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

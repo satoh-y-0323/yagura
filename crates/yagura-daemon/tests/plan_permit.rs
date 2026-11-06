@@ -9,15 +9,12 @@
 //! fact to build a permit from. Children are `echo_child`, never a
 //! real vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
-
-use tokio::time::sleep;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
@@ -25,7 +22,6 @@ use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::PlanStore;
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_protocol::WindowStatus;
 use yagura_test_support::process::echo_child_path;
 
 fn db_path(tag: &str) -> PathBuf {
@@ -70,34 +66,6 @@ fn end_child(registry: &WindowRegistry, window_id: &str) {
 /// without waiting for anything else to happen.
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
-}
-
-/// Polls a registry-held entry until it reports `Exited`; panics on timeout. Mirrors
-/// `tests/window_liveness.rs`'s helper of the same purpose (each integration test
-/// binary is its own crate, so the helper cannot be shared directly).
-async fn wait_for_exited(registry: &WindowRegistry, window_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let entry = registry
-            .get(window_id)
-            .expect("window must still be registered while waiting for it to exit");
-        if entry.current_status() == WindowStatus::Exited {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            // What each layer last saw tells a missed child exit from a missed
-            // status transition when this fires.
-            panic!(
-                "timed out waiting for the window to become Exited: raw exit status {:?}, \
-                 current status {:?}, detector attached {}, detector task alive {}",
-                entry.session().exit_status(),
-                entry.current_status(),
-                entry.has_detector(),
-                entry.detector_task_alive(),
-            );
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
 }
 
 /// A single-task plan with one write target, valid against `validate_plan` with every
@@ -151,7 +119,7 @@ async fn issuing_a_create_permit_requires_the_calling_window_to_be_alive() {
 
     let dying = open_window(&registry).await;
     end_child(&registry, &dying);
-    wait_for_exited(&registry, &dying).await;
+    common::wait_for_registry_window_exited(&registry, &dying).await;
     assert!(
         matches!(
             plan_permit::issue_create(&RequestOrigin::Window(dying), &registry),
@@ -357,7 +325,7 @@ async fn change_authorization_treats_a_dead_owner_the_same_as_a_bound_non_owner(
     );
 
     end_child(&dying_registry, &ending_owner);
-    wait_for_exited(&dying_registry, &ending_owner).await;
+    common::wait_for_registry_window_exited(&dying_registry, &ending_owner).await;
 
     let dead_guard = dying_table.lock(&dying_plan_id).await;
     let dead_result = plan_permit::issue_change(
@@ -501,7 +469,7 @@ async fn read_authorization_admits_owner_bound_and_approver_but_not_out_of_range
         .set_owner(nominate_permit)
         .expect("set_owner must persist the nominated owner");
     end_child(&dying_registry, &dying_window_id);
-    wait_for_exited(&dying_registry, &dying_window_id).await;
+    common::wait_for_registry_window_exited(&dying_registry, &dying_window_id).await;
     assert!(
         plan_permit::issue_read(
             &RequestOrigin::Window(dying_window_id),

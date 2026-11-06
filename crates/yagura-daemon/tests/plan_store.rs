@@ -13,7 +13,7 @@
 //! schema as a fresh v7 database) live in `tests/store_migrations.rs`, next to the
 //! existing per-version schema fixtures they extend.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

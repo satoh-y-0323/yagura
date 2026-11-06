@@ -4,7 +4,7 @@
 //! (1.0.101). See `tests/fixtures/copilot-cli/README.md` for fixture provenance, the
 //! `VtScreen::bottom_lines(16)` extraction rule, and the redactions applied.
 
-mod common;
+use crate::common;
 
 use common::detection_rules::judge;
 use common::repo_definition_text;

@@ -3,7 +3,7 @@
 //! The daemon's reading of a screen whose model bounds the work a child's
 //! output can ask for: what the reading shows after such output.
 
-mod common;
+use crate::common;
 
 mod work_bound {
     //! One `feed` of a few KB must return quickly even on the largest screen, whatever the

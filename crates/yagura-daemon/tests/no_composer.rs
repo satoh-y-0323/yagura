@@ -19,7 +19,7 @@
 //! delivery through that CLI's own doors, or as the launch prompt of a window it
 //! opens. A window that declares no delivery is handed nothing, composer or not.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

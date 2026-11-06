@@ -48,6 +48,10 @@ python scripts/dep-audit/dep_audit.py   # from the repository root
 `cargo test` can exit 0 with fewer tests than before when a test binary fails to start. Compare the
 counts, not just the exit code.
 
+Each crate's integration tests build as one binary named after the crate (`daemon`, `mcp`, `os`, ...):
+`tests/main.rs` lists every file in `tests/` as a `mod`, and a file it does not list is not built.
+Run one file's tests with `cargo test -p yagura-daemon --test daemon <file>::`.
+
 ## Design rules
 
 These are review requirements. A change that breaks one is rejected even if it works.

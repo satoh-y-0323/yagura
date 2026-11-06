@@ -8,10 +8,8 @@
 //! IPC endpoint through `common::Harness`, the same convention every other
 //! file in this suite uses.
 
-mod common;
+use crate::common;
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use common::{
@@ -362,119 +360,6 @@ async fn send_text_to_an_unknown_window_with_no_definition_names_the_reason_in_t
 // The confirmed-transition log line
 // =============================================================================
 
-/// One captured `tracing` event: level, and every recorded field normalized
-/// to a string. A field recorded through `record_str`/`record_debug` of a
-/// `&str`/`String` value comes back wrapped in `Debug`-style quotes; those
-/// are stripped here so a field recorded via `%field` (no quotes) and one
-/// recorded via a plain string field (quoted) compare the same way.
-#[derive(Debug, Clone)]
-struct CapturedEvent {
-    level: tracing::Level,
-    fields: HashMap<String, String>,
-}
-
-impl CapturedEvent {
-    fn message(&self) -> Option<&str> {
-        self.fields.get("message").map(String::as_str)
-    }
-}
-
-#[derive(Default)]
-struct FieldVisitor {
-    fields: HashMap<String, String>,
-}
-
-impl tracing::field::Visit for FieldVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        let text = format!("{value:?}");
-        let normalized = text
-            .strip_prefix('"')
-            .and_then(|rest| rest.strip_suffix('"'))
-            .map(str::to_string)
-            .unwrap_or(text);
-        self.fields.insert(field.name().to_string(), normalized);
-    }
-}
-
-/// A process-wide `tracing` subscriber, installed exactly once for this
-/// whole test binary via [`install_capture`].
-///
-/// A global default rather than a scoped `tracing::subscriber::with_default`:
-/// the confirmed-transition log line this file tests fires inside
-/// `spawn_status_forwarder`'s own spawned task, not the caller's -- the same
-/// situation `src/window.rs`'s own `before_spawn_snapshot_failure_emits_a_warning`
-/// test documents (it uses `tracing_test` instead of a scoped subscriber for
-/// exactly this reason: `tracing`'s per-callsite `Interest` cache is
-/// process-global, so a scoped, thread-local subscriber can lose the race to
-/// another thread that touches the same call site first with no subscriber
-/// active, permanently caching "not interested" for it). A single global
-/// default sidesteps that race outright (`enabled` always returns `true`,
-/// and `tracing::subscriber::set_global_default` forces every call site's
-/// cached interest to be re-evaluated); per-test isolation comes from
-/// filtering the shared buffer by each test's own unique `window_id` rather
-/// than from thread scoping.
-struct GlobalCapture {
-    events: std::sync::Arc<Mutex<Vec<CapturedEvent>>>,
-}
-
-impl tracing::Subscriber for GlobalCapture {
-    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut visitor = FieldVisitor::default();
-        event.record(&mut visitor);
-        self.events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(CapturedEvent {
-                level: *event.metadata().level(),
-                fields: visitor.fields,
-            });
-    }
-
-    fn enter(&self, _span: &tracing::span::Id) {}
-
-    fn exit(&self, _span: &tracing::span::Id) {}
-}
-
-static CAPTURE_EVENTS: OnceLock<std::sync::Arc<Mutex<Vec<CapturedEvent>>>> = OnceLock::new();
-
-/// Installs [`GlobalCapture`] as the process-wide default exactly once (via
-/// `OnceLock`) and returns the shared event buffer every call, including the
-/// first, can read from.
-fn install_capture() -> std::sync::Arc<Mutex<Vec<CapturedEvent>>> {
-    CAPTURE_EVENTS
-        .get_or_init(|| {
-            let events = std::sync::Arc::new(Mutex::new(Vec::new()));
-            let subscriber = GlobalCapture {
-                events: std::sync::Arc::clone(&events),
-            };
-            // A second call in the same process never happens (OnceLock runs
-            // this closure at most once), but set_global_default's Err is
-            // ignored on principle rather than unwrapped.
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            events
-        })
-        .clone()
-}
-
-fn captured_events(events: &Mutex<Vec<CapturedEvent>>) -> Vec<CapturedEvent> {
-    events
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-}
-
 /// Self-verification of the capture harness against a synthetic event fired
 /// from a spawned background `tokio` task, independent of any production
 /// code path -- proof that a subscriber installed this way is not
@@ -483,7 +368,7 @@ fn captured_events(events: &Mutex<Vec<CapturedEvent>>) -> Vec<CapturedEvent> {
 /// `spawn_status_forwarder`'s own spawned task, not this test's).
 #[tokio::test]
 async fn capture_harness_observes_an_event_fired_from_a_spawned_background_task() {
-    let events = install_capture();
+    common::global_tracing::install();
     let marker = format!("t5-self-check-{}-{}", std::process::id(), line!());
 
     let task_marker = marker.clone();
@@ -493,7 +378,7 @@ async fn capture_harness_observes_an_event_fired_from_a_spawned_background_task(
     .await
     .expect("the spawned task must not panic");
 
-    let matching: Vec<_> = captured_events(&events)
+    let matching: Vec<_> = common::global_tracing::captured_events()
         .into_iter()
         .filter(|event| {
             event.level == tracing::Level::INFO
@@ -515,7 +400,7 @@ async fn capture_harness_observes_an_event_fired_from_a_spawned_background_task(
 
 #[tokio::test]
 async fn a_confirmed_transition_logs_exactly_one_info_event_naming_the_status_and_reason() {
-    let events = install_capture();
+    common::global_tracing::install();
     let dir = unique_temp_dir("t5-confirmed-log");
     let config = detection_config(&dir, DaemonConfig::default());
     let h = Harness::start("t5-confirmed-log", config).await;
@@ -534,7 +419,7 @@ async fn a_confirmed_transition_logs_exactly_one_info_event_naming_the_status_an
         .and_then(|window| window.status_rev)
         .expect("the listed window must carry its status_rev");
 
-    let matching: Vec<_> = captured_events(&events)
+    let matching: Vec<_> = common::global_tracing::captured_events()
         .into_iter()
         .filter(|event| {
             event.level == tracing::Level::INFO

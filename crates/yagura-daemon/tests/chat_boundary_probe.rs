@@ -10,7 +10,7 @@
 //! small message-shaped helpers locally rather than depending on its
 //! private (non-`pub`) functions.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

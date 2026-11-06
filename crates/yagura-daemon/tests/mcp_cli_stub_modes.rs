@@ -11,7 +11,7 @@
 //! path the daemon's own registration mechanism (a later layer) drives the
 //! fixture through.
 
-mod common;
+use crate::common;
 
 use std::ffi::OsString;
 use std::path::Path;

@@ -8,7 +8,7 @@
 //! window opened in a real `WindowRegistry`; `tests/ticket_permit.rs` is the contract
 //! for who gets which permit.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

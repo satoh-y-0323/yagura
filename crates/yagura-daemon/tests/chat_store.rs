@@ -9,7 +9,7 @@
 //! go through `ChatStore` itself use `store::open_readonly` and raw SQL against the chat
 //! tables, the same pattern the session-store tests use for `snapshot_windows`.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

@@ -7,7 +7,7 @@
 //! child exits, so grandchildren are torn down immediately instead of surviving until
 //! the window is evicted.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

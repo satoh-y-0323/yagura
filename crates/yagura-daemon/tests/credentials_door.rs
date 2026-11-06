@@ -13,7 +13,7 @@
 //! it connects to is the in-process daemon's and never a running daemon of the user, and
 //! points the data, state and config base directories into a temporary directory.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

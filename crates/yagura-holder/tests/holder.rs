@@ -405,8 +405,9 @@ async fn wait_until(what: &str, satisfied: impl Fn() -> bool) {
 }
 
 fn running_as(name: &str) -> bool {
+    let name = yagura_test_support::process::libtest_name(module_path!(), name);
     let args: Vec<String> = std::env::args().collect();
-    args.iter().any(|arg| arg == "--exact") && args.iter().any(|arg| arg == name)
+    args.iter().any(|arg| arg == "--exact") && args.contains(&name)
 }
 
 /// Runs [`intruder`] in a process of its own, which does not hold the daemon
@@ -415,7 +416,7 @@ async fn run_intruder(endpoint: &str) -> String {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args([
-            INTRUDER,
+            yagura_test_support::process::libtest_name(module_path!(), INTRUDER).as_str(),
             "--exact",
             "--ignored",
             "--nocapture",

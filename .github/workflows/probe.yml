@@ -18,11 +18,11 @@ on:
         type: string
         default: yagura-os
       test_target:
-        description: "Integration test target (--test). Empty means every test target of the package."
+        description: "Integration test target (--test): each crate has one, named after it (daemon, mcp, os, protocol, term, holder, test_support, gui). Empty means every test target of the package."
         type: string
         default: ""
       filter:
-        description: "libtest name filter, substring match. Empty means no filter."
+        description: "libtest name filter, substring match; <file>:: picks one test file. Empty means no filter."
         type: string
         default: ""
       skip:

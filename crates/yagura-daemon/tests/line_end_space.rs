@@ -8,7 +8,7 @@
 //! Each case drives a real `IpcServer` against `submit_child`, which logs
 //! every byte it reads; what is asserted is what the child read.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

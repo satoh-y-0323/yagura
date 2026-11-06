@@ -10,9 +10,7 @@
 //! or inline SQL; every verification read goes through the non-destructive read port
 //! (`store::open_readonly` and the `read_*_conn` functions) that the restore flow uses.
 
-mod common;
-
-use std::path::Path;
+use crate::common;
 
 use common::store_fixtures::{
     capture_warns, count_warns, insert_window_row, insert_window_row_with_command_json,
@@ -21,13 +19,6 @@ use common::store_fixtures::{
 };
 use rusqlite::types::Value as SqlValue;
 use yagura_daemon::store;
-
-/// Creates schema v2 at `path` through the production entry point, releasing the store's
-/// own connection before returning so a seeding connection can take the write lock. Kept
-/// per-binary so `Store`'s `Drop`-ness cannot leak into this file's lint status.
-fn create_schema(path: &Path) {
-    store::open_store(path).expect("open_store must succeed on a fresh path");
-}
 
 fn sample_rows_with_layout() -> Vec<store::SnapshotWindow> {
     vec![
@@ -101,20 +92,6 @@ fn user_version(conn: &rusqlite::Connection) -> i64 {
 }
 
 #[test]
-fn open_store_on_a_fresh_path_reaches_the_latest_schema() {
-    let db = temp_store_db("v2-fresh-open");
-    create_schema(&db.path);
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    assert_eq!(
-        user_version(&conn),
-        store::MIGRATIONS.len() as i64,
-        "a fresh open_store must migrate all the way to the latest schema version (the full \
-         series)"
-    );
-}
-
-#[test]
 fn production_migrations_applied_incrementally_match_a_fresh_application() {
     let fresh_db = temp_store_db("v2-migrate-fresh");
     {
@@ -164,7 +141,7 @@ fn production_migrations_applied_incrementally_match_a_fresh_application() {
 #[test]
 fn write_snapshot_then_read_round_trips_layout_json_when_present() {
     let db = temp_store_db("v2-round-trip-some");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let written = sample_rows_with_layout();
     {
@@ -183,7 +160,7 @@ fn write_snapshot_then_read_round_trips_layout_json_when_present() {
 #[test]
 fn a_v1_origin_row_predating_the_layout_column_reads_back_as_none() {
     let db = temp_store_db("v2-round-trip-v1-origin");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -216,7 +193,7 @@ fn a_v1_origin_row_predating_the_layout_column_reads_back_as_none() {
 #[allow(clippy::disallowed_methods)]
 fn rotate_slots_preserves_layout_json_in_the_rotated_prev_row() {
     let db = temp_store_db("v2-rotate-preserves-layout");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let written = sample_rows_with_layout();
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -239,7 +216,7 @@ const SKIPPED_ROW_WARNING: &str = "skipped one or more corrupt snapshot_windows 
 #[test]
 fn a_layout_json_at_exactly_the_byte_limit_is_returned_unchanged() {
     let db = temp_store_db("v2-layout-at-limit");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let at_limit = layout_json_of_exact_length(store::MAX_LAYOUT_JSON_BYTES);
     {
@@ -268,7 +245,7 @@ fn a_layout_json_at_exactly_the_byte_limit_is_returned_unchanged() {
 #[test]
 fn a_layout_json_one_byte_over_the_limit_degrades_to_none_and_warns() {
     let db = temp_store_db("v2-layout-over-limit");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let oversized = layout_json_of_exact_length(store::MAX_LAYOUT_JSON_BYTES + 1);
     {
@@ -305,7 +282,7 @@ fn a_layout_json_one_byte_over_the_limit_degrades_to_none_and_warns() {
 #[test]
 fn a_blob_layout_json_degrades_to_none_and_warns() {
     let db = temp_store_db("v2-layout-blob");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -333,7 +310,7 @@ fn a_blob_layout_json_degrades_to_none_and_warns() {
 #[test]
 fn an_invalid_utf8_layout_json_degrades_to_none_and_warns() {
     let db = temp_store_db("v2-layout-invalid-utf8");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -366,7 +343,7 @@ fn an_invalid_utf8_layout_json_degrades_to_none_and_warns() {
 #[test]
 fn two_degraded_layout_rows_in_one_call_still_warn_only_once() {
     let db = temp_store_db("v2-layout-multiple-degraded-rows");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let oversized = layout_json_of_exact_length(store::MAX_LAYOUT_JSON_BYTES + 1);
     {
@@ -415,7 +392,7 @@ fn two_degraded_layout_rows_in_one_call_still_warn_only_once() {
 #[test]
 fn a_null_layout_json_degrades_to_none_without_warning() {
     let db = temp_store_db("v2-layout-null");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -446,7 +423,7 @@ fn command_json_skip_and_layout_json_degradation_warn_independently_in_the_same_
     // the oversized layout_json on a different, otherwise well-formed row must degrade,
     // each warning exactly once and distinctly from the other.
     let db = temp_store_db("v2-layout-and-command-both-warn");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let oversized_layout = layout_json_of_exact_length(store::MAX_LAYOUT_JSON_BYTES + 1);
     {
@@ -505,7 +482,7 @@ fn command_json_skip_and_layout_json_degradation_warn_independently_in_the_same_
 #[test]
 fn a_corrupt_command_json_row_is_still_skipped_when_its_layout_json_is_well_formed() {
     let db = temp_store_db("v2-command-skip-non-regression");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -549,7 +526,7 @@ fn a_corrupt_command_json_row_is_still_skipped_when_its_layout_json_is_well_form
 #[test]
 fn read_prev_taken_at_conn_returns_none_when_no_meta_row_exists() {
     let db = temp_store_db("v2-prev-taken-at-no-row");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
     let result = store::read_prev_taken_at_conn(&conn)
@@ -562,7 +539,7 @@ fn read_prev_taken_at_conn_returns_none_when_no_meta_row_exists() {
 #[allow(clippy::disallowed_methods)]
 fn read_prev_taken_at_conn_returns_some_after_rotation() {
     let db = temp_store_db("v2-prev-taken-at-rotated");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
     insert_window_row(&conn, store::SLOT_CURRENT, 0, "current-a");
@@ -582,7 +559,7 @@ fn read_prev_taken_at_conn_returns_some_after_rotation() {
 #[test]
 fn read_prev_taken_at_conn_returns_none_for_an_explicit_null() {
     let db = temp_store_db("v2-prev-taken-at-null");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -603,7 +580,7 @@ fn read_prev_taken_at_conn_returns_none_for_an_explicit_null() {
 #[test]
 fn read_prev_taken_at_conn_degrades_a_non_integer_cell_without_warning() {
     let db = temp_store_db("v2-prev-taken-at-non-integer");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");

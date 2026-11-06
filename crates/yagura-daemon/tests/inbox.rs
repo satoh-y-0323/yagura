@@ -8,7 +8,7 @@
 //! The inbox is filled through `WindowEntry::inbox().deposit(..)`; nothing in this layer
 //! fills it over IPC. Parcels are read back only through the doors, as a hook does.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

@@ -1,0 +1,40 @@
+//! Every integration test of this crate, built as one test binary: each file in
+//! this directory is a module listed below, and a file not listed is not built.
+
+mod approval_protocol;
+mod approval_settings_protocol;
+mod chat_protocol;
+mod chat_protocol_matrix;
+mod daemon_health_protocol;
+mod frame_fixture;
+mod frame_protocol;
+mod framing;
+mod handoff_protocol;
+mod holder_frames;
+mod inbox_protocol;
+mod input_bounds;
+mod instruction_protocol;
+mod launch_option;
+mod mcp_channel_protocol;
+mod mcp_registration_protocol;
+mod model_alias_protocol;
+mod notice_protocol;
+mod open_window_args;
+mod plan_protocol;
+mod plan_review_protocol;
+mod profile_enabled_protocol;
+mod protocol_v2;
+mod registration_notice_protocol;
+mod report_gap;
+mod report_protocol;
+mod required_revision;
+mod restore_protocol;
+mod send_keys_protocol;
+mod status;
+mod status_rev;
+mod structured_input_protocol;
+mod ticket_protocol;
+mod unknown_reason;
+mod view_visibility_protocol;
+mod window_name;
+mod wire_inventory;

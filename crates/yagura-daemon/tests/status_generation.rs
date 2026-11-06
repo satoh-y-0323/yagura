@@ -10,7 +10,7 @@
 //! judgement logic (`tests/detector_engine.rs`) nor the waiting primitives
 //! that consume a confirmed pair (`tests/waiter.rs`).
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

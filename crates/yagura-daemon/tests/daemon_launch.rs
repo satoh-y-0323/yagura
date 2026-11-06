@@ -8,7 +8,7 @@
 //! windows beside a bundled pseudoconsole that is not the pinned build, and the GUI's
 //! detached start reports truthfully whether the daemon left the caller's job.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::process::{Child, ExitStatus};
@@ -490,7 +490,13 @@ mod detached {
     // about the daemon dying with it.
     #[test]
     fn a_detached_start_leaves_the_callers_job_unless_it_reports_the_fallback() {
-        let program = capture_child_path();
+        // A copy under a name of its own: other tests of this binary start
+        // `capture_child` as children of this process too.
+        let program = common::unique_temp_dir("detached-start").join(format!(
+            "detached-start-probe{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::copy(capture_child_path(), &program).expect("copy the capture_child fixture");
         let image = program.file_name().unwrap().to_string_lossy().to_string();
         let own_pid = std::process::id();
 

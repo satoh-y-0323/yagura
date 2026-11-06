@@ -60,7 +60,7 @@ Any combination of the three axes may be requested; the axes are independent fla
 
 | Value | Meaning | Required flags |
 |---|---|---|
-| `cargo` | Resolve the test executable once with `cargo test -p <crate> --test <file> --no-run --message-format=json`, then run that executable every iteration. With `--form full` there is no resolution step: `cargo` itself is the iteration command. | `--crate`, `--test-file` (not with `--form full`) |
+| `cargo` | Resolve the test executable once with `cargo test -p <crate> --test <target> --no-run --message-format=json`, then run that executable every iteration. Each crate's integration tests are one binary named after the crate (`daemon`, `mcp`, `os`, `protocol`, `term`, `holder`, `test_support`, `gui`); its tests are named `<file>::<test>`. With `--form full` there is no resolution step: `cargo` itself is the iteration command. | `--crate`, `--test-file` (not with `--form full`) |
 | `exe` | Use an already built executable; **no cargo step at all**. `resolve.log` is not created, and the summary shows the executable that was used. | `--exe` |
 | `command` | Any executable with a free argument list (synthetic commands). | `--exe`, `--arg` (repeatable) |
 
@@ -69,7 +69,7 @@ Any combination of the three axes may be requested; the axes are independent fla
 | Value | Meaning |
 |---|---|
 | `single` | One test: the harness appends `<test name> --exact --test-threads 1`. With `--target command` no arguments are appended - the `--arg` list is passed verbatim and the iteration is one process. |
-| `binary` | The whole test binary at libtest's default parallelism (no filter). |
+| `binary` | The whole test binary at libtest's default parallelism. With `--target cargo`, `--arg` adds libtest filters (`--arg status_token::` runs one file's tests). |
 | `full` | `cargo` is the iteration command. Default arguments: `test --workspace --no-fail-fast`; replace them with `--cargo-arg` (repeatable). Requires `--target cargo`. |
 
 **(C) CPU saturation - `--saturate`**
@@ -81,7 +81,8 @@ cleanup record lists each worker pid and its state.
 **Valid combinations** - every (A)x(B)x(C) pair is accepted except: `--form full` needs
 `--target cargo`; `--target command` needs `--form single` and takes no `--test-name`;
 `--form single` needs `--test-name` for `--target cargo|exe`; `--form binary|full` takes no
-`--test-name`. Invalid combinations exit with code 2 and an explanation, before any measurement.
+`--test-name`; `--target cargo` takes `--arg` only with `--form binary`. Invalid combinations exit
+with code 2 and an explanation, before any measurement.
 
 ## 4. Calling it (verbatim examples)
 
@@ -89,13 +90,13 @@ All examples are meant to be pasted into **Git Bash** from the repository root.
 
 ```bash
 # (1) cargo resolution x single test x saturation on - the "one flaky test" arm
-python scripts/flake-harness/flake_harness.py run --run-id measure-status-token --target cargo --form single --saturate --crate yagura-daemon --test-file status_token --test-name window_verify_status_token_accepts_the_configured_override --iterations 60
+python scripts/flake-harness/flake_harness.py run --run-id measure-status-token --target cargo --form single --saturate --crate yagura-daemon --test-file daemon --test-name status_token::window_verify_status_token_accepts_the_configured_override --iterations 60
 
 # (2) cargo resolution x whole binary at default parallelism x saturation on
-python scripts/flake-harness/flake_harness.py run --run-id confirm-status-token --target cargo --form binary --saturate --crate yagura-daemon --test-file status_token --iterations 40
+python scripts/flake-harness/flake_harness.py run --run-id confirm-status-token --target cargo --form binary --saturate --crate yagura-daemon --test-file daemon --arg status_token:: --iterations 40
 
 # (3) direct executable x single test x saturation on - the control arm (no cargo step)
-python scripts/flake-harness/flake_harness.py run --run-id control-prefix --target exe --form single --saturate --exe 'C:/Users/you/scratch/prefix-target/debug/deps/status_token-1a2b3c4d5e6f7890.exe' --test-name window_verify_status_token_accepts_the_configured_override --iterations 60 --extra-target-dir 'C:/Users/you/scratch/prefix-target'
+python scripts/flake-harness/flake_harness.py run --run-id control-prefix --target exe --form single --saturate --exe 'C:/Users/you/scratch/prefix-target/debug/deps/daemon-1a2b3c4d5e6f7890.exe' --test-name status_token::window_verify_status_token_accepts_the_configured_override --iterations 60 --extra-target-dir 'C:/Users/you/scratch/prefix-target'
 
 # (4) arbitrary executable and argument list x single x saturation off - synthetic commands
 python scripts/flake-harness/flake_harness.py run --run-id demo-fail --target command --form single --exe python --arg=-c --arg 'print("synthetic fail"); raise SystemExit(1)' --iterations 2
@@ -104,7 +105,7 @@ python scripts/flake-harness/flake_harness.py run --run-id demo-fail --target co
 python scripts/flake-harness/flake_harness.py run --run-id full-run-10 --target cargo --form full --iterations 10
 
 # (6) full run form with replaced cargo arguments (reduced scope)
-python scripts/flake-harness/flake_harness.py run --run-id full-run-cli-args --target cargo --form full --cargo-arg test --cargo-arg=-p --cargo-arg yagura-daemon --cargo-arg=--test --cargo-arg cli_args --iterations 1
+python scripts/flake-harness/flake_harness.py run --run-id full-run-cli-args --target cargo --form full --cargo-arg test --cargo-arg=-p --cargo-arg yagura-daemon --cargo-arg=--test --cargo-arg daemon --cargo-arg cli_args:: --iterations 1
 
 # (7) standalone cleanup and self diagnosis
 python scripts/flake-harness/flake_harness.py sweep
@@ -137,7 +138,7 @@ and poll its progress file:
 
 ```bash
 # start (single process, all 60 iterations)
-python scripts/flake-harness/flake_harness.py run --run-id measure-status-token --target cargo --form single --saturate --crate yagura-daemon --test-file status_token --test-name window_verify_status_token_accepts_the_configured_override --iterations 60 > /c/Users/you/AppData/Local/Temp/measure.out 2>&1
+python scripts/flake-harness/flake_harness.py run --run-id measure-status-token --target cargo --form single --saturate --crate yagura-daemon --test-file daemon --test-name status_token::window_verify_status_token_accepts_the_configured_override --iterations 60 > /c/Users/you/AppData/Local/Temp/measure.out 2>&1
 
 # poll: last progress line, and completion
 tail -2 target/flake-logs/measure-status-token/progress.jsonl

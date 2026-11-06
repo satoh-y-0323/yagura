@@ -14,7 +14,7 @@
 //! an hour of it let pass (`let_every_clock_bound_run_out`), never with a
 //! sleep. The hang guards (`timeout(..)`) only bound a failure.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

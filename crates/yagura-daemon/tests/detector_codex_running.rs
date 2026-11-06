@@ -8,7 +8,7 @@
 //! `Working` line with a `tab to queue message` hint. The streams live under
 //! `tests/fixtures/codex-cli/running/`; see the README there for their origin.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::path::Path;

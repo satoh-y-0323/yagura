@@ -10,7 +10,7 @@
 //! the child's own screen (`reading::read_composer`), the same way
 //! `composer_gate.rs` verifies the window layer's writes.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

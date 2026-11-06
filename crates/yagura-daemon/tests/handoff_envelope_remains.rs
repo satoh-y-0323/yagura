@@ -7,7 +7,7 @@
 //! its spawn fails or the envelope is known never to be delivered. A profile
 //! that cannot be handed a request at launch is refused before anything starts.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

@@ -22,7 +22,7 @@
 //! or remove a profile without restarting the daemon, so it is asserted directly rather
 //! than inferred from the absence of a cache.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

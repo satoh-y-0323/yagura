@@ -5,7 +5,7 @@
 //! can be (`MAX_WINDOW_DIMENSION` both ways) with a different pair of colors
 //! in every neighbouring cell, so every cell is its own run.
 
-mod common;
+use crate::common;
 
 use std::time::Duration;
 

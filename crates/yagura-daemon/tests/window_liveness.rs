@@ -8,16 +8,15 @@
 //! Children are echo_child or a fixed self-exiting command, never a real
 //! vendor CLI.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use crate::common;
 
-use tokio::time::sleep;
+use std::path::PathBuf;
+
 use yagura_test_support::paths::{strip_extended_length_prefix, unique_temp_dir};
 use yagura_test_support::process::{echo_child_path, exit_with_code_command};
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowLiveness, WindowRegistry};
-use yagura_protocol::WindowStatus;
 
 /// The minimal `OpenWindowRequest` most tests need: spawn echo_child with all
 /// optional fields omitted.
@@ -60,25 +59,6 @@ fn self_exiting_request() -> OpenWindowRequest {
     }
 }
 
-/// Polls a registry-held entry until it reports `Exited`; panics on timeout.
-/// Deterministic polling instead of a fixed sleep keeps this robust on slow
-/// machines.
-async fn wait_for_exited(registry: &WindowRegistry, window_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let entry = registry
-            .get(window_id)
-            .expect("window must still be registered while waiting for it to exit");
-        if entry.current_status() == WindowStatus::Exited {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the window to become Exited");
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[tokio::test]
 async fn a_window_with_a_running_child_is_alive_and_carries_its_open_time_cwd() {
     let registry = WindowRegistry::new(DaemonConfig::default());
@@ -117,7 +97,7 @@ async fn a_window_whose_child_exited_on_its_own_is_not_alive_but_stays_registere
         .await
         .expect("open should succeed")
         .window_id;
-    wait_for_exited(&registry, &window_id).await;
+    common::wait_for_registry_window_exited(&registry, &window_id).await;
 
     assert!(
         registry.get(&window_id).is_some(),

@@ -5,7 +5,7 @@
 //! Frames are read as raw JSON rather than through `decode_daemon_message`,
 //! because an omitted key and a `null` one decode to the same `Option::None`.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

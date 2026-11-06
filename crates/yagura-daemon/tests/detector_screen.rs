@@ -7,7 +7,7 @@
 //! rather than panicking because they arrive from untrusted IPC clients, and PTY reads
 //! may split escape sequences or multi-byte characters across `feed` calls.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use regex::Regex;

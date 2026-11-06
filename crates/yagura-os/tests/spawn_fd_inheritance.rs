@@ -271,7 +271,7 @@ fn spawn_captured_child_inherits_no_fd_it_was_not_given() {
     let argv = vec![
         exe.to_str().expect("utf8 test binary path").to_owned(),
         "--exact".to_owned(),
-        CAPTURED_TEST.to_owned(),
+        yagura_test_support::process::libtest_name(module_path!(), CAPTURED_TEST),
         CHILD_MARKER.to_owned(),
         inheritable.arg(INHERITABLE_ARG),
         non_inheritable.arg(NON_INHERITABLE_ARG),
@@ -334,9 +334,10 @@ fn spawn_daemon_detached_child_inherits_no_fd_it_was_not_given() {
     let report_arg = format!("{REPORT_ARG}{}", fifo.to_str().expect("utf8 path"));
     let inheritable_arg = inheritable.arg(INHERITABLE_ARG);
     let non_inheritable_arg = non_inheritable.arg(NON_INHERITABLE_ARG);
+    let test_name = yagura_test_support::process::libtest_name(module_path!(), DETACHED_UNIX_TEST);
     let args = [
         OsStr::new("--exact"),
-        OsStr::new(DETACHED_UNIX_TEST),
+        OsStr::new(&test_name),
         OsStr::new(CHILD_MARKER),
         OsStr::new(&inheritable_arg),
         OsStr::new(&non_inheritable_arg),
@@ -498,9 +499,11 @@ fn spawn_daemon_detached_child_inherits_no_handle_it_was_not_given() {
     let report_arg = format!("{REPORT_ARG}{}", report.to_str().expect("utf8 path"));
     let inheritable_arg = inheritable.arg(INHERITABLE_ARG);
     let non_inheritable_arg = non_inheritable.arg(NON_INHERITABLE_ARG);
+    let test_name =
+        yagura_test_support::process::libtest_name(module_path!(), DETACHED_WINDOWS_TEST);
     let args = [
         OsStr::new("--exact"),
-        OsStr::new(DETACHED_WINDOWS_TEST),
+        OsStr::new(&test_name),
         OsStr::new(CHILD_MARKER),
         OsStr::new(&inheritable_arg),
         OsStr::new(&non_inheritable_arg),

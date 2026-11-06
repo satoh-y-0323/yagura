@@ -13,7 +13,7 @@
 //! The open requests are written as raw JSON frames so this file names only the wire
 //! keys, and an answer's `name` is read from its wire form.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

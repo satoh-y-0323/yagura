@@ -7,7 +7,7 @@
 //! a `hook_child` launched from a profile, never a real vendor CLI; it logs every argument
 //! it was started with and every byte typed into it.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -11,7 +11,7 @@
 //! second draws the dialog at the first probe character typed behind the
 //! notice text, which the dialog takes as its own input.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

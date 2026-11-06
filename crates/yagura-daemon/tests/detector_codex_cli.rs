@@ -6,7 +6,7 @@
 //! `VtScreen::bottom_lines(16)` extraction rule, why a dialog is recognised by the shape
 //! of its footer, and why a numbered option row is not read as the composer.
 
-mod common;
+use crate::common;
 
 use common::detection_rules::{
     judge, judge_after_two_stage_tick, mutate_rules, rule_for_status, rule_priority_for_status,

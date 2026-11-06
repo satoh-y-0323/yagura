@@ -45,7 +45,10 @@ fn enter_raw_console_input_is_a_no_op_ok_when_stdin_is_not_a_console() {
     let exe = env::current_exe().expect("current_exe should resolve for a running test binary");
     let status = Command::new(exe)
         .arg("--exact")
-        .arg(TEST_NAME)
+        .arg(yagura_test_support::process::libtest_name(
+            module_path!(),
+            TEST_NAME,
+        ))
         .env(CHILD_MODE_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -133,7 +136,10 @@ fn raw_mode_clears_the_listed_settings_and_keeps_every_other_one() {
     let exe = env::current_exe().expect("current_exe should resolve for a running test binary");
     let status = Command::new(exe)
         .arg("--exact")
-        .arg(RAW_TEST_NAME)
+        .arg(yagura_test_support::process::libtest_name(
+            module_path!(),
+            RAW_TEST_NAME,
+        ))
         .env(RAW_CHILD_MODE_ENV, "1")
         .stdin(Stdio::from(
             slave.try_clone().expect("duplicate the terminal"),

@@ -8,7 +8,7 @@
 //! The bundled pseudoconsole sits beside this test executable (the daemon's
 //! build script places it), which `spawn` requires.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

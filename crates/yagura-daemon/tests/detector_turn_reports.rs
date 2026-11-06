@@ -12,7 +12,7 @@
 //! again. A screen the rules positively classify always wins, and a screen the
 //! daemon has lost is never rescued by a report.
 
-mod common;
+use crate::common;
 
 use common::{CopiedEngine, ScreenFeed};
 use std::path::Path;

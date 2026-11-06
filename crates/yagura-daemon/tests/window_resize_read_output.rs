@@ -4,7 +4,7 @@
 //! line the child printed still reads back as one line after the window was
 //! narrowed and widened again.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

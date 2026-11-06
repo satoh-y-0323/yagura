@@ -15,7 +15,7 @@
 //! writer's bytes to land before the probe set to its maximum; the paused
 //! clock runs it out.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

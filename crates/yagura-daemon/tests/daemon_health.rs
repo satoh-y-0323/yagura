@@ -2,7 +2,7 @@
 
 //! `get_daemon_health` against a real `IpcServer` over a real endpoint.
 
-mod common;
+use crate::common;
 
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;

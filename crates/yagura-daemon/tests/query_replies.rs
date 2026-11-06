@@ -8,7 +8,7 @@
 //! prints every byte it then reads from stdin as hex, so the reply the child received is
 //! read back from the window's text.
 
-mod common;
+use crate::common;
 
 use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
 use yagura_daemon::DaemonConfig;

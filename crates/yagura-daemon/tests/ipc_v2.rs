@@ -3,7 +3,7 @@
 //! Integration test: yagura-daemon IPC protocol v2 (multi-window architecture) --
 //! per-window attach, window lifecycle management and the `window_id` addition.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

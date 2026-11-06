@@ -11,7 +11,7 @@
 //! Every property is measured through a real daemon process
 //! ([`common::real_daemon`]) and a real child (`env_probe`).
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

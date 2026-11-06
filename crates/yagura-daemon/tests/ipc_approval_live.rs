@@ -13,7 +13,7 @@
 //! read behind a later answer that has to come after it, and is paired with a
 //! positive control under the same conditions.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

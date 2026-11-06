@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 # A part of the yagura app, shipped in its installers rather than released to crates.io.
 publish = false
+# The integration tests are one binary (tests/main.rs) rather than one per file.
+autotests = false
 
 [dependencies]
 serde.workspace = true
@@ -17,3 +19,7 @@ serde_json.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "protocol"
+path = "tests/main.rs"

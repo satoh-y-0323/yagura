@@ -12,8 +12,6 @@
 //! in through the configuration, so the Windows resolution rules are measured
 //! on whichever host runs this binary.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;

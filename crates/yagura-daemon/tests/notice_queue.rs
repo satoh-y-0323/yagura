@@ -7,7 +7,7 @@
 //! Every window is a `submit_child` or `echo_child` fixture, never a real
 //! vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

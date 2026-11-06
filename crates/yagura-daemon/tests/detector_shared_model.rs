@@ -4,7 +4,7 @@
 //! screen the window actually shows: a burst it did not follow chunk by chunk
 //! cannot leave it with a lost screen.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

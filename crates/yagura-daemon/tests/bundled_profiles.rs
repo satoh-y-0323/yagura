@@ -12,7 +12,7 @@
 //! `launch_option_docs.rs` draws between the bundled launch profiles and
 //! `profile_load.rs`'s general parsing rules.
 
-mod common;
+use crate::common;
 
 use common::docs::read_doc_verbatim;
 use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};

@@ -8,7 +8,7 @@
 //! same connection right after `WindowClosed` arrives, and the status it reports is
 //! asserted.
 
-mod common;
+use crate::common;
 
 use common::{HANG_GUARD, Harness, policy, read_response, send};
 use yagura_daemon::DaemonConfig;

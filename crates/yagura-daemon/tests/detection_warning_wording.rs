@@ -12,7 +12,7 @@
 //! the absence of the one claim that is untrue, so the wording stays the
 //! implementation's to choose.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

@@ -21,7 +21,7 @@
 //!   field on the wire (refused as `invalid_argument`), while `Some("")` sends
 //!   an explicit empty string, which names no window (`window_not_found`).
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

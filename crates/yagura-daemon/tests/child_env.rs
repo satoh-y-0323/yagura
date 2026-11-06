@@ -5,7 +5,7 @@
 //! read feeds into, and the two places that must consume the composed
 //! result the same way (the PTY spawn path and executable resolution).
 
-mod common;
+use crate::common;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};

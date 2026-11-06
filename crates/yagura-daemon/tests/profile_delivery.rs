@@ -16,7 +16,7 @@
 //! configuration: the Windows and the Unix rules are both measured on whichever host runs
 //! this binary.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

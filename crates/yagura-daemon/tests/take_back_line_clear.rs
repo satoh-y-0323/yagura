@@ -11,7 +11,7 @@
 //! correctly in each case; only what its clear key does differs, so nothing
 //! here depends on how the composer is read.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

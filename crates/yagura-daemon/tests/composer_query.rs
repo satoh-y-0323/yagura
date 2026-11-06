@@ -36,7 +36,7 @@
 //! assertion in `detector_engine.rs` or `detector_failsafe_api.rs` names
 //! `query_composer`, so nothing there needed to change for this file to exist.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::time::Duration;

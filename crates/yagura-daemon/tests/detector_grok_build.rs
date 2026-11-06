@@ -5,7 +5,7 @@
 //! `reading::bottom_lines(16)` extraction rule, and the note that these captures
 //! are to be replaced by ones taken from a daemon-opened window.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use common::detection_rules::judge;

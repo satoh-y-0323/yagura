@@ -6,7 +6,7 @@
 //! fixture's own content are filled the way a full-screen TUI fills unused
 //! space: painted, not left untouched.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use common::detection_rules::judge;

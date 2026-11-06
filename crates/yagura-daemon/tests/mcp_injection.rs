@@ -15,7 +15,7 @@
 //! `tests/child_env.rs`, which checks the composed environment directly and
 //! so does not depend on this test process's own environment.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -220,35 +220,6 @@ fn expect_task_window_opened(msg: DaemonMessage) -> String {
     match msg {
         DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
         other => panic!("expected task_window_opened, got {other:?}"),
-    }
-}
-
-// --- Session-snapshot polling -------------------------------
-
-/// Polls the current slot until `predicate` holds, then returns the rows
-/// that satisfied it. Duplicated locally the way `ipc_restore.rs` and
-/// `store_snapshot.rs` each keep their own copy: an integration-test binary
-/// cannot import another's private items.
-async fn wait_for_current_snapshot(
-    db_path: &Path,
-    label: &str,
-    predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
-) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let mut last: Option<Vec<store::SnapshotWindow>> = None;
-    loop {
-        if let Ok(conn) = store::open_readonly(db_path)
-            && let Ok(rows) = store::read_snapshot_conn(&conn)
-        {
-            if predicate(&rows) {
-                return rows;
-            }
-            last = Some(rows);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for {label}; last observed snapshot: {last:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -718,7 +689,7 @@ async fn open_window_from_profile_with_mcp_injection_excludes_the_injection_from
     // it never reached the stored one.
     h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
 
-    let rows = wait_for_current_snapshot(
+    let rows = common::store_fixtures::wait_for_current_snapshot(
         &db_path,
         "the profile-launched window to be recorded",
         |rows| rows.len() == 1,
@@ -843,9 +814,11 @@ async fn open_window_from_profile_with_launch_options_persists_profile_model_and
     )
     .await;
 
-    let rows = wait_for_current_snapshot(&db_path, "both windows to be recorded", |rows| {
-        rows.len() == 2
-    })
+    let rows = common::store_fixtures::wait_for_current_snapshot(
+        &db_path,
+        "both windows to be recorded",
+        |rows| rows.len() == 2,
+    )
     .await;
 
     let profiled = rows
@@ -1235,18 +1208,28 @@ async fn an_mcp_absent_guard_drops_the_injection_when_the_clis_settings_name_the
         write_profile(&profiles_dir, id, &absent_profile_source(&home, file, env));
     }
     let bridge = tree.make_dir("bridge").join("yagura-mcp.exe");
-    let mut config = mcp_daemon_config(profiles_dir, &mcp_dir, Some(bridge));
-    config.home_dir = Some(home.clone());
-    config.mcp_listing_timeout = Duration::from_millis(2000);
-    let h = Harness::start("mcp-inject-absent", config).await;
-    let mut client = h.connect().await;
+    // Only the timed-out case may run into the listing bound: every other read is given
+    // the hang guard, so a slow start of the read tool cannot pass for a timeout.
+    for (listing_timeout, timed_out_case) in [
+        (yagura_test_support::HANG_GUARD, false),
+        (Duration::from_millis(2000), true),
+    ] {
+        let mut config = mcp_daemon_config(profiles_dir.clone(), &mcp_dir, Some(bridge.clone()));
+        config.home_dir = Some(home.clone());
+        config.mcp_listing_timeout = listing_timeout;
+        let h = Harness::start("mcp-inject-absent", config).await;
+        let mut client = h.connect().await;
 
-    for (id, _, _, expected) in &cases {
-        assert_eq!(
-            absent_case_injected(&h, &mut client, id).await,
-            *expected,
-            "{id}: the [mcp] injection must be kept only when the settings file is missing or \
-             does not name the server"
-        );
+        for (id, _, _, expected) in &cases {
+            if (*id == "absent-timed-out") != timed_out_case {
+                continue;
+            }
+            assert_eq!(
+                absent_case_injected(&h, &mut client, id).await,
+                *expected,
+                "{id}: the [mcp] injection must be kept only when the settings file is missing or \
+                 does not name the server"
+            );
+        }
     }
 }

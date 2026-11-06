@@ -7,7 +7,7 @@
 //! is set explicitly and observed before the case moves on. Never a real
 //! vendor CLI, never a running daemon.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

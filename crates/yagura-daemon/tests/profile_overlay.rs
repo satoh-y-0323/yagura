@@ -7,8 +7,6 @@
 //! `list_profiles` / `resolve_launch` and writes through `save_model_aliases` /
 //! `set_profile_enabled`, the same entry points the daemon uses.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 
 use yagura_daemon::DaemonConfig;

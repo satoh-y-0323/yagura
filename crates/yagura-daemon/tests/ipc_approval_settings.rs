@@ -16,7 +16,7 @@
 //! [`common::live_playbook_config`]), the same discipline
 //! `ipc_approval_live.rs` documents.
 
-mod common;
+use crate::common;
 
 use std::fs;
 use std::path::{Path, PathBuf};

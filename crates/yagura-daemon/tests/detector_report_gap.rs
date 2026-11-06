@@ -7,7 +7,7 @@
 //!
 //! The mark never changes the confirmed status.
 
-mod common;
+use crate::common;
 
 use common::{CopiedEngine, ScreenFeed, SharedLocalScreen};
 use std::time::Duration;

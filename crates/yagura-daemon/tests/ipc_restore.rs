@@ -10,10 +10,9 @@
 //! `rusqlite::Connection::open` and point a `DaemonConfig` at that field; the `Harness`
 //! in this crate never wires the store itself.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use common::store_fixtures::{insert_window_row_with_command_json, set_meta, temp_store_db};
 use common::{Harness, expect_error, read_response, send, sleepy_command, unique_temp_dir};
@@ -33,32 +32,6 @@ fn config_with_store(path: PathBuf) -> DaemonConfig {
     DaemonConfig {
         store_db_path_resolved: Some(path),
         ..DaemonConfig::default()
-    }
-}
-
-/// Polls the current slot until `predicate` holds. Duplicated locally because each
-/// integration-test binary is its own compilation unit and cannot import another's
-/// private items.
-async fn wait_for_current_snapshot(
-    db_path: &Path,
-    label: &str,
-    predicate: impl Fn(&[store::SnapshotWindow]) -> bool,
-) -> Vec<store::SnapshotWindow> {
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let mut last: Option<Vec<store::SnapshotWindow>> = None;
-    loop {
-        if let Ok(conn) = store::open_readonly(db_path)
-            && let Ok(rows) = store::read_snapshot_conn(&conn)
-        {
-            if predicate(&rows) {
-                return rows;
-            }
-            last = Some(rows);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for {label}; last observed snapshot: {last:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -254,7 +227,7 @@ async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
     store::wire_into(&harness.registry, Some(db.path.clone()));
 
     let window_id = harness.open(sleepy_command("30"), None).await;
-    wait_for_current_snapshot(
+    common::store_fixtures::wait_for_current_snapshot(
         &db.path,
         "the window to appear with no layout yet",
         |rows| rows.len() == 1 && rows[0].layout_json.is_none(),
@@ -276,7 +249,7 @@ async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
         other => panic!("expected window_layout_updated, got {other:?}"),
     }
 
-    wait_for_current_snapshot(
+    common::store_fixtures::wait_for_current_snapshot(
         &db.path,
         "the updated layout to reach the current snapshot",
         |rows| rows.len() == 1 && rows[0].layout_json.as_deref() == Some(layout_json.as_str()),

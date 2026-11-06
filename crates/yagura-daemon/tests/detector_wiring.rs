@@ -8,7 +8,7 @@
 //! resolution (`tests/cli_args.rs`). Every test drives a real `WindowRegistry` +
 //! `IpcServer` pair purely through the IPC wire protocol.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

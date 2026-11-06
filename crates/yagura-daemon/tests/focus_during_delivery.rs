@@ -8,7 +8,7 @@
 //! a focus-out report and shows it on a focus-in report, the way GitHub
 //! Copilot CLI does, so a screen it is not focused on never reads as finished.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

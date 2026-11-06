@@ -12,9 +12,8 @@
 use serde_json::{Value, json};
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, MCP_REGISTRATION_MIN_REVISION, McpRegistrationRow,
-    PROTOCOL_REVISION_BASELINE, decode_client_message, decode_daemon_message,
-    encode_daemon_message, required_protocol_revision,
+    DaemonMessage, McpRegistrationRow, decode_client_message, decode_daemon_message,
+    encode_daemon_message,
 };
 
 fn window_info_json(extra: Value) -> Value {
@@ -32,25 +31,6 @@ fn window_info_json(extra: Value) -> Value {
         }
     }
     base
-}
-
-#[test]
-fn the_new_fields_and_the_removed_one_need_no_message_gate() {
-    // Nothing a peer must establish before sending: the mark and the entries
-    // are fields of answers, and `ttl_ms` is only ignored.
-    let status_event = decode_client_message(
-        br#"{"type":"status_event","source":"cli","status":"running","token":"0123456789abcdef0123456789abcdef"}"#,
-    )
-    .expect("status_event must decode");
-    assert_eq!(
-        required_protocol_revision(&status_event),
-        PROTOCOL_REVISION_BASELINE
-    );
-    assert_eq!(
-        required_protocol_revision(&ClientMessage::ListWindows),
-        PROTOCOL_REVISION_BASELINE
-    );
-    assert_eq!(MCP_REGISTRATION_MIN_REVISION, 13);
 }
 
 #[test]

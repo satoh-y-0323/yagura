@@ -5,12 +5,9 @@
 //! opened in it, and is used against a real `TicketStore` on a temporary database, so
 //! what is measured is what a permit lets a caller reach.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use tokio::time::sleep;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
@@ -18,7 +15,6 @@ use yagura_daemon::ticket::{TicketConfig, TicketState};
 use yagura_daemon::ticket_permit::{self, TicketPermitError};
 use yagura_daemon::ticket_store::{NewTicket, TicketQuery, TicketStore};
 use yagura_daemon::window::{OpenWindowRequest, RequestedCwd, WindowRegistry};
-use yagura_protocol::WindowStatus;
 use yagura_test_support::process::{echo_child_path, sleepy_command};
 
 fn db_path(tag: &str) -> PathBuf {
@@ -69,25 +65,6 @@ async fn open_short_lived_window_in(registry: &WindowRegistry, cwd: &Path) -> St
         .await
         .expect("open should succeed")
         .window_id
-}
-
-async fn wait_for_exited(registry: &WindowRegistry, window_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let entry = registry
-            .get(window_id)
-            .expect("window must still be registered while waiting for it to exit");
-        if entry.current_status() == WindowStatus::Exited {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for the window to become Exited: current status {:?}",
-                entry.current_status()
-            );
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
 }
 
 fn one_state_config() -> TicketConfig {
@@ -142,7 +119,7 @@ async fn only_an_alive_window_gets_a_write_permit_and_it_writes_its_own_workspac
     );
 
     let dying = open_short_lived_window_in(&registry, &repo).await;
-    wait_for_exited(&registry, &dying).await;
+    common::wait_for_registry_window_exited(&registry, &dying).await;
     assert!(
         matches!(
             ticket_permit::issue_write(&RequestOrigin::Window(dying), &registry),

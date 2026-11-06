@@ -7,7 +7,7 @@
 //! vendor CLI. The notice text this same inbox eventually triggers is
 //! measured in `ipc_report_notice.rs`, not here.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

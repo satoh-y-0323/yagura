@@ -6,7 +6,7 @@
 //! `tests/fixtures/claude-code/README.md` for fixture provenance, geometry, and the
 //! per-fixture region a rule's anchor line must fall inside.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use common::detection_rules::{

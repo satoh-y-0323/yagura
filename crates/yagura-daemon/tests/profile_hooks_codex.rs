@@ -13,7 +13,7 @@
 //! launch command swapped for the `mcp_cli_stub` fixture and `home_dir` at a
 //! temporary directory: the user's own `~/.codex/config.toml` is never read.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

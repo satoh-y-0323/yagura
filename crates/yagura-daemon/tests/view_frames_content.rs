@@ -8,7 +8,7 @@
 //! on the main and the alternate screen, scrolling output, colors and flags,
 //! the cursor, and that a small change costs a small frame.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 

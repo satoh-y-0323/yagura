@@ -365,3 +365,37 @@ pub fn insert_window_row_with_invalid_utf8_layout(
     )
     .expect("seeding a snapshot_windows row with an invalid-UTF-8 layout_json must succeed");
 }
+
+/// Polls the current slot of the store at `db_path` until `predicate` holds, then returns
+/// the rows that satisfied it. A read error counts as "not converged yet" (the store
+/// thread may be mid-write), never as a failure, and only the final state is asserted.
+pub async fn wait_for_current_snapshot(
+    db_path: &std::path::Path,
+    label: &str,
+    predicate: impl Fn(&[yagura_daemon::store::SnapshotWindow]) -> bool,
+) -> Vec<yagura_daemon::store::SnapshotWindow> {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    let mut last: Option<Vec<yagura_daemon::store::SnapshotWindow>> = None;
+    loop {
+        if let Ok(conn) = yagura_daemon::store::open_readonly(db_path)
+            && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
+        {
+            if predicate(&rows) {
+                return rows;
+            }
+            last = Some(rows);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for {label}; last observed snapshot: {last:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Creates the schema at `path` through the production entry point, releasing the
+/// store's own connection before returning so a seeding connection can take the write
+/// lock. The `Store` is left unbound rather than passed to `drop(..)`, so whether it
+/// implements `Drop` cannot reach this file's lint status (`clippy::drop_non_drop`).
+pub fn create_schema(path: &std::path::Path) {
+    yagura_daemon::store::open_store(path).expect("open_store must succeed on a fresh path");
+}

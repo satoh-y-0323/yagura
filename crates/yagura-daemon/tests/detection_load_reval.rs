@@ -7,7 +7,7 @@
 //! Each case pairs one failure trigger with the text its warning must carry, so the
 //! wording that crosses the process boundary towards clients stays pinned.
 
-mod common;
+use crate::common;
 
 use yagura_test_support::paths::{TempDir, write_definition};
 

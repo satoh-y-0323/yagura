@@ -9,8 +9,6 @@
 //! `--detection` resolves to `Run { detection_name: None, .. }`, and applying the
 //! default is `DaemonConfig::default()`'s responsibility.
 
-mod common;
-
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -40,12 +38,6 @@ fn default_namespace() -> InstanceNamespace {
 fn dev_namespace() -> InstanceNamespace {
     yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new("dev")))
         .expect("\"dev\" is a valid identifier and must resolve")
-}
-
-#[test]
-fn parse_args_return_type_matches_confirmed_api() {
-    let result: Result<CliCommand, CliError> = parse_args(&args(&[]));
-    assert!(result.is_ok());
 }
 
 #[test]

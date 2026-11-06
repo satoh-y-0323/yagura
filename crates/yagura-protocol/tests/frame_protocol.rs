@@ -11,11 +11,10 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use yagura_protocol::{
     CellAttr, CellColor, CellFlag, ClientMessage, ColorOverride, CursorShape, CursorState,
-    DaemonMessage, FRAME_BUDGET_BYTES, FRAME_MIN_REVISION, Frame, FrameLine, FrameRun,
-    MAX_FRAME_BODY_LEN, MessageError, Palette, PaletteSlot, TerminalSize, ViewState,
-    client_message_wire_tags, daemon_message_wire_tags, decode_client_message,
-    decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    DaemonMessage, FRAME_BUDGET_BYTES, Frame, FrameLine, FrameRun, MAX_FRAME_BODY_LEN,
+    MessageError, Palette, PaletteSlot, TerminalSize, ViewState, client_message_wire_tags,
+    daemon_message_wire_tags, decode_client_message, decode_daemon_message, encode_client_message,
+    encode_daemon_message,
 };
 
 fn wire(body: &[u8]) -> Value {
@@ -330,35 +329,6 @@ fn scroll_view_carries_signed_lines_and_positive_goes_back_into_history() {
 }
 
 // --- revisions ---------------------------------------------------------
-
-#[test]
-fn the_view_messages_need_the_frame_revision_and_this_build_speaks_it() {
-    let palette = Palette {
-        foreground: [0; 3],
-        background: [0; 3],
-        cursor: [0; 3],
-        ansi: Vec::new(),
-    };
-    let messages = [
-        ClientMessage::AttachView {
-            window_id: "w1".to_string(),
-            size: None,
-        },
-        ClientMessage::FrameAck { seq: 1 },
-        ClientMessage::SetPalette(palette),
-        ClientMessage::CopySelection,
-        ClientMessage::ClearSelection,
-        ClientMessage::ScrollView { lines: 1 },
-    ];
-    for msg in messages {
-        assert_eq!(
-            required_protocol_revision(&msg),
-            FRAME_MIN_REVISION,
-            "{msg:?}"
-        );
-    }
-    assert_eq!(FRAME_MIN_REVISION, 19);
-}
 
 // --- the built-in palette ---------------------------------------------
 

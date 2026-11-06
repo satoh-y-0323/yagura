@@ -10,7 +10,7 @@
 //! attempt waits with its notice unsent but already in the composer, and what
 //! happens next is set up by the test.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

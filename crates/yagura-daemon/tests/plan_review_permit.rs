@@ -8,13 +8,11 @@
 //! window that could not act anyway), and approving or marking a plan seen is an
 //! approver-only licence.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use rusqlite::params;
-use tokio::time::sleep;
 
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::RequestOrigin;
@@ -22,7 +20,6 @@ use yagura_daemon::plan::{PlanSpec, TaskSpec, ValidatedPlan, validate_plan};
 use yagura_daemon::plan_permit::{self, ChangeKind, LockTable, PermitError};
 use yagura_daemon::plan_store::{PlanReview, PlanStore};
 use yagura_daemon::window::{OpenWindowRequest, WindowRegistry};
-use yagura_protocol::WindowStatus;
 use yagura_test_support::process::{echo_child_path, sleepy_command};
 
 fn db_path(tag: &str) -> PathBuf {
@@ -67,22 +64,6 @@ async fn open_short_lived_window(registry: &WindowRegistry) -> String {
         .await
         .expect("open should succeed")
         .window_id
-}
-
-async fn wait_for_exited(registry: &WindowRegistry, window_id: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let entry = registry
-            .get(window_id)
-            .expect("window must still be registered while waiting for it to exit");
-        if entry.current_status() == WindowStatus::Exited {
-            return;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for the window to become Exited");
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
 }
 
 fn one_task_plan() -> ValidatedPlan {
@@ -251,7 +232,7 @@ async fn a_window_that_could_not_open_a_task_anyway_gets_the_same_refusal_whethe
     let dying = open_short_lived_window(&registry).await;
     let dying_pending = create(&mut store, &registry, &dying, Some(PlanReview::Pending));
     let dying_unreviewed = create(&mut store, &registry, &dying, None);
-    wait_for_exited(&registry, &dying).await;
+    common::wait_for_registry_window_exited(&registry, &dying).await;
 
     let cases = [
         (

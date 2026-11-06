@@ -17,8 +17,6 @@
 //! daemon's already-running policy needs updating from a write's outcome is a
 //! judgement made elsewhere.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 

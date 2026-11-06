@@ -10,7 +10,7 @@
 //! the second must not reach its composer before that reaction, and must
 //! arrive without waiting out the delivery confirmation once it has.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

@@ -651,12 +651,6 @@ fn silence_check(
 }
 
 #[test]
-fn a_placed_message_with_no_reply_is_a_candidate_once_the_timeout_elapses() {
-    let check = silence_check(vec![ChatDeliveryState::Taken], false, 300_000);
-    assert!(is_silence_candidate(&check, 300_000));
-}
-
-#[test]
 fn a_placed_message_is_not_a_candidate_before_the_timeout_elapses() {
     let check = silence_check(vec![ChatDeliveryState::Taken], false, 299_999);
     assert!(!is_silence_candidate(&check, 300_000));

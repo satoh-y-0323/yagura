@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 # A part of the yagura app, shipped in its installers rather than released to crates.io.
 publish = false
+# The integration tests are one binary (tests/main.rs) rather than one per file.
+autotests = false
 
 [[bin]]
 name = "yagura-daemon"
@@ -114,3 +116,7 @@ windows = { workspace = true, features = [
 
 [lints]
 workspace = true
+
+[[test]]
+name = "daemon"
+path = "tests/main.rs"

@@ -9,7 +9,7 @@
 //! rewrites between requests. Each workspace is a temporary directory with a
 //! bare `.git` marker; children are `echo_child`, never a real vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

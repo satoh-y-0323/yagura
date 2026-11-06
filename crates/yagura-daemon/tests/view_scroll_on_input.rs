@@ -6,7 +6,7 @@
 //! changes, pointer events, the wheel and the view's own paging keys leave the
 //! position where it is.
 
-mod common;
+use crate::common;
 
 use common::Harness;
 use common::views::{

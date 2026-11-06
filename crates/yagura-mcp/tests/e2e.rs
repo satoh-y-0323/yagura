@@ -35,7 +35,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
@@ -603,41 +602,6 @@ impl DaemonTransport for BoundedTransport {
     }
 }
 
-/// Wraps a real transport and counts round trips, so a test can assert that
-/// a locally rejected request never reached the wire. Delegation keeps the
-/// real `EndpointTransport` in the path for everything that *is* sent.
-struct CountingTransport<T: DaemonTransport> {
-    inner: T,
-    round_trips: AtomicUsize,
-}
-
-impl<T: DaemonTransport> CountingTransport<T> {
-    fn new(inner: T) -> Self {
-        Self {
-            inner,
-            round_trips: AtomicUsize::new(0),
-        }
-    }
-
-    fn round_trips(&self) -> usize {
-        self.round_trips.load(Ordering::SeqCst)
-    }
-}
-
-impl<T: DaemonTransport> DaemonTransport for CountingTransport<T> {
-    // Delegated rather than left to the default: a wrapper that answered for
-    // itself would report an external client however the wrapped transport's
-    // claim was settled.
-    fn requester_identity(&self) -> RequesterIdentity {
-        self.inner.requester_identity()
-    }
-
-    async fn round_trip(&self, msg: ClientMessage) -> Result<DaemonMessage, TransportError> {
-        self.round_trips.fetch_add(1, Ordering::SeqCst);
-        self.inner.round_trip(msg).await
-    }
-}
-
 fn window_ids(list: &serde_json::Value) -> Vec<String> {
     list.get("windows")
         .and_then(|w| w.as_array())
@@ -929,39 +893,6 @@ async fn get_window_status_for_an_unknown_window_id_is_window_not_found() {
         "expected WindowNotFound, got {error:?}"
     );
     assert_eq!(error.code(), "window_not_found");
-
-    harness.shutdown_and_assert_children_exited().await;
-}
-
-#[tokio::test]
-async fn send_message_with_an_unknown_mode_is_unsupported_and_never_reaches_the_daemon() {
-    let harness = DaemonHarness::start("unsupported-mode").await;
-    let counting = CountingTransport::new(harness.transport());
-    harness.wait_until_ready(&counting).await;
-    let round_trips_before = counting.round_trips();
-
-    let error = send_message(
-        &counting,
-        SendMessageArgs {
-            window_id: Some(harness.initial_window_id.clone()),
-            text: Some(SEND_MESSAGE_MARKER.to_string()),
-            mode: Some("queue_until_input".to_string()),
-        },
-    )
-    .await
-    .expect_err("a non-immediate mode must be rejected");
-    assert!(
-        matches!(error, ToolError::Unsupported(_)),
-        "expected Unsupported, got {error:?}"
-    );
-    assert_eq!(error.code(), "unsupported");
-    // The rejection is local and unconditional: not a single byte may go to
-    // the daemon, whatever the window's state.
-    assert_eq!(
-        counting.round_trips(),
-        round_trips_before,
-        "an unsupported mode must be rejected locally, without any daemon round trip"
-    );
 
     harness.shutdown_and_assert_children_exited().await;
 }

@@ -12,7 +12,7 @@
 //! composer-draw `submit_child`, never a real vendor CLI, never a running
 //! daemon.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::Duration;

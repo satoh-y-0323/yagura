@@ -15,7 +15,7 @@
 //! test's clock paused and an hour of it let pass, then by another writer's
 //! byte ending the same wait; the hang guards only bound a failure.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

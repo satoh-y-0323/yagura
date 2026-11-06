@@ -8,7 +8,7 @@
 //! (`env_probe`) on the platform's own pseudo-terminal, whose repaint of wrapped rows is
 //! what a reader of the raw output gets wrong.
 
-mod common;
+use crate::common;
 
 use common::real_daemon::Sandbox;
 use common::{read_response, send};

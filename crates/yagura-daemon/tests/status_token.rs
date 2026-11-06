@@ -15,7 +15,7 @@
 //! stronger property that the value handed to the child is the very value that window
 //! verifies against.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

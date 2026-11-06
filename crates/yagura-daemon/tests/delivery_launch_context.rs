@@ -10,7 +10,7 @@
 //! it was started with before it paints its waiting line, so a window seen waiting has
 //! already logged it.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

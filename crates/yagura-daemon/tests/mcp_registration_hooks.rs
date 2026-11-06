@@ -11,7 +11,7 @@
 //! `home_dir` at a temporary directory, so the user's own `~/.gemini` is never
 //! read or written.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

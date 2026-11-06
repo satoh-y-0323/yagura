@@ -15,7 +15,7 @@
 //! The recorded stream lives under `tests/fixtures/codex-cli/settle/`; see the
 //! README there for its origin.
 
-mod common;
+use crate::common;
 
 use common::{CopiedEngine, ScreenFeed, SharedLocalScreen, feed_handle};
 use std::path::Path;

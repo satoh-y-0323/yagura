@@ -16,7 +16,7 @@
 //! racing, a profile's window closing, an approval gate) go through the real
 //! IPC messages instead, and say so in their own doc comment.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

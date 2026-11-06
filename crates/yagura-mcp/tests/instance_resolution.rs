@@ -78,7 +78,7 @@ use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry};
 use yagura_os::{InstanceNamespace, IpcTransport, PeerAuth, PlatformIpc};
 use yagura_test_support::paths::TempDir;
 
-mod common;
+use crate::common;
 
 use common::{McpChild, tool_reply};
 

@@ -10,7 +10,7 @@
 //! that case diffs every bundled host beside the built holder; the tests in this file
 //! take one lock so no other window opens inside that diff.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -63,11 +63,9 @@ fn subtree(root: u32) -> Vec<u32> {
     found
 }
 
-/// Every running bundled host whose image is beside the built holder, whoever its
-/// parent was.
-fn bundled_hosts_beside_the_holder() -> Vec<u32> {
-    let holder_dir =
-        common::canonical_lower(parent_dir(&yagura_test_support::process::holder_path()));
+/// Every running bundled host whose image is in `holder_dir`, whoever its parent was.
+fn bundled_hosts_in(holder_dir: &Path) -> Vec<u32> {
+    let holder_dir = common::canonical_lower(holder_dir);
     common::process_table()
         .into_iter()
         .filter(|row| row.image.eq_ignore_ascii_case(BUNDLED_HOST_IMAGE))
@@ -164,8 +162,15 @@ async fn close_window_ends_the_open_console_and_the_whole_window_tree() {
 #[tokio::test]
 async fn a_window_whose_program_cannot_start_leaves_no_pseudoconsole_host_behind() {
     let _serial = SERIAL.lock().await;
-    let before = bundled_hosts_beside_the_holder();
-    let registry = WindowRegistry::new(DaemonConfig::default());
+    // A holder of its own: the other tests of this binary open windows whose hosts start
+    // beside the shared holder.
+    let holder_dir = common::unique_temp_dir("conpty-host-no-start");
+    yagura_test_support::process::install_window_runtime(&holder_dir);
+    let before = bundled_hosts_in(&holder_dir);
+    let registry = WindowRegistry::new(DaemonConfig {
+        holder_exe: Some(holder_dir.join(yagura_daemon::holder_host::holder_file_name())),
+        ..DaemonConfig::default()
+    });
     let missing = common::guaranteed_nonexistent_exe_path();
 
     let opened = registry
@@ -182,7 +187,7 @@ async fn a_window_whose_program_cannot_start_leaves_no_pseudoconsole_host_behind
 
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        let left: Vec<u32> = bundled_hosts_beside_the_holder()
+        let left: Vec<u32> = bundled_hosts_in(&holder_dir)
             .into_iter()
             .filter(|pid| !before.contains(pid))
             .collect();

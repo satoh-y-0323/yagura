@@ -5,7 +5,7 @@
 //! what `list` reports about each layer, and the `open_window` warning that
 //! eventually carries a resolution failure to a client.
 
-mod common;
+use crate::common;
 
 use yagura_daemon::detector::definition::{
     bundled_definition_names, bundled_definition_source, parse_definition,

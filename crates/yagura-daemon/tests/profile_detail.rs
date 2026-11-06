@@ -5,7 +5,7 @@
 //! to the shipped one. The library entry points are measured directly; the
 //! IPC cases check that only the approver reaches them.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

@@ -16,15 +16,14 @@
 //!   carried".
 //! - A row may carry no `add` / `remove` command (a registration that only
 //!   writes files); what it writes travels under `entries`.
-//! - Both requests require `MCP_REGISTRATION_MIN_REVISION` (also see
-//!   `required_revision.rs`'s per-variant corpus).
+//!
+//! The revision both requests require is measured in `required_revision.rs`.
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, MCP_REGISTRATION_MIN_REVISION, McpRegistrationAction,
-    McpRegistrationCommand, McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo,
-    McpRegistrationStep, McpRegistrationTomlSet, McpRegistrationTomlValue, MessageError,
-    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    ClientMessage, DaemonMessage, McpRegistrationAction, McpRegistrationCommand,
+    McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep,
+    McpRegistrationTomlSet, McpRegistrationTomlValue, MessageError, decode_client_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -605,22 +604,3 @@ fn a_row_carries_what_registration_writes_under_entries() {
 // =============================================================================
 // Revision (also see required_revision.rs).
 // =============================================================================
-
-#[test]
-fn both_requests_require_the_mcp_registration_threshold() {
-    let messages = [
-        ClientMessage::ListMcpRegistrations { request_id: 1 },
-        ClientMessage::RunMcpRegistration {
-            profile: "cli-host".to_string(),
-            action: McpRegistrationAction::Register,
-            request_id: 2,
-        },
-    ];
-    for msg in messages {
-        assert_eq!(
-            required_protocol_revision(&msg),
-            MCP_REGISTRATION_MIN_REVISION,
-            "{msg:?} must require the MCP registration threshold"
-        );
-    }
-}

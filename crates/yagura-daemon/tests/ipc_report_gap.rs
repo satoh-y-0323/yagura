@@ -12,7 +12,7 @@
 //! they will; its length and the mark's other rules are measured on a paused
 //! clock in `detector_report_gap.rs`.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

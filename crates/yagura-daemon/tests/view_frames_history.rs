@@ -7,7 +7,7 @@
 //! When the program asked for mouse reports, the wheel belongs to the
 //! program and the view does not move.
 
-mod common;
+use crate::common;
 
 use common::Harness;
 use common::views::{numbered_lines, open_script_window, script_write_and_wait};

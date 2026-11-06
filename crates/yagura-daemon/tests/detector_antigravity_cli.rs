@@ -6,7 +6,7 @@
 //! `reading::bottom_lines(16)` extraction rule, and why a background-task footer reads
 //! as `running` and an unrecognised dialog reads as `unknown` rather than `waiting_input`.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use common::detection_rules::judge;

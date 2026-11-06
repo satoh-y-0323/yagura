@@ -10,7 +10,7 @@
 //! `home_dir` at its own temporary directory, so no case reads or writes the
 //! user's own home.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

@@ -14,7 +14,7 @@
 //! never exercised. Children are `echo_child` or a fixed self-exiting
 //! command, never a real vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

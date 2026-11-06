@@ -7,7 +7,7 @@
 //! The child is `hex_echo --emit <mode>...`: it sets the modes, then prints every byte it
 //! reads from stdin as hex, so what it received is read back from its output.
 
-mod common;
+use crate::common;
 
 use common::{
     Harness, assert_hex_echo_receives, attach, contains_subsequence, expect_error, hex_echo_path,

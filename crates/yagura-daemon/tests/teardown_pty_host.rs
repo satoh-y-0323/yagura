@@ -7,7 +7,7 @@
 //! beside the target command, not a descendant of it, so it needs its own
 //! teardown.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

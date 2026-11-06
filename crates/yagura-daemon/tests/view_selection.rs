@@ -7,7 +7,7 @@
 //! separated by a line feed. Shift forces a selection while the program
 //! tracks the mouse.
 
-mod common;
+use crate::common;
 
 use common::Harness;
 use common::views::{open_script_window, script_write_and_wait};

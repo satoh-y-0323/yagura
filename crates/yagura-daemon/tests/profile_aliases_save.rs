@@ -10,8 +10,6 @@
 //! refused request leaves every byte in place.
 //! Every profile is written by the test itself into a directory it just made.
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 

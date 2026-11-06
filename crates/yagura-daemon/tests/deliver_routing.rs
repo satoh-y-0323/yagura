@@ -16,7 +16,7 @@
 //! The daemon runs in this process on an instance endpoint of this test's own, so the doors
 //! reach it and never a daemon of the user's.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

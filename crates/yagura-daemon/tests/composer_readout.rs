@@ -16,7 +16,7 @@
 //! (`Body` / `Tail` / `Empty` / `NotObserved`) and the restore rule that turns
 //! a region's raw lines into recovered body text.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use regex::Regex;

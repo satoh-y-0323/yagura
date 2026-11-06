@@ -11,7 +11,7 @@
 //! order), and prints every byte it reads as hex. No input is ever sent, so the
 //! queries race the window's creation the way a real CLI's do.
 
-mod common;
+use crate::common;
 
 use common::{
     Harness, assert_hex_echo_receives, contains_subsequence, hex_echo_path, hex_of,

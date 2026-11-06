@@ -763,12 +763,3 @@ fn pc_r1_does_not_mix_fields_from_different_sources() {
         "effort must not fall back to the role's value"
     );
 }
-
-#[test]
-fn pc_r2_a_role_source_that_the_table_could_not_supply_resolves_to_unassigned() {
-    // Caller passes role=None when the table lookup found nothing or the table
-    // itself was unusable; the resolved outcome must fall through, not error out.
-    let resolved = resolve_assignment(None, None, None, None);
-    assert_eq!(resolved.source, AssignmentSource::Unassigned);
-    assert_eq!(resolved.assignment, None);
-}

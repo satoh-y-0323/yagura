@@ -3,7 +3,7 @@
 //! Integration test: `send_keys` writes its named keys the way the window's terminal
 //! modes call for at the moment they are written, including after an approval wait.
 
-mod common;
+use crate::common;
 
 use common::{
     CONTROL_DETECTION_NAME, Harness, approval_config, approver_base_config,

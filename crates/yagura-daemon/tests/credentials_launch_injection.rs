@@ -9,7 +9,7 @@
 //! in-process daemon, so what a CLI would read from disk and from its argv is what is
 //! measured.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

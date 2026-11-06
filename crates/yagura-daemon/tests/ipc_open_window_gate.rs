@@ -8,7 +8,7 @@
 //! a real connection and measure what the requester and an approver see, and
 //! whether a window exists at each point.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

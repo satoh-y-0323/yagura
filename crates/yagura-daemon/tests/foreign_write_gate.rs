@@ -13,7 +13,7 @@
 //! asserted is the child's input log, cut at a marker written after
 //! everything else (`M` and an erase, which leave the composer as it was).
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

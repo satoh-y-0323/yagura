@@ -8,7 +8,7 @@
 //! the call reports `ScreenIntegrity::Rebuilt` instead of unwinding into the caller. The
 //! `ScreenIntegrity` type itself is contracted in `tests/detector_failsafe_api.rs`.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::time::Duration;

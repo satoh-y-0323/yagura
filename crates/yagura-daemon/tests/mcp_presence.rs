@@ -5,7 +5,7 @@
 //! `get_window_status`) and the `awaiting` list an empty `wait_for_report`
 //! answer carries. Driven through a real `Harness` over a real IPC endpoint.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::path::Path;

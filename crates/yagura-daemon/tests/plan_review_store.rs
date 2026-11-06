@@ -11,7 +11,7 @@
 //! `plan_permit`; `tests/plan_review_permit.rs` is the authorization contract for
 //! those permits.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

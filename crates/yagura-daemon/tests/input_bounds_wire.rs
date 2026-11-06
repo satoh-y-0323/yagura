@@ -4,7 +4,7 @@
 //! `yagura_protocol::check_input_bounds` gives, so a sender that checks first (the GUI's
 //! core) and the daemon say the same thing. A paste may be 1 MiB.
 
-mod common;
+use crate::common;
 
 use common::{Harness, attach, expect_error, hex_echo_path, read_response, send};
 use yagura_daemon::DaemonConfig;

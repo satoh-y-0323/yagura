@@ -15,10 +15,10 @@
 //! Every database lives in a per-test temporary directory, and the `resolve_db_path`
 //! contract passes synthetic `OsString`s rather than reading the real environment.
 
-mod common;
+use crate::common;
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use common::store_fixtures::{
     count_warns, insert_window_row, insert_window_row_with_blob_command,
@@ -415,22 +415,10 @@ fn sample_rows() -> Vec<store::SnapshotWindow> {
     ]
 }
 
-/// Creates schema v1 at `path` through the production entry point, releasing the store's
-/// own connection before returning so a seeding connection can take the write lock.
-///
-/// The returned `Store` is deliberately left unbound rather than passed to `drop(..)`:
-/// whether `Store` implements `Drop` is an implementation detail, and an explicit
-/// `drop(..)` of a type that does not would tie this file's lint status to it
-/// (`clippy::drop_non_drop`).
-fn create_schema(path: &Path) {
-    // Kept per-binary: the shared fixtures must not name yagura_daemon::store.
-    store::open_store(path).expect("open_store must succeed on a fresh path");
-}
-
 #[test]
 fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_names() {
     let db = temp_store_db("store-fresh-open");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
     assert_eq!(
@@ -1463,7 +1451,7 @@ fn a_future_schema_version_is_refused_and_left_untouched() {
 #[test]
 fn writing_a_snapshot_updates_the_single_meta_row() {
     let db = temp_store_db("store-meta-update");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
     set_meta(&conn, 0, None);
@@ -1539,7 +1527,7 @@ fn resolve_db_path_follows_the_documented_precedence() {
 #[test]
 fn rotate_slots_moves_current_into_prev_and_stamps_prev_taken_at() {
     let db = temp_store_db("store-rotate-nonempty");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
     insert_window_row(&conn, store::SLOT_PREV, 0, "stale-prev");
@@ -1576,7 +1564,7 @@ fn rotate_slots_moves_current_into_prev_and_stamps_prev_taken_at() {
 #[test]
 fn rotate_slots_is_a_no_op_when_current_is_empty() {
     let db = temp_store_db("store-rotate-empty");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
     insert_window_row(&conn, store::SLOT_PREV, 0, "keep-me-a");
@@ -1603,7 +1591,7 @@ fn rotate_slots_is_a_no_op_when_current_is_empty() {
 #[test]
 fn writing_after_rotation_leaves_prev_taken_at_untouched() {
     let db = temp_store_db("store-rotate-then-write");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
     insert_window_row(&conn, store::SLOT_CURRENT, 0, "before-rotation");
@@ -1653,7 +1641,7 @@ fn command_json_of_exact_length(total_len: usize) -> String {
 #[test]
 fn a_storage_class_corrupt_row_in_the_current_slot_is_skipped_not_fatal() {
     let db = temp_store_db("store-blob-current");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -1690,7 +1678,7 @@ fn a_storage_class_corrupt_row_in_the_current_slot_is_skipped_not_fatal() {
 #[test]
 fn a_storage_class_corrupt_row_in_the_prev_slot_is_skipped_not_fatal() {
     let db = temp_store_db("store-blob-prev");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
@@ -1729,7 +1717,7 @@ fn a_storage_class_corrupt_row_in_the_prev_slot_is_skipped_not_fatal() {
 #[test]
 fn a_command_json_row_over_the_byte_limit_is_skipped_and_warns_once() {
     let db = temp_store_db("store-oversized-json");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let oversized = command_json_of_exact_length(MAX_COMMAND_JSON_BYTES_EXPECTED + 1);
     {
@@ -1761,7 +1749,7 @@ fn a_command_json_row_over_the_byte_limit_is_skipped_and_warns_once() {
 #[test]
 fn a_command_json_row_at_exactly_the_byte_limit_is_still_returned() {
     let db = temp_store_db("store-boundary-json");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
 
     let at_limit = command_json_of_exact_length(MAX_COMMAND_JSON_BYTES_EXPECTED);
     assert_eq!(
@@ -1827,7 +1815,7 @@ fn every_store_connection_waits_on_a_locked_database_instead_of_failing_at_once(
 #[test]
 fn writing_a_snapshot_stamps_the_current_wall_clock_time() {
     let db = temp_store_db("store-meta-wall-clock");
-    create_schema(&db.path);
+    common::store_fixtures::create_schema(&db.path);
     let epoch_secs = || -> i64 {
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

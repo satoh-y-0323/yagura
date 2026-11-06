@@ -12,7 +12,7 @@
 //! paints nothing from the first paste on. The hang guards only bound a
 //! failure.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::Duration;

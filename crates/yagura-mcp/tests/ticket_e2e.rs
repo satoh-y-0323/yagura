@@ -29,7 +29,7 @@ use yagura_test_support::ipc::connect_with_retry;
 use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::echo_child_command;
 
-mod common;
+use crate::common;
 
 use common::{McpChild, tool_reply};
 

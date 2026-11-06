@@ -13,7 +13,7 @@
 //! an identifier of this test's own and points the data, state and config base directories
 //! into a temporary directory, so it never reaches a running daemon of the user.
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::path::PathBuf;

@@ -14,7 +14,7 @@
 //! `open_task_window` runs: delivering an instruction as a notice is a
 //! separate contract, and this file only measures the ledger.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

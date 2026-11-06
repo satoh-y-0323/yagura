@@ -6,7 +6,7 @@
 //! JSON files written here.
 //!
 //! The `regenerate_*` tests write the files and are ignored by default:
-//! `cargo test -p yagura-daemon --test gui_generated_tables -- --ignored`.
+//! `cargo test -p yagura-daemon --test daemon -- --ignored gui_generated_tables::`.
 //! The other tests fail while a file differs from what the daemon computes today.
 
 use std::collections::BTreeMap;
@@ -17,7 +17,8 @@ use unicode_width::UnicodeWidthChar;
 use yagura_daemon::input_encode::{ViewPage, encode_key, view_page};
 use yagura_protocol::{InputModes, Key, KeyInput, Modifiers, NamedKey};
 
-const REGENERATE: &str = "cargo test -p yagura-daemon --test gui_generated_tables -- --ignored";
+const REGENERATE: &str =
+    "cargo test -p yagura-daemon --test daemon -- --ignored gui_generated_tables::";
 
 fn gui_file(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

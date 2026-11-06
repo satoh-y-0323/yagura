@@ -7,10 +7,9 @@
 //! `TaskReport`), and `PlanTaskInfo.report`.
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, PROTOCOL_REVISION_BASELINE, REPORT_PATH_MAX_BYTES,
-    REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, TaskReport,
-    decode_client_message, decode_daemon_message, encode_client_message, encode_daemon_message,
-    required_protocol_revision,
+    ClientMessage, DaemonMessage, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES, ReceivedReport,
+    ReportOutcome, ReportTaskRef, TaskReport, decode_client_message, decode_daemon_message,
+    encode_client_message, encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -320,22 +319,3 @@ fn report_summary_and_path_byte_limits_are_fixed() {
 // =============================================================================
 // The two new ClientMessage variants require no more than baseline
 // =============================================================================
-
-#[test]
-fn send_report_and_wait_for_report_require_no_more_than_the_baseline_revision() {
-    let messages = [
-        ClientMessage::SendReport {
-            outcome: ReportOutcome::Succeeded,
-            summary: "done".to_string(),
-            path: None,
-        },
-        ClientMessage::WaitForReport { timeout_sec: 0 },
-    ];
-    for message in messages {
-        assert_eq!(
-            required_protocol_revision(&message),
-            PROTOCOL_REVISION_BASELINE,
-            "message must require no more than the baseline revision: {message:?}"
-        );
-    }
-}

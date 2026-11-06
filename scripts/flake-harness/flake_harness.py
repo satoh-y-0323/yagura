@@ -1177,8 +1177,10 @@ def validate_run_args(args: argparse.Namespace) -> None:
         else:
             if not args.crate or not args.test_file:
                 die("--target cargo with --form single|binary needs --crate and --test-file")
-        if args.exe or args.arg:
-            die("--target cargo does not take --exe/--arg")
+        if args.exe:
+            die("--target cargo does not take --exe")
+        if args.arg and args.form != "binary":
+            die("--target cargo takes --arg only with --form binary (a libtest filter)")
     else:
         if not args.exe:
             die(f"--target {args.target} needs --exe")
@@ -1372,12 +1374,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--saturate-workers", type=int, help="busy loop count (default: cpu count)")
     run.add_argument("--crate", help="cargo package for --target cargo")
-    run.add_argument("--test-file", help="integration test target name for --target cargo")
+    run.add_argument(
+        "--test-file",
+        help="integration test target for --target cargo: the crate's one binary (daemon, mcp, ...)",
+    )
     run.add_argument("--exe", help="executable for --target exe|command")
     run.add_argument(
         "--arg",
         action="append",
-        help="argument for --target command (repeatable, use --arg=-x for dash values)",
+        help=(
+            "argument for --target command, or a libtest filter for --target cargo --form binary "
+            "(repeatable, use --arg=-x for dash values)"
+        ),
     )
     run.add_argument("--test-name", help="test name for --form single")
     run.add_argument(

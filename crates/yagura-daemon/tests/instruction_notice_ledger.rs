@@ -23,7 +23,7 @@
 //! Children are `echo_child`, never a real vendor CLI, mirroring `tests/plan_permit.rs`
 //! and `tests/report_ledger.rs`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

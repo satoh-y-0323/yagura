@@ -13,7 +13,7 @@
 //! on a paused clock too: the driver steps on a blocking thread, which keeps the
 //! paused clock from moving until each step has been published.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::time::Duration;

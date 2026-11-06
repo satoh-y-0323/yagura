@@ -10,7 +10,7 @@
 //! external contract, so the shipped files are read as data and their JSON is
 //! decoded.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

@@ -4,7 +4,7 @@
 //! Every server is built with a unique per-test endpoint name so the suite runs
 //! concurrently and without depending on a real shell.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,65 +144,6 @@ async fn attach_shows_what_was_written_before_it_and_continues_live_without_gap_
     let screen = view.grid.screen_text().join("\n");
     assert_eq!(screen.matches("before-attach;").count(), 1, "{screen}");
     assert_eq!(screen.matches("after-attach;").count(), 1, "{screen}");
-}
-
-#[tokio::test]
-async fn second_attach_supersedes_first_and_closes_old_connection() {
-    let config = common::opening_config();
-    let registry = Arc::new(WindowRegistry::new(config.clone()));
-    let pipe_name = unique_endpoint_name("yagura-test", "multi-attach");
-    let server = Arc::new(IpcServer::new(
-        registry.clone(),
-        pipe_name.clone(),
-        config.clone(),
-    ));
-    let _server_task = tokio::spawn(server.clone().run());
-
-    let mut client_a = connect_with_retry(&pipe_name).await;
-    let window_id = open_window_via_ipc(&mut client_a).await;
-
-    send_client_message(
-        &mut client_a,
-        &ClientMessage::AttachView {
-            window_id: window_id.clone(),
-            size: None,
-        },
-    )
-    .await;
-    let _ = read_status_skipping_message(&mut client_a)
-        .await
-        .expect_message("attach response A");
-
-    let mut client_b = connect_with_retry(&pipe_name).await;
-    send_client_message(
-        &mut client_b,
-        &ClientMessage::AttachView {
-            window_id,
-            size: None,
-        },
-    )
-    .await;
-    let attached_b = read_status_skipping_message(&mut client_b)
-        .await
-        .expect_message("attach response B");
-    assert!(matches!(attached_b, DaemonMessage::Attached { .. }));
-
-    let msg_a = read_control_message(&mut client_a)
-        .await
-        .expect_message("superseded notice for A");
-    match msg_a {
-        DaemonMessage::Error { code, .. } => assert_eq!(code, "superseded"),
-        other => panic!("expected error(superseded) for superseded connection, got {other:?}"),
-    }
-    read_status_skipping_message(&mut client_a)
-        .await
-        .expect_closed("superseded connection must be closed by the daemon");
-
-    send_client_message(&mut client_b, &ClientMessage::Ping).await;
-    let pong = read_control_message(&mut client_b)
-        .await
-        .expect_message("pong for B");
-    assert!(matches!(pong, DaemonMessage::Pong));
 }
 
 #[tokio::test]

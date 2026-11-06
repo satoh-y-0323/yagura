@@ -19,7 +19,7 @@
 //! `APPROVED`, any other byte it took prints `DIALOG-INPUT`, and a line the
 //! composer accepted prints `SUBMITTED <body>`.
 
-mod common;
+use crate::common;
 
 use common::ScreenFeed;
 use std::path::{Path, PathBuf};

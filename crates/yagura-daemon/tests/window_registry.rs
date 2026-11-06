@@ -7,7 +7,7 @@
 //! Children are echo_child or a per-OS shell (`cmd.exe` / `/bin/sh`), never a
 //! real vendor CLI.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

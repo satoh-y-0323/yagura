@@ -20,7 +20,7 @@
 //! drives exactly that sequence against a real `IpcServer`, and this file's
 //! probe does not change that path.
 
-mod common;
+use crate::common;
 
 use common::{Harness, read_response, send};
 use yagura_daemon::DaemonConfig;

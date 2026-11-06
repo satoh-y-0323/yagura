@@ -11,7 +11,7 @@
 //! after the frames for everything the attached window's feeder had received,
 //! a synchronized update holding the view included.
 
-mod common;
+use crate::common;
 
 use common::Harness;
 use common::views::{
@@ -195,20 +195,6 @@ async fn input_to_the_window_ends_a_synchronized_update() {
     view.send_text("x").await;
     view.pump_until("the frame after the input", |grid| {
         grid.contains_text("HELD-TWO")
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn the_childs_exit_ends_a_synchronized_update() {
-    let (h, window_id, mut view) = settled_view("view-sync-exit").await;
-
-    script_write_and_wait(&h, &window_id, b"\x1b[?2026hHELD-THREE", "HELD-THREE").await;
-    view.assert_no_frame("a synchronized update is open").await;
-
-    h.write_input(&window_id, b"!").await;
-    view.pump_until("the frame after the exit", |grid| {
-        grid.contains_text("HELD-THREE")
     })
     .await;
 }

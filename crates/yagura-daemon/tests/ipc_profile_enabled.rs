@@ -12,7 +12,7 @@
 //! decided against an injected `program_lookup`, never against what happens
 //! to be installed on the machine running the suite.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

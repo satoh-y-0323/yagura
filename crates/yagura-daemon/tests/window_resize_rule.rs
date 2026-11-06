@@ -6,7 +6,7 @@
 //! The child is the script fixture, so what it wrote is its ready line and
 //! the bytes the test told it to write.
 
-mod common;
+use crate::common;
 
 use common::CopiedScreen;
 use common::Harness;

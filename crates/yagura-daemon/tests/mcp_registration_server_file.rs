@@ -8,7 +8,7 @@
 //! and such an entry belongs to its instance without `{server}` in the key.
 //! Each case runs a stubbed row over a temporary `home_dir`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::Duration;

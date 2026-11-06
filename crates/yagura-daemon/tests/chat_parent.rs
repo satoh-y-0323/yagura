@@ -9,7 +9,7 @@
 //! ordinary `@name` mention, a speaker with no parent at all, and the
 //! default chat intro's wording.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

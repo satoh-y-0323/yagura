@@ -436,6 +436,18 @@ pub fn argv_probe_path() -> PathBuf {
     fixture_bin_path("argv_probe")
 }
 
+/// The name libtest runs the test `name` under, where `module_path` is the
+/// `module_path!()` of the module declaring it: that path without the test
+/// crate's own name in front, then `name`. A test that starts its own binary
+/// again to run one of its tests passes this with `--exact`.
+#[must_use]
+pub fn libtest_name(module_path: &str, name: &str) -> String {
+    match module_path.split_once("::") {
+        Some((_, path)) => format!("{path}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 /// Path to the `yagura-holder` binary of the profile the running test binary
 /// was built in: the holder a daemon started from that profile runs a window
 /// in.

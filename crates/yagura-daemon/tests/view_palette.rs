@@ -10,7 +10,7 @@
 //! daemon in query order), and prints every byte it reads as hex. A reply
 //! missing before the sentinel's reply therefore proves it was never sent.
 
-mod common;
+use crate::common;
 
 use common::{Harness, assert_hex_echo_receives, hex_echo_path, hex_of};
 use yagura_daemon::DaemonConfig;
