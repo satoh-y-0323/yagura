@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::SharedScreen;
+use yagura_daemon::detector::SharedLocalScreen;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle, REPORT_GAP_GRACE};
 use yagura_protocol::{DetectedStatus, WindowStatus};
 
@@ -208,7 +208,7 @@ async fn the_mark_does_not_change_the_confirmed_statuses() {
     assert!(with.iter().any(|(_, s)| *s == DetectedStatus::Running));
 }
 
-async fn drain(screen: &SharedScreen, handle: &DetectorHandle, expect: bool) {
+async fn drain(screen: &SharedLocalScreen, handle: &DetectorHandle, expect: bool) {
     handle.expect_status_reports(expect);
     common::feed_handle(screen, handle, &running());
     // No event arrives after this, so only the engine's own deadline can

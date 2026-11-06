@@ -24,9 +24,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::SharedScreen;
+use yagura_daemon::detector::SharedLocalScreen;
 use yagura_daemon::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle};
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 /// Small debounce so a judgement shows up as a confirmed status within a few
@@ -327,7 +327,7 @@ async fn a_postponed_judgement_is_dropped_when_the_child_exits() {
 async fn idle_handle() -> (
     DetectorHandle,
     UnboundedReceiver<ConfirmedStatus>,
-    SharedScreen,
+    SharedLocalScreen,
 ) {
     let config = DaemonConfig::default();
     let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);

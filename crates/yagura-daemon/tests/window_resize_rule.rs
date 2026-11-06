@@ -6,10 +6,10 @@
 
 mod common;
 
+use common::CopiedScreen;
 use common::Harness;
 use common::views::{model_screen, numbered_lines, open_script_window, script_write_and_wait};
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::VtScreen;
 
 const CLEAR: &[u8] = b"\x1b[H\x1b[2J";
 
@@ -18,7 +18,7 @@ struct Shown {
     cursor_row: u16,
 }
 
-fn reference_shown(reference: &VtScreen) -> Shown {
+fn reference_shown(reference: &CopiedScreen) -> Shown {
     let (_, rows) = reference.size();
     Shown {
         rows: reference
@@ -43,7 +43,7 @@ async fn a_resized_window_shows_what_a_model_with_the_unix_rule_shows() {
     script_write_and_wait(&h, &window_id, &bytes, "TAIL-MARK").await;
 
     let captured = h.captured_output(&window_id);
-    let mut reference = VtScreen::with_history(80, 24, config.read_output_max_lines);
+    let mut reference = CopiedScreen::with_history(80, 24, config.read_output_max_lines);
     reference.feed(&captured);
 
     let before = model_screen(&h, &window_id).await;

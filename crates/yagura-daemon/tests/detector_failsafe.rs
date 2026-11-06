@@ -13,10 +13,10 @@ mod common;
 use common::ScreenFeed;
 use std::time::Duration;
 
-use common::{HANG_GUARD, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle};
+use common::{CopiedScreen, HANG_GUARD, TIME_BOTH_PROMPT_DEF, advance_ms, feed_handle};
 use tokio::sync::mpsc;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::VtScreen;
+use yagura_daemon::detector::LocalScreen;
 use yagura_daemon::detector::definition::parse_definition;
 use yagura_daemon::detector::engine::{ConfirmedStatus, DetectionEngine, DetectorHandle};
 use yagura_daemon::window::WindowRegistry;
@@ -43,7 +43,7 @@ fn new_prompt_engine() -> DetectionEngine {
     DetectionEngine::new(
         Some(definition),
         &config,
-        VtScreen::new(80, 24).into_shared(),
+        LocalScreen::new(80, 24).into_shared(),
     )
 }
 
@@ -70,7 +70,7 @@ async fn engine_confirmed_running() -> DetectionEngine {
 
 #[test]
 fn canonical_resize_sequence_does_not_panic_and_the_screen_recovers_to_the_clamped_size() {
-    let mut screen = VtScreen::new(80, 24);
+    let mut screen = CopiedScreen::new(80, 24);
     screen.feed(RESIZE_CHUNK);
     screen.feed(RESIZE_CHUNK);
     screen.resize(46, 1);
@@ -175,7 +175,7 @@ async fn detector_handle_keeps_publishing_after_the_screen_is_rebuilt() {
     let mut engine = DetectionEngine::new(
         Some(definition),
         &config,
-        VtScreen::new(80, 24).into_shared(),
+        LocalScreen::new(80, 24).into_shared(),
     );
     // The two feeds and the resize below complete; the feed after them panics.
     engine.poison_screen_after_calls(3);
@@ -233,7 +233,7 @@ async fn a_resize_that_rebuilds_the_screen_degrades_through_the_handle() {
     let engine = DetectionEngine::new(
         Some(definition),
         &config,
-        VtScreen::new(80, 24).into_shared(),
+        LocalScreen::new(80, 24).into_shared(),
     );
     let screen = engine.screen().clone();
     let (handle, mut statuses) = DetectorHandle::spawn(engine);

@@ -7,7 +7,7 @@
 //!
 //! Every case drives a real `WindowRegistry` and writes bytes straight
 //! through `WindowEntry::write_pty_input`, then reads the composer back off
-//! the child's own screen (`VtScreen::read_composer`), the same way
+//! the child's own screen (`reading::read_composer`), the same way
 //! `composer_gate.rs` verifies the window layer's writes.
 
 mod common;
@@ -20,7 +20,7 @@ use common::{
     paste_buffered_values, unique_temp_dir, wait_until_composer_is,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
 
 /// A [`DaemonConfig`] whose detection directory is empty: every case writes

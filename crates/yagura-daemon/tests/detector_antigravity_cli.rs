@@ -3,16 +3,16 @@
 //! Judges `detection/antigravity-cli.toml` against real Antigravity CLI (`agy`) screen
 //! captures (1.2.11) and one synthetic fail-safe fixture. See
 //! `tests/fixtures/antigravity-cli/README.md` for fixture provenance, the
-//! `VtScreen::bottom_lines(16)` extraction rule, and why a background-task footer reads
+//! `reading::bottom_lines(16)` extraction rule, and why a background-task footer reads
 //! as `running` and an unrecognised dialog reads as `unknown` rather than `waiting_input`.
 
 mod common;
 
+use common::CopiedScreen;
 use common::detection_rules::judge;
 use common::{repaint_lines, repo_definition_text};
-use yagura_daemon::detector::VtScreen;
 use yagura_daemon::detector::definition::parse_definition;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_protocol::WindowStatus;
 
 const FIXTURE_100X30_IDLE_STARTUP: &str =
@@ -161,7 +161,7 @@ async fn unknown_dialog_synthetic_fixture_stays_unknown_despite_history_caret_li
 
 // --- The composer readout on a real fixture ---
 //
-// Built directly against `VtScreen::read_composer`, bypassing `DetectionEngine`: this is
+// Built directly against `reading::read_composer`, bypassing `DetectionEngine`: this is
 // the same "read what the daemon would type over" contract `composer_fixture.rs` proves
 // for the mock fixture binaries, exercised here against a real agy screen capture instead.
 //
@@ -196,7 +196,7 @@ fn read_composer_from_fixture_at_cursor(
     let section = definition
         .composer
         .expect("antigravity-cli.toml must declare a [composer] section");
-    let mut screen = VtScreen::new(cols, rows);
+    let mut screen = CopiedScreen::new(cols, rows);
     let mut bytes = repaint_lines(lines);
     bytes.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
     screen.feed(&bytes);

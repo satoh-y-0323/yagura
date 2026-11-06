@@ -12,7 +12,7 @@
 //! calls: it owns no task and reads the clock only through
 //! `tokio::time::Instant`, so its time-dependent behavior stays reproducible
 //! under `tokio::time::pause()`. It does not parse output itself: it reads the
-//! window's own terminal model ([`SharedScreen`]), and is told when output
+//! copy of the window's own screen ([`SharedCopy`]), and is told when output
 //! has reached it. [`DetectorHandle`] is the thin async wrapper
 //! that owns one engine in a driver task, sleeps until the engine's next
 //! deadline and republishes confirmed-status changes.
@@ -33,7 +33,7 @@ use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 use crate::DaemonConfig;
 use crate::detector::definition::{Definition, Region};
-use crate::detector::screen::{ComposerReadout, SharedScreen};
+use crate::detector::reading::{self, ComposerReadout, SharedCopy, SharedLocalScreen};
 use crate::detector::source::TurnReport;
 use crate::handoff;
 
@@ -188,14 +188,16 @@ impl ComposerObservation {
     }
 }
 
-/// What one evaluation reads off the window's model. Taken under one lock, so
-/// the cursor, the rule verdict and the composer all describe the same screen.
+/// What one evaluation reads off the window's screen copy. Read from one copy,
+/// so the cursor, the rule verdict and the composer all describe the same
+/// screen.
 #[derive(Debug)]
 struct ScreenReading {
-    /// The model was replaced since the engine last read it, so the screen
-    /// it judged before is gone.
+    /// The model was replaced, or a read of the copy was lost, since the
+    /// engine last read it, so the screen it judged before is gone.
     rebuilt: bool,
     generation: u64,
+    read_losses: u64,
     cursor_hidden: bool,
     /// The program has a synchronized update open.
     sync_open: bool,
@@ -224,10 +226,16 @@ struct RuleLines {
 #[derive(Debug)]
 pub struct DetectionEngine {
     definition: Option<Definition>,
-    screen: SharedScreen,
-    /// The model's [`generation`](yagura_term::VtScreen::generation) as
+    /// The window's model, which the copy is carried out of. Reached only by
+    /// the tests' seams; the engine reads `copy`.
+    screen: SharedLocalScreen,
+    copy: SharedCopy,
+    /// The copy's [`generation`](yagura_protocol::ScreenCopy::generation) as
     /// of the latest reading.
     screen_generation: u64,
+    /// The copy's [`read_losses`](crate::detector::CopyRead::read_losses) as
+    /// of the latest reading.
+    read_losses: u64,
     /// What the latest hook report says about the current turn.
     turn: TurnReport,
     /// The most recent output that was not an echo or a resize redraw; an open
@@ -287,12 +295,13 @@ pub const SETTLE_QUIET: Duration = Duration::from_millis(50);
 pub const SETTLE_CEILING: Duration = Duration::from_millis(250);
 
 impl DetectionEngine {
-    /// Builds an engine that judges `screen`, the window's own terminal
-    /// model, so it reads the very screen the window shows. Whoever feeds the
-    /// model reports each arrival with [`DetectionEngine::on_output`].
+    /// Builds an engine that judges the copy carried out of `screen`, the
+    /// window's own terminal model, so it reads the very screen the window
+    /// shows. Whoever feeds the model reports each arrival with
+    /// [`DetectionEngine::on_output`].
     ///
-    /// The engine's readings wait on the model's lock, so async code drives
-    /// it only through [`DetectorHandle`], which runs it on blocking threads.
+    /// The engine's readings wait on the copy's lock, so async code drives it
+    /// only through [`DetectorHandle`], which runs it on blocking threads.
     ///
     /// `definition == None` means no usable definition was loaded: the engine
     /// then stays `Unknown` for its whole life instead of failing, keeping the
@@ -305,7 +314,7 @@ impl DetectionEngine {
     pub fn new(
         definition: Option<Definition>,
         config: &DaemonConfig,
-        screen: SharedScreen,
+        screen: SharedLocalScreen,
     ) -> Self {
         let confirm_ms = definition
             .as_ref()
@@ -342,12 +351,16 @@ impl DetectionEngine {
             Some(_) => DetectedStatus::Unknown(UnknownReason::NotYetJudged),
             None => DetectedStatus::Unknown(UnknownReason::NoDefinition),
         };
+        let copy = screen.copy().clone();
         Self {
             definition,
             screen,
-            // Every model starts at generation 0, so a rebuild before the
-            // first reading is a loss too, and building takes no lock.
+            copy,
+            // Every model starts at generation 0 and every copy at no lost
+            // read, so a loss before the first reading is a loss too, and
+            // building takes no lock.
             screen_generation: 0,
+            read_losses: 0,
             turn: TurnReport::Unreported,
             turn_output_at: now,
             turn_report_at: now,
@@ -433,9 +446,9 @@ impl DetectionEngine {
     /// redraw following a terminal resize is evidence of work. Rule matching
     /// reads the screen either way.
     ///
-    /// A model that was rebuilt since the last reading (see
-    /// [`generation`](yagura_term::VtScreen::generation)) is evidence of
-    /// nothing: the call degrades instead of evaluating (see
+    /// A model that was rebuilt, or a read of the copy that was lost, since
+    /// the last reading (see [`CopyRead`](crate::detector::CopyRead)) is
+    /// evidence of nothing: the call degrades instead of evaluating (see
     /// [`DetectionEngine::degrade_after_screen_loss`]), leaving both the
     /// quiescence clock and the attribution timeline where they were.
     ///
@@ -525,9 +538,9 @@ impl DetectionEngine {
         None
     }
 
-    /// The degradation behind a screen the model had to rebuild, noticed by
-    /// any reading through a changed
-    /// [`generation`](yagura_term::VtScreen::generation).
+    /// The degradation behind a screen the model had to rebuild or a read of
+    /// it that was lost, noticed by any reading through a changed
+    /// [`CopyRead`](crate::detector::CopyRead) count.
     ///
     /// Confirms `Unknown(ScreenLost)` at once, without waiting out
     /// `confirm_ms` and regardless of what the raw judgement would otherwise
@@ -586,9 +599,9 @@ impl DetectionEngine {
         self.read_and_evaluate(now)
     }
 
-    /// The window's terminal model this engine reads.
+    /// The window's terminal model whose copy this engine reads.
     #[must_use]
-    pub fn screen(&self) -> &SharedScreen {
+    pub fn screen(&self) -> &SharedLocalScreen {
         &self.screen
     }
 
@@ -632,8 +645,8 @@ impl DetectionEngine {
     /// `confirm_ms`). `None` when no rule matches; a definition with no rules
     /// at all, or no definition, answers `None` the same way.
     ///
-    /// Synchronous and free of I/O; waits for the model's lock for at most
-    /// one slice of output being fed, so it belongs on a blocking thread.
+    /// Synchronous and free of I/O; waits for the copy's lock for at most one
+    /// copy being applied, so it belongs on a blocking thread.
     /// The daemon itself asks through [`DetectorHandle::query_composer`]: this
     /// reading is not recorded, so a dialog it reads does not move
     /// [`ComposerObservation::closed_screens`].
@@ -658,7 +671,7 @@ impl DetectionEngine {
         }
     }
 
-    /// Reads the model once (see [`ScreenReading`]), without recording what
+    /// Reads the copy once (see [`ScreenReading`]), without recording what
     /// was read.
     fn take_reading(&self, with_composer: bool) -> ScreenReading {
         let composer = self
@@ -675,53 +688,51 @@ impl DetectionEngine {
                 .iter()
                 .any(|rule| rule.region == Region::Screen)
         });
-        let (read, generation) = {
-            let mut model = self.screen.lock();
-            let read = model.read_guarded(|screen| {
-                let lines = has_rules.then(|| {
-                    let all = match composer {
-                        Some(section) => screen.lines_without_composer(section),
-                        None => screen.all_lines(),
-                    };
-                    if reads_screen {
-                        RuleLines {
-                            bottom: screen.bottom_window(&all, self.bottom_line_count),
-                            screen: Some(all),
-                        }
-                    } else {
-                        RuleLines {
-                            bottom: screen.window_of(all, self.bottom_line_count),
-                            screen: None,
-                        }
+        let read = self.copy.read(|copy| {
+            let lines = has_rules.then(|| {
+                let all = match composer {
+                    Some(section) => reading::lines_without_composer(copy, section),
+                    None => reading::all_lines(copy),
+                };
+                if reads_screen {
+                    RuleLines {
+                        bottom: reading::bottom_window(copy, &all, self.bottom_line_count),
+                        screen: Some(all),
                     }
-                });
-                let readout = composer
-                    .filter(|_| with_composer)
-                    .map(|section| screen.read_composer(section));
-                ((screen.cursor_hidden(), screen.sync_open()), lines, readout)
+                } else {
+                    RuleLines {
+                        bottom: reading::window_of(copy, all, self.bottom_line_count),
+                        screen: None,
+                    }
+                }
             });
-            (read, model.generation())
-        };
-        let ((cursor_hidden, sync_open), lines, composer) = read.unwrap_or_default();
+            let readout = composer
+                .filter(|_| with_composer)
+                .map(|section| reading::read_composer(copy, section));
+            ((copy.cursor_hidden, copy.sync_open), lines, readout)
+        });
+        let ((cursor_hidden, sync_open), lines, composer) = read.value.unwrap_or_default();
         ScreenReading {
-            // A read that panicked rebuilt the model, which moved its generation.
-            rebuilt: generation != self.screen_generation,
-            generation,
+            rebuilt: read.generation != self.screen_generation
+                || read.read_losses != self.read_losses,
+            generation: read.generation,
+            read_losses: read.read_losses,
             cursor_hidden,
             sync_open,
-            // Matched after the lock is released, so the reader thread does
-            // not wait on the regular expressions.
+            // Matched after the copy is read, so the reader does not hold it
+            // through the regular expressions.
             rule: lines.and_then(|lines| self.match_rules(&lines)),
             composer,
         }
     }
 
-    /// Reads the model once and remembers its generation, so the next
-    /// reading only reports a rebuild that happened after this one, and
-    /// counts it when a rule closes the write gate on it.
+    /// Reads the copy once and remembers its generation and lost reads, so
+    /// the next reading only reports a loss that happened after this one,
+    /// and counts it when a rule closes the write gate on it.
     fn read_screen(&mut self, with_composer: bool) -> ScreenReading {
         let reading = self.take_reading(with_composer);
         self.screen_generation = reading.generation;
+        self.read_losses = reading.read_losses;
         if matches!(
             reading.rule.map(declare_status),
             Some(DetectedStatus::WaitingApproval)
@@ -1426,7 +1437,7 @@ mod tests {
     //! one panic message to stderr per armed test; that noise is expected.
 
     use super::*;
-    use crate::detector::VtScreen;
+    use crate::detector::LocalScreen;
     use crate::detector::definition::parse_definition;
 
     /// Rules-only definition: with neither `[activity]` nor `[quiescence]`,
@@ -1461,7 +1472,7 @@ region = "bottom"
         let mut engine = DetectionEngine::new(
             Some(definition),
             &config,
-            VtScreen::new(80, 24).into_shared(),
+            LocalScreen::new(80, 24).into_shared(),
         );
 
         engine.screen().lock().feed(PROMPT);
@@ -1517,7 +1528,7 @@ region = "bottom"
         let mut engine = DetectionEngine::new(
             Some(definition),
             &config,
-            VtScreen::new(80, 24).into_shared(),
+            LocalScreen::new(80, 24).into_shared(),
         );
         let show = |engine: &mut DetectionEngine, line: &str| {
             engine

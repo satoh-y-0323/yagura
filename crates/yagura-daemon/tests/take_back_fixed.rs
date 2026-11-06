@@ -28,7 +28,7 @@ use common::{
     wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment,
     SubmitPlacement, WindowEntry,

@@ -5,8 +5,10 @@
 //! crate keeps, since the child's output is untrusted. Policy (what a screen
 //! means) is not here: readers decide that.
 
+mod projection;
 pub mod screen;
 mod screen_model;
 pub mod screen_view;
 
+pub use projection::Projector;
 pub use screen::{PtyHost, ScreenIntegrity, SharedScreen, VtScreen};

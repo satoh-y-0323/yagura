@@ -58,9 +58,7 @@ use crate::config::DaemonConfig;
 use crate::control::{
     self, ControlError, DenyReason, DestructiveTool, GateVerdict, RateBucket, RequestOrigin,
 };
-use crate::detector::VtScreen;
 use crate::detector::layers::DetectionLayers;
-use crate::detector::screen_view::{self, FrameCapture};
 use crate::handoff::{
     DELIVERY_REACTION_STATUSES, EnvelopeFrom, READY_STATUSES, StartupEvidence, check_envelope_len,
     compose_envelope, compose_task_notice, is_ready,
@@ -89,6 +87,8 @@ use crate::window::{
     WakeCommand, WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
     WindowRenameError, resolve_existing_dir,
 };
+use yagura_term::VtScreen;
+use yagura_term::screen_view::{self, FrameCapture};
 
 use permit::{
     ApprovedOutcome, GateOutcome, OpenDescription, OpenPurpose, OpenVerdict, OpenWindow, Permit,
@@ -1460,7 +1460,7 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let _ = entry
                         .session()
-                        .with_model(move |screen| screen.set_palette(palette))
+                        .with_model(move |screen| screen.terminal_mut().set_palette(palette))
                         .await;
                 }
                 FrameOutcome::Continue
@@ -1477,7 +1477,7 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let text = entry
                         .session()
-                        .with_model(|screen| screen_view::selected_text(screen))
+                        .with_model(|screen| screen_view::selected_text(screen.terminal_mut()))
                         .await
                         .flatten();
                     outbound.reply(&DaemonMessage::SelectionText { text });
@@ -1488,7 +1488,7 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let _ = entry
                         .session()
-                        .with_model(|screen| screen_view::clear_selection(screen))
+                        .with_model(|screen| screen_view::clear_selection(screen.terminal_mut()))
                         .await;
                     state.note_view(ViewNote::Changed);
                 }
@@ -1498,7 +1498,9 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let _ = entry
                         .session()
-                        .with_model(move |screen| screen_view::scroll_view(screen, lines))
+                        .with_model(move |screen| {
+                            screen_view::scroll_view(screen.terminal_mut(), lines)
+                        })
                         .await;
                     state.note_view(ViewNote::Changed);
                 }
@@ -4079,7 +4081,7 @@ impl IpcServer {
             }
             let _ = entry
                 .session()
-                .with_model(move |screen| action.apply(screen))
+                .with_model(move |screen| action.apply(screen.terminal_mut()))
                 .await;
             state.note_view(ViewNote::Changed);
             return;
@@ -4116,7 +4118,7 @@ impl IpcServer {
             ClientMessage::Key(_) | ClientMessage::Text { .. } | ClientMessage::Paste { .. }
         ) && entry
             .session()
-            .with_model(|screen| screen_view::scroll_to_bottom(screen))
+            .with_model(|screen| screen_view::scroll_to_bottom(screen.terminal_mut()))
             .await
             .unwrap_or(false)
         {

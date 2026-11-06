@@ -7,9 +7,11 @@
 //! composer is drawn with (two-column indent, `│ > ` marker row, `│   `
 //! continuation rows, a truecolor `│` right edge).
 
-use yagura_daemon::detector::VtScreen;
+mod common;
+
+use common::CopiedScreen;
 use yagura_daemon::detector::definition::{ComposerSection, DefinitionError, parse_definition};
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 
 const COLS: u16 = 40;
 const ROWS: u16 = 8;
@@ -54,8 +56,8 @@ fn box_row(inner: &str) -> String {
 }
 
 /// Feeds `rows` top to bottom and leaves the cursor at 0-based (`row`, `col`).
-fn screen(rows: &[String], row: u16, col: u16) -> VtScreen {
-    let mut screen = VtScreen::new(COLS, ROWS);
+fn screen(rows: &[String], row: u16, col: u16) -> CopiedScreen {
+    let mut screen = CopiedScreen::new(COLS, ROWS);
     screen.feed(rows.join("\r\n").as_bytes());
     screen.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
     screen

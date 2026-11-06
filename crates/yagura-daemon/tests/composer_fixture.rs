@@ -5,7 +5,7 @@
 //! screen, once launched in composer-draw mode?
 //!
 //! Every test here spawns a fixture through a bare [`PtySession`] and calls
-//! [`yagura_daemon::detector::VtScreen::read_composer`] on that session's own
+//! [`yagura_daemon::detector::reading::read_composer`] on that session's own
 //! model directly -- never through `WindowRegistry`, `IpcServer` or the
 //! input-plan judgment layer, so this file is independent of every other composer-delivery layer. The
 //! marker/separator/continuation-prefix triple the composer section below
@@ -28,7 +28,7 @@ use std::time::Duration;
 use regex::Regex;
 
 use yagura_daemon::detector::definition::ComposerSection;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::{self, ComposerReadout};
 use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_test_support::{HANG_GUARD, process};
 
@@ -73,7 +73,7 @@ async fn observe_composer_until(
     loop {
         let section = section.clone();
         let readout = session
-            .read_screen(move |screen| screen.read_composer(&section))
+            .read_screen(move |copy| reading::read_composer(copy, &section))
             .await
             .unwrap();
         if accept(&readout) {

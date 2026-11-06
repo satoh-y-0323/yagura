@@ -1,22 +1,24 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! `VtScreen`, the VT screen model the detector matches patterns against.
+//! `VtScreen`, the VT screen model whose copy the detector matches patterns against.
 //!
 //! Only the public wrapper type is driven here; the underlying VT parser crate is an
 //! implementation detail and must not appear in this file. Degenerate sizes are clamped
 //! rather than panicking because they arrive from untrusted IPC clients, and PTY reads
 //! may split escape sequences or multi-byte characters across `feed` calls.
 
+mod common;
+
+use common::CopiedScreen;
 use regex::Regex;
-use yagura_daemon::detector::VtScreen;
 use yagura_daemon::detector::definition::ComposerSection;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 
 const COLS: u16 = 20;
 const ROWS: u16 = 4;
 
-fn new_screen() -> VtScreen {
-    VtScreen::new(COLS, ROWS)
+fn new_screen() -> CopiedScreen {
+    CopiedScreen::new(COLS, ROWS)
 }
 
 /// A composer-identifying section built directly (not through the TOML
@@ -38,8 +40,8 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
 /// display lines joined by CRLF. The cursor is left wherever ordinary output
 /// would leave it (the end of the last row fed); callers that need it
 /// somewhere else reposition it explicitly with a CUP escape afterward.
-fn feed_rows(cols: u16, rows: &[&str]) -> VtScreen {
-    let mut screen = VtScreen::new(cols, rows.len() as u16);
+fn feed_rows(cols: u16, rows: &[&str]) -> CopiedScreen {
+    let mut screen = CopiedScreen::new(cols, rows.len() as u16);
     screen.feed(rows.join("\r\n").as_bytes());
     screen
 }
@@ -201,7 +203,7 @@ fn degenerate_resize_is_clamped_instead_of_panicking() {
 #[test]
 fn a_size_below_the_narrowest_window_is_raised_to_it() {
     let narrowest = yagura_protocol::MIN_WINDOW_COLS;
-    let mut screen = VtScreen::new(narrowest - 1, 5);
+    let mut screen = CopiedScreen::new(narrowest - 1, 5);
     assert_eq!(screen.size(), (narrowest, 5));
 
     screen.resize(COLS, 5);
@@ -369,7 +371,7 @@ fn bottom_lines_returns_the_top_n_lines_when_content_is_shorter_than_the_window(
 
 // =====================================================================
 // cursor_row: the accessor the composer region-finder
-// walks upward from, exposed from `VtScreen::cursor_row`.
+// walks upward from, exposed from `reading::cursor_row`.
 // =====================================================================
 
 #[test]

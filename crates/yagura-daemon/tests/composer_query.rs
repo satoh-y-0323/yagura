@@ -47,7 +47,7 @@ use common::{
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::handoff;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 

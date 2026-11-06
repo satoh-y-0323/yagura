@@ -22,7 +22,7 @@ use common::{
     wait_until_composer_is, wait_until_status, write_submit_definition_with_input_toml,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{
     NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement, WindowEntry,
 };

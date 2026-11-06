@@ -37,7 +37,7 @@ use crate::detector::engine::{
     ComposerObservation, ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho,
 };
 use crate::detector::layers::{DefinitionSource, DetectionLayers, LayerError, ResolvedDefinition};
-use crate::detector::screen::ComposerReadout;
+use crate::detector::reading::ComposerReadout;
 use crate::handoff::{ReadyHoldLatch, StartupEvidence};
 use crate::holder_host::HolderHost;
 use crate::inbox::{Inbox, is_session_id};
@@ -1458,7 +1458,7 @@ fn decline_not_accepting(residue_write_seq: Option<u64>) -> SubmitJudgment {
 /// wrote or was asked to write) are the same text once whitespace is
 /// disregarded.
 ///
-/// `VtScreen::read_composer` trims each painted line's trailing whitespace
+/// `reading::read_composer` trims each painted line's trailing whitespace
 /// before joining them, so a wrapped body's own space at its very last wrap
 /// boundary is lost from the reading, not from anything actually written.
 /// Ignoring all whitespace (not only that one position) only ever forgives

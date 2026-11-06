@@ -12,8 +12,9 @@ use super::holder_link::Feed;
 use super::reply_queue::ReplyQueue;
 use super::views::{AttachGeneration, FrameSink, ViewSlot, ViewTaken};
 use super::{PublishedInput, RawCapture};
-use crate::detector::screen_view::FrameCapture;
-use crate::detector::{SharedScreen, VtScreen};
+use crate::detector::SharedLocalScreen;
+use yagura_term::VtScreen;
+use yagura_term::screen_view::FrameCapture;
 
 /// Output is fed to the terminal model this many bytes at a time.
 const MODEL_SLICE_BYTES: usize = 1024;
@@ -27,7 +28,7 @@ const MODEL_LOCK_HOLD: Duration = Duration::from_millis(2);
 /// reads frames for: the feeder is the one thread that changes the model on
 /// output and reads the view's frames off it.
 pub(super) struct ModelFeed {
-    pub(super) screen: SharedScreen,
+    pub(super) screen: SharedLocalScreen,
     pub(super) input: Arc<PublishedInput>,
     /// Where the model's replies to the child's queries go.
     pub(super) replies: Arc<ReplyQueue>,
@@ -50,12 +51,12 @@ impl ModelFeed {
     /// of [`MODEL_LOCK_HOLD`] and kept when nobody is waiting.
     ///
     /// The model's replies to queries in the output are taken under the lock
-    /// and queued after it is released, never written here. The input state
-    /// is published before every release, so it never lags what a reader
-    /// that takes the lock sees. The frame is encoded and sent after the
-    /// release.
+    /// and queued after it is released, never written here. The screen is
+    /// carried into the window's copy once everything is fed, and the input
+    /// state is published from that copy, so it never lags what a reader of
+    /// the copy sees. The frame is encoded and sent after the release.
     ///
-    /// The arrival is announced once both the model and the raw capture hold
+    /// The arrival is announced once both the copy and the raw capture hold
     /// the output, so whoever it wakes finds it in either.
     pub(super) fn take_in(&self, outputs: &mut Vec<Vec<u8>>, ended: bool) {
         let Self {
@@ -74,21 +75,20 @@ impl ModelFeed {
             .flat_map(|output| output.chunks(MODEL_SLICE_BYTES))
         {
             if held_since.elapsed() >= MODEL_LOCK_HOLD {
-                input.publish(&guard);
                 parking_lot::MutexGuard::bump(&mut guard);
                 held_since = Instant::now();
             }
-            guard.feed(slice);
+            guard.feed_uncarried(slice);
         }
         let fed = !outputs.is_empty();
-        // Counted under the lock, so the count announced never runs ahead of
-        // what the screen holds.
+        // Counted, and carried into the copy, under the lock, so the count
+        // announced never runs ahead of what the copy holds.
         let arrival = fed.then(|| guard.note_output());
-        input.publish(&guard);
-        let taken_replies = fed.then(|| guard.take_replies());
+        input.publish(guard.carried());
+        let taken_replies = fed.then(|| guard.terminal_mut().take_replies());
         let frame = read_view_frame(
             views,
-            &mut guard,
+            guard.terminal_mut(),
             exited.load(Ordering::SeqCst),
             fed || ended,
         );
@@ -186,8 +186,9 @@ mod tests {
     use tokio::sync::oneshot::error::TryRecvError;
 
     use super::*;
-    use crate::detector::screen_view::View;
+    use crate::detector::LocalScreen;
     use crate::pty::views::{EncodedFrame, FrameSend, SendKey};
+    use yagura_term::screen_view::View;
 
     /// A safety bound only: reaching it fails the test.
     const HANG_GUARD: Duration = Duration::from_secs(60);
@@ -247,7 +248,7 @@ mod tests {
         let (frame_gate, frame_entered, frame_release) = Gate::new();
         let (ack_gate, ack_entered, ack_release) = Gate::new();
 
-        let screen = VtScreen::new(20, 5).into_shared();
+        let screen = LocalScreen::new(20, 5).into_shared();
         let views = Arc::new(ViewSlot::default());
         let (generation, _kicked) = views.attach();
         let sink: Arc<dyn FrameSink> = Arc::new(HeldSink {
@@ -255,7 +256,7 @@ mod tests {
             gate: frame_gate,
         });
         let _ = views.place(generation, View::new(), sink);
-        let input = Arc::new(PublishedInput::of(&screen.lock()));
+        let input = Arc::new(PublishedInput::of(screen.lock().carried()));
         let feed = ModelFeed {
             screen,
             input,

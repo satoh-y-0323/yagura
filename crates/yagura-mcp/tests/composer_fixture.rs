@@ -11,7 +11,7 @@
 //! repeats `yagura-daemon/tests/composer_fixture.rs`'s single-write case
 //! verbatim, built from this crate instead, using only
 //! `yagura-test-support::process` plus `yagura-daemon`'s public library
-//! surface (`PtySession`, `detector::screen`, `detector::definition` --
+//! surface (`PtySession`, `detector::reading`, `detector::definition` --
 //! never `yagura-daemon/tests/common`, which this crate's `Cargo.toml` does
 //! not even see). `submit_child` stands in for all three delivery-receiving
 //! fixtures here: `yagura-daemon/tests/composer_fixture.rs` already covers
@@ -29,7 +29,7 @@
 use std::time::Duration;
 
 use yagura_daemon::detector::definition::{ComposerSection, parse_definition};
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::{self, ComposerReadout};
 use yagura_daemon::{DaemonConfig, PtySession};
 use yagura_test_support::{HANG_GUARD, detection, process};
 
@@ -60,7 +60,7 @@ async fn observe_composer_until(
     loop {
         let section = section.clone();
         let readout = session
-            .read_screen(move |screen| screen.read_composer(&section))
+            .read_screen(move |copy| reading::read_composer(copy, &section))
             .await
             .unwrap();
         if accept(&readout) {

@@ -21,8 +21,8 @@ use yagura_daemon::detector::definition::{
     ComposerSection, Definition, load_definition, parse_definition,
 };
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
-use yagura_daemon::detector::screen::ComposerReadout;
-use yagura_daemon::detector::{SharedScreen, VtScreen};
+use yagura_daemon::detector::reading::{self, ComposerReadout};
+use yagura_daemon::detector::{HeldCopy, LocalScreen, SharedLocalScreen};
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{
     DaemonConfig, IpcServer, OpenWindowRequest, PtySession, RequestedCwd, WindowRegistry,
@@ -55,7 +55,7 @@ pub const SCREEN_COLS: u16 = 80;
 
 /// Screen height used by most `detector_engine` tests. Kept at the default
 /// `bottom_line_count` so that fed text stays inside the matched region
-/// (`VtScreen::bottom_lines` ends the window at the last line holding a
+/// (`reading::bottom_lines` ends the window at the last line holding a
 /// visible character, so fed text fits when `SCREEN_ROWS` equals the
 /// default `bottom_line_count`).
 pub const SCREEN_ROWS: u16 = 5;
@@ -78,9 +78,97 @@ pub fn new_engine_sized(
     DetectionEngine::new(Some(definition), config, screen_of(cols, rows))
 }
 
-/// A fresh model of `(cols, rows)` for an engine to read.
-pub fn screen_of(cols: u16, rows: u16) -> SharedScreen {
-    VtScreen::new(cols, rows).into_shared()
+/// A fresh model of `(cols, rows)` whose copy an engine reads.
+pub fn screen_of(cols: u16, rows: u16) -> SharedLocalScreen {
+    LocalScreen::new(cols, rows).into_shared()
+}
+
+/// A screen read the way the daemon reads a window's screen: bytes go into a
+/// terminal model, and every read is of the model's copy as it stands,
+/// projected and then applied through the daemon's checked apply.
+pub struct CopiedScreen {
+    screen: yagura_term::VtScreen,
+}
+
+impl CopiedScreen {
+    /// A blank screen of `(cols, rows)` behind this OS's PTY host.
+    pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_history(cols, rows, 0)
+    }
+
+    /// A blank screen keeping `history_rows` rows scrolled off its top.
+    pub fn with_history(cols: u16, rows: u16, history_rows: usize) -> Self {
+        let host = yagura_term::PtyHost {
+            requests_win32_input: yagura_os::program::HostOs::host()
+                .pty_host_requests_win32_input(),
+        };
+        Self {
+            screen: yagura_term::VtScreen::with_history(cols, rows, history_rows, host),
+        }
+    }
+
+    /// The model's copy, carried as a whole copy and applied.
+    pub fn copy(&self) -> yagura_protocol::ScreenCopy {
+        let (rows, push) = yagura_term::Projector::new().project(self.screen.screen_copy());
+        let mut held = HeldCopy::new();
+        held.apply(rows, push)
+            .expect("the daemon refused the model's own copy");
+        held.copy().expect("a whole copy was applied").clone()
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> yagura_term::ScreenIntegrity {
+        self.screen.feed(bytes)
+    }
+
+    pub fn note_output(&mut self) -> u64 {
+        self.screen.note_output()
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> yagura_term::ScreenIntegrity {
+        self.screen.resize(cols, rows)
+    }
+
+    pub fn poison_after_calls(&mut self, calls: usize) {
+        self.screen.poison_after_calls(calls);
+    }
+
+    /// The model's text; see [`yagura_term::VtScreen::text_tail`].
+    pub fn text_tail(&mut self, max_lines: usize, max_bytes: usize) -> (String, bool) {
+        self.screen.text_tail(max_lines, max_bytes)
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        let copy = self.copy();
+        (copy.cols, copy.rows)
+    }
+
+    pub fn cursor_hidden(&self) -> bool {
+        self.copy().cursor_hidden
+    }
+
+    pub fn cursor_row(&self) -> u16 {
+        reading::cursor_row(&self.copy())
+    }
+
+    pub fn bottom_lines(&self, n: usize) -> Vec<String> {
+        reading::bottom_lines(&self.copy(), n)
+    }
+
+    pub fn bottom_lines_without_composer(
+        &self,
+        n: usize,
+        section: &ComposerSection,
+    ) -> Vec<String> {
+        reading::bottom_lines_without_composer(&self.copy(), n, section)
+    }
+
+    pub fn read_composer(&self, section: &ComposerSection) -> ComposerReadout {
+        reading::read_composer(&self.copy(), section)
+    }
+
+    pub fn locate_composer(&self, section: &ComposerSection) -> Option<(u16, u16)> {
+        reading::locate_composer(&self.copy(), section)
+    }
 }
 
 /// Drives an engine the way a window's PTY reader does: output goes into the
@@ -107,7 +195,7 @@ impl ScreenFeed for DetectionEngine {
 
 /// [`ScreenFeed::feed`] for an engine running behind a [`DetectorHandle`]:
 /// `screen` is the model the engine was built on.
-pub fn feed_handle(screen: &SharedScreen, handle: &DetectorHandle, bytes: &[u8]) {
+pub fn feed_handle(screen: &SharedLocalScreen, handle: &DetectorHandle, bytes: &[u8]) {
     screen.lock().feed(bytes);
     handle.notify_output();
 }
@@ -3288,7 +3376,7 @@ pub async fn read_composer_now(h: &Harness, window_id: &str) -> ComposerReadout 
         .session()
         .clone();
     session
-        .read_screen(|screen| screen.read_composer(&submit_child_composer_section()))
+        .read_screen(|copy| reading::read_composer(copy, &submit_child_composer_section()))
         .await
         .unwrap()
 }
@@ -3349,10 +3437,10 @@ pub async fn wait_until_frame_satisfies(
             // wait below.
             arrivals.borrow_and_update();
             let (readout, unfinished) = session
-                .read_screen(|screen| {
+                .read_screen(|copy| {
                     (
-                        screen.read_composer(&submit_child_composer_section()),
-                        screen.cursor_hidden() || screen.sync_open(),
+                        reading::read_composer(copy, &submit_child_composer_section()),
+                        copy.cursor_hidden || copy.sync_open,
                     )
                 })
                 .await

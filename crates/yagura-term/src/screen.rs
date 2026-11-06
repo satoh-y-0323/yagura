@@ -13,12 +13,13 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Row};
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Term, TermMode};
-use yagura_protocol::{InputModes, MouseTracking};
+use yagura_protocol::{
+    InputModes, MouseTracking, ScreenCell, ScreenCopy, ScreenCursor, ScreenLine,
+};
 
 use crate::screen_model::{Model, clamp_size, has_content};
 
@@ -172,14 +173,37 @@ impl VtScreen {
         &self.model
     }
 
-    /// The engine's terminal, for a reader of the grid, the cursor and the
-    /// modes outside this crate.
-    ///
-    /// Public only while the daemon still reads the model itself; it goes once
-    /// the daemon reads a copy of the screen instead.
+    /// The screen as it stands, for a reader that has no terminal engine:
+    /// every row of the live screen with the cells a program wrote on it, the
+    /// cursor, the modes and the counts (see [`ScreenCopy`]).
     #[must_use]
-    pub fn term(&self) -> &Term<VoidListener> {
-        self.model.term()
+    pub fn screen_copy(&self) -> ScreenCopy {
+        let grid = self.model.term().grid();
+        let cols = grid.columns();
+        let lines = (0..grid.screen_lines())
+            .filter_map(|row| Some((u16::try_from(row).ok()?, i32::try_from(row).ok()?)))
+            .map(|(line, row)| ScreenLine {
+                line,
+                cells: copied_cells(&grid[Line(row)], cols),
+            })
+            .collect();
+        let cursor = &grid.cursor;
+        let (cols, rows) = self.size();
+        ScreenCopy {
+            cols,
+            rows,
+            lines,
+            cursor: ScreenCursor {
+                line: u16::try_from(cursor.point.line.0).unwrap_or(0),
+                col: u16::try_from(cursor.point.column.0).unwrap_or(u16::MAX),
+                input_needs_wrap: cursor.input_needs_wrap,
+            },
+            cursor_hidden: self.cursor_hidden(),
+            sync_open: self.sync_open(),
+            input_modes: self.input_modes(),
+            generation: self.generation,
+            outputs_fed: self.outputs_fed,
+        }
     }
 
     /// Runs `op` on the model under the same guard as a feed; see
@@ -229,12 +253,8 @@ impl VtScreen {
         }
     }
 
-    /// What [`VtScreen::read_guarded`] does after its read panicked, for a
-    /// reader outside this crate that guards its own reads.
-    ///
-    /// Public only while the daemon still reads the model itself; it goes once
-    /// the daemon reads a copy of the screen instead.
-    pub fn rebuild_after_read_panic(&mut self) {
+    /// What [`VtScreen::read_guarded`] does after its read panicked.
+    fn rebuild_after_read_panic(&mut self) {
         let (cols, rows) = self.size();
         let win32_input = self.model.extras().win32_input;
         self.rebuild(cols, rows, win32_input);
@@ -295,7 +315,7 @@ impl VtScreen {
         let mut len = 0usize;
         let mut first = row;
         loop {
-            let (text, _) = cells_text(&grid[Line(first)], 0, cols, false);
+            let text = row_text(&grid[Line(first)], cols);
             if segments.is_empty() {
                 let kept = text.trim_end_matches(' ');
                 if !kept.is_empty() {
@@ -512,44 +532,40 @@ fn has_content_row(row: &Row<Cell>) -> bool {
     row.into_iter().any(has_content)
 }
 
-/// The text of `row` between columns `start` (inclusive) and `end`
-/// (exclusive), and the column just past the last cell it took. Cells nobody
-/// wrote are skipped and read as the spaces between the cells that follow
-/// them, so a line has no trailing padding; a space a program wrote stays.
-/// With `skip_dim`, dimmed cells are skipped like unwritten ones.
-///
-/// Public only while the daemon still reads the model's grid itself; it goes
-/// once the daemon reads a copy of the screen instead.
-#[must_use]
-pub fn cells_text(row: &Row<Cell>, start: usize, end: usize, skip_dim: bool) -> (String, u16) {
-    cells_text_mapped(row, start, end, skip_dim, |_, _| {})
+/// The cells of `row` a program wrote something to, as a copy carries them.
+fn copied_cells(row: &Row<Cell>, cols: usize) -> Vec<ScreenCell> {
+    (0..cols.min(row.len()))
+        .filter_map(|col| {
+            let cell = &row[Column(col)];
+            if !has_content(cell) {
+                return None;
+            }
+            Some(ScreenCell {
+                col: u16::try_from(col).ok()?,
+                c: cell.c,
+                zerowidth: cell.zerowidth().map(<[char]>::to_vec).unwrap_or_default(),
+                dim: cell.flags.contains(Flags::DIM),
+                wide: cell.flags.contains(Flags::WIDE_CHAR),
+            })
+        })
+        .collect()
 }
 
-/// [`cells_text`], calling `column_starts(byte, col)` where the text of each
-/// column begins. A combining mark adds bytes but no column, and a wide
-/// character's second column has no start of its own.
-///
-/// Public only while the daemon still reads the model's grid itself; it goes
-/// once the daemon reads a copy of the screen instead.
-pub fn cells_text_mapped(
-    row: &Row<Cell>,
-    start: usize,
-    end: usize,
-    skip_dim: bool,
-    mut column_starts: impl FnMut(usize, usize),
-) -> (String, u16) {
+/// The text of `row` as a person reads it, and nothing past its last
+/// written cell. Cells nobody wrote are read as the spaces between the cells
+/// that follow them, so a line has no trailing padding; a space a program
+/// wrote stays.
+fn row_text(row: &Row<Cell>, cols: usize) -> String {
     let mut text = String::new();
-    let mut next_col = start;
-    for col in start..end.min(row.len()) {
+    let mut next_col = 0;
+    for col in 0..cols.min(row.len()) {
         let cell = &row[Column(col)];
-        if !has_content(cell) || (skip_dim && cell.flags.contains(Flags::DIM)) {
+        if !has_content(cell) {
             continue;
         }
-        for blank in next_col..col {
-            column_starts(text.len(), blank);
+        for _ in next_col..col {
             text.push(' ');
         }
-        column_starts(text.len(), col);
         text.push(if cell.c == '\t' { ' ' } else { cell.c });
         if let Some(marks) = cell.zerowidth() {
             text.extend(marks);
@@ -561,7 +577,7 @@ pub fn cells_text_mapped(
                 1
             };
     }
-    (text, u16::try_from(next_col).unwrap_or(u16::MAX))
+    text
 }
 
 #[cfg(test)]

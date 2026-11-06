@@ -25,7 +25,7 @@ use common::{
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::interrupt_window;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::pty::PtyResult;
 use yagura_daemon::window::{
     InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,

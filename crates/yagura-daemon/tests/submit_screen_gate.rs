@@ -37,7 +37,7 @@ use common::{
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::{self, ComposerReadout};
 use yagura_daemon::input::plan_raw_write;
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
@@ -261,12 +261,9 @@ struct ScreenRead {
 async fn rebuilt_screen(h: &Harness, window_id: &str) -> ScreenRead {
     let session = entry(h, window_id).session().clone();
     session
-        .read_screen(|screen| {
-            let (_, rows) = screen.size();
-            ScreenRead {
-                composer: screen.read_composer(&submit_child_composer_section()),
-                lines: screen.bottom_lines(usize::from(rows)),
-            }
+        .read_screen(|copy| ScreenRead {
+            composer: reading::read_composer(copy, &submit_child_composer_section()),
+            lines: reading::bottom_lines(copy, usize::from(copy.rows)),
         })
         .await
         .unwrap()
@@ -2504,7 +2501,7 @@ async fn cursor_hidden_now(h: &Harness, window_id: &str) -> bool {
     entry(h, window_id)
         .session()
         .clone()
-        .read_screen(|screen| screen.cursor_hidden())
+        .read_screen(|copy| copy.cursor_hidden)
         .await
         .unwrap()
 }

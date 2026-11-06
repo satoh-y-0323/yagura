@@ -30,7 +30,7 @@ use common::{
     write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;

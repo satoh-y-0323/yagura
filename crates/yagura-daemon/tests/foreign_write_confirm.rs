@@ -28,7 +28,7 @@ use common::{
 };
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::pty::{PtyError, PtyResult};
 use yagura_daemon::window::{
     InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,

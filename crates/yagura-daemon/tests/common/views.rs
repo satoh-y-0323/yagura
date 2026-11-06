@@ -3,7 +3,8 @@
 //! applied grid with, and the wait that holds until they agree.
 
 use tokio::time::Instant;
-use yagura_daemon::detector::VtScreen;
+use yagura_daemon::detector::reading;
+use yagura_protocol::ScreenCopy;
 use yagura_test_support::frame::Grid;
 use yagura_test_support::view::ViewClient;
 
@@ -74,18 +75,16 @@ pub async fn model_screen(h: &Harness, window_id: &str) -> ModelScreen {
         .expect("the window's model is readable")
 }
 
-fn model_screen_of(screen: &VtScreen) -> ModelScreen {
-    let (cols, rows) = screen.size();
-    let modes = screen.input_modes();
+fn model_screen_of(copy: &ScreenCopy) -> ModelScreen {
+    let modes = copy.input_modes;
     ModelScreen {
-        cols,
-        rows: screen
-            .bottom_lines(usize::from(rows))
+        cols: copy.cols,
+        rows: reading::bottom_lines(copy, usize::from(copy.rows))
             .into_iter()
             .map(|line| line.trim_end_matches(' ').to_string())
             .collect(),
-        cursor_row: screen.cursor_row(),
-        cursor_hidden: screen.cursor_hidden(),
+        cursor_row: reading::cursor_row(copy),
+        cursor_hidden: copy.cursor_hidden,
         alt_screen: modes.alt_screen,
         mouse_reporting: modes.mouse != yagura_protocol::MouseTracking::Off,
     }

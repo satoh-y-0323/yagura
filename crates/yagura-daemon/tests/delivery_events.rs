@@ -27,7 +27,7 @@ use common::{
     wait_until_frame_satisfies, wait_until_input_log_contains, wait_until_status,
     write_submit_definition,
 };
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::input::{BRACKETED_PASTE_END, BRACKETED_PASTE_START, ComposerLine};
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlaced, NotPlacedReason, SendStage, SubmitJudgment,

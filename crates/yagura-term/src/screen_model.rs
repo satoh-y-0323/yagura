@@ -44,9 +44,6 @@ fn min_size() -> (u16, u16) {
     )
 }
 
-/// Combining characters kept on one cell; later ones are dropped.
-const MAX_ZEROWIDTH_PER_CELL: usize = 16;
-
 /// OSC payload bytes passed on before the string is cut off.
 const MAX_OSC_BYTES: usize = 64 * 1024;
 
@@ -521,7 +518,7 @@ impl BoundedHandler<'_> {
         }
         grid[line][column]
             .zerowidth()
-            .is_none_or(|marks| marks.len() < MAX_ZEROWIDTH_PER_CELL)
+            .is_none_or(|marks| marks.len() < yagura_protocol::MAX_ZEROWIDTH_PER_CELL)
     }
 
     /// Marks the cell a space was just written to; see [`WRITTEN_BLANK`].

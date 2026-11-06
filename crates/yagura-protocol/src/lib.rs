@@ -207,6 +207,11 @@ mod input_modes;
 pub use input_modes::{
     InputModes, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, KITTY_SUPPORTED_FLAGS, MouseTracking,
 };
+mod screen_copy;
+pub use screen_copy::{
+    MAX_SCREEN_LINE_BYTES, MAX_ZEROWIDTH_PER_CELL, SCREEN_ROWS_BUDGET, ScreenCell, ScreenCopy,
+    ScreenCursor, ScreenLine, ScreenPush, ScreenRows,
+};
 
 /// The wire revision this build implements.
 ///

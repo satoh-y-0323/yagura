@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
 use super::lock_recover;
-use crate::detector::screen_view::{FrameCapture, View};
+use yagura_term::screen_view::{FrameCapture, View};
 
 /// Which attach of a window a connection holds; a later attach
 /// supersedes it. Only the window makes one.

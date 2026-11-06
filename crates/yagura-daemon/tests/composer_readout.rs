@@ -2,7 +2,7 @@
 
 //! Reconstructing the composer's body text from a screen.
 //!
-//! `VtScreen::read_composer` is a pure function of a `ComposerSection` (the
+//! `reading::read_composer` is a pure function of a `ComposerSection` (the
 //! marker / separator / continuation-prefix triple a detection definition can
 //! declare) and the screen's own lines and cursor position: no window, no PTY,
 //! no clock. These tests build `ComposerSection` fixtures directly rather than
@@ -16,10 +16,12 @@
 //! (`Body` / `Tail` / `Empty` / `NotObserved`) and the restore rule that turns
 //! a region's raw lines into recovered body text.
 
+mod common;
+
+use common::CopiedScreen;
 use regex::Regex;
-use yagura_daemon::detector::VtScreen;
 use yagura_daemon::detector::definition::ComposerSection;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 
 /// A composer-identifying section built directly, without going through the
 /// TOML loader.
@@ -38,8 +40,8 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
 /// A screen exactly `rows.len()` rows tall, `cols` wide, with `rows` fed in as
 /// display lines joined by CRLF. The cursor is left wherever ordinary output
 /// would leave it (the end of the last row fed).
-fn feed_rows(cols: u16, rows: &[&str]) -> VtScreen {
-    let mut screen = VtScreen::new(cols, rows.len() as u16);
+fn feed_rows(cols: u16, rows: &[&str]) -> CopiedScreen {
+    let mut screen = CopiedScreen::new(cols, rows.len() as u16);
     screen.feed(rows.join("\r\n").as_bytes());
     screen
 }
@@ -323,7 +325,7 @@ fn a_separator_space_drawn_as_a_cursor_move_still_reads_empty() {
 
 /// Positions the cursor with a raw CUP escape (1-based row/col), the same
 /// mechanism the existing border/prompt tests above already use.
-fn move_cursor(screen: &mut VtScreen, row: u16, col: u16) {
+fn move_cursor(screen: &mut CopiedScreen, row: u16, col: u16) {
     screen.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
 }
 
@@ -429,14 +431,14 @@ fn shipped_composer(definition: &str) -> ComposerSection {
         .expect("bundled definition must declare a composer")
 }
 
-fn captured_screen(cli: &str, name: &str, cols: u16, rows: u16) -> VtScreen {
+fn captured_screen(cli: &str, name: &str, cols: u16, rows: u16) -> CopiedScreen {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(cli)
         .join("composer")
         .join(format!("{name}.bin"));
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let mut screen = VtScreen::new(cols, rows);
+    let mut screen = CopiedScreen::new(cols, rows);
     screen.feed(&bytes);
     screen
 }
@@ -726,7 +728,7 @@ fn a_body_that_fills_the_row_exactly_is_still_read() {
 // sidebar) is read from the panel's right edge.
 // =====================================================================
 
-fn sidebar_screen(fixture: &str, cursor_col: u16) -> VtScreen {
+fn sidebar_screen(fixture: &str, cursor_col: u16) -> CopiedScreen {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/copilot-cli")
         .join(format!("{fixture}.txt"));
@@ -813,7 +815,7 @@ fn muse_captured_empty_composer_and_drafts_keep_their_reading() {
 
 /// A one-row Muse composer showing `text` after the marker, with the cursor
 /// either at the body's start (an untyped composer) or after the text.
-fn muse_row(text: &str, cursor_at_start: bool) -> VtScreen {
+fn muse_row(text: &str, cursor_at_start: bool) -> CopiedScreen {
     let mut screen = feed_rows(100, &[&format!("\u{276f} {text}")]);
     if cursor_at_start {
         move_cursor(&mut screen, 0, 2);

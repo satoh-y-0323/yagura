@@ -21,7 +21,7 @@ use common::{
     read_composer_now, unique_temp_dir, wait_until_composer_satisfies, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::input::ComposerLine;
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, SendStage, SubmitJudgment, SubmitPlacement, WindowEntry,

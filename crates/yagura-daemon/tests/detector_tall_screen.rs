@@ -8,8 +8,8 @@
 
 mod common;
 
+use common::CopiedScreen;
 use common::detection_rules::judge;
-use yagura_daemon::detector::VtScreen;
 use yagura_protocol::WindowStatus;
 
 const FIXTURE_CODEX_CLI_IDLE_STARTUP: &str =
@@ -42,7 +42,7 @@ fn padded_lines<'a>(content: &[&'a str], fill: &'a str) -> Vec<&'a str> {
 /// before a case's real assertion runs, so a wrong filler count fails here
 /// instead of silently passing the wrong screen shape below.
 fn assert_filler_reaches_the_bottom(lines: &[&str]) {
-    let mut screen = VtScreen::new(TALL_COLS, TALL_ROWS);
+    let mut screen = CopiedScreen::new(TALL_COLS, TALL_ROWS);
     screen.feed(&common::repaint_lines(lines));
 
     let full = screen.bottom_lines(usize::from(TALL_ROWS));

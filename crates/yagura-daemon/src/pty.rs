@@ -15,10 +15,12 @@ use yagura_protocol::holder::is_plain_window_id;
 
 use crate::child_env::ChildBaseEnv;
 use crate::config::DaemonConfig;
-use crate::detector::screen_view::View;
-use crate::detector::{SharedScreen, VtScreen};
+use crate::detector::{LocalScreen, SharedLocalScreen};
 use crate::holder_host::HolderHost;
-use yagura_protocol::InputModes;
+#[cfg(feature = "fault-injection")]
+use yagura_protocol::ScreenCopy;
+use yagura_protocol::{InputModes, ScreenPush};
+use yagura_term::screen_view::View;
 
 mod env;
 mod feeder;
@@ -420,17 +422,17 @@ impl InputState {
 struct PublishedInput(AtomicU64);
 
 impl PublishedInput {
-    fn of(screen: &VtScreen) -> Self {
+    fn of(copy: &ScreenPush) -> Self {
         let published = Self(AtomicU64::new(0));
-        published.publish(screen);
+        published.publish(copy);
         published
     }
 
-    fn publish(&self, screen: &VtScreen) {
-        let (cols, rows) = screen.size();
-        let bits = u64::from(screen.input_modes().to_bits())
-            | u64::from(cols) << 16
-            | u64::from(rows) << 32;
+    /// Publishes the modes and size of the copy `copy` closed.
+    fn publish(&self, copy: &ScreenPush) {
+        let bits = u64::from(copy.input_modes.to_bits())
+            | u64::from(copy.cols) << 16
+            | u64::from(copy.rows) << 32;
         self.0.store(bits, Ordering::Release);
     }
 
@@ -489,7 +491,7 @@ pub struct PtySession {
     /// The output as a terminal shows it, at the PTY's size, and the one
     /// owner of that size. Locked only on blocking threads (see
     /// [`PtySession::with_screen`]), never on the async runtime's.
-    screen: SharedScreen,
+    screen: SharedLocalScreen,
 
     /// Admits the blocking threads that wait on `screen` for async callers.
     model_access: Arc<Semaphore>,
@@ -665,17 +667,19 @@ impl PtySession {
         let context = host.link_context().await?;
 
         let (input_writes, writes_seen) = watch::channel(0u64);
-        let mut screen = VtScreen::with_history(
+        let mut screen = LocalScreen::with_history(
             Self::INITIAL_COLS,
             Self::INITIAL_ROWS,
             config.read_output_max_lines,
         );
-        screen.follow_writes(move || *writes_seen.borrow());
+        screen
+            .terminal_mut()
+            .follow_writes(move || *writes_seen.borrow());
         if let Some(palette) = spawn.palette {
-            screen.set_palette(palette);
+            screen.terminal_mut().set_palette(palette);
         }
+        let input = Arc::new(PublishedInput::of(screen.carried()));
         let screen = screen.into_shared();
-        let input = Arc::new(PublishedInput::of(&screen.lock()));
         let (arrivals_tx, output_arrivals) = watch::channel(0u64);
 
         let exit_code = Arc::new(AtomicI32::new(0));
@@ -775,7 +779,7 @@ impl PtySession {
     /// is shutting down).
     async fn with_screen<R: Send + 'static>(
         &self,
-        access: impl FnOnce(&SharedScreen) -> R + Send + 'static,
+        access: impl FnOnce(&SharedLocalScreen) -> R + Send + 'static,
     ) -> Option<R> {
         // Once the exit is known, a read sees everything the child wrote
         // before it.
@@ -797,7 +801,7 @@ impl PtySession {
     /// throughout.
     pub(crate) async fn with_model<R: Send + 'static>(
         &self,
-        read: impl FnOnce(&mut VtScreen) -> R + Send + 'static,
+        read: impl FnOnce(&mut LocalScreen) -> R + Send + 'static,
     ) -> Option<R> {
         self.with_screen(move |screen| read(&mut screen.lock()))
             .await
@@ -808,7 +812,7 @@ impl PtySession {
     /// Returns `None` when the blocking read could not run to completion
     /// (the runtime is shutting down).
     pub async fn text_tail(&self, max_lines: usize, max_bytes: usize) -> Option<(String, bool)> {
-        self.with_model(move |model| model.text_tail(max_lines, max_bytes))
+        self.with_model(move |model| model.terminal_mut().text_tail(max_lines, max_bytes))
             .await
     }
 
@@ -816,7 +820,7 @@ impl PtySession {
     /// [`DetectionEngine`](crate::detector::DetectionEngine) alone, which
     /// [`DetectorHandle`](crate::detector::DetectorHandle) drives on blocking
     /// threads.
-    pub(crate) fn model_for_detection(&self) -> SharedScreen {
+    pub(crate) fn model_for_detection(&self) -> SharedLocalScreen {
         self.screen.clone()
     }
 
@@ -881,7 +885,7 @@ impl PtySession {
                 // reaches the feeder's end after this view is placed.
                 let child_exited = exited.load(Ordering::SeqCst);
                 let mut view = View::new();
-                let capture = view.capture(screen, child_exited, true);
+                let capture = view.capture(screen.terminal_mut(), child_exited, true);
                 (capture, slot.place(generation, view, sink))
             })
             .await
@@ -899,18 +903,20 @@ impl PtySession {
         }
     }
 
-    /// Runs `read` against the window's model as it stands, the way a reader
-    /// that shares it does (see [`VtScreen::read_guarded`]). A test seam (the
+    /// Runs `read` against the copy of the window's screen as it stands, the
+    /// way the detector reads it (see [`SharedCopy::read`]). A test seam (the
     /// `fault-injection` feature only).
     ///
     /// Returns `None` when `read` panicked or could not run to completion
     /// (the runtime is shutting down).
+    ///
+    /// [`SharedCopy::read`]: crate::detector::SharedCopy::read
     #[cfg(feature = "fault-injection")]
     pub async fn read_screen<R: Send + 'static>(
         &self,
-        read: impl FnOnce(&VtScreen) -> R + Send + 'static,
+        read: impl FnOnce(&ScreenCopy) -> R + Send + 'static,
     ) -> Option<R> {
-        self.with_model(move |model| model.read_guarded(read))
+        self.with_screen(move |screen| screen.copy().read(read).value)
             .await
             .flatten()
     }
@@ -1177,9 +1183,9 @@ impl PtySession {
         let input = Arc::clone(&self.input);
         let previous = self
             .with_model(move |model| {
-                let previous = model.size();
+                let previous = model.terminal().size();
                 model.resize(cols, rows);
-                input.publish(model);
+                input.publish(model.carried());
                 previous
             })
             .await
@@ -1192,7 +1198,7 @@ impl PtySession {
             let input = Arc::clone(&self.input);
             self.with_model(move |model| {
                 model.resize(previous.0, previous.1);
-                input.publish(model);
+                input.publish(model.carried());
             })
             .await;
             return Err(PtyError::ResizeFailed);
@@ -1214,7 +1220,7 @@ impl PtySession {
     /// Returns `None` when the blocking read could not run to completion
     /// (the runtime is shutting down).
     pub async fn size(&self) -> Option<(u16, u16)> {
-        self.with_model(|model| model.size()).await
+        self.with_model(|model| model.terminal().size()).await
     }
 
     /// Get the OS process ID of the child, as captured when it was spawned.

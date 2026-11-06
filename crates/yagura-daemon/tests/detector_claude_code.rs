@@ -2,17 +2,17 @@
 
 //! Judges `detection/claude-code.toml` against real Claude Code screen captures. Each
 //! fixture is cut by the capture tool using the engine's own window arithmetic
-//! (`VtScreen::bottom_lines(16)`), not a manual line count. See
+//! (`reading::bottom_lines(16)`), not a manual line count. See
 //! `tests/fixtures/claude-code/README.md` for fixture provenance, geometry, and the
 //! per-fixture region a rule's anchor line must fall inside.
 
 mod common;
 
+use common::CopiedScreen;
 use common::detection_rules::{
     judge, judge_after_two_stage_tick, mutate_rules, rule_for_status, rule_status,
     set_rule_priority, with_every_pattern, with_status_pattern,
 };
-use yagura_daemon::detector::VtScreen;
 use yagura_daemon::detector::definition::parse_definition;
 use yagura_protocol::WindowStatus;
 
@@ -365,14 +365,14 @@ async fn claude_code_definition_classifies_captured_screens() {
 async fn each_fixture_reproduces_itself_through_the_engines_16_line_window() {
     for (name, fixture, cols, rows, _expected) in POSITIVE_CASES {
         let lines: Vec<&str> = fixture.lines().collect();
-        let mut screen = VtScreen::new(*cols, *rows);
+        let mut screen = CopiedScreen::new(*cols, *rows);
         screen.feed(&common::repaint_lines(&lines));
 
         let observed = screen.bottom_lines(16);
         let expected: Vec<String> = lines.iter().map(|line| (*line).to_string()).collect();
         assert_eq!(
             observed, expected,
-            "fixture {name} must reproduce itself through VtScreen::bottom_lines(16): no \
+            "fixture {name} must reproduce itself through reading::bottom_lines(16): no \
              wrapping or stray control bytes may have crept in"
         );
     }

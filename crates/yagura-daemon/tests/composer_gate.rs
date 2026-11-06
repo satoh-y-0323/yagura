@@ -31,7 +31,7 @@ use common::{
     wait_until_composer_satisfies, write_interactive_input, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::input::BRACKETED_PASTE_START;
 use yagura_daemon::window::{
     ComposerResidue, InputOrigin, NotPlacedReason, SendStage, SubmitJudgment, SubmitPlacement,
@@ -2226,7 +2226,7 @@ async fn send_text_not_written_message_distinguishes_foreign_from_unobservable()
 /// A body 65 characters long: composer-draw mode's own wrap (32 characters
 /// per painted line, never ending a line on a space) folds it across two
 /// full rows and carries the trailing space alone onto a third row, which
-/// is exactly the row `VtScreen::read_composer` trims to nothing (nothing
+/// is exactly the row `reading::read_composer` trims to nothing (nothing
 /// follows that row to carry the space forward, unlike an interior wrap
 /// point). Shared by every case in this section so the same reading loss
 /// is exercised the same way throughout.
@@ -2282,7 +2282,7 @@ async fn a_wrap_boundary_space_the_reading_lost_does_not_keep_a_reflected_body_f
 }
 
 /// A residue comparison against the screen must ignore the whitespace
-/// `VtScreen::read_composer` loses at a wrap boundary (see the case above
+/// `reading::read_composer` loses at a wrap boundary (see the case above
 /// for why [`wrap_boundary_space_body`] loses it). `stale_seq` is captured
 /// before the seed write, so the write ledger alone cannot vouch for this
 /// residue (`record_vouches_for_residue` requires a matching `write_seq`)

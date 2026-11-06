@@ -2,16 +2,16 @@
 
 //! Judges `detection/grok-build.toml` against real Grok Build screen captures (1.0.70).
 //! See `tests/fixtures/grok-build/README.md` for fixture provenance, the
-//! `VtScreen::bottom_lines(16)` extraction rule, and the note that these captures
+//! `reading::bottom_lines(16)` extraction rule, and the note that these captures
 //! are to be replaced by ones taken from a daemon-opened window.
 
 mod common;
 
+use common::CopiedScreen;
 use common::detection_rules::judge;
 use common::repo_definition_text;
-use yagura_daemon::detector::VtScreen;
 use yagura_daemon::detector::definition::parse_definition;
-use yagura_daemon::detector::screen::ComposerReadout;
+use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_protocol::WindowStatus;
 
 const DEFINITION: &str = "grok-build.toml";
@@ -133,12 +133,12 @@ async fn grok_build_definition_leaves_an_unmatched_screen_unknown() {
     );
 }
 
-fn captured_screen(name: &str) -> VtScreen {
+fn captured_screen(name: &str) -> CopiedScreen {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/grok-build/composer")
         .join(format!("{name}.bin"));
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let mut screen = VtScreen::new(100, 30);
+    let mut screen = CopiedScreen::new(100, 30);
     screen.feed(&bytes);
     screen
 }
