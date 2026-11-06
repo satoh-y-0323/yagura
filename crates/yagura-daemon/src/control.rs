@@ -914,7 +914,7 @@ pub async fn close_window(
 
 /// Reads `entry`'s text as the window shows it, as its last `lines` logical
 /// lines cut to `max_bytes`; the flag reports that text was left out (see
-/// [`crate::detector::VtScreen::text_tail`]).
+/// [`yagura_term::VtScreen::text_tail`]).
 ///
 /// The read runs on a blocking thread, admitted by `permits`, so neither a
 /// flooding window nor many readers at once hold up the async runtime.

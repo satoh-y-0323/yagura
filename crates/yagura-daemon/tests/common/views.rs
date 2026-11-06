@@ -87,7 +87,7 @@ fn model_screen_of(screen: &VtScreen) -> ModelScreen {
         cursor_row: screen.cursor_row(),
         cursor_hidden: screen.cursor_hidden(),
         alt_screen: modes.alt_screen,
-        mouse_reporting: modes.mouse != yagura_daemon::input_encode::MouseTracking::Off,
+        mouse_reporting: modes.mouse != yagura_protocol::MouseTracking::Off,
     }
 }
 

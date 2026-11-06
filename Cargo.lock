@@ -5632,6 +5632,7 @@ dependencies = [
  "yagura-holder",
  "yagura-os",
  "yagura-protocol",
+ "yagura-term",
  "yagura-test-support",
 ]
 
@@ -5708,6 +5709,21 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "yagura-term"
+version = "0.3.0"
+dependencies = [
+ "alacritty_terminal",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tracing",
+ "unicode-width",
+ "yagura-os",
+ "yagura-protocol",
+ "yagura-test-support",
 ]
 
 [[package]]

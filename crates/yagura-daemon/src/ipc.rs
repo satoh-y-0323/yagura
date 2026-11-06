@@ -1477,7 +1477,7 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let text = entry
                         .session()
-                        .with_model(screen_view::selected_text)
+                        .with_model(|screen| screen_view::selected_text(screen))
                         .await
                         .flatten();
                     outbound.reply(&DaemonMessage::SelectionText { text });
@@ -1488,7 +1488,7 @@ impl IpcServer {
                 if let Some(entry) = attached_or_refuse(outbound, state) {
                     let _ = entry
                         .session()
-                        .with_model(screen_view::clear_selection)
+                        .with_model(|screen| screen_view::clear_selection(screen))
                         .await;
                     state.note_view(ViewNote::Changed);
                 }
@@ -4116,7 +4116,7 @@ impl IpcServer {
             ClientMessage::Key(_) | ClientMessage::Text { .. } | ClientMessage::Paste { .. }
         ) && entry
             .session()
-            .with_model(screen_view::scroll_to_bottom)
+            .with_model(|screen| screen_view::scroll_to_bottom(screen))
             .await
             .unwrap_or(false)
         {

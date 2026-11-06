@@ -18,7 +18,7 @@ use crate::config::DaemonConfig;
 use crate::detector::screen_view::View;
 use crate::detector::{SharedScreen, VtScreen};
 use crate::holder_host::HolderHost;
-use crate::input_encode::InputModes;
+use yagura_protocol::InputModes;
 
 mod env;
 mod feeder;
@@ -513,7 +513,7 @@ pub struct PtySession {
     output_arrivals: watch::Receiver<u64>,
 
     /// Counts the writes to the child's input, before each reaches it;
-    /// `screen` follows it (see [`VtScreen::follow_writes`]).
+    /// `screen` follows it (see [`yagura_term::VtScreen::follow_writes`]).
     input_writes: Arc<watch::Sender<u64>>,
 
     /// The window's attach and its view, whose frames the feeder reads.
@@ -670,7 +670,7 @@ impl PtySession {
             Self::INITIAL_ROWS,
             config.read_output_max_lines,
         );
-        screen.follow_writes(writes_seen);
+        screen.follow_writes(move || *writes_seen.borrow());
         if let Some(palette) = spawn.palette {
             screen.set_palette(palette);
         }
@@ -803,7 +803,7 @@ impl PtySession {
             .await
     }
 
-    /// The window's text as a terminal shows it: see [`VtScreen::text_tail`].
+    /// The window's text as a terminal shows it: see [`yagura_term::VtScreen::text_tail`].
     ///
     /// Returns `None` when the blocking read could not run to completion
     /// (the runtime is shutting down).

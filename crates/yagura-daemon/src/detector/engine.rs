@@ -225,7 +225,7 @@ struct RuleLines {
 pub struct DetectionEngine {
     definition: Option<Definition>,
     screen: SharedScreen,
-    /// The model's [`generation`](crate::detector::VtScreen::generation) as
+    /// The model's [`generation`](yagura_term::VtScreen::generation) as
     /// of the latest reading.
     screen_generation: u64,
     /// What the latest hook report says about the current turn.
@@ -434,7 +434,7 @@ impl DetectionEngine {
     /// reads the screen either way.
     ///
     /// A model that was rebuilt since the last reading (see
-    /// [`generation`](crate::detector::VtScreen::generation)) is evidence of
+    /// [`generation`](yagura_term::VtScreen::generation)) is evidence of
     /// nothing: the call degrades instead of evaluating (see
     /// [`DetectionEngine::degrade_after_screen_loss`]), leaving both the
     /// quiescence clock and the attribution timeline where they were.
@@ -527,7 +527,7 @@ impl DetectionEngine {
 
     /// The degradation behind a screen the model had to rebuild, noticed by
     /// any reading through a changed
-    /// [`generation`](crate::detector::VtScreen::generation).
+    /// [`generation`](yagura_term::VtScreen::generation).
     ///
     /// Confirms `Unknown(ScreenLost)` at once, without waiting out
     /// `confirm_ms` and regardless of what the raw judgement would otherwise
@@ -593,7 +593,7 @@ impl DetectionEngine {
     }
 
     /// Arms the model's fault-injection seam (see
-    /// [`VtScreen::poison_after_calls`](crate::detector::VtScreen::poison_after_calls)).
+    /// [`VtScreen::poison_after_calls`](yagura_term::VtScreen::poison_after_calls)).
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn poison_screen_after_calls(&mut self, calls: usize) {
         self.screen.lock().poison_after_calls(calls);

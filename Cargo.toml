@@ -4,6 +4,7 @@ members = [
     "crates/yagura-os",
     "crates/yagura-daemon",
     "crates/yagura-holder",
+    "crates/yagura-term",
     "crates/yagura-mcp",
     "crates/yagura-test-support",
     "crates/yagura-build-support",

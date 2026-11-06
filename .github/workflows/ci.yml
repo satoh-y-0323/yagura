@@ -138,7 +138,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
+      - run: cargo clippy --all-targets -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-term -p yagura-daemon -p yagura-mcp -p yagura-test-support -- -D warnings
       # Save right after clippy so build artifacts carry over even if the test step times out.
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -146,4 +146,4 @@ jobs:
             ~/.cargo/registry
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-      - run: cargo test -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-daemon -p yagura-mcp -p yagura-test-support --locked
+      - run: cargo test -p yagura-protocol -p yagura-os -p yagura-holder -p yagura-term -p yagura-daemon -p yagura-mcp -p yagura-test-support --locked

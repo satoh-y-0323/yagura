@@ -4,10 +4,14 @@
 //! keyboard protocol's flag stack and Win32 Input Mode (DECSET 9001). Bytes go straight
 //! into a `VtScreen`, without a daemon or a PTY host in between.
 
-use yagura_daemon::detector::{ScreenIntegrity, VtScreen};
+use yagura_os::program::HostOs;
+use yagura_term::{PtyHost, ScreenIntegrity, VtScreen};
 
 fn screen() -> VtScreen {
-    VtScreen::new(80, 24)
+    let host = PtyHost {
+        requests_win32_input: HostOs::host().pty_host_requests_win32_input(),
+    };
+    VtScreen::new(80, 24, host)
 }
 
 #[track_caller]

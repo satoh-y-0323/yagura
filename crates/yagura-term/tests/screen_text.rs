@@ -3,14 +3,19 @@
 //! The text a window shows, as `read_output` and the status summary return it: what a
 //! person sees in the window (and could scroll back to), in logical lines.
 
-use yagura_daemon::detector::VtScreen;
-use yagura_daemon::detector::screen_view::View;
 use yagura_protocol::PaletteSlot;
+use yagura_term::screen_view::View;
+use yagura_term::{PtyHost, VtScreen};
+
+/// No window here is behind a PTY host that asks for Win32 Input Mode; no test feeds 9001.
+const HOST: PtyHost = PtyHost {
+    requests_win32_input: false,
+};
 
 const NO_BYTE_LIMIT: usize = usize::MAX;
 
 fn screen(cols: u16, rows: u16, history: usize, bytes: &[u8]) -> VtScreen {
-    let mut screen = VtScreen::with_history(cols, rows, history);
+    let mut screen = VtScreen::with_history(cols, rows, history, HOST);
     screen.feed(bytes);
     screen
 }
@@ -278,7 +283,7 @@ fn an_osc_is_applied_whole_within_the_length_limit_and_cut_past_it() {
         ),
     ];
     for (name, bytes, chunks, expected) in cases {
-        let mut screen = VtScreen::with_history(20, 3, 100);
+        let mut screen = VtScreen::with_history(20, 3, 100, HOST);
         for chunk in bytes.chunks(bytes.len().div_ceil(chunks)) {
             screen.feed(chunk);
         }
@@ -337,7 +342,7 @@ fn a_synchronized_update_holds_the_view_up_to_sixty_four_bytes_per_cell() {
     let (cols, rows) = (80u16, 24u16);
     let bound = usize::from(cols) * usize::from(rows) * 64;
     let open = b"\x1b[?2026h";
-    let mut screen = VtScreen::new(cols, rows);
+    let mut screen = VtScreen::new(cols, rows, HOST);
 
     screen.feed(open);
     assert!(screen.frame_held(), "just opened");

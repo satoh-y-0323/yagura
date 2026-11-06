@@ -6,13 +6,13 @@
 //! mouse encoders), plus yagura's own Shift+Enter.
 
 use yagura_daemon::input_encode::{
-    ClientWrite, InputModes, MouseTracking, PointerOutcome, WheelOutcome, control_key_press,
-    encode_focus, encode_key, encode_paste, encode_pointer, encode_text, encode_wheel,
+    ClientWrite, PointerOutcome, WheelOutcome, control_key_press, encode_focus, encode_key,
+    encode_paste, encode_pointer, encode_text, encode_wheel,
 };
 use yagura_daemon::pty::InputState;
 use yagura_protocol::{
-    CellPosition, ClientMessage, ControlKey, Key, KeyInput, Modifiers, NamedKey, PointerButton,
-    PointerInput, PointerKind, WheelInput,
+    CellPosition, ClientMessage, ControlKey, InputModes, Key, KeyInput, Modifiers, MouseTracking,
+    NamedKey, PointerButton, PointerInput, PointerKind, WheelInput,
 };
 
 const NONE: Modifiers = Modifiers {

@@ -6,12 +6,17 @@
 //! frame, the cursor waiting to wrap, and a selection made while the view looks
 //! into the history.
 
-use yagura_daemon::detector::VtScreen;
-use yagura_daemon::detector::screen_view::{self, View};
 use yagura_protocol::{
     CellColor, CellPosition, Modifiers, PointerButton, PointerInput, PointerKind,
 };
+use yagura_term::screen_view::{self, View};
+use yagura_term::{PtyHost, VtScreen};
 use yagura_test_support::frame::Grid;
+
+/// No window here is behind a PTY host that asks for Win32 Input Mode; no test feeds 9001.
+const HOST: PtyHost = PtyHost {
+    requests_win32_input: false,
+};
 
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
@@ -49,7 +54,7 @@ impl Client {
 
 #[test]
 fn a_frame_that_rebuilds_the_grid_leaves_out_only_rows_that_are_truly_blank() {
-    let mut screen = VtScreen::new(COLS, ROWS);
+    let mut screen = VtScreen::new(COLS, ROWS, HOST);
     let full_row = "x".repeat(usize::from(COLS));
     screen.feed(format!("{full_row}\r\n\x1b[44m\x1b[2K\x1b[0m\r\nend").as_bytes());
 
@@ -67,7 +72,7 @@ fn a_frame_that_rebuilds_the_grid_leaves_out_only_rows_that_are_truly_blank() {
 
 #[test]
 fn moving_only_the_cursor_sends_a_frame() {
-    let mut screen = VtScreen::new(COLS, ROWS);
+    let mut screen = VtScreen::new(COLS, ROWS, HOST);
     screen.feed(b"still");
     let mut client = Client::attach(&mut screen);
 
@@ -78,7 +83,7 @@ fn moving_only_the_cursor_sends_a_frame() {
 
 #[test]
 fn turning_any_mouse_tracking_mode_on_or_off_alone_sends_a_frame() {
-    let mut screen = VtScreen::new(COLS, ROWS);
+    let mut screen = VtScreen::new(COLS, ROWS, HOST);
     let mut client = Client::attach(&mut screen);
 
     for mode in [1000, 1002, 1003] {
@@ -94,7 +99,7 @@ fn turning_any_mouse_tracking_mode_on_or_off_alone_sends_a_frame() {
 
 #[test]
 fn a_cursor_waiting_to_wrap_is_one_past_the_last_column() {
-    let mut screen = VtScreen::new(COLS, ROWS);
+    let mut screen = VtScreen::new(COLS, ROWS, HOST);
     screen.feed("y".repeat(usize::from(COLS)).as_bytes());
 
     let client = Client::attach(&mut screen);
@@ -114,7 +119,7 @@ fn press(kind: PointerKind, col: u16, row: u16) -> PointerInput {
 
 #[test]
 fn a_selection_made_while_the_view_looks_into_the_history_marks_the_rows_shown() {
-    let mut screen = VtScreen::with_history(COLS, ROWS, 100);
+    let mut screen = VtScreen::with_history(COLS, ROWS, 100, HOST);
     let lines: String = (0..60).map(|n| format!("{n:03} history\r\n")).collect();
     screen.feed(lines.as_bytes());
     screen_view::scroll_view(&mut screen, 5);

@@ -7,9 +7,8 @@
 //! buffering in the parser (an open update is only recorded, see
 //! [`SyncHold`]), a cap on combining characters per cell, no window titles, a cap
 //! on OSC length, and a ceiling on the size of the screen. The model also keeps
-//! what the engine does not model or hides (see [`Extras`]). Nothing outside
-//! this file, `screen.rs` and `screen_view.rs` names an
-//! engine type.
+//! what the engine does not model or hides (see [`Extras`]). In this crate,
+//! only this file, `screen.rs` and `screen_view.rs` name an engine type.
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Grid};
@@ -23,9 +22,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
-use yagura_protocol::Palette;
-
-use crate::input_encode::KITTY_SUPPORTED_FLAGS;
+use yagura_protocol::{KITTY_SUPPORTED_FLAGS, Palette};
 
 /// Column count substituted when a caller passes `cols == 0`.
 pub(super) const DEFAULT_COLS: u16 = 80;
@@ -214,6 +211,9 @@ pub(super) struct Extras {
     /// Win32 Input Mode (DECSET 9001). Only DECRST 9001 clears it: the PTY
     /// host, not the program, asks for it, so a program's reset keeps it.
     pub(super) win32_input: bool,
+    /// The PTY host asks for Win32 Input Mode itself, so a DECSET 9001 in the
+    /// stream is its request; otherwise the request is the child's and ignored.
+    host_requests_win32_input: bool,
     /// The Kitty keyboard flag stacks of the main and the alternate screen,
     /// which the protocol keeps apart.
     kitty_main: KittyStack,
@@ -221,7 +221,7 @@ pub(super) struct Extras {
 }
 
 impl Extras {
-    fn new(history_rows: usize) -> Self {
+    fn new(history_rows: usize, host_requests_win32_input: bool) -> Self {
         Self {
             x10_mouse: false,
             reverse_wrap: false,
@@ -232,6 +232,7 @@ impl Extras {
             sync: None,
             palette: None,
             win32_input: false,
+            host_requests_win32_input,
             kitty_main: KittyStack::default(),
             kitty_alt: KittyStack::default(),
         }
@@ -680,7 +681,10 @@ impl Handler for BoundedHandler<'_> {
             let dropped = self.extras.dropped_replies;
             let palette = self.extras.palette.take();
             let win32_input = self.extras.win32_input;
-            *self.extras = Extras::new(self.extras.history_rows);
+            *self.extras = Extras::new(
+                self.extras.history_rows,
+                self.extras.host_requests_win32_input,
+            );
             self.extras.replies = replies;
             self.extras.dropped_replies = dropped;
             self.extras.palette = palette;
@@ -840,10 +844,8 @@ impl Handler for BoundedHandler<'_> {
                 }
             }
             PrivateMode::Unknown(45) => self.extras.reverse_wrap = true,
-            // Only ConPTY requests 9001; on Unix a child's ESC[?9001h is ignored.
             PrivateMode::Unknown(WIN32_INPUT_MODE) => {
-                self.extras.win32_input =
-                    yagura_os::program::HostOs::host().pty_host_requests_win32_input();
+                self.extras.win32_input = self.extras.host_requests_win32_input;
             }
             // DECNKM is the keypad mode `ESC =` sets.
             PrivateMode::Unknown(66) => self.term.set_keypad_application_mode(),
@@ -943,8 +945,15 @@ pub(super) struct Model {
 }
 
 impl Model {
-    /// A blank model of an already clamped size (see [`clamp_size`]).
-    pub(super) fn new(cols: u16, rows: u16, history_rows: usize) -> Self {
+    /// A blank model of an already clamped size (see [`clamp_size`]), behind
+    /// a PTY host that asks for Win32 Input Mode itself or not (see
+    /// [`Extras::win32_input`]).
+    pub(super) fn new(
+        cols: u16,
+        rows: u16,
+        history_rows: usize,
+        host_requests_win32_input: bool,
+    ) -> Self {
         let config = Config {
             scrolling_history: history_rows,
             ..Config::default()
@@ -957,7 +966,7 @@ impl Model {
             term: Term::new(config, &size, VoidListener),
             processor: Processor::new(),
             osc: OscLimiter::default(),
-            extras: Extras::new(history_rows),
+            extras: Extras::new(history_rows, host_requests_win32_input),
             filtered: Vec::new(),
         }
     }

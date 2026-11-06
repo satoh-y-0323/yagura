@@ -202,6 +202,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 pub mod holder;
+mod input_modes;
+
+pub use input_modes::{
+    InputModes, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, KITTY_SUPPORTED_FLAGS, MouseTracking,
+};
 
 /// The wire revision this build implements.
 ///

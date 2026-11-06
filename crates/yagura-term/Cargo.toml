@@ -1,0 +1,26 @@
+[package]
+name = "yagura-term"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A part of the yagura app, shipped in its installers rather than released to crates.io.
+publish = false
+
+[dependencies]
+yagura-protocol = { path = "../yagura-protocol" }
+alacritty_terminal.workspace = true
+unicode-width.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Tells a test screen the PTY host it would be behind on this OS.
+yagura-os = { path = "../yagura-os" }
+# Applies a view's frames the way a renderer does.
+yagura-test-support = { path = "../yagura-test-support" }
+
+[lints]
+workspace = true

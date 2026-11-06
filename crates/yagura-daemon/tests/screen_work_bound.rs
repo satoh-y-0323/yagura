@@ -119,19 +119,6 @@ fn a_flood_of_screen_swaps_returns_quickly() {
 }
 
 #[test]
-fn only_line_breaks_are_not_dropped_by_the_work_budget() {
-    let mut screen = VtScreen::with_history(MAX_COLS, MAX_ROWS, 20_000);
-    let mut bytes = b"top".to_vec();
-    bytes.extend(repeated("\n", 8 * 1024));
-    bytes.extend_from_slice(b"bottom");
-    screen.feed(&bytes);
-    let (text, _) = screen.text_tail(usize::MAX, usize::MAX);
-    assert!(text.starts_with("top"), "{:?}", &text[..10.min(text.len())]);
-    assert!(text.ends_with("bottom"));
-    assert_eq!(text.matches('\n').count(), 8 * 1024);
-}
-
-#[test]
 fn a_recording_of_full_redraws_is_applied_in_full() {
     let mut screen = VtScreen::new(80, 24);
     let mut bytes = Vec::new();
@@ -167,15 +154,6 @@ fn a_flood_of_every_csi_final_with_the_largest_count_returns_quickly_without_tab
         slow.is_empty(),
         "feeds over {bound:?} ({BASELINE_FACTOR} times the baseline): {slow:?}"
     );
-}
-
-#[test]
-fn switching_a_mode_that_leaves_the_screen_alone_costs_no_work() {
-    let mut screen = VtScreen::new(MAX_COLS, MAX_ROWS);
-    let mut bytes = "\x1b[?1h\x1b[?1l".repeat(8).into_bytes();
-    bytes.extend_from_slice(b"\x1b[?25l");
-    screen.feed(&bytes);
-    assert!(screen.cursor_hidden());
 }
 
 #[test]

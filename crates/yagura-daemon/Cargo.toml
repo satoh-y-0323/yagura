@@ -52,6 +52,9 @@ yagura-protocol = { path = "../yagura-protocol" }
 # The only way this crate reaches the operating system: transport,
 # endpoint protection, peer identity, process groups and randomness.
 yagura-os = { path = "../yagura-os" }
+# The window's terminal. The daemon reads its grid directly until it reads a
+# copy of the screen instead.
+yagura-term = { path = "../yagura-term" }
 tokio.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -70,7 +73,7 @@ sha2.workspace = true
 
 [features]
 # Lets tests make the detection screen panic on demand, to exercise its
-# recovery (see `VtScreen::poison_after_calls`), and keeps the raw bytes a
+# recovery (see `DetectionEngine::poison_screen_after_calls`), and keeps the raw bytes a
 # window's child wrote for tests that count writes. Enabled for this crate's own
 # tests through the self dev-dependency below; never in a shipped build.
 fault-injection = []

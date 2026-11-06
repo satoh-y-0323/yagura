@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::reply_queue::ReplyQueue;
-use crate::input_encode::{self, InputModes};
+use crate::input_encode;
+use yagura_protocol::InputModes;
 
 /// The focus a window's child is told, derived from the view's focus and from
 /// the daemon's own input.

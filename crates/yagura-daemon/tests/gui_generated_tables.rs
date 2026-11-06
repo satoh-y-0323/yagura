@@ -14,8 +14,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use unicode_width::UnicodeWidthChar;
-use yagura_daemon::input_encode::{InputModes, ViewPage, encode_key, view_page};
-use yagura_protocol::{Key, KeyInput, Modifiers, NamedKey};
+use yagura_daemon::input_encode::{ViewPage, encode_key, view_page};
+use yagura_protocol::{InputModes, Key, KeyInput, Modifiers, NamedKey};
 
 const REGENERATE: &str = "cargo test -p yagura-daemon --test gui_generated_tables -- --ignored";
 

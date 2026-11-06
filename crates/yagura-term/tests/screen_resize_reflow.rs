@@ -5,11 +5,16 @@
 //! The bundled ConPTY sends nothing downstream on a resize, so every system
 //! follows this one rule.
 
-use yagura_daemon::detector::VtScreen;
+use yagura_term::{PtyHost, VtScreen};
+
+/// No window here is behind a PTY host that asks for Win32 Input Mode; no test feeds 9001.
+const HOST: PtyHost = PtyHost {
+    requests_win32_input: false,
+};
 
 #[test]
 fn rows_are_pulled_back_from_history_when_rows_are_added() {
-    let mut screen = VtScreen::with_history(10, 3, 100);
+    let mut screen = VtScreen::with_history(10, 3, 100, HOST);
     screen.feed(b"a\r\nb\r\nc\r\nd\r\ne");
     screen.resize(10, 5);
     screen.feed(b"\x1b[HX");
@@ -18,7 +23,7 @@ fn rows_are_pulled_back_from_history_when_rows_are_added() {
 
 #[test]
 fn the_top_row_is_pushed_into_history_when_columns_shrink() {
-    let mut screen = VtScreen::with_history(10, 6, 100);
+    let mut screen = VtScreen::with_history(10, 6, 100, HOST);
     screen.feed(b"0123456789ABCDE\r\nx");
     screen.resize(5, 6);
     screen.feed(b"\x1b[HZ");

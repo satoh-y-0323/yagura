@@ -4,37 +4,21 @@
 //! because full-screen TUI agents rewrite the screen and move the cursor to
 //! redraw spinners; only a real VT parser reproduces that faithfully.
 //!
-//! The terminal itself is `screen_model::Model`, which keeps the child's
-//! output inside bounds; this file reads it. The engine can panic on an input
-//! a size check alone cannot rule out, so `VtScreen` defends on two fronts: it
-//! clamps degenerate dimensions (see `screen_model::clamp_size`), and every
-//! call that mutates or reads the model runs under a guard that turns an
-//! escaping panic into a blank rebuilt screen plus a
-//! [`ScreenIntegrity::Rebuilt`] answer instead of unwinding into the caller.
-//! `size()` therefore always returns cols/rows `>= 1`.
+//! The terminal itself is [`yagura_term::VtScreen`]; this file reads it with
+//! the detection definitions' policy. `VtScreen` here holds that terminal and
+//! adds the reads, for as long as the daemon reads the terminal itself rather
+//! than a copy of its screen.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use alacritty_terminal::grid::{Dimensions, Row};
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::TermMode;
-use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
+use yagura_os::program::HostOs;
+use yagura_term::PtyHost;
+use yagura_term::screen::{cells_text, cells_text_mapped};
 
-use super::screen_model::{Model, clamp_size, has_content};
-use crate::input_encode::{InputModes, MouseTracking};
-
-/// Whether a screen-mutating call left the screen model intact, or had to
-/// rebuild it from scratch to survive a panic inside the terminal engine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScreenIntegrity {
-    /// The call completed normally. Everything fed so far is still on screen.
-    Intact,
-    /// The call panicked inside the engine and the screen was replaced
-    /// with a blank one. Everything fed before it is lost, so screen-derived
-    /// judgements must start over rather than trust what they read next.
-    Rebuilt,
-}
+pub use yagura_term::ScreenIntegrity;
 
 /// The result of reading a composer from the screen: body recovered, only the
 /// body's end in view, empty (marker present but no text), or not observed.
@@ -72,127 +56,55 @@ enum ComposerWalk {
 /// `DetectorHandle` take it on blocking threads for async callers.
 pub type SharedScreen = Arc<parking_lot::Mutex<VtScreen>>;
 
-/// A virtual terminal screen that turns a byte stream into display lines.
+/// A window's terminal ([`yagura_term::VtScreen`], reached through `Deref`)
+/// with the detector's reads of it.
 ///
-/// This is the only public surface the detector's pattern matcher touches;
-/// the terminal engine is an implementation detail hidden behind this type.
+/// This is the only public surface the detector's pattern matcher touches.
 pub struct VtScreen {
-    model: Model,
-    /// Rows kept after they scroll off the top; every rebuilt model keeps it.
-    history_rows: usize,
-    /// See [`VtScreen::generation`].
-    generation: u64,
-    /// Chunks of output taken in; see [`VtScreen::note_output`].
-    outputs_fed: u64,
-    /// A read panicked and the model was rebuilt; the next feed or resize
-    /// reports it, since a read has no way to.
-    rebuilt_by_read: bool,
-    /// The window's count of input writes; see [`VtScreen::follow_writes`].
-    writes: tokio::sync::watch::Receiver<u64>,
-    /// Fault-injection countdown; see [`VtScreen::poison_after_calls`].
-    #[cfg(any(test, feature = "fault-injection"))]
-    poison_countdown: Option<usize>,
+    term: yagura_term::VtScreen,
 }
 
 impl std::fmt::Debug for VtScreen {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (cols, rows) = self.size();
-        f.debug_struct("VtScreen")
-            .field("cols", &cols)
-            .field("rows", &rows)
-            .finish()
+        self.term.fmt(f)
     }
 }
 
-/// The row's last cell carries the engine's mark that the line goes on in the
-/// next row.
-pub(super) fn row_wraps(row: &Row<Cell>) -> bool {
-    row.len()
-        .checked_sub(1)
-        .is_some_and(|last| row[Column(last)].flags.contains(Flags::WRAPLINE))
+impl std::ops::Deref for VtScreen {
+    type Target = yagura_term::VtScreen;
+
+    fn deref(&self) -> &Self::Target {
+        &self.term
+    }
+}
+
+impl std::ops::DerefMut for VtScreen {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.term
+    }
 }
 
 impl VtScreen {
-    /// Creates a new blank screen of the given size.
+    /// Creates a new blank screen of the given size, behind this OS's PTY
+    /// host; see [`yagura_term::VtScreen::new`].
     ///
     /// `cols`/`rows` follow the same `(cols, rows)` order as
-    /// `PtySession::size()`. A zero dimension is degenerate and is replaced
-    /// with the standard terminal default, and a size beyond the model's
-    /// limits is cut to them; this constructor never panics.
+    /// `PtySession::size()`. Never panics.
     #[must_use]
     pub fn new(cols: u16, rows: u16) -> Self {
         Self::with_history(cols, rows, 0)
     }
 
-    /// Creates a blank screen that keeps up to `history_rows` rows scrolled off
-    /// its top, for reading back with [`VtScreen::text_tail`].
-    ///
-    /// Sized like [`VtScreen::new`]; never panics.
+    /// Creates a blank screen that keeps up to `history_rows` rows scrolled
+    /// off its top; see [`yagura_term::VtScreen::with_history`]. Never panics.
     #[must_use]
     pub fn with_history(cols: u16, rows: u16, history_rows: usize) -> Self {
-        let (cols, rows) = clamp_size(cols, rows);
+        let host = PtyHost {
+            requests_win32_input: HostOs::host().pty_host_requests_win32_input(),
+        };
         Self {
-            model: Model::new(cols, rows, history_rows),
-            history_rows,
-            generation: 0,
-            outputs_fed: 0,
-            rebuilt_by_read: false,
-            writes: tokio::sync::watch::channel(0).1,
-            #[cfg(any(test, feature = "fault-injection"))]
-            poison_countdown: None,
+            term: yagura_term::VtScreen::with_history(cols, rows, history_rows, host),
         }
-    }
-
-    /// The text a person sees in this window and could scroll back to, as its
-    /// last `max_lines` logical lines: a row the window wrapped joins the next
-    /// one, so only a line break the program wrote ends a line. While a
-    /// full-screen program has the alternate screen up, that screen is all
-    /// there is, as in the GUI. Trailing blank rows, and the spaces a
-    /// terminal paints after a line's last character, are left out.
-    ///
-    /// The text is cut to its last `max_bytes` bytes on a character boundary.
-    /// The flag is `true` when lines before the returned ones exist, the byte
-    /// limit cut the text, or the history is full (rows may then have been
-    /// dropped from it, whether or not the rows that remain show any text).
-    ///
-    /// Never panics: a panic from inside the engine rebuilds the screen blank
-    /// and returns empty text; the next feed or resize reports
-    /// [`ScreenIntegrity::Rebuilt`].
-    pub fn text_tail(&mut self, max_lines: usize, max_bytes: usize) -> (String, bool) {
-        self.read_guarded(|screen| screen.read_tail(max_lines, max_bytes))
-            .unwrap_or_default()
-    }
-
-    /// Follows the window's count of writes to its child's input: a
-    /// synchronized update holds the view only until the next write (see
-    /// [`VtScreen::frame_held`]). A screen that follows none never sees one.
-    pub(crate) fn follow_writes(&mut self, writes: tokio::sync::watch::Receiver<u64>) {
-        self.writes = writes;
-    }
-
-    /// Whether the program's synchronized update (`CSI ? 2026 h`) holds the
-    /// window's view back: it is open and nothing has released it yet -- an
-    /// input write, a resize, or more output than the screen's size allows.
-    #[must_use]
-    pub fn frame_held(&self) -> bool {
-        self.model.frame_held(*self.writes.borrow())
-    }
-
-    /// Keeps the window client's theme colors, which the program's color
-    /// queries (OSC 4/10/11/12) are answered from.
-    pub fn set_palette(&mut self, palette: yagura_protocol::Palette) {
-        self.model.set_palette(palette);
-    }
-
-    pub(super) fn model(&self) -> &Model {
-        &self.model
-    }
-
-    /// Runs `op` on the model under the same guard as a feed; see
-    /// [`VtScreen::guard_call`].
-    pub(super) fn update_model(&mut self, op: impl FnOnce(&mut Model)) -> ScreenIntegrity {
-        let (cols, rows) = self.size();
-        self.guard_call(cols, rows, op)
     }
 
     /// Wraps this screen for sharing between its writer and its readers.
@@ -201,149 +113,22 @@ impl VtScreen {
         Arc::new(parking_lot::Mutex::new(self))
     }
 
-    /// Counts one chunk of the child's output as taken in, returning the new
-    /// count. Called by whoever feeds the screen, once per chunk, while it
-    /// still holds the screen.
-    pub fn note_output(&mut self) -> u64 {
-        self.outputs_fed = self.outputs_fed.wrapping_add(1);
-        self.outputs_fed
-    }
-
-    /// How many times the model has been rebuilt after a panic and lost what
-    /// it showed. A reader that keeps the
-    /// value it last saw can tell that the screen it judged is gone.
-    #[must_use]
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Runs `read` against this screen and returns what it returns.
     ///
     /// Never panics: a panic from inside the engine rebuilds the screen
-    /// blank at its current size, advances [`VtScreen::generation`] and
-    /// returns `None`; the next feed or resize reports
-    /// [`ScreenIntegrity::Rebuilt`].
+    /// blank at its current size, advances
+    /// [`generation`](yagura_term::VtScreen::generation) and returns `None`;
+    /// the next feed or resize reports [`ScreenIntegrity::Rebuilt`].
     pub fn read_guarded<R>(&mut self, read: impl FnOnce(&Self) -> R) -> Option<R> {
         // `AssertUnwindSafe`: `read` borrows the screen shared, so a panic
         // cannot leave a half-updated value behind.
         match catch_unwind(AssertUnwindSafe(|| read(&*self))) {
             Ok(value) => Some(value),
             Err(_) => {
-                let (cols, rows) = self.size();
-                let win32_input = self.model.extras().win32_input;
-                self.rebuild(cols, rows, win32_input);
-                self.rebuilt_by_read = true;
+                self.term.rebuild_after_read_panic();
                 None
             }
         }
-    }
-
-    /// Reads logical lines from the last non-blank row upwards, so the work
-    /// follows what is asked for and not the length of the history.
-    fn read_tail(&self, max_lines: usize, max_bytes: usize) -> (String, bool) {
-        let grid = self.model.term().grid();
-        let top = grid.topmost_line().0;
-        let mut last = grid.bottommost_line().0;
-        while last >= top && !has_content_row(&grid[Line(last)]) && !row_wraps(&grid[Line(last)]) {
-            last -= 1;
-        }
-
-        let mut lines_rev: Vec<String> = Vec::new();
-        let mut total = 0usize;
-        let mut truncated = false;
-        let mut row = last;
-        while row >= top {
-            if lines_rev.len() >= max_lines || total > max_bytes {
-                truncated = true;
-                break;
-            }
-            let (line, first_row) = self.logical_line_ending_at(row, top, max_bytes);
-            total = total.saturating_add(line.len() + usize::from(!lines_rev.is_empty()));
-            lines_rev.push(line);
-            row = first_row - 1;
-        }
-        if row < top && self.history_rows > 0 {
-            truncated |= grid.history_size() >= self.history_rows;
-        }
-
-        lines_rev.reverse();
-        let text = lines_rev.join("\n");
-        if text.len() <= max_bytes {
-            return (text, truncated);
-        }
-        let mut start = text.len() - max_bytes;
-        while !text.is_char_boundary(start) {
-            start += 1;
-        }
-        (text[start..].to_string(), true)
-    }
-
-    /// The logical line whose last row is `row`, and the grid line of its
-    /// first row. Rows are added upwards and stop once the line alone is past
-    /// `byte_budget`, so one very long line cannot be assembled in full.
-    ///
-    /// Only the bytes the line keeps count against the budget: the blank rows
-    /// at its end are trimmed away, so stopping inside them would end the line
-    /// short of its start, and the caller would read the rest as another line.
-    fn logical_line_ending_at(&self, row: i32, top: i32, byte_budget: usize) -> (String, i32) {
-        let grid = self.model.term().grid();
-        let cols = grid.columns();
-        let mut segments = Vec::new();
-        let mut len = 0usize;
-        let mut first = row;
-        loop {
-            let (text, _) = cells_text(&grid[Line(first)], 0, cols, false);
-            if segments.is_empty() {
-                let kept = text.trim_end_matches(' ');
-                if !kept.is_empty() {
-                    len += kept.len();
-                    segments.push(kept.to_string());
-                }
-            } else {
-                len += text.len();
-                segments.push(text);
-            }
-            if len > byte_budget || first <= top || !row_wraps(&grid[Line(first - 1)]) {
-                break;
-            }
-            first -= 1;
-        }
-        let joined: String = segments.iter().rev().map(String::as_str).collect();
-        (joined.trim_end_matches(' ').to_string(), first)
-    }
-
-    /// Feeds a chunk of raw PTY output into the screen.
-    ///
-    /// Input may be split at arbitrary byte boundaries (escape sequences and
-    /// multi-byte UTF-8 characters included): the parser retains state
-    /// across calls and reassembles split sequences correctly. Malformed
-    /// escape sequences and invalid UTF-8 are tolerated.
-    ///
-    /// Never panics: a panic from inside the engine is caught and the
-    /// screen is rebuilt blank at its current size, which this reports as
-    /// [`ScreenIntegrity::Rebuilt`] (see [`VtScreen::guard_call`]). The chunk
-    /// that triggered the rebuild is lost along with everything fed before it.
-    pub fn feed(&mut self, bytes: &[u8]) -> ScreenIntegrity {
-        let (cols, rows) = self.size();
-        let writes = *self.writes.borrow();
-        self.guard_call(cols, rows, |model: &mut Model| model.feed(bytes, writes))
-    }
-
-    /// Takes the replies to the child's terminal queries that the feeds so
-    /// far queued, to be written back to the child, and how many replies were
-    /// dropped because the queue was full.
-    pub fn take_replies(&mut self) -> (Vec<u8>, usize) {
-        self.model.take_replies()
-    }
-
-    /// Returns the current screen size as `(cols, rows)`.
-    #[must_use]
-    pub fn size(&self) -> (u16, u16) {
-        let term = self.model.term();
-        (
-            u16::try_from(term.columns()).unwrap_or(u16::MAX),
-            u16::try_from(term.screen_lines()).unwrap_or(u16::MAX),
-        )
     }
 
     /// Returns the bottom `n` display lines as plain text, top-to-bottom
@@ -471,70 +256,6 @@ impl VtScreen {
         skip.min(lines.len())..(skip + take).min(lines.len())
     }
 
-    /// Resizes the virtual screen, keeping its contents readable afterwards.
-    ///
-    /// A zero dimension is degenerate and is replaced the same way as in
-    /// [`VtScreen::new`].
-    ///
-    /// Never panics: a panic from inside the engine is caught and the
-    /// screen is rebuilt blank at the clamped target size, which this reports
-    /// as [`ScreenIntegrity::Rebuilt`] (see [`VtScreen::guard_call`]). The
-    /// resize still takes effect in that case; only the contents are lost.
-    pub fn resize(&mut self, cols: u16, rows: u16) -> ScreenIntegrity {
-        let (cols, rows) = clamp_size(cols, rows);
-        self.guard_call(cols, rows, |model: &mut Model| model.resize(cols, rows))
-    }
-
-    /// Whether the cursor is currently hidden (`ESC[?25l`), which CLIs and
-    /// ConPTY use to bracket a repaint in progress.
-    #[must_use]
-    pub fn cursor_hidden(&self) -> bool {
-        !self.model.term().mode().contains(TermMode::SHOW_CURSOR)
-    }
-
-    /// Whether the program has a synchronized update (`CSI ? 2026 h`) open,
-    /// so the frame it brackets is not finished yet. Unlike
-    /// [`VtScreen::frame_held`], only the program closing it (or a reset)
-    /// ends it.
-    #[must_use]
-    pub fn sync_open(&self) -> bool {
-        self.model.sync_open()
-    }
-
-    /// The modes the child set that change what input becomes (see
-    /// [`crate::input_encode`]).
-    #[must_use]
-    pub fn input_modes(&self) -> InputModes {
-        let mode = self.model.term().mode();
-        let mouse = if mode.contains(TermMode::MOUSE_MOTION) {
-            MouseTracking::Motion
-        } else if mode.contains(TermMode::MOUSE_DRAG) {
-            MouseTracking::Drag
-        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
-            MouseTracking::Click
-        } else if self.model.extras().x10_mouse {
-            MouseTracking::X10
-        } else {
-            MouseTracking::Off
-        };
-        InputModes {
-            app_cursor: mode.contains(TermMode::APP_CURSOR),
-            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
-            mouse,
-            sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
-            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
-            alt_screen: mode.contains(TermMode::ALT_SCREEN),
-            focus_reports: mode.contains(TermMode::FOCUS_IN_OUT),
-            win32_input: self.model.extras().win32_input,
-            kitty_flags: self
-                .model
-                .extras()
-                .kitty_flags(mode.contains(TermMode::ALT_SCREEN)),
-            // Set from the window's program by `PtySession::input_state` (`pty.rs`).
-            key_records_flattened: false,
-        }
-    }
-
     /// Returns the row index (0-based) where the cursor is currently positioned.
     #[must_use]
     pub fn cursor_row(&self) -> u16 {
@@ -545,7 +266,7 @@ impl VtScreen {
     /// waiting to wrap, is at column `cols`: that is where the next
     /// character would go, and where a reader of the row sees it.
     fn cursor_position(&self) -> (u16, u16) {
-        let cursor = &self.model.term().grid().cursor;
+        let cursor = &self.term.term().grid().cursor;
         let row = u16::try_from(cursor.point.line.0).unwrap_or(0);
         let col = u16::try_from(cursor.point.column.0 + usize::from(cursor.input_needs_wrap))
             .unwrap_or(u16::MAX);
@@ -554,7 +275,7 @@ impl VtScreen {
 
     /// Every screen row as text, covering all contents (dimmed ones too).
     fn screen_rows(&self) -> Vec<String> {
-        let grid = self.model.term().grid();
+        let grid = self.term.term().grid();
         let cols = grid.columns();
         (0..grid.screen_lines())
             .filter_map(|row| i32::try_from(row).ok())
@@ -840,7 +561,7 @@ impl VtScreen {
         let Some(border) = &section.right_border else {
             return cols;
         };
-        let grid = self.model.term().grid();
+        let grid = self.term.term().grid();
         if usize::from(row) >= grid.screen_lines() {
             return cols;
         }
@@ -876,7 +597,7 @@ impl VtScreen {
 
     /// [`cells_text`] of a screen row, or `None` below the last row.
     fn row_text(&self, row: u16, start: u16, end: u16, skip_dim: bool) -> Option<(String, u16)> {
-        let grid = self.model.term().grid();
+        let grid = self.term.term().grid();
         if usize::from(row) >= grid.screen_lines() {
             return None;
         }
@@ -893,7 +614,7 @@ impl VtScreen {
     /// ending with the text's length and the column past it; `None` below the
     /// last row.
     fn row_text_columns(&self, row: u16) -> Option<(String, Vec<(usize, usize)>)> {
-        let grid = self.model.term().grid();
+        let grid = self.term.term().grid();
         if usize::from(row) >= grid.screen_lines() {
             return None;
         }
@@ -908,99 +629,6 @@ impl VtScreen {
         columns.push((text.len(), usize::from(next_col)));
         Some((text, columns))
     }
-
-    /// Runs `op` -- a call that mutates the model -- and contains any panic it
-    /// raises by replacing the model with a blank `(cols, rows)` screen.
-    ///
-    /// Invariant: every call that mutates the model goes through this helper.
-    /// Construction ([`VtScreen::with_history`]) builds a fresh model instead.
-    ///
-    /// Invariant: `cols` / `rows` are decided by the caller *before* `op`
-    /// runs. A model that panicked mid-update is left in an unspecified state,
-    /// so nothing may be read back from it afterwards -- not even its size.
-    ///
-    /// The recovery is reported, never logged with the panic payload or the
-    /// bytes that triggered it: the log line carries the new size and nothing
-    /// else, so PTY output cannot leak into it.
-    fn guard_call(&mut self, cols: u16, rows: u16, op: impl FnOnce(&mut Model)) -> ScreenIntegrity {
-        #[cfg(any(test, feature = "fault-injection"))]
-        let poisoned = self.poison_is_due();
-        let win32_input = self.model.extras().win32_input;
-
-        let model = &mut self.model;
-        // `AssertUnwindSafe`: the only state this closure reaches is `model`,
-        // and the recovery below discards it wholesale instead of reading the
-        // partial update a panic left behind, so no torn value is observable.
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            #[cfg(any(test, feature = "fault-injection"))]
-            if poisoned {
-                fire_poison_seam();
-            }
-            op(model);
-        }));
-
-        match outcome {
-            Ok(()) if std::mem::take(&mut self.rebuilt_by_read) => ScreenIntegrity::Rebuilt,
-            Ok(()) => ScreenIntegrity::Intact,
-            Err(_) => {
-                self.rebuild(cols, rows, win32_input);
-                self.rebuilt_by_read = false;
-                ScreenIntegrity::Rebuilt
-            }
-        }
-    }
-
-    /// Replaces the model with a blank one after a panic, keeping Win32
-    /// Input Mode as it was before the call (see [`Model::keep_win32_input`]).
-    fn rebuild(&mut self, cols: u16, rows: u16, win32_input: bool) {
-        self.model = Model::new(cols, rows, self.history_rows);
-        self.model.keep_win32_input(win32_input);
-        self.generation = self.generation.wrapping_add(1);
-        tracing::warn!(
-            cols,
-            rows,
-            "the virtual terminal screen model panicked and was rebuilt blank; \
-             screen-derived detection restarts from an empty screen"
-        );
-    }
-
-    /// Arms the fault-injection seam: after `calls` more calls through
-    /// [`VtScreen::guard_call`] have completed, the next one panics from inside
-    /// the guarded call itself, after the recovery size has been decided. The
-    /// seam is consumed by that one call.
-    ///
-    /// Exists so the recovery path can be exercised without depending on a
-    /// specific engine version's panic conditions. Compiled for tests and
-    /// behind the `fault-injection` feature only.
-    #[cfg(any(test, feature = "fault-injection"))]
-    pub fn poison_after_calls(&mut self, calls: usize) {
-        self.poison_countdown = Some(calls);
-    }
-
-    /// Advances the countdown by one guarded call; `true` when it is this
-    /// call's turn to panic.
-    #[cfg(any(test, feature = "fault-injection"))]
-    fn poison_is_due(&mut self) -> bool {
-        match self.poison_countdown {
-            Some(0) => {
-                self.poison_countdown = None;
-                true
-            }
-            Some(remaining) => {
-                self.poison_countdown = Some(remaining - 1);
-                false
-            }
-            None => false,
-        }
-    }
-}
-
-/// The seam's actual failure, kept in its own item so that no `panic!` exists
-/// in a build without the seam.
-#[cfg(any(test, feature = "fault-injection"))]
-#[allow(clippy::panic)] // the seam exists to make the guarded call panic
-fn fire_poison_seam() {
-    panic!("poison seam: simulated engine panic");
 }
 
 /// Whether the marker row holds only the section's `placeholder`: nothing but
@@ -1031,55 +659,6 @@ fn is_untyped_hint(
         .is_some_and(|found| found.start() == 0 && found.end() == hint.len())
 }
 
-fn has_content_row(row: &Row<Cell>) -> bool {
-    row.into_iter().any(has_content)
-}
-
-/// The text of `row` between columns `start` (inclusive) and `end`
-/// (exclusive), and the column just past the last cell it took. Cells nobody
-/// wrote are skipped and read as the spaces between the cells that follow
-/// them, so a line has no trailing padding; a space a program wrote stays.
-/// With `skip_dim`, dimmed cells are skipped like unwritten ones.
-fn cells_text(row: &Row<Cell>, start: usize, end: usize, skip_dim: bool) -> (String, u16) {
-    cells_text_mapped(row, start, end, skip_dim, |_, _| {})
-}
-
-/// [`cells_text`], calling `column_starts(byte, col)` where the text of each
-/// column begins. A combining mark adds bytes but no column, and a wide
-/// character's second column has no start of its own.
-fn cells_text_mapped(
-    row: &Row<Cell>,
-    start: usize,
-    end: usize,
-    skip_dim: bool,
-    mut column_starts: impl FnMut(usize, usize),
-) -> (String, u16) {
-    let mut text = String::new();
-    let mut next_col = start;
-    for col in start..end.min(row.len()) {
-        let cell = &row[Column(col)];
-        if !has_content(cell) || (skip_dim && cell.flags.contains(Flags::DIM)) {
-            continue;
-        }
-        for blank in next_col..col {
-            column_starts(text.len(), blank);
-            text.push(' ');
-        }
-        column_starts(text.len(), col);
-        text.push(if cell.c == '\t' { ' ' } else { cell.c });
-        if let Some(marks) = cell.zerowidth() {
-            text.extend(marks);
-        }
-        next_col = col
-            + if cell.flags.contains(Flags::WIDE_CHAR) {
-                2
-            } else {
-                1
-            };
-    }
-    (text, u16::try_from(next_col).unwrap_or(u16::MAX))
-}
-
 /// The column whose text starts at `byte` in a [`VtScreen::row_text_columns`]
 /// map, or `None` when `byte` falls inside a cell.
 fn column_at_byte(columns: &[(usize, usize)], byte: usize) -> Option<u16> {
@@ -1099,12 +678,11 @@ fn byte_at_column(columns: &[(usize, usize)], col: u16) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    //! The guard helper and its `#[cfg(test)]` poison seam.
+    //! The guard as the detector's reads see it.
     //!
     //! The default panic hook is left in place, so every test that arms the
     //! seam prints one panic message to stderr; that noise is expected.
 
-    use super::super::screen_model::DEFAULT_COLS;
     use super::*;
 
     #[test]
@@ -1139,19 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn a_poisoned_resize_recovers_at_the_clamped_target_size() {
-        // The recovery size is the resize's own clamped target, decided
-        // before the guarded call ran, never a size read back from the
-        // model that panicked.
-        let mut screen = VtScreen::new(80, 24);
-
-        screen.poison_after_calls(0);
-        assert_eq!(screen.resize(0, 7), ScreenIntegrity::Rebuilt);
-
-        assert_eq!(screen.size(), (DEFAULT_COLS, 7));
-    }
-
-    #[test]
     fn the_screen_stays_usable_after_a_rebuild() {
         let mut screen = VtScreen::new(80, 24);
         screen.poison_after_calls(0);
@@ -1165,39 +730,5 @@ mod tests {
                 .any(|line| line.contains("still alive")),
             "output fed after a rebuild must reach the new screen"
         );
-    }
-
-    #[test]
-    fn the_poison_seam_is_consumed_by_a_single_call() {
-        let mut screen = VtScreen::new(80, 24);
-        screen.poison_after_calls(0);
-
-        assert_eq!(screen.feed(b"first"), ScreenIntegrity::Rebuilt);
-        assert_eq!(screen.feed(b"second"), ScreenIntegrity::Intact);
-    }
-
-    #[test]
-    fn replies_are_queued_up_to_the_cap_and_one_past_it_is_dropped_and_counted() {
-        const REPLY: &[u8] = b"\x1b[0n";
-        let fit = 16 * 1024 / REPLY.len();
-        let mut screen = VtScreen::new(80, 24);
-
-        let integrity = screen.feed(&b"\x1b[5n".repeat(fit + 1));
-
-        assert_eq!(integrity, ScreenIntegrity::Intact);
-        assert_eq!(screen.take_replies(), (REPLY.repeat(fit), 1));
-    }
-
-    #[test]
-    fn a_logical_line_grows_upwards_until_it_is_past_the_budget() {
-        let mut screen = VtScreen::with_history(10, 4, 100);
-        screen.feed("0123456789".repeat(3).as_bytes());
-        screen.feed(b"01234");
-
-        // Rows 0 to 3 are one line: 10 + 10 + 10 + 5 bytes, read from the bottom.
-        let first_row = |budget| screen.logical_line_ending_at(3, 0, budget).1;
-        assert_eq!(first_row(usize::MAX), 0);
-        assert_eq!(first_row(14), 2, "15 bytes are past a budget of 14");
-        assert_eq!(first_row(15), 1, "15 bytes are not past a budget of 15");
     }
 }

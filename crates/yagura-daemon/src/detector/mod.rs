@@ -6,9 +6,8 @@ pub mod definition;
 pub mod engine;
 pub mod layers;
 pub mod screen;
-mod screen_model;
-pub mod screen_view;
 pub mod source;
 
 pub use engine::{ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho};
 pub use screen::{ScreenIntegrity, SharedScreen, VtScreen};
+pub use yagura_term::screen_view;

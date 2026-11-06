@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use super::focus::FocusState;
 use super::{PublishedInput, WriterSlot, lock_recover};
-use crate::input_encode::InputModes;
+use yagura_protocol::InputModes;
 
 /// Reply bytes waiting for a window's reply writer; a batch that would go
 /// past this is dropped.
