@@ -24,6 +24,7 @@ use crate::common;
 use std::path::Path;
 use std::time::Duration;
 
+use common::store_fixtures::{last_opened_seq, opened_seq, wire_window_table};
 use common::{
     CONTROL_INPUT_TABLE, Harness, READY_MARKER, SUBMIT_CHILD_PROBE, VALID_TOKEN,
     approver_base_config, call_list_windows, call_open_window, call_send_handoff_from_profile,
@@ -67,27 +68,6 @@ async fn write_marker_and_see_it(h: &Harness, window_id: &str, marker: &str) {
     h.write_input(window_id, format!("{marker}\r").as_bytes())
         .await;
     h.wait_for_scrollback(window_id, marker.as_bytes()).await;
-}
-
-/// The number in a window id (`w<n>-<boot>`): the registry numbers every
-/// open it starts in turn, a failed one included, so an open's number tells
-/// how many opens were started before it.
-fn open_number(window_id: &str) -> u64 {
-    window_id
-        .strip_prefix('w')
-        .and_then(|rest| rest.split('-').next())
-        .and_then(|number| number.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
-}
-
-/// The highest open number among the windows `client` lists, 0 for none.
-async fn highest_open_number(client: &mut Connection) -> u64 {
-    call_list_windows(client)
-        .await
-        .iter()
-        .map(|window| open_number(&window.window_id))
-        .max()
-        .unwrap_or(0)
 }
 
 fn write_definitions(dir: &Path) {
@@ -701,16 +681,17 @@ async fn window_count(client: &mut Connection) -> usize {
 
 #[tokio::test]
 async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_no_child() {
-    let (h, _dir) = start_launch(
+    let (h, dir) = start_launch(
         "no-composer-pre-open-handoff",
         None,
         Some(policy(&["send_handoff"])),
     )
     .await;
+    let db = wire_window_table(&h.registry, &dir);
     let mut client = h.connect().await;
 
     let before: usize = window_count(&mut client).await;
-    let highest_before = highest_open_number(&mut client).await;
+    let last_before = last_opened_seq(&db);
     let msg =
         call_send_handoff_from_profile(&mut client, "silent-profile", None, None, "r", "t").await;
     let message = expect_error(msg, "no_composer");
@@ -731,8 +712,8 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
          must open"
     );
     assert_eq!(
-        open_number(&control_id),
-        highest_before + 1,
+        opened_seq(&db, &control_id),
+        last_before + 1,
         "the control must be the first open started after the refusal: a launch started for \
          the refused handoff, even one left running behind the answer, would have come first"
     );
@@ -759,9 +740,10 @@ async fn the_composer_refusal_follows_the_launch_content_check_and_precedes_the_
     let playbook = playbook_dir.join("unused-playbook.toml");
     std::fs::write(&playbook, "").expect("write the playbook placeholder");
     let (h, dir) = start_launch(tag, Some(playbook), None).await;
+    let db = wire_window_table(&h.registry, &dir);
     let mut client = h.connect().await;
     let before: usize = window_count(&mut client).await;
-    let highest_before = highest_open_number(&mut client).await;
+    let last_before = last_opened_seq(&db);
 
     let missing_cwd = dir.join("cwd-that-does-not-exist");
     let missing_cwd = missing_cwd.to_string_lossy().into_owned();
@@ -797,8 +779,8 @@ async fn the_composer_refusal_follows_the_launch_content_check_and_precedes_the_
     );
     let marker = h.open(echo_child_command(), None).await;
     assert_eq!(
-        open_number(&marker),
-        highest_before + 1,
+        opened_seq(&db, &marker),
+        last_before + 1,
         "no refusal may have started an open, even one left running behind its answer"
     );
     h.registry.terminate_all().await;
@@ -933,6 +915,10 @@ async fn windows_named(client: &mut Connection, name: &str) -> usize {
 async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_composer_before_starting_a_child()
  {
     let h = start_ledger("no-composer-pre-open-task").await;
+    let db = wire_window_table(
+        &h.registry,
+        &unique_temp_dir("no-composer-pre-open-task-table"),
+    );
     let mut owner = h.connect().await;
     become_plan_owner(&h, &mut owner).await;
     let plan = create_plan(
@@ -946,7 +932,7 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
     .await;
 
     let before: usize = window_count(&mut owner).await;
-    let highest_before = highest_open_number(&mut owner).await;
+    let last_before = last_opened_seq(&db);
     let msg = open_task_window(&mut owner, &plan.plan_id, "instructed", "instructed-window").await;
     let message = expect_error(msg, "no_composer");
     assert_no_composer_guidance(&message, "an instructed task window");
@@ -973,8 +959,8 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_declares_no_c
         "the same profile with nothing to tell the window must open",
     );
     assert_eq!(
-        open_number(&bare_window),
-        highest_before + 1,
+        opened_seq(&db, &bare_window),
+        last_before + 1,
         "the control must be the first open started after the refusal: a child started for the \
          refused task, even one left running behind the answer, would have come first"
     );
@@ -1405,16 +1391,17 @@ async fn a_send_message_with_no_line_to_judge_is_written_into_a_composer_without
 
 #[tokio::test]
 async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_child() {
-    let (h, _dir) = start_launch(
+    let (h, dir) = start_launch(
         "no-probe-pre-open-handoff",
         None,
         Some(policy(&["send_handoff"])),
     )
     .await;
+    let db = wire_window_table(&h.registry, &dir);
     let mut client = h.connect().await;
 
     let before: usize = window_count(&mut client).await;
-    let highest_before = highest_open_number(&mut client).await;
+    let last_before = last_opened_seq(&db);
     let msg =
         call_send_handoff_from_profile(&mut client, "raw-profile", None, None, "r", "t").await;
     let message = expect_error(msg, "no_composer");
@@ -1430,8 +1417,8 @@ async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_chi
     let (control_id, opened, _) = expect_handoff_sent(control);
     assert!(opened, "the control handoff must open its window");
     assert_eq!(
-        open_number(&control_id),
-        highest_before + 1,
+        opened_seq(&db, &control_id),
+        last_before + 1,
         "the control must be the first open started after the refusal: a launch started for \
          the refused handoff, even one left running behind the answer, would have come first"
     );
@@ -1443,6 +1430,10 @@ async fn send_handoff_to_a_profile_whose_definition_names_no_probe_starts_no_chi
 async fn open_task_window_refuses_an_instructed_task_whose_profile_names_no_probe_before_starting_a_child()
  {
     let h = start_ledger("no-probe-pre-open-task").await;
+    let db = wire_window_table(
+        &h.registry,
+        &unique_temp_dir("no-probe-pre-open-task-table"),
+    );
     let mut owner = h.connect().await;
     become_plan_owner(&h, &mut owner).await;
     let plan = create_plan(
@@ -1455,7 +1446,7 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_names_no_prob
     .await;
 
     let before: usize = window_count(&mut owner).await;
-    let highest_before = highest_open_number(&mut owner).await;
+    let last_before = last_opened_seq(&db);
     let msg = open_task_window(&mut owner, &plan.plan_id, "instructed", "instructed-window").await;
     let message = expect_error(msg, "no_composer");
     assert_no_composer_guidance(&message, "an instructed task window without a probe");
@@ -1475,8 +1466,8 @@ async fn open_task_window_refuses_an_instructed_task_whose_profile_names_no_prob
         "the same profile with nothing to tell the window must open",
     );
     assert_eq!(
-        open_number(&bare_window),
-        highest_before + 1,
+        opened_seq(&db, &bare_window),
+        last_before + 1,
         "the control must be the first open started after the refusal: a child started for the \
          refused task, even one left running behind the answer, would have come first"
     );

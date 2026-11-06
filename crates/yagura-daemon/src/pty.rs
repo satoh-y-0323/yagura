@@ -418,6 +418,9 @@ pub(crate) struct WindowSpawn<'a> {
     /// Answers color queries from the child's first output on; `None` leaves
     /// them unanswered until a palette is set.
     pub(crate) palette: Option<Palette>,
+    /// The launch record the holder keeps in memory only and returns in its
+    /// `Welcome`.
+    pub(crate) record: String,
 }
 
 /// What a session shares with its link, made before the link starts.
@@ -595,6 +598,7 @@ impl PtySession {
                 extra_env,
                 removed_env: &[],
                 palette: None,
+                record: String::new(),
             },
             config,
             host,
@@ -628,6 +632,7 @@ impl PtySession {
             history_rows: config.read_output_max_lines,
             palette: spawn.palette,
             fault: config.launch_fault(),
+            record: spawn.record,
         };
         let context = host.link_context().await?;
         let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);

@@ -205,6 +205,7 @@ mod window_resize_bundled_conpty;
 mod window_resize_read_output;
 mod window_resize_rule;
 mod window_size_limit;
+mod window_table;
 mod windows_shell_resolution;
 mod wiring_enforcement;
 mod workspace;

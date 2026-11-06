@@ -136,9 +136,10 @@ struct Shared {
 }
 
 impl Shared {
-    /// Mints the next request id: `a{sequence}-{boot nonce}`, the same shape
-    /// as a window id. The sequence never repeats, even for a settled
-    /// request, so a late decision can never resolve the wrong one. It is
+    /// Mints the next request id: `a{sequence}-{boot nonce}`, since a pending
+    /// request does not outlive the daemon run. The sequence never repeats,
+    /// even for a settled request, so a late decision can never resolve the
+    /// wrong one. It is
     /// returned alongside the id so an [`Entry`] can record its submission
     /// order without parsing the id back apart.
     fn mint_request_id(&self) -> (u64, String) {
@@ -192,8 +193,8 @@ pub struct ApprovalBroker {
 }
 
 impl ApprovalBroker {
-    /// Creates an empty ledger. `boot_nonce` seeds every request id this
-    /// broker mints, the same nonce a window id carries, so a stale id from a
+    /// Creates an empty ledger. `boot_nonce`, the daemon run's own value,
+    /// seeds every request id this broker mints, so a stale id from a
     /// previous daemon boot can never resolve here.
     #[must_use]
     pub fn new(boot_nonce: &str) -> Self {

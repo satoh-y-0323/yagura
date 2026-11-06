@@ -4755,7 +4755,8 @@ async fn execute_close(
 /// # Errors
 ///
 /// Returns whatever [`control::close_window`] refused with, in which case
-/// nothing was marked closed.
+/// nothing was marked closed. The window's row is gone either way: it is
+/// removed before the holder is told to end.
 async fn close_for_cleanup(
     registry: &WindowRegistry,
     config: &DaemonConfig,
@@ -4763,7 +4764,9 @@ async fn close_for_cleanup(
     force: bool,
 ) -> Result<control::Closed, ControlError> {
     let grace = Duration::from_millis(config.close_grace_ms);
-    let closed = control::close_window(entry, force, grace).await?;
+    let closed = entry
+        .remove_row_then(control::close_window(entry, force, grace))
+        .await?;
     entry.mark_closed();
     registry.request_snapshot();
     Ok(closed)

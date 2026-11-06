@@ -24,6 +24,7 @@ use common::{
     write_profile,
 };
 
+use common::store_fixtures::{last_opened_seq, opened_seq, wire_window_table};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
     AssignmentSource, ClientMessage, DaemonMessage, PlanInfo, PlanReview, PlanSummary,
@@ -370,17 +371,6 @@ async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
     }
 }
 
-/// The number in a window id (`w<n>-<boot>`): the registry numbers every
-/// open it starts in turn, a failed one included, so an open's number tells
-/// how many opens were started before it.
-fn open_number(window_id: &str) -> u64 {
-    window_id
-        .strip_prefix('w')
-        .and_then(|rest| rest.split('-').next())
-        .and_then(|number| number.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
-}
-
 // --- creation --------------------------------------------------------------------
 
 #[tokio::test]
@@ -420,17 +410,13 @@ async fn a_plan_created_while_approval_is_not_required_carries_no_review() {
 #[tokio::test]
 async fn a_pending_plan_refuses_its_owners_open_task_window_and_opens_nothing() {
     let (h, _dirs) = start("prg-pending-refuses", true).await;
+    let db = wire_window_table(&h.registry, &unique_temp_dir("prg-pending-refuses-table"));
     let mut owner = h.connect().await;
     open_plain_owner(&h, &mut owner).await;
     let plan = create_plan(&mut owner, "plan", vec![task("t1", "first")]).await;
     let mut lister = h.connect().await;
-    let listed = call_list_windows(&mut lister).await;
-    let before = listed.len();
-    let highest_before = listed
-        .iter()
-        .map(|window| open_number(&window.window_id))
-        .max()
-        .unwrap_or(0);
+    let before = call_list_windows(&mut lister).await.len();
+    let last_before = last_opened_seq(&db);
 
     let reply = open_task_window(&mut owner, &plan.plan_id, "t1").await;
     expect_error(reply, "plan_not_approved");
@@ -451,8 +437,8 @@ async fn a_pending_plan_refuses_its_owners_open_task_window_and_opens_nothing() 
     match open_task_window(&mut owner, &plan.plan_id, "t1").await {
         DaemonMessage::TaskWindowOpened { window_id, .. } => {
             assert_eq!(
-                open_number(&window_id),
-                highest_before + 1,
+                opened_seq(&db, &window_id),
+                last_before + 1,
                 "the refused request must not have started an open"
             );
         }

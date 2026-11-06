@@ -2485,25 +2485,19 @@ async fn status_event_with_an_empty_window_id_returns_window_not_found() {
 }
 
 #[tokio::test]
-async fn status_event_with_a_window_id_from_a_previous_boot_nonce_returns_window_not_found() {
-    // A client still holding an id from a previous daemon boot must get
-    // window_not_found, not silently match a same-numbered window from this boot.
-    let dir = unique_temp_dir("hk-stale-nonce");
-    let h = Harness::start("hk-stale-nonce", detection_config(&dir)).await;
+async fn status_event_with_a_window_id_one_digit_off_a_live_one_returns_window_not_found() {
+    // An id this daemon never allocated must get window_not_found even beside a
+    // live window it differs from in one digit, never a near match.
+    let dir = unique_temp_dir("hk-near-miss-id");
+    let h = Harness::start("hk-near-miss-id", detection_config(&dir)).await;
     let mut client = h.connect().await;
     let real_window_id = h.open_unknown_window().await;
 
-    let (prefix, real_nonce) = real_window_id
-        .rsplit_once('-')
-        .expect("window_id must be formatted as `w{n}-{boot_nonce}` (window.rs)");
-    let stale_nonce: String = real_nonce
-        .chars()
-        .map(|c| if c == '0' { '1' } else { '0' })
-        .collect();
-    let stale_window_id = format!("{prefix}-{stale_nonce}");
+    let (head, last) = real_window_id.split_at(real_window_id.len() - 1);
+    let stale_window_id = format!("{head}{}", if last == "0" { "1" } else { "0" });
     assert_ne!(
         stale_window_id, real_window_id,
-        "the constructed stale id must actually differ from the real one"
+        "the constructed id must actually differ from the real one"
     );
 
     let outcome = probe_status_event(
@@ -2688,6 +2682,18 @@ async fn close_window_from_an_external_connection_is_pending_and_decision_true_c
     assert_eq!(target.window_id, window_id);
     assert_eq!(target.name, expected_name);
     assert_eq!(target.status, WindowStatus::Idle);
+    // A pending request does not outlive this daemon run, a window does.
+    let boot = h.registry.boot_nonce();
+    assert!(
+        request.request_id.ends_with(boot),
+        "an approval request id must carry this daemon run's boot nonce {boot}, got {}",
+        request.request_id
+    );
+    assert!(
+        !window_id.contains(boot),
+        "a window id must not carry the boot nonce {boot} of the daemon run that opened it, \
+         got {window_id}"
+    );
 
     decide(&mut approver, &request.request_id, true).await;
 

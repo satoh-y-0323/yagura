@@ -100,27 +100,23 @@ async fn wait_for_exited(entry: &WindowEntry) {
     }
 }
 
-/// Asserts the `w{sequence}-{nonce}` shape without pinning the nonce: tests
-/// must consume ids returned by `open` / `list`, never a literal.
+/// Asserts the `w` + eight base36 digits shape: an id that outlives the daemon
+/// carries nothing of the daemon run that minted it.
 fn assert_window_id_shape(id: &str) {
-    let rest = id
+    let digits = id
         .strip_prefix('w')
         .unwrap_or_else(|| panic!("window_id must start with 'w', got {id}"));
-    let (sequence, nonce) = rest
-        .split_once('-')
-        .unwrap_or_else(|| panic!("window_id must contain a nonce suffix, got {id}"));
     assert!(
-        !sequence.is_empty() && sequence.chars().all(|c| c.is_ascii_digit()),
-        "window_id must carry a numeric sequence before the nonce, got {id}"
-    );
-    assert!(
-        !nonce.is_empty() && nonce.chars().all(|c| c.is_ascii_alphanumeric()),
-        "window_id must carry an alphanumeric nonce suffix, got {id}"
+        digits.len() == 8
+            && digits
+                .chars()
+                .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()),
+        "window_id must be 'w' and eight base36 digits, got {id}"
     );
 }
 
 #[tokio::test]
-async fn registry_open_assigns_unique_window_ids_sequentially() {
+async fn registry_open_assigns_distinct_window_ids_of_one_shape() {
     let registry = WindowRegistry::new(DaemonConfig::default());
     let id1 = registry
         .open(echo_request())
@@ -133,45 +129,11 @@ async fn registry_open_assigns_unique_window_ids_sequentially() {
         .expect("second open should succeed")
         .window_id;
 
-    assert_ne!(id1, id2, "sequential opens must assign distinct window_ids");
+    assert_ne!(id1, id2, "two opens must assign distinct window_ids");
     assert_window_id_shape(&id1);
     assert_window_id_shape(&id2);
 
     registry.terminate_all().await;
-}
-
-#[tokio::test]
-async fn registry_window_ids_never_collide_across_registry_instances() {
-    let first = WindowRegistry::new(DaemonConfig::default());
-    let second = WindowRegistry::new(DaemonConfig::default());
-
-    let id_from_first = first
-        .open(echo_request())
-        .await
-        .expect("open on the first registry should succeed")
-        .window_id;
-    let id_from_second = second
-        .open(echo_request())
-        .await
-        .expect("open on the second registry should succeed")
-        .window_id;
-
-    assert_ne!(
-        id_from_first, id_from_second,
-        "two registries must not mint the same window_id at the same sequence \
-         position (a restarted daemon's ids must never match the old ones)"
-    );
-    assert!(
-        first.get(&id_from_second).is_none(),
-        "a window_id minted by another registry must not resolve here"
-    );
-    assert!(
-        second.get(&id_from_first).is_none(),
-        "a window_id minted by another registry must not resolve here"
-    );
-
-    first.terminate_all().await;
-    second.terminate_all().await;
 }
 
 #[tokio::test]

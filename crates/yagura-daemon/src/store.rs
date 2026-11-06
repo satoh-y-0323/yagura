@@ -156,6 +156,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/014_chat_seq.sql"),
     include_str!("../migrations/015_default_palettes.sql"),
     include_str!("../migrations/016_tickets.sql"),
+    include_str!("../migrations/017_windows.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a
@@ -641,7 +642,8 @@ pub fn spawn_store_thread(mut store: Store) -> Sender<Vec<SnapshotWindow>> {
 /// once at start-up before any window can be opened.
 ///
 /// Internal order: [`open_store`] -> [`rotate_slots`] ->
-/// [`spawn_store_thread`] -> [`crate::window::WindowRegistry::set_store_sender`].
+/// [`spawn_store_thread`] -> [`crate::window::WindowRegistry::set_store_sender`],
+/// then the window table's writer on a connection of its own.
 /// `db_path` being `None`, or [`open_store`] failing, disables persistence
 /// for the rest of this process (warned once through this call's own
 /// [`WarnGate`]) without affecting window operations.
@@ -665,6 +667,12 @@ pub fn wire_into(registry: &Arc<WindowRegistry>, db_path: Option<PathBuf>) {
     }
     let tx = spawn_store_thread(store);
     registry.set_store_sender(tx);
+    match open_migrated(&db_path) {
+        Ok(conn) => registry.set_window_table(crate::window_table::WindowTable::spawn(conn)),
+        Err(err) => {
+            tracing::warn!("failed to open the window table ({err}); windows open without rows");
+        }
+    }
 }
 
 /// Resolves the database path: `explicit` > `YAGURA_STORE_DB` >

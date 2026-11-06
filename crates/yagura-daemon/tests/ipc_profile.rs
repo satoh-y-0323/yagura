@@ -1862,10 +1862,10 @@ async fn send_handoff_from_a_profile_with_an_oversized_envelope_is_invalid_argum
     // How many JSON-encoded bytes the cwd alone must contribute to push the
     // envelope past HANDOFF_ENVELOPE_MAX_BYTES on its own, computed with the
     // same encoder the daemon uses rather than assumed. "w0-000000" (9
-    // bytes) matches this requester's real id shape: the first window a
-    // fresh registry allocates is always "w1-" followed by a fixed 6-byte
-    // nonce. The fixture precondition below (checked against the real id
-    // and cwd after opening) fails loud if that shape ever changes, instead
+    // bytes) matches the length of this requester's real id: every window
+    // id is "w" followed by eight base36 digits, one JSON byte each. The
+    // fixture precondition below (checked against the real id and cwd
+    // after opening) fails loud if that shape ever changes, instead
     // of this estimate silently drifting.
     let min_cwd_content_len = {
         let baseline = yagura_daemon::handoff::compose_envelope(

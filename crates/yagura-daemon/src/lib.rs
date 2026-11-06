@@ -46,6 +46,7 @@ pub mod token;
 pub mod toml_set;
 pub mod waiter;
 pub mod window;
+mod window_table;
 pub mod workspace;
 
 use std::path::{Path, PathBuf};

@@ -399,3 +399,38 @@ pub async fn wait_for_current_snapshot(
 pub fn create_schema(path: &std::path::Path) {
     yagura_daemon::store::open_store(path).expect("open_store must succeed on a fresh path");
 }
+
+/// Wires a fresh database under `dir` into `registry`, so every window it opens from
+/// then on reserves a row in the window table; returns the database's path.
+pub fn wire_window_table(
+    registry: &Arc<yagura_daemon::window::WindowRegistry>,
+    dir: &std::path::Path,
+) -> PathBuf {
+    let db = dir.join("window-table.db");
+    yagura_daemon::store::wire_into(registry, Some(db.clone()));
+    db
+}
+
+/// The last open order the window table of `db` handed out, 0 when it never handed
+/// one out. Every open the registry starts takes the next one, a failed open
+/// included, and no order is handed out twice.
+pub fn last_opened_seq(db: &std::path::Path) -> i64 {
+    let conn = yagura_daemon::store::open_readonly(db).expect("open the window table");
+    conn.query_row(
+        "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'windows'), 0)",
+        [],
+        |row| row.get(0),
+    )
+    .expect("read the last open order")
+}
+
+/// The open order of `window_id`'s row in the window table of `db`.
+pub fn opened_seq(db: &std::path::Path, window_id: &str) -> i64 {
+    let conn = yagura_daemon::store::open_readonly(db).expect("open the window table");
+    conn.query_row(
+        "SELECT opened_seq FROM windows WHERE window_id = ?1",
+        [window_id],
+        |row| row.get(0),
+    )
+    .unwrap_or_else(|err| panic!("the row of {window_id} must hold its open order: {err}"))
+}

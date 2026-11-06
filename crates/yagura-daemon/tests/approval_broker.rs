@@ -707,9 +707,9 @@ fn a_settled_request_frees_its_place_in_the_caps() {
 
 #[test]
 fn request_ids_carry_the_boot_nonce_and_increase() {
-    // Same shape as a window id (`w{sequence}-{boot nonce}`): the nonce keeps a
-    // stale id from a previous daemon from resolving here, and the sequence
-    // makes ids unique within this one.
+    // `a{sequence}-{boot nonce}`: the nonce keeps a stale id from a previous
+    // daemon from resolving here, and the sequence makes ids unique within
+    // this one.
     let broker = broker();
     let sink = RecordingSink::accepting();
     broker.register_approver(10, sink);

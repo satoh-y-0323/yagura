@@ -11,6 +11,7 @@ use crate::common;
 
 use std::path::{Path, PathBuf};
 
+use common::store_fixtures::{opened_seq, wire_window_table};
 use common::{
     Harness, call_list_windows, call_send_handoff_from_profile, empty_lookup, expect_handoff_sent,
     handoff_profile_config, identify, policy, unique_temp_dir, write_profile,
@@ -137,6 +138,7 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
         profile_config(profiles_dir, &detection_dir),
     )
     .await;
+    let db = wire_window_table(&h.registry, &dir);
     let mut requester = h.connect().await;
     let reply =
         call_send_handoff_from_profile(&mut requester, "drawn", None, None, "src/foo.rs", "look")
@@ -145,12 +147,12 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
         matches!(reply, DaemonMessage::Error { .. }),
         "a profile with no launch prompt cannot be handed the envelope, got {reply:?}"
     );
-    // The registry numbers every open it starts in turn, a failed one
-    // included: an open started after the refusal is the first, so the
-    // refusal started none, not even one still on its way.
+    // Every open the registry starts takes the next open order in the window
+    // table, a failed one included: an open started after the refusal is the
+    // first, so the refusal started none, not even one still on its way.
     let control = h.open(process::echo_child_command(), None).await;
     assert_eq!(
-        open_number(&control),
+        opened_seq(&db, &control),
         1,
         "nothing starts for a handoff that cannot be handed over"
     );
@@ -159,14 +161,4 @@ async fn a_profile_that_cannot_be_handed_a_request_at_launch_is_refused_before_a
         1,
         "only the control window is open"
     );
-}
-
-/// The number in a window id (`w<n>-<boot>`): the registry numbers every
-/// open it starts in turn, a failed one included.
-fn open_number(window_id: &str) -> u64 {
-    window_id
-        .strip_prefix('w')
-        .and_then(|rest| rest.split('-').next())
-        .and_then(|number| number.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected window id {window_id:?}"))
 }

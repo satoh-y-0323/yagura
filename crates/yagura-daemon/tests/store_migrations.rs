@@ -451,11 +451,12 @@ fn fresh_open_store_reaches_the_shipped_schema_version_with_the_same_object_name
             "ticket_milestone".to_string(),
             "ticket_result".to_string(),
             "ticket_workspace".to_string(),
+            "windows".to_string(),
         ],
         "migration 007 (the plan module) adds four new tables, migration 014 the chat numbering \
-         table, migration 015 the default palettes table and migration 016 the five ticket \
-         tables on top of the six the chat and session-store migrations already left \
-         in place; nothing after the fourth migration changes any of those first six object \
+         table, migration 015 the default palettes table, migration 016 the five ticket \
+         tables and migration 017 the window table on top of the six the chat and \
+         session-store migrations already left in place; nothing after the fourth migration changes any of those first six object \
          names"
     );
 }
@@ -474,8 +475,8 @@ fn a_plan_written_at_v15_survives_migration_016_with_no_ticket() {
              VALUES ('p-v15', 'kept', 'C:/work', NULL, 1000, 1000);",
         )
         .expect("seeding a v15 plan row must succeed");
-        store::apply_migrations(&mut conn, store::MIGRATIONS)
-            .expect("the rest of the shipped series must apply on top of v15");
+        store::apply_migrations(&mut conn, &store::MIGRATIONS[..16])
+            .expect("migration 016 must apply on top of v15");
     }
 
     let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");

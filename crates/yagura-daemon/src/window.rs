@@ -54,6 +54,9 @@ use crate::pty::{
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
+use crate::window_table::{
+    OpeningRow, Reservation, WindowRow, WindowTable, WindowValues, credentials_kind, launch_record,
+};
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
 mod status_gate;
@@ -78,9 +81,8 @@ static REGISTRY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// wall clock, the process ID and [`REGISTRY_SEQUENCE`].
 ///
 /// This is not a cryptographic value and carries no secret. Its only job is
-/// that identifiers minted by different daemon instances do not
-/// collide, so a client still holding an identifier from a previous daemon
-/// gets `window_not_found` instead of silently matching a different window.
+/// that what lives only as long as one daemon run (approval request ids, the
+/// run a holder is told of) does not match another run's.
 pub(crate) fn boot_nonce() -> String {
     // Fail-safe: a clock that cannot be read (or predates the Unix epoch)
     // must not abort daemon startup, and the process ID plus the sequence
@@ -115,6 +117,77 @@ fn to_base36(mut value: u64, digits: usize) -> String {
         value /= 36;
     }
     out
+}
+
+/// Number of base36 digits after the `w` of a window id.
+const WINDOW_ID_DIGITS: usize = 8;
+
+/// How many random ids one reservation round offers to
+/// [`first_free_window_id`]; each id is taken only by a holder's files or a
+/// window, so a round runs dry only on a broken random source.
+const WINDOW_ID_CANDIDATES: usize = 8;
+
+/// How many reservation rounds an open makes before it gives up, each ending
+/// when the table already holds the id the round picked.
+const WINDOW_ID_ROUNDS: usize = 8;
+
+/// A fresh random window id: `w` and [`WINDOW_ID_DIGITS`] base36 digits. It
+/// outlives the daemon run that drew it, so nothing of the run is in it.
+fn random_window_id() -> Result<String, WindowOpenError> {
+    let mut random = [0u8; 8];
+    yagura_os::fill_random(&mut random)
+        .map_err(|err| WindowOpenError::SpawnFailed(format!("cannot draw a window id: {err}")))?;
+    Ok(format!(
+        "w{}",
+        to_base36(u64::from_le_bytes(random), WINDOW_ID_DIGITS)
+    ))
+}
+
+/// The first of `candidates` that no holder's files in `holders_dir` name
+/// (its record and, on Unix, its socket and the socket's lock) and that
+/// `in_use` does not claim; `None` when every candidate is taken. An id
+/// named by a holder's files may still be a living window whose daemon
+/// is gone.
+fn first_free_window_id(
+    candidates: impl IntoIterator<Item = String>,
+    holders_dir: &Path,
+    in_use: impl Fn(&str) -> bool,
+) -> Option<String> {
+    candidates.into_iter().find(|id| {
+        let named_by_files = ["json", "sock", "sock.lock"]
+            .iter()
+            .any(|extension| holders_dir.join(format!("{id}.{extension}")).exists());
+        !named_by_files && !in_use(id)
+    })
+}
+
+/// A window's values as its row is first written: no layout or session yet.
+fn window_values(
+    provenance: &WindowProvenance,
+    name: &str,
+    cwd: &str,
+    vendor: Option<&String>,
+    command: &[String],
+    detection: Option<&String>,
+) -> WindowValues {
+    let launch = provenance.launch.as_ref();
+    let task = provenance.task_origin.as_ref();
+    WindowValues {
+        name: name.to_owned(),
+        cwd: cwd.to_owned(),
+        vendor: vendor.cloned(),
+        command: command.to_vec(),
+        detection: detection.cloned(),
+        profile: launch.map(|launch| launch.profile.clone()),
+        model: launch.and_then(|launch| launch.model.clone()),
+        effort: launch.and_then(|launch| launch.effort.clone()),
+        layout_json: None,
+        session_id: None,
+        opener: provenance.opener.clone(),
+        task_plan_id: task.map(|task| task.plan_id.clone()),
+        task_id: task.map(|task| task.task_id.clone()),
+        credentials: credentials_kind(provenance.credentials),
+    }
 }
 
 /// The result of request validation in [`validate_open_request`].
@@ -1767,18 +1840,41 @@ pub struct WindowEntry {
     /// Raised when this window's display name or exit changes who takes part
     /// in a chat room.
     participation: Arc<ParticipationSignal>,
+    /// The window's row in the window table, removed before the window's
+    /// holder is told to end ([`WindowEntry::remove_row_then`]).
+    row: WindowRow,
 }
 
 impl WindowEntry {
-    /// This window's registry-assigned identifier
-    /// (`"w{sequence}-{boot nonce}"`, for example `"w1-k3f9xa"`).
+    /// This window's registry-assigned identifier: `w` and eight random
+    /// base36 digits, for example `"wk3f9xa0q"`.
     ///
-    /// Non-persistent and opaque: identifiers are only valid for the lifetime
-    /// of the daemon process, and the boot nonce makes an
-    /// identifier minted by a previous daemon fail to resolve rather than
-    /// match a different window.
+    /// Opaque, and the same for the window's whole life: nothing of the
+    /// daemon run that opened the window is in it.
     pub fn window_id(&self) -> &str {
         &self.window_id
+    }
+
+    /// Removes the window's row from the window table and, only once it is
+    /// gone, runs `end`, which tells the window's holder to end.
+    pub(crate) async fn remove_row_then<T>(&self, end: impl std::future::Future<Output = T>) -> T {
+        self.row.remove_then(end).await
+    }
+
+    /// Writes the window's values as they are now to its row.
+    fn update_row(&self) {
+        self.row.update(|| WindowValues {
+            layout_json: self.layout_json(),
+            session_id: self.session_id(),
+            ..window_values(
+                &self.provenance,
+                &lock_recover(&self.name),
+                &self.cwd,
+                self.vendor.as_ref(),
+                &self.command,
+                self.detection.as_ref(),
+            )
+        });
     }
 
     /// The PTY session backing this window (input / resize / screen /
@@ -4498,6 +4594,7 @@ impl WindowEntry {
             return false;
         }
         *lock_recover(&self.session_id) = Some(candidate.to_string());
+        self.update_row();
         // A wake by command needs the session, so a parcel held for it can go now.
         self.notice_wake.notify_one();
         true
@@ -4723,6 +4820,7 @@ impl WindowEntry {
             stored.clone()
         };
         self.participation.raise();
+        self.update_row();
         stored
     }
 
@@ -4731,6 +4829,7 @@ impl WindowEntry {
     /// responsibility.
     fn set_layout(&self, layout_json: String) {
         *lock_recover(&self.layout_json) = Some(layout_json);
+        self.update_row();
     }
 
     /// The presentation layout last reported for this window, if any.
@@ -4898,12 +4997,11 @@ pub struct WindowRegistry {
     /// spawn -> insert) against concurrent opens, so the dual resource
     /// limits are enforced atomically rather than raced past.
     open_lock: AsyncMutex<()>,
-    next_id: AtomicU64,
-    /// What every window's holder is started in. Its boot value is the
-    /// per-instance suffix appended to every assigned `window_id`, so that
-    /// the sequence restarting at 1 in a new daemon cannot make an old
-    /// client's stale identifier resolve to a different window.
+    /// What every window's holder is started in.
     holder_host: Arc<HolderHost>,
+    /// The table every window's row goes in, installed once at start-up by
+    /// `store::wire_into`; `None` when the registry has no database.
+    window_table: Mutex<Option<WindowTable>>,
     /// The one `StatusEvent` auth token every window must adopt, when
     /// [`DaemonConfig::status_token_override`] supplied a well-formed value.
     /// `None` -- the production setting -- means each window gets its own
@@ -4982,8 +5080,8 @@ impl WindowRegistry {
             config,
             entries: Mutex::new(Vec::new()),
             open_lock: AsyncMutex::new(()),
-            next_id: AtomicU64::new(0),
             holder_host,
+            window_table: Mutex::new(None),
             status_token_override,
             store_sender: Mutex::new(None),
             window_opened_hook: Mutex::new(None),
@@ -5160,6 +5258,9 @@ impl WindowRegistry {
             prepared.push(self.prepare_injection(injection).await);
         }
 
+        // Refused before the id is reserved, so a refused request starts no open.
+        let resolution = self.resolve_window_program(&command)?;
+
         // The binding decision: the limits and the name are decided under the
         // lock every open and rename takes, and the open in progress holds its
         // seat and its name from here on, so the lock is not held while the
@@ -5172,26 +5273,37 @@ impl WindowRegistry {
             claim_name(&entries, &opening, &name, on_name_taken)?
         };
 
-        // Generate window ID and status token early so they can be injected
-        // into the child environment before spawn.
-        let window_id = self.allocate_window_id();
+        // The id and token exist before the spawn, so they can be injected
+        // into the child environment.
+        let values = window_values(
+            &provenance,
+            &name,
+            &cwd_string,
+            vendor.as_ref(),
+            &command,
+            detection.as_ref(),
+        );
+        let (window_id, row) = self.reserve_window_id(&values).await?;
         let status_token = self.acquire_status_token();
         let opening = self.begin_opening(&window_id, &name);
         drop(open_guard);
 
         let palette = self.default_palette_for(vendor.as_deref());
-        let (session, hooks_injected) = self
-            .spawn_pty_for_window(
+        let record = launch_record(&window_id, status_token.as_hex(), &values);
+        let ((session, hooks_injected), row) = row
+            .open(self.spawn_pty_for_window(
                 &command,
                 &resolved_cwd,
                 &status_token,
                 &window_id,
+                record,
+                &resolution,
                 extra_profile_env,
                 &prepared,
                 palette,
                 provenance.credentials,
                 credentials_folder.as_ref(),
-            )
+            ))
             .await?;
         let session = Arc::new(session);
         if let Some(folder) = credentials_folder {
@@ -5238,6 +5350,7 @@ impl WindowRegistry {
             definition_name,
             detection_warning.clone(),
             provenance,
+            row,
         );
 
         self.register_window(
@@ -5501,15 +5614,11 @@ impl WindowRegistry {
     /// when one was resolved, plus `extra_profile_env` (a launch profile's
     /// own `[env]` table; empty for an `OpenWindow` request). `injections`
     /// are appended to `argv` in order for this spawn only. The window's
-    /// terminal answers color queries with `palette` from the start.
+    /// terminal answers color queries with `palette` from the start. The
+    /// holder keeps `record` in memory only.
     ///
-    /// This is the registry's one spawn call site, and the only place
-    /// `argv[0]` is resolved to a concrete executable through `yagura-os`
-    /// (`resolve_program`). A resolution the command interpreter would
-    /// reinterpret is refused (`InvalidArgument`); one that resolves to
-    /// nothing (`Resolution::NotFound`) is passed through unchanged and left
-    /// to fail on its own (`SpawnFailed`), preserving the existing
-    /// `OpenWindow` contract for a program that simply is not there.
+    /// This is the registry's one spawn call site; `resolution` is what
+    /// [`Self::resolve_window_program`] resolved `argv[0]` to.
     // Each argument is a distinct part of one spawn; grouping them would only rename them.
     #[allow(clippy::too_many_arguments)]
     async fn spawn_pty_for_window(
@@ -5518,6 +5627,8 @@ impl WindowRegistry {
         resolved_cwd: &std::path::Path,
         status_token: &StatusToken,
         window_id: &str,
+        record: String,
+        resolution: &program::Resolution,
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
         palette: Palette,
@@ -5525,13 +5636,6 @@ impl WindowRegistry {
         credentials_folder: Option<&CredentialsFolder>,
     ) -> Result<(PtySession, bool), WindowOpenError> {
         let platform = self.config.host_os.platform();
-        let predicate = crate::profile::is_executable_predicate(&self.config);
-        let resolution =
-            program::resolve_program(argv, platform, &self.config.program_lookup, &predicate)
-                .map_err(|rejected| WindowOpenError::InvalidArgument {
-                    reason: rejected.0,
-                    argument: None,
-                })?;
         let launched = credentials == CredentialsMode::Launch;
         let has_credentials_file = launched
             && Self::write_credentials_file(credentials_folder, window_id, status_token).await;
@@ -5567,7 +5671,7 @@ impl WindowRegistry {
                     .map(|arg| crate::profile::fill_env_refs(arg, &env_refs))
                     .collect(),
             };
-            let args = injection_args_for(&resolution, &filled);
+            let args = injection_args_for(resolution, &filled);
             hooks_injected |= filled.kind == InjectionKind::Hooks && !args.is_empty();
             full_argv.extend_from_slice(args);
         }
@@ -5590,7 +5694,7 @@ impl WindowRegistry {
         // needs: this OS boundary does no Windows-specific reconstruction of
         // its own. The injections are already part of `full_argv`, so that
         // decision sees them too.
-        let spawn_argv = program::into_spawn_argv(&resolution, &full_argv, platform);
+        let spawn_argv = program::into_spawn_argv(resolution, &full_argv, platform);
         let spawn_argv: Vec<&str> = spawn_argv.iter().map(String::as_str).collect();
 
         let removed_env: &[&str] = if launched {
@@ -5606,6 +5710,7 @@ impl WindowRegistry {
                 extra_env: &extra_env,
                 removed_env,
                 palette: Some(palette),
+                record,
             },
             &self.config,
             &self.holder_host,
@@ -5613,6 +5718,30 @@ impl WindowRegistry {
         .await
         .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
         Ok((session, hooks_injected))
+    }
+
+    /// Resolves `argv[0]` to the executable the window will run, through
+    /// `yagura-os` (`resolve_program`): the only place it is resolved. A
+    /// resolution the command interpreter would reinterpret is refused
+    /// (`InvalidArgument`); one that resolves to nothing
+    /// (`Resolution::NotFound`) is kept and left to fail at spawn
+    /// (`SpawnFailed`), preserving the `OpenWindow` contract for a program
+    /// that simply is not there.
+    fn resolve_window_program(
+        &self,
+        argv: &[String],
+    ) -> Result<program::Resolution, WindowOpenError> {
+        let predicate = crate::profile::is_executable_predicate(&self.config);
+        program::resolve_program(
+            argv,
+            self.config.host_os.platform(),
+            &self.config.program_lookup,
+            &predicate,
+        )
+        .map_err(|rejected| WindowOpenError::InvalidArgument {
+            reason: rejected.0,
+            argument: None,
+        })
     }
 
     /// Initializes the detection engine for a new window, loading its
@@ -5709,25 +5838,53 @@ impl WindowRegistry {
         }
     }
 
-    /// This registry's boot nonce: the per-instance suffix every identifier
-    /// minted for this daemon boot carries.
-    ///
-    /// Exposed so that approval request ids are built from the same nonce as
-    /// window ids rather than from a second, independently generated one.
+    /// This registry's boot nonce: what identifies this daemon run, and ends
+    /// every approval request id minted in it. Window ids do not carry it.
     #[must_use]
     pub fn boot_nonce(&self) -> &str {
         self.holder_host.boot()
     }
 
-    /// Allocates a new window ID by incrementing the sequence and combining
-    /// with the boot nonce. Generated early so it can be injected into the
-    /// child environment; sequence gaps may occur when a spawn fails.
-    fn allocate_window_id(&self) -> String {
-        format!(
-            "w{}-{}",
-            self.next_id.fetch_add(1, Ordering::SeqCst) + 1,
-            self.holder_host.boot()
-        )
+    /// Picks a window id that no window, holder's files or row of the window
+    /// table has, and reserves it by writing the window's `opening` row with
+    /// `values`. Called under `open_lock`, so two opens never pick one id.
+    async fn reserve_window_id(
+        &self,
+        values: &WindowValues,
+    ) -> Result<(String, OpeningRow), WindowOpenError> {
+        let table = lock_recover(&self.window_table).clone();
+        let holders_dir = self.holder_host.holders_dir();
+        for _ in 0..WINDOW_ID_ROUNDS {
+            let candidates = (0..WINDOW_ID_CANDIDATES)
+                .map(|_| random_window_id())
+                .collect::<Result<Vec<_>, _>>()?;
+            let in_use: HashSet<String> = {
+                let entries = lock_recover(&self.entries);
+                let opening = lock_recover(&self.opening);
+                entries
+                    .iter()
+                    .map(|entry| entry.window_id.clone())
+                    .chain(opening.keys().cloned())
+                    .collect()
+            };
+            let in_use = |id: &str| in_use.contains(id);
+            let picked = match &holders_dir {
+                Some(dir) => first_free_window_id(candidates, dir, in_use),
+                // No holder has been started yet, so none has files.
+                None => candidates.into_iter().find(|id| !in_use(id)),
+            };
+            let Some(window_id) = picked else {
+                continue;
+            };
+            if let Reservation::Reserved(row) =
+                OpeningRow::reserve(table.as_ref(), &window_id, values).await
+            {
+                return Ok((window_id, row));
+            }
+        }
+        Err(WindowOpenError::SpawnFailed(
+            "no free window id was found".to_owned(),
+        ))
     }
 
     /// Acquires this window's status token: the override (shared by all windows
@@ -5760,6 +5917,7 @@ impl WindowRegistry {
         detection_definition: Option<String>,
         detection_warning: Option<String>,
         provenance: WindowProvenance,
+        row: WindowRow,
     ) -> Arc<WindowEntry> {
         // The same rule the engine itself applies at
         // construction -- a resolved definition means nothing has been
@@ -5822,6 +5980,7 @@ impl WindowRegistry {
             provenance,
             mcp_connections: Arc::new(AtomicUsize::new(0)),
             participation: Arc::clone(&self.participation),
+            row,
         })
     }
 
@@ -5962,6 +6121,12 @@ impl WindowRegistry {
         *lock_recover(&self.store_sender) = Some(tx);
     }
 
+    /// Installs the window table every window opened from now on writes its
+    /// row in (`store::wire_into` is its only caller).
+    pub(crate) fn set_window_table(&self, table: WindowTable) {
+        *lock_recover(&self.window_table) = Some(table);
+    }
+
     /// This registry's own configuration, for a caller that needs it outside
     /// this module (the chat intro hook reads `handoff_ready_timeout_secs`
     /// the same way a delivery does).
@@ -6094,7 +6259,9 @@ impl WindowRegistry {
         self.shutting_down.store(true, Ordering::SeqCst);
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
         for entry in &entries {
-            entry.session.terminate();
+            entry
+                .remove_row_then(async { entry.session.terminate() })
+                .await;
         }
         let limit = Duration::from_millis(self.config.close_grace_ms);
         let deadline = tokio::time::Instant::now() + limit;
@@ -7192,20 +7359,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_boot_nonce_is_the_one_window_ids_carry_and_differs_per_registry() {
+    async fn the_boot_nonce_differs_per_registry() {
         let registry = WindowRegistry::new(DaemonConfig::default());
         let other = WindowRegistry::new(DaemonConfig::default());
 
-        let window_id = registry.allocate_window_id();
-        assert_eq!(
-            window_id.rsplit_once('-').map(|(_, nonce)| nonce),
-            Some(registry.boot_nonce()),
-            "approval request ids are minted from boot_nonce, so it must be the nonce window ids carry"
-        );
         assert_ne!(
             registry.boot_nonce(),
             other.boot_nonce(),
-            "an id minted by one daemon must never resolve in another"
+            "an approval request id minted by one daemon must never resolve in another"
+        );
+    }
+
+    #[test]
+    fn a_window_id_whose_holder_files_exist_or_that_is_in_use_is_passed_over() {
+        let holders_dir =
+            yagura_test_support::paths::unique_temp_dir("yagura-test-window-id", "passed-over");
+        std::fs::write(holders_dir.join("wrecord01.json"), b"{}").expect("place a record");
+        let mut candidates = vec!["wrecord01", "wmemory02"];
+        #[cfg(unix)]
+        {
+            std::fs::write(holders_dir.join("wsocket03.sock"), b"").expect("place a socket");
+            std::fs::write(holders_dir.join("wlocked04.sock.lock"), b"").expect("place a lock");
+            candidates.extend(["wsocket03", "wlocked04"]);
+        }
+        candidates.push("wfree0005");
+
+        let picked = first_free_window_id(
+            candidates.iter().map(|id| (*id).to_owned()),
+            &holders_dir,
+            |id| id == "wmemory02",
+        );
+        assert_eq!(
+            picked.as_deref(),
+            Some("wfree0005"),
+            "an id named by a holder's files, or held by a window in memory, must not be handed out"
+        );
+        assert_eq!(
+            first_free_window_id(["wrecord01".to_owned()], &holders_dir, |_| false),
+            None,
+            "no id is handed out when every candidate is taken"
         );
     }
 

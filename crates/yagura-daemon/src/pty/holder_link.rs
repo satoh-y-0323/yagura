@@ -69,6 +69,8 @@ pub(super) struct Launch {
     pub(super) history_rows: usize,
     pub(super) palette: Option<Palette>,
     pub(super) fault: Option<HolderFault>,
+    /// What the holder keeps in memory and returns in its `Welcome`.
+    pub(super) record: String,
 }
 
 /// Where the child's exit is published.
@@ -603,7 +605,7 @@ impl HolderAt<'_> {
             env: launch.env.clone(),
             cols: launch.cols,
             rows: launch.rows,
-            record: String::new(),
+            record: launch.record.clone(),
             hello_deadline_ms: u64::try_from(HELLO_DEADLINE.as_millis()).unwrap_or(u64::MAX),
             holders_dir: self.holders_dir.to_path_buf(),
             daemon_endpoint: self.daemon_endpoint.to_owned(),

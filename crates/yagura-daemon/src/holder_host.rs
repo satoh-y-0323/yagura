@@ -134,11 +134,19 @@ impl HolderHost {
         })
     }
 
-    /// Identifies this daemon run: the boot nonce window ids carry, and what
-    /// every holder is told in `Hello`.
+    /// Identifies this daemon run: what every holder is told in `Hello`.
     #[must_use]
     pub fn boot(&self) -> &str {
         &self.boot
+    }
+
+    /// The directory this host's holders keep their files in; `None` for a
+    /// host whose private place is not made yet, which no holder has used.
+    pub(crate) fn holders_dir(&self) -> Option<PathBuf> {
+        match &self.place {
+            Place::Daemon(place) => Some(place.holders_dir.clone()),
+            Place::Private(cell) => cell.get().map(|private| private.holders_dir.clone()),
+        }
     }
 
     /// A window id for a session opened outside a registry, unique within

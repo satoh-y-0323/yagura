@@ -166,7 +166,7 @@ async fn session_survives_client_disconnect_and_accepts_reattach() {
         // Identified as a window so the end of this connection is observable.
         let claimed = open_window_via_ipc(&mut client).await;
         common::identify(&mut client, &claimed).await;
-        // An identifier no registry can mint (it carries no boot nonce): this
+        // An identifier no registry can mint (too short for a window id): this
         // test only needs the connection to survive an attach that fails.
         send_client_message(
             &mut client,
