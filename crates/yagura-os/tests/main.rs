@@ -8,6 +8,8 @@ mod debug_forms;
 mod endpoint;
 mod enter_raw_console_input;
 mod existing_file_replace;
+#[cfg(unix)]
+mod exit_watch_unix;
 mod holder_endpoint;
 mod hook_path;
 mod host_os;
@@ -20,4 +22,5 @@ mod os_unix;
 mod pipe_accept;
 mod program_resolution;
 mod pty_unix;
+mod reap_gate;
 mod spawn_fd_inheritance;

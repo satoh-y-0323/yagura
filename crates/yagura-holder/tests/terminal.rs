@@ -402,6 +402,8 @@ struct Link {
     view: Option<u64>,
     grid: Grid,
     next_id: u64,
+    /// The close of the copy `screen` was last built from.
+    last_push: Option<ScreenPush>,
 }
 
 impl Link {
@@ -423,6 +425,7 @@ impl Link {
             view: None,
             grid: Grid::new(),
             next_id: 0,
+            last_push: None,
         };
         let first = match link.seen().await {
             Seen::Copy(push) => push,
@@ -524,6 +527,7 @@ impl Link {
             generation: push.generation,
             outputs_fed: push.outputs_fed,
         });
+        self.last_push = Some(push.clone());
     }
 
     /// Reads until the next applied copy; returns it and what came before.
@@ -537,14 +541,16 @@ impl Link {
         }
     }
 
-    /// Reads copies, acknowledged as they come, until one shows `needle`.
+    /// Returns the close of the first applied copy that shows `needle`,
+    /// the current one included: the holder sends no further copy while the
+    /// screen stays as it is.
     async fn copy_with(&mut self, needle: &str) -> ScreenPush {
         assert!(self.auto_ack, "copies stop without a PushAck");
         loop {
-            let (push, _) = self.next_copy().await;
             if self.text().contains(needle) {
-                return push;
+                return self.last_push.clone().expect("a copy shows text");
             }
+            self.next_copy().await;
         }
     }
 

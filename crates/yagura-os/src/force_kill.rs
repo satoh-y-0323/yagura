@@ -1,50 +1,46 @@
 //! The decision behind [`crate::schedule_force_kill`], kept free of clocks
 //! and threads so the caller supplies how to wait and how to kill.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Longest single wait between two reads of `exited`, so a child that dies
-/// from the caller's first signal stops the escalation long before the
-/// deadline instead of at it.
+use crate::ReapGate;
+
+/// Longest single wait between two looks at the gate, so a child that dies
+/// from the caller's first signal and is reaped stops the escalation long
+/// before the deadline instead of at it.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Waits out `grace` through `wait`, in steps of at most [`POLL_INTERVAL`],
-/// then calls `kill` -- unless `exited` is seen set before a step or after
-/// the last one.
+/// Waits out `grace` through `wait`, in steps of at most [`POLL_INTERVAL`] and
+/// outside the gate's lock, then calls `kill` under the lock -- unless the
+/// child is seen reaped before a step or under the lock.
 ///
-/// `exited` is read again right before `kill` rather than only at the
-/// deadline: by then the child may have been reaped and its pid reused.
 /// The grace counts the waits asked for, so a `wait` that oversleeps can only
 /// delay the kill, never bring it forward.
 pub(crate) fn escalate_after_grace(
     grace: Duration,
-    exited: &AtomicBool,
+    gate: &ReapGate,
     mut wait: impl FnMut(Duration),
     kill: impl FnOnce(),
 ) {
     let mut remaining = grace;
     while !remaining.is_zero() {
-        if exited.load(Ordering::SeqCst) {
+        if gate.is_reaped() {
             return;
         }
         let step = remaining.min(POLL_INTERVAL);
         wait(step);
         remaining -= step;
     }
-    if exited.load(Ordering::SeqCst) {
-        return;
-    }
-    kill();
+    let _ = gate.signal_unless_reaped(kill);
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use super::escalate_after_grace;
+    use crate::ReapGate;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Event {
@@ -81,11 +77,12 @@ mod tests {
     #[test]
     fn an_exit_observed_before_the_call_is_never_killed() {
         let events = RefCell::new(Vec::new());
-        let exited = AtomicBool::new(true);
+        let gate = ReapGate::new();
+        gate.reap_with(|| {});
 
         escalate_after_grace(
             Duration::from_millis(100),
-            &exited,
+            &gate,
             |step| record_wait(&events, step),
             || events.borrow_mut().push(Event::Kill),
         );
@@ -98,14 +95,14 @@ mod tests {
     fn an_exit_observed_during_the_grace_stops_the_escalation_before_the_deadline() {
         let grace = Duration::from_secs(3600);
         let events = RefCell::new(Vec::new());
-        let exited = AtomicBool::new(false);
+        let gate = ReapGate::new();
 
         escalate_after_grace(
             grace,
-            &exited,
+            &gate,
             |step| {
                 record_wait(&events, step);
-                exited.store(true, Ordering::SeqCst);
+                gate.reap_with(|| {});
             },
             || events.borrow_mut().push(Event::Kill),
         );
@@ -123,15 +120,15 @@ mod tests {
     fn an_exit_observed_by_the_last_wait_is_never_killed() {
         let grace = Duration::from_millis(100);
         let events = RefCell::new(Vec::new());
-        let exited = AtomicBool::new(false);
+        let gate = ReapGate::new();
 
         escalate_after_grace(
             grace,
-            &exited,
+            &gate,
             |step| {
                 record_wait(&events, step);
                 if waited(&events.borrow()) >= grace {
-                    exited.store(true, Ordering::SeqCst);
+                    gate.reap_with(|| {});
                 }
             },
             || events.borrow_mut().push(Event::Kill),
@@ -145,18 +142,18 @@ mod tests {
         assert_eq!(
             kills(&events),
             0,
-            "`exited` must be read again right before the kill; events: {events:?}"
+            "the gate must be looked at again right before the kill; events: {events:?}"
         );
     }
 
     #[test]
     fn a_zero_grace_kills_without_waiting() {
         let events = RefCell::new(Vec::new());
-        let exited = AtomicBool::new(false);
+        let gate = ReapGate::new();
 
         escalate_after_grace(
             Duration::ZERO,
-            &exited,
+            &gate,
             |step| record_wait(&events, step),
             || events.borrow_mut().push(Event::Kill),
         );
@@ -168,11 +165,11 @@ mod tests {
     fn the_kill_comes_once_and_only_after_the_whole_grace_has_been_waited() {
         let grace = Duration::from_millis(100);
         let events = RefCell::new(Vec::new());
-        let exited = AtomicBool::new(false);
+        let gate = ReapGate::new();
 
         escalate_after_grace(
             grace,
-            &exited,
+            &gate,
             |step| record_wait(&events, step),
             || events.borrow_mut().push(Event::Kill),
         );

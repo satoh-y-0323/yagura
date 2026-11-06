@@ -548,7 +548,7 @@ impl Drop for OutsideHolder {
         yagura_os::schedule_force_kill(
             self.0,
             Duration::ZERO,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(yagura_os::ReapGate::new()),
         );
     }
 }

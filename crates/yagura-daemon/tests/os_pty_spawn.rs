@@ -60,7 +60,7 @@ fn killing_a_child_that_has_already_exited_is_not_an_error() {
 
     assert_eq!(code, 3);
     killer
-        .kill()
+        .kill(&yagura_os::ReapGate::new())
         .expect("a child that has already exited is not an error to kill");
 }
 

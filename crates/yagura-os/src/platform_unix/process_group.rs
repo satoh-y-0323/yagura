@@ -103,6 +103,27 @@ impl UnixProcessGroup {
         send_signal(pgid, libc::SIGKILL)?;
         Ok(())
     }
+
+    /// Sends `SIGKILL` to every process in the group now, without a grace
+    /// period, and counts as [`Self::terminate`] having run, so nothing is
+    /// sent when the group is dropped. Repeatable; waits for a `terminate`
+    /// in progress. Returns whether a live member received it.
+    ///
+    /// Only for while the leader is unreaped: its zombie keeps the group id
+    /// from being reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OsError::Security`] when a live member cannot be signalled,
+    /// or the group's members cannot be enumerated.
+    pub fn kill_now(&self) -> Result<bool, OsError> {
+        let mut terminated = self
+            .terminated
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *terminated = true;
+        send_signal(self.pgid, libc::SIGKILL)
+    }
 }
 
 impl Drop for UnixProcessGroup {

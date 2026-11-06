@@ -14,7 +14,6 @@ use std::ffi::OsStr;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -37,6 +36,7 @@ pub mod platform_unix;
 pub mod platform_windows;
 pub mod program;
 pub mod pty;
+mod reap_gate;
 #[cfg(windows)]
 pub mod webview;
 
@@ -50,6 +50,7 @@ pub use instance::{
     resolve_instance_from, resolve_startup_env, store_override_conflicts, validate_instance_id,
 };
 pub use mcp_bridge::{merge_wslenv, resolve_sibling_executable, to_plain_path};
+pub use reap_gate::ReapGate;
 
 /// Failure of an operating-system operation behind this boundary.
 #[derive(Debug, thiserror::Error)]
@@ -424,15 +425,15 @@ pub fn sibling_executable_dir(exe: &Path) -> PathBuf {
 }
 
 /// Asks for `pid` to be force-terminated once `grace` has elapsed, unless
-/// `exited` has been set in the meantime.
+/// `gate` has seen the child reaped by then.
 ///
 /// Returns immediately; any waiting happens on a thread of this function's
 /// own, so a caller that must not block (a `Drop` implementation, a
 /// synchronous close handler) can still escalate a kill it just sent.
 ///
-/// `exited` is read again immediately before the force-terminate, so a child
-/// whose exit is observed during the grace period is never signalled -- which
-/// is also what keeps a recycled process id from being hit.
+/// The grace is waited out outside `gate`'s lock, and the force-terminate is
+/// sent under it only if the child has not been reaped, so a recycled process
+/// id is never hit. `gate` must be the one the child is reaped through.
 ///
 /// # Platform-specific behavior
 ///
@@ -445,17 +446,16 @@ pub fn sibling_executable_dir(exe: &Path) -> PathBuf {
 /// that a caller's own kill sends, which a child that installed a handler for
 /// it (or ignores it) can survive.
 ///
-/// There is no error path: the outcome of the signal is not reported, because
-/// a process id that has already been reaped is the expected case rather than
-/// a failure. Callers confirm termination through their own exit observation.
-pub fn schedule_force_kill(pid: u32, grace: Duration, exited: Arc<AtomicBool>) {
+/// There is no error path: the outcome of the signal is not reported. Callers
+/// confirm termination through their own exit observation.
+pub fn schedule_force_kill(pid: u32, grace: Duration, gate: Arc<ReapGate>) {
     #[cfg(windows)]
     {
-        platform_windows::schedule_force_kill(pid, grace, exited);
+        platform_windows::schedule_force_kill(pid, grace, gate);
     }
     #[cfg(not(windows))]
     {
-        platform_unix::schedule_force_kill(pid, grace, exited);
+        platform_unix::schedule_force_kill(pid, grace, gate);
     }
 }
 

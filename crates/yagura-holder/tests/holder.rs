@@ -638,8 +638,13 @@ async fn terminate_ends_the_child_tree_and_the_holder() {
         .parse()
         .unwrap();
     let watch = GrandchildWatch::open(grandchild);
+    #[cfg(windows)]
+    let window = window_processes(&holder);
 
     peer.send(HolderFrame::Terminate { tree: true }).await;
+    until_exited(&mut peer).await;
+    #[cfg(windows)]
+    assert_window_processes_end(window).await;
     holder.wait_exit().await;
     watch.wait_gone().await;
 }
@@ -681,8 +686,7 @@ impl Drop for Reaper {
     }
 }
 
-#[cfg(unix)]
-fn pid_in(path: &Path) -> libc::pid_t {
+fn pid_in(path: &Path) -> u32 {
     std::fs::read_to_string(path)
         .unwrap()
         .trim()
@@ -690,10 +694,10 @@ fn pid_in(path: &Path) -> libc::pid_t {
         .unwrap()
 }
 
-/// A grandchild that ignores SIGTERM ends only by the escalation to SIGKILL,
-/// which the holder has to have sent before it ends.
-#[cfg(unix)]
-async fn a_stubborn_grandchild_ends_with_the_holder(label: &str, terminate: bool) {
+/// A grandchild that ignores SIGTERM on Unix ends only by the escalation to
+/// SIGKILL, which the holder has to have sent, and seen take effect, before
+/// `Exited`.
+async fn a_stubborn_grandchild_has_ended_by_exited(label: &str, terminate: bool) {
     let rig = Rig::new(label);
     let _daemon = hold_daemon_endpoint(&rig).await;
     let pid_file = rig.file("grandchild");
@@ -707,11 +711,17 @@ async fn a_stubborn_grandchild_ends_with_the_holder(label: &str, terminate: bool
     let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
     peer.text_until("HOLDER-CHILD-TREE").await;
     let grandchild = pid_in(&pid_file);
+    #[cfg(unix)]
     let _reaper = Reaper {
-        pid: grandchild,
+        pid: libc::pid_t::try_from(grandchild).unwrap(),
         always: false,
     };
-    assert!(alive(grandchild), "the grandchild is alive before the end");
+    assert!(
+        yagura_test_support::process::process_is_running(grandchild),
+        "the grandchild is alive before the end"
+    );
+    #[cfg(windows)]
+    let window = window_processes(&holder);
 
     if terminate {
         peer.send(HolderFrame::Terminate { tree: false }).await;
@@ -719,25 +729,25 @@ async fn a_stubborn_grandchild_ends_with_the_holder(label: &str, terminate: bool
         std::fs::write(&gate, b"").unwrap();
     }
     until_exited(&mut peer).await;
+    #[cfg(unix)]
+    assert!(
+        has_ended(grandchild),
+        "the grandchild ignoring SIGTERM was still running when Exited arrived"
+    );
+    #[cfg(windows)]
+    assert_window_processes_end(window).await;
     drop(peer);
     holder.wait_exit().await;
-    wait_until(
-        "the grandchild ignoring SIGTERM ends with the holder",
-        || !alive(grandchild),
-    )
-    .await;
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_grandchild_ignoring_sigterm_ends_with_the_holder_after_the_child_exits_on_its_own() {
-    a_stubborn_grandchild_ends_with_the_holder("stubexit", false).await;
+async fn a_stubborn_grandchild_has_ended_by_exited_after_the_child_exits_on_its_own() {
+    a_stubborn_grandchild_has_ended_by_exited("stubexit", false).await;
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_grandchild_ignoring_sigterm_ends_with_the_holder_after_terminate() {
-    a_stubborn_grandchild_ends_with_the_holder("stubterm", true).await;
+async fn a_stubborn_grandchild_has_ended_by_exited_after_terminate() {
+    a_stubborn_grandchild_has_ended_by_exited("stubterm", true).await;
 }
 
 /// The write's Ctrl+C ends the child, while the rest of it can never be
@@ -755,7 +765,7 @@ async fn a_write_that_ends_the_child_is_answered_before_exited() {
     let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
     peer.text_until("HOLDER-CHILD-ESCAPED").await;
     let _reaper = Reaper {
-        pid: pid_in(&pid_file),
+        pid: libc::pid_t::try_from(pid_in(&pid_file)).unwrap(),
         always: true,
     };
 
@@ -1191,4 +1201,208 @@ impl GrandchildWatch {
 fn alive(pid: libc::pid_t) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// The window's child and its console host beside the holder: the processes
+/// of the window the holder itself started.
+#[cfg(windows)]
+fn window_processes(holder: &Holder) -> Vec<u32> {
+    let query = format!(
+        "Get-CimInstance Win32_Process -Filter 'ParentProcessId={}' | \
+         ForEach-Object {{ \"$($_.ProcessId)|$($_.ExecutablePath)\" }}",
+        holder.child.id()
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+        .stdin(Stdio::null())
+        .output()
+        .expect("list the holder's children");
+    let holder_dir = std::fs::canonicalize(Path::new(HOLDER).parent().unwrap()).unwrap();
+    let mut child = None;
+    let mut hosts = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((pid, image)) = line.trim().split_once('|') else {
+            continue;
+        };
+        let pid: u32 = pid.parse().unwrap();
+        let image = Path::new(image);
+        let image_dir = image
+            .parent()
+            .and_then(|dir| std::fs::canonicalize(dir).ok());
+        if image == Path::new(CHILD) || image.file_name() == Path::new(CHILD).file_name() {
+            child = Some(pid);
+        } else if image_dir.as_deref() == Some(holder_dir.as_path()) {
+            hosts.push(pid);
+        }
+    }
+    let child = child.expect("the holder runs no window child");
+    assert!(
+        !hosts.is_empty(),
+        "no console host beside the holder runs the window"
+    );
+    hosts.push(child);
+    hosts
+}
+
+/// The window's processes end once `Exited` has arrived, the holder still
+/// running.
+#[cfg(windows)]
+async fn assert_window_processes_end(window: Vec<u32>) {
+    yagura_test_support::process::wait_processes_gone(&window, |left| {
+        format!("the window's processes {left:?} outlived Exited")
+    })
+    .await;
+}
+
+/// The state `ps` shows for `pid`; `None` once it is gone.
+#[cfg(unix)]
+fn ps_state(pid: u32) -> Option<char> {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .chars()
+        .next()
+}
+
+/// Gone, or a zombie whose end only its parent has yet to take.
+#[cfg(unix)]
+fn has_ended(pid: u32) -> bool {
+    ps_state(pid).is_none_or(|state| state == 'Z')
+}
+
+/// The child's end is told by the end of its tree, never by the terminal's
+/// output ending or by time: another process keeps the terminal open, as any
+/// may by its name, and a grandchild that left the child's session keeps
+/// writing to it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_end_follows_the_childs_tree_and_not_the_terminals_other_writers() {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let rig = Rig::new("endrace");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let info = rig.file("info");
+    let gate = rig.file("gate");
+    let term = rig.file("term");
+    let mut holder = rig.start(&rig.launch(
+        &[
+            "end-race",
+            path_arg(&info),
+            path_arg(&gate),
+            path_arg(&term),
+        ],
+        NO_DEADLINE_MS,
+    ));
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-END-RACE").await;
+    let leader = rig
+        .record_where(|record| record.child_pid.is_some())
+        .await
+        .child_pid
+        .unwrap();
+    let info = std::fs::read_to_string(&info).unwrap();
+    let [member, escaped, tty] = info.split_whitespace().collect::<Vec<_>>()[..] else {
+        panic!("unexpected fixture info {info:?}");
+    };
+    let member: u32 = member.parse().unwrap();
+    let escaped: u32 = escaped.parse().unwrap();
+    let _member_reaper = Reaper {
+        pid: libc::pid_t::try_from(member).unwrap(),
+        always: false,
+    };
+    let _escaped_reaper = Reaper {
+        pid: libc::pid_t::try_from(escaped).unwrap(),
+        always: true,
+    };
+    let terminal = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(tty)
+        .expect("open the window's terminal by its name");
+
+    std::fs::write(&gate, b"").unwrap();
+    wait_until("the member of the child's group is asked to end", || {
+        std::fs::read_to_string(&term).is_ok_and(|text| text.contains("TERMED"))
+    })
+    .await;
+    // Read before the member is seen alive: the leader was unreaped then.
+    let leader_state = ps_state(leader);
+    if !has_ended(member) {
+        assert_eq!(
+            leader_state,
+            Some('Z'),
+            "the leader {leader} was reaped while the member {member} of its tree still ran"
+        );
+    }
+
+    peer.send(HolderFrame::Write {
+        id: 5,
+        bytes: b"w".to_vec(),
+    })
+    .await;
+    let mut answer = None;
+    let mut exited = false;
+    let mut last_push = None;
+    while answer.is_none() || !exited {
+        match peer.frame().await {
+            HolderFrame::ScreenPush(push) => last_push = Some(push.number),
+            HolderFrame::ScreenRows(_) => {}
+            HolderFrame::Exited { .. } => exited = true,
+            frame @ (HolderFrame::Written { id: 5 } | HolderFrame::WriteFailed { id: 5, .. }) => {
+                answer = Some(frame);
+            }
+            other => panic!("unexpected frame on the way to Exited: {other:?}"),
+        }
+    }
+    assert!(
+        matches!(answer, Some(HolderFrame::WriteFailed { id: 5, .. })),
+        "a write sent after the leader ended was not refused: {answer:?}"
+    );
+
+    // The terminal stays open past Exited, so the holder keeps reading it;
+    // that the whole write goes through shows the holder has read it.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(number) = last_push {
+            peer.send(HolderFrame::PushAck { number }).await;
+        }
+        let mut terminal = terminal;
+        let written = tokio::time::timeout(
+            yagura_test_support::HANG_GUARD,
+            tokio::task::spawn_blocking(move || {
+                let line = b"after-exited\n";
+                for _ in 0..(1024 * 1024 / line.len()) {
+                    terminal.write_all(line)?;
+                }
+                Ok::<_, std::io::Error>(terminal)
+            }),
+        )
+        .await
+        .expect("the holder stopped reading the terminal after Exited")
+        .unwrap()
+        .expect("write to the terminal after Exited");
+        peer.send(HolderFrame::ReadTail {
+            id: 1,
+            max_lines: 100,
+            max_bytes: 64 * 1024,
+        })
+        .await;
+        match peer.frame().await {
+            HolderFrame::Tail { id: 1, text, .. } => assert!(
+                !text.contains("after-exited"),
+                "output read after Exited reached the text: {text}"
+            ),
+            frame if is_copy(&frame) => panic!("a screen copy came after Exited: {frame:?}"),
+            other => panic!("unexpected frame after Exited: {other:?}"),
+        }
+        drop(written);
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop((terminal, last_push));
+
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
 }

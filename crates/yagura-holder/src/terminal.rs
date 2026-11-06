@@ -69,9 +69,9 @@ pub(crate) enum Control {
     /// A write was counted, which may release a view a synchronized update
     /// holds.
     Wrote,
-    /// The child has exited and its output was read to the end (or for as
-    /// long as the core waits): the copy holding all of it goes out, and no
-    /// copy after it. Answered on `done` once it is sent.
+    /// The child has exited and its output up to its end was taken in: the
+    /// copy holding all of it goes out, and no copy after it. Answered on
+    /// `done` once it is sent.
     Final {
         done: oneshot::Sender<()>,
     },
@@ -274,6 +274,8 @@ impl Model {
     fn run(mut self) {
         while let Some(item) = self.intake.next() {
             match item {
+                // The model stays as the child's end left it.
+                Item::Output(_) if self.exited => {}
                 Item::Output(bytes) => self.take_in(&bytes),
                 Item::Control(control) => self.handle(control),
             }

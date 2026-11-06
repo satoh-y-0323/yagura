@@ -8,7 +8,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty};
 
-use super::{DEFAULT_TERM_GRACE, UnixProcessGroup};
+use super::{DEFAULT_TERM_GRACE, UnixProcessGroup, tty_mark};
+use crate::ReapGate;
 use crate::pty::{EnvOp, PtyCommand, PtySize, PtySpawn, PtySpawnError};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -60,6 +61,56 @@ impl PtyControl {
     pub fn close(&self) {
         drop(lock(&self.master).take());
     }
+
+    /// A new end mark: a run of ASCII digits nobody could know before, made
+    /// before it is written so the reader can look for it from the start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no randomness is available.
+    pub fn new_end_mark() -> io::Result<Vec<u8>> {
+        tty_mark::new_mark()
+    }
+
+    /// Writes `mark` to the terminal by opening the terminal by its name
+    /// (never as a controlling terminal) after letting stopped output go on.
+    ///
+    /// Written once every process that wrote to the terminal has died, the
+    /// mark is the last thing the terminal's output holds, even while another
+    /// process keeps the terminal open so the output never ends. Blocks while
+    /// the terminal's buffer is full: read the output on another thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal has been closed, or cannot be named,
+    /// opened or written.
+    pub fn write_mark(&self, mark: &[u8]) -> io::Result<()> {
+        let slave = {
+            let master = lock(&self.master);
+            let fd = master
+                .as_ref()
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "the pseudoterminal is closed")
+                })?
+                .as_raw_fd()
+                .ok_or_else(|| io::Error::other("the pseudoterminal has no descriptor"))?;
+            tty_mark::slave_name(fd)?
+        };
+        // The write may block on a full buffer, so a resize must not wait for it.
+        tty_mark::write_mark(&slave, mark)
+    }
+
+    /// Makes a new end mark ([`Self::new_end_mark`]), writes it
+    /// ([`Self::write_mark`]) and returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error either step fails with.
+    pub fn write_end_mark(&self) -> io::Result<Vec<u8>> {
+        let mark = Self::new_end_mark()?;
+        self.write_mark(&mark)?;
+        Ok(mark)
+    }
 }
 
 impl std::fmt::Debug for PtyControl {
@@ -92,6 +143,16 @@ impl PtyChild {
     pub fn wait(mut self) -> io::Result<i32> {
         self.child.wait().map(|status| status.exit_code() as i32)
     }
+
+    /// Blocks until the child exits, leaving it unreaped for [`Self::wait`],
+    /// so its id keeps naming it until then.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when waiting fails.
+    pub fn wait_for_exit(&self) -> io::Result<()> {
+        super::wait_for_exit_without_reaping(self.pid)
+    }
 }
 
 /// Kills the child. Clones act on the same process and work while another
@@ -100,13 +161,16 @@ impl PtyChild {
 pub struct PtyKiller(Mutex<Box<dyn ChildKiller + Send + Sync>>);
 
 impl PtyKiller {
-    /// Asks the child to end. A child that has already exited is not an error.
+    /// Asks the child to end, under `gate`'s lock, unless the child has been
+    /// reaped through `gate`: its id may name another process by then. A
+    /// child that has exited is not an error.
     ///
     /// # Errors
     ///
     /// Returns the operating system's error when the signal cannot be sent.
-    pub fn kill(&self) -> io::Result<()> {
-        lock(&self.0).kill()
+    pub fn kill(&self, gate: &ReapGate) -> io::Result<()> {
+        gate.signal_unless_reaped(|| lock(&self.0).kill())
+            .unwrap_or(Ok(()))
     }
 }
 

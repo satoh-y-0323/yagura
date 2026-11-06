@@ -29,6 +29,9 @@ libc.workspace = true
 # Unix windows start their child on a pseudoterminal through it (`pty`); it
 # stays inside this crate.
 portable-pty.workspace = true
+# `signal`: `ChildSignals` awaits SIGCHLD on the caller's runtime. Its one
+# extra crate, `signal-hook-registry`, is already in the graph.
+tokio = { workspace = true, features = ["signal"] }
 
 # macOS-only: `locale::preferred_locale` reads the user's CFLocale, the one
 # place a Finder-started process can learn its locale without `LANG`. The

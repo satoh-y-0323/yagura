@@ -18,9 +18,16 @@
 // terms of the raw socket types that `clippy.toml` bans everywhere else.
 #![allow(clippy::disallowed_types)]
 
+mod exit_watch;
 mod process_group;
 pub(crate) mod pty;
+mod tty_mark;
 
+#[cfg(target_os = "macos")]
+pub use exit_watch::wait_group_exit;
+pub use exit_watch::{ChildSignals, wait_for_exit_without_reaping};
+#[cfg(target_os = "linux")]
+pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
 
@@ -32,7 +39,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tokio::net::UnixListener;
@@ -42,6 +48,7 @@ use crate::DetachedSpawn;
 use crate::IpcTransport;
 use crate::OsError;
 use crate::PeerAuth;
+use crate::ReapGate;
 use crate::instance::InstanceNamespace;
 
 // =========================================================================
@@ -813,25 +820,20 @@ fn peer_executable_path(_conn: &UnixStream) -> Option<PathBuf> {
 /// Unix branch of [`crate::schedule_force_kill`].
 ///
 /// The wait happens on a detached thread so the caller never blocks for the
-/// grace period; the decision itself is `force_kill::escalate_after_grace`, which reads
-/// `exited` once more immediately before the signal rather than only at the
-/// deadline: in between, the child may have been reaped and its pid handed to
-/// an unrelated same-uid process. That leaves the same narrow window
-/// `UnixProcessGroup` documents for a reused `pgid`, and is accepted for the
-/// same reason.
+/// grace period; the decision itself is `force_kill::escalate_after_grace`,
+/// which sends under `gate`'s lock only while the child is unreaped, so the
+/// pid still names the child when the signal goes out.
 ///
 /// `kill` rather than `killpg`, because this escalation is about the single
 /// child the caller spawned; its descendants are the process group's business.
-/// The result is discarded and no error is reported: `ESRCH` (already reaped)
-/// is the expected outcome of the race above, and the caller learns whether
-/// the child is gone from its own exit observation, not from here.
-pub fn schedule_force_kill(pid: u32, grace: Duration, exited: Arc<AtomicBool>) {
+/// The result is discarded: the caller learns whether the child is gone from
+/// its own exit observation, not from here.
+pub fn schedule_force_kill(pid: u32, grace: Duration, gate: Arc<ReapGate>) {
     std::thread::spawn(move || {
-        crate::force_kill::escalate_after_grace(grace, &exited, std::thread::sleep, || {
-            // SAFETY: `kill` signals the single process `pid` supplied by the
-            // caller, which spawned it and is still tracking its exit;
-            // `SIGKILL` is a constant. A pid that no longer exists fails with
-            // `ESRCH` instead of affecting anything.
+        crate::force_kill::escalate_after_grace(grace, &gate, std::thread::sleep, || {
+            // SAFETY: `kill` signals the single process `pid`, which the gate
+            // has not seen reaped, so it is still the caller's child;
+            // `SIGKILL` is a constant.
             let _ = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         });
     });

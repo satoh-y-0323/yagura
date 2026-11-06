@@ -18,6 +18,7 @@ use windows::core::{HRESULT, PCSTR, PCWSTR};
 use super::child::ChildProcess;
 use super::command_line::{self, ChildEnv, win32_error_to_io};
 use super::spawn::{Io, SpawnSpec, anonymous_pipe, spawn_in_job};
+use crate::ReapGate;
 use crate::bundled_conpty;
 use crate::pty::{EnvOp, PtyCommand, PtySize, PtySpawn, PtySpawnError};
 
@@ -207,6 +208,17 @@ impl PtyChild {
     pub fn wait(self) -> io::Result<i32> {
         self.0.wait().map(|code| code as i32)
     }
+
+    /// Blocks until the child exits, leaving its exit code to [`Self::wait`].
+    /// The handle this holds keeps the id from being reused until it is
+    /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when waiting fails.
+    pub fn wait_for_exit(&self) -> io::Result<()> {
+        self.0.wait().map(drop)
+    }
 }
 
 /// Kills the child. Clones act on the same process and work while another
@@ -215,15 +227,17 @@ impl PtyChild {
 pub struct PtyKiller(ChildProcess);
 
 impl PtyKiller {
-    /// Terminates the child with exit code `1`. A child that has already
-    /// exited is not an error.
+    /// Terminates the child with exit code `1` under `gate`'s lock, unless the
+    /// child has been reaped through `gate`. A child that has already exited
+    /// is not an error.
     ///
     /// # Errors
     ///
     /// Returns the operating system's error when the child still runs and
     /// cannot be terminated.
-    pub fn kill(&self) -> io::Result<()> {
-        self.0.kill()
+    pub fn kill(&self, gate: &ReapGate) -> io::Result<()> {
+        gate.signal_unless_reaped(|| self.0.kill())
+            .unwrap_or(Ok(()))
     }
 }
 

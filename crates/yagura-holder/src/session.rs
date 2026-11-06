@@ -4,15 +4,16 @@
 //! daemon's writes.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use yagura_os::pty::{EnvOp, PtyCommand, PtyKiller, PtySize, PtySpawn, PtySpawnError};
-use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup};
+use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn, PtySpawnError};
+use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup, ReapGate};
 use yagura_protocol::holder::{
     HolderEnvOp, HolderExit, HolderFault, HolderFrame, HolderLaunch, HolderSpawnFailure,
     MAX_HELLO_DEADLINE_MS,
@@ -28,9 +29,8 @@ use crate::terminal::{self, Control, Terminal, TerminalStart};
 
 pub(crate) use provisional::{ExitKept, Provisional};
 
-/// How long the output is still read after the child's exit, for an end of
-/// output that may never come (something else keeping the terminal open).
-const POST_EXIT_DRAIN: Duration = Duration::from_secs(2);
+/// Bytes the end-of-output reader takes from the terminal at a time.
+const CUT_READ_CHUNK: usize = 8192;
 
 /// How long the child has to act on the first, refusable kill before the OS
 /// boundary forces it down (a no-op on Windows, whose kill cannot be refused).
@@ -55,10 +55,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What the terminal reader, the exit monitor and the core share.
 #[derive(Default)]
 struct Shared {
-    /// The child's exit, once observed: its code when known.
+    /// The child has exited; no write is taken from here on.
+    child_ended: AtomicBool,
+    /// The child's exit code, once reaped: after its tree has ended and the
+    /// end of its output is fixed.
     exit: Mutex<Option<Option<i32>>>,
-    /// The terminal's output has ended.
-    reader_done: AtomicBool,
+    /// Where the child's output ends.
+    cut: Mutex<Cut>,
+    /// Everything before the end of output has been handed to the terminal
+    /// thread; nothing after it will be.
+    output_ended: AtomicBool,
+    /// Bytes read after the end of output and dropped.
+    dropped_bytes: AtomicU64,
+    /// The holder's children have changed: some were reaped.
+    #[cfg(target_os = "linux")]
+    children_changed: ChildChanges,
     /// Wakes the core when the child exited or the output ended.
     core_wake: Notify,
 }
@@ -66,6 +77,182 @@ struct Shared {
 impl Shared {
     fn exit(&self) -> MutexGuard<'_, Option<Option<i32>>> {
         lock(&self.exit)
+    }
+
+    fn end_output(&self) {
+        self.output_ended.store(true, Ordering::SeqCst);
+        self.core_wake.notify_one();
+    }
+}
+
+/// How the end of the child's output is told.
+#[derive(Default)]
+enum Cut {
+    /// Not yet: everything read is the child's output.
+    #[default]
+    Open,
+    /// The output ends where this mark is read back.
+    // Windows ends the output with its end of file, never with a mark.
+    #[cfg_attr(windows, allow(dead_code))]
+    Mark(Vec<u8>),
+    /// No mark could be written: the output ended where it had been read.
+    #[cfg_attr(windows, allow(dead_code))]
+    Abandoned,
+}
+
+/// Counts the changes to the holder's children, for a thread that waits for
+/// the next one.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ChildChanges {
+    count: Mutex<u64>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(target_os = "linux")]
+impl ChildChanges {
+    fn count(&self) -> u64 {
+        *lock(&self.count)
+    }
+
+    fn note(&self) {
+        *lock(&self.count) += 1;
+        self.changed.notify_all();
+    }
+
+    /// Waits until a change after `seen` has been noted.
+    fn wait_past(&self, seen: u64) {
+        let mut count = lock(&self.count);
+        while *count == seen {
+            count = self
+                .changed
+                .wait(count)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// The terminal's output up to its end: the end of file, or the end mark
+/// read back, whichever comes first. The mark is never passed on, and as
+/// many bytes as a mark could start with are held back until they are known
+/// not to start it. Past the end it reads on and drops what it reads, so
+/// whoever still writes to the terminal is never held up.
+struct CutReader {
+    inner: Box<dyn Read + Send>,
+    shared: Arc<Shared>,
+    chunk: Vec<u8>,
+    held: Vec<u8>,
+    ready: Vec<u8>,
+    ready_at: usize,
+    end_found: bool,
+    inner_ended: bool,
+}
+
+impl CutReader {
+    fn new(inner: Box<dyn Read + Send>, shared: Arc<Shared>) -> Self {
+        Self {
+            inner,
+            shared,
+            chunk: vec![0; CUT_READ_CHUNK],
+            held: Vec::new(),
+            ready: Vec::new(),
+            ready_at: 0,
+            end_found: false,
+            inner_ended: false,
+        }
+    }
+
+    /// Moves what is known to come before the end from `held` to `ready`.
+    fn release(&mut self) {
+        let cut = lock(&self.shared.cut);
+        match &*cut {
+            Cut::Open => self.ready = std::mem::take(&mut self.held),
+            Cut::Mark(mark) => {
+                let found = if mark.is_empty() {
+                    None
+                } else {
+                    self.held
+                        .windows(mark.len())
+                        .position(|bytes| bytes == mark.as_slice())
+                };
+                if let Some(at) = found {
+                    let after = self.held.len() - at - mark.len();
+                    self.held.truncate(at);
+                    self.ready = std::mem::take(&mut self.held);
+                    self.end_found = true;
+                    drop(cut);
+                    self.drop_bytes(after);
+                } else {
+                    let keep = mark.len().saturating_sub(1);
+                    if self.held.len() > keep {
+                        self.ready = self.held.drain(..self.held.len() - keep).collect();
+                    }
+                }
+            }
+            Cut::Abandoned => {
+                let held = std::mem::take(&mut self.held);
+                self.end_found = true;
+                drop(cut);
+                self.drop_bytes(held.len());
+            }
+        }
+    }
+
+    fn drop_bytes(&self, count: usize) {
+        self.shared
+            .dropped_bytes
+            .fetch_add(u64::try_from(count).unwrap_or(u64::MAX), Ordering::SeqCst);
+    }
+
+    /// The output ended: what was held is the last of it.
+    fn end_here(&mut self) {
+        self.inner_ended = true;
+        self.ready = std::mem::take(&mut self.held);
+        self.end_found = true;
+    }
+
+    /// Called once everything before the end has been passed on: tells the
+    /// core, then reads and drops until the terminal's output ends.
+    fn read_past_end(&mut self) {
+        self.shared.end_output();
+        while !self.inner_ended {
+            match self.inner.read(&mut self.chunk) {
+                Ok(0) => self.inner_ended = true,
+                Ok(read) => self.drop_bytes(read),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => self.inner_ended = true,
+            }
+        }
+    }
+}
+
+impl Read for CutReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.ready_at < self.ready.len() {
+                let count = buf.len().min(self.ready.len() - self.ready_at);
+                buf[..count].copy_from_slice(&self.ready[self.ready_at..self.ready_at + count]);
+                self.ready_at += count;
+                return Ok(count);
+            }
+            self.ready.clear();
+            self.ready_at = 0;
+            if self.end_found {
+                self.read_past_end();
+                return Ok(0);
+            }
+            match self.inner.read(&mut self.chunk) {
+                // Linux ends the output (EIO) once nothing has the terminal
+                // open: an end before the mark is the end.
+                Ok(0) => self.end_here(),
+                Ok(read) => {
+                    self.held.extend_from_slice(&self.chunk[..read]);
+                    self.release();
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => self.end_here(),
+            }
+        }
     }
 }
 
@@ -90,7 +277,8 @@ struct Child {
     killer: PtyKiller,
     group: Arc<ProcessGroup>,
     pid: u32,
-    exited: Arc<AtomicBool>,
+    gate: Arc<ReapGate>,
+    control: Arc<PtyControl>,
     terminal: Terminal,
     force_kill_scheduled: bool,
     tree_end_started: bool,
@@ -100,14 +288,14 @@ impl Child {
     /// Kills before letting go of the input: on Windows closing the input is
     /// itself a kill, and the explicit kill is to decide the exit code.
     fn terminate(&mut self, tree: bool) {
-        if !self.exited.load(Ordering::SeqCst) {
-            let _ = self.killer.kill();
+        if !self.gate.is_reaped() {
+            let _ = self.killer.kill(&self.gate);
             if !self.force_kill_scheduled {
                 self.force_kill_scheduled = true;
                 yagura_os::schedule_force_kill(
                     self.pid,
                     TERMINATE_ESCALATION_GRACE,
-                    Arc::clone(&self.exited),
+                    Arc::clone(&self.gate),
                 );
             }
         }
@@ -132,6 +320,107 @@ fn end_tree(group: &ProcessGroup) {
         crate::log(format_args!(
             "failed to end the child's process tree: {error}"
         ));
+    }
+}
+
+/// Ends the tree of the exited `leader`, still unreaped, and returns once its
+/// every process has died. The holder is their reaper, so the tree has ended
+/// once the zombie leader is the holder's only child; each reap is a change
+/// to look again at.
+#[cfg(target_os = "linux")]
+fn end_tree_after_exit(group: &ProcessGroup, leader: u32, gate: &ReapGate, shared: &Shared) {
+    use yagura_os::platform_unix::{child_pids, kill_orphans};
+
+    let only_leader = child_pids().is_ok_and(|children| children.iter().all(|&pid| pid == leader));
+    if only_leader {
+        // Nobody is left to be given the grace.
+        if let Err(error) = group.kill_now() {
+            crate::log(format_args!(
+                "failed to end the child's process tree: {error}"
+            ));
+        }
+    } else {
+        end_tree(group);
+    }
+    loop {
+        let seen = shared.children_changed.count();
+        if let Err(error) = group.kill_now() {
+            crate::log(format_args!(
+                "failed to end the child's process group: {error}"
+            ));
+        }
+        match kill_orphans(leader, gate) {
+            Ok(0) => return,
+            Ok(_) => shared.children_changed.wait_past(seen),
+            Err(error) => {
+                crate::log(format_args!(
+                    "cannot end the rest of the child's process tree: {error}"
+                ));
+                return;
+            }
+        }
+    }
+}
+
+/// Ends the tree of the exited `leader` and returns once every member of its
+/// group has exited, or, when the members cannot be watched, once the last
+/// signal is sent.
+#[cfg(target_os = "macos")]
+fn end_tree_after_exit(group: &ProcessGroup, leader: u32, _gate: &ReapGate, _shared: &Shared) {
+    end_tree(group);
+    if let Err(error) = yagura_os::platform_unix::wait_group_exit(leader) {
+        crate::log(format_args!(
+            "cannot watch the child's process group end: {error}"
+        ));
+    }
+}
+
+/// Ends the tree of the exited child. Its end is the end of the output that
+/// follows (Windows), or is not known apart from the signals sent.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn end_tree_after_exit(group: &ProcessGroup, _leader: u32, _gate: &ReapGate, _shared: &Shared) {
+    end_tree(group);
+}
+
+/// Fixes where the child's output ends, once its whole tree has died.
+/// Closing the pseudoconsole ends the output once the console host is done.
+#[cfg(windows)]
+fn end_output(control: &PtyControl, _shared: &Shared) {
+    control.close();
+}
+
+/// Fixes where the child's output ends, once its whole tree has died: at a
+/// mark nobody could know before, written after every writer of the tree,
+/// which the reader is told of before it can arrive.
+#[cfg(unix)]
+fn end_output(control: &PtyControl, shared: &Shared) {
+    let written = PtyControl::new_end_mark().and_then(|mark| {
+        *lock(&shared.cut) = Cut::Mark(mark.clone());
+        control.write_mark(&mark)
+    });
+    if let Err(error) = written {
+        crate::log(format_args!(
+            "cannot mark the end of the child's output, which ends where it was read: {error}"
+        ));
+        *lock(&shared.cut) = Cut::Abandoned;
+        shared.end_output();
+    }
+}
+
+/// Reaps the holder's children other than the leader as they exit, for as
+/// long as the window lives, and tells whoever waits for the tree's end.
+#[cfg(target_os = "linux")]
+async fn reap_orphans_as_they_end(
+    mut signals: yagura_os::platform_unix::ChildSignals,
+    leader: u32,
+    gate: Arc<ReapGate>,
+    shared: Arc<Shared>,
+) {
+    while signals.next().await {
+        if let Err(error) = yagura_os::platform_unix::reap_orphans(leader, &gate) {
+            crate::log(format_args!("cannot reap the child's orphans: {error}"));
+        }
+        shared.children_changed.note();
     }
 }
 
@@ -188,6 +477,14 @@ fn spawn_child(
     shared: &Arc<Shared>,
     events: &mpsc::UnboundedSender<Event>,
 ) -> Result<Child, SpawnError> {
+    // Every process the child's tree leaves behind becomes the holder's, so
+    // the tree's end can be known from the holder's children.
+    #[cfg(target_os = "linux")]
+    yagura_os::platform_unix::set_child_subreaper().map_err(|error| {
+        SpawnError::other(format!(
+            "cannot become the reaper of the child's tree: {error}"
+        ))
+    })?;
     let command = PtyCommand {
         argv: launch.argv.clone(),
         cwd: launch.cwd.clone(),
@@ -208,7 +505,7 @@ fn spawn_child(
     let pid = child.process_id();
     let group = Arc::new(group);
     let control = Arc::new(control);
-    let exited = Arc::new(AtomicBool::new(false));
+    let gate = Arc::new(ReapGate::new());
     let (terminal, threads) = terminal::terminal(
         TerminalStart {
             cols: launch.cols,
@@ -228,27 +525,28 @@ fn spawn_child(
             spawn_thread("holder-read", {
                 let shared = Arc::clone(shared);
                 let intake = Arc::clone(&terminal.intake);
-                move || {
-                    buffer::read_into(reader, &intake);
-                    shared.reader_done.store(true, Ordering::SeqCst);
-                    shared.core_wake.notify_one();
-                }
+                move || buffer::read_into(Box::new(CutReader::new(reader, shared)), &intake)
             })
         })
         .and_then(|()| {
             spawn_thread("holder-exit", {
                 let shared = Arc::clone(shared);
                 let group = Arc::clone(&group);
-                let exited = Arc::clone(&exited);
+                let gate = Arc::clone(&gate);
+                let control = Arc::clone(&control);
                 move || {
-                    // The monitor is the child's only waiter. After the exit the
-                    // order is fixed: end the tree, close the terminal so its
-                    // output can end, then publish the exit. A published exit
-                    // therefore means the tree has been ended.
-                    let code = child.wait().ok();
-                    exited.store(true, Ordering::SeqCst);
-                    end_tree(&group);
-                    control.close();
+                    // The monitor is the child's only waiter, and each step
+                    // starts on the one before: the exit, known without
+                    // reaping so the leader's id keeps holding its group;
+                    // the tree's end; the end of its output; the reap.
+                    if let Err(error) = child.wait_for_exit() {
+                        crate::log(format_args!("cannot wait for the child's exit: {error}"));
+                    }
+                    shared.child_ended.store(true, Ordering::SeqCst);
+                    shared.core_wake.notify_one();
+                    end_tree_after_exit(&group, pid, &gate, &shared);
+                    end_output(&control, &shared);
+                    let code = gate.reap_with(|| child.wait().ok());
                     *shared.exit() = Some(code);
                     shared.core_wake.notify_one();
                 }
@@ -262,7 +560,8 @@ fn spawn_child(
         killer,
         group,
         pid,
-        exited,
+        gate,
+        control,
         terminal,
         force_kill_scheduled: false,
         tree_end_started: false,
@@ -297,7 +596,6 @@ struct Core {
     conn: Option<Conn>,
     next_conn: u64,
     terminating: bool,
-    exit_seen: Option<Instant>,
     /// The exit is settled (in the exit file when one is kept) and no daemon
     /// is let in any more; `Exited` has reached the connection.
     exit_recorded: bool,
@@ -329,40 +627,32 @@ pub(crate) async fn serve(
         conn: None,
         next_conn: 0,
         terminating: false,
-        exit_seen: None,
         exit_recorded: false,
         unanswered_writes: VecDeque::new(),
     };
     let ending = loop {
-        let output_ended = core.shared.reader_done.load(Ordering::SeqCst);
-        if let Some(seen) = core.exit_seen
-            && !core.exit_recorded
-            && ((output_ended && core.unanswered_writes.is_empty())
-                || Instant::now() >= seen + POST_EXIT_DRAIN)
+        if !core.exit_recorded
+            && core.shared.exit().is_some()
+            && core.shared.output_ended.load(Ordering::SeqCst)
         {
             // An exit file is written while the endpoint is still held, so a
             // next holder of this window starts only after it and clears it.
             core.record_exit();
-            core.fail_unanswered_writes();
             core.send_last_copy().await;
+            core.fail_unanswered_writes();
             core.send_exited();
+            core.release_terminal();
             Acceptor::stop(&mut acceptor).await;
             if core.terminating || core.conn.is_none() {
                 break Ending::ChildExited;
             }
         }
-        let drain_deadline = core
-            .exit_seen
-            .filter(|_| !core.exit_recorded)
-            .map(|seen| seen + POST_EXIT_DRAIN);
         tokio::select! {
             () = tokio::time::sleep_until(hello_deadline), if core.child.is_none() => {
                 core.window.record.remove();
                 break Ending::NoHello;
             }
-            () = tokio::time::sleep_until(drain_deadline.unwrap_or(hello_deadline)),
-                if drain_deadline.is_some() => {}
-            () = core.shared.core_wake.notified() => core.on_wake(),
+            () = core.shared.core_wake.notified() => {}
             event = incoming.recv() => {
                 let Some(event) = event else { break Ending::ChildExited };
                 if let Some(ending) = core.handle(event).await {
@@ -371,6 +661,12 @@ pub(crate) async fn serve(
             }
         }
     };
+    if core.child.is_some() {
+        crate::log(format_args!(
+            "dropped {} bytes of terminal output read after the child's exit",
+            core.shared.dropped_bytes.load(Ordering::SeqCst)
+        ));
+    }
     Acceptor::stop(&mut acceptor).await;
     core.close_conn().await;
     // The core, dropped here after the close (or by an unwind), removes a
@@ -442,12 +738,6 @@ impl Acceptor {
 }
 
 impl Core {
-    fn on_wake(&mut self) {
-        if self.exit_seen.is_none() && self.shared.exit().is_some() {
-            self.exit_seen = Some(Instant::now());
-        }
-    }
-
     fn terminal(&self) -> Option<&Terminal> {
         self.child.as_ref().map(|child| &child.terminal)
     }
@@ -459,7 +749,7 @@ impl Core {
     }
 
     fn child_has_exited(&self) -> bool {
-        self.exit_recorded || self.shared.exit().is_some()
+        self.exit_recorded || self.shared.child_ended.load(Ordering::SeqCst)
     }
 
     /// Handles one event; returns how the holder ends when it is to end now.
@@ -544,6 +834,16 @@ impl Core {
                     return Some(self.spawn_failed(accepted, id, &error));
                 }
             };
+            #[cfg(target_os = "linux")]
+            let signals = match yagura_os::platform_unix::ChildSignals::new() {
+                Ok(signals) => signals,
+                Err(error) => {
+                    let error = SpawnError::other(format!(
+                        "cannot learn of the exits of the child's tree: {error}"
+                    ));
+                    return Some(self.spawn_failed(accepted, id, &error));
+                }
+            };
             let shared = Arc::clone(&self.shared);
             let events = self.events.clone();
             let spawned =
@@ -552,6 +852,13 @@ impl Core {
             match spawned {
                 Ok(Ok(child)) => {
                     let pid = child.pid;
+                    #[cfg(target_os = "linux")]
+                    tokio::spawn(reap_orphans_as_they_end(
+                        signals,
+                        pid,
+                        Arc::clone(&child.gate),
+                        Arc::clone(&self.shared),
+                    ));
                     self.child = Some(child);
                     if let Err(error) = self.window.record.set_child_pid(pid) {
                         crate::log(format_args!("cannot update the holder record: {error}"));
@@ -761,6 +1068,15 @@ impl Core {
         let code = self.shared.exit().flatten();
         if let Some(conn) = &self.conn {
             conn.send(Reply::Exited { code });
+        }
+    }
+
+    /// Lets go of the handle kept for resizing. On Unix it only resizes, so
+    /// it goes once the exit is told; on Windows closing it ended the output
+    /// and was done before.
+    fn release_terminal(&self) {
+        if let Some(child) = &self.child {
+            child.control.close();
         }
     }
 

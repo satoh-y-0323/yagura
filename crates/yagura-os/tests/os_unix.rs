@@ -25,7 +25,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -1398,7 +1397,7 @@ fn seed_config_file_writes_nothing_through_a_symlinked_config_directory() {
 // schedule_force_kill. The child is spawned through this file's own
 // spawn_own_group_child helper: `exec` keeps the pid stable and
 // grandchild-free, and no SIGHUP suppression is needed because this function
-// only ever sends SIGKILL. The grace and `exited` decisions are tested
+// only ever sends SIGKILL. The grace and gate decisions are tested
 // without a clock in `force_kill.rs`; this test keeps the real wait and the
 // real signal wired to them.
 // =====================================================================
@@ -1412,7 +1411,7 @@ fn schedule_force_kill_sigkills_the_child_after_the_grace_period_when_exit_was_n
     yagura_os::schedule_force_kill(
         pid,
         Duration::from_millis(50),
-        Arc::new(AtomicBool::new(false)),
+        Arc::new(yagura_os::ReapGate::new()),
     );
 
     let status = child
@@ -1422,7 +1421,7 @@ fn schedule_force_kill_sigkills_the_child_after_the_grace_period_when_exit_was_n
         status.signal(),
         Some(libc::SIGKILL),
         "schedule_force_kill must SIGKILL the child once the grace period elapses with \
-         `exited` still false; status: {status:?}"
+         the child still unreaped; status: {status:?}"
     );
 }
 

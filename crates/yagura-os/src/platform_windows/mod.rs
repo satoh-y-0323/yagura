@@ -29,7 +29,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tokio::net::windows::named_pipe::ClientOptions;
@@ -696,7 +695,7 @@ const DETACHED_SPAWN_FLAGS_NO_BREAKAWAY: PROCESS_CREATION_FLAGS = DETACHED_PROCE
 /// catch, ignore or delay, so a follow-up signal after a grace period would
 /// have nothing left to do. The parameters are kept so the boundary has one
 /// signature on every platform and its callers need no `cfg` of their own.
-pub fn schedule_force_kill(_pid: u32, _grace: Duration, _exited: Arc<AtomicBool>) {}
+pub fn schedule_force_kill(_pid: u32, _grace: Duration, _gate: Arc<crate::ReapGate>) {}
 
 /// Windows branch of [`crate::enter_raw_console_input`].
 ///
