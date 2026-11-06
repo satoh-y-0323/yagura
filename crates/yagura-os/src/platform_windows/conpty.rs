@@ -172,7 +172,26 @@ impl PtyControl {
         // SAFETY: `console` was taken out of the slot, so this is the only close.
         unsafe { (self.api.close)(console) };
     }
+
+    /// Lets a write to the console finish once nothing is to read it any
+    /// more, until the returned [`InputDrain`] is dropped.
+    ///
+    /// Only the console host holds the input's reading end, and it reads its
+    /// input for as long as it runs: once it has ended, which the end of the
+    /// output follows, a write to the input fails. Nothing is left to do here.
+    ///
+    /// # Errors
+    ///
+    /// Never fails on Windows.
+    pub fn drain_input(&self) -> io::Result<InputDrain> {
+        Ok(InputDrain(()))
+    }
 }
+
+/// Lets the console's input be written until dropped (see
+/// [`PtyControl::drain_input`]).
+#[derive(Debug)]
+pub struct InputDrain(());
 
 impl Drop for PtyControl {
     fn drop(&mut self) {

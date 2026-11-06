@@ -19,6 +19,8 @@
 //!   grandchild.
 //! - `exit <code> [<gate_file>]`: prints `EXITING <code>\r\n` and exits with
 //!   `code`; with `gate_file`, first waits until that file exists.
+//! - `exit-on-input`: prints [`READY_MARKER`], then exits with 0 as soon as
+//!   it reads a byte from stdin.
 //! - `ignore-end`: ignores every request to end that can be ignored (SIGTERM
 //!   and SIGHUP on Unix; console control events, the console close included,
 //!   on Windows), prints [`IGNORING_MARKER`] and stays alive, past stdin's end
@@ -87,6 +89,7 @@ fn main() -> io::Result<()> {
         "flood" => flood(Path::new(arg(1)), arg(2).parse().ok()),
         "tree" => tree(Path::new(arg(1))),
         "exit" => exit_with(arg(1), args.get(2).map(Path::new)),
+        "exit-on-input" => exit_on_input(),
         "ignore-end" => ignore_end(),
         "stubborn-tree" => stubborn_tree(Path::new(arg(1)), args.get(2).map(Path::new)),
         #[cfg(unix)]
@@ -107,7 +110,7 @@ fn main() -> io::Result<()> {
         _ => {
             eprintln!(
                 "usage: holder_child size | hex | flood <count_file> [<total_bytes>] \
-                 | tree <pid_file> | exit <code> [<gate_file>] | ignore-end \
+                 | tree <pid_file> | exit <code> [<gate_file>] | exit-on-input | ignore-end \
                  | stubborn-tree <pid_file> [<gate_file>] | escaped-holder <pid_file> \
                  | script <input_log> | end-race <info_file> <gate_file> <term_file> \
                  | orphans"
@@ -304,6 +307,19 @@ fn exit_with(code: &str, gate_file: Option<&Path>) -> io::Result<()> {
     stdout.write_all(format!("EXITING {code}\r\n").as_bytes())?;
     stdout.flush()?;
     std::process::exit(code)
+}
+
+fn exit_on_input() -> io::Result<()> {
+    if let Err(error) = yagura_os::enter_raw_console_input() {
+        eprintln!("holder_child: cannot enter raw console input: {error}");
+        std::process::exit(2);
+    }
+    let mut stdout = io::stdout();
+    stdout.write_all(READY_MARKER)?;
+    stdout.flush()?;
+    let mut byte = [0u8; 1];
+    io::stdin().lock().read_exact(&mut byte)?;
+    std::process::exit(0)
 }
 
 fn ignore_end() -> io::Result<()> {

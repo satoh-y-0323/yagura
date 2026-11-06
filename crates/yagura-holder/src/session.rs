@@ -3,7 +3,6 @@
 //! the core hands it the daemon's requests and the child's writer the
 //! daemon's writes.
 
-use std::collections::VecDeque;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -289,6 +288,7 @@ pub(crate) enum Event {
     Frame { conn: u64, frame: HolderFrame },
     Closed { conn: u64 },
     WriteDone { conn: u64, id: u64, written: bool },
+    WriterDone,
 }
 
 /// The child and the handles to reach it.
@@ -617,11 +617,14 @@ struct Core {
     next_conn: u64,
     terminating: bool,
     /// The exit is settled (in the exit file when one is kept) and no daemon
-    /// is let in any more; `Exited` has reached the connection.
+    /// is let in any more.
     exit_recorded: bool,
-    /// The writes handed to the child's input and not yet reported done, in
-    /// the order the input takes them (connection, id).
-    unanswered_writes: VecDeque<(u64, u64)>,
+    /// The writer thread has answered its last write.
+    writer_done: bool,
+    /// Lets the writes in hand finish while the writer thread is waited for.
+    input_drain: Option<yagura_os::pty::InputDrain>,
+    /// `Exited` has reached the connection.
+    exit_told: bool,
 }
 
 /// Serves the window until the holder is to end.
@@ -648,7 +651,9 @@ pub(crate) async fn serve(
         next_conn: 0,
         terminating: false,
         exit_recorded: false,
-        unanswered_writes: VecDeque::new(),
+        writer_done: false,
+        input_drain: None,
+        exit_told: false,
     };
     let ending = loop {
         if !core.exit_recorded
@@ -659,7 +664,11 @@ pub(crate) async fn serve(
             // next holder of this window starts only after it and clears it.
             core.record_exit();
             core.send_last_copy().await;
-            core.fail_unanswered_writes();
+            core.let_go_of_input();
+        }
+        // Every write is answered by the writer thread alone, and all its
+        // answers are handled before its end is: none is guessed here.
+        if core.exit_recorded && core.writer_done && !core.exit_told {
             core.send_exited();
             core.release_terminal();
             Acceptor::stop(&mut acceptor).await;
@@ -796,11 +805,13 @@ impl Core {
                 }
             }
             Event::WriteDone { conn, id, written } => {
-                // Counted whichever connection asked, and only if still owed
-                // an answer: a write failed at the settle is answered already.
-                if self.unanswered_writes.pop_front().is_some() && self.is_current(conn) {
+                if self.is_current(conn) {
                     self.answer_write(id, written);
                 }
+            }
+            Event::WriterDone => {
+                self.writer_done = true;
+                self.input_drain = None;
             }
             Event::Frame { .. } | Event::Closed { .. } => {}
         }
@@ -984,7 +995,7 @@ impl Core {
                 if let Some(child) = self.child.as_mut() {
                     child.terminate(tree);
                 }
-                if self.exit_recorded {
+                if self.exit_told {
                     return Some(Ending::ChildExited);
                 }
             }
@@ -1015,9 +1026,7 @@ impl Core {
             && self
                 .terminal()
                 .is_some_and(|terminal| terminal.input.push_write(conn_id, id, bytes));
-        if queued {
-            self.unanswered_writes.push_back((conn_id, id));
-        } else if let Some(conn) = &self.conn {
+        if !queued && let Some(conn) = &self.conn {
             conn.send(Reply::WriteFailed {
                 id,
                 reason: "the child has exited or its input is closed".to_owned(),
@@ -1060,14 +1069,20 @@ impl Core {
         self.exit_recorded = true;
     }
 
-    /// Answers `WriteFailed` to the connection for each write it was owed an
-    /// answer for, before `Exited`: they will not be reported done in time.
-    fn fail_unanswered_writes(&mut self) {
-        let owed = std::mem::take(&mut self.unanswered_writes);
-        for (conn, id) in owed {
-            if self.is_current(conn) {
-                self.answer_write(id, false);
-            }
+    /// Lets go of the child's input, so the writer thread answers what it
+    /// still holds and ends, and lets a write in hand that nobody reads any
+    /// more finish its piece meanwhile.
+    fn let_go_of_input(&mut self) {
+        let Some(child) = &self.child else { return };
+        child.terminal.input.close();
+        if self.writer_done {
+            return;
+        }
+        match child.control.drain_input() {
+            Ok(drain) => self.input_drain = Some(drain),
+            Err(error) => crate::log(format_args!(
+                "cannot read the child's input in its place, so a write nobody reads may never end: {error}"
+            )),
         }
     }
 
@@ -1085,6 +1100,7 @@ impl Core {
 
     /// Tells the connection the child exited; no copy of the screen follows.
     fn send_exited(&mut self) {
+        self.exit_told = true;
         let code = self.shared.exit().flatten();
         if let Some(conn) = &self.conn {
             conn.send(Reply::Exited { code });

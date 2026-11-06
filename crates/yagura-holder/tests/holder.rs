@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::holder::{
-    HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, HolderLaunch, HolderRecord,
+    HOLDER_PROTOCOL, HolderFault, HolderFrame, HolderFrameBuffer, HolderLaunch, HolderRecord,
     encode_holder_frame, encode_holder_launch, holder_exit_path, read_holder_exit,
     read_holder_record,
 };
@@ -27,6 +27,7 @@ const POLL: Duration = Duration::from_millis(20);
 /// Long enough that no test meets the first-connection deadline by accident.
 const NO_DEADLINE_MS: u64 = 600_000;
 const HOLDER: &str = env!("CARGO_BIN_EXE_yagura-holder");
+const FAULT_HOLDER: &str = env!("CARGO_BIN_EXE_holder_fault");
 const CHILD: &str = env!("CARGO_BIN_EXE_holder_child");
 const INTRUDER: &str = "intruder";
 const INTRUDER_ENDPOINT_ENV: &str = "YAGURA_HOLDER_TEST_INTRUDER_ENDPOINT";
@@ -144,10 +145,19 @@ impl Rig {
         self.start_with(&encode_holder_launch(launch), Stdio::null())
     }
 
+    /// Starts the fault-injecting holder, which acts out `launch.fault`.
+    fn start_faulty(&self, launch: &HolderLaunch) -> Holder {
+        self.start_exe(FAULT_HOLDER, &encode_holder_launch(launch), Stdio::null())
+    }
+
     /// Starts the holder with `input` on its stdin and its environment left
     /// as this process's: it is the base of the child's environment.
     fn start_with(&self, input: &[u8], stdout: Stdio) -> Holder {
-        let mut child = Command::new(HOLDER)
+        self.start_exe(HOLDER, input, stdout)
+    }
+
+    fn start_exe(&self, exe: &str, input: &[u8], stdout: Stdio) -> Holder {
+        let mut child = Command::new(exe)
             .arg(&self.window_id)
             .arg(&self.instance)
             .stdin(Stdio::piped())
@@ -788,6 +798,37 @@ async fn a_write_that_ends_the_child_is_answered_before_exited() {
         matches!(answers.as_slice(), [HolderFrame::WriteFailed { id: 7, .. }]),
         "the write was not answered as failed before Exited: {answers:?}"
     );
+    drop(peer);
+    holder.wait_exit().await;
+}
+
+/// The write ends the child, and its answer is held back past the child's
+/// end: the write reached the child, so it is answered as written, before
+/// `Exited`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_written_write_that_ends_the_child_is_answered_written_before_exited() {
+    let rig = Rig::new("wdone");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let mut launch = rig.launch(&["exit-on-input"], NO_DEADLINE_MS);
+    launch.fault = Some(HolderFault::HoldWriteAnswer);
+    let mut holder = rig.start_faulty(&launch);
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-READY").await;
+
+    peer.send(HolderFrame::Write {
+        id: 3,
+        bytes: b"q".to_vec(),
+    })
+    .await;
+    let mut answers = Vec::new();
+    loop {
+        match peer.frame().await {
+            frame if is_copy(&frame) => {}
+            HolderFrame::Exited { .. } => break,
+            other => answers.push(other),
+        }
+    }
+    assert_eq!(answers, [HolderFrame::Written { id: 3 }]);
     drop(peer);
     holder.wait_exit().await;
 }

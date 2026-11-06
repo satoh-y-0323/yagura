@@ -868,11 +868,13 @@ async fn a_body_that_stays_unread_beside_an_approval_dialog_is_not_rewritten_and
         shows(screen, APPROVAL_HEADING)
     })
     .await;
-    assert_eq!(
-        read_composer_now(&h, &window_id).await,
-        ComposerReadout::Empty,
-        "the composer must read empty for this case to reach the clear step"
-    );
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "Empty: the composer must read empty for this case to reach the clear step",
+        |readout| readout == &ComposerReadout::Empty,
+    )
+    .await;
     let_every_clock_bound_run_out().await;
     assert!(
         !call.is_finished(),
@@ -2053,11 +2055,13 @@ async fn an_unshown_envelope_is_not_decided_on_while_its_probe_reads_as_a_torn_f
         shows(screen, "PASTE 1")
     })
     .await;
-    assert_eq!(
-        read_composer_now(&h, &window_id).await,
-        ComposerReadout::Empty,
-        "the held envelope must not show for this case to mean anything"
-    );
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "Empty: the held envelope must not show for this case to mean anything",
+        |readout| readout == &ComposerReadout::Empty,
+    )
+    .await;
     let seq = entry(&h, &window_id).write_seq();
 
     let sender = entry(&h, &window_id);

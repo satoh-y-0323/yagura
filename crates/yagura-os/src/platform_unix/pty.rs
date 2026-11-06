@@ -8,8 +8,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty};
 
+pub use super::input_drain::InputDrain;
 pub use super::tty_mark::EndMarkWriter;
-use super::{DEFAULT_TERM_GRACE, UnixProcessGroup, tty_mark};
+use super::{DEFAULT_TERM_GRACE, UnixProcessGroup, input_drain, tty_mark};
 use crate::ReapGate;
 use crate::pty::{EnvOp, PtyCommand, PtySize, PtySpawn, PtySpawnError};
 
@@ -89,19 +90,36 @@ impl PtyControl {
     /// Returns an error when the terminal has been closed, or cannot be named,
     /// opened or written.
     pub fn write_mark(&self, mark: &[u8]) -> io::Result<EndMarkWriter> {
-        let slave = {
-            let master = lock(&self.master);
-            let fd = master
-                .as_ref()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "the pseudoterminal is closed")
-                })?
-                .as_raw_fd()
-                .ok_or_else(|| io::Error::other("the pseudoterminal has no descriptor"))?;
-            tty_mark::slave_name(fd)?
-        };
+        let slave = self.slave_name()?;
         // The write may block on a full buffer, so a resize must not wait for it.
         tty_mark::write_mark(&slave, mark)
+    }
+
+    /// Starts reading and dropping what is written to the terminal, on
+    /// another thread, until the returned [`InputDrain`] is dropped.
+    ///
+    /// Once nothing is to read the terminal any more, this lets a write to
+    /// it finish that a full input queue holds up, even while another
+    /// process keeps the terminal open and never reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal has been closed or cannot be named
+    /// or opened, or the thread cannot be started.
+    pub fn drain_input(&self) -> io::Result<InputDrain> {
+        input_drain::drain(&self.slave_name()?)
+    }
+
+    fn slave_name(&self) -> io::Result<std::ffi::CString> {
+        let master = lock(&self.master);
+        let fd = master
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "the pseudoterminal is closed")
+            })?
+            .as_raw_fd()
+            .ok_or_else(|| io::Error::other("the pseudoterminal has no descriptor"))?;
+        tty_mark::slave_name(fd)
     }
 }
 

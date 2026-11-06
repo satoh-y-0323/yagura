@@ -19,6 +19,7 @@
 #![allow(clippy::disallowed_types)]
 
 mod exit_watch;
+mod input_drain;
 mod process_group;
 pub(crate) mod pty;
 mod tty_mark;

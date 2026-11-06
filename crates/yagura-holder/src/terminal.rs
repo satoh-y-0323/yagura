@@ -216,7 +216,10 @@ pub(crate) fn terminal(
         move || published.writes.load(Ordering::SeqCst)
     });
     let intake = Arc::new(Intake::default());
-    let input = Arc::new(InputWriter::default());
+    let input = Arc::new(InputWriter {
+        hold_answers: start.fault == Some(HolderFault::HoldWriteAnswer),
+        ..InputWriter::default()
+    });
     let outlet = Arc::new(Outlet::default());
     let model = Model {
         screen,
@@ -404,7 +407,7 @@ impl Model {
         match self.fault.take() {
             Some(HolderFault::StallModel) => self.stall(),
             Some(HolderFault::PoisonModel) => self.screen.poison_after_calls(0),
-            None => {}
+            Some(HolderFault::HoldWriteAnswer) | None => {}
         }
     }
 
@@ -489,6 +492,18 @@ impl Model {
 /// this is dropped.
 const MAX_QUEUED_REPLY_BYTES: usize = 64 * 1024;
 
+/// Bytes of a write handed to the terminal at a time, so letting go of the
+/// input stops a write the terminal no longer takes within one piece.
+const WRITE_PIECE: usize = 4096;
+
+fn write_whole(writer: &mut dyn Write, bytes: &[u8]) -> bool {
+    bytes.is_empty()
+        || writer
+            .write_all(bytes)
+            .and_then(|()| writer.flush())
+            .is_ok()
+}
+
 /// One thing for the writer, written in the order it was queued.
 enum WriteJob {
     /// The daemon's write: counted as the user's input, answered.
@@ -528,6 +543,8 @@ struct WriterState {
 pub(crate) struct InputWriter {
     state: Mutex<WriterState>,
     ready: Condvar,
+    /// Acts out [`HolderFault::HoldWriteAnswer`].
+    hold_answers: bool,
 }
 
 impl InputWriter {
@@ -601,8 +618,9 @@ impl InputWriter {
         }
     }
 
-    /// Lets go of the input once the job in hand is done. Nothing still
-    /// queued is written; the writes among it are answered as failed.
+    /// Lets go of the input: a write in hand stops at its next piece, and
+    /// nothing still queued is written. Each of those writes is answered as
+    /// failed, and then the writer thread ends with [`Event::WriterDone`].
     pub(crate) fn close(&self) {
         let mut state = self.state();
         state.closed = true;
@@ -634,7 +652,33 @@ impl InputWriter {
         }
     }
 
-    /// The writer thread's body.
+    fn wait_closed(&self) {
+        let mut state = self.state();
+        while !state.closed {
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Writes `bytes` a piece at a time; `false` when a piece failed, or the
+    /// input was let go of before the last piece.
+    fn write_answered(&self, writer: &mut dyn Write, bytes: &[u8]) -> bool {
+        for (index, piece) in bytes.chunks(WRITE_PIECE).enumerate() {
+            if index > 0 && self.state().closed {
+                return false;
+            }
+            if writer.write_all(piece).is_err() {
+                return false;
+            }
+        }
+        writer.flush().is_ok()
+    }
+
+    /// The writer thread's body. Every write it is handed is answered here,
+    /// and [`Event::WriterDone`] follows the last answer, once the child's
+    /// input is let go of.
     fn write_all_to(
         &self,
         mut writer: Box<dyn Write + Send>,
@@ -642,13 +686,18 @@ impl InputWriter {
         intake: &Intake,
         events: &mpsc::UnboundedSender<Event>,
     ) {
-        let mut write = |bytes: &[u8]| -> bool {
-            bytes.is_empty()
-                || writer
-                    .write_all(bytes)
-                    .and_then(|()| writer.flush())
-                    .is_ok()
-        };
+        self.write_jobs(writer.as_mut(), published, intake, events);
+        drop(writer);
+        let _ = events.send(Event::WriterDone);
+    }
+
+    fn write_jobs(
+        &self,
+        writer: &mut dyn Write,
+        published: &Published,
+        intake: &Intake,
+        events: &mpsc::UnboundedSender<Event>,
+    ) {
         while let Some((job, closed)) = self.next() {
             match job {
                 WriteJob::Write { conn, id, .. } if closed => {
@@ -669,7 +718,10 @@ impl InputWriter {
                         .focus
                         .before_input(published.modes(), published.outputs_fed());
                     lead.extend_from_slice(&bytes);
-                    let written = write(&lead);
+                    let written = self.write_answered(writer, &lead);
+                    if self.hold_answers {
+                        self.wait_closed();
+                    }
                     let _ = events.send(Event::WriteDone { conn, id, written });
                     let report = {
                         let mut state = self.state();
@@ -680,10 +732,10 @@ impl InputWriter {
                             Vec::new()
                         }
                     };
-                    write(&report);
+                    write_whole(writer, &report);
                 }
                 WriteJob::Unanswered(bytes) => {
-                    write(&bytes);
+                    write_whole(writer, &bytes);
                 }
                 WriteJob::ViewFocus(focused) => {
                     let report = {
@@ -693,7 +745,7 @@ impl InputWriter {
                             .focus
                             .reconcile(published.modes(), published.outputs_fed())
                     };
-                    write(&report);
+                    write_whole(writer, &report);
                 }
                 WriteJob::Interval { open } => {
                     let report = {
@@ -711,14 +763,14 @@ impl InputWriter {
                             Vec::new()
                         }
                     };
-                    write(&report);
+                    write_whole(writer, &report);
                 }
                 WriteJob::CheckFocus => {
                     let report = self
                         .state()
                         .focus
                         .reconcile(published.modes(), published.outputs_fed());
-                    write(&report);
+                    write_whole(writer, &report);
                 }
             }
         }

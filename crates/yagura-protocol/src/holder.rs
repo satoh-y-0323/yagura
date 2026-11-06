@@ -362,6 +362,9 @@ pub enum HolderFault {
     /// Once the first whole copy after the `Welcome` is sent, the model's
     /// next call panics, so the model is rebuilt blank.
     PoisonModel,
+    /// Each write's answer is held back, after the write reached the child,
+    /// until the holder lets go of the child's input.
+    HoldWriteAnswer,
 }
 
 // The window's record carries its token, a write and a report carry what the

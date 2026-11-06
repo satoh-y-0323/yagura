@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use common::{
     HANG_GUARD, Harness, SUBMIT_CHILD_PROBE, approver_base_config, composer_section_toml,
-    read_composer_now, unique_temp_dir, wait_until_composer_satisfies, wait_until_status,
+    unique_temp_dir, wait_until_composer_satisfies, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::reading::ComposerReadout;
@@ -139,11 +139,13 @@ impl Receiver {
         self.h
             .wait_for_scrollback(&self.window_id, b"PASTE 1")
             .await;
-        assert_eq!(
-            read_composer_now(&self.h, &self.window_id).await,
-            ComposerReadout::Empty,
-            "the fixture must hold the pasted text unpainted"
-        );
+        wait_until_composer_satisfies(
+            &self.h,
+            &self.window_id,
+            "Empty: the fixture must hold the pasted text unpainted",
+            |readout| readout == &ComposerReadout::Empty,
+        )
+        .await;
     }
 
     /// The file whose creation removes an `until|` dialog.

@@ -199,7 +199,11 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         decode_holder_launch(&encode_holder_launch(&launch)).unwrap(),
         launch
     );
-    for fault in [HolderFault::StallModel, HolderFault::PoisonModel] {
+    for fault in [
+        HolderFault::StallModel,
+        HolderFault::PoisonModel,
+        HolderFault::HoldWriteAnswer,
+    ] {
         let faulty = HolderLaunch {
             fault: Some(fault),
             palette: None,

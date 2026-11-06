@@ -1049,10 +1049,13 @@ async fn a_body_the_receiver_drops_is_reported_not_reflected_with_nothing_left_b
     h.wait_for_scrollback(&window_id, b"PASTE 1").await;
     // Stage 2: the composer reads back empty -- the probe was erased, not
     // merely nothing painted.
-    match read_composer_now(&h, &window_id).await {
-        ComposerReadout::Empty => {}
-        other => panic!("the composer must be left empty, got {other:?}"),
-    }
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "Empty: the composer must be left empty",
+        |readout| readout == &ComposerReadout::Empty,
+    )
+    .await;
     let read = child_read(&h, &window_id, &dir, "btb").await;
     assert_eq!(
         line_ends_outside_paste(read.bytes()),
@@ -1154,11 +1157,13 @@ async fn presses_submit_on_a_first_write_whose_folded_placeholder_hides_its_own_
     }
     h.wait_for_scrollback(&window_id, format!("SUBMITTED {body}").as_bytes())
         .await;
-    assert_eq!(
-        read_composer_now(&h, &window_id).await,
-        ComposerReadout::Empty,
-        "once the receiver accepts the submit, the composer settles back to empty"
-    );
+    wait_until_composer_satisfies(
+        &h,
+        &window_id,
+        "Empty: once the receiver accepts the submit, the composer settles back to empty",
+        |readout| readout == &ComposerReadout::Empty,
+    )
+    .await;
     let read = child_read(&h, &window_id, &dir, "bfirstfold").await;
     assert_eq!(
         read.line_writes(body),
