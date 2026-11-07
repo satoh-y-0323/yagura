@@ -1414,10 +1414,9 @@ async fn let_go(leftover: Leftover, limit: Duration) -> Ending {
         Leftover::Closing(connection) => (connection, None),
     };
     let closed = tokio::time::timeout(limit, async {
-        if let Some(ask) = ask
-            && connection.write_all(&ask).await.is_err()
-        {
-            return;
+        if let Some(ask) = ask {
+            // A failed ask leaves the close to wait for, as an answered one does.
+            let _ = connection.write_all(&ask).await;
         }
         let mut chunk = [0u8; 4096];
         while matches!(connection.read(&mut chunk).await, Ok(read) if read > 0) {}
@@ -1459,8 +1458,9 @@ enum PumpEnd {
 
 /// Carries frames both ways until the connection ends; the holder closes it
 /// once it is told to end. Only a frame whose framing is broken ends it from
-/// this side. After the child's exit the connection is kept, so the holder
-/// can still be told to end.
+/// this side; a failed write stops the sending, not the reading. After the
+/// child's exit the connection is kept, so the holder can still be told to
+/// end.
 async fn pump(
     reader: &mut Reader<'_>,
     connection: Connection,
@@ -1501,8 +1501,11 @@ async fn pump(
             },
             bytes = out_rx.recv(), if sending => match bytes {
                 Some(bytes) => {
+                    // The holder may have closed after frames still to be
+                    // read, such as its `Exited`; only the read side ends.
                     if write.write_all(&bytes).await.is_err() {
-                        break;
+                        sending = false;
+                        out_rx.close();
                     }
                 }
                 None => sending = false,
@@ -1899,7 +1902,7 @@ mod tests {
         //! A holder played by the test in its own process, over the holder's
         //! endpoint, so the daemon's side of the link is driven frame by frame.
 
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use yagura_os::PeerAuth;
         use yagura_protocol::holder::{
             HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, encode_holder_frame,
@@ -2131,6 +2134,21 @@ region = "bottom"
                 self.expect_ack(number).await;
             }
 
+            /// Reads at least `count` bytes of whatever the daemon sends,
+            /// without taking them as frames.
+            async fn drain_at_least(&mut self, count: usize) {
+                let mut chunk = vec![0u8; 64 * 1024];
+                let mut read = 0;
+                while read < count {
+                    let n = tokio::time::timeout(HANG_GUARD, self.connection.read(&mut chunk))
+                        .await
+                        .expect("HANG_GUARD")
+                        .expect("read from the daemon");
+                    assert_ne!(n, 0, "the daemon kept the connection");
+                    read += n;
+                }
+            }
+
             fn was_told_to_end(&self) -> bool {
                 self.passed
                     .iter()
@@ -2233,6 +2251,39 @@ region = "bottom"
             assert!(
                 screen.contains("PLAYED-PROMPT>") && !screen.contains("AFTER-EXIT"),
                 "copy {late} came after the exit and is not applied; the screen shows {screen:?}"
+            );
+        }
+
+        /// A holder sends `Exited` and closes; a write the daemon is in the
+        /// middle of then fails, which does not lose the exit still to be
+        /// read.
+        #[tokio::test]
+        async fn the_exit_sent_before_the_close_is_read_after_a_write_to_the_holder_failed() {
+            /// More than any pipe or socket holds: the daemon is still writing
+            /// it when the holder closes.
+            const LARGE: usize = 16 * 1024 * 1024;
+            let (endpoint, listener) = bind_holder_endpoint("write-fails").await;
+            let (session, mut holder) =
+                tokio::join!(played_session(&endpoint), Holder::accept(listener));
+            holder.expect_ack(1).await;
+
+            session.send_report(vec![b'r'; LARGE]);
+            // Where the write is buffered (Windows), its failure comes out on
+            // the next one, which waits behind it.
+            session.send_report(vec![b's']);
+            holder.drain_at_least(1024 * 1024).await;
+            holder.send(&HolderFrame::Exited { code: Some(7) }).await;
+            drop(holder);
+
+            let mut exited = session.exit_notified();
+            tokio::time::timeout(HANG_GUARD, exited.wait_for(|&gone| gone))
+                .await
+                .expect("the exit is announced")
+                .expect("the exit channel stays open while the session lives");
+            assert_eq!(
+                session.exit_status(),
+                Some(7),
+                "the exit the holder sent before it closed is read, not lost to the failed write"
             );
         }
 
