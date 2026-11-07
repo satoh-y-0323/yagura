@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -45,6 +45,7 @@ use crate::input::{
     ComposerLine, InputProfile, ProbeChars, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep,
     TakeBack, plan_submit_line,
 };
+use crate::parcel_store::{InboxKeeper, KeptParcel, ParcelStore};
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
@@ -71,8 +72,18 @@ use status_gate::{Publication, StatusGate};
 pub(crate) const STATUS_BROADCAST_CAPACITY: usize = 64;
 
 /// A window's `StatusEvent` auth token, set once: when the window opens, or
-/// for a window taken back once its holder returns it.
-type TokenSlot = Arc<OnceLock<Arc<StatusToken>>>;
+/// for a window taken back once its holder returns it. A take-back that ends
+/// any other way drops the sender unset, which settles the slot empty.
+type TokenSlot = watch::Receiver<Option<Arc<StatusToken>>>;
+
+/// What a holder's `Welcome` gives back for a window taken back without a
+/// row: its values, and its token with where to settle it once the window
+/// built from them is registered.
+struct RowlessWelcome {
+    values: WindowValues,
+    token: Option<Arc<StatusToken>>,
+    token_tx: watch::Sender<Option<Arc<StatusToken>>>,
+}
 
 /// Number of base36 digits in a registry's boot nonce (see [`boot_nonce`]).
 const BOOT_NONCE_LEN: usize = 6;
@@ -4589,11 +4600,34 @@ impl WindowEntry {
     /// [`DaemonConfig::status_token_override`]: when it is set, every window
     /// adopts that same value, so any window's token verifies against any
     /// other window (a test / development facility, never production).
+    ///
+    /// A window being taken back has no token until its holder lets the
+    /// daemon in, so this returns `false` meanwhile; see
+    /// [`WindowEntry::verify_status_token_once_settled`].
     #[must_use]
     pub fn verify_status_token(&self, candidate: &str) -> bool {
         self.status_token
-            .get()
+            .borrow()
+            .as_ref()
             .is_some_and(|token| token.verify(candidate))
+    }
+
+    /// Whether the window's token is still to come from a take-back in
+    /// progress.
+    pub(crate) fn token_pending(&self) -> bool {
+        self.status_token.borrow().is_none() && self.status_token.has_changed().is_ok()
+    }
+
+    /// [`WindowEntry::verify_status_token`] once the window's token is
+    /// settled: for a window being taken back, after the take-back ends,
+    /// with the token its holder returned, or with none (every candidate
+    /// refused) when it failed or the window was closed first. Not bounded
+    /// in time, as the take-back is not.
+    pub async fn verify_status_token_once_settled(&self, candidate: &str) -> bool {
+        let mut slot = self.status_token.clone();
+        slot.wait_for(Option::is_some)
+            .await
+            .is_ok_and(|token| token.as_ref().is_some_and(|token| token.verify(candidate)))
     }
 
     /// The parcels waiting for this window's CLI.
@@ -5010,6 +5044,9 @@ impl ParticipationSignal {
 /// [`WindowRegistry::set_window_opened_hook`].
 type WindowOpenedHook = Box<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
 
+/// [`WindowRegistry::set_kept_parcels_hook`].
+pub(crate) type KeptParcelsHook = Arc<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
+
 /// Starts or wakes one window's notice delivery agent; see
 /// [`WindowRegistry::set_notice_launcher`].
 pub(crate) type NoticeLauncher = Box<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
@@ -5045,6 +5082,9 @@ pub struct WindowRegistry {
     /// The table every window's row goes in, installed once at start-up by
     /// `store::wire_into`; `None` when the registry has no database.
     window_table: Mutex<Option<WindowTable>>,
+    /// Where every window's inbox keeps its parcels, installed with the window
+    /// table; `None` when the registry has no database.
+    parcel_store: Mutex<Option<ParcelStore>>,
     /// The one `StatusEvent` auth token every window must adopt, when
     /// [`DaemonConfig::status_token_override`] supplied a well-formed value.
     /// `None` -- the production setting -- means each window gets its own
@@ -5056,6 +5096,10 @@ pub struct WindowRegistry {
     /// when chat is disabled or this registry predates chat entirely (most
     /// tests): a registry never knows what a chat participant is on its own.
     window_opened_hook: Mutex<Option<WindowOpenedHook>>,
+    /// Answers for the parcels a window's inbox read back from the store,
+    /// whose depositors are gone. `None` until an IPC server is built on this
+    /// registry.
+    kept_parcels_hook: Mutex<Option<KeptParcelsHook>>,
     /// Starts or wakes a window's notice delivery agent. `None` until an IPC
     /// server is built on this registry: notices queued before then wait.
     notice_launcher: Mutex<Option<NoticeLauncher>>,
@@ -5119,8 +5163,10 @@ impl WindowRegistry {
             open_lock: AsyncMutex::new(()),
             holder_host,
             window_table: Mutex::new(None),
+            parcel_store: Mutex::new(None),
             status_token_override,
             window_opened_hook: Mutex::new(None),
+            kept_parcels_hook: Mutex::new(None),
             notice_launcher: Mutex::new(None),
             workspace_walks,
             mcp_config_write: AsyncMutex::new(()),
@@ -5380,7 +5426,7 @@ impl WindowRegistry {
             detection,
             session.clone(),
             detector_handle.clone(),
-            Arc::new(OnceLock::from(status_token)),
+            watch::channel(Some(status_token)).1,
             input,
             composer_access,
             abandons_calls_at_turn_end,
@@ -5388,6 +5434,7 @@ impl WindowRegistry {
             detection_warning.clone(),
             provenance,
             row,
+            Vec::new(),
         );
 
         self.register_window(
@@ -5957,6 +6004,7 @@ impl WindowRegistry {
         detection_warning: Option<String>,
         provenance: WindowProvenance,
         row: WindowRow,
+        kept: Vec<KeptParcel>,
     ) -> Arc<WindowEntry> {
         // The same rule the engine itself applies at
         // construction -- a resolved definition means nothing has been
@@ -5976,10 +6024,15 @@ impl WindowRegistry {
             .delivery
             .as_ref()
             .map_or_else(|| self.config().delivery.clone(), ProfileDelivery::spec);
-        let inbox = Inbox::new(
+        let keeper = self
+            .parcel_store()
+            .map(|store| InboxKeeper::new(store, &window_id));
+        let inbox = Inbox::kept(
             self.config().inbox_capacity,
             delivery_spec,
             status_gate.watch(),
+            keeper,
+            kept,
         );
         let detector_weak = Arc::downgrade(&detector_handle);
 
@@ -6160,6 +6213,18 @@ impl WindowRegistry {
         *lock_recover(&self.window_table) = Some(table);
     }
 
+    /// Installs where every window opened or taken back from now on keeps its
+    /// inbox's parcels (`store::wire_into` is its only caller).
+    pub(crate) fn set_parcel_store(&self, store: ParcelStore) {
+        *lock_recover(&self.parcel_store) = Some(store);
+    }
+
+    /// Where every window's parcels are kept; `None` when the registry has no
+    /// database.
+    pub(crate) fn parcel_store(&self) -> Option<ParcelStore> {
+        lock_recover(&self.parcel_store).clone()
+    }
+
     /// The table every window's row goes in; `None` when the registry has no
     /// database.
     pub(crate) fn window_table(&self) -> Option<WindowTable> {
@@ -6203,32 +6268,42 @@ impl WindowRegistry {
             holder,
             credentials,
         } = survivor;
-        let status_token: TokenSlot = Arc::default();
-        let (recorded_tx, recorded_rx) = oneshot::channel::<WindowValues>();
+        let (token_tx, status_token) = watch::channel(None);
+        let (recorded_tx, recorded_rx) = oneshot::channel::<RowlessWelcome>();
         // A row whose values do not read back counts as none: the launch
         // record gives them back, and the row is written again from them.
         let stored = stored.and_then(|stored| stored.values);
         let needs_values = stored.is_none();
         let on_welcome: Box<dyn FnOnce(&str) + Send> = {
-            let status_token = Arc::clone(&status_token);
             let window_id = window_id.clone();
             Box::new(move |record: &str| {
                 let recorded = recorded_launch(record, &window_id);
                 let token = recorded
                     .as_ref()
                     .and_then(|recorded| recorded.token.as_deref())
-                    .and_then(StatusToken::from_override);
-                match token {
-                    Some(token) => {
-                        let _ = status_token.set(Arc::new(token));
-                    }
-                    None => tracing::warn!(
+                    .and_then(StatusToken::from_override)
+                    .map(Arc::new);
+                if token.is_none() {
+                    tracing::warn!(
                         window_id,
                         "the holder's launch record carries no token for the window; its status events are refused"
-                    ),
+                    );
                 }
-                if needs_values && let Some(recorded) = recorded {
-                    let _ = recorded_tx.send(recorded.values);
+                match recorded.filter(|_| needs_values) {
+                    // The token waits for the window built from the values, so
+                    // a request checked against it is served by that window.
+                    Some(recorded) => {
+                        let _ = recorded_tx.send(RowlessWelcome {
+                            values: recorded.values,
+                            token,
+                            token_tx,
+                        });
+                    }
+                    None => {
+                        if let Some(token) = token {
+                            token_tx.send_replace(Some(token));
+                        }
+                    }
                 }
             })
         };
@@ -6280,11 +6355,16 @@ impl WindowRegistry {
         if needs_values {
             let registry = Arc::downgrade(self);
             tokio::spawn(async move {
-                let Ok(values) = recorded_rx.await else {
+                let Ok(welcome) = recorded_rx.await else {
                     return;
                 };
-                if let Some(registry) = registry.upgrade() {
-                    registry.fill_taken_back(&entry, values).await;
+                let Some(registry) = registry.upgrade() else {
+                    return;
+                };
+                if registry.fill_taken_back(&entry, welcome.values).await
+                    && let Some(token) = welcome.token
+                {
+                    welcome.token_tx.send_replace(Some(token));
                 }
             });
         }
@@ -6294,8 +6374,9 @@ impl WindowRegistry {
     /// Replaces `placeholder`, a window taken back without a row, with the
     /// same window built from `values`, which its holder's launch record kept,
     /// and writes its row again. A window closed or removed meanwhile is left
-    /// so.
-    async fn fill_taken_back(&self, placeholder: &Arc<WindowEntry>, values: WindowValues) {
+    /// so, and `false` is returned; the placeholder stays when the window
+    /// cannot be built.
+    async fn fill_taken_back(&self, placeholder: &Arc<WindowEntry>, values: WindowValues) -> bool {
         let window_id = placeholder.window_id.clone();
         let row = match self.window_table() {
             Some(table) => table.restore_row(&window_id, &values).await,
@@ -6307,7 +6388,7 @@ impl WindowRegistry {
                 values,
                 true,
                 &placeholder.session,
-                Arc::clone(&placeholder.status_token),
+                placeholder.status_token.clone(),
                 row,
             )
             .await;
@@ -6315,7 +6396,7 @@ impl WindowRegistry {
             Ok(built) => built,
             Err(error) => {
                 tracing::warn!(window_id, %error, "cannot give the window taken back its values");
-                return;
+                return true;
             }
         };
         {
@@ -6324,10 +6405,10 @@ impl WindowRegistry {
                 .iter_mut()
                 .find(|entry| Arc::ptr_eq(entry, placeholder))
             else {
-                return;
+                return false;
             };
             if placeholder.closed.load(Ordering::SeqCst) {
-                return;
+                return false;
             }
             *slot = Arc::clone(&entry);
         }
@@ -6338,6 +6419,7 @@ impl WindowRegistry {
         );
         spawn_status_forwarder(Arc::downgrade(&entry), detected_rx);
         self.participation.raise();
+        true
     }
 
     /// A window taken back, built from `values` over `session`: with the
@@ -6412,6 +6494,12 @@ impl WindowRegistry {
             detector_handle.expect_status_reports(true);
         }
         spawn_output_pump(session, Arc::downgrade(&detector_handle));
+        // A placeholder answers for no delivery, so its parcels wait in the
+        // store for the window built from its values.
+        let kept = match self.parcel_store().filter(|_| known) {
+            Some(store) => store.load(window_id).await,
+            None => Vec::new(),
+        };
         let name = {
             let entries = lock_recover(&self.entries);
             let opening = lock_recover(&self.opening);
@@ -6435,12 +6523,17 @@ impl WindowRegistry {
             detection_warning,
             provenance,
             row,
+            kept,
         );
         if let Some(layout_json) = values.layout_json {
             entry.set_layout(layout_json);
         }
         if let Some(session_id) = values.session_id.as_deref() {
             entry.record_session_id(session_id);
+        }
+        let kept_parcels_hook = lock_recover(&self.kept_parcels_hook).clone();
+        if let Some(hook) = kept_parcels_hook {
+            hook(&entry);
         }
         Ok((entry, detector_handle, detected_rx))
     }
@@ -6458,6 +6551,18 @@ impl WindowRegistry {
     /// this, so `open_impl` stays a no-op past registration in that case.
     pub fn set_window_opened_hook(&self, hook: WindowOpenedHook) {
         *lock_recover(&self.window_opened_hook) = Some(hook);
+    }
+
+    /// Installs `hook`, which answers for the parcels a window's inbox read
+    /// back from the store, and runs it for every window registered so far;
+    /// a window taken back from then on runs it as it is built, before it
+    /// can be reached.
+    pub(crate) fn set_kept_parcels_hook(&self, hook: KeptParcelsHook) {
+        *lock_recover(&self.kept_parcels_hook) = Some(Arc::clone(&hook));
+        let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
+        for entry in &entries {
+            hook(entry);
+        }
     }
 
     /// Installs the IPC layer's notice launcher, then runs it for every

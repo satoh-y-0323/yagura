@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
+use tokio::sync::oneshot;
 use yagura_protocol::{
     CHAT_READ_LIMIT_MAX, ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo,
     DaemonMessage, WindowStatus, is_valid_token, validate_chat_body,
@@ -1266,8 +1267,11 @@ async fn complete_post(
 /// The inbox key a chat post travels under: the delivery puts it in under
 /// this key, and a clear takes it back out by the same one.
 fn chat_parcel_key(room_id: &str, seq: i64) -> String {
-    format!("chat:{room_id}:{seq}")
+    format!("{CHAT_PARCEL_PREFIX}{room_id}:{seq}")
 }
+
+/// What every chat parcel's key starts with.
+const CHAT_PARCEL_PREFIX: &str = "chat:";
 
 /// Puts the post in `target_id`'s inbox and records how it left: taken by the
 /// window's CLI, or never delivered.
@@ -1320,19 +1324,74 @@ fn spawn_delivery_task(
             Err(_) => return,
         };
         let outcome = match notice_queue::after_deposit(&registry, &entry, deposited) {
-            Ok(end) => match end.await {
-                Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
-                Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
-                // The next daemon settles it.
-                Ok(ParcelEnd::Stopped) => return,
-                Ok(ParcelEnd::Closed) | Err(_) => DeliveryOutcome::UndeliveredUnknown(None),
-            },
+            Ok(end) => {
+                record_when_left(&chat, &broker, &room_id, seq, &target_id, end).await;
+                return;
+            }
             Err(notice_queue::Refused::Full) => DeliveryOutcome::UndeliveredExhausted,
             Err(notice_queue::Refused::Ended) => DeliveryOutcome::UndeliveredUnknown(None),
         };
         chat.record_delivery_and_notify(&broker, &room_id, seq, &target_id, outcome)
             .await;
     });
+}
+
+/// Records how the post `seq` of `room_id` left `target_id`'s inbox, once
+/// `end` says: the one place a delivery in an inbox is settled, whether the
+/// post was put in by this daemon or kept from a previous one.
+async fn record_when_left(
+    chat: &ChatRuntime,
+    broker: &Arc<ApprovalBroker>,
+    room_id: &str,
+    seq: i64,
+    target_id: &str,
+    end: oneshot::Receiver<ParcelEnd>,
+) {
+    let outcome = match end.await {
+        Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
+        Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
+        // The next daemon settles it.
+        Ok(ParcelEnd::Stopped) => return,
+        Ok(ParcelEnd::Closed) | Err(_) => DeliveryOutcome::UndeliveredUnknown(None),
+    };
+    chat.record_delivery_and_notify(broker, room_id, seq, target_id, outcome)
+        .await;
+}
+
+/// The room and sequence number a chat parcel's `key` names: the inverse of
+/// [`chat_parcel_key`].
+fn chat_parcel_of(key: &str) -> Option<(String, i64)> {
+    let (room_id, seq) = key.strip_prefix(CHAT_PARCEL_PREFIX)?.rsplit_once(':')?;
+    Some((room_id.to_owned(), seq.parse().ok()?))
+}
+
+/// Settles, as [`spawn_delivery_task`] does, the delivery of every chat post
+/// a window's inbox read back from the store: a previous daemon put it in, and
+/// it is still `pending` in the room. Runs for every window taken back, before
+/// its doors can be reached.
+pub(super) fn settle_kept_deliveries(
+    registry: &Arc<WindowRegistry>,
+    chat: &Arc<ChatRuntime>,
+    broker: &Arc<ApprovalBroker>,
+) {
+    let chat = Arc::clone(chat);
+    let broker = Arc::clone(broker);
+    registry.set_kept_parcels_hook(Arc::new(move |entry: &Arc<WindowEntry>| {
+        if !chat.store.is_enabled() {
+            return;
+        }
+        for (key, end) in entry.inbox().adopt_kept(CHAT_PARCEL_PREFIX) {
+            let Some((room_id, seq)) = chat_parcel_of(&key) else {
+                continue;
+            };
+            let chat = Arc::clone(&chat);
+            let broker = Arc::clone(&broker);
+            let target_id = entry.window_id().to_owned();
+            tokio::spawn(async move {
+                record_when_left(&chat, &broker, &room_id, seq, &target_id, end).await;
+            });
+        }
+    }));
 }
 
 fn spawn_silence_watch(

@@ -7,6 +7,9 @@
 //! Anything else the daemon does of its own accord is a push ([`Inbox::begin_push`]):
 //! the parcels it carries are out of reach of the doors until it ends, so one
 //! parcel never reaches the CLI twice.
+//!
+//! An inbox given an [`InboxKeeper`] is the copy of what the store keeps for
+//! its window: each change is sent to the store under the inbox's lock.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
@@ -15,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tokio::sync::{oneshot, watch};
 use yagura_protocol::{DaemonMessage, DeliveryStream, WindowStatus};
 
+use crate::parcel_store::{InboxKeeper, KeptParcel};
 use crate::waiter::StatusAt;
 
 /// Between two parcels, and between the intro and the first parcel.
@@ -415,11 +419,22 @@ pub struct PushBudget {
 /// push draws on.
 struct Held {
     parcel: Parcel,
+    /// Its place in the inbox as the store keeps it: lower is older.
+    seq: i64,
     end: Option<oneshot::Sender<ParcelEnd>>,
     budget: Option<PushBudget>,
 }
 
 impl Held {
+    fn kept(&self) -> KeptParcel {
+        KeptParcel {
+            seq: self.seq,
+            key: self.parcel.key.clone(),
+            notice: self.parcel.notice,
+            text: self.parcel.text.clone(),
+        }
+    }
+
     fn settle(self, end: ParcelEnd) {
         if let Some(tx) = self.end {
             // A depositor that stopped listening has nothing left to learn.
@@ -455,18 +470,18 @@ struct State {
     closed: Option<ParcelEnd>,
     waiter: Option<Waiter>,
     next_waiter: u64,
+    /// The place the next parcel deposited takes.
+    next_seq: i64,
 }
 
 impl State {
-    /// Removes the waiting parcel named `key`; `false` when none waits.
-    fn remove_waiting(&mut self, key: &str) -> bool {
-        match self.parcels.iter().position(|held| held.parcel.key == key) {
-            Some(position) => {
-                self.parcels.remove(position);
-                true
-            }
-            None => false,
-        }
+    /// Removes the waiting parcel named `key`; `None` when none waits.
+    fn remove_waiting(&mut self, key: &str) -> Option<Held> {
+        let position = self
+            .parcels
+            .iter()
+            .position(|held| held.parcel.key == key)?;
+        self.parcels.remove(position)
     }
 
     /// How many waiting parcels are not notices: the ones the capacity bounds.
@@ -483,6 +498,7 @@ struct Shared {
     capacity: usize,
     spec: DeliverySpec,
     status: watch::Receiver<StatusAt>,
+    keeper: Option<InboxKeeper>,
     #[cfg(test)]
     before_withdraw: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -490,6 +506,22 @@ struct Shared {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps `held` as it is now. Called under the inbox's lock, so the store
+    /// sees the changes in the order the inbox made them.
+    fn keep(&self, held: &Held) {
+        if let Some(keeper) = &self.keeper {
+            keeper.keep(held.kept());
+        }
+    }
+
+    /// Forgets `held`, which left the inbox for good. Called under the
+    /// inbox's lock.
+    fn forget<'a>(&self, held: impl IntoIterator<Item = &'a Held>) {
+        if let Some(keeper) = &self.keeper {
+            keeper.forget(held.into_iter().map(|held| held.seq).collect());
+        }
     }
 
     /// Whether the daemon may push to the window: not while it cannot tell
@@ -570,6 +602,7 @@ impl Shared {
             }
             return;
         }
+        self.forget(&taken);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
@@ -697,12 +730,53 @@ impl Inbox {
     /// and pushing only while `status` allows it.
     #[must_use]
     pub fn new(capacity: usize, spec: DeliverySpec, status: watch::Receiver<StatusAt>) -> Self {
+        Self::kept(capacity, spec, status, None, Vec::new())
+    }
+
+    /// [`Self::new`], keeping every change through `keeper` and holding
+    /// `kept` first: the parcels the store kept for the window, oldest first,
+    /// whose depositors are gone. A kept parcel longer than one answer
+    /// carries is dropped, as a deposit of it would have been turned away.
+    pub(crate) fn kept(
+        capacity: usize,
+        spec: DeliverySpec,
+        status: watch::Receiver<StatusAt>,
+        keeper: Option<InboxKeeper>,
+        kept: Vec<KeptParcel>,
+    ) -> Self {
+        let mut state = State::default();
+        let mut too_long = Vec::new();
+        for parcel in kept {
+            state.next_seq = state.next_seq.max(parcel.seq.saturating_add(1));
+            if parcel.text.chars().count() > spec.max_chars {
+                too_long.push(parcel.seq);
+                continue;
+            }
+            state.parcels.push_back(Held {
+                parcel: Parcel {
+                    key: parcel.key,
+                    text: parcel.text,
+                    notice: parcel.notice,
+                },
+                seq: parcel.seq,
+                end: None,
+                budget: None,
+            });
+        }
+        if let Some(keeper) = keeper.as_ref().filter(|_| !too_long.is_empty()) {
+            tracing::warn!(
+                count = too_long.len(),
+                "dropped kept parcels longer than the window's answers carry"
+            );
+            keeper.forget(too_long);
+        }
         Self {
             shared: Arc::new(Shared {
-                state: Mutex::new(State::default()),
+                state: Mutex::new(state),
                 capacity,
                 spec,
                 status,
+                keeper,
                 #[cfg(test)]
                 before_withdraw: Mutex::new(None),
             }),
@@ -747,8 +821,9 @@ impl Inbox {
             return refused(parcel);
         }
         let (tx, rx) = oneshot::channel();
-        let held = Held {
+        let mut held = Held {
             parcel,
+            seq: state.next_seq,
             end: Some(tx),
             budget,
         };
@@ -760,9 +835,15 @@ impl Inbox {
         match waiting {
             Some(waiting) => {
                 tracing::debug!(key = %held.parcel.key, "notice replaced the one waiting under its key");
+                held.seq = waiting.seq;
+                self.shared.keep(&held);
                 *waiting = held;
             }
-            None => state.parcels.push_back(held),
+            None => {
+                state.next_seq = state.next_seq.saturating_add(1);
+                self.shared.keep(&held);
+                state.parcels.push_back(held);
+            }
         }
         self.shared.wake(&mut state);
         Deposited {
@@ -800,6 +881,31 @@ impl Inbox {
             .unwrap_or_else(PoisonError::into_inner) = Some(hook);
     }
 
+    /// Gives each parcel the store kept whose depositor is gone and whose key
+    /// starts with `prefix` a new end, so whoever answers for such parcels
+    /// learns how each leaves the inbox. A parcel is adopted once; returns
+    /// the adopted parcels' keys with their ends.
+    pub fn adopt_kept(&self, prefix: &str) -> Vec<(String, oneshot::Receiver<ParcelEnd>)> {
+        let mut state = self.shared.lock();
+        let State {
+            parcels, carrying, ..
+        } = &mut *state;
+        parcels
+            .iter_mut()
+            .chain(
+                carrying
+                    .iter_mut()
+                    .flat_map(|carried| carried.held.iter_mut()),
+            )
+            .filter(|held| held.end.is_none() && held.parcel.key.starts_with(prefix))
+            .map(|held| {
+                let (tx, rx) = oneshot::channel();
+                held.end = Some(tx);
+                (held.parcel.key.clone(), rx)
+            })
+            .collect()
+    }
+
     /// Whether a wait is registered.
     #[must_use]
     pub fn has_waiter(&self) -> bool {
@@ -820,6 +926,7 @@ impl Inbox {
     fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DaemonMessage {
         let mut state = self.shared.lock();
         let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
+        self.shared.forget(&taken);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
@@ -850,6 +957,7 @@ impl Inbox {
         }
         if !state.parcels.is_empty() && self.shared.pushable() {
             let (taken, text) = self.shared.take_within(&mut state, "");
+            self.shared.forget(&taken);
             for held in taken {
                 held.settle(ParcelEnd::Taken);
             }
@@ -946,18 +1054,20 @@ impl Inbox {
         let carried = state.carrying.remove(position);
         match end {
             PushEnd::Taken => {
+                self.shared.forget(&carried.held);
                 for held in carried.held {
                     held.settle(ParcelEnd::Taken);
                 }
             }
             PushEnd::TurnedAway => {
+                self.shared.forget(&carried.held);
                 for held in carried.held {
                     held.settle(ParcelEnd::TurnedAway);
                 }
             }
             // A withdrawn parcel is dropped unsettled: its depositor answers
             // for it.
-            PushEnd::Failed if *carried.withdrawn.borrow() => {}
+            PushEnd::Failed if *carried.withdrawn.borrow() => self.shared.forget(&carried.held),
             PushEnd::Failed => match state.closed {
                 Some(closed) => {
                     for held in carried.held {
@@ -992,7 +1102,8 @@ impl Inbox {
             }
         }
         let mut state = self.shared.lock();
-        if state.remove_waiting(key) {
+        if let Some(removed) = state.remove_waiting(key) {
+            self.shared.forget([&removed]);
             return Withdrawal::Removed;
         }
         match state
@@ -1015,7 +1126,12 @@ impl Inbox {
     /// everything else that push carries: unlike [`Self::withdraw`], this
     /// never marks a push withdrawn.
     pub fn withdraw_waiting(&self, key: &str) -> bool {
-        self.shared.lock().remove_waiting(key)
+        let mut state = self.shared.lock();
+        let Some(removed) = state.remove_waiting(key) else {
+            return false;
+        };
+        self.shared.forget([&removed]);
+        true
     }
 
     /// Replaces the text of the waiting parcel named `key`. `false` when no
@@ -1028,6 +1144,7 @@ impl Inbox {
         match state.parcels.iter_mut().find(|held| held.parcel.key == key) {
             Some(held) => {
                 held.parcel.text = text;
+                self.shared.keep(held);
                 true
             }
             None => false,
@@ -1036,7 +1153,9 @@ impl Inbox {
 
     /// Ends the inbox: every waiting parcel ends as `end`, a push under way
     /// ends that way if it fails, the registered wait is answered with
-    /// nothing, and nothing more is accepted.
+    /// nothing, and nothing more is accepted. What the store keeps is left
+    /// to go with the window's row: a window whose holder was lost, or whose
+    /// daemon stopped, keeps it for a later daemon.
     pub fn close(&self, end: ParcelEnd) {
         let mut state = self.shared.lock();
         if state.closed.is_some() {

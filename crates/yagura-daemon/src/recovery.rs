@@ -24,6 +24,7 @@ use tokio::sync::watch;
 use yagura_os::{Liveness, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{HolderRecord, holder_record_path, read_holder_record};
 
+use crate::parcel_store::KeptReport;
 use crate::sql::FixedSql;
 use crate::store::StoreError;
 use crate::window::WindowRegistry;
@@ -240,6 +241,23 @@ pub async fn take_back_windows(
         }
     }
     remaining
+}
+
+/// The reports the store kept for each window taken back, read once as the
+/// daemon starts; a `lost` window's stay in the store with its row. A
+/// window's inbox reads its own parcels as it is built.
+pub(crate) async fn kept_reports(registry: &WindowRegistry) -> Vec<(String, Vec<KeptReport>)> {
+    let Some(store) = registry.parcel_store() else {
+        return Vec::new();
+    };
+    let mut kept = Vec::new();
+    for info in registry.list() {
+        let reports = store.load_reports(&info.window_id).await;
+        if !reports.is_empty() {
+            kept.push((info.window_id, reports));
+        }
+    }
+    kept
 }
 
 /// What judging the rows and records came to.

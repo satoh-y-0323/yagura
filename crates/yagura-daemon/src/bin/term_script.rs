@@ -24,14 +24,16 @@
 //! `idle`: does nothing until it is killed, with no console of its own
 //! needed. A test names it as a holder's child in a record it writes.
 //!
-//! `fake-holder <mute|reject> <endpoint> <log_file>`: stands in for a
-//! window's holder at `endpoint` (removing a stale socket file there first on
-//! Unix), with no console of its own needed. It accepts every connection and
-//! appends to `log_file` one line per event: `LISTENING` once bound,
-//! `CONNECTED`, `FRAME <frame>` for each frame read and `CLOSED` once the peer
-//! closes. `mute` never writes; `reject` answers each `Hello` with
+//! `fake-holder <mute|reject|gate> <endpoint> <log_file> [<record_file>]`:
+//! stands in for a window's holder at `endpoint` (removing a stale socket file
+//! there first on Unix), with no console of its own needed. It accepts every
+//! connection and appends to `log_file` one line per event: `LISTENING` once
+//! bound, `CONNECTED`, `FRAME <frame>` for each frame read and `CLOSED` once
+//! the peer closes. `mute` never writes; `reject` answers each `Hello` with
 //! `VersionRejected` and keeps the connection open, so whatever the peer sends
-//! next is logged too.
+//! next is logged too. `gate` answers each `Hello` only once a line arrives on
+//! its stdin: `welcome` gets a `Welcome` carrying the content of
+//! `record_file` as the launch record, anything else `VersionRejected`.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -177,7 +179,50 @@ fn run_idle() -> io::Result<()> {
     }
 }
 
-fn run_fake_holder(reject: bool, endpoint: &str, log: &Path) -> io::Result<()> {
+/// How a `fake-holder` answers a `Hello`.
+#[derive(Clone)]
+enum FakeAnswer {
+    Mute,
+    Reject,
+    /// Waits for a line on stdin; `welcome` lets the peer in with this launch
+    /// record.
+    Gate(String),
+}
+
+impl FakeAnswer {
+    async fn answer(&self) -> Option<HolderFrame> {
+        let rejected = HolderFrame::VersionRejected {
+            protocol: HOLDER_PROTOCOL + 1,
+        };
+        match self {
+            Self::Mute => None,
+            Self::Reject => Some(rejected),
+            Self::Gate(record) => {
+                let line = tokio::task::spawn_blocking(|| {
+                    let mut line = String::new();
+                    let _ = io::stdin().read_line(&mut line);
+                    line
+                })
+                .await
+                .unwrap_or_default();
+                Some(if line.trim() == "welcome" {
+                    HolderFrame::Welcome {
+                        protocol: HOLDER_PROTOCOL,
+                        record: record.clone(),
+                        cols: 80,
+                        rows: 24,
+                        exited: false,
+                        child_pid: None,
+                    }
+                } else {
+                    rejected
+                })
+            }
+        }
+    }
+}
+
+fn run_fake_holder(answer: FakeAnswer, endpoint: &str, log: &Path) -> io::Result<()> {
     #[cfg(unix)]
     let _ = std::fs::remove_file(endpoint);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -194,6 +239,7 @@ fn run_fake_holder(reject: bool, endpoint: &str, log: &Path) -> io::Result<()> {
         loop {
             let mut connection = ipc.accept(&mut listener).await.map_err(io::Error::other)?;
             let log = log.to_path_buf();
+            let answer = answer.clone();
             tokio::spawn(async move {
                 log_line(&log, "CONNECTED");
                 let mut frames = HolderFrameBuffer::new();
@@ -206,11 +252,10 @@ fn run_fake_holder(reject: bool, endpoint: &str, log: &Path) -> io::Result<()> {
                     frames.push(&chunk[..read]);
                     while let Ok(Some(frame)) = frames.next_frame() {
                         log_line(&log, &format!("FRAME {frame:?}"));
-                        if reject && matches!(frame, HolderFrame::Hello { .. }) {
-                            let rejected = encode_holder_frame(&HolderFrame::VersionRejected {
-                                protocol: HOLDER_PROTOCOL + 1,
-                            });
-                            let _ = connection.write_all(&rejected).await;
+                        if matches!(frame, HolderFrame::Hello { .. })
+                            && let Some(reply) = answer.answer().await
+                        {
+                            let _ = connection.write_all(&encode_holder_frame(&reply)).await;
                             let _ = connection.flush().await;
                         }
                     }
@@ -227,7 +272,12 @@ fn main() -> io::Result<()> {
         Some("idle") => return run_idle(),
         Some("fake-holder") => {
             let arg = |index: usize| args.get(index).map_or("", String::as_str);
-            return run_fake_holder(arg(2) == "reject", arg(3), Path::new(arg(4)));
+            let answer = match arg(2) {
+                "reject" => FakeAnswer::Reject,
+                "gate" => FakeAnswer::Gate(std::fs::read_to_string(arg(5))?),
+                _ => FakeAnswer::Mute,
+            };
+            return run_fake_holder(answer, arg(3), Path::new(arg(4)));
         }
         _ => {}
     }

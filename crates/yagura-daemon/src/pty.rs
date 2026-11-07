@@ -441,7 +441,8 @@ pub(crate) struct TakeBackSpawn<'a> {
     pub(crate) holder: Option<yagura_os::ProcessHandle>,
     /// Turns `true` once the daemon accepts connections.
     pub(crate) begin: watch::Receiver<bool>,
-    /// Given the launch record the holder's `Welcome` returns.
+    /// Given the launch record the holder's `Welcome` returns; dropped
+    /// uncalled as soon as the take-back fails or the window is closed first.
     pub(crate) on_welcome: Box<dyn FnOnce(&str) + Send>,
     pub(crate) lost: LostNotice,
 }

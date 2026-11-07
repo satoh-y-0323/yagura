@@ -126,6 +126,7 @@ mod notice_residue_rewrite;
 mod one_shot_capture;
 mod os_pty_spawn;
 mod palette_store;
+mod parcels_survive_restart;
 mod plan_core;
 mod plan_permit;
 mod plan_review_gate;

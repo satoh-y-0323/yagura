@@ -830,6 +830,8 @@ struct Outbound {
     /// `Some` on a handle made for one request ([`Outbound::for_one_answer`]):
     /// set by its first reply, after which its replies are dropped.
     answered: Option<AtomicBool>,
+    /// Turns `true` once the peer has closed its side, shared like `broken`.
+    gone: Arc<watch::Sender<bool>>,
 }
 
 impl Outbound {
@@ -838,7 +840,21 @@ impl Outbound {
             tx,
             broken: Arc::new(AtomicBool::new(false)),
             answered: None,
+            gone: Arc::new(watch::channel(false).0),
         }
+    }
+
+    /// Records that the peer has closed its side of the connection.
+    fn mark_gone(&self) {
+        self.gone.send_replace(true);
+    }
+
+    /// Resolves once the peer has closed its side of the connection, so a
+    /// request waiting without a bound has no one left to answer.
+    async fn gone(&self) {
+        let mut gone = self.gone.subscribe();
+        // The sender lives as long as `self`, so this only ends on `true`.
+        let _ = gone.wait_for(|gone| *gone).await;
     }
 
     /// A handle onto the same connection for one request that two parties may
@@ -848,6 +864,7 @@ impl Outbound {
             tx: self.tx.clone(),
             broken: Arc::clone(&self.broken),
             answered: Some(AtomicBool::new(false)),
+            gone: Arc::clone(&self.gone),
         })
     }
 
@@ -1154,6 +1171,17 @@ impl IpcServer {
         self
     }
 
+    /// Answers for what the store kept for the windows taken back as the
+    /// daemon starts: each window's report inbox queues its reports, and the
+    /// chat posts in each window's inbox have their deliveries settled once
+    /// taken. Called once, before the server accepts connections.
+    pub async fn restore_kept_parcels(&self) {
+        for (window_id, kept) in crate::recovery::kept_reports(&self.registry).await {
+            self.reports.restore(&window_id, kept);
+        }
+        chat::settle_kept_deliveries(&self.registry, &self.chat, &self.broker);
+    }
+
     /// Saves every `set_default_palettes` to `store` from now on. `store` is
     /// opened by the caller (`main.rs`) on a blocking thread, which also
     /// hands what it held to [`WindowRegistry::set_default_palettes`].
@@ -1370,9 +1398,14 @@ impl IpcServer {
                                     Ok(Some((body, consumed))) => {
                                         let body_owned = body.to_vec();
                                         read_buf.drain(..consumed);
-                                        let outcome = self
-                                            .handle_frame(&outbound, &body_owned, &mut state)
-                                            .await;
+                                        let outcome = handle_while_reading(
+                                            self.handle_frame(&outbound, &body_owned, &mut state),
+                                            &mut reader,
+                                            &mut read_buf,
+                                            &mut recv_chunk,
+                                            &outbound,
+                                        )
+                                        .await;
                                         match outcome {
                                             FrameOutcome::Continue => {}
                                             FrameOutcome::Disconnect => break 'conn,
@@ -3682,10 +3715,17 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return FrameOutcome::Continue;
         };
-        let authenticated = entry.verify_status_token(token);
+        let Some(authenticated) = verify_once_settled(&entry, "identify", token, outbound).await
+        else {
+            return FrameOutcome::Disconnect;
+        };
         if !authenticated {
             return reject_identify(outbound, state);
         }
+        let Some(entry) = self.registry.get(entry.window_id()) else {
+            outbound.reply(&window_not_found_msg());
+            return FrameOutcome::Continue;
+        };
 
         match &state.origin {
             // Re-claiming the same window is the same statement twice, not a
@@ -3964,7 +4004,10 @@ impl IpcServer {
     ///
     /// A child may speak as soon as it is spawned, before its open has
     /// registered it, so the window is resolved the same way `identify` does:
-    /// by waiting for an open in progress to finish.
+    /// by waiting for an open in progress to finish. Likewise a window being
+    /// taken back is listed before its holder returns its token, so the check
+    /// waits for the take-back to end. Nothing is answered when the peer
+    /// leaves first.
     async fn authenticate_window(
         &self,
         outbound: &Outbound,
@@ -3994,7 +4037,8 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return None;
         };
-        if !entry.verify_status_token(token) {
+        let verified = verify_once_settled(&entry, door, token, outbound).await?;
+        if !verified {
             tracing::warn!(
                 window_id = %entry.window_id(),
                 "rejected a {door} carrying a token that is not this window's"
@@ -4002,7 +4046,13 @@ impl IpcServer {
             outbound.reply(&auth_failed());
             return None;
         }
-        Some(entry)
+        // Served by the window registered now: one taken back without a row
+        // is replaced, while its token settles, by the window its values built.
+        let current = self.registry.get(entry.window_id());
+        if current.is_none() {
+            outbound.reply(&window_not_found_msg());
+        }
+        current
     }
 
     /// Takes one token from the daemon-wide `StatusEvent` bucket,
@@ -4321,6 +4371,65 @@ fn view_action(msg: &ClientMessage, input: InputState) -> Option<ViewAction> {
 /// Encodes one [`DaemonMessage`] into its wire frame (LPJF).
 fn encode_frame(msg: &DaemonMessage) -> Vec<u8> {
     frame_encode(&encode_daemon_message(msg))
+}
+
+/// Whether `token` is `entry`'s, checked once the window's token is settled
+/// (a window being taken back has it only once its take-back ends); `None`
+/// when the peer closed the connection while the token was still to come.
+async fn verify_once_settled(
+    entry: &WindowEntry,
+    door: &str,
+    token: &str,
+    outbound: &Outbound,
+) -> Option<bool> {
+    // A settled token is checked at once: a peer that sends one request and
+    // closes without reading (`--emit-status`) is still heard.
+    if !entry.token_pending() {
+        return Some(entry.verify_status_token(token));
+    }
+    tracing::info!(
+        window_id = %entry.window_id(),
+        door,
+        "the request waits for the window's take-back to settle its token"
+    );
+    tokio::select! {
+        biased;
+        verified = entry.verify_status_token_once_settled(token) => Some(verified),
+        () = outbound.gone() => None,
+    }
+}
+
+/// Bytes a connection may have buffered ahead while one frame is handled: a
+/// whole largest frame with its length prefix.
+const READ_AHEAD_LIMIT: usize = yagura_protocol::MAX_FRAME_BODY_LEN + 4;
+
+/// Runs `handling` to its end while still reading the connection, so a
+/// handler waiting without a bound learns from [`Outbound::gone`] that the
+/// peer has closed it. `handling` is never cut short; what is read is kept in
+/// `read_buf` for the frames after. Reading pauses at [`READ_AHEAD_LIMIT`].
+async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
+    handling: impl Future<Output = FrameOutcome>,
+    reader: &mut R,
+    read_buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+    outbound: &Outbound,
+) -> FrameOutcome {
+    tokio::pin!(handling);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            outcome = &mut handling => return outcome,
+            read = reader.read(chunk), if open && read_buf.len() < READ_AHEAD_LIMIT => {
+                match read {
+                    Ok(0) | Err(_) => {
+                        open = false;
+                        outbound.mark_gone();
+                    }
+                    Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+        }
+    }
 }
 
 /// Writes one connection's queued frames out, in order.
@@ -5248,7 +5357,8 @@ async fn wait_for_submit_evidence(
 }
 
 /// Names each handoff's parcel, so the one this handoff put in a window's
-/// inbox can be withdrawn and no other.
+/// inbox can be withdrawn and no other; with the daemon run's nonce, also
+/// none a previous daemon kept.
 static NEXT_HANDOFF_PARCEL: AtomicU64 = AtomicU64::new(1);
 
 /// Puts a handoff's envelope in its window's inbox and answers once the
@@ -5287,7 +5397,8 @@ async fn deliver_handoff(job: DeliveryJob) {
     );
 
     let key = format!(
-        "handoff:{}",
+        "handoff:{}:{}",
+        registry.boot_nonce(),
         NEXT_HANDOFF_PARCEL.fetch_add(1, Ordering::Relaxed)
     );
     // The daemon-wide budget is drawn only while the envelope is being typed,
@@ -5323,6 +5434,11 @@ async fn deliver_handoff(job: DeliveryJob) {
     // Given back before the answer, so a caller holding the answer also has
     // its budget back.
     drop(slot);
+    // What the answer says of the envelope holds for a next daemon too: one
+    // taken or withdrawn is no longer kept.
+    if let Some(store) = registry.parcel_store() {
+        store.kept().await;
+    }
     outbound.reply(&answer);
 }
 

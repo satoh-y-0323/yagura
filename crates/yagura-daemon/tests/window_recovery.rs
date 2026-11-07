@@ -15,6 +15,7 @@ use crate::common;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -24,12 +25,13 @@ use common::store_fixtures::{insert_window_row_with_layout_value, set_meta};
 use common::{read_response, send};
 use rusqlite::types::Value as SqlValue;
 use yagura_daemon::store;
-use yagura_os::{Liveness, ProcessHandle, ProcessStart};
+use yagura_os::{Liveness, PeerAuth, PlatformIpc, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderRecord, encode_holder_record, holder_record_path, read_holder_record,
 };
 use yagura_protocol::{ClientMessage, DaemonMessage, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
+use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{holder_path, term_script_path};
 
 /// The only token shape `StatusToken::from_override` accepts: the first daemon gives it
@@ -382,6 +384,17 @@ impl FakeHolder {
         }
     }
 
+    /// Hands a `gate` stand-in the line it answers the waiting `Hello` with.
+    fn answer(&mut self, line: &str) {
+        let stdin = self
+            .holder
+            .stdin
+            .as_mut()
+            .expect("the stand-in's stdin is piped");
+        writeln!(stdin, "{line}").expect("write to the stand-in's stdin");
+        stdin.flush().expect("flush the stand-in's stdin");
+    }
+
     fn running(&mut self) -> (bool, bool) {
         (
             self.holder.try_wait().unwrap().is_none(),
@@ -394,7 +407,7 @@ fn spawn_term_script(args: &[&str]) -> Child {
     let mut command = Command::new(term_script_path());
     command
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(unix)]
@@ -411,6 +424,16 @@ async fn replace_holder(
     mode: &str,
     log: PathBuf,
 ) -> FakeHolder {
+    replace_holder_with(sandbox, record, &[mode], log).await
+}
+
+/// [`replace_holder`] with the stand-in's mode followed by the arguments after its log.
+async fn replace_holder_with(
+    sandbox: &Sandbox,
+    record: &HolderRecord,
+    mode: &[&str],
+    log: PathBuf,
+) -> FakeHolder {
     let holders_dir = sandbox.holders_dir();
     let _ = yagura_test_support::process::end_recorded_holder(
         &holders_dir,
@@ -418,7 +441,9 @@ async fn replace_holder(
         record,
     );
     let child = spawn_term_script(&["idle"]);
-    let holder = spawn_term_script(&["fake-holder", mode, &record.endpoint, utf8(&log)]);
+    let mut args = vec!["fake-holder", mode[0], &record.endpoint, utf8(&log)];
+    args.extend_from_slice(&mode[1..]);
+    let holder = spawn_term_script(&args);
     let fake = FakeHolder {
         holder,
         child,
@@ -450,6 +475,173 @@ async fn replace_holder(
 
 fn hello_logged(lines: &[String]) -> bool {
     lines.iter().any(|line| line.starts_with("FRAME Hello"))
+}
+
+/// Another connection to the sandbox's daemon.
+async fn connect(sandbox: &Sandbox) -> Connection {
+    let user = PlatformIpc::default()
+        .current_user_id()
+        .expect("the current user id must resolve");
+    connect_with_retry(&yagura_os::default_endpoint(&user, &sandbox.namespace())).await
+}
+
+fn deliver_take(window_id: &str, token: &str) -> ClientMessage {
+    ClientMessage::DeliverTake {
+        window_id: window_id.to_owned(),
+        token: token.to_owned(),
+    }
+}
+
+fn assert_auth_failed(answer: DaemonMessage, what: &str) {
+    match answer {
+        DaemonMessage::Error { code, .. } => assert_eq!(code, "auth_failed", "{what}"),
+        other => panic!("{what} must be refused, got {other:?}"),
+    }
+}
+
+/// Waits until the daemon has logged that a request to `window_id` waits for the
+/// window's take-back.
+async fn until_held(sandbox: &Sandbox, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    let field = format!("window_id={window_id}");
+    loop {
+        let log = sandbox.daemon_log();
+        if log
+            .lines()
+            .any(|line| line.contains("waits for the window's take-back") && line.contains(&field))
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never held the request to {window_id} for its take-back; daemon log:\n{log}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A launch record of `window_id` carrying `token`, as a holder hands it back.
+fn launch_record(window_id: &str, token: &str) -> String {
+    serde_json::json!({
+        "window_id": window_id,
+        "token": token,
+        "window": { "name": window_id, "cwd": ".", "command": ["idle"], "credentials": "env" },
+    })
+    .to_string()
+}
+
+/// A request carrying a window's token that arrives while the window is still being
+/// taken back is checked once the take-back ends: it passes with the token the holder
+/// hands back, and is refused when the take-back fails. A window taken back without a
+/// row serves it as the window its launch record's values build, with what it keeps.
+#[tokio::test]
+async fn a_door_request_during_a_take_back_is_checked_once_the_take_back_ends() {
+    const KEPT_MARK: &str = "ROWLESS-KEPT-PARCEL";
+    let sandbox = Sandbox::new("recover-gate");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+
+    let mut first = sandbox
+        .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
+        .await;
+    let welcomed = first.open_profile_window(&sandbox, "script").await;
+    let refused = first.open_profile_window(&sandbox, "script").await;
+    let rowless = first.open_profile_window(&sandbox, "script").await;
+    let welcomed_record = record_of(&sandbox, &welcomed);
+    let refused_record = record_of(&sandbox, &refused);
+    let rowless_record = record_of(&sandbox, &rowless);
+    first.kill_keeping_windows();
+    // The row goes, and a parcel is kept for the window without it, which only the
+    // window built from its launch record's values loads.
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        db.execute("DELETE FROM windows WHERE window_id = ?1", [&rowless])
+            .unwrap();
+        db.execute(
+            "INSERT INTO inbox_parcels (window_id, seq, key, notice, body) \
+             VALUES (?1, 1, 'seeded:1', 0, ?2)",
+            [rowless.as_str(), KEPT_MARK],
+        )
+        .unwrap();
+    }
+
+    let fakes = sandbox.tree.make_dir("fake");
+    let welcomed_launch = fakes.join("welcomed.record");
+    std::fs::write(&welcomed_launch, launch_record(&welcomed, TOKEN)).unwrap();
+    let mut welcomed_fake = replace_holder_with(
+        &sandbox,
+        &welcomed_record,
+        &["gate", utf8(&welcomed_launch)],
+        fakes.join("welcomed.log"),
+    )
+    .await;
+    let refused_launch = fakes.join("refused.record");
+    std::fs::write(&refused_launch, launch_record(&refused, TOKEN)).unwrap();
+    let mut refused_fake = replace_holder_with(
+        &sandbox,
+        &refused_record,
+        &["gate", utf8(&refused_launch)],
+        fakes.join("refused.log"),
+    )
+    .await;
+    let rowless_launch = fakes.join("rowless.record");
+    std::fs::write(&rowless_launch, launch_record(&rowless, TOKEN)).unwrap();
+    let mut rowless_fake = replace_holder_with(
+        &sandbox,
+        &rowless_record,
+        &["gate", utf8(&rowless_launch)],
+        fakes.join("rowless.log"),
+    )
+    .await;
+
+    let mut next = sandbox.start().await;
+    for (window_id, fake) in [
+        (&welcomed, &welcomed_fake),
+        (&refused, &refused_fake),
+        (&rowless, &rowless_fake),
+    ] {
+        listed(&mut next, &sandbox, window_id).await;
+        fake.wait_logged("the next daemon's Hello", hello_logged)
+            .await;
+    }
+    let mut welcomed_door = connect(&sandbox).await;
+    send(&mut welcomed_door, &deliver_take(&welcomed, TOKEN)).await;
+    let mut refused_door = connect(&sandbox).await;
+    send(&mut refused_door, &deliver_take(&refused, TOKEN)).await;
+    let mut rowless_door = connect(&sandbox).await;
+    send(&mut rowless_door, &deliver_take(&rowless, TOKEN)).await;
+    for window_id in [&welcomed, &refused, &rowless] {
+        until_held(&sandbox, window_id).await;
+    }
+
+    welcomed_fake.answer("welcome");
+    refused_fake.answer("reject");
+    rowless_fake.answer("welcome");
+    match read_response(&mut welcomed_door).await {
+        DaemonMessage::Delivery { .. } => {}
+        other => panic!(
+            "a request with the token the holder hands back must pass once the window is \
+             taken back, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+    assert_auth_failed(
+        read_response(&mut refused_door).await,
+        "a request to a window whose take-back failed",
+    );
+    match read_response(&mut rowless_door).await {
+        DaemonMessage::Delivery { output, .. } => assert!(
+            output.contains(KEPT_MARK),
+            "a window taken back without a row must serve the request as the window its \
+             values build, with the parcel it keeps: {output:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+        other => panic!(
+            "a request to a window taken back without a row must pass, got {other:?}; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
 }
 
 /// Windows whose holders never welcome the next daemon are listed `Unknown` while it
@@ -508,6 +700,9 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
         "another window's status event must not wait for the windows still being taken back"
     );
 
+    let mut door = connect(&sandbox).await;
+    send(&mut door, &deliver_take(&closed, TOKEN)).await;
+    until_held(&sandbox, &closed).await;
     send(
         &mut next.client,
         &ClientMessage::CloseWindow {
@@ -521,6 +716,10 @@ async fn a_window_being_taken_back_is_listed_closable_and_holds_no_other_window_
         other => panic!("a window being taken back must close, got {other:?}"),
     }
     closed_fake.wait_gone("close_window").await;
+    assert_auth_failed(
+        read_response(&mut door).await,
+        "a door request to a window closed while it was taken back",
+    );
 
     send(&mut next.client, &ClientMessage::Shutdown).await;
     while !matches!(

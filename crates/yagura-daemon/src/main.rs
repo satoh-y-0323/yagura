@@ -601,6 +601,7 @@ async fn async_main(
     if let Some(palette_store) = palette_store {
         server = server.with_palette_store(palette_store);
     }
+    server.restore_kept_parcels().await;
     let server = Arc::new(server);
     server
         .run_with_listener(listener, daemon_sid)

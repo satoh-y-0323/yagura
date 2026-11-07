@@ -98,7 +98,8 @@ pub(super) struct TakeBack {
     /// check of whom it lets in needs.
     pub(super) begin: watch::Receiver<bool>,
     /// Given the launch record the holder's `Welcome` returns, before anything
-    /// else of the holder is taken in.
+    /// else of the holder is taken in; dropped uncalled as soon as the
+    /// take-back fails or the window is closed first.
     pub(super) on_welcome: Box<dyn FnOnce(&str) + Send>,
     pub(super) lost: LostNotice,
 }
@@ -767,6 +768,9 @@ fn run_take_back(
         };
         match handshake {
             None => {
+                // Dropped uncalled, so whoever waits on the window's token
+                // learns at once that it will not come.
+                drop(on_welcome);
                 link.close();
                 if end_unconnected_holder(holder.as_deref(), &files) {
                     remove_dead_holder_files(&files);
@@ -780,6 +784,7 @@ fn run_take_back(
                 sink.exit.publish(None);
             }
             Some(Err(reason)) => {
+                drop(on_welcome);
                 tracing::warn!(
                     window_id = window_id.as_str(),
                     reason,

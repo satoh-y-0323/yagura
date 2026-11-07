@@ -141,6 +141,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/015_default_palettes.sql"),
     include_str!("../migrations/016_tickets.sql"),
     include_str!("../migrations/017_windows.sql"),
+    include_str!("../migrations/018_parcels.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a
@@ -407,7 +408,8 @@ pub struct Store {
 /// Internal order: [`open_store`] -> the one move of a 0.3 store's last
 /// windows into `lost` rows ([`crate::recovery::move_0_3_candidates`]) ->
 /// the window table's writer on the store's connection
-/// ([`crate::window::WindowRegistry::set_window_table`]). `db_path` being
+/// ([`crate::window::WindowRegistry::set_window_table`]) -> the writer of the
+/// kept parcels on a connection of its own. `db_path` being
 /// `None`, or [`open_store`] failing, disables persistence for the rest of
 /// this process (warned once) without affecting window operations.
 pub fn wire_into(registry: &Arc<WindowRegistry>, db_path: Option<PathBuf>) {
@@ -433,6 +435,12 @@ pub fn wire_into(registry: &Arc<WindowRegistry>, db_path: Option<PathBuf>) {
         tracing::warn!("failed to move the 0.3 store's last windows into lost rows ({err})");
     }
     registry.set_window_table(crate::window_table::WindowTable::spawn(store.conn));
+    match open_migrated(&db_path) {
+        Ok(conn) => registry.set_parcel_store(crate::parcel_store::ParcelStore::spawn(conn)),
+        Err(err) => tracing::warn!(
+            "failed to open the store of kept parcels ({err}); parcels are kept in memory only"
+        ),
+    }
 }
 
 /// Resolves the database path: `explicit` > `YAGURA_STORE_DB` >

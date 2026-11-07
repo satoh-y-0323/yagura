@@ -16,6 +16,10 @@
 //! put in the parent window's own inbox for its CLI, and not again until the
 //! report inbox has been emptied. Its count follows the reports that arrive
 //! while it waits; emptying the report inbox withdraws it.
+//!
+//! Each report inbox is the copy of what the store keeps for its window
+//! ([`crate::parcel_store`]): a report queued is kept, and a drain forgets
+//! them, so a next daemon hands out the reports this one accepted.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,6 +35,7 @@ use yagura_protocol::{
 use crate::approval::ApprovalBroker;
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
+use crate::parcel_store::{KeptReport, ParcelStore};
 use crate::plan_permit::{self, PermitError, TaskBinding};
 use crate::pty::lock_recover;
 use crate::store::StoreError;
@@ -56,11 +61,11 @@ pub(super) struct ReportBody {
 }
 
 /// Every window's inbox of received reports, together with the
-/// `wait_for_report` waiters parked on an empty one. Memory only:
-/// window ids do not survive a restart, so neither does an
-/// inbox.
+/// `wait_for_report` waiters parked on an empty one. The queued reports are
+/// kept in the registry's store when it has one.
 pub struct ReportInboxes {
     registry: Arc<WindowRegistry>,
+    store: Option<ParcelStore>,
     /// Held across every change to a notice's state and the matching deposit,
     /// revision or withdrawal in the window's own inbox, so the two never
     /// disagree. Taken before that inbox's lock, which never calls back here.
@@ -82,6 +87,10 @@ struct Inbox {
     /// recreated, so a notice written for one stretch is never recorded
     /// against a later one.
     stretch: u64,
+    /// The place the store keeps the oldest queued report at.
+    first_seq: i64,
+    /// The place the next report queued behind the others takes.
+    next_seq: i64,
 }
 
 /// Where the inbox's current non-empty stretch stands on its notice.
@@ -100,6 +109,27 @@ impl Inbox {
     fn is_idle(&self) -> bool {
         self.reports.is_empty() && self.reserved == 0 && self.waiters.is_empty()
     }
+
+    /// The places `count` reports take in the store: ahead of the queued
+    /// ones when `older`, behind them otherwise.
+    fn places(&mut self, count: usize, older: bool) -> Vec<i64> {
+        let count = i64::try_from(count).unwrap_or(i64::MAX);
+        if self.reports.is_empty() {
+            self.first_seq = 0;
+            self.next_seq = 0;
+        }
+        let start = if older {
+            self.first_seq = self.first_seq.saturating_sub(count);
+            self.first_seq
+        } else {
+            let start = self.next_seq;
+            self.next_seq = self.next_seq.saturating_add(count);
+            start
+        };
+        (0..count)
+            .map(|offset| start.saturating_add(offset))
+            .collect()
+    }
 }
 
 /// What [`ReportInboxes::take_or_wait`] decided.
@@ -114,6 +144,7 @@ impl ReportInboxes {
     #[must_use]
     pub fn new(registry: Arc<WindowRegistry>) -> Self {
         Self {
+            store: registry.parcel_store(),
             registry,
             inboxes: Mutex::new(HashMap::new()),
             next_waiter_id: AtomicU64::new(0),
@@ -159,6 +190,13 @@ impl ReportInboxes {
             let Some(reports) = hand_to_waiter(inbox, reports) else {
                 return;
             };
+            // Kept under the same lock a drain forgets them under, so the
+            // store follows the inbox's order.
+            if let Some(store) = self.store.as_ref().filter(|_| entry.is_some()) {
+                let places = inbox.places(reports.len(), older);
+                let kept: Vec<(i64, &ReceivedReport)> = places.into_iter().zip(&reports).collect();
+                store.keep_reports(window_id, &kept);
+            }
             if older {
                 inbox.reports.splice(0..0, reports);
             } else {
@@ -246,6 +284,9 @@ impl ReportInboxes {
         {
             let reports = std::mem::take(&mut inbox.reports);
             inbox.notice = Notice::Lowered;
+            if let Some(store) = &self.store {
+                store.forget_reports(window_id);
+            }
             // The reports it announced were read.
             if let Some(entry) = &entry {
                 let _ = entry.inbox().withdraw(REPORT_NOTICE_KEY);
@@ -278,7 +319,8 @@ impl ReportInboxes {
     }
 
     /// Drops everything queued for `window_id`, whose window can no longer
-    /// read it.
+    /// read it. What the store keeps goes with the window's row: a window
+    /// whose holder was lost, or whose daemon stopped, keeps it.
     pub(super) fn discard(&self, window_id: &str) {
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id) {
@@ -288,6 +330,34 @@ impl ReportInboxes {
                 inboxes.remove(window_id);
             }
         }
+    }
+
+    /// Returns once every report queued or drained so far is written to the
+    /// store (or failed): what answers for an accepted report waits for this.
+    pub(super) async fn kept(&self) {
+        if let Some(store) = &self.store {
+            store.kept().await;
+        }
+    }
+
+    /// Queues `kept`, the reports the store kept for `window_id`'s inbox,
+    /// for a window taken back as the daemon starts; their notice, if it
+    /// still waits, is in the window's own inbox and counts as due.
+    pub(super) fn restore(&self, window_id: &str, kept: Vec<KeptReport>) {
+        let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+            return;
+        };
+        let (first_seq, next_seq) = (first.seq, last.seq.saturating_add(1));
+        let mut inboxes = lock_recover(&self.inboxes);
+        let inbox = inboxes.entry(window_id.to_string()).or_default();
+        if !inbox.reports.is_empty() {
+            return;
+        }
+        inbox.reports = kept.into_iter().map(|kept| kept.report).collect();
+        inbox.first_seq = first_seq;
+        inbox.next_seq = next_seq;
+        inbox.notice = Notice::Due;
+        inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -503,6 +573,11 @@ pub(super) async fn handle_send_report(
         }
         None => send_opener_report(inboxes, registry, &entry, &body),
     };
+    // Accepted only once kept: the report and the notice it put in the
+    // parent's inbox.
+    if matches!(reply, DaemonMessage::ReportSent { .. }) {
+        inboxes.kept().await;
+    }
     outbound.reply(&reply);
 }
 
