@@ -1842,9 +1842,9 @@ pub const MAX_FRAME_BODY_LEN: usize = 16 * 1024 * 1024;
 /// like `WindowList` and other window queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowInfo {
-    /// Unique identifier for this window within the daemon process lifetime.
-    /// Window IDs are non-persistent: they are valid only while the daemon
-    /// process is running.
+    /// Unique identifier for this window. A window keeps its id across
+    /// daemon restarts while its holder runs: the next daemon of the instance
+    /// takes the window back under the same id.
     pub window_id: String,
     /// User-provided or auto-derived name for the window.
     pub name: String,

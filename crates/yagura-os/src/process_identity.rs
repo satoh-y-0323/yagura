@@ -382,8 +382,6 @@ mod platform {
     pub(super) struct Handle {
         pid: libc::pid_t,
         start: String,
-        /// Watches the process's exit (`EVFILT_PROC`, `NOTE_EXIT`).
-        queue: OwnedFd,
     }
 
     /// The process's status and start; `None` when no process has that id.
@@ -456,56 +454,60 @@ mod platform {
         }
     }
 
+    /// A new watch of `pid`'s exit (`EVFILT_PROC`, `NOTE_EXIT`); `None` when
+    /// no process has that id. Each waiter needs its own: a queue reports the
+    /// exit to one of the threads waiting on it.
+    fn watch_exit(pid: libc::pid_t) -> io::Result<Option<OwnedFd>> {
+        let Ok(ident) = libc::uintptr_t::try_from(pid) else {
+            return Ok(None);
+        };
+        // SAFETY: kqueue takes no arguments and returns a new descriptor
+        // or -1.
+        let queue = unsafe { libc::kqueue() };
+        if queue == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor was just returned to this function alone.
+        let queue = unsafe { OwnedFd::from_raw_fd(queue) };
+        // SAFETY: zeroed is a valid `kevent`; the fields that matter are
+        // set below.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = ident;
+        change.filter = libc::EVFILT_PROC;
+        change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        change.fflags = libc::NOTE_EXIT;
+        // SAFETY: one change from a live stack local, no events asked for.
+        let added = unsafe {
+            libc::kevent(
+                queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if added == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        Ok(Some(queue))
+    }
+
     impl Handle {
-        /// Watches the exit first and checks the start after, so the watch
-        /// is known to be on the process the start names.
         pub(super) fn open(pid: u32, start: &str) -> io::Result<Option<Self>> {
             let Ok(pid) = libc::pid_t::try_from(pid) else {
                 return Ok(None);
             };
-            let Ok(ident) = libc::uintptr_t::try_from(pid) else {
-                return Ok(None);
-            };
-            // SAFETY: kqueue takes no arguments and returns a new descriptor
-            // or -1.
-            let queue = unsafe { libc::kqueue() };
-            if queue == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            // SAFETY: the descriptor was just returned to this function alone.
-            let queue = unsafe { OwnedFd::from_raw_fd(queue) };
-            // SAFETY: zeroed is a valid `kevent`; the fields that matter are
-            // set below.
-            let mut change: libc::kevent = unsafe { std::mem::zeroed() };
-            change.ident = ident;
-            change.filter = libc::EVFILT_PROC;
-            change.flags = libc::EV_ADD | libc::EV_ONESHOT;
-            change.fflags = libc::NOTE_EXIT;
-            // SAFETY: one change from a live stack local, no events asked for.
-            let added = unsafe {
-                libc::kevent(
-                    queue.as_raw_fd(),
-                    &change,
-                    1,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null(),
-                )
-            };
-            if added == -1 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    return Ok(None);
-                }
-                return Err(error);
-            }
             if !runs(pid, start)? {
                 return Ok(None);
             }
             Ok(Some(Self {
                 pid,
                 start: start.to_owned(),
-                queue,
             }))
         }
 
@@ -517,10 +519,15 @@ mod platform {
             }
         }
 
+        /// The watch is made before the start is checked, so it is known to
+        /// be on the process the start names.
         pub(super) fn wait(&self) -> io::Result<()> {
+            let Some(queue) = watch_exit(self.pid)? else {
+                return Ok(());
+            };
             // A process that became a zombie before the watch sends no event.
             while self.liveness() != Liveness::Dead {
-                if exit_reported(&self.queue, None)? {
+                if exit_reported(&queue, None)? {
                     return Ok(());
                 }
             }

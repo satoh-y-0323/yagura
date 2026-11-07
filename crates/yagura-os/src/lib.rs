@@ -1243,3 +1243,8 @@ pub type ProcessGroup = platform_windows::JobObject;
 /// ends every process in it, and dropping it does too.
 #[cfg(not(windows))]
 pub type ProcessGroup = platform_unix::UnixProcessGroup;
+
+/// How long a [`ProcessGroup`] ended with `terminate` is given between
+/// `SIGTERM` and `SIGKILL`.
+#[cfg(not(windows))]
+pub const PROCESS_GROUP_TERM_GRACE: Duration = platform_unix::DEFAULT_TERM_GRACE;

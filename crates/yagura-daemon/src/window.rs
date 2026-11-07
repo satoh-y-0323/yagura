@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -48,14 +48,15 @@ use crate::input::{
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
-    AttachGeneration, GuardedWrite, PtyResult, PtySession, TakeBackCall, TakeBackPrefix,
-    TakeBackRegistration, WindowSpawn, lock_recover,
+    AttachGeneration, GuardedWrite, LostNotice, PtyResult, PtySession, TakeBackCall,
+    TakeBackPrefix, TakeBackRegistration, TakeBackSpawn, WindowSpawn, lock_recover,
 };
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::window_table::{
-    OpeningRow, Reservation, WindowRow, WindowTable, WindowValues, credentials_kind, launch_record,
+    OpeningRow, Reservation, WindowRow, WindowTable, WindowValues, credentials_kind,
+    credentials_mode, launch_record, recorded_launch,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
@@ -68,6 +69,10 @@ use status_gate::{Publication, StatusGate};
 /// generous enough that a lagging subscriber means a stalled connection
 /// rather than a burst.
 pub(crate) const STATUS_BROADCAST_CAPACITY: usize = 64;
+
+/// A window's `StatusEvent` auth token, set once: when the window opens, or
+/// for a window taken back once its holder returns it.
+type TokenSlot = Arc<OnceLock<Arc<StatusToken>>>;
 
 /// Number of base36 digits in a registry's boot nonce (see [`boot_nonce`]).
 const BOOT_NONCE_LEN: usize = 6;
@@ -1763,8 +1768,10 @@ pub struct WindowEntry {
     /// value; without the override each window owns a freshly generated token.
     /// No accessor exposes the raw value:
     /// [`WindowEntry::verify_status_token`] and the env injection in
-    /// [`WindowRegistry::open`] are the only consumers.
-    status_token: Arc<StatusToken>,
+    /// [`WindowRegistry::open`] are the only consumers. Empty for a window
+    /// being taken back until its holder returns the token in its launch
+    /// record.
+    status_token: TokenSlot,
     /// How this window's CLI accepts and submits one line, resolved from its
     /// detection definition's `[input]` table at open time (`InputProfile`
     /// defaults when the definition has none, or none loaded).
@@ -4550,7 +4557,9 @@ impl WindowEntry {
     /// other window (a test / development facility, never production).
     #[must_use]
     pub fn verify_status_token(&self, candidate: &str) -> bool {
-        self.status_token.verify(candidate)
+        self.status_token
+            .get()
+            .is_some_and(|token| token.verify(candidate))
     }
 
     /// The parcels waiting for this window's CLI.
@@ -5290,13 +5299,14 @@ impl WindowRegistry {
 
         let palette = self.default_palette_for(vendor.as_deref());
         let record = launch_record(&window_id, status_token.as_hex(), &values);
+        let lost = row.lost_notice();
         let ((session, hooks_injected), row) = row
             .open(self.spawn_pty_for_window(
                 &command,
                 &resolved_cwd,
                 &status_token,
                 &window_id,
-                record,
+                (record, lost),
                 &resolution,
                 extra_profile_env,
                 &prepared,
@@ -5343,7 +5353,7 @@ impl WindowRegistry {
             detection,
             session.clone(),
             detector_handle.clone(),
-            status_token,
+            Arc::new(OnceLock::from(status_token)),
             input,
             composer_access,
             abandons_calls_at_turn_end,
@@ -5358,8 +5368,8 @@ impl WindowRegistry {
             entry.clone(),
             detector_handle,
             detected_rx,
-            &opening,
-        )?;
+            Some(&opening),
+        );
         // Registered above, so a hook that spawns a watcher observes an entry
         // the registry can already look up by id.
         if let Some(hook) = lock_recover(&self.window_opened_hook).as_ref() {
@@ -5627,7 +5637,7 @@ impl WindowRegistry {
         resolved_cwd: &std::path::Path,
         status_token: &StatusToken,
         window_id: &str,
-        record: String,
+        (record, lost): (String, LostNotice),
         resolution: &program::Resolution,
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
@@ -5711,6 +5721,7 @@ impl WindowRegistry {
                 removed_env,
                 palette: Some(palette),
                 record,
+                lost,
             },
             &self.config,
             &self.holder_host,
@@ -5764,6 +5775,18 @@ impl WindowRegistry {
             .to_string();
         let outcome = load_definition_for(&self.config, detection_override);
         let outcome = self.reject_when_submit_delay_does_not_outlast_confirm(outcome);
+        self.detection_from(window_id, session, outcome, resolved_name)
+    }
+
+    /// The detection a window runs from `outcome`, the load of the definition
+    /// named `resolved_name`.
+    fn detection_from(
+        &self,
+        window_id: &str,
+        session: &PtySession,
+        outcome: DetectionLoadOutcome,
+        resolved_name: String,
+    ) -> DetectionSetup {
         // The one place the two-variant outcome is widened into the optional
         // pair the detection engine and `DetectionSetup` are built from.
         let (definition, warning) = match outcome {
@@ -5910,7 +5933,7 @@ impl WindowRegistry {
         detection: Option<String>,
         session: Arc<PtySession>,
         detector_handle: Arc<DetectorHandle>,
-        status_token: Arc<StatusToken>,
+        status_token: TokenSlot,
         input: InputProfile,
         composer_access: ComposerAccess,
         abandons_calls_at_turn_end: bool,
@@ -5984,17 +6007,17 @@ impl WindowRegistry {
         })
     }
 
-    /// Registers the window entry in the registry, spawns all background
-    /// tasks (output pump, exit watcher, status forwarder), and returns
-    /// ownership of the entry to the caller.
+    /// Registers the window entry in the registry, handing it the seat and
+    /// name of the open in progress (`opening`) if any, and spawns all
+    /// background tasks (output pump, exit watcher, status forwarder).
     fn register_window(
         &self,
         session: &Arc<PtySession>,
         entry: Arc<WindowEntry>,
         detector_handle: Arc<DetectorHandle>,
         detected_rx: mpsc::UnboundedReceiver<ConfirmedStatus>,
-        opening: &OpeningWindow<'_>,
-    ) -> Result<(), WindowOpenError> {
+        opening: Option<&OpeningWindow<'_>>,
+    ) {
         // The output pump is already running (started right after the
         // detector was created, see `open_impl`); exactly `entry` and this
         // watcher task hold a strong `Arc<DetectorHandle>` from here on.
@@ -6011,10 +6034,11 @@ impl WindowRegistry {
             // as an entry and as an open in progress, nor as neither.
             let mut entries = lock_recover(&self.entries);
             entries.push(entry);
-            opening.hand_over();
+            if let Some(opening) = opening {
+                opening.hand_over();
+            }
         }
         self.participation.raise();
-        Ok(())
     }
 
     /// A receiver that wakes whenever the set of windows, or a name or
@@ -6125,6 +6149,280 @@ impl WindowRegistry {
     /// row in (`store::wire_into` is its only caller).
     pub(crate) fn set_window_table(&self, table: WindowTable) {
         *lock_recover(&self.window_table) = Some(table);
+    }
+
+    /// The table every window's row goes in; `None` when the registry has no
+    /// database.
+    pub(crate) fn window_table(&self) -> Option<WindowTable> {
+        lock_recover(&self.window_table).clone()
+    }
+
+    /// The directory holders that outlive this daemon keep their records in;
+    /// `None` when this registry's holders end with it.
+    pub(crate) fn lasting_holders_dir(&self) -> Option<PathBuf> {
+        self.holder_host
+            .take_back_context()
+            .map(|context| context.holders_dir)
+    }
+
+    /// Registers the window `survivor` names, which a previous daemon of the
+    /// instance left running, under its id: not connected and `Unknown`,
+    /// listed, closable and stopped with the daemon from now on. Its link
+    /// lets itself into the holder once `begin` turns `true`; the holder's
+    /// launch record then gives back the window's token. A window with a row
+    /// takes the values the row keeps; one without takes only its id, and the
+    /// values the launch record keeps (with its row written again) once the
+    /// holder lets the daemon in. Not refused by the window limits: the window
+    /// already exists. The chat introduction is not sent again.
+    ///
+    /// # Errors
+    ///
+    /// [`WindowOpenError::SpawnFailed`] when the window's link cannot start.
+    pub(crate) async fn take_back(
+        self: &Arc<Self>,
+        survivor: crate::recovery::Survivor,
+        begin: watch::Receiver<bool>,
+    ) -> Result<(), WindowOpenError> {
+        let crate::recovery::Survivor {
+            window_id,
+            stored,
+            record,
+            holder,
+        } = survivor;
+        let status_token: TokenSlot = Arc::default();
+        let (recorded_tx, recorded_rx) = oneshot::channel::<WindowValues>();
+        let needs_values = stored.is_none();
+        let on_welcome: Box<dyn FnOnce(&str) + Send> = {
+            let status_token = Arc::clone(&status_token);
+            let window_id = window_id.clone();
+            Box::new(move |record: &str| {
+                let recorded = recorded_launch(record, &window_id);
+                let token = recorded
+                    .as_ref()
+                    .and_then(|recorded| recorded.token.as_deref())
+                    .and_then(StatusToken::from_override);
+                match token {
+                    Some(token) => {
+                        let _ = status_token.set(Arc::new(token));
+                    }
+                    None => tracing::warn!(
+                        window_id,
+                        "the holder's launch record carries no token for the window; its status events are refused"
+                    ),
+                }
+                if needs_values && let Some(recorded) = recorded {
+                    let _ = recorded_tx.send(recorded.values);
+                }
+            })
+        };
+        let lost: LostNotice = {
+            let table = self.window_table();
+            let window_id = window_id.clone();
+            Box::new(move || {
+                if let Some(table) = table {
+                    table.mark_lost(&window_id);
+                }
+            })
+        };
+        let (values, row, known) = match stored {
+            Some(stored) => (
+                stored.values,
+                WindowRow::taken_back(self.window_table(), &window_id),
+                true,
+            ),
+            None => (
+                unknown_values(&window_id),
+                WindowRow::taken_back(None, &window_id),
+                false,
+            ),
+        };
+        let session = PtySession::take_back(
+            TakeBackSpawn {
+                window_id: &window_id,
+                command: &values.command,
+                record,
+                holder,
+                begin,
+                on_welcome,
+                lost,
+            },
+            &self.config,
+            &self.holder_host,
+        )
+        .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
+        let session = Arc::new(session);
+        let (entry, detector_handle, detected_rx) = self
+            .taken_back_entry(&window_id, values, known, &session, status_token, row)
+            .await?;
+        self.register_window(&session, entry.clone(), detector_handle, detected_rx, None);
+        if needs_values {
+            let registry = Arc::downgrade(self);
+            tokio::spawn(async move {
+                let Ok(values) = recorded_rx.await else {
+                    return;
+                };
+                if let Some(registry) = registry.upgrade() {
+                    registry.fill_taken_back(&entry, values).await;
+                }
+            });
+        }
+        self.request_snapshot();
+        Ok(())
+    }
+
+    /// Replaces `placeholder`, a window taken back without a row, with the
+    /// same window built from `values`, which its holder's launch record kept,
+    /// and writes its row again. A window closed or removed meanwhile is left
+    /// so.
+    async fn fill_taken_back(&self, placeholder: &Arc<WindowEntry>, values: WindowValues) {
+        let window_id = placeholder.window_id.clone();
+        let row = match self.window_table() {
+            Some(table) => table.restore_row(&window_id, &values).await,
+            None => WindowRow::taken_back(None, &window_id),
+        };
+        let built = self
+            .taken_back_entry(
+                &window_id,
+                values,
+                true,
+                &placeholder.session,
+                Arc::clone(&placeholder.status_token),
+                row,
+            )
+            .await;
+        let (entry, detector_handle, detected_rx) = match built {
+            Ok(built) => built,
+            Err(error) => {
+                tracing::warn!(window_id, %error, "cannot give the window taken back its values");
+                return;
+            }
+        };
+        {
+            let mut entries = lock_recover(&self.entries);
+            let Some(slot) = entries
+                .iter_mut()
+                .find(|entry| Arc::ptr_eq(entry, placeholder))
+            else {
+                return;
+            };
+            if placeholder.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            *slot = Arc::clone(&entry);
+        }
+        spawn_exit_watcher(
+            Arc::clone(&placeholder.session),
+            detector_handle,
+            Arc::downgrade(&entry),
+        );
+        spawn_status_forwarder(Arc::downgrade(&entry), detected_rx);
+        self.participation.raise();
+        self.request_snapshot();
+    }
+
+    /// A window taken back, built from `values` over `session`: with the
+    /// detection they name and what its profile determines when they are
+    /// `known`, without a definition (so its status stays `Unknown`) when they
+    /// are only a placeholder.
+    async fn taken_back_entry(
+        &self,
+        window_id: &str,
+        values: WindowValues,
+        known: bool,
+        session: &Arc<PtySession>,
+        status_token: TokenSlot,
+        row: WindowRow,
+    ) -> Result<
+        (
+            Arc<WindowEntry>,
+            Arc<DetectorHandle>,
+            mpsc::UnboundedReceiver<ConfirmedStatus>,
+        ),
+        WindowOpenError,
+    > {
+        let workspace = resolve_key_blocking(PathBuf::from(&values.cwd)).await;
+        let detection = if known {
+            self.initialize_detection_for_window(window_id, session, values.detection.as_deref())
+        } else {
+            self.detection_from(
+                window_id,
+                session,
+                DetectionLoadOutcome::Failed(
+                    "the window's values are not known until its holder lets the daemon in"
+                        .to_owned(),
+                ),
+                String::new(),
+            )
+        };
+        let DetectionSetup {
+            handle: detector_handle,
+            detected_rx,
+            warning: detection_warning,
+            input,
+            definition_name,
+            composer_access,
+            abandons_calls_at_turn_end,
+        } = detection;
+        let profile = values
+            .profile
+            .as_deref()
+            .filter(|_| known)
+            .map(|profile| profile_determined(&self.config, window_id, profile))
+            .unwrap_or_default();
+        let provenance = WindowProvenance {
+            opener: values.opener.clone(),
+            task_origin: values
+                .task_plan_id
+                .clone()
+                .zip(values.task_id.clone())
+                .map(|(plan_id, task_id)| TaskOrigin { plan_id, task_id }),
+            launch: values.profile.clone().map(|profile| LaunchIdentity {
+                profile,
+                model: values.model.clone(),
+                effort: values.effort.clone(),
+            }),
+            delivery: profile.delivery,
+            hooks: profile.hooks,
+            wake_command: profile.wake_command,
+            credentials: credentials_mode(values.credentials),
+            // Only an open creates the folder; a window taken back has its own.
+            credentials_dir: None,
+        };
+        if provenance.hooks.reaches() {
+            detector_handle.expect_status_reports(true);
+        }
+        spawn_output_pump(session, Arc::downgrade(&detector_handle));
+        let name = {
+            let entries = lock_recover(&self.entries);
+            let opening = lock_recover(&self.opening);
+            claim_name(&entries, &opening, &values.name, OnNameTaken::Number)?
+        };
+        let entry = self.create_window_entry(
+            window_id.to_owned(),
+            name,
+            values.vendor.clone(),
+            values.cwd.clone(),
+            workspace,
+            values.command.clone(),
+            values.detection.clone(),
+            Arc::clone(session),
+            detector_handle.clone(),
+            status_token,
+            input,
+            composer_access,
+            abandons_calls_at_turn_end,
+            definition_name,
+            detection_warning,
+            provenance,
+            row,
+        );
+        if let Some(layout_json) = values.layout_json {
+            entry.set_layout(layout_json);
+        }
+        if let Some(session_id) = values.session_id.as_deref() {
+            entry.record_session_id(session_id);
+        }
+        Ok((entry, detector_handle, detected_rx))
     }
 
     /// This registry's own configuration, for a caller that needs it outside
@@ -6274,6 +6572,86 @@ impl WindowRegistry {
                 );
             }
         }
+    }
+}
+
+/// The values a window taken back without a row has until its holder's launch
+/// record gives its own: its id for a name, and nothing else.
+fn unknown_values(window_id: &str) -> WindowValues {
+    WindowValues {
+        name: window_id.to_owned(),
+        cwd: String::new(),
+        vendor: None,
+        command: Vec::new(),
+        detection: None,
+        profile: None,
+        model: None,
+        effort: None,
+        layout_json: None,
+        session_id: None,
+        opener: None,
+        task_plan_id: None,
+        task_id: None,
+        credentials: credentials_kind(CredentialsMode::Env),
+    }
+}
+
+/// What a window's profile determines and its row does not keep.
+#[derive(Default)]
+struct ProfileDetermined {
+    delivery: Option<ProfileDelivery>,
+    hooks: HooksRoute,
+    wake_command: Option<WakeCommand>,
+}
+
+/// What the profile `profile` determines for a window taken back, resolved
+/// against the profiles this daemon loaded the way an open plans it: its
+/// `[delivery]`, the route its hooks take, and its wake command. The defaults,
+/// with one line logged, when the profile cannot be launched any more. How an
+/// open settled its hooks (left out or not) is not kept, so the route is the
+/// one the profile plans.
+fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> ProfileDetermined {
+    let launch = match crate::profile::resolve_launch(
+        config,
+        profile,
+        None,
+        None,
+        &crate::profile::LaunchOptionValues::default(),
+    ) {
+        Ok(launch) => launch,
+        Err(error) => {
+            tracing::warn!(
+                window_id,
+                profile,
+                %error,
+                "the profile of a window taken back cannot be resolved; its delivery, hooks and wake command take the defaults"
+            );
+            return ProfileDetermined::default();
+        }
+    };
+    let hooks = if launch.hooks.is_some() {
+        HooksRoute::Injection
+    } else if launch
+        .hooks_registration
+        .as_ref()
+        .is_some_and(crate::mcp_registration::McpRegistrationSpec::owns_entries)
+    {
+        HooksRoute::RegisteredEntries
+    } else {
+        HooksRoute::Unarranged
+    };
+    let wake_command = launch
+        .delivery
+        .as_ref()
+        .filter(|delivery| matches!(delivery.wake, crate::profile_delivery::WakeMode::Command(_)))
+        .map(|_| WakeCommand {
+            argv: launch.argv.clone(),
+            env: launch.env.clone().into_iter().collect(),
+        });
+    ProfileDetermined {
+        delivery: launch.delivery,
+        hooks,
+        wake_command,
     }
 }
 

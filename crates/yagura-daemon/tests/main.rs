@@ -200,6 +200,7 @@ mod waiter;
 mod window_liveness;
 mod window_model_responsiveness;
 mod window_names;
+mod window_recovery;
 mod window_registry;
 mod window_resize_bundled_conpty;
 mod window_resize_read_output;

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{oneshot, watch};
-use yagura_protocol::holder::{HolderViewOp, is_plain_window_id};
+use yagura_protocol::holder::{HolderRecord, HolderViewOp, is_plain_window_id};
 use yagura_protocol::{InputModes, Palette, ScreenCopy, ScreenPush};
 
 use crate::child_env::ChildBaseEnv;
@@ -45,6 +45,10 @@ pub enum PtyError {
 }
 
 pub type PtyResult<T> = Result<T, PtyError>;
+
+/// Marks a window's row lost once its holder is found gone with the window
+/// still open; run at most once, from the window's link.
+pub(crate) type LostNotice = Box<dyn FnOnce() + Send>;
 
 /// Makes the next PTY resize fail, for tests of what a failed resize leaves
 /// behind. Only the `fault-injection` feature can arm it; `take` is the same
@@ -421,6 +425,25 @@ pub(crate) struct WindowSpawn<'a> {
     /// The launch record the holder keeps in memory only and returns in its
     /// `Welcome`.
     pub(crate) record: String,
+    pub(crate) lost: LostNotice,
+}
+
+/// A window a previous daemon of the instance left running, to be taken back
+/// by [`PtySession::take_back`].
+pub(crate) struct TakeBackSpawn<'a> {
+    pub(crate) window_id: &'a str,
+    /// The command the window was opened with, as its row keeps it.
+    pub(crate) command: &'a [String],
+    /// The holder's record.
+    pub(crate) record: HolderRecord,
+    /// The holder's process, opened by its id and start; `None` when the OS
+    /// would not tell whether it runs.
+    pub(crate) holder: Option<yagura_os::ProcessHandle>,
+    /// Turns `true` once the daemon accepts connections.
+    pub(crate) begin: watch::Receiver<bool>,
+    /// Given the launch record the holder's `Welcome` returns.
+    pub(crate) on_welcome: Box<dyn FnOnce(&str) + Send>,
+    pub(crate) lost: LostNotice,
 }
 
 /// What a session shares with its link, made before the link starts.
@@ -513,7 +536,8 @@ pub struct PtySession {
     /// `true` once the child has exited (see [`PtySession::exit_notified`]).
     exit_notify_rx: watch::Receiver<bool>,
 
-    /// `true` once the holder's process has ended.
+    /// `true` once the link has let go of the holder: its process ended, or
+    /// a closed window's holder could not be named, leaving it running.
     released: watch::Receiver<bool>,
 
     /// Outlives every window opened through it.
@@ -599,6 +623,7 @@ impl PtySession {
                 removed_env: &[],
                 palette: None,
                 record: String::new(),
+                lost: Box::new(|| {}),
             },
             config,
             host,
@@ -636,8 +661,59 @@ impl PtySession {
         };
         let context = host.link_context().await?;
         let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
-        let started = holder_link::start(context, launch, sink)?;
+        let started = holder_link::start(context, launch, sink, spawn.lost)?;
         Self::open(started, shared, key_records_flattened, host).await
+    }
+
+    /// The window `spawn` names, which a previous daemon of the instance left
+    /// running: returned at once, not connected, with no screen and its
+    /// status to be judged. Once [`TakeBackSpawn::begin`] turns `true` its
+    /// link lets itself into the holder; until then, and until the holder
+    /// lets it in, writes and resizes wait. A take-back that fails ends
+    /// nothing: the window stays unconnected, with its holder running until
+    /// the window is closed.
+    ///
+    /// # Errors
+    ///
+    /// [`PtyError::SpawnFailed`] when `host` keeps no holders that outlive a
+    /// daemon, the window id is not plain, or the link cannot start.
+    pub(crate) fn take_back(
+        spawn: TakeBackSpawn<'_>,
+        config: &DaemonConfig,
+        host: &Arc<HolderHost>,
+    ) -> PtyResult<Self> {
+        if !is_plain_window_id(spawn.window_id) {
+            return Err(PtyError::SpawnFailed);
+        }
+        let Some(context) = host.take_back_context() else {
+            return Err(PtyError::SpawnFailed);
+        };
+        let key_records_flattened = spawn
+            .command
+            .first()
+            .is_some_and(|program| config.host_os.flattens_key_records(program));
+        let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
+        let child_process_id = spawn.record.child_pid.unwrap_or(0);
+        let take = holder_link::TakeBack {
+            window_id: spawn.window_id.to_owned(),
+            endpoint: spawn.record.endpoint,
+            holder_pid: spawn.record.holder_pid,
+            holder: spawn.holder,
+            cols: Self::INITIAL_COLS,
+            rows: Self::INITIAL_ROWS,
+            begin: spawn.begin,
+            on_welcome: spawn.on_welcome,
+            lost: spawn.lost,
+        };
+        let (link, released) = holder_link::start_take_back(context, take, sink)?;
+        Ok(Self::from_parts(
+            link,
+            released,
+            shared,
+            key_records_flattened,
+            child_process_id,
+            host,
+        ))
     }
 
     /// A window over a holder already serving `endpoint` from process
@@ -670,6 +746,24 @@ impl PtySession {
         let holder_link::Opened {
             child_pid: child_process_id,
         } = opened.await.map_err(|_| PtyError::SpawnFailed)??;
+        Ok(Self::from_parts(
+            link,
+            released,
+            shared,
+            key_records_flattened,
+            child_process_id,
+            host,
+        ))
+    }
+
+    fn from_parts(
+        link: Link,
+        released: watch::Receiver<bool>,
+        shared: Shared,
+        key_records_flattened: bool,
+        child_process_id: u32,
+        host: &Arc<HolderHost>,
+    ) -> Self {
         let Shared {
             copy,
             input,
@@ -679,7 +773,7 @@ impl PtySession {
             is_exited,
             exit_notify_rx,
         } = shared;
-        Ok(Self {
+        Self {
             resize_fault: ResizeFault::default(),
             copy,
             input,
@@ -695,7 +789,7 @@ impl PtySession {
             exit_notify_rx,
             released,
             _host: Arc::clone(host),
-        })
+        }
     }
 
     /// The window's text as a terminal shows it, its last `max_lines`
@@ -1070,6 +1164,10 @@ impl PtySession {
     /// child. A holder whose child already exited stays to answer reads of
     /// the window until it is told this. A writer stuck inside a write is not
     /// waited for: its write fails once the child or the holder is gone.
+    ///
+    /// A window not connected to its holder (still being taken back, its
+    /// take-back failed, or its connection lost) has its holder ended by its
+    /// link instead.
     pub fn terminate(&self) {
         self.link.terminate(false);
         self.writer.request_release();
@@ -1084,8 +1182,8 @@ impl PtySession {
         self.link.terminate(true);
     }
 
-    /// Waits, at most `limit`, until the window's holder process has ended;
-    /// returns whether it got there.
+    /// Waits, at most `limit`, until the window's link has let go of its
+    /// holder (see [`PtySession::terminate`]); returns whether it got there.
     pub async fn wait_until_released(&self, limit: Duration) -> bool {
         let mut released = self.released.clone();
         matches!(

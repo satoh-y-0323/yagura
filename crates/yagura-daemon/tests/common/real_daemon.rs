@@ -132,6 +132,11 @@ impl Sandbox {
         yagura_os::instance_dir(&base, &self.namespace())
     }
 
+    /// The instance's holders folder, where each window's holder keeps its record.
+    pub fn holders_dir(&self) -> PathBuf {
+        self.state_root().join("holders")
+    }
+
     pub fn daemon_log(&self) -> String {
         std::fs::read_to_string(self.state_root().join("logs").join("daemon.log"))
             .unwrap_or_else(|err| format!("<no daemon log: {err}>"))
@@ -251,7 +256,11 @@ impl Sandbox {
 
     async fn connect_to(&self, child: Child) -> RunningDaemon {
         let client = connect_with_retry(self.endpoint.endpoint()).await;
-        RunningDaemon { child, client }
+        RunningDaemon {
+            child,
+            client,
+            holders: Some((self.holders_dir(), self.instance.clone())),
+        }
     }
 
     pub fn write_probe_profile(&self, id: &str, command: &[&str], env_table: &str) {
@@ -274,21 +283,43 @@ impl Sandbox {
     }
 }
 
-/// A daemon process and a connection to it. Dropping it stops the process; the windows'
-/// children go with it because the daemon owns them through a kill-on-close group.
+impl Drop for Sandbox {
+    // Windows whose holders outlived every daemon of the instance are ended with it.
+    fn drop(&mut self) {
+        let _ = yagura_test_support::process::end_recorded_holders(
+            &self.holders_dir(),
+            Some(std::ffi::OsStr::new(&self.instance)),
+        );
+    }
+}
+
+/// A daemon process and a connection to it. Dropping it kills the process and then
+/// ends the windows its holders' records name, since a holder may outlive its daemon.
 pub struct RunningDaemon {
     child: Child,
     pub client: Connection,
+    /// The holders folder and the instance of the windows ended on drop.
+    holders: Option<(PathBuf, String)>,
 }
 
 impl Drop for RunningDaemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some((dir, instance)) = &self.holders {
+            let _ =
+                yagura_test_support::process::end_recorded_holders(dir, Some(instance.as_ref()));
+        }
     }
 }
 
 impl RunningDaemon {
+    /// Kills the daemon process outright and waits for it to be gone, leaving its
+    /// windows' holders to whatever they do when their daemon goes away.
+    pub fn kill_keeping_windows(mut self) {
+        self.holders = None;
+    }
+
     pub async fn open_profile_window(&mut self, sandbox: &Sandbox, profile: &str) -> String {
         send(
             &mut self.client,

@@ -20,8 +20,27 @@
 //! synchronized update (`CSI ? 2026 h`), writes about `<bytes>` bytes of text
 //! lines (`x` repeated, a line break every 79 characters), and stays alive
 //! without ever ending the update.
+//!
+//! `idle`: does nothing until it is killed, with no console of its own
+//! needed. A test names it as a holder's child in a record it writes.
+//!
+//! `fake-holder <mute|reject> <endpoint> <log_file>`: stands in for a
+//! window's holder at `endpoint` (removing a stale socket file there first on
+//! Unix), with no console of its own needed. It accepts every connection and
+//! appends to `log_file` one line per event: `LISTENING` once bound,
+//! `CONNECTED`, `FRAME <frame>` for each frame read and `CLOSED` once the peer
+//! closes. `mute` never writes; `reject` answers each `Hello` with
+//! `VersionRejected` and keeps the connection open, so whatever the peer sends
+//! next is logged too.
 
 use std::io::{self, Read, Write};
+use std::path::Path;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
+use yagura_protocol::holder::{
+    HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, encode_holder_frame,
+};
 
 const READY_MARKER: &[u8] = b"SCRIPT-READY\r\n";
 
@@ -142,12 +161,80 @@ fn run_sync_flood(stdout: &mut io::Stdout, bytes: usize) -> io::Result<()> {
     stay_alive()
 }
 
+fn log_line(log: &Path, line: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+fn run_idle() -> io::Result<()> {
+    loop {
+        std::thread::park();
+    }
+}
+
+fn run_fake_holder(reject: bool, endpoint: &str, log: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(endpoint);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let ipc = PlatformIpc::default();
+        let security = ipc.endpoint_security().map_err(io::Error::other)?;
+        let mut listener = ipc
+            .bind(endpoint, security)
+            .await
+            .map_err(io::Error::other)?;
+        log_line(log, "LISTENING");
+        loop {
+            let mut connection = ipc.accept(&mut listener).await.map_err(io::Error::other)?;
+            let log = log.to_path_buf();
+            tokio::spawn(async move {
+                log_line(&log, "CONNECTED");
+                let mut frames = HolderFrameBuffer::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let read = match connection.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    frames.push(&chunk[..read]);
+                    while let Ok(Some(frame)) = frames.next_frame() {
+                        log_line(&log, &format!("FRAME {frame:?}"));
+                        if reject && matches!(frame, HolderFrame::Hello { .. }) {
+                            let rejected = encode_holder_frame(&HolderFrame::VersionRejected {
+                                protocol: HOLDER_PROTOCOL + 1,
+                            });
+                            let _ = connection.write_all(&rejected).await;
+                            let _ = connection.flush().await;
+                        }
+                    }
+                }
+                log_line(&log, "CLOSED");
+            });
+        }
+    })
+}
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("idle") => return run_idle(),
+        Some("fake-holder") => {
+            let arg = |index: usize| args.get(index).map_or("", String::as_str);
+            return run_fake_holder(arg(2) == "reject", arg(3), Path::new(arg(4)));
+        }
+        _ => {}
+    }
     if let Err(error) = yagura_os::enter_raw_console_input() {
         eprintln!("term_script: cannot enter raw console input: {error}");
         std::process::exit(2);
     }
-    let args: Vec<String> = std::env::args().collect();
     let mut stdout = io::stdout();
     match args.get(1).map(String::as_str) {
         Some("attr-grid") => {

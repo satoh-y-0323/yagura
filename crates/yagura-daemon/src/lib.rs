@@ -34,6 +34,7 @@ pub mod profile_hook_events;
 mod profile_layers;
 pub mod profile_rewrite;
 pub mod pty;
+pub mod recovery;
 pub mod roles;
 pub mod room;
 mod sql;

@@ -163,6 +163,9 @@ impl HolderHost {
             tracing::error!("no window holder executable is resolved; refusing to open a window");
             return Err(PtyError::SpawnFailed);
         };
+        // A daemon's place outlives the daemon: the next daemon of its instance
+        // comes for the window. A private place goes with its host.
+        let awaits_successor = matches!(self.place, Place::Daemon(_));
         let (daemon_endpoint, holders_dir, stderr, log_file, keep) = match &self.place {
             Place::Daemon(place) => {
                 let holders_dir = place.holders_dir.clone();
@@ -215,14 +218,36 @@ impl HolderHost {
             holders_dir,
             stderr,
             log_file,
-            // No daemon comes back for a window yet: every window ends with
-            // the connection to the daemon that opened it.
-            awaits_successor: false,
+            awaits_successor,
             fallback_logged: Arc::clone(&self.fallback_logged),
             keep,
             live: LiveLink(Arc::clone(&self.links)),
         })
     }
+
+    /// What a window a previous daemon of the instance left is taken back
+    /// with; `None` for a host without a [`HolderPlace`], whose holders never
+    /// outlive it.
+    pub(crate) fn take_back_context(&self) -> Option<TakeBackContext> {
+        let Place::Daemon(place) = &self.place else {
+            return None;
+        };
+        Some(TakeBackContext {
+            instance: self.instance.clone(),
+            boot: self.boot.clone(),
+            daemon_endpoint: place.daemon_endpoint.clone(),
+            holders_dir: place.holders_dir.clone(),
+        })
+    }
+}
+
+/// What a window left by a previous daemon is taken back with: the holder is
+/// already running, at a place that outlives every daemon of the instance.
+pub(crate) struct TakeBackContext {
+    pub(crate) instance: OsString,
+    pub(crate) boot: String,
+    pub(crate) daemon_endpoint: String,
+    pub(crate) holders_dir: PathBuf,
 }
 
 impl Drop for HolderHost {

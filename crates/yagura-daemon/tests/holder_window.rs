@@ -1,11 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// `ps` only reads the process table on Unix; it starts nothing a window could adopt.
+// `ps` only reads the process table on Unix, and the library host is this test binary
+// run again and killed by the test; neither starts anything a window could adopt.
 #![allow(clippy::disallowed_methods)]
 
 //! The daemon keeps every window through a `yagura-holder` process: the window's child
-//! runs under the holder, every end of the window (closing it, the daemon's shutdown,
-//! the daemon going away) ends the child's tree and the holder, and none of them leaves
-//! the holder's files behind.
+//! runs under the holder, every end of the window (closing it, the daemon's shutdown, a
+//! library registry going away unclosed) ends the child's tree and the holder, and none
+//! of them leaves the holder's files behind.
 //!
 //! Each process is watched from while it is known to be alive, so its end is observed
 //! on the process itself rather than on a reused pid.
@@ -179,11 +180,6 @@ async fn published_pid(pid_file: &Path) -> u32 {
     }
 }
 
-/// The holders folder of the sandbox's instance.
-fn holders_dir(sandbox: &Sandbox) -> PathBuf {
-    sandbox.state_root().join("holders")
-}
-
 /// Opens the `profile` window and watches every process it consists of: the holder
 /// its record names, the child, the grandchild and, on Windows, the pseudoconsole
 /// hosts under the holder.
@@ -194,7 +190,7 @@ async fn open_tree_window(
     pid_file: &Path,
 ) -> (String, Vec<Watch>) {
     let window_id = daemon.open_profile_window(sandbox, profile).await;
-    let record = read_holder_record(&holders_dir(sandbox), &window_id).unwrap_or_else(|error| {
+    let record = read_holder_record(&sandbox.holders_dir(), &window_id).unwrap_or_else(|error| {
         panic!(
             "the window's holder must keep its record in the instance's holders folder: \
              {error}; daemon log:\n{}",
@@ -242,7 +238,7 @@ async fn wait_all_gone(watches: Vec<Watch>) {
 /// No file named for the window is left in the holders directory: its
 /// holder's record or any other.
 fn assert_no_holder_files(sandbox: &Sandbox, window_id: &str, route: &str) {
-    let dir = holders_dir(sandbox);
+    let dir = sandbox.holders_dir();
     let prefix = format!("{window_id}.");
     let left: Vec<_> = std::fs::read_dir(&dir)
         .into_iter()
@@ -320,21 +316,124 @@ async fn the_daemons_shutdown_ends_every_tree_and_holder_and_leaves_no_holder_fi
     assert_no_holder_files(&sandbox, &window_id, "the daemon's shutdown");
 }
 
-/// Provisional until holders outlive the daemon: a daemon that goes away without
-/// closing its windows takes them with it.
-#[tokio::test]
-async fn provisional_a_daemon_that_goes_away_ends_every_tree_and_holder_and_leaves_no_files() {
-    let sandbox = Sandbox::new("holder-daemon-gone");
-    let pid_file = sandbox.tree.make_dir("pids").join("tree.pid");
-    write_tree_profile(&sandbox, "tree", &pid_file);
-    let mut daemon = sandbox.start().await;
-    let (window_id, watches) = open_tree_window(&mut daemon, &sandbox, "tree", &pid_file).await;
+const LIBRARY_HOST: &str = "library_host";
+const LIBRARY_HOST_OUT_ENV: &str = "HOLDER_WINDOW_LIBRARY_HOST_OUT";
+const LIBRARY_HOST_PID_ENV: &str = "HOLDER_WINDOW_LIBRARY_HOST_PID";
 
-    // Kills the daemon process outright and waits for it to be gone.
-    drop(daemon);
+/// A window registry used as a library has no next daemon to come for its
+/// windows: the process holding it going away unclosed ends every window's tree
+/// and holder, and leaves none of the holder's files.
+#[tokio::test]
+async fn a_library_registry_that_goes_away_unclosed_ends_every_tree_and_holder() {
+    let tmp = yagura_test_support::paths::TempDir::new("yagura-holder-window", "library-gone");
+    let out = tmp.path().join("window");
+    let pid_file = tmp.path().join("grandchild.pid");
+    let process = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            yagura_test_support::process::libtest_name(module_path!(), LIBRARY_HOST).as_str(),
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LIBRARY_HOST_OUT_ENV, &out)
+        .env(LIBRARY_HOST_PID_ENV, &pid_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start the library host");
+    let mut host = LibraryHost {
+        process,
+        holders: None,
+    };
+
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    let window_id = loop {
+        if let Ok(text) = std::fs::read_to_string(&out)
+            && let Some(window_id) = text.strip_suffix('\n')
+        {
+            break window_id.to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the library host never opened its window"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let prefix = format!("yagura-holders-{}-", host.process.id());
+    let holders = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+        })
+        .expect("the library host's holders folder");
+    host.holders = Some(holders.clone());
+    let record = read_holder_record(&holders, &window_id).expect("the holder's record");
+    let mut watches = vec![
+        Watch::new("holder", record.holder_pid),
+        Watch::new(
+            "child",
+            record.child_pid.expect("the record names its child"),
+        ),
+        Watch::new("grandchild", published_pid(&pid_file).await),
+    ];
+    watches.extend(pseudoconsole_hosts(record.holder_pid));
+
+    host.process.kill().unwrap();
+    host.process.wait().unwrap();
 
     wait_all_gone(watches).await;
-    assert_no_holder_files(&sandbox, &window_id, "the daemon going away");
+    let prefix = format!("{window_id}.");
+    let left: Vec<_> = std::fs::read_dir(&holders)
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with(&prefix))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the library registry going away left the holder's {left:?} behind"
+    );
+}
+
+/// The library host process and its place, which it cannot remove once killed: ends
+/// whatever the place's records still name, then removes it.
+struct LibraryHost {
+    process: std::process::Child,
+    holders: Option<PathBuf>,
+}
+
+impl Drop for LibraryHost {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        if let Some(holders) = &self.holders {
+            let _ = yagura_test_support::process::end_recorded_holders(holders, None);
+            let _ = std::fs::remove_dir_all(holders);
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "the library host of a_library_registry_that_goes_away_unclosed_ends_every_tree_and_holder"]
+async fn library_host() {
+    let (Some(out), Some(pid_file)) = (
+        std::env::var_os(LIBRARY_HOST_OUT_ENV),
+        std::env::var_os(LIBRARY_HOST_PID_ENV),
+    ) else {
+        return;
+    };
+    let command =
+        yagura_test_support::process::first_grandchild_command(Path::new(&pid_file), 600_000);
+    let (registry, window_id) = open_window(command).await;
+    std::fs::write(&out, format!("{window_id}\n")).unwrap();
+    // Held until the test kills this process.
+    let _registry = registry;
+    std::future::pending::<()>().await;
 }
 
 #[tokio::test]

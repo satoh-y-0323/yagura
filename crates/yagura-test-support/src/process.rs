@@ -897,6 +897,113 @@ pub fn argv_probe_profile_source(display_name: &str, extra_tables: &str) -> Stri
     format!("{}{extra_tables}", profile_source(display_name, &[program]))
 }
 
+/// Ends every window a record in `holders_dir` names, as a test's last step:
+/// the child's process group (Unix) and the child, then the holder, each only
+/// while the record's pid and start still name a running process; returns the
+/// holder pids it ended. A holder that may outlive its daemon is left running
+/// by the daemon's end, and nothing else ends it. `instance` is the instance
+/// argument the holders were started with (`None` for the default instance).
+///
+/// Waits at most [`crate::HANG_GUARD`] for each process to end and never
+/// panics, so it may run while a failing test unwinds.
+#[must_use = "the ended holders tell a test what its windows left running"]
+pub fn end_recorded_holders(holders_dir: &Path, instance: Option<&std::ffi::OsStr>) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(holders_dir) else {
+        return Vec::new();
+    };
+    let mut ended = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let Some(window_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if let Ok(record) = yagura_protocol::holder::read_holder_record(holders_dir, window_id)
+            && let Some(holder) = end_recorded_holder(holders_dir, instance, &record)
+        {
+            ended.push(holder);
+        }
+    }
+    ended
+}
+
+/// Ends the window `record` names as [`end_recorded_holders`] does; returns the
+/// holder's pid when it was still running. On Unix the killed holder's socket
+/// and lock are removed, since it cannot remove them itself.
+pub fn end_recorded_holder(
+    holders_dir: &Path,
+    instance: Option<&std::ffi::OsStr>,
+    record: &yagura_protocol::holder::HolderRecord,
+) -> Option<u32> {
+    if let Some(child) = record
+        .child_pid
+        .and_then(|pid| recorded_process(pid, record.child_start.as_deref()))
+    {
+        #[cfg(unix)]
+        if let Ok(group) = libc::pid_t::try_from(child.0) {
+            // SAFETY: plain values; the child leads its own group, and a group
+            // of another id is refused with ESRCH.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
+        end_process(&child.1);
+    }
+    let holder = recorded_process(record.holder_pid, record.holder_start.as_deref())?;
+    end_process(&holder.1);
+    remove_killed_holder_endpoint(holders_dir, instance, &record.window_id);
+    Some(holder.0)
+}
+
+/// Removes the socket and lock (Unix) of `window_id`'s holder in `holders_dir`
+/// once its killer has seen it end, which a killed holder cannot do itself:
+/// under the endpoint lock, named as the holder names its endpoint, so a live
+/// listener's are left. Nothing to remove on Windows.
+pub fn remove_killed_holder_endpoint(
+    holders_dir: &Path,
+    instance: Option<&std::ffi::OsStr>,
+    window_id: &str,
+) {
+    #[cfg(unix)]
+    remove_killed_holder_socket(holders_dir, instance, window_id);
+    #[cfg(not(unix))]
+    let _ = (holders_dir, instance, window_id);
+}
+
+#[cfg(unix)]
+fn remove_killed_holder_socket(
+    holders_dir: &Path,
+    instance: Option<&std::ffi::OsStr>,
+    window_id: &str,
+) {
+    use yagura_os::PeerAuth as _;
+    let Ok(namespace) = yagura_os::resolve_instance_from(instance) else {
+        return;
+    };
+    let Ok(user_id) = yagura_os::PlatformIpc::default().current_user_id() else {
+        return;
+    };
+    let Ok(endpoint) = yagura_os::holder_endpoint(&user_id, &namespace, holders_dir, window_id)
+    else {
+        return;
+    };
+    let _ = yagura_os::platform_unix::remove_abandoned_endpoint(Path::new(&endpoint));
+}
+
+fn recorded_process(pid: u32, start: Option<&str>) -> Option<(u32, yagura_os::ProcessHandle)> {
+    let start: yagura_os::ProcessStart = start?.parse().ok()?;
+    let handle = yagura_os::ProcessHandle::open(pid, &start).ok()??;
+    (handle.liveness() == yagura_os::Liveness::Alive).then_some((pid, handle))
+}
+
+fn end_process(handle: &yagura_os::ProcessHandle) {
+    let _ = handle.kill();
+    let deadline = std::time::Instant::now() + crate::HANG_GUARD;
+    while handle.liveness() == yagura_os::Liveness::Alive && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

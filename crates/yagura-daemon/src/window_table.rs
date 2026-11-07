@@ -8,7 +8,8 @@
 //! around its row, so neither order can be written the other way round.
 //!
 //! The rows are written on a thread of their own, over a connection of their
-//! own; nothing here reads them back.
+//! own; a next daemon reads them back once, as it starts
+//! ([`WindowTable::rows`]), to take back the windows they name.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -70,7 +71,101 @@ pub(crate) fn launch_record(window_id: &str, token: Option<&str>, values: &Windo
     .unwrap_or_default()
 }
 
+/// The spelling `kind` names in the table and the launch record, back as
+/// what a window is opened with; anything else is the default, `env`.
+pub(crate) fn credentials_mode(kind: &str) -> CredentialsMode {
+    if kind == credentials_kind(CredentialsMode::Launch) {
+        CredentialsMode::Launch
+    } else {
+        CredentialsMode::Env
+    }
+}
+
+/// Where a row's window stands, as the table records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowState {
+    /// Written before the window's holder started.
+    Opening,
+    /// The holder let the daemon in.
+    Live,
+    /// The holder ended without the window being closed.
+    Lost,
+}
+
+/// One row of the table as a next daemon reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct StoredWindow {
+    pub(crate) window_id: String,
+    pub(crate) values: WindowValues,
+    pub(crate) state: RowState,
+}
+
+/// What a holder's launch record gives back, read from the record its
+/// `Welcome` returns.
+pub(crate) struct RecordedLaunch {
+    pub(crate) token: Option<String>,
+    pub(crate) values: WindowValues,
+}
+
+/// Reads back the launch record `record` of `window_id`; `None` when it is
+/// not one, or names another window.
+pub(crate) fn recorded_launch(record: &str, window_id: &str) -> Option<RecordedLaunch> {
+    #[derive(serde::Deserialize)]
+    struct Values {
+        name: String,
+        cwd: String,
+        vendor: Option<String>,
+        command: Vec<String>,
+        detection: Option<String>,
+        profile: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        layout_json: Option<String>,
+        session_id: Option<String>,
+        opener: Option<String>,
+        task_plan_id: Option<String>,
+        task_id: Option<String>,
+        credentials: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Recorded {
+        window_id: String,
+        token: Option<String>,
+        window: Values,
+    }
+    let recorded: Recorded = serde_json::from_str(record).ok()?;
+    if recorded.window_id != window_id {
+        return None;
+    }
+    let values = recorded.window;
+    Some(RecordedLaunch {
+        token: recorded.token,
+        values: WindowValues {
+            name: values.name,
+            cwd: values.cwd,
+            vendor: values.vendor,
+            command: values.command,
+            detection: values.detection,
+            profile: values.profile,
+            model: values.model,
+            effort: values.effort,
+            layout_json: values.layout_json,
+            session_id: values.session_id,
+            opener: values.opener,
+            task_plan_id: values.task_plan_id,
+            task_id: values.task_id,
+            credentials: credentials_kind(credentials_mode(&values.credentials)),
+        },
+    })
+}
+
 enum Command {
+    Rows {
+        reply: oneshot::Sender<Vec<StoredWindow>>,
+    },
+    Lost {
+        window_id: String,
+    },
     Reserve {
         window_id: String,
         values: WindowValues,
@@ -116,6 +211,80 @@ impl WindowTable {
     fn send(&self, command: Command) -> bool {
         self.commands.send(command).is_ok()
     }
+
+    /// Every row, in the order the windows were opened; none when the rows
+    /// cannot be read.
+    pub(crate) async fn rows(&self) -> Vec<StoredWindow> {
+        let (reply, read) = oneshot::channel();
+        if !self.send(Command::Rows { reply }) {
+            return Vec::new();
+        }
+        read.await.unwrap_or_default()
+    }
+
+    /// Writes `window_id`'s row again from `values`, `live`, for a window whose
+    /// holder runs without one; a row already there is kept as it is.
+    pub(crate) async fn restore_row(&self, window_id: &str, values: &WindowValues) -> WindowRow {
+        match OpeningRow::reserve(Some(self), window_id, values).await {
+            Reservation::Reserved(row) => {
+                let opened: Result<((), WindowRow), std::convert::Infallible> =
+                    row.open(async { Ok(()) }).await;
+                match opened {
+                    Ok(((), row)) => row,
+                    Err(never) => match never {},
+                }
+            }
+            Reservation::Taken => WindowRow::taken_back(Some(self.clone()), window_id),
+        }
+    }
+
+    /// Marks `window_id`'s row `lost` if it is still there: only a row that
+    /// is `opening` or `live` changes, so a window removed by a close never
+    /// comes back as lost.
+    pub(crate) fn mark_lost(&self, window_id: &str) {
+        self.send(Command::Lost {
+            window_id: window_id.to_owned(),
+        });
+    }
+}
+
+fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
+    let mut statement = conn.prepare_fixed(
+        "SELECT window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
+         layout_json, session_id, opener, task_plan_id, task_id, credentials, state \
+         FROM windows ORDER BY opened_seq",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let command_json: String = row.get(4)?;
+        let credentials: String = row.get(14)?;
+        let state: String = row.get(15)?;
+        Ok(StoredWindow {
+            window_id: row.get(0)?,
+            values: WindowValues {
+                name: row.get(1)?,
+                cwd: row.get(2)?,
+                vendor: row.get(3)?,
+                // A row whose command does not read back is still a window.
+                command: serde_json::from_str(&command_json).unwrap_or_default(),
+                detection: row.get(5)?,
+                profile: row.get(6)?,
+                model: row.get(7)?,
+                effort: row.get(8)?,
+                layout_json: row.get(9)?,
+                session_id: row.get(10)?,
+                opener: row.get(11)?,
+                task_plan_id: row.get(12)?,
+                task_id: row.get(13)?,
+                credentials: credentials_kind(credentials_mode(&credentials)),
+            },
+            state: match state.as_str() {
+                "opening" => RowState::Opening,
+                "live" => RowState::Live,
+                _ => RowState::Lost,
+            },
+        })
+    })?;
+    rows.collect()
 }
 
 fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
@@ -128,6 +297,22 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
     };
     while let Ok(command) = received.recv() {
         match command {
+            Command::Rows { reply } => {
+                let rows = read_rows(conn).unwrap_or_else(|error| {
+                    tracing::warn!(%error, "failed to read the window table; no window is taken back");
+                    Vec::new()
+                });
+                let _ = reply.send(rows);
+            }
+            Command::Lost { window_id } => {
+                if let Err(error) = conn.execute_fixed(
+                    "UPDATE windows SET state = 'lost' \
+                     WHERE window_id = ?1 AND state IN ('opening', 'live')",
+                    params![window_id],
+                ) {
+                    warn(error);
+                }
+            }
             Command::Reserve {
                 window_id,
                 values,
@@ -248,6 +433,29 @@ pub(crate) struct WindowRow {
 }
 
 impl WindowRow {
+    /// The row a previous daemon wrote for `window_id`, which a window taken
+    /// back goes on with.
+    pub(crate) fn taken_back(table: Option<WindowTable>, window_id: &str) -> Self {
+        Self {
+            table,
+            window_id: window_id.to_owned(),
+            updates: Mutex::new(()),
+            removed: AtomicBool::new(false),
+        }
+    }
+
+    /// What marks this row `lost` once the window's holder is found gone;
+    /// nothing for a window without a row.
+    pub(crate) fn lost_notice(&self) -> crate::pty::LostNotice {
+        let table = self.table.clone();
+        let window_id = self.window_id.clone();
+        Box::new(move || {
+            if let Some(table) = table {
+                table.mark_lost(&window_id);
+            }
+        })
+    }
+
     /// Writes the window's values as they are now; `values` is read under the
     /// row's own lock, so the last write carries every change made before it.
     pub(crate) fn update(&self, values: impl FnOnce() -> WindowValues) {
@@ -346,6 +554,11 @@ impl OpeningRow {
             Ok(Reserved::Taken) => Reservation::Taken,
             Ok(Reserved::Unwritten) | Err(_) => row(None),
         }
+    }
+
+    /// See [`WindowRow::lost_notice`].
+    pub(crate) fn lost_notice(&self) -> crate::pty::LostNotice {
+        self.0.lost_notice()
     }
 
     /// Runs `start`, which starts the window's holder and returns once the

@@ -540,6 +540,12 @@ async fn async_main(
     }
     store::wire_into(&registry, store_db_path);
 
+    // The windows a previous daemon of this instance left are registered
+    // before any connection is accepted; each one's holder is reached once
+    // the server accepts, since a holder lets in only a daemon it can reach.
+    let (accepting, accepted) = tokio::sync::watch::channel(false);
+    yagura_daemon::recovery::take_back_windows(&registry, accepted).await;
+
     // Opening a database is blocking I/O, so it runs on a blocking thread
     // rather than this async one. Installed before any window can be opened,
     // so every participant window gets the intro.
@@ -588,7 +594,8 @@ async fn async_main(
 
     let mut server = IpcServer::new_with_chat(registry, endpoint, config, chat)
         .with_ledger(ledger)
-        .with_tickets(tickets);
+        .with_tickets(tickets)
+        .with_accepting(accepting);
     if let Some(palette_store) = palette_store {
         server = server.with_palette_store(palette_store);
     }

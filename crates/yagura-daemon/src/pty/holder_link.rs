@@ -1,12 +1,20 @@
-//! The daemon's end of one window's holder: starts it, lets itself in, and
-//! carries the window's screen copies, view frames, writes, requests and end
-//! over the holder's endpoint on a thread and runtime of its own, so a
-//! blocked caller runtime never stops them.
+//! The daemon's end of one window's holder: starts it, or takes back one a
+//! previous daemon of the instance left running, lets itself in, and carries
+//! the window's screen copies, view frames, writes, requests and end over the
+//! holder's endpoint on a thread and runtime of its own, so a blocked caller
+//! runtime never stops them.
 //!
 //! The link takes the holder's frames in the order they were sent, one at a
 //! time: a copy's rows are held until its close, checked, and applied at once,
 //! so readers only ever see whole copies, and everything the holder sent
 //! before an answer has been taken in when that answer is handed on.
+//!
+//! The link's thread is the only owner of the holder's process: it alone
+//! waits for the holder's end, kills it, and removes the files of a holder it
+//! killed or found gone. It kills a holder only in [`end_unconnected_holder`]
+//! (a window closed while it is not connected to its holder) and for a window
+//! that never opened. A failed take-back itself ends nothing: only the user's
+//! later close of that window does.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -18,18 +26,19 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
-use yagura_os::{DetachedProcess, IpcTransport, PlatformIpc};
+use yagura_os::{DetachedProcess, IpcTransport, PlatformIpc, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderEnvOp, HolderFault, HolderFrame, HolderFrameBuffer, HolderLaunch,
     HolderSpawnFailure, HolderViewNote, HolderViewOp, encode_holder_frame, encode_holder_launch,
-    holder_record_path, read_holder_record,
+    read_holder_record,
 };
 use yagura_protocol::{MAX_WINDOW_DIMENSION, Palette, ScreenPush, ScreenRows};
 
 use super::views::ViewSlot;
-use super::{PtyError, PublishedInput, lock_recover};
+use super::{LostNotice, PtyError, PublishedInput, lock_recover};
 use crate::detector::SharedCopy;
-use crate::holder_host::LinkContext;
+use crate::holder_host::{LinkContext, TakeBackContext};
+use crate::recovery::{HolderFiles, remove_dead_holder_files};
 
 /// How long a holder waits for its first `Hello`; also bounds how long the
 /// daemon tries to be let in.
@@ -73,6 +82,27 @@ pub(super) struct Launch {
     pub(super) record: String,
 }
 
+/// A window a previous daemon of the instance left, whose holder runs.
+pub(super) struct TakeBack {
+    pub(super) window_id: String,
+    /// The endpoint the holder's record names.
+    pub(super) endpoint: String,
+    /// The holder's process as its record names it.
+    pub(super) holder_pid: u32,
+    /// The holder's process, opened by its id and start; `None` when the OS
+    /// would not tell whether it runs.
+    pub(super) holder: Option<ProcessHandle>,
+    pub(super) cols: u16,
+    pub(super) rows: u16,
+    /// Turns `true` once the daemon accepts connections, which a holder's
+    /// check of whom it lets in needs.
+    pub(super) begin: watch::Receiver<bool>,
+    /// Given the launch record the holder's `Welcome` returns, before anything
+    /// else of the holder is taken in.
+    pub(super) on_welcome: Box<dyn FnOnce(&str) + Send>,
+    pub(super) lost: LostNotice,
+}
+
 /// Where the child's exit is published.
 pub(super) struct ExitReport {
     pub(super) code: Arc<AtomicI32>,
@@ -108,10 +138,23 @@ pub(super) struct Sink {
     pub(super) exit: ExitReport,
 }
 
+impl Sink {
+    /// Readers learn the screen they hold is gone until a whole copy comes:
+    /// the window is not connected to its holder.
+    fn lose_screen(&self) {
+        self.copy.refuse();
+        self.arrivals.send_modify(|_| {});
+    }
+}
+
 /// What waits for the holder's answers, and the sizes a write's take-back
 /// keys are counted at.
 struct Pending {
     closed: bool,
+    /// Set once the holder let the daemon in. Until then, a window being
+    /// taken back has no screen to read: reads answer at once, while writes
+    /// and resizes wait for the holder.
+    connected: bool,
     next_id: u64,
     writes: HashMap<u64, std::sync::mpsc::SyncSender<bool>>,
     resize: Option<oneshot::Sender<bool>>,
@@ -129,6 +172,7 @@ impl Pending {
     fn new(cols: u16, rows: u16) -> Self {
         Self {
             closed: false,
+            connected: false,
             next_id: 0,
             writes: HashMap::new(),
             resize: None,
@@ -162,6 +206,9 @@ pub(super) struct Link {
     pending: Arc<Mutex<Pending>>,
     /// Sends one `Resize` at a time, the next only once the last is answered.
     resizing: Arc<tokio::sync::Mutex<()>>,
+    /// Turns `true` once the window is told to end, which a link that is not
+    /// connected to its holder learns from here rather than from a frame.
+    ending: Arc<watch::Sender<bool>>,
 }
 
 impl Link {
@@ -171,6 +218,7 @@ impl Link {
             out,
             pending: Arc::new(Mutex::new(Pending::new(cols, rows))),
             resizing: Arc::default(),
+            ending: Arc::new(watch::Sender::new(false)),
         };
         (link, out_rx)
     }
@@ -182,7 +230,12 @@ impl Link {
     /// Asks the holder to end the child (and with `tree`, its whole tree now),
     /// and then itself; nothing to do once the holder is gone.
     pub(super) fn terminate(&self, tree: bool) {
+        self.ending.send_replace(true);
         self.send(&HolderFrame::Terminate { tree });
+    }
+
+    fn ending(&self) -> watch::Receiver<bool> {
+        self.ending.subscribe()
     }
 
     /// Writes `bytes` to the child as a report: after every earlier write,
@@ -222,12 +275,13 @@ impl Link {
     }
 
     /// The view's selected text, as the holder answers it; `None` when
-    /// nothing is selected or the holder is gone.
+    /// nothing is selected, the window is being taken back or the holder is
+    /// gone.
     pub(super) async fn selected_text(&self) -> Option<String> {
         let (answer, answered) = oneshot::channel();
         {
             let mut pending = lock_recover(&self.pending);
-            if pending.closed {
+            if pending.closed || !pending.connected {
                 return None;
             }
             let id = pending.next_id();
@@ -240,8 +294,8 @@ impl Link {
         answered.await.ok().flatten()
     }
 
-    /// The window's text as the holder answers it; `None` once the holder is
-    /// gone.
+    /// The window's text as the holder answers it: empty while the window is
+    /// being taken back, `None` once the holder is gone.
     pub(super) async fn read_tail(
         &self,
         max_lines: usize,
@@ -252,6 +306,9 @@ impl Link {
             let mut pending = lock_recover(&self.pending);
             if pending.closed {
                 return None;
+            }
+            if !pending.connected {
+                return Some((String::new(), false));
             }
             let id = pending.next_id();
             pending.tails.insert(id, answer);
@@ -266,15 +323,22 @@ impl Link {
 
     /// Resolves once the holder has taken in the output it read before the
     /// settle and the link has handed on every frame it sent before its
-    /// answer; ends unanswered (an error) once the holder is gone.
+    /// answer; ends unanswered (an error) once the holder is gone. Resolves at
+    /// once while the window is being taken back, when nothing of the holder
+    /// has come yet.
     pub(super) fn settle(&self) -> oneshot::Receiver<()> {
         let (answer, answered) = oneshot::channel();
         let mut pending = lock_recover(&self.pending);
-        if !pending.closed {
-            let id = pending.next_id();
-            pending.settles.insert(id, answer);
-            self.send(&HolderFrame::Settle { id });
+        if pending.closed {
+            return answered;
         }
+        if !pending.connected {
+            let _ = answer.send(());
+            return answered;
+        }
+        let id = pending.next_id();
+        pending.settles.insert(id, answer);
+        self.send(&HolderFrame::Settle { id });
         answered
     }
 
@@ -371,7 +435,9 @@ impl Link {
     }
 
     fn welcomed(&self, cols: u16, rows: u16) {
-        lock_recover(&self.pending).confirmed = (cols, rows);
+        let mut pending = lock_recover(&self.pending);
+        pending.confirmed = (cols, rows);
+        pending.connected = true;
     }
 
     /// Fails every request waiting for an answer, and every later one.
@@ -412,13 +478,20 @@ pub(super) struct Started {
     /// What the holder's `Welcome` told once it let the daemon in and its
     /// first copy was taken in, or why the window cannot open.
     pub(super) opened: oneshot::Receiver<Result<Opened, PtyError>>,
-    /// `true` once the holder's process has ended.
+    /// `true` once the link has let go of the holder: the holder's process
+    /// has ended, or a window closed with its holder unnameable was left.
     pub(super) released: watch::Receiver<bool>,
 }
 
 /// Starts the holder of `launch` on a thread of its own; what it sends goes
-/// to `sink`.
-pub(super) fn start(context: LinkContext, launch: Launch, sink: Sink) -> Result<Started, PtyError> {
+/// to `sink`, and `lost` marks the window's row once its holder is found gone
+/// with the window still open.
+pub(super) fn start(
+    context: LinkContext,
+    launch: Launch,
+    sink: Sink,
+    lost: LostNotice,
+) -> Result<Started, PtyError> {
     let (link, out_rx) = Link::new(launch.cols, launch.rows);
     let (opened_tx, opened) = oneshot::channel();
     let (released_tx, released) = watch::channel(false);
@@ -427,7 +500,7 @@ pub(super) fn start(context: LinkContext, launch: Launch, sink: Sink) -> Result<
         .spawn({
             let link = link.clone();
             move || {
-                run(context, &launch, &link, out_rx, &sink, opened_tx);
+                run(context, &launch, &link, out_rx, &sink, opened_tx, lost);
                 let _ = released_tx.send(true);
             }
         })
@@ -440,6 +513,33 @@ pub(super) fn start(context: LinkContext, launch: Launch, sink: Sink) -> Result<
         opened,
         released,
     })
+}
+
+/// Starts taking back the window `take` names on a thread of its own: once
+/// the daemon accepts connections, the thread lets itself into the holder
+/// and goes on as for a window it opened. Returns the link at once; writes
+/// and resizes made meanwhile wait for the holder.
+pub(super) fn start_take_back(
+    context: TakeBackContext,
+    take: TakeBack,
+    sink: Sink,
+) -> Result<(Link, watch::Receiver<bool>), PtyError> {
+    let (link, out_rx) = Link::new(take.cols, take.rows);
+    let (released_tx, released) = watch::channel(false);
+    std::thread::Builder::new()
+        .name("holder-link".to_owned())
+        .spawn({
+            let link = link.clone();
+            move || {
+                run_take_back(&context, take, &link, out_rx, &sink);
+                let _ = released_tx.send(true);
+            }
+        })
+        .map_err(|error| {
+            tracing::error!(%error, "cannot start the thread of a window's holder");
+            PtyError::SpawnFailed
+        })?;
+    Ok((link, released))
 }
 
 /// Lets the daemon into a holder already serving `endpoint` from process
@@ -467,7 +567,7 @@ pub(super) fn start_over(
                     boot: "played-boot",
                 };
                 serve(
-                    &holder, &endpoint, holder_pid, &link, out_rx, &sink, opened_tx,
+                    &holder, &endpoint, holder_pid, &link, out_rx, &sink, opened_tx, false,
                 );
                 link.close();
                 let _ = released_tx.send(true);
@@ -486,6 +586,11 @@ enum Ending {
     /// The connection is over; the holder ends by itself and removes its
     /// own files.
     Served,
+    /// Another daemon took the holder over.
+    Displaced,
+    /// The connection was lost with the holder awaiting a successor: the
+    /// window stays, not connected, until its holder ends or it is closed.
+    Lost,
     /// The window never opened and the holder has not ended: it may still
     /// wait for a `Hello`, or overran [`RELEASE_LIMIT`]. It is killed, and its
     /// record and endpoint are removed here.
@@ -499,6 +604,7 @@ fn run(
     out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     sink: &Sink,
     opened: oneshot::Sender<Result<Opened, PtyError>>,
+    lost: LostNotice,
 ) {
     let LinkContext {
         holder_exe,
@@ -542,18 +648,48 @@ fn run(
         daemon_endpoint: &daemon_endpoint,
         boot: &boot,
     };
+    let files = HolderFiles {
+        instance: &instance,
+        holders_dir: &holders_dir,
+        window_id,
+    };
     let ready = holder.become_ready(&mut process, launch, log_file, awaits_successor);
     let not_ready = ready.is_err();
-    let ending = match ready {
-        Ok(endpoint) => serve(&holder, &endpoint, process.id(), link, out_rx, sink, opened),
+    let (ending, start) = match ready {
+        Ok((endpoint, start)) => (
+            serve(
+                &holder,
+                &endpoint,
+                process.id(),
+                link,
+                out_rx,
+                sink,
+                opened,
+                awaits_successor,
+            ),
+            start,
+        ),
         Err(error) => {
             let _ = opened.send(Err(error));
-            Ending::Refused
+            (Ending::Refused, None)
         }
     };
     link.close();
-    let refused = matches!(ending, Ending::Refused);
-    if refused {
+    let mut killed = matches!(ending, Ending::Refused);
+    if matches!(ending, Ending::Lost) {
+        let handle = start.and_then(|start| open_process(process.id(), &start));
+        let left = on_runtime(after_lost_connection(
+            sink,
+            handle.map(Arc::new),
+            link.ending(),
+            &files,
+            lost,
+        ));
+        // A holder whose process cannot be named again is still this
+        // daemon's child, which only it can be killed through.
+        killed = matches!(left, Some(AfterLoss::KillLeft));
+    }
+    if killed {
         let _ = process.kill();
     }
     match process.wait() {
@@ -572,13 +708,326 @@ fn run(
     // A killed holder cannot remove its record or endpoint. Other leftovers
     // (a holder killed from outside, or ended with the daemon's job) are for
     // the start-up reconciliation, not a second remover here.
-    if refused {
-        remove_holder_record(&holders_dir, window_id);
-        #[cfg(unix)]
-        remove_holder_endpoint(&instance, &holders_dir, window_id);
+    if killed {
+        remove_dead_holder_files(&files);
     }
     drop(keep);
     drop(live);
+}
+
+/// Takes back the window `take` names: waits for the daemon to accept
+/// connections, lets itself into the holder and goes on as for a window it
+/// opened. A take-back that fails sends the holder nothing and never ends
+/// it; the window stays, not connected, until its holder ends or it is
+/// closed. A window closed while it is being taken back ends its holder.
+fn run_take_back(
+    context: &TakeBackContext,
+    take: TakeBack,
+    link: &Link,
+    out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    sink: &Sink,
+) {
+    let TakeBack {
+        window_id,
+        endpoint,
+        holder_pid,
+        holder,
+        cols: _,
+        rows: _,
+        mut begin,
+        on_welcome,
+        lost,
+    } = take;
+    let holder = holder.map(Arc::new);
+    let at = HolderAt {
+        holders_dir: &context.holders_dir,
+        window_id: &window_id,
+        daemon_endpoint: &context.daemon_endpoint,
+        boot: &context.boot,
+    };
+    let files = HolderFiles {
+        instance: &context.instance,
+        holders_dir: &context.holders_dir,
+        window_id: &window_id,
+    };
+    let taken = on_runtime(async {
+        let mut ending = link.ending();
+        let began = tokio::select! {
+            began = begin.wait_for(|began| *began) => began.is_ok(),
+            () = told_to_end(&mut ending) => false,
+        };
+        let handshake = if began {
+            tokio::select! {
+                handshake = take_back_handshake(&at, &endpoint, holder_pid) => Some(handshake),
+                () = told_to_end(&mut ending) => None,
+            }
+        } else {
+            told_to_end(&mut ending).await;
+            None
+        };
+        match handshake {
+            None => {
+                link.close();
+                if end_unconnected_holder(holder.as_deref(), &files) {
+                    remove_dead_holder_files(&files);
+                } else {
+                    tracing::warn!(
+                        window_id = window_id.as_str(),
+                        "a window closed while it was taken back has a holder that cannot be named; \
+                         it is left running"
+                    );
+                }
+                sink.exit.publish(None);
+            }
+            Some(Err(reason)) => {
+                tracing::warn!(
+                    window_id = window_id.as_str(),
+                    reason,
+                    "the window could not be taken back; it stays, unconnected, with its holder \
+                     running until it is closed (a holder accepts only the daemon endpoint and version it was \
+                     started with)"
+                );
+                link.close();
+                stay_refused(holder.as_ref(), ending, &files, lost).await;
+                sink.exit.publish(None);
+            }
+            Some(Ok(welcomed)) => {
+                on_welcome(&welcomed.record);
+                let (cols, rows) = welcomed.size;
+                link.welcomed(cols, rows);
+                let mut reader = Reader {
+                    window_id: &window_id,
+                    link,
+                    sink,
+                    opening: None,
+                    rows: Vec::new(),
+                    row_count: 0,
+                    outputs_fed: None,
+                    exited: false,
+                    late_copy_logged: false,
+                };
+                let end = pump(&mut reader, welcomed.connection, welcomed.frames, out_rx).await;
+                link.close();
+                match end {
+                    PumpEnd::Displaced => {}
+                    PumpEnd::Closed { exited: true } => {
+                        // The holder closes once it is told to end, and then ends.
+                        if let Some(holder) = &holder {
+                            let _ = holder_ended(holder).await;
+                        }
+                    }
+                    PumpEnd::Closed { exited: false } => {
+                        tracing::warn!(
+                            window_id = window_id.as_str(),
+                            "the connection to the window's holder was lost; the window stays, \
+                             unconnected, until its holder ends or it is closed"
+                        );
+                        let left =
+                            after_lost_connection(sink, holder.clone(), ending, &files, lost).await;
+                        if matches!(left, AfterLoss::KillLeft) {
+                            tracing::warn!(
+                                window_id = window_id.as_str(),
+                                "the closed window's holder cannot be named; it is left running"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+    if taken.is_none() {
+        link.close();
+        sink.exit.publish(None);
+    }
+}
+
+/// Runs `work` on a runtime of this thread's own; `None` when none can be
+/// made.
+fn on_runtime<F: std::future::Future>(work: F) -> Option<F::Output> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime.block_on(work)),
+        Err(error) => {
+            tracing::error!(%error, "cannot start the runtime of a window's holder");
+            None
+        }
+    }
+}
+
+/// Resolves once the window is told to end.
+async fn told_to_end(ending: &mut watch::Receiver<bool>) {
+    // A link nobody holds any more can be told nothing; that is its end.
+    let _ = ending.wait_for(|ending| *ending).await;
+}
+
+/// The process `pid` that started at `start`; `None` when it has ended or the
+/// OS would not open it.
+fn open_process(pid: u32, start: &ProcessStart) -> Option<ProcessHandle> {
+    match ProcessHandle::open(pid, start) {
+        Ok(handle) => handle,
+        Err(error) => {
+            tracing::warn!(pid, %error, "cannot open a window holder's process");
+            None
+        }
+    }
+}
+
+/// Resolves once `holder` has ended; never when the wait cannot be made, since
+/// a process whose end is not known is not taken for gone.
+async fn holder_ended(holder: &Arc<ProcessHandle>) {
+    let (ended, waited) = oneshot::channel();
+    let started = std::thread::Builder::new()
+        .name("holder-wait".to_owned())
+        .spawn({
+            let holder = Arc::clone(holder);
+            move || {
+                let _ = ended.send(holder.wait());
+            }
+        });
+    if started.is_ok()
+        && let Ok(Ok(())) = waited.await
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
+
+/// What ended a stretch in which a window is not connected to its holder.
+enum Unconnected {
+    HolderEnded,
+    Closed,
+}
+
+async fn wait_unconnected(
+    holder: Option<&Arc<ProcessHandle>>,
+    ending: &mut watch::Receiver<bool>,
+) -> Unconnected {
+    let ended = async {
+        match holder {
+            Some(holder) => holder_ended(holder).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        () = ended => Unconnected::HolderEnded,
+        () = told_to_end(ending) => Unconnected::Closed,
+    }
+}
+
+/// A window whose take-back failed: the failure ends nothing, and the window
+/// stays, unconnected. Once the holder ends by itself, the window's row is
+/// marked lost and the holder's files are removed; once the user closes the
+/// window, it is closed as any unconnected window is.
+async fn stay_refused(
+    holder: Option<&Arc<ProcessHandle>>,
+    mut ending: watch::Receiver<bool>,
+    files: &HolderFiles<'_>,
+    lost: LostNotice,
+) {
+    match wait_unconnected(holder, &mut ending).await {
+        Unconnected::HolderEnded => {
+            lost();
+            remove_dead_holder_files(files);
+        }
+        Unconnected::Closed if end_unconnected_holder(holder.map(Arc::as_ref), files) => {
+            remove_dead_holder_files(files);
+        }
+        Unconnected::Closed => tracing::warn!(
+            window_id = files.window_id,
+            "the closed window's holder cannot be named; it is left running"
+        ),
+    }
+}
+
+/// What is left after [`after_lost_connection`].
+enum AfterLoss {
+    /// The holder has ended, and its files are gone.
+    Ended,
+    /// The window was closed and its holder could not be named again: the
+    /// caller kills it if it can, and removes its files.
+    KillLeft,
+}
+
+/// A window whose connection to a holder awaiting a successor was lost with
+/// both still running: what was waiting fails, the window shows no screen
+/// (so its status is `Unknown`), and it stays until its holder ends (its row
+/// is marked lost and its files removed) or it is closed (its holder is
+/// ended). Either way the window then reads as exited.
+async fn after_lost_connection(
+    sink: &Sink,
+    holder: Option<Arc<ProcessHandle>>,
+    mut ending: watch::Receiver<bool>,
+    files: &HolderFiles<'_>,
+    lost: LostNotice,
+) -> AfterLoss {
+    sink.lose_screen();
+    let left = match wait_unconnected(holder.as_ref(), &mut ending).await {
+        Unconnected::HolderEnded => {
+            lost();
+            remove_dead_holder_files(files);
+            AfterLoss::Ended
+        }
+        Unconnected::Closed if end_unconnected_holder(holder.as_deref(), files) => {
+            remove_dead_holder_files(files);
+            AfterLoss::Ended
+        }
+        Unconnected::Closed => AfterLoss::KillLeft,
+    };
+    sink.exit.publish(None);
+    left
+}
+
+/// Ends the holder of a window closed while the daemon is not connected to
+/// it: on Unix the child's process group first, when the child its record
+/// names still runs (a holder killed outright cannot end it), then the holder,
+/// which is waited for. On Windows the holder's job ends the child's tree with
+/// it. Returns `false`, doing nothing, when the holder's process cannot be
+/// named. The one place a window's holder is killed once its window opened.
+fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_>) -> bool {
+    let Some(holder) = holder else {
+        return false;
+    };
+    #[cfg(unix)]
+    end_recorded_child_group(files);
+    #[cfg(not(unix))]
+    let _ = files;
+    if let Err(error) = holder.kill() {
+        tracing::warn!(%error, "cannot end a window's holder");
+        return true;
+    }
+    if let Err(error) = holder.wait() {
+        tracing::warn!(%error, "cannot wait for a window's holder");
+    }
+    true
+}
+
+/// Ends the process group the child named by the holder's record leads, when
+/// that child still runs: while its leader runs, the group id names no other
+/// group.
+#[cfg(unix)]
+fn end_recorded_child_group(files: &HolderFiles<'_>) {
+    let Ok(record) = read_holder_record(files.holders_dir, files.window_id) else {
+        return;
+    };
+    let (Some(child_pid), Some(child_start)) = (record.child_pid, record.child_start.as_deref())
+    else {
+        return;
+    };
+    let Ok(child_start) = child_start.parse::<ProcessStart>() else {
+        return;
+    };
+    let runs = open_process(child_pid, &child_start)
+        .is_some_and(|child| child.liveness() == yagura_os::Liveness::Alive);
+    if !runs {
+        return;
+    }
+    let ended = yagura_os::ProcessGroup::led_by(child_pid, yagura_os::PROCESS_GROUP_TERM_GRACE)
+        .and_then(|group| group.terminate());
+    if let Err(error) = ended {
+        tracing::warn!(child_pid, %error, "cannot end a window's process group");
+    }
 }
 
 /// One holder's names.
@@ -591,14 +1040,15 @@ struct HolderAt<'a> {
 
 impl HolderAt<'_> {
     /// Hands the holder its launch, waits for its ready notice and checks its
-    /// record names it; returns the endpoint the record names.
+    /// record names it; returns the endpoint the record names and the
+    /// holder's start, when the record carries one.
     fn become_ready(
         &self,
         process: &mut DetachedProcess,
         launch: &Launch,
         log_file: Option<PathBuf>,
         awaits_successor: bool,
-    ) -> Result<String, PtyError> {
+    ) -> Result<(String, Option<ProcessStart>), PtyError> {
         let encoded = encode_holder_launch(&HolderLaunch {
             argv: launch.argv.clone(),
             cwd: launch.cwd.clone(),
@@ -645,7 +1095,11 @@ impl HolderAt<'_> {
             );
             return Err(PtyError::SpawnFailed);
         }
-        Ok(record.endpoint)
+        let start = record
+            .holder_start
+            .as_deref()
+            .and_then(|start| start.parse().ok());
+        Ok((record.endpoint, start))
     }
 }
 
@@ -704,6 +1158,8 @@ fn read_notice(mut stdout: std::fs::File) -> std::io::Result<bool> {
     Ok(false)
 }
 
+// Each argument is one part of the connection the window is served over.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     holder: &HolderAt<'_>,
     endpoint: &str,
@@ -712,19 +1168,9 @@ fn serve(
     out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     sink: &Sink,
     opened: oneshot::Sender<Result<Opened, PtyError>>,
+    awaits_successor: bool,
 ) -> Ending {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            tracing::error!(%error, "cannot start the runtime of a window's holder");
-            let _ = opened.send(Err(PtyError::SpawnFailed));
-            return Ending::Refused;
-        }
-    };
-    runtime.block_on(async {
+    let served = on_runtime(async {
         let welcomed = match handshake(holder, endpoint, holder_pid).await {
             Ok(welcomed) => welcomed,
             Err(Refusal { error, leftover }) => {
@@ -757,9 +1203,29 @@ fn serve(
             exited: false,
             late_copy_logged: false,
         };
-        pump(&mut reader, welcomed.connection, welcomed.frames, out_rx).await;
-        Ending::Served
-    })
+        match pump(&mut reader, welcomed.connection, welcomed.frames, out_rx).await {
+            PumpEnd::Displaced => Ending::Displaced,
+            PumpEnd::Closed { exited: true } => Ending::Served,
+            PumpEnd::Closed { exited: false } if awaits_successor => {
+                tracing::warn!(
+                    window_id = holder.window_id,
+                    "the connection to the window's holder was lost; the window stays, \
+                     unconnected, until its holder ends or it is closed"
+                );
+                reader.tell_opened();
+                Ending::Lost
+            }
+            PumpEnd::Closed { exited: false } => {
+                tracing::warn!(
+                    window_id = holder.window_id,
+                    "the connection to the window's holder was lost; the window is treated as exited"
+                );
+                reader.end(None);
+                Ending::Served
+            }
+        }
+    });
+    served.unwrap_or(Ending::Refused)
 }
 
 /// Why the daemon was not let in, and what is left of the holder.
@@ -796,6 +1262,8 @@ struct Welcomed {
     frames: HolderFrameBuffer,
     child_pid: Option<u32>,
     size: (u16, u16),
+    /// The launch record the holder keeps.
+    record: String,
 }
 
 /// Connects to the holder's endpoint, checks the holder serves it, and is let
@@ -822,11 +1290,7 @@ async fn handshake(
             );
             return Err(PtyError::SpawnFailed.into());
         }
-        let hello = encode_holder_frame(&HolderFrame::Hello {
-            protocol: HOLDER_PROTOCOL,
-            daemon_boot: holder.boot.to_owned(),
-        });
-        if connection.write_all(&hello).await.is_err() {
+        if connection.write_all(&hello(holder)).await.is_err() {
             continue;
         }
         let mut frames = HolderFrameBuffer::new();
@@ -844,6 +1308,7 @@ async fn handshake(
                 child_pid,
                 cols,
                 rows,
+                record,
                 ..
             }) => {
                 return Ok(Welcomed {
@@ -851,6 +1316,7 @@ async fn handshake(
                     frames,
                     child_pid,
                     size: (cols, rows),
+                    record,
                 });
             }
             Some(HolderFrame::SpawnFailed {
@@ -899,6 +1365,54 @@ async fn handshake(
     }
     tracing::warn!(window_id, "the window's holder did not let the daemon in");
     Err(PtyError::SpawnFailed.into())
+}
+
+fn hello(holder: &HolderAt<'_>) -> Vec<u8> {
+    encode_holder_frame(&HolderFrame::Hello {
+        protocol: HOLDER_PROTOCOL,
+        daemon_boot: holder.boot.to_owned(),
+    })
+}
+
+/// Lets the daemon into a holder a previous daemon of the instance left: one
+/// connection and one `Hello`, waited on for as long as the holder takes,
+/// since the holder serves a live window. Every answer but a `Welcome` fails
+/// the take-back with why; the connection is then dropped, closing it with
+/// nothing more sent.
+async fn take_back_handshake(
+    holder: &HolderAt<'_>,
+    endpoint: &str,
+    holder_pid: u32,
+) -> Result<Welcomed, &'static str> {
+    let ipc = PlatformIpc::default();
+    let Ok(mut connection) = ipc.connect(endpoint).await else {
+        return Err("the holder's endpoint cannot be connected to");
+    };
+    if ipc.server_process_id(&connection) != Some(holder_pid) {
+        return Err("the holder's endpoint is served by another process");
+    }
+    if connection.write_all(&hello(holder)).await.is_err() {
+        return Err("the holder closed the connection");
+    }
+    let mut frames = HolderFrameBuffer::new();
+    match next_frame(&mut connection, &mut frames).await {
+        Some(HolderFrame::Welcome {
+            child_pid,
+            cols,
+            rows,
+            record,
+            ..
+        }) => Ok(Welcomed {
+            connection,
+            frames,
+            child_pid,
+            size: (cols, rows),
+            record,
+        }),
+        Some(HolderFrame::VersionRejected { .. }) => Err("the holder speaks another version"),
+        Some(_) => Err("the holder answered out of turn"),
+        None => Err("the holder closed the connection without a word"),
+    }
 }
 
 /// Lets go of a holder whose window will not open. One that let the daemon
@@ -951,15 +1465,25 @@ async fn next_frame(
     }
 }
 
+/// How [`pump`] ended.
+enum PumpEnd {
+    /// Another daemon took the holder over; the exit was published.
+    Displaced,
+    /// The connection ended; `exited` tells whether the holder reported the
+    /// child's exit first, after which the end is the holder's own.
+    Closed { exited: bool },
+}
+
 /// Carries frames both ways until the connection ends; the holder closes it
 /// once it is told to end. Only a frame whose framing is broken ends it from
-/// this side.
+/// this side. After the child's exit the connection is kept, so the holder
+/// can still be told to end.
 async fn pump(
     reader: &mut Reader<'_>,
     connection: Connection,
     mut frames: HolderFrameBuffer,
     mut out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-) {
+) -> PumpEnd {
     let (mut read, mut write) = tokio::io::split(connection);
     let mut chunk = vec![0u8; 64 * 1024];
     let mut sending = true;
@@ -973,7 +1497,7 @@ async fn pump(
                             "another daemon took the window's holder over"
                         );
                         reader.end(None);
-                        return;
+                        return PumpEnd::Displaced;
                     }
                 }
                 Ok(None) => break,
@@ -1002,13 +1526,9 @@ async fn pump(
             },
         }
     }
-    if !reader.exited {
-        tracing::warn!(
-            window_id = reader.window_id,
-            "the connection to the window's holder was lost; the window is treated as exited"
-        );
+    PumpEnd::Closed {
+        exited: reader.exited,
     }
-    reader.end(None);
 }
 
 /// The window still waiting to learn it opened.
@@ -1163,48 +1683,6 @@ impl Reader<'_> {
         if opened.send(Ok(Opened { child_pid })).is_err() {
             self.link.terminate(true);
         }
-    }
-}
-
-/// Removes the socket and lock of a holder this daemon killed, which it
-/// removes itself as it ends. Named as the holder names them, from its
-/// instance argument; a live listener's are never removed.
-#[cfg(unix)]
-fn remove_holder_endpoint(instance: &OsStr, holders_dir: &Path, window_id: &str) {
-    use yagura_os::PeerAuth;
-
-    // The holder's instance argument: empty for the default instance.
-    let instance = (!instance.is_empty()).then_some(instance);
-    let endpoint = yagura_os::resolve_instance_from(instance)
-        .map_err(|error| error.to_string())
-        .and_then(|namespace| {
-            let user_id = PlatformIpc::default()
-                .current_user_id()
-                .map_err(|error| error.to_string())?;
-            yagura_os::holder_endpoint(&user_id, &namespace, holders_dir, window_id)
-                .map_err(|error| error.to_string())
-        });
-    let removed = endpoint.and_then(|endpoint| {
-        yagura_os::platform_unix::remove_abandoned_endpoint(Path::new(&endpoint))
-            .map_err(|error| error.to_string())
-    });
-    if let Err(error) = removed {
-        tracing::warn!(window_id, %error, "cannot remove a window holder's endpoint");
-    }
-}
-
-/// Removes the record of a holder this daemon killed.
-fn remove_holder_record(holders_dir: &Path, window_id: &str) {
-    let Ok(path) = holder_record_path(holders_dir, window_id) else {
-        return;
-    };
-    match std::fs::remove_file(&path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => tracing::warn!(
-            %error,
-            path = %path.display(),
-            "cannot remove a window holder's record"
-        ),
-        _ => {}
     }
 }
 

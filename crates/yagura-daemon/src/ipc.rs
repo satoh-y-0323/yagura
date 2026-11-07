@@ -959,6 +959,9 @@ pub struct IpcServer {
     open_handoffs: Arc<AtomicUsize>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Turned `true` once, right before the first connection is accepted;
+    /// see [`IpcServer::with_accepting`].
+    accepting: Option<watch::Sender<bool>>,
     /// The chat room's runtime state. [`IpcServer::new`] builds this with no
     /// chat at all (`ChatRuntime::unwired`, no store touched); the
     /// chat-serving entry point is [`IpcServer::new_with_chat`].
@@ -1088,6 +1091,7 @@ impl IpcServer {
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             shutdown_tx,
             shutdown_rx,
+            accepting: None,
             chat,
             ledger,
             tickets: Arc::new(ticket::TicketRuntime::disabled()),
@@ -1138,6 +1142,15 @@ impl IpcServer {
     #[must_use]
     pub fn with_tickets(mut self, tickets: Arc<ticket::TicketRuntime>) -> Self {
         self.tickets = tickets;
+        self
+    }
+
+    /// Turns `accepting` `true` once the server is about to accept its first
+    /// connection: what the windows a previous daemon left wait for, since
+    /// their holders let in only a daemon they can reach.
+    #[must_use]
+    pub fn with_accepting(mut self, accepting: watch::Sender<bool>) -> Self {
+        self.accepting = Some(accepting);
         self
     }
 
@@ -1217,6 +1230,9 @@ impl IpcServer {
             Arc::clone(&self.broker),
             self.shutdown_rx.clone(),
         );
+        if let Some(accepting) = &self.accepting {
+            accepting.send_replace(true);
+        }
 
         loop {
             if *shutdown_rx.borrow() {
