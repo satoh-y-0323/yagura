@@ -142,6 +142,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/016_tickets.sql"),
     include_str!("../migrations/017_windows.sql"),
     include_str!("../migrations/018_parcels.sql"),
+    include_str!("../migrations/019_delivery_marks.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a

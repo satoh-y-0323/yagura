@@ -38,6 +38,7 @@ mod deliver_cli;
 mod deliver_routing;
 mod delivery_events;
 mod delivery_launch_context;
+mod delivery_mark_recovery;
 mod detection_layers;
 mod detection_load_reval;
 mod detection_warning_wording;

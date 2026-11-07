@@ -45,7 +45,7 @@ use crate::input::{
     ComposerLine, InputProfile, ProbeChars, SubmitAction, SubmitOutcome, SubmitPlan, SubmitStep,
     TakeBack, plan_submit_line,
 };
-use crate::parcel_store::{InboxKeeper, KeptParcel, ParcelStore};
+use crate::parcel_store::{InboxKeeper, KeptParcel, MarkKeeper, ParcelStore};
 use crate::profile::CredentialsMode;
 use crate::profile_delivery::ProfileDelivery;
 use crate::pty::{
@@ -1320,6 +1320,25 @@ fn split_own_probes(written: &str) -> (&str, &str) {
     }
 }
 
+/// `line` with the probes `readout` shows right behind it, when the composer
+/// holds the line and nothing but probe characters after it (whitespace
+/// disregarded); `line` alone otherwise.
+fn line_with_shown_probes(
+    readout: &ComposerReadout,
+    line: &ComposerLine,
+    probes: &[char],
+) -> String {
+    let visible = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    if let ComposerReadout::Body(text) = readout
+        && let Some(behind) = visible(text).strip_prefix(&visible(line.as_str()))
+        && !behind.is_empty()
+        && behind.chars().all(|c| probes.contains(&c))
+    {
+        return format!("{}{behind}", line.as_str());
+    }
+    line.as_str().to_owned()
+}
+
 /// The last character of `text` that is not blank.
 fn last_visible(text: &str) -> Option<char> {
     text.chars().rev().find(|c| !c.is_whitespace())
@@ -1895,6 +1914,12 @@ pub struct WindowEntry {
     /// The window's row in the window table, removed before the window's
     /// holder is told to end ([`WindowEntry::remove_row_then`]).
     row: WindowRow,
+    /// Where [`WindowEntry::submit_message`] keeps the body it writes while
+    /// it may stay in the composer; `None` without a database.
+    marks: Option<MarkKeeper>,
+    /// The bodies a previous daemon of the instance left marked for this
+    /// window, taken back by whoever next holds `input_lock`.
+    left_marks: Mutex<Vec<String>>,
 }
 
 impl WindowEntry {
@@ -2264,6 +2289,7 @@ impl WindowEntry {
         let Some(_guard) = self.lock_input(&mut requester).await else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
+        self.take_back_left_marks().await;
         if self.composer_access == ComposerAccess::Absent {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         }
@@ -2389,10 +2415,33 @@ impl WindowEntry {
         let Some(_guard) = self.lock_input(&mut requester).await else {
             return Ok(declined(NotPlacedReason::Unobservable, None));
         };
+        self.take_back_left_marks().await;
         let _scope = self.begin_take_back_scope();
         if !self.composer_access.is_judged() || self.input.probe.is_none() {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         }
+        let marks = self.mark_delivery(body).await;
+        let judgment = self
+            .judge_and_check(body, residue, stage, &mut requester)
+            .await;
+        // The mark stays while the body may: a next daemon takes it back.
+        if let Some(marks) = marks
+            && !matches!(&judgment, Ok(judgment) if leaves_envelope(judgment))
+        {
+            marks.unmark(body);
+        }
+        judgment
+    }
+
+    /// [`WindowEntry::submit_message`] once it holds the input lock and the
+    /// window takes a judged line.
+    async fn judge_and_check(
+        &self,
+        body: &str,
+        residue: Option<ComposerResidue<'_>>,
+        stage: SendStage,
+        requester: &mut Requester,
+    ) -> PtyResult<SubmitJudgment> {
         // The one place the bodies become what is written: everything below
         // decides on, writes and takes back the lines alone.
         let line = ComposerLine::new(body);
@@ -2403,11 +2452,8 @@ impl WindowEntry {
                 line,
                 write_seq: residue.write_seq,
             });
-        let judgment = self
-            .judge_submit(&line, residue, stage, &mut requester)
-            .await?;
-        self.check_after_another_write(judgment, &mut requester)
-            .await
+        let judgment = self.judge_submit(&line, residue, stage, requester).await?;
+        self.check_after_another_write(judgment, requester).await
     }
 
     /// [`WindowEntry::submit_message`]'s judgment, before what another
@@ -4169,6 +4215,92 @@ impl WindowEntry {
             ProbeErased::Interrupted(_) => Ok(declined_unvouched(NotPlacedReason::Interrupted)),
             ProbeErased::Undecidable => Ok(self.declined_undecidable()),
         }
+    }
+
+    /// Marks `body` as written into this window, before its first byte, when
+    /// it could be taken back; the keeper to forget it through, if marked.
+    async fn mark_delivery(&self, body: &str) -> Option<&MarkKeeper> {
+        let marks = self
+            .marks
+            .as_ref()
+            .filter(|_| self.input.take_back() == TakeBack::Fixed)?;
+        marks.mark(body).await;
+        Some(marks)
+    }
+
+    /// Hands this window the bodies a previous daemon of the instance left
+    /// marked for it, before any write can take its input lock.
+    fn keep_left_marks(&self, bodies: Vec<String>) {
+        *lock_recover(&self.left_marks) = bodies;
+    }
+
+    /// Takes the left marks back in a task of its own, unless a write that
+    /// takes the input lock first does it.
+    fn spawn_left_marks_take_back(self: &Arc<Self>) {
+        if lock_recover(&self.left_marks).is_empty() {
+            return;
+        }
+        let entry = Arc::clone(self);
+        tokio::spawn(async move {
+            let _guard = entry.input_lock.lock().await;
+            entry.take_back_left_marks().await;
+        });
+    }
+
+    /// Takes out of the composer, for each body a previous daemon left marked
+    /// for this window, what of it shows there alone, as a call's own text is
+    /// checked once another writer ended it; a composer holding anything
+    /// beside it is left as it is. Each mark is forgotten afterwards. The
+    /// caller holds the input lock, so no write of the daemon's lands first.
+    async fn take_back_left_marks(&self) {
+        let bodies = std::mem::take(&mut *lock_recover(&self.left_marks));
+        for body in bodies {
+            match self.take_back_left_mark(&body).await {
+                Ok(Checked::Gone) => tracing::info!(
+                    window_id = %self.window_id,
+                    "took back what a delivery cut short by the previous daemon left in the composer"
+                ),
+                Ok(Checked::MayRemain) => tracing::info!(
+                    window_id = %self.window_id,
+                    "the composer does not hold a delivery cut short by the previous daemon alone; \
+                     it is left as it is"
+                ),
+                Err(error) => tracing::warn!(
+                    window_id = %self.window_id,
+                    %error,
+                    "cannot take back what a delivery cut short by the previous daemon left in the \
+                     composer"
+                ),
+            }
+            if let Some(marks) = &self.marks {
+                marks.unmark(&body);
+            }
+        }
+    }
+
+    /// [`WindowEntry::check_own_text`] of `body`'s line, with the probes the
+    /// first writable reading shows right behind it counted as written too.
+    async fn take_back_left_mark(&self, body: &str) -> PtyResult<Checked> {
+        let Some(probes) = self.input.probe.as_ref().filter(|_| {
+            self.composer_access.is_judged() && self.input.take_back() == TakeBack::Fixed
+        }) else {
+            return Ok(Checked::MayRemain);
+        };
+        let _scope = self.begin_take_back_scope();
+        let line = ComposerLine::new(body);
+        let mut requester = Requester::none();
+        let Some((observation, _)) = self
+            .read_writable_screen("take_back_left_mark", &mut requester)
+            .await?
+        else {
+            return Ok(Checked::MayRemain);
+        };
+        let own = line_with_shown_probes(&observation.readout, &line, probes.as_slice());
+        let part = OwnPart {
+            left: OwnLeft::Text(own.clone()),
+            ..OwnPart::default()
+        };
+        self.check_own_text(&own, &part, &mut requester).await
     }
 
     /// The requester left once this call had written `written` (its line and
@@ -6024,6 +6156,9 @@ impl WindowRegistry {
             .delivery
             .as_ref()
             .map_or_else(|| self.config().delivery.clone(), ProfileDelivery::spec);
+        let marks = self
+            .parcel_store()
+            .map(|store| MarkKeeper::new(store, &window_id));
         let keeper = self
             .parcel_store()
             .map(|store| InboxKeeper::new(store, &window_id));
@@ -6073,6 +6208,8 @@ impl WindowRegistry {
             mcp_connections: Arc::new(AtomicUsize::new(0)),
             participation: Arc::clone(&self.participation),
             row,
+            marks,
+            left_marks: Mutex::new(Vec::new()),
         })
     }
 
@@ -6352,6 +6489,7 @@ impl WindowRegistry {
             .taken_back_entry(&window_id, values, known, &session, status_token, row)
             .await?;
         self.register_window(&session, entry.clone(), detector_handle, detected_rx, None);
+        entry.spawn_left_marks_take_back();
         if needs_values {
             let registry = Arc::downgrade(self);
             tokio::spawn(async move {
@@ -6418,6 +6556,7 @@ impl WindowRegistry {
             Arc::downgrade(&entry),
         );
         spawn_status_forwarder(Arc::downgrade(&entry), detected_rx);
+        entry.spawn_left_marks_take_back();
         self.participation.raise();
         true
     }
@@ -6530,6 +6669,10 @@ impl WindowRegistry {
         }
         if let Some(session_id) = values.session_id.as_deref() {
             entry.record_session_id(session_id);
+        }
+        // A placeholder takes nothing back: it writes nothing.
+        if let Some(marks) = entry.marks.as_ref().filter(|_| known) {
+            entry.keep_left_marks(marks.marks().await);
         }
         let kept_parcels_hook = lock_recover(&self.kept_parcels_hook).clone();
         if let Some(hook) = kept_parcels_hook {

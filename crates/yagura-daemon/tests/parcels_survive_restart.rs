@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
+use common::store_fixtures::store_holds;
 use common::{VALID_TOKEN, identify, read_response, report_status, send};
-use rusqlite::types::ValueRef;
 use yagura_daemon::store;
 use yagura_os::{PeerAuth, PlatformIpc};
 use yagura_protocol::holder::read_holder_record;
@@ -230,42 +230,6 @@ fn count(haystack: &str, needle: &str) -> usize {
 
 fn store_db(sandbox: &Sandbox) -> PathBuf {
     sandbox.data_root().join("yagura.db")
-}
-
-/// Whether any value of any table in the session store at `db` holds `needle`; the
-/// tables a parcel is kept in are not named here.
-fn store_holds(db: &Path, needle: &str) -> bool {
-    let Ok(conn) = store::open_readonly(db) else {
-        return false;
-    };
-    let Ok(mut tables) = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'") else {
-        return false;
-    };
-    let names: Vec<String> = tables
-        .query_map([], |row| row.get(0))
-        .map(|rows| rows.flatten().collect())
-        .unwrap_or_default();
-    names.iter().any(|table| {
-        let Ok(mut rows) = conn.prepare(&format!("SELECT * FROM \"{table}\"")) else {
-            return false;
-        };
-        let columns = rows.column_count();
-        let Ok(mut rows) = rows.query([]) else {
-            return false;
-        };
-        while let Ok(Some(row)) = rows.next() {
-            for column in 0..columns {
-                let bytes = match row.get_ref(column) {
-                    Ok(ValueRef::Text(bytes) | ValueRef::Blob(bytes)) => bytes,
-                    _ => continue,
-                };
-                if String::from_utf8_lossy(bytes).contains(needle) {
-                    return true;
-                }
-            }
-        }
-        false
-    })
 }
 
 /// The state the window table records for `window_id`; `None` without a row.

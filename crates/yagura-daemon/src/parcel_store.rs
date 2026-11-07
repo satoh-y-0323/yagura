@@ -1,6 +1,8 @@
 //! The parcels kept in `yagura.db`: what each window's inbox holds and what
 //! each window's report inbox holds, so a next daemon of the instance hands
-//! out what this one accepted.
+//! out what this one accepted; and each window's delivery marks, the body of
+//! every delivery that may have left the daemon's text in the window's
+//! composer, so a next daemon can take that text back.
 //!
 //! The inboxes in memory are the copy: every change to one is sent here
 //! under that inbox's own lock, so the rows follow the same order, and a
@@ -35,6 +37,10 @@ const MAX_KEPT_REPORTS: i64 = crate::ipc::report::REPORT_INBOX_MAX as i64;
 /// The longest report row read back: a report's text fields within their
 /// limits, with room for its names and JSON.
 const MAX_REPORT_JSON_BYTES: usize = 4 * (REPORT_SUMMARY_MAX_BYTES + REPORT_PATH_MAX_BYTES) + 4096;
+
+/// The most delivery marks one window reads back. One delivery at a time
+/// writes into a window, so more than a few means a damaged file.
+const MAX_KEPT_MARKS: i64 = 64;
 
 /// One parcel of a window's inbox as it is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +83,19 @@ enum Command {
     LoadReports {
         window_id: String,
         reply: oneshot::Sender<Vec<KeptReport>>,
+    },
+    Mark {
+        window_id: String,
+        body: String,
+        reply: oneshot::Sender<()>,
+    },
+    Unmark {
+        window_id: String,
+        body: String,
+    },
+    LoadMarks {
+        window_id: String,
+        reply: oneshot::Sender<Vec<String>>,
     },
     Kept {
         reply: oneshot::Sender<()>,
@@ -197,6 +216,64 @@ impl InboxKeeper {
     }
 }
 
+/// What one window's deliveries keep their marks through. A body is the
+/// user's text: it is kept in the store alone and never logged.
+#[derive(Clone)]
+pub(crate) struct MarkKeeper {
+    store: ParcelStore,
+    window_id: String,
+}
+
+impl std::fmt::Debug for MarkKeeper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkKeeper")
+            .field("window_id", &self.window_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MarkKeeper {
+    pub(crate) fn new(store: ParcelStore, window_id: &str) -> Self {
+        Self {
+            store,
+            window_id: window_id.to_owned(),
+        }
+    }
+
+    /// Keeps `body` as a mark of the window, returning once it is written (or
+    /// failed): a delivery marks its body before its first byte.
+    pub(crate) async fn mark(&self, body: &str) {
+        let (reply, written) = oneshot::channel();
+        if self.store.send(Command::Mark {
+            window_id: self.window_id.clone(),
+            body: body.to_owned(),
+            reply,
+        }) {
+            let _ = written.await;
+        }
+    }
+
+    /// Forgets the mark of `body`.
+    pub(crate) fn unmark(&self, body: &str) {
+        self.store.send(Command::Unmark {
+            window_id: self.window_id.clone(),
+            body: body.to_owned(),
+        });
+    }
+
+    /// The bodies the window's marks keep.
+    pub(crate) async fn marks(&self) -> Vec<String> {
+        let (reply, read) = oneshot::channel();
+        if !self.store.send(Command::LoadMarks {
+            window_id: self.window_id.clone(),
+            reply,
+        }) {
+            return Vec::new();
+        }
+        read.await.unwrap_or_default()
+    }
+}
+
 fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
     // One warning for the whole run: a broken database must not flood the log.
     let mut warned = false;
@@ -271,6 +348,37 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
                     Vec::new()
                 });
                 let _ = reply.send(reports);
+            }
+            Command::Mark {
+                window_id,
+                body,
+                reply,
+            } => {
+                // Kept only while the window has a row, which takes it along
+                // when it goes.
+                if let Err(error) = conn.execute_fixed(
+                    "INSERT OR IGNORE INTO delivery_marks (window_id, body) \
+                     SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM windows WHERE window_id = ?1)",
+                    params![window_id, body],
+                ) {
+                    warn(error);
+                }
+                let _ = reply.send(());
+            }
+            Command::Unmark { window_id, body } => {
+                if let Err(error) = conn.execute_fixed(
+                    "DELETE FROM delivery_marks WHERE window_id = ?1 AND body = ?2",
+                    params![window_id, body],
+                ) {
+                    warn(error);
+                }
+            }
+            Command::LoadMarks { window_id, reply } => {
+                let marks = read_marks(conn, &window_id).unwrap_or_else(|error| {
+                    tracing::warn!(window_id, %error, "failed to read a window's delivery marks");
+                    Vec::new()
+                });
+                let _ = reply.send(marks);
             }
             Command::Kept { reply } => {
                 let _ = reply.send(());
@@ -366,6 +474,24 @@ fn read_reports(conn: &Connection, window_id: &str) -> rusqlite::Result<Vec<Kept
         );
     }
     Ok(reports)
+}
+
+/// `window_id`'s delivery marks, bounded by [`MAX_KEPT_MARKS`]; a body that
+/// does not read back as text within [`MAX_KEPT_TEXT_BYTES`] is skipped.
+fn read_marks(conn: &Connection, window_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare_fixed(
+        "SELECT body FROM delivery_marks WHERE window_id = ?1 ORDER BY body LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![window_id, MAX_KEPT_MARKS], |row| {
+        Ok(text_of(row.get_ref(0)?))
+    })?;
+    let mut marks = Vec::new();
+    for row in rows {
+        if let Some(body) = row? {
+            marks.push(body);
+        }
+    }
+    Ok(marks)
 }
 
 /// Whether a report read back keeps to what `send_report` accepts.

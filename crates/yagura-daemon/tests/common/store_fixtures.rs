@@ -291,6 +291,45 @@ pub fn window_rows(db_path: &std::path::Path) -> Option<Vec<TableRow>> {
     rows.collect::<Result<_, _>>().ok()
 }
 
+/// Whether any value of any table in the session store at `db` holds `needle`; which
+/// table keeps it is not named. `false` while the store cannot be read.
+pub fn store_holds(db: &std::path::Path, needle: &str) -> bool {
+    let Ok(conn) = yagura_daemon::store::open_readonly(db) else {
+        return false;
+    };
+    let Ok(mut tables) = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'") else {
+        return false;
+    };
+    let names: Vec<String> = tables
+        .query_map([], |row| row.get(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default();
+    names.iter().any(|table| {
+        let Ok(mut rows) = conn.prepare(&format!("SELECT * FROM \"{table}\"")) else {
+            return false;
+        };
+        let columns = rows.column_count();
+        let Ok(mut rows) = rows.query([]) else {
+            return false;
+        };
+        while let Ok(Some(row)) = rows.next() {
+            for column in 0..columns {
+                let bytes = match row.get_ref(column) {
+                    Ok(
+                        rusqlite::types::ValueRef::Text(bytes)
+                        | rusqlite::types::ValueRef::Blob(bytes),
+                    ) => bytes,
+                    _ => continue,
+                };
+                if String::from_utf8_lossy(bytes).contains(needle) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
 /// Polls the window table of the store at `db_path` until `predicate` holds, then returns
 /// the rows that satisfied it. A read error counts as "not converged yet" (the table's
 /// writer may be mid-write), never as a failure, and only the final state is asserted.
