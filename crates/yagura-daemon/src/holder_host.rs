@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{OnceCell, oneshot};
 use yagura_os::{DetachedStderr, IpcTransport, PeerAuth, PlatformIpc};
+use yagura_protocol::holder::HolderScopes;
 
 use crate::config::DaemonConfig;
 use crate::pty::{PtyError, lock_recover};
@@ -154,6 +155,37 @@ impl HolderHost {
     pub(crate) fn anonymous_window_id(&self) -> String {
         let n = self.anonymous_windows.fetch_add(1, Ordering::Relaxed) + 1;
         format!("p{n}-{}", self.boot)
+    }
+
+    /// New scope names for a start of `window_id`'s holder (Linux), to write
+    /// to the window's row before the holder is handed them; `None` where
+    /// windows have no scopes, or when no names can be made.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn scope_names(&self, window_id: &str) -> Option<HolderScopes> {
+        let instance = (!self.instance.is_empty()).then_some(self.instance.as_os_str());
+        let names = yagura_os::resolve_instance_from(instance)
+            .map_err(|error| error.to_string())
+            .and_then(|namespace| {
+                yagura_os::platform_unix::scope_names(&namespace, window_id)
+                    .map_err(|error| error.to_string())
+            });
+        match names {
+            Ok(names) => Some(HolderScopes {
+                holder: names.holder,
+                child: names.child,
+            }),
+            Err(error) => {
+                tracing::warn!(window_id, %error, "cannot name a window's scopes; it opens without them");
+                None
+            }
+        }
+    }
+
+    /// See the Linux version: windows elsewhere have no scopes.
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn scope_names(&self, _window_id: &str) -> Option<HolderScopes> {
+        None
     }
 
     /// Resolves what the next holder is started with; a host without a

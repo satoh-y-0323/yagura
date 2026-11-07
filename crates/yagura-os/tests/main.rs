@@ -25,3 +25,5 @@ mod program_resolution;
 mod pty_unix;
 mod reap_gate;
 mod spawn_fd_inheritance;
+#[cfg(target_os = "linux")]
+mod user_manager_linux;

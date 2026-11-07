@@ -59,6 +59,10 @@ regex = "1.10"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Workspace-key room ids are derived from a `.git` path via sha256.
 sha2 = "0.11"
+# The D-Bus client for the user's systemd user manager (Linux only, in yagura-os):
+# pure Rust on tokio, no libdbus. `default-features = false` leaves out the
+# transports that start a process (`unixexec`) and the async-io runtime.
+zbus = { version = "6.2", default-features = false, features = ["tokio"] }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

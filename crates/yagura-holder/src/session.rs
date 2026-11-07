@@ -72,6 +72,9 @@ struct Shared {
     /// The holder's children have changed: some were reaped.
     #[cfg(target_os = "linux")]
     children_changed: ChildChanges,
+    /// The cgroup of the child's scope, once the child was moved into it.
+    #[cfg(target_os = "linux")]
+    child_cgroup: Mutex<Option<std::path::PathBuf>>,
     /// Wakes the core when the child exited or the output ended.
     core_wake: Notify,
 }
@@ -362,6 +365,14 @@ fn end_tree_after_exit(group: &ProcessGroup, leader: u32, gate: &ReapGate, share
     }
     loop {
         let seen = shared.children_changed.count();
+        let cgroup = lock(&shared.child_cgroup).clone();
+        if let Some(cgroup) = cgroup
+            && let Err(error) = yagura_os::platform_unix::kill_cgroup(&cgroup)
+        {
+            crate::log(format_args!(
+                "cannot kill the child's scope through its cgroup: {error}"
+            ));
+        }
         if let Err(error) = group.kill_now() {
             crate::log(format_args!(
                 "failed to end the child's process group: {error}"
@@ -877,6 +888,10 @@ impl Core {
                         Arc::clone(&child.gate),
                         Arc::clone(&self.shared),
                     ));
+                    #[cfg(target_os = "linux")]
+                    if let Some(scopes) = self.window.record.written_scopes() {
+                        scopes::ask_for(scopes, pid, &child.gate, &self.shared);
+                    }
                     self.child = Some(child);
                     if let Err(error) = self.window.record.set_child(pid) {
                         crate::log(format_args!("cannot update the holder record: {error}"));
@@ -1121,6 +1136,136 @@ impl Core {
             let _ = tokio::time::timeout(FINAL_SEND_LIMIT, conn.close()).await;
         }
         self.window.record.remove()
+    }
+}
+
+/// The systemd user scopes of the holder and its child (Linux), asked for once
+/// the child has started. The window never waits for the answer: the child
+/// runs, and its tree ends, under the holder's own care either way, and a
+/// scope only adds that the tree ends with the holder.
+#[cfg(target_os = "linux")]
+mod scopes {
+    use std::os::fd::{AsFd as _, OwnedFd};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use yagura_os::ReapGate;
+    use yagura_os::platform_unix::{
+        UserManager, cgroup_dir_of, descendants_outside, orphan_pidfds, pidfd_open,
+    };
+
+    use super::{Shared, lock};
+    use crate::record::WrittenScopes;
+
+    /// Opens the holder's and the leader's pidfds now, the leader's under its
+    /// reap gate so its id still names it, and asks for the scopes on a task
+    /// of their own. A failure is logged once and nothing more is asked.
+    pub(super) fn ask_for(
+        scopes: WrittenScopes,
+        leader: u32,
+        gate: &Arc<ReapGate>,
+        shared: &Arc<Shared>,
+    ) {
+        let opened = pidfd_open(std::process::id()).and_then(|holder| {
+            let leader = gate
+                .signal_unless_reaped(|| pidfd_open(leader))
+                .unwrap_or_else(|| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "the child has been reaped",
+                    ))
+                })?;
+            Ok((holder, leader))
+        });
+        let (holder_fd, leader_fd) = match opened {
+            Ok(fds) => fds,
+            Err(error) => {
+                crate::log(format_args!(
+                    "cannot name the processes to move into the window's scopes: {error}"
+                ));
+                return;
+            }
+        };
+        tokio::spawn(request(
+            scopes,
+            holder_fd,
+            leader_fd,
+            leader,
+            Arc::clone(gate),
+            Arc::clone(shared),
+        ));
+    }
+
+    async fn request(
+        scopes: WrittenScopes,
+        holder_fd: OwnedFd,
+        leader_fd: OwnedFd,
+        leader: u32,
+        gate: Arc<ReapGate>,
+        shared: Arc<Shared>,
+    ) {
+        let manager = match UserManager::connect().await {
+            Ok(manager) => manager,
+            Err(error) => {
+                crate::log(format_args!(
+                    "cannot ask the user manager for the window's scopes: {error}"
+                ));
+                return;
+            }
+        };
+        if let Err(error) = manager
+            .start_holder_scope(scopes.holder(), holder_fd.as_fd())
+            .await
+        {
+            crate::log(format_args!(
+                "cannot move the holder into its scope: {error}"
+            ));
+            return;
+        }
+        // A child that has exited is ending its tree already.
+        if shared.child_ended.load(Ordering::SeqCst) {
+            return;
+        }
+        let orphans = match orphan_pidfds(leader, &gate) {
+            Ok(orphans) => orphans,
+            Err(error) => {
+                crate::log(format_args!(
+                    "cannot name the child's tree to move into its scope: {error}"
+                ));
+                return;
+            }
+        };
+        let mut members = vec![leader_fd.as_fd()];
+        members.extend(orphans.iter().map(|fd| fd.as_fd()));
+        if let Err(error) = manager
+            .start_child_scope(scopes.child(), scopes.holder(), &members)
+            .await
+        {
+            crate::log(format_args!(
+                "cannot move the child into its scope: {error}"
+            ));
+            return;
+        }
+        match gate.signal_unless_reaped(|| cgroup_dir_of(leader)) {
+            Some(Ok(Some(cgroup))) => {
+                // Not acted on: how often a child's tree grows before its scope is
+                // made, for whoever reads the log.
+                match descendants_outside(&cgroup) {
+                    Ok(outside) => crate::log(format_args!(
+                        "the child's scope is made; {outside} of the holder's descendants are outside it"
+                    )),
+                    Err(error) => crate::log(format_args!(
+                        "the child's scope is made; its outsiders cannot be counted: {error}"
+                    )),
+                }
+                *lock(&shared.child_cgroup) = Some(cgroup);
+            }
+            // The child was reaped meanwhile: its tree has ended.
+            None | Some(Ok(None)) => {}
+            Some(Err(error)) => crate::log(format_args!(
+                "cannot read the cgroup of the child's scope: {error}"
+            )),
+        }
     }
 }
 

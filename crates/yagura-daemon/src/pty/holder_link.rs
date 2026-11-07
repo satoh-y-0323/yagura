@@ -39,6 +39,7 @@ use super::{LostNotice, PtyError, PublishedInput, lock_recover};
 use crate::detector::SharedCopy;
 use crate::holder_host::{LinkContext, TakeBackContext};
 use crate::recovery::{HolderFiles, remove_dead_holder_files};
+use crate::window_table::RowScopes;
 
 /// How long a holder waits for its first `Hello`; also bounds how long the
 /// daemon tries to be let in.
@@ -80,6 +81,9 @@ pub(super) struct Launch {
     pub(super) fault: Option<HolderFault>,
     /// What the holder keeps in memory and returns in its `Welcome`.
     pub(super) record: String,
+    /// The scope names the window's row was written with, for the holder to
+    /// ask for; `None` asks for none.
+    pub(super) scopes: Option<RowScopes>,
 }
 
 /// A window a previous daemon of the instance left, whose holder runs.
@@ -999,7 +1003,9 @@ fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_
     let exit = holder.watch_exit();
     #[cfg(unix)]
     if let Ok(record) = read_holder_record(files.holders_dir, files.window_id) {
-        crate::recovery::end_recorded_child_group(files.window_id, &record, None);
+        // No scope is killed by name: the holder runs, and the scope bound to
+        // its own, if made, ends as it is killed.
+        crate::recovery::end_recorded_child_group(files.window_id, &record, None, None);
     }
     #[cfg(not(unix))]
     let _ = files;
@@ -1047,6 +1053,7 @@ impl HolderAt<'_> {
             history_rows: launch.history_rows,
             palette: launch.palette.clone(),
             fault: launch.fault,
+            scopes: launch.scopes.as_ref().map(RowScopes::launch),
         });
         match hand_launch(process, encoded) {
             Notice::Ready => {}

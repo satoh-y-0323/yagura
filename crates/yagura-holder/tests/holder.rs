@@ -136,6 +136,7 @@ impl Rig {
             history_rows: 1000,
             palette: None,
             fault: None,
+            scopes: None,
         }
     }
 
@@ -157,14 +158,37 @@ impl Rig {
     }
 
     fn start_exe(&self, exe: &str, input: &[u8], stdout: Stdio) -> Holder {
-        let mut child = Command::new(exe)
+        self.start_exe_with(exe, input, stdout, |_| {})
+    }
+
+    /// Starts the holder with its environment changed by `environment`, on the
+    /// holder's command only.
+    #[cfg(target_os = "linux")]
+    fn start_in(&self, launch: &HolderLaunch, environment: impl FnOnce(&mut Command)) -> Holder {
+        self.start_exe_with(
+            HOLDER,
+            &encode_holder_launch(launch),
+            Stdio::null(),
+            environment,
+        )
+    }
+
+    fn start_exe_with(
+        &self,
+        exe: &str,
+        input: &[u8],
+        stdout: Stdio,
+        environment: impl FnOnce(&mut Command),
+    ) -> Holder {
+        let mut command = Command::new(exe);
+        command
             .arg(&self.window_id)
             .arg(&self.instance)
             .stdin(Stdio::piped())
             .stdout(stdout)
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("start yagura-holder");
+            .stderr(Stdio::inherit());
+        environment(&mut command);
+        let mut child = command.spawn().expect("start yagura-holder");
         let mut stdin = child.stdin.take().unwrap();
         stdin
             .write_all(input)
@@ -1385,6 +1409,170 @@ async fn the_end_follows_the_childs_tree_and_not_the_terminals_other_writers() {
     #[cfg(not(target_os = "linux"))]
     drop((terminal, last_push));
 
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
+}
+
+/// Scope names for a window of `rig`, new for each test.
+#[cfg(target_os = "linux")]
+fn scopes_of(rig: &Rig) -> yagura_protocol::holder::HolderScopes {
+    yagura_protocol::holder::HolderScopes {
+        holder: format!(
+            "yagura_test_{}_{}_holder.scope",
+            rig.instance, rig.window_id
+        ),
+        child: format!("yagura_test_{}_{}_child.scope", rig.instance, rig.window_id),
+    }
+}
+
+/// The cgroup path `/proc/<pid>/cgroup` names; empty once the process is gone.
+#[cfg(target_os = "linux")]
+fn cgroup_of(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The children of every thread of the process `pid`.
+#[cfg(target_os = "linux")]
+fn children_of(pid: u32) -> Vec<u32> {
+    let mut children = Vec::new();
+    for task in std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+    {
+        let text = std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+        children.extend(text.split_whitespace().map(|id| id.parse::<u32>().unwrap()));
+    }
+    children.sort_unstable();
+    children
+}
+
+#[cfg(target_os = "linux")]
+fn scope_lines(log: &Path) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("scope"))
+        .count()
+}
+
+/// Stops, as a test ends, the scopes it may have made.
+#[cfg(target_os = "linux")]
+struct StopScopes(yagura_protocol::holder::HolderScopes);
+
+#[cfg(target_os = "linux")]
+impl Drop for StopScopes {
+    fn drop(&mut self) {
+        for name in [&self.0.child, &self.0.holder] {
+            let _ = Command::new("systemctl")
+                .args(["--user", "stop", "--quiet", name])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// With no user bus to reach, a window given scope names runs as without them:
+/// the child starts, writes and ends with `Exited`, the holder starts no other
+/// process for the request, keeps the child's scope name in its record and logs
+/// one line for the scope it could not ask for.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_reachable_user_bus_a_window_runs_as_ever_and_its_holder_logs_one_line() {
+    let rig = Rig::new("nobus");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let gate = rig.file("gate");
+    let log = rig.file("holder.log");
+    std::fs::write(&log, b"").unwrap();
+    let run_dir = private_dir(&rig.file("no-bus-run"));
+    let scopes = scopes_of(&rig);
+    let launch = HolderLaunch {
+        log_file: Some(log.clone()),
+        scopes: Some(scopes.clone()),
+        ..rig.launch(&["exit", "0", path_arg(&gate)], NO_DEADLINE_MS)
+    };
+    let mut holder = rig.start_in(&launch, |command| {
+        command
+            .env("XDG_RUNTIME_DIR", &run_dir)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS");
+    });
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    let record = rig.record_where(|record| record.child_pid.is_some()).await;
+    assert_eq!(
+        record.child_scope.as_deref(),
+        Some(scopes.child.as_str()),
+        "the record does not name the child's scope it was given"
+    );
+
+    wait_until("the holder logs the scope it could not ask for", || {
+        scope_lines(&log) > 0
+    })
+    .await;
+    assert_eq!(
+        children_of(record.holder_pid),
+        vec![record.child_pid.unwrap()],
+        "the holder runs a process beside the window's child"
+    );
+
+    std::fs::write(&gate, b"").unwrap();
+    assert_eq!(until_exited(&mut peer).await, Some(0));
+    peer.send(HolderFrame::ReadTail {
+        id: 1,
+        max_lines: 100,
+        max_bytes: 64 * 1024,
+    })
+    .await;
+    match next_answer(&mut peer).await {
+        HolderFrame::Tail { id: 1, text, .. } => assert!(
+            text.contains("EXITING 0"),
+            "the child's output is not in the text: {text}"
+        ),
+        other => panic!("expected the text, got {other:?}"),
+    }
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
+    assert_eq!(
+        scope_lines(&log),
+        1,
+        "the holder did not log the failed request once:\n{}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+/// With the user's user manager running, the holder ends up in the holder's
+/// scope and the window's child in the child's scope.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the user's systemd user manager; run with --include-ignored where one runs"]
+async fn with_a_user_manager_the_holder_and_its_child_end_up_in_their_scopes() {
+    let rig = Rig::new("scoped");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let gate = rig.file("gate");
+    let scopes = scopes_of(&rig);
+    let _stop = StopScopes(scopes.clone());
+    let launch = HolderLaunch {
+        scopes: Some(scopes.clone()),
+        ..rig.launch(&["exit", "0", path_arg(&gate)], NO_DEADLINE_MS)
+    };
+    let mut holder = rig.start(&launch);
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    let record = rig.record_where(|record| record.child_pid.is_some()).await;
+    let child = record.child_pid.unwrap();
+
+    wait_until("the holder and the child are in their scopes", || {
+        cgroup_of(record.holder_pid).ends_with(&format!("/{}", scopes.holder))
+            && cgroup_of(child).ends_with(&format!("/{}", scopes.child))
+    })
+    .await;
+
+    std::fs::write(&gate, b"").unwrap();
+    assert_eq!(until_exited(&mut peer).await, Some(0));
     peer.send(HolderFrame::Terminate { tree: true }).await;
     holder.wait_exit().await;
 }

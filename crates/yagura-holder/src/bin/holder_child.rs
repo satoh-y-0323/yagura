@@ -46,6 +46,11 @@
 //!   milliseconds for as long as it lives. Writes `<member> <escaped> <tty>`
 //!   to `info_file` once the member is armed, prints [`END_RACE_MARKER`] and
 //!   exits with 0 once `gate_file` exists.
+//! - `late-tree <gate_file> <pid_file>` (Unix): ignores SIGTERM and SIGHUP,
+//!   prints [`LATE_TREE_WAITING_MARKER`] and, once `gate_file` exists, starts a
+//!   grandchild in a session of its own that ignores them too, writes its
+//!   process id to `pid_file` and prints [`LATE_TREE_MARKER`]. Both then idle,
+//!   so only a kill that cannot be refused ends them.
 //! - `orphans` (Linux): makes itself a child subreaper, starts a child that
 //!   starts [`ORPHANS`] grandchildren in sessions of their own and exits, and
 //!   reaps the orphans through `yagura-os` on each SIGCHLD, never the child.
@@ -71,6 +76,10 @@ const ESCAPED_MARKER: &[u8] = b"HOLDER-CHILD-ESCAPED\r\n";
 const SCRIPT_MARKER: &[u8] = b"HOLDER-CHILD-SCRIPT\r\n";
 #[cfg(unix)]
 const END_RACE_MARKER: &[u8] = b"HOLDER-CHILD-END-RACE\r\n";
+#[cfg(unix)]
+const LATE_TREE_WAITING_MARKER: &[u8] = b"HOLDER-CHILD-LATE-TREE-WAITING\r\n";
+#[cfg(unix)]
+const LATE_TREE_MARKER: &[u8] = b"HOLDER-CHILD-LATE-TREE-STARTED\r\n";
 /// The grandchildren `orphans` leaves behind.
 #[cfg(target_os = "linux")]
 const ORPHANS: usize = 10;
@@ -105,6 +114,8 @@ fn main() -> io::Result<()> {
         #[cfg(unix)]
         "end-race" => end_race(Path::new(arg(1)), Path::new(arg(2)), Path::new(arg(3))),
         #[cfg(unix)]
+        "late-tree" => late_tree(Path::new(arg(1)), Path::new(arg(2))),
+        #[cfg(unix)]
         "--term-member" => term_member(Path::new(arg(1))),
         #[cfg(unix)]
         "--escaped-writer" => escaped_writer(),
@@ -120,7 +131,7 @@ fn main() -> io::Result<()> {
                  | tree <pid_file> | exit <code> [<gate_file>] | exit-on-input | ignore-end \
                  | stubborn-tree <pid_file> [<gate_file>] | escaped-holder <pid_file> \
                  | script <input_log> [<gate_file> <hex>] | end-race <info_file> <gate_file> <term_file> \
-                 | orphans"
+                 | late-tree <gate_file> <pid_file> | orphans"
             );
             std::process::exit(2);
         }
@@ -307,6 +318,28 @@ fn escaped_holder(pid_file: &Path) -> io::Result<()> {
     std::fs::write(pid_file, grandchild.id().to_string())?;
     let mut stdout = io::stdout();
     stdout.write_all(ESCAPED_MARKER)?;
+    stdout.flush()?;
+    idle()
+}
+
+/// The grandchild starts only once the gate opens, so a test can open it after
+/// the child has been moved to where the grandchild should start.
+#[cfg(unix)]
+fn late_tree(gate_file: &Path, pid_file: &Path) -> io::Result<()> {
+    ignore_end_requests()?;
+    let mut stdout = io::stdout();
+    stdout.write_all(LATE_TREE_WAITING_MARKER)?;
+    stdout.flush()?;
+    while !gate_file.exists() {
+        std::thread::sleep(POLL);
+    }
+    let mut command = grandchild_command()?;
+    in_own_session(&mut command);
+    let grandchild = command.spawn()?;
+    let staged = pid_file.with_extension("staged");
+    std::fs::write(&staged, grandchild.id().to_string())?;
+    std::fs::rename(&staged, pid_file)?;
+    stdout.write_all(LATE_TREE_MARKER)?;
     stdout.flush()?;
     idle()
 }

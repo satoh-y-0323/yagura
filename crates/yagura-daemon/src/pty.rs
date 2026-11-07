@@ -426,6 +426,9 @@ pub(crate) struct WindowSpawn<'a> {
     /// `Welcome`.
     pub(crate) record: String,
     pub(crate) lost: LostNotice,
+    /// The scope names the window's row was written with; `None` asks the
+    /// holder for none.
+    pub(crate) scopes: Option<crate::window_table::RowScopes>,
 }
 
 /// A window a previous daemon of the instance left running, to be taken back
@@ -625,6 +628,7 @@ impl PtySession {
                 palette: None,
                 record: String::new(),
                 lost: Box::new(|| {}),
+                scopes: None,
             },
             config,
             host,
@@ -659,6 +663,7 @@ impl PtySession {
             palette: spawn.palette,
             fault: config.launch_fault(),
             record: spawn.record,
+            scopes: spawn.scopes,
         };
         let context = host.link_context().await?;
         let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);

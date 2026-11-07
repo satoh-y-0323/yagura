@@ -1200,6 +1200,20 @@ pub struct HolderLaunch {
     /// A fault for the fault-injecting holder to act out; the shipped holder
     /// refuses a launch that names one.
     pub fault: Option<HolderFault>,
+    /// The systemd user scopes the holder asks to be moved into once the
+    /// child has started (Linux); `None` asks for none.
+    pub scopes: Option<HolderScopes>,
+}
+
+/// The names of the systemd user scopes of one start of a window's holder:
+/// unit names of ASCII letters, digits and `_` followed by `.scope`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderScopes {
+    /// The scope holding the holder alone.
+    pub holder: String,
+    /// The scope holding the window's child and its tree, bound to the
+    /// holder's.
+    pub child: String,
 }
 
 impl std::fmt::Debug for HolderLaunch {
@@ -1216,6 +1230,7 @@ impl std::fmt::Debug for HolderLaunch {
             .field("log_file", &self.log_file)
             .field("history_rows", &self.history_rows)
             .field("fault", &self.fault)
+            .field("scopes", &self.scopes)
             .finish_non_exhaustive()
     }
 }
@@ -1236,6 +1251,7 @@ struct LaunchOut<'a> {
     history_rows: usize,
     palette: Option<&'a Palette>,
     fault: Option<HolderFault>,
+    scopes: Option<&'a HolderScopes>,
 }
 
 #[derive(Deserialize)]
@@ -1257,6 +1273,8 @@ struct LaunchIn {
     palette: Option<Palette>,
     #[serde(default)]
     fault: Option<HolderFault>,
+    #[serde(default)]
+    scopes: Option<HolderScopes>,
 }
 
 /// Encodes `launch` for a holder's standard input. Paths and environment
@@ -1278,6 +1296,7 @@ pub fn encode_holder_launch(launch: &HolderLaunch) -> Vec<u8> {
         history_rows: launch.history_rows,
         palette: launch.palette.as_ref(),
         fault: launch.fault,
+        scopes: launch.scopes.as_ref(),
     };
     // Only strings, numbers and OS strings, which serde_json always encodes;
     // an empty launch would be refused by the holder.
@@ -1305,6 +1324,7 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         history_rows,
         palette,
         fault,
+        scopes,
     } = serde_json::from_slice(input).map_err(HolderCodecError::Launch)?;
     Ok(HolderLaunch {
         argv,
@@ -1321,6 +1341,7 @@ pub fn decode_holder_launch(input: &[u8]) -> Result<HolderLaunch, HolderCodecErr
         history_rows,
         palette,
         fault,
+        scopes,
     })
 }
 
@@ -1348,6 +1369,12 @@ pub struct HolderRecord {
     /// started, and when its start could not be read.
     #[serde(default)]
     pub child_start: Option<String>,
+    /// The systemd user scope the child is asked to be moved into, written
+    /// before it is asked for, so a holder that died is ended by that name.
+    /// `None` when none is asked for, and in a record written before it was
+    /// carried.
+    #[serde(default)]
+    pub child_scope: Option<String>,
 }
 
 /// Whether `window_id` may name a holder's files and endpoint: ASCII letters,

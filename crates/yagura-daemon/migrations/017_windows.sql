@@ -15,5 +15,6 @@ CREATE TABLE windows (
     task_plan_id TEXT,
     task_id TEXT,
     credentials TEXT NOT NULL CHECK (credentials IN ('env', 'launch')),
-    state TEXT NOT NULL CHECK (state IN ('opening', 'live', 'lost'))
+    state TEXT NOT NULL CHECK (state IN ('opening', 'live', 'lost')),
+    child_scope TEXT
 );

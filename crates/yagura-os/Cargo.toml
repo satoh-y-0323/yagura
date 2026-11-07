@@ -33,6 +33,12 @@ portable-pty.workspace = true
 # extra crate, `signal-hook-registry`, is already in the graph.
 tokio = { workspace = true, features = ["signal"] }
 
+# Linux-only: `platform_unix::user_manager` asks the user's systemd user
+# manager for a window's scopes over D-Bus, passing processes by pidfd. Pure
+# Rust, so a holder never needs libdbus to start.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
 # macOS-only: `locale::preferred_locale` reads the user's CFLocale, the one
 # place a Finder-started process can learn its locale without `LANG`. The
 # `-sys` crate is used directly because the safe wrapper has no CFLocale type.

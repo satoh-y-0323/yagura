@@ -23,6 +23,8 @@ mod input_drain;
 mod process_group;
 pub(crate) mod pty;
 mod tty_mark;
+#[cfg(target_os = "linux")]
+mod user_manager;
 
 #[cfg(target_os = "macos")]
 pub use exit_watch::wait_group_exit;
@@ -31,6 +33,11 @@ pub use exit_watch::{ChildSignals, wait_for_exit_without_reaping};
 pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
+#[cfg(target_os = "linux")]
+pub use user_manager::{
+    ScopeNames, UserManager, UserManagerError, cgroup_dir_of, descendants_outside,
+    is_window_scope_name, kill_cgroup, orphan_pidfds, pidfd_open, scope_names,
+};
 
 use std::ffi::OsStr;
 use std::io;

@@ -391,10 +391,12 @@ impl Judge<'_> {
         }
     }
 
-    /// What is left of a window whose holder is gone: on Unix the child's
-    /// process group, when the child its record names still runs; then the
-    /// holder's files. Removing the files first leaves, if the daemon dies
-    /// here, a `live` row without a record, which the next start marks lost.
+    /// What is left of a window whose holder is gone: on Linux the child's
+    /// scope, by the name its row (or, without a row, its record) keeps; on
+    /// Unix the child's process group, when the child its record names still
+    /// runs; then the holder's files. Removing the files first leaves, if the
+    /// daemon dies here, a `live` row without a record, which the next start
+    /// marks lost.
     fn end_gone(&self, window_id: &str, record: &HolderRecord, row: Option<&StoredWindow>) {
         #[cfg(unix)]
         end_recorded_child_group(
@@ -403,6 +405,7 @@ impl Judge<'_> {
             row.and_then(|row| row.values.as_ref())
                 .and_then(|values| values.command.first())
                 .map(String::as_str),
+            self.recorded_scope(window_id, record, row).as_deref(),
         );
         #[cfg(not(unix))]
         let _ = (record, row);
@@ -411,6 +414,48 @@ impl Judge<'_> {
             holders_dir: self.holders_dir,
             window_id,
         });
+    }
+}
+
+impl Judge<'_> {
+    /// The child's scope name a gone holder's window keeps: its row's, or its
+    /// record's when it has no row, and only when it has the form of this
+    /// instance's names, since any process of the user can write either.
+    #[cfg(target_os = "linux")]
+    fn recorded_scope(
+        &self,
+        window_id: &str,
+        record: &HolderRecord,
+        row: Option<&StoredWindow>,
+    ) -> Option<String> {
+        let scope = match row {
+            Some(row) => row.child_scope.clone(),
+            None => record.child_scope.clone(),
+        }?;
+        let instance = (!self.instance.is_empty()).then_some(self.instance);
+        let ours = yagura_os::resolve_instance_from(instance).is_ok_and(|namespace| {
+            yagura_os::platform_unix::is_window_scope_name(&namespace, &scope)
+        });
+        if !ours {
+            tracing::warn!(
+                window_id,
+                "a window's recorded scope is not a name this instance makes; it is not ended by it"
+            );
+            return None;
+        }
+        Some(scope)
+    }
+
+    /// Windows have no scope outside Linux.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[allow(clippy::unused_self)]
+    fn recorded_scope(
+        &self,
+        _window_id: &str,
+        _record: &HolderRecord,
+        _row: Option<&StoredWindow>,
+    ) -> Option<String> {
+        None
     }
 }
 
@@ -475,14 +520,24 @@ fn holder_of(window_id: &str, record: &HolderRecord) -> Holder {
 /// record names, since while its leader runs the group id names no other
 /// group. Otherwise nothing is ended, and the group the record names is
 /// logged with `command`, the window's argv[0] when known; nothing is read
-/// from any other process. The one place a window's child group is ended
-/// without its holder.
+/// from any other process. On Linux, for a holder that is gone, `child_scope`
+/// is the child's scope name as the window's row keeps it: the user manager
+/// is asked to kill every process in it, which reaches a child that left its
+/// group, and its answer is logged, not waited for. The one place a window's
+/// child group is ended without its holder.
 #[cfg(unix)]
 pub(crate) fn end_recorded_child_group(
     window_id: &str,
     record: &HolderRecord,
     command: Option<&str>,
+    child_scope: Option<&str>,
 ) {
+    #[cfg(target_os = "linux")]
+    if let Some(scope) = child_scope {
+        kill_scope(window_id, scope);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = child_scope;
     let Some(child_pid) = record.child_pid.filter(|pid| *pid != 0) else {
         return;
     };
@@ -508,6 +563,41 @@ pub(crate) fn end_recorded_child_group(
     if let Err(error) = ended {
         tracing::warn!(window_id, child_pid, %error, "cannot end a window's process group");
     }
+}
+
+/// Asks the user manager, on a task of its own, to kill every process of the
+/// scope `scope`; a scope already gone makes the answer an error, which is
+/// only logged.
+#[cfg(target_os = "linux")]
+fn kill_scope(window_id: &str, scope: &str) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            window_id,
+            "no runtime to ask the user manager to end a window's scope"
+        );
+        return;
+    };
+    let window_id = window_id.to_owned();
+    let scope = scope.to_owned();
+    runtime.spawn(async move {
+        let answer = match yagura_os::platform_unix::UserManager::connect().await {
+            Ok(manager) => manager.kill_unit(&scope).await,
+            Err(error) => Err(error),
+        };
+        match answer {
+            Ok(()) => tracing::info!(
+                window_id,
+                scope,
+                "asked the user manager to kill the scope of a window whose holder is gone"
+            ),
+            Err(error) => tracing::info!(
+                window_id,
+                scope,
+                %error,
+                "the user manager did not kill the scope of a window whose holder is gone"
+            ),
+        }
+    });
 }
 
 /// The window ids of the records in `holders_dir` that no row of the table

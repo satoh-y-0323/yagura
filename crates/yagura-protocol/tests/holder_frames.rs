@@ -195,6 +195,10 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         history_rows: 1000,
         palette: Some(yagura_protocol::built_in_dark_palette()),
         fault: None,
+        scopes: Some(yagura_protocol::holder::HolderScopes {
+            holder: "yagura_w1_holder.scope".to_owned(),
+            child: "yagura_w1_child.scope".to_owned(),
+        }),
     };
     assert_eq!(
         decode_holder_launch(&encode_holder_launch(&launch)).unwrap(),
@@ -208,6 +212,7 @@ fn the_frames_and_launch_fields_the_daemon_link_added_round_trip() {
         let faulty = HolderLaunch {
             fault: Some(fault),
             palette: None,
+            scopes: None,
             awaits_successor: false,
             log_file: None,
             ..launch.clone()
@@ -261,8 +266,9 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
 }
 
 /// The record names the holder's and the child's starts, so a pid taken over by
-/// another process is not mistaken for them; a record written before they
-/// were carried reads as having neither.
+/// another process is not mistaken for them, and the child's scope, so a holder
+/// that died is ended by that name; a record written before they were carried
+/// reads as having none.
 #[test]
 fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without_them() {
     use yagura_protocol::holder::{HolderRecord, encode_holder_record};
@@ -275,6 +281,7 @@ fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without
         protocol: 3,
         holder_start: Some("holder-start".to_owned()),
         child_start: Some("child-start".to_owned()),
+        child_scope: Some("yagura_w1_child.scope".to_owned()),
     };
     let decoded: HolderRecord = serde_json::from_slice(&encode_holder_record(&record)).unwrap();
     assert_eq!(decoded, record);
@@ -283,7 +290,10 @@ fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without
         br#"{"window_id":"w1","endpoint":"holder-endpoint","holder_pid":10,"child_pid":11,"protocol":2}"#,
     )
     .unwrap();
-    assert_eq!((older.holder_start, older.child_start), (None, None));
+    assert_eq!(
+        (older.holder_start, older.child_start, older.child_scope),
+        (None, None, None)
+    );
 }
 
 /// The frames that carry the terminal kept in the holder: the screen copy and

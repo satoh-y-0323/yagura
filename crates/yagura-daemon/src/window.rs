@@ -56,7 +56,7 @@ use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::window_table::{
-    OpeningRow, Reservation, WindowRow, WindowTable, WindowValues, credentials_kind,
+    OpeningRow, Reservation, RowScopes, WindowRow, WindowTable, WindowValues, credentials_kind,
     credentials_mode, launch_record, recorded_launch,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
@@ -5505,13 +5505,14 @@ impl WindowRegistry {
         let palette = self.default_palette_for(vendor.as_deref());
         let record = launch_record(&window_id, status_token.as_hex(), &values);
         let lost = row.lost_notice();
+        let scopes = row.scopes();
         let ((session, hooks_injected), row) = row
             .open(self.spawn_pty_for_window(
                 &command,
                 &resolved_cwd,
                 &status_token,
                 &window_id,
-                (record, lost),
+                (record, lost, scopes),
                 &resolution,
                 extra_profile_env,
                 &prepared,
@@ -5840,7 +5841,7 @@ impl WindowRegistry {
         resolved_cwd: &std::path::Path,
         status_token: &StatusToken,
         window_id: &str,
-        (record, lost): (String, LostNotice),
+        (record, lost, scopes): (String, LostNotice, Option<RowScopes>),
         resolution: &program::Resolution,
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
@@ -5925,6 +5926,7 @@ impl WindowRegistry {
                 palette: Some(palette),
                 record,
                 lost,
+                scopes,
             },
             &self.config,
             &self.holder_host,
@@ -6094,8 +6096,10 @@ impl WindowRegistry {
             let Some(window_id) = picked else {
                 continue;
             };
+            // Named for each id tried: a name is never used for two starts.
+            let scopes = self.holder_host.scope_names(&window_id);
             if let Reservation::Reserved(row) =
-                OpeningRow::reserve(table.as_ref(), &window_id, values).await
+                OpeningRow::reserve(table.as_ref(), &window_id, values, scopes).await
             {
                 return Ok((window_id, row));
             }

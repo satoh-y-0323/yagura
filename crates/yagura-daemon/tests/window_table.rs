@@ -481,6 +481,13 @@ async fn a_windows_token_is_in_its_holders_launch_record_and_in_no_file() {
 
     let holders_dir = holders_dir_of(&window_id);
     let record = read_holder_record(&holders_dir, &window_id).expect("the holder's record");
+    // Read before the Hello below displaces the daemon: a holder that awaits no successor
+    // ends, removing its record, once that connection closes.
+    #[cfg(target_os = "linux")]
+    let record_file =
+        yagura_protocol::holder::holder_record_path(&holders_dir, &window_id).unwrap();
+    #[cfg(target_os = "linux")]
+    let record_bytes = std::fs::read(record_file).unwrap();
     let launch_record = welcome_record(&record.endpoint).await;
     let mut leaves = Vec::new();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&launch_record) {
@@ -495,6 +502,31 @@ async fn a_windows_token_is_in_its_holders_launch_record_and_in_no_file() {
         "the holder's launch record must carry the window's token, after its name, layout and \
          session id changed"
     );
+
+    #[cfg(target_os = "linux")]
+    {
+        let is_scope_name = |name: &str| {
+            name.strip_suffix(".scope").is_some_and(|stem| {
+                !stem.is_empty()
+                    && stem
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            })
+        };
+        let row = row_of(&state_rows(&db), &window_id).expect("the window's row");
+        let in_row: Vec<&str> = texts(&row).filter(|text| is_scope_name(text)).collect();
+        let mut in_record = Vec::new();
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&record_bytes) {
+            string_leaves(&value, &mut in_record);
+        }
+        assert!(
+            in_row
+                .iter()
+                .any(|name| in_record.iter().any(|recorded| recorded == name)),
+            "the window's row must carry the scope name its holder's record carries: row \
+             {in_row:?}, record {in_record:?}"
+        );
+    }
 
     let mut files = Vec::new();
     files_under(&root, &mut files);

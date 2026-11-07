@@ -154,7 +154,9 @@ fn start(faults: session::Faults) -> Result<session::Ending, String> {
                 protocol: HOLDER_PROTOCOL,
                 holder_start: record::start_of(holder_pid),
                 child_start: None,
+                child_scope: None,
             },
+            launch.scopes.clone(),
         );
         if let Err(error) = publish(&record) {
             record.remove();

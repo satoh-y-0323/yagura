@@ -19,6 +19,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use tokio::sync::oneshot;
+use yagura_protocol::holder::HolderScopes;
 
 use crate::profile::CredentialsMode;
 use crate::pty::lock_recover;
@@ -100,6 +101,25 @@ pub(crate) struct StoredWindow {
     /// `None` for a `lost` row, and for a row whose values do not read back.
     pub(crate) values: Option<WindowValues>,
     pub(crate) state: RowState,
+    /// The systemd user scope the window's child was asked to be moved into
+    /// (Linux), as written before the holder asked for it; any process of
+    /// the user can write the file, so a reader checks its form.
+    // Read only where windows have scopes (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) child_scope: Option<String>,
+}
+
+/// The scope names of a window's holder start, as its `opening` row was
+/// written with them: only an [`OpeningRow`] whose row is in the table gives
+/// them out, so a holder is never handed a name a next daemon cannot read back.
+#[derive(Debug, Clone)]
+pub(crate) struct RowScopes(HolderScopes);
+
+impl RowScopes {
+    /// The names as a holder's launch carries them.
+    pub(crate) fn launch(&self) -> HolderScopes {
+        self.0.clone()
+    }
 }
 
 /// What a holder's launch record gives back, read from the record its
@@ -176,6 +196,7 @@ enum Command {
     Reserve {
         window_id: String,
         values: WindowValues,
+        child_scope: Option<String>,
         reply: oneshot::Sender<Reserved>,
     },
     Live {
@@ -233,7 +254,7 @@ impl WindowTable {
     /// holder runs without one, or whose row's values do not read back; a row
     /// already there keeps its state and takes `values`.
     pub(crate) async fn restore_row(&self, window_id: &str, values: &WindowValues) -> WindowRow {
-        match OpeningRow::reserve(Some(self), window_id, values).await {
+        match OpeningRow::reserve(Some(self), window_id, values, None).await {
             Reservation::Reserved(row) => {
                 let opened: Result<((), WindowRow), std::convert::Infallible> =
                     row.open(async { Ok(()) }).await;
@@ -292,8 +313,8 @@ fn text_of(cell: ValueRef<'_>) -> Option<String> {
 fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
-         effort, layout_json, session_id, opener, task_plan_id, task_id, credentials \
-         FROM windows ORDER BY opened_seq",
+         effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
+         child_scope FROM windows ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
         let Some(window_id) = text_of(row.get_ref(0)?) else {
@@ -309,10 +330,12 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
         } else {
             row_values(row).ok()
         };
+        let child_scope = text_of(row.get_ref(16)?);
         Ok(Some(StoredWindow {
             window_id,
             values,
             state,
+            child_scope,
         }))
     })?;
     let mut read = Vec::new();
@@ -406,9 +429,10 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
             Command::Reserve {
                 window_id,
                 values,
+                child_scope,
                 reply,
             } => {
-                let reserved = match insert_opening(conn, &window_id, &values) {
+                let reserved = match insert_opening(conn, &window_id, &values, child_scope) {
                     Ok(0) => Reserved::Taken,
                     Ok(_) => Reserved::Written,
                     Err(error) => {
@@ -450,14 +474,17 @@ fn insert_opening(
     conn: &Connection,
     window_id: &str,
     values: &WindowValues,
+    child_scope: Option<String>,
 ) -> rusqlite::Result<usize> {
     let command_json = serde_json::to_string(&values.command)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     conn.execute_fixed(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
-         layout_json, session_id, opener, task_plan_id, task_id, credentials, state) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'opening') \
+         layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
+         state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
             window_id,
@@ -475,6 +502,7 @@ fn insert_opening(
             values.task_plan_id,
             values.task_id,
             values.credentials,
+            child_scope,
         ],
     )
 }
@@ -601,7 +629,12 @@ impl Drop for WindowRow {
 }
 
 /// A window's row while it is `opening`: what [`WindowTable`] gave the id to.
-pub(crate) struct OpeningRow(WindowRow);
+pub(crate) struct OpeningRow {
+    row: WindowRow,
+    /// The scope names the row was written with; `None` for a window without
+    /// a row.
+    scopes: Option<HolderScopes>,
+}
 
 /// What reserving a window id in the table came to.
 pub(crate) enum Reservation {
@@ -611,44 +644,56 @@ pub(crate) enum Reservation {
 }
 
 impl OpeningRow {
-    /// Writes `window_id`'s row as `opening` with `values`, and returns once
-    /// it is written. With no `table`, or when the row cannot be written, the
-    /// window opens without a row.
+    /// Writes `window_id`'s row as `opening` with `values` and the child's
+    /// scope name of `scopes`, and returns once it is written. With no
+    /// `table`, or when the row cannot be written, the window opens without a
+    /// row, and without scopes.
     pub(crate) async fn reserve(
         table: Option<&WindowTable>,
         window_id: &str,
         values: &WindowValues,
+        scopes: Option<HolderScopes>,
     ) -> Reservation {
-        let row = |table: Option<WindowTable>| {
-            Reservation::Reserved(Self(WindowRow {
-                table,
-                window_id: window_id.to_owned(),
-                updates: Mutex::new(()),
-                removed: AtomicBool::new(false),
-            }))
+        let row = |table: Option<WindowTable>, scopes: Option<HolderScopes>| {
+            Reservation::Reserved(Self {
+                row: WindowRow {
+                    table,
+                    window_id: window_id.to_owned(),
+                    updates: Mutex::new(()),
+                    removed: AtomicBool::new(false),
+                },
+                scopes,
+            })
         };
         let Some(table) = table else {
-            return row(None);
+            return row(None, None);
         };
         let (reply, written) = oneshot::channel();
         let sent = table.send(Command::Reserve {
             window_id: window_id.to_owned(),
             values: values.clone(),
+            child_scope: scopes.as_ref().map(|scopes| scopes.child.clone()),
             reply,
         });
         if !sent {
-            return row(None);
+            return row(None, None);
         }
         match written.await {
-            Ok(Reserved::Written) => row(Some(table.clone())),
+            Ok(Reserved::Written) => row(Some(table.clone()), scopes),
             Ok(Reserved::Taken) => Reservation::Taken,
-            Ok(Reserved::Unwritten) | Err(_) => row(None),
+            Ok(Reserved::Unwritten) | Err(_) => row(None, None),
         }
     }
 
     /// See [`WindowRow::lost_notice`].
     pub(crate) fn lost_notice(&self) -> crate::pty::LostNotice {
-        self.0.lost_notice()
+        self.row.lost_notice()
+    }
+
+    /// The scope names the row was written with, for the window's holder to
+    /// ask for; `None` for a window without a row.
+    pub(crate) fn scopes(&self) -> Option<RowScopes> {
+        self.scopes.clone().map(RowScopes)
     }
 
     /// Runs `start`, which starts the window's holder and returns once the
@@ -660,7 +705,7 @@ impl OpeningRow {
         start: impl Future<Output = Result<T, E>>,
     ) -> Result<(T, WindowRow), E> {
         let opened = start.await?;
-        let row = self.0;
+        let row = self.row;
         if let Some(table) = &row.table {
             table.send(Command::Live {
                 window_id: row.window_id.clone(),

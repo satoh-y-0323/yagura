@@ -130,6 +130,7 @@ impl Rig {
             history_rows: HISTORY_ROWS,
             palette: None,
             fault: None,
+            scopes: None,
         }
     }
 

@@ -457,13 +457,12 @@ async fn replace_holder_with(
     let holder_pid = fake.holder.id();
     let child_pid = fake.child.id();
     let replaced = HolderRecord {
-        window_id: record.window_id.clone(),
-        endpoint: record.endpoint.clone(),
         holder_pid,
         child_pid: Some(child_pid),
         protocol: HOLDER_PROTOCOL,
         holder_start: Some(start_of(holder_pid)),
         child_start: Some(start_of(child_pid)),
+        ..record.clone()
     };
     std::fs::write(
         holder_record_path(&sandbox.holders_dir(), &record.window_id).unwrap(),
@@ -1585,7 +1584,15 @@ async fn a_lost_windows_child_that_outlived_its_holder_is_ended_with_its_group()
     let sandbox = Sandbox::new("reconcile-group");
     sandbox.write_probe_profile("stubborn", &[&holder_child(), "ignore-end"], "");
 
-    let mut first = sandbox.start().await;
+    // On Linux a child's scope bound to its holder's would end the child with the holder,
+    // so the window opens where no user bus is reached and its child gets no scope.
+    #[cfg(target_os = "linux")]
+    let no_bus = format!("unix:path={}", sandbox.tree.path().join("no-bus").display());
+    #[cfg(target_os = "linux")]
+    let launcher_env = [("DBUS_SESSION_BUS_ADDRESS", no_bus.as_str())];
+    #[cfg(not(target_os = "linux"))]
+    let launcher_env: [(&str, &str); 0] = [];
+    let mut first = sandbox.start_from(&launcher_env).await;
     let window_id = first.open_profile_window(&sandbox, "stubborn").await;
     first
         .output_until(&window_id, "the child ignoring every end", |text| {
@@ -1683,6 +1690,160 @@ async fn a_lost_windows_child_id_taken_by_another_process_is_left_running() {
         running,
         "a process that took over the recorded child's id must not be ended"
     );
+}
+
+/// Whether `name` is a unit name of the form a window's scope has.
+#[cfg(target_os = "linux")]
+fn is_scope_name(name: &str) -> bool {
+    name.strip_suffix(".scope").is_some_and(|stem| {
+        !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+/// The scope names `window_id`'s holder record carries, read without naming its fields.
+#[cfg(target_os = "linux")]
+fn recorded_scope_names(sandbox: &Sandbox, window_id: &str) -> Vec<String> {
+    fn leaves(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => out.push(text.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|item| leaves(item, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|item| leaves(item, out)),
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    if let Ok(bytes) = std::fs::read(holder_record_path(&sandbox.holders_dir(), window_id).unwrap())
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+    {
+        leaves(&value, &mut names);
+    }
+    names.retain(|name| is_scope_name(name));
+    names
+}
+
+/// The cgroup path `/proc/<pid>/cgroup` names; empty once the process is gone.
+#[cfg(target_os = "linux")]
+fn cgroup_of(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .unwrap_or_default()
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Stops, as a test ends, the scopes it saw.
+#[cfg(target_os = "linux")]
+struct StopScopes(Vec<String>);
+
+#[cfg(target_os = "linux")]
+impl Drop for StopScopes {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            let _ = Command::new("systemctl")
+                .args(["--user", "stop", "--quiet", name])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// On Linux with the user's user manager, a window's child is in the scope its holder's
+/// record names. When the holder is killed while no daemon is there, the whole child's
+/// scope ends with it -- the child ignoring SIGTERM and SIGHUP and a grandchild it started
+/// in a session of its own -- and the next daemon makes the window `lost`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "needs the user's systemd user manager; run with --include-ignored where one runs"]
+async fn a_linux_window_whose_holder_was_killed_while_no_daemon_was_there_ends_its_scope_whole() {
+    let sandbox = Sandbox::new("reconcile-scope");
+    let gate = sandbox.tree.path().join("gate");
+    let pid_file = sandbox.tree.path().join("grandchild.pid");
+    sandbox.write_probe_profile(
+        "late",
+        &[&holder_child(), "late-tree", utf8(&gate), utf8(&pid_file)],
+        "",
+    );
+
+    let mut first = sandbox.start().await;
+    let window_id = first.open_profile_window(&sandbox, "late").await;
+    first
+        .output_until(&window_id, "the child waiting for its gate", |text| {
+            text.contains("HOLDER-CHILD-LATE-TREE-WAITING")
+        })
+        .await;
+    let record = record_of(&sandbox, &window_id);
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&window_id]);
+    let child_pid = record.child_pid.expect("the record names the child");
+    let child = EndOnDrop(Some(handle_of(child_pid, record.child_start.as_deref())));
+    let mut scope: Option<String>;
+    settle!(sandbox, "the child is not in a scope its record names", {
+        let names = recorded_scope_names(&sandbox, &window_id);
+        let cgroup = cgroup_of(child_pid);
+        scope = names
+            .iter()
+            .find(|name| cgroup.ends_with(&format!("/{name}")))
+            .cloned();
+        if scope.is_some() {
+            Vec::new()
+        } else {
+            vec![format!(
+                "the child's cgroup {cgroup:?}, the record's scopes {names:?}"
+            )]
+        }
+    });
+    let scope = scope.unwrap();
+    let _scopes = StopScopes(recorded_scope_names(&sandbox, &window_id));
+
+    std::fs::write(&gate, b"").unwrap();
+    first
+        .output_until(&window_id, "the grandchild started", |text| {
+            text.contains("HOLDER-CHILD-LATE-TREE-STARTED")
+        })
+        .await;
+    let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let grandchild = EndOnDrop(Some(handle_of(
+        grandchild_pid,
+        Some(&start_of(grandchild_pid)),
+    )));
+    assert!(
+        cgroup_of(grandchild_pid).ends_with(&format!("/{scope}")),
+        "the fixture's grandchild must start in the child's scope: {}",
+        cgroup_of(grandchild_pid)
+    );
+    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    first.kill_keeping_windows();
+    kill_and_wait(&holder, "the killed holder").await;
+    wait_dead(
+        child.0.as_ref().unwrap(),
+        "the child in the killed holder's scope",
+    )
+    .await;
+    wait_dead(
+        grandchild.0.as_ref().unwrap(),
+        "the grandchild in the killed holder's scope",
+    )
+    .await;
+
+    let _next = sandbox.start().await;
+    let db = store_db(&sandbox);
+    settle!(sandbox, "the window whose holder died is not lost", {
+        let state = row_state(&db, &window_id);
+        if state.as_deref() == Some("lost") {
+            Vec::new()
+        } else {
+            vec![format!("the window's row is {state:?}, not lost")]
+        }
+    });
 }
 
 /// The version that shipped the snapshot slots: migrations 001 to 016.

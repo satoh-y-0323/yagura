@@ -3,8 +3,12 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use yagura_protocol::holder::{HolderRecord, encode_holder_record, holder_record_path};
+use yagura_protocol::holder::{
+    HolderRecord, HolderScopes, encode_holder_record, holder_record_path,
+};
 
 use crate::endpoint::Place;
 
@@ -36,7 +40,31 @@ pub(crate) fn start_of(pid: u32) -> Option<String> {
 pub(crate) struct RecordFile {
     holders_dir: PathBuf,
     record: HolderRecord,
+    /// The scopes of the launch, whose child's name the record carries.
+    #[cfg(target_os = "linux")]
+    scopes: Option<HolderScopes>,
+    /// A write of the record has succeeded.
+    #[cfg(target_os = "linux")]
+    written: AtomicBool,
     removed: bool,
+}
+
+/// The scope names the holder may ask for: only obtained from a record that
+/// was written carrying the child's, so a next daemon can always find a scope
+/// that was asked for by the name its record keeps.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub(crate) struct WrittenScopes(HolderScopes);
+
+#[cfg(target_os = "linux")]
+impl WrittenScopes {
+    pub(crate) fn holder(&self) -> &str {
+        &self.0.holder
+    }
+
+    pub(crate) fn child(&self) -> &str {
+        &self.0.child
+    }
 }
 
 /// Proof that the record is removed, which giving up the endpoint asks for:
@@ -44,12 +72,30 @@ pub(crate) struct RecordFile {
 pub(crate) struct RecordRemoved(());
 
 impl RecordFile {
-    pub(crate) fn new(place: &Place, record: HolderRecord) -> Self {
+    /// The record of a holder launched with `scopes`, whose child's name the
+    /// record carries.
+    pub(crate) fn new(place: &Place, record: HolderRecord, scopes: Option<HolderScopes>) -> Self {
+        let mut record = record;
+        record.child_scope = scopes.as_ref().map(|scopes| scopes.child.clone());
         Self {
             holders_dir: place.holders_dir.clone(),
             record,
+            #[cfg(target_os = "linux")]
+            scopes,
+            #[cfg(target_os = "linux")]
+            written: AtomicBool::new(false),
             removed: false,
         }
+    }
+
+    /// The scopes to ask for, once a write of the record carrying the
+    /// child's name has succeeded; `None` before, or with none to ask for.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn written_scopes(&self) -> Option<WrittenScopes> {
+        if !self.written.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.scopes.clone().map(WrittenScopes)
     }
 
     /// Writes the record as it is now.
@@ -63,7 +109,10 @@ impl RecordFile {
             &self.holders_dir,
             &file_name(&path)?,
             content,
-        )
+        )?;
+        #[cfg(target_os = "linux")]
+        self.written.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Names the started child and its start in the record.
