@@ -151,7 +151,7 @@ impl Scene {
             let config = config.clone();
             Arc::new(
                 tokio::task::spawn_blocking(move || {
-                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&config)
+                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&config, &[])
                 })
                 .await
                 .expect("ChatRuntime::from_config must not panic"),

@@ -115,8 +115,12 @@ impl ChatRuntime {
     /// running it with built-in defaults: a broken policy file
     /// must not leave chat silently open on whatever the defaults happen to
     /// allow.
+    ///
+    /// The pending deliveries to the windows of `remaining` (the windows the
+    /// start found still there, taken back or lost) stay pending; every other
+    /// one is settled as never delivered.
     #[must_use]
-    pub fn from_config(config: &DaemonConfig) -> Self {
+    pub fn from_config(config: &DaemonConfig, remaining: &[String]) -> Self {
         if config.playbook.is_some() && config.approval_policy.is_none() {
             return Self::disabled_with_reason("the configured playbook failed to load");
         }
@@ -127,8 +131,8 @@ impl ChatRuntime {
             Ok(mut store) => {
                 tracing::info!("chat store: {}", db_path.display());
                 // An inbox ends with its daemon: what a previous one still held
-                // was never delivered.
-                if let Err(err) = store.settle_pending_after_restart() {
+                // for a window that is gone was never delivered.
+                if let Err(err) = store.settle_pending_after_restart(remaining) {
                     tracing::warn!(error = %err, "could not settle the deliveries a previous daemon left pending");
                 }
                 Self {

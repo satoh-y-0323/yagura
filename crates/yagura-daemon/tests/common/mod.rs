@@ -797,7 +797,7 @@ impl Harness {
             let from_config_config = config.clone();
             Arc::new(
                 tokio::task::spawn_blocking(move || {
-                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&from_config_config)
+                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&from_config_config, &[])
                 })
                 .await
                 .expect("ChatRuntime::from_config must not panic"),
@@ -838,7 +838,7 @@ impl Harness {
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
                 let from_config_config = config.clone();
-                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config)
+                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config, &[])
             })
             .await
             .expect("PlanRuntime::from_config must not panic"),
@@ -877,7 +877,7 @@ impl Harness {
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
                 let from_config_config = config.clone();
-                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config)
+                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config, &[])
             })
             .await
             .expect("PlanRuntime::from_config must not panic"),
@@ -927,7 +927,7 @@ impl Harness {
             let from_config_config = config.clone();
             Arc::new(
                 tokio::task::spawn_blocking(move || {
-                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&from_config_config)
+                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&from_config_config, &[])
                 })
                 .await
                 .expect("ChatRuntime::from_config must not panic"),
@@ -937,7 +937,7 @@ impl Harness {
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
                 let from_config_config = config.clone();
-                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config)
+                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&from_config_config, &[])
             })
             .await
             .expect("PlanRuntime::from_config must not panic"),

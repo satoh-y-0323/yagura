@@ -533,7 +533,7 @@ async fn opening_as_a_new_boot_turns_a_pending_instruction_notice_into_window_cl
         plan_id
     };
 
-    let store = PlanStore::open_as_new_boot(&path).expect("open_as_new_boot must succeed");
+    let store = PlanStore::open_as_new_boot(&path, &[]).expect("open_as_new_boot must succeed");
     let detail = store
         .get_plan(&plan_id)
         .expect("get_plan must not error")

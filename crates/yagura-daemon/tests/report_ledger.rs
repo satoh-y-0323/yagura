@@ -598,7 +598,7 @@ async fn opening_as_a_new_boot_keeps_a_tasks_report_even_though_its_binding_is_c
         plan_id
     };
 
-    let store = PlanStore::open_as_new_boot(&path).expect("open_as_new_boot must succeed");
+    let store = PlanStore::open_as_new_boot(&path, &[]).expect("open_as_new_boot must succeed");
     let detail = store
         .get_plan(&plan_id)
         .expect("get_plan must not error")

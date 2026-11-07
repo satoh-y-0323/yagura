@@ -6,7 +6,7 @@
 //! environment and, through a launch profile's `[mcp]` table, into its argv
 //! and a settings file on disk -- across every path that opens a
 //! profile-addressed window -- and never lets that injection leak into the
-//! session snapshot or the child's argv as the window's own status token.
+//! window's stored row or the child's argv as the window's own status token.
 //!
 //! Every property here is measured through a real spawned child
 //! (`argv_probe` / `env_probe`), never a fake transport: the injection is
@@ -666,7 +666,7 @@ async fn open_task_window_carries_the_same_mcp_injection_into_the_childs_argv() 
 }
 
 #[tokio::test]
-async fn open_window_from_profile_with_mcp_injection_excludes_the_injection_from_the_snapshot_command()
+async fn open_window_from_profile_with_mcp_injection_excludes_the_injection_from_the_stored_command()
  {
     let tree = TempDir::new("yagura-cli-test", "mcp-inject-snapshot-command");
     let profiles_dir = tree.make_dir("profiles");
@@ -689,7 +689,7 @@ async fn open_window_from_profile_with_mcp_injection_excludes_the_injection_from
     // it never reached the stored one.
     h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
 
-    let rows = common::store_fixtures::wait_for_current_snapshot(
+    let rows = common::store_fixtures::wait_for_window_rows(
         &db_path,
         "the profile-launched window to be recorded",
         |rows| rows.len() == 1,
@@ -723,11 +723,13 @@ fn legacy_snapshot_rows_read_profile_model_effort_as_none_after_migrating_forwar
     let before_profile_tracking = &store::MIGRATIONS[..10];
     store::apply_migrations(&mut conn, before_profile_tracking)
         .expect("every migration before profile tracking must apply");
+    // The slot a 0.3 store kept the windows open at its last write in.
+    const V0_3_SLOT_CURRENT: i64 = 0;
     conn.execute(
         "INSERT INTO snapshot_windows (slot, position, command_json, cwd, name, vendor, \
          detection) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
-            store::SLOT_CURRENT,
+            V0_3_SLOT_CURRENT,
             0i64,
             "[\"cmd.exe\"]",
             "C:/work",
@@ -739,8 +741,10 @@ fn legacy_snapshot_rows_read_profile_model_effort_as_none_after_migrating_forwar
     .expect("seed a row written before profile tracking existed");
     store::apply_migrations(&mut conn, store::MIGRATIONS)
         .expect("the full migration series must apply forward from any earlier version");
+    yagura_daemon::recovery::move_0_3_candidates(&mut conn, None)
+        .expect("the 0.3 store's last windows must move into lost rows");
 
-    let rows = store::read_snapshot_conn(&conn).expect("read_snapshot_conn must succeed");
+    let rows = store::read_lost_windows(&conn).expect("read_lost_windows must succeed");
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].profile, None,
@@ -752,17 +756,17 @@ fn legacy_snapshot_rows_read_profile_model_effort_as_none_after_migrating_forwar
 }
 
 #[test]
-fn snapshot_rows_written_with_profile_launch_metadata_round_trip_through_read_snapshot_conn() {
+fn lost_rows_written_with_profile_launch_metadata_round_trip_through_read_lost_windows() {
     let tree = TempDir::new("yagura-cli-test", "mcp-migration-fresh");
     let db_path = tree.make_dir("store").join("yagura.db");
     store::open_store(&db_path).expect("open_store must create a freshly migrated database");
     let conn = rusqlite::Connection::open(&db_path).expect("open the freshly migrated database");
     conn.execute(
-        "INSERT INTO snapshot_windows (slot, position, command_json, cwd, name, vendor, \
-         detection, profile, model, effort) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO windows (window_id, command_json, cwd, name, vendor, detection, profile, \
+         model, effort, credentials, state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'env', 'lost')",
         rusqlite::params![
-            store::SLOT_CURRENT,
-            0i64,
+            "w00000000",
             "[\"argv_probe\"]",
             "C:/work",
             "with-options",
@@ -775,7 +779,7 @@ fn snapshot_rows_written_with_profile_launch_metadata_round_trip_through_read_sn
     )
     .expect("seed a row carrying profile launch metadata");
 
-    let rows = store::read_snapshot_conn(&conn).expect("read_snapshot_conn must succeed");
+    let rows = store::read_lost_windows(&conn).expect("read_lost_windows must succeed");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].profile.as_deref(), Some("with-options"));
     assert_eq!(rows[0].model.as_deref(), Some("alpha"));
@@ -783,7 +787,7 @@ fn snapshot_rows_written_with_profile_launch_metadata_round_trip_through_read_sn
 }
 
 #[tokio::test]
-async fn open_window_from_profile_with_launch_options_persists_profile_model_and_effort_into_the_current_snapshot_row_while_a_raw_open_window_leaves_them_none()
+async fn open_window_from_profile_with_launch_options_persists_profile_model_and_effort_into_the_windows_row_while_a_raw_open_window_leaves_them_none()
  {
     let tree = TempDir::new("yagura-cli-test", "mcp-inject-snapshot-metadata");
     let profiles_dir = tree.make_dir("profiles");
@@ -814,7 +818,7 @@ async fn open_window_from_profile_with_launch_options_persists_profile_model_and
     )
     .await;
 
-    let rows = common::store_fixtures::wait_for_current_snapshot(
+    let rows = common::store_fixtures::wait_for_window_rows(
         &db_path,
         "both windows to be recorded",
         |rows| rows.len() == 2,

@@ -66,19 +66,19 @@ impl PlanRuntime {
         Self::disabled()
     }
 
-    /// Opens the plan store as a new boot (clearing every plan's owner and
-    /// task window binding, since no window id survives a restart), or
+    /// Opens the plan store after a restart (clearing every plan's owner and
+    /// task window binding that names a window not in `remaining`), or
     /// returns a disabled runtime when no store path is resolved or the open
     /// fails.
     ///
     /// A caller in an async context must run this on a blocking thread
     /// (`tokio::task::spawn_blocking`): opening a database is blocking I/O.
     #[must_use]
-    pub fn from_config(config: &DaemonConfig) -> Self {
+    pub fn from_config(config: &DaemonConfig, remaining: &[String]) -> Self {
         let Some(db_path) = config.store_db_path_resolved.as_ref() else {
             return Self::disabled_with_reason("no store database path is resolved");
         };
-        match PlanStore::open_as_new_boot(db_path) {
+        match PlanStore::open_as_new_boot(db_path, remaining) {
             Ok(store) => {
                 tracing::info!("plan store: {}", db_path.display());
                 Self {

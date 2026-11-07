@@ -486,14 +486,6 @@ async fn async_main(
     };
     config.mcp_config_dir = yagura_os::default_state_base_dir()
         .map(|base| yagura_os::instance_dir(&base, &namespace).join(MCP_CONFIG_DIR_NAME));
-    // The endpoint is held by now, so no other daemon of this instance owns a
-    // window whose credentials are left in there.
-    if let Some(dir) = config.mcp_config_dir.clone() {
-        let _ = tokio::task::spawn_blocking(move || {
-            yagura_daemon::window::remove_stale_credentials(&dir);
-        })
-        .await;
-    }
     config.report_dir = tokio::task::spawn_blocking({
         let namespace = namespace.clone();
         move || resolve_report_dir(&namespace)
@@ -510,8 +502,7 @@ async fn async_main(
 
     let registry = Arc::new(WindowRegistry::new(config.clone()));
 
-    // The store is wired before any window can be opened, so start-up
-    // rotation runs before anything writes to `current`.
+    // The store is wired before any window can be opened or taken back.
     let explicit_db_path = config.store_db_path.clone();
     let data_base_dir = yagura_os::default_data_base_dir();
     let store_db_path = store::resolve_db_path(
@@ -544,7 +535,17 @@ async fn async_main(
     // before any connection is accepted; each one's holder is reached once
     // the server accepts, since a holder lets in only a daemon it can reach.
     let (accepting, accepted) = tokio::sync::watch::channel(false);
-    yagura_daemon::recovery::take_back_windows(&registry, accepted).await;
+    let remaining = yagura_daemon::recovery::take_back_windows(&registry, accepted).await;
+    let remaining_ids = remaining.window_ids();
+
+    // The endpoint is held and the windows that remain are known, so what is
+    // left in there for any other window belongs to no window that may run.
+    if let Some(dir) = config.mcp_config_dir.clone() {
+        let _ = tokio::task::spawn_blocking(move || {
+            yagura_daemon::window::remove_stale_credentials(&dir, &remaining);
+        })
+        .await;
+    }
 
     // Opening a database is blocking I/O, so it runs on a blocking thread
     // rather than this async one. Installed before any window can be opened,
@@ -552,20 +553,21 @@ async fn async_main(
     let chat = Arc::new(
         tokio::task::spawn_blocking({
             let config = config.clone();
-            move || chat::ChatRuntime::from_config(&config)
+            let remaining_ids = remaining_ids.clone();
+            move || chat::ChatRuntime::from_config(&config, &remaining_ids)
         })
         .await
         .context("chat runtime initialization panicked")?,
     );
     chat::install_intro_hook(&registry, chat.clone());
 
-    // Opened as a new boot (clearing every plan's owner and task window
-    // binding, since no window id survives a restart), on a blocking thread
-    // for the same reason the chat store above is.
+    // Opened after the restart (clearing the plan owners and task window
+    // bindings of every window that did not remain), on a blocking thread for
+    // the same reason the chat store above is.
     let ledger = Arc::new(
         tokio::task::spawn_blocking({
             let config = config.clone();
-            move || plan::PlanRuntime::from_config(&config)
+            move || plan::PlanRuntime::from_config(&config, &remaining_ids)
         })
         .await
         .context("plan ledger initialization panicked")?,

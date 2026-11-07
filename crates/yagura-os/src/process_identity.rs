@@ -116,6 +116,35 @@ impl ProcessHandle {
     pub fn kill(&self) -> io::Result<()> {
         self.0.kill()
     }
+
+    /// Starts watching for the process's end, to be made before whatever ends
+    /// it: [`ExitWatch::wait`] then returns once the exit is complete, the
+    /// process's descriptors closed. On macOS a [`ProcessHandle::wait`] begun
+    /// once the exit is under way returns at once, while the process may
+    /// still hold its descriptors (and the locks taken on them).
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the watch cannot be made.
+    pub fn watch_exit(&self) -> io::Result<ExitWatch> {
+        self.0.watch().map(ExitWatch)
+    }
+}
+
+/// A watch of one process's end, made by [`ProcessHandle::watch_exit`].
+#[derive(Debug)]
+pub struct ExitWatch(platform::Watch);
+
+impl ExitWatch {
+    /// Blocks until the watched process has exited; at once when it had
+    /// already ended when the watch was made. Reaps nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the wait fails.
+    pub fn wait(self) -> io::Result<()> {
+        self.0.wait()
+    }
 }
 
 #[cfg(windows)]
@@ -183,6 +212,24 @@ mod platform {
         Ok(ticks.to_string())
     }
 
+    fn wait_for(handle: &OwnedHandle) -> io::Result<()> {
+        // SAFETY: the handle is open for the call.
+        if unsafe { WaitForSingleObject(raw(handle), INFINITE) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Watch(OwnedHandle);
+
+    impl Watch {
+        pub(super) fn wait(self) -> io::Result<()> {
+            wait_for(&self.0)
+        }
+    }
+
     /// A process object is signalled once its process has exited, whoever
     /// still holds it open.
     fn liveness_of(handle: &OwnedHandle) -> Liveness {
@@ -219,12 +266,11 @@ mod platform {
         }
 
         pub(super) fn wait(&self) -> io::Result<()> {
-            // SAFETY: the handle is open for the call.
-            if unsafe { WaitForSingleObject(raw(&self.0), INFINITE) } == WAIT_OBJECT_0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            wait_for(&self.0)
+        }
+
+        pub(super) fn watch(&self) -> io::Result<Watch> {
+            self.0.try_clone().map(Watch)
         }
 
         pub(super) fn kill(&self) -> io::Result<()> {
@@ -283,6 +329,15 @@ mod platform {
 
     pub(super) fn start_of(pid: u32) -> io::Result<Option<String>> {
         Ok(read_stat(pid)?.map(|(_, start)| start))
+    }
+
+    #[derive(Debug)]
+    pub(super) struct Watch(OwnedFd);
+
+    impl Watch {
+        pub(super) fn wait(self) -> io::Result<()> {
+            poll_exit(&self.0, -1).map(drop)
+        }
     }
 
     /// Polls the process's descriptor, which turns readable once it has
@@ -344,6 +399,11 @@ mod platform {
 
         pub(super) fn wait(&self) -> io::Result<()> {
             poll_exit(&self.0, -1).map(drop)
+        }
+
+        /// The descriptor turns readable only once the exit is complete.
+        pub(super) fn watch(&self) -> io::Result<Watch> {
+            self.0.try_clone().map(Watch)
         }
 
         pub(super) fn kill(&self) -> io::Result<()> {
@@ -425,13 +485,26 @@ mod platform {
         Ok(read_info(pid)?.is_some_and(|(status, read)| read == start && status != libc::SZOMB))
     }
 
-    /// Asks `queue` for one event, waiting at most `timeout` (`None` for no
-    /// limit); `true` once the exit was reported.
-    fn exit_reported(queue: &OwnedFd, timeout: Option<&libc::timespec>) -> io::Result<bool> {
+    /// `None` when the process had already ended, or begun to, as the watch
+    /// was made.
+    #[derive(Debug)]
+    pub(super) struct Watch(Option<OwnedFd>);
+
+    impl Watch {
+        pub(super) fn wait(self) -> io::Result<()> {
+            let Some(queue) = self.0 else {
+                return Ok(());
+            };
+            exit_reported(&queue)
+        }
+    }
+
+    /// Blocks until `queue` reports its one watch's event: the exit, the only
+    /// one asked for.
+    fn exit_reported(queue: &OwnedFd) -> io::Result<()> {
         loop {
             // SAFETY: zeroed is a valid `kevent`, which kevent only writes.
             let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-            let timeout = timeout.map_or(std::ptr::null(), std::ptr::from_ref);
             // SAFETY: no changes are passed; `event` is a live stack local of
             // the one entry asked for.
             let count = unsafe {
@@ -441,11 +514,11 @@ mod platform {
                     0,
                     &mut event,
                     1,
-                    timeout,
+                    std::ptr::null(),
                 )
             };
             if count >= 0 {
-                return Ok(count == 1 && event.fflags & libc::NOTE_EXIT != 0);
+                return Ok(());
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
@@ -519,19 +592,23 @@ mod platform {
             }
         }
 
-        /// The watch is made before the start is checked, so it is known to
-        /// be on the process the start names.
         pub(super) fn wait(&self) -> io::Result<()> {
+            self.watch()?.wait()
+        }
+
+        /// The watch is made before the start is checked, so it is known to
+        /// be on the process the start names. A watch attaches only to a
+        /// process that has not begun to exit (an exiting or zombie process
+        /// answers ESRCH), so an attached one is sent the exit, once the
+        /// process has closed its descriptors.
+        pub(super) fn watch(&self) -> io::Result<Watch> {
             let Some(queue) = watch_exit(self.pid)? else {
-                return Ok(());
+                return Ok(Watch(None));
             };
-            // A process that became a zombie before the watch sends no event.
-            while self.liveness() != Liveness::Dead {
-                if exit_reported(&queue, None)? {
-                    return Ok(());
-                }
+            match read_info(self.pid)? {
+                Some((_, start)) if start != self.start => Ok(Watch(None)),
+                _ => Ok(Watch(Some(queue))),
             }
-            Ok(())
         }
 
         /// The start is checked again just before the signal; the gap
@@ -587,8 +664,21 @@ mod platform {
             Err(unsupported())
         }
 
+        pub(super) fn watch(&self) -> io::Result<Watch> {
+            Err(unsupported())
+        }
+
         pub(super) fn kill(&self) -> io::Result<()> {
             Err(unsupported())
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) enum Watch {}
+
+    impl Watch {
+        pub(super) fn wait(self) -> io::Result<()> {
+            match self {}
         }
     }
 }

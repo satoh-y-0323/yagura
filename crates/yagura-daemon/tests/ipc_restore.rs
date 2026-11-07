@@ -1,26 +1,35 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Seeds and reads the database with raw SQL, which only tests may do.
+#![allow(clippy::disallowed_methods)]
 
 //! IPC-level contracts for the restore flow's daemon side: `ListRestoreCandidates`,
-//! `UpdateWindowLayout`, its reflection into the next snapshot row, and `ListWindows`'s
+//! `UpdateWindowLayout`, its reflection into the window's row, and `ListWindows`'s
 //! `WindowInfo.layout_json`.
 //!
-//! `ListRestoreCandidates` is answered from `DaemonConfig::store_db_path_resolved`
-//! directly, not through the registry's store-writer channel, which carries only the
-//! write path. Tests needing candidates therefore seed a database with
-//! `rusqlite::Connection::open` and point a `DaemonConfig` at that field; the `Harness`
-//! in this crate never wires the store itself.
+//! `ListRestoreCandidates` is answered from `DaemonConfig::store_db_path_resolved`:
+//! the candidates are the window table's `lost` rows. Tests needing candidates seed a
+//! database with `rusqlite::Connection::open` and point a `DaemonConfig` at that field.
+//! The table is untrusted input (another process of the same user can write it), so a
+//! corrupt row costs only itself and a read warns once per kind of damage.
 
 use crate::common;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use common::store_fixtures::{insert_window_row_with_command_json, set_meta, temp_store_db};
+use common::real_daemon::Sandbox;
+use common::store_fixtures::{
+    insert_lost_window, insert_lost_window_with_invalid_utf8_layout, insert_window_table_row,
+    temp_store_db,
+};
 use common::{Harness, expect_error, read_response, send, sleepy_command, unique_temp_dir};
+use rusqlite::types::Value;
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::store;
-use yagura_protocol::{ClientMessage, DaemonMessage};
+use yagura_protocol::{ClientMessage, DaemonMessage, RestoreCandidate};
+use yagura_test_support::HANG_GUARD;
 
-/// Creates schema v2 at `path` through the production entry point, releasing the store's
+/// Creates the schema at `path` through the production entry point, releasing the store's
 /// own connection before returning so a seeding connection can take the write lock.
 fn create_schema(path: &Path) {
     store::open_store(path).expect("open_store must succeed on a fresh path");
@@ -35,56 +44,65 @@ fn config_with_store(path: PathBuf) -> DaemonConfig {
     }
 }
 
-#[tokio::test]
-async fn list_restore_candidates_returns_the_prev_slot_not_current() {
-    let db = temp_store_db("ipc-restore-prev-vs-current");
-    create_schema(&db.path);
-    {
-        let conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
-        insert_window_row_with_command_json(
-            &conn,
-            store::SLOT_PREV,
-            0,
-            "prev-alpha",
-            "[\"cmd.exe\"]",
-        );
-        insert_window_row_with_command_json(
-            &conn,
-            store::SLOT_CURRENT,
-            0,
-            "current-only",
-            "[\"pwsh.exe\"]",
-        );
-        set_meta(&conn, 2000, Some(1000));
-    }
+/// A window id of the shape the window table hands out, distinct per `index`.
+fn seeded_id(index: usize) -> String {
+    format!("w{index:08}")
+}
 
-    let harness = Harness::start(
-        "ipc-restore-prev-vs-current",
-        config_with_store(db.path.clone()),
-    )
-    .await;
-    let mut client = harness.connect().await;
-
-    send(&mut client, &ClientMessage::ListRestoreCandidates).await;
-    match read_response(&mut client).await {
-        DaemonMessage::RestoreCandidateList {
-            windows,
-            taken_at_epoch_s,
-        } => {
-            assert_eq!(
-                taken_at_epoch_s,
-                Some(1000),
-                "the reported timestamp must be prev_taken_at_epoch_s, not taken_at_epoch_s"
-            );
-            let names: Vec<&str> = windows.iter().map(|w| w.name.as_str()).collect();
-            assert_eq!(
-                names,
-                vec!["prev-alpha"],
-                "only the prev slot's rows must be returned; current must never leak in"
-            );
-        }
+async fn candidates(client: &mut yagura_test_support::ipc::Connection) -> Vec<RestoreCandidate> {
+    send(client, &ClientMessage::ListRestoreCandidates).await;
+    match read_response(client).await {
+        DaemonMessage::RestoreCandidateList { windows, .. } => windows,
         other => panic!("expected restore_candidate_list, got {other:?}"),
     }
+}
+
+fn names(candidates: &[RestoreCandidate]) -> Vec<&str> {
+    candidates.iter().map(|c| c.name.as_str()).collect()
+}
+
+/// The candidates are the `lost` rows only, in the order the windows opened, and one read
+/// returns at most the row limit, bounded by a bound SQL parameter rather than a cast.
+#[tokio::test]
+async fn list_restore_candidates_returns_the_lost_rows_in_open_order_up_to_the_limit() {
+    let db = temp_store_db("ipc-restore-lost-rows");
+    create_schema(&db.path);
+    let limit = usize::try_from(store::MAX_SNAPSHOT_WINDOWS).unwrap();
+    let seeded = limit + 44;
+    {
+        let conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
+        let command = || Value::Text("[\"cmd.exe\"]".to_owned());
+        insert_window_table_row(
+            &conn,
+            &seeded_id(90_000_000),
+            "an-opening-window",
+            "opening",
+            command(),
+            Value::Null,
+        );
+        insert_window_table_row(
+            &conn,
+            &seeded_id(90_000_001),
+            "a-live-window",
+            "live",
+            command(),
+            Value::Null,
+        );
+        for index in 0..seeded {
+            insert_lost_window(&conn, &seeded_id(index), &format!("lost-{index:03}"));
+        }
+    }
+
+    let harness = Harness::start("ipc-restore-lost-rows", config_with_store(db.path.clone())).await;
+    let mut client = harness.connect().await;
+    let read = candidates(&mut client).await;
+    let expected: Vec<String> = (0..limit).map(|index| format!("lost-{index:03}")).collect();
+    assert_eq!(
+        names(&read),
+        expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        "the candidates must be the first lost rows in the order the windows opened, at most \
+         the row limit; an opening or live row is never one"
+    );
 
     drop(harness);
 }
@@ -220,20 +238,26 @@ async fn update_window_layout_accepts_a_layout_json_at_exactly_the_byte_limit() 
     drop(harness);
 }
 
+/// The layout `window_id`'s row in the window table at `db` keeps; `None` while the row
+/// is not there or keeps none.
+fn row_layout(db: &Path, window_id: &str) -> Option<String> {
+    let conn = store::open_readonly(db).ok()?;
+    conn.query_row(
+        "SELECT layout_json FROM windows WHERE window_id = ?1",
+        [window_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
 #[tokio::test]
-async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
+async fn update_window_layout_is_reflected_in_the_windows_row() {
     let db = temp_store_db("ipc-layout-reflected");
     let harness = Harness::start("ipc-layout-reflected", DaemonConfig::default()).await;
     store::wire_into(&harness.registry, Some(db.path.clone()));
 
     let window_id = harness.open(sleepy_command("30"), None).await;
-    common::store_fixtures::wait_for_current_snapshot(
-        &db.path,
-        "the window to appear with no layout yet",
-        |rows| rows.len() == 1 && rows[0].layout_json.is_none(),
-    )
-    .await;
-
     let mut client = harness.connect().await;
     let layout_json = "{\"v\":1,\"pos\":{\"x\":10,\"y\":20}}".to_string();
     send(
@@ -249,12 +273,15 @@ async fn update_window_layout_is_reflected_in_the_next_snapshot_row() {
         other => panic!("expected window_layout_updated, got {other:?}"),
     }
 
-    common::store_fixtures::wait_for_current_snapshot(
-        &db.path,
-        "the updated layout to reach the current snapshot",
-        |rows| rows.len() == 1 && rows[0].layout_json.as_deref() == Some(layout_json.as_str()),
-    )
-    .await;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while row_layout(&db.path, &window_id).as_deref() != Some(layout_json.as_str()) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the updated layout never reached the window's row: {:?}",
+            row_layout(&db.path, &window_id)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     drop(harness);
 }
@@ -333,16 +360,16 @@ async fn list_restore_candidates_truncates_from_the_row_that_exceeds_the_reply_b
     const ROW_COMMAND_JSON_LEN: usize = 950_000;
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a seed connection must open");
-        for position in 0..3i64 {
-            insert_window_row_with_command_json(
+        for index in 0..3usize {
+            insert_window_table_row(
                 &conn,
-                store::SLOT_PREV,
-                position,
-                &format!("row-{position}"),
-                &command_json_of_len(ROW_COMMAND_JSON_LEN),
+                &seeded_id(index),
+                &format!("row-{index}"),
+                "lost",
+                Value::Text(command_json_of_len(ROW_COMMAND_JSON_LEN)),
+                Value::Null,
             );
         }
-        set_meta(&conn, 5000, Some(4000));
     }
 
     let harness = Harness::start("ipc-restore-budget", config_with_store(db.path.clone())).await;
@@ -357,12 +384,11 @@ async fn list_restore_candidates_truncates_from_the_row_that_exceeds_the_reply_b
                 "3 rows of ~950 KiB each must exceed the 2 MiB reply budget after the third, \
                  leaving exactly the first two"
             );
-            let positions: Vec<i64> = windows.iter().map(|w| w.position).collect();
             assert_eq!(
-                positions,
-                vec![0, 1],
-                "truncation must cut off from the row that exceeds the budget, in position \
-                 order, keeping a contiguous low-position prefix"
+                names(&windows),
+                vec!["row-0", "row-1"],
+                "truncation must cut off from the row that exceeds the budget, in open \
+                 order, keeping a contiguous prefix"
             );
         }
         other => panic!("expected restore_candidate_list, got {other:?}"),
@@ -376,4 +402,120 @@ async fn list_restore_candidates_truncates_from_the_row_that_exceeds_the_reply_b
     }
 
     drop(harness);
+}
+
+/// The `WARN` lines `log` gained past its first `from` bytes.
+fn warns_after(log: &str, from: usize) -> usize {
+    log.get(from..)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(" WARN "))
+        .count()
+}
+
+/// A corrupt `lost` row costs only itself: one whose command does not read back as an
+/// argv (not JSON, not an array, a `BLOB`, longer than `MAX_COMMAND_JSON_BYTES`) is
+/// skipped, and a layout that does not read back as text within `MAX_LAYOUT_JSON_BYTES`
+/// becomes `None` while its row stays. Each read warns once for skipped rows and once for
+/// degraded layouts however many there were, so a tampered table cannot flood the log.
+#[tokio::test]
+async fn a_corrupt_lost_row_costs_only_itself_and_each_read_warns_once_per_kind() {
+    let sandbox = Sandbox::new("restore-corrupt");
+    let data_root = sandbox.data_root();
+    std::fs::create_dir_all(&data_root).unwrap();
+    let db = data_root.join("yagura.db");
+    create_schema(&db);
+    let at_limit = "x".repeat(store::MAX_LAYOUT_JSON_BYTES);
+    {
+        let conn = rusqlite::Connection::open(&db).expect("a seed connection must open");
+        let command = || Value::Text("[\"cmd.exe\"]".to_owned());
+        let mut index = 0;
+        let mut row = |name: &str, command_json: Value, layout_json: Value| {
+            insert_window_table_row(
+                &conn,
+                &seeded_id(index),
+                name,
+                "lost",
+                command_json,
+                layout_json,
+            );
+            index += 1;
+        };
+        row("good-first", command(), Value::Null);
+        row(
+            "not-json",
+            Value::Text("this is not json".to_owned()),
+            Value::Null,
+        );
+        row(
+            "blob-command",
+            Value::Blob(b"[\"cmd.exe\"]".to_vec()),
+            Value::Null,
+        );
+        row(
+            "not-an-array",
+            Value::Text("{\"argv\": [\"cmd.exe\"]}".to_owned()),
+            Value::Null,
+        );
+        row(
+            "oversized-command",
+            Value::Text(format!(
+                "[\"{}\"]",
+                "x".repeat(store::MAX_COMMAND_JSON_BYTES)
+            )),
+            Value::Null,
+        );
+        row("layout-at-limit", command(), Value::Text(at_limit.clone()));
+        row(
+            "layout-over-limit",
+            command(),
+            Value::Text("x".repeat(store::MAX_LAYOUT_JSON_BYTES + 1)),
+        );
+        row("layout-blob", command(), Value::Blob(b"{\"v\":1}".to_vec()));
+        insert_lost_window_with_invalid_utf8_layout(
+            &conn,
+            &seeded_id(90_000_000),
+            "layout-invalid-utf8",
+            &[0x7b, 0xff, 0xfe, 0x7d],
+        );
+        insert_lost_window(&conn, &seeded_id(90_000_001), "good-last");
+    }
+
+    let mut daemon = sandbox.start().await;
+    // The daemon logs its start-up before it answers anything; connecting alone is not
+    // ordered after that.
+    common::call_list_windows(&mut daemon.client).await;
+    let log_path = sandbox.state_root().join("logs").join("daemon.log");
+    for call in ["first", "second"] {
+        let before = std::fs::read_to_string(&log_path).unwrap_or_default().len();
+        let read = candidates(&mut daemon.client).await;
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        assert_eq!(
+            names(&read),
+            vec![
+                "good-first",
+                "layout-at-limit",
+                "layout-over-limit",
+                "layout-blob",
+                "layout-invalid-utf8",
+                "good-last"
+            ],
+            "the {call} read must skip exactly the rows whose command does not read back"
+        );
+        let layouts: Vec<Option<&str>> = read.iter().map(|c| c.layout_json.as_deref()).collect();
+        assert_eq!(
+            layouts,
+            vec![None, Some(at_limit.as_str()), None, None, None, None],
+            "a layout within the limit must come back unchanged, and one that does not read \
+             back as text within it must become None"
+        );
+        assert_eq!(
+            warns_after(&log, before),
+            2,
+            "the {call} read must warn once for the skipped rows and once for the degraded \
+             layouts; it logged:\n{}",
+            log.get(before..).unwrap_or_default()
+        );
+    }
+    drop(daemon);
 }

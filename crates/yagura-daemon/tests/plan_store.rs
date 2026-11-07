@@ -333,7 +333,7 @@ async fn opening_as_a_new_boot_clears_owner_and_window_bindings_but_keeps_everyt
         plan_id
     };
 
-    let store = PlanStore::open_as_new_boot(&path).expect("open_as_new_boot must succeed");
+    let store = PlanStore::open_as_new_boot(&path, &[]).expect("open_as_new_boot must succeed");
     let detail = store
         .get_plan(&plan_id)
         .expect("get_plan must not error")

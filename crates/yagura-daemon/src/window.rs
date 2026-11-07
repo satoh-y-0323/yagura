@@ -166,6 +166,42 @@ fn first_free_window_id(
     })
 }
 
+/// One round of [`WINDOW_ID_CANDIDATES`] fresh ids: the first that no
+/// holder's files in `holders_dir` name and `in_use` does not claim.
+fn drawn_window_id(
+    holders_dir: Option<&Path>,
+    in_use: impl Fn(&str) -> bool,
+) -> Result<Option<String>, WindowOpenError> {
+    let candidates = (0..WINDOW_ID_CANDIDATES)
+        .map(|_| random_window_id())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(match holders_dir {
+        Some(dir) => first_free_window_id(candidates, dir, in_use),
+        // No holder has been started yet, so none has files.
+        None => candidates.into_iter().find(|id| !in_use(id)),
+    })
+}
+
+/// A fresh window id that no holder's files in `holders_dir` name and `in_use`
+/// does not claim, for a window given an id outside an open; `None` when
+/// [`WINDOW_ID_ROUNDS`] rounds find none or the random source fails.
+pub(crate) fn free_window_id(
+    holders_dir: Option<&Path>,
+    in_use: impl Fn(&str) -> bool,
+) -> Option<String> {
+    for _ in 0..WINDOW_ID_ROUNDS {
+        match drawn_window_id(holders_dir, &in_use) {
+            Ok(Some(window_id)) => return Some(window_id),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cannot draw a window id");
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// A window's values as its row is first written: no layout or session yet.
 fn window_values(
     provenance: &WindowProvenance,
@@ -1743,10 +1779,8 @@ pub struct WindowEntry {
     /// reports one. Mutable after creation, so every access goes through the
     /// lock.
     layout_json: Mutex<Option<String>>,
-    /// Set by [`WindowEntry::mark_closed`] once `close_window` has succeeded:
-    /// [`WindowRegistry::request_snapshot`] excludes a closed window from the
-    /// restore candidates it builds, while a window whose child merely exited
-    /// on its own stays included.
+    /// Set by [`WindowEntry::mark_closed`] once `close_window` has succeeded,
+    /// which a window whose child merely exited on its own never is.
     closed: AtomicBool,
     session: Arc<PtySession>,
     /// The one and only long-lived strong holder besides
@@ -5017,12 +5051,6 @@ pub struct WindowRegistry {
     /// freshly generated token instead, which is what keeps one window's child
     /// from being able to speak for another.
     status_token_override: Option<Arc<StatusToken>>,
-    /// The channel [`WindowRegistry::request_snapshot`] sends
-    /// restore-candidate rows on, installed once at start-up by
-    /// `store::wire_into`. `None` when persistence failed to
-    /// initialize, or this registry was never wired to a store at all (a
-    /// plain daemon build, or most tests).
-    store_sender: Mutex<Option<std::sync::mpsc::Sender<Vec<crate::store::SnapshotWindow>>>>,
     /// Called at the end of every successful `open`, once the
     /// new entry is already registered and can be looked up by id. `None`
     /// when chat is disabled or this registry predates chat entirely (most
@@ -5092,7 +5120,6 @@ impl WindowRegistry {
             holder_host,
             window_table: Mutex::new(None),
             status_token_override,
-            store_sender: Mutex::new(None),
             window_opened_hook: Mutex::new(None),
             notice_launcher: Mutex::new(None),
             workspace_walks,
@@ -5375,9 +5402,6 @@ impl WindowRegistry {
         if let Some(hook) = lock_recover(&self.window_opened_hook).as_ref() {
             hook(&entry);
         }
-
-        // One trigger point inside `open` covers every open.
-        self.request_snapshot();
 
         Ok(OpenedWindow {
             window_id,
@@ -5878,9 +5902,6 @@ impl WindowRegistry {
         let table = lock_recover(&self.window_table).clone();
         let holders_dir = self.holder_host.holders_dir();
         for _ in 0..WINDOW_ID_ROUNDS {
-            let candidates = (0..WINDOW_ID_CANDIDATES)
-                .map(|_| random_window_id())
-                .collect::<Result<Vec<_>, _>>()?;
             let in_use: HashSet<String> = {
                 let entries = lock_recover(&self.entries);
                 let opening = lock_recover(&self.opening);
@@ -5890,12 +5911,7 @@ impl WindowRegistry {
                     .chain(opening.keys().cloned())
                     .collect()
             };
-            let in_use = |id: &str| in_use.contains(id);
-            let picked = match &holders_dir {
-                Some(dir) => first_free_window_id(candidates, dir, in_use),
-                // No holder has been started yet, so none has files.
-                None => candidates.into_iter().find(|id| !in_use(id)),
-            };
+            let picked = drawn_window_id(holders_dir.as_deref(), |id| in_use.contains(id))?;
             let Some(window_id) = picked else {
                 continue;
             };
@@ -6138,13 +6154,6 @@ impl WindowRegistry {
         WindowLiveness::Alive(entry)
     }
 
-    /// Installs the channel [`WindowRegistry::request_snapshot`] sends
-    /// restore-candidate rows on (`store::wire_into` is its only caller). Persistence being disabled or unwired is represented by
-    /// never calling this at all, so `request_snapshot` stays a no-op.
-    pub fn set_store_sender(&self, tx: std::sync::mpsc::Sender<Vec<crate::store::SnapshotWindow>>) {
-        *lock_recover(&self.store_sender) = Some(tx);
-    }
-
     /// Installs the window table every window opened from now on writes its
     /// row in (`store::wire_into` is its only caller).
     pub(crate) fn set_window_table(&self, table: WindowTable) {
@@ -6157,12 +6166,16 @@ impl WindowRegistry {
         lock_recover(&self.window_table).clone()
     }
 
-    /// The directory holders that outlive this daemon keep their records in;
-    /// `None` when this registry's holders end with it.
-    pub(crate) fn lasting_holders_dir(&self) -> Option<PathBuf> {
-        self.holder_host
-            .take_back_context()
-            .map(|context| context.holders_dir)
+    /// Where the holders that outlive this daemon are, and what they are
+    /// taken back with; `None` when this registry's holders end with it.
+    pub(crate) fn take_back_context(&self) -> Option<crate::holder_host::TakeBackContext> {
+        self.holder_host.take_back_context()
+    }
+
+    /// The directory this registry's holders keep their files in; `None`
+    /// before the first holder of a registry whose holders end with it.
+    pub(crate) fn holders_dir(&self) -> Option<PathBuf> {
+        self.holder_host.holders_dir()
     }
 
     /// Registers the window `survivor` names, which a previous daemon of the
@@ -6188,9 +6201,13 @@ impl WindowRegistry {
             stored,
             record,
             holder,
+            credentials,
         } = survivor;
         let status_token: TokenSlot = Arc::default();
         let (recorded_tx, recorded_rx) = oneshot::channel::<WindowValues>();
+        // A row whose values do not read back counts as none: the launch
+        // record gives them back, and the row is written again from them.
+        let stored = stored.and_then(|stored| stored.values);
         let needs_values = stored.is_none();
         let on_welcome: Box<dyn FnOnce(&str) + Send> = {
             let status_token = Arc::clone(&status_token);
@@ -6225,8 +6242,8 @@ impl WindowRegistry {
             })
         };
         let (values, row, known) = match stored {
-            Some(stored) => (
-                stored.values,
+            Some(values) => (
+                values,
                 WindowRow::taken_back(self.window_table(), &window_id),
                 true,
             ),
@@ -6251,6 +6268,11 @@ impl WindowRegistry {
         )
         .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
         let session = Arc::new(session);
+        // The folder goes once the window ends, as for a window opened here:
+        // closed, its child exited, or its holder found gone.
+        if let Some(dir) = credentials {
+            remove_credentials_when_exited(&session, CredentialsFolder { dir });
+        }
         let (entry, detector_handle, detected_rx) = self
             .taken_back_entry(&window_id, values, known, &session, status_token, row)
             .await?;
@@ -6266,7 +6288,6 @@ impl WindowRegistry {
                 }
             });
         }
-        self.request_snapshot();
         Ok(())
     }
 
@@ -6317,7 +6338,6 @@ impl WindowRegistry {
         );
         spawn_status_forwarder(Arc::downgrade(&entry), detected_rx);
         self.participation.raise();
-        self.request_snapshot();
     }
 
     /// A window taken back, built from `values` over `session`: with the
@@ -6502,50 +6522,10 @@ impl WindowRegistry {
             .collect()
     }
 
-    /// Builds the current restore-candidate snapshot (registration order,
-    /// closed windows excluded, positions renumbered from 0) and sends it to
-    /// the store's writer thread. A no-op when no sender was
-    /// installed. The send is fire-and-forget: a full or disconnected
-    /// channel never blocks or fails the caller, matching every other
-    /// persistence failure mode in this module.
-    pub fn request_snapshot(&self) {
-        let sender = lock_recover(&self.store_sender).clone();
-        let Some(sender) = sender else {
-            return;
-        };
-        let rows: Vec<crate::store::SnapshotWindow> = lock_recover(&self.entries)
-            .iter()
-            .filter(|entry| !entry.closed.load(Ordering::SeqCst))
-            .enumerate()
-            .map(|(position, entry)| {
-                let launch = entry.provenance.launch.as_ref();
-                crate::store::SnapshotWindow {
-                    position: i64::try_from(position).unwrap_or(i64::MAX),
-                    command: entry.command.clone(),
-                    cwd: entry.cwd.clone(),
-                    name: lock_recover(&entry.name).clone(),
-                    vendor: entry.vendor.clone(),
-                    detection: entry.detection.clone(),
-                    layout_json: entry.layout_json(),
-                    profile: launch.map(|launch| launch.profile.clone()),
-                    model: launch.and_then(|launch| launch.model.clone()),
-                    effort: launch.and_then(|launch| launch.effort.clone()),
-                }
-            })
-            .collect();
-        let _ = sender.send(rows);
-    }
-
-    /// Records `layout_json` as `entry`'s presentation layout and asks the
-    /// store to persist the resulting configuration.
-    ///
-    /// The snapshot request lives here rather than at the call site so that
-    /// storing a layout and persisting it cannot drift apart: a layout that
-    /// only ever reached memory would be lost at the very restart it exists
-    /// for.
+    /// Records `layout_json` as `entry`'s presentation layout, which its row
+    /// follows.
     pub fn set_window_layout(&self, entry: &WindowEntry, layout_json: String) {
         entry.set_layout(layout_json);
-        self.request_snapshot();
     }
 
     /// Terminates every window's child process, then waits, at most
@@ -6969,26 +6949,58 @@ fn remove_credentials_when_exited(session: &PtySession, folder: CredentialsFolde
     });
 }
 
-/// Blocking: removes what earlier daemon runs of this instance left in
-/// `config_dir`. Run once the instance's endpoint is held, so no live window
-/// of another daemon can own what is removed.
-pub fn remove_stale_credentials(config_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(config_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let is_credentials_folder = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(CREDENTIALS_FOLDER_PREFIX));
-        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-        if is_credentials_folder
-            && is_dir
-            && let Err(err) = std::fs::remove_dir_all(entry.path())
-        {
+/// Blocking: removes the credentials folders earlier daemon runs of this
+/// instance left in `config_dir`, but those of the windows `remaining` keeps
+/// the credentials of. Run once the instance's endpoint is held and the start
+/// has judged its windows, so no window that may still run loses its file.
+pub fn remove_stale_credentials(config_dir: &Path, remaining: &crate::recovery::Remaining) {
+    for (dir, window_id) in credentials_folders(config_dir) {
+        let kept = window_id.is_some_and(|window_id| remaining.keeps_credentials_of(&window_id));
+        if !kept && let Err(err) = std::fs::remove_dir_all(&dir) {
             tracing::warn!(error = %err, "could not remove a stale credentials folder");
         }
     }
+}
+
+/// Blocking: every credentials folder in `config_dir` (never a link), with the
+/// window its file names, if it names one.
+pub(crate) fn credentials_folders(config_dir: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let Ok(entries) = std::fs::read_dir(config_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(CREDENTIALS_FOLDER_PREFIX))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| {
+            let dir = entry.path();
+            let window_id = credentials_window_id(&dir);
+            (dir, window_id)
+        })
+        .collect()
+}
+
+/// Blocking: the window the credentials file in the folder `dir` names;
+/// `None` when it is not a plain file of that shape.
+fn credentials_window_id(dir: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        window_id: String,
+    }
+    let path = dir.join(CREDENTIALS_FILE_NAME);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let body = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<Named>(&body)
+        .ok()
+        .map(|named| named.window_id)
 }
 
 /// An injection whose settings file is on disk, ready to append to the spawn

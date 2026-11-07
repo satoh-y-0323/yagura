@@ -2,23 +2,30 @@
 //! instance left running, and removing the files of a holder that is gone.
 //!
 //! The start has two steps. Before the daemon accepts connections, the holders'
-//! records and the window table decide which windows are still there: each
-//! window whose holder runs (or whose holder the OS cannot tell about) is
-//! registered at once, not connected and `Unknown`, with the values its row
-//! keeps, or, without a row, with only its id until its holder's launch record
-//! gives the values back. Once the daemon accepts
+//! records, and whether the processes they name still run, decide which
+//! windows are still there: each window whose holder runs (or whose holder the
+//! OS cannot tell about) is registered at once, not connected and `Unknown`,
+//! with the values its row keeps, or, without a row, with only its id until
+//! its holder's launch record gives the values back. A window whose holder is
+//! gone becomes `lost`, a restore candidate, and its holder's files are
+//! removed. What the start sweeps away afterwards is decided by the
+//! [`Remaining`] windows this step returns. Once the daemon accepts
 //! connections, each window's own link lets itself into its holder; no window
 //! waits for another, and nothing waits for them all.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rusqlite::types::Value;
+use rusqlite::{Connection, TransactionBehavior, params};
 use tokio::sync::watch;
 use yagura_os::{Liveness, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{HolderRecord, holder_record_path, read_holder_record};
 
+use crate::sql::FixedSql;
+use crate::store::StoreError;
 use crate::window::WindowRegistry;
 use crate::window_table::{RowState, StoredWindow};
 
@@ -124,31 +131,107 @@ pub(crate) struct Survivor {
     /// The holder's process; `None` when the OS would not tell whether it
     /// runs, which is not taken for gone.
     pub(crate) holder: Option<ProcessHandle>,
+    /// The window's credentials folder, which the window taken back owns.
+    pub(crate) credentials: Option<PathBuf>,
 }
 
-/// The first step of the start: registers every window a previous daemon of
-/// the instance left whose holder still runs, not connected and `Unknown`,
-/// before the daemon accepts connections. Each window's link lets itself into
-/// its holder once `begin` turns `true`.
-///
-/// A window whose holder is gone is left as it is here.
-pub async fn take_back_windows(registry: &Arc<WindowRegistry>, begin: watch::Receiver<bool>) {
-    let (Some(table), Some(holders_dir)) =
-        (registry.window_table(), registry.lasting_holders_dir())
-    else {
-        return;
+/// The windows the first step of a start found still there: what the
+/// start-up sweep keeps of theirs, while it clears what names any other
+/// window.
+#[derive(Debug, Default, Clone)]
+pub struct Remaining {
+    /// Windows whose holder runs or cannot be told about: taken back, being
+    /// taken back, or left as they are.
+    running: BTreeSet<String>,
+    /// Windows whose row is `lost`: the restore candidates.
+    lost: BTreeSet<String>,
+}
+
+impl Remaining {
+    /// Whether the credentials file of `window_id` is kept: only a window
+    /// whose holder may still run can use it.
+    #[must_use]
+    pub fn keeps_credentials_of(&self, window_id: &str) -> bool {
+        self.running.contains(window_id)
+    }
+
+    /// Every window that remains, running or lost, in id order: whose plan
+    /// ownership, task bindings and pending deliveries are kept.
+    #[must_use]
+    pub fn window_ids(&self) -> Vec<String> {
+        self.running.union(&self.lost).cloned().collect()
+    }
+
+    /// Every row's window counted as remaining as it is, for a start that
+    /// cannot judge any of them.
+    fn unjudged(rows: &[StoredWindow]) -> Self {
+        let mut remaining = Self::default();
+        for row in rows {
+            let ids = if row.state == RowState::Lost {
+                &mut remaining.lost
+            } else {
+                &mut remaining.running
+            };
+            ids.insert(row.window_id.clone());
+        }
+        remaining
+    }
+}
+
+/// The first step of the start: judges every window a previous daemon of the
+/// instance left from its row and its holder's record, before the daemon
+/// accepts connections. A window whose holder runs is registered, not
+/// connected and `Unknown`, and its link lets itself into the holder once
+/// `begin` turns `true`; a window whose holder is gone becomes `lost` and its
+/// holder's files are removed; an `opening` row whose holder never started
+/// the child is removed. Returns the windows that remain.
+pub async fn take_back_windows(
+    registry: &Arc<WindowRegistry>,
+    begin: watch::Receiver<bool>,
+) -> Remaining {
+    let table = registry.window_table();
+    let rows = match &table {
+        Some(table) => table.rows().await,
+        None => Vec::new(),
     };
-    let rows = table.rows().await;
-    let found = tokio::task::spawn_blocking(move || survivors(&holders_dir, rows)).await;
-    let found = match found {
-        Ok(found) => found,
+    let unjudged = Remaining::unjudged(&rows);
+    let Some(context) = registry.take_back_context() else {
+        // Holders end with this daemon, so no record tells whether a row's
+        // window still runs; every row stays as it is.
+        return unjudged;
+    };
+    let credentials_dir = registry.config().mcp_config_dir.clone();
+    let judged = tokio::task::spawn_blocking(move || {
+        let judge = Judge {
+            holders_dir: &context.holders_dir,
+            instance: &context.instance,
+        };
+        let mut judged = judge.all(rows);
+        if let Some(dir) = credentials_dir {
+            give_credentials(&mut judged.survivors, &dir);
+        }
+        judged
+    })
+    .await;
+    let judged = match judged {
+        Ok(judged) => judged,
         Err(error) => {
             tracing::error!(%error, "cannot read the holders' records; no window is taken back");
-            return;
+            return unjudged;
         }
     };
-    for survivor in found {
+    if let Some(table) = &table {
+        table
+            .settle_start(judged.lost.clone(), judged.removed.clone())
+            .await;
+    }
+    let mut remaining = Remaining {
+        running: judged.left.into_iter().collect(),
+        lost: judged.lost.into_iter().chain(judged.already_lost).collect(),
+    };
+    for survivor in judged.survivors {
         let window_id = survivor.window_id.clone();
+        remaining.running.insert(window_id.clone());
         match registry.take_back(survivor, begin.clone()).await {
             Ok(()) => tracing::info!(window_id, "taking the window back"),
             Err(error) => {
@@ -156,70 +239,257 @@ pub async fn take_back_windows(registry: &Arc<WindowRegistry>, begin: watch::Rec
             }
         }
     }
+    remaining
 }
 
-/// The windows whose holder's record is in `holders_dir` and whose holder
-/// runs, or whose holder the OS cannot tell about: those of `rows` first, in
-/// the order they were opened, then those without a row.
-fn survivors(holders_dir: &Path, rows: Vec<StoredWindow>) -> Vec<Survivor> {
-    let named: HashSet<String> = rows.iter().map(|row| row.window_id.clone()).collect();
-    let rowless = records_without_rows(holders_dir, &named);
-    rows.into_iter()
-        .filter(|stored| stored.state != RowState::Lost)
-        .map(|stored| (stored.window_id.clone(), Some(stored)))
-        .chain(rowless.into_iter().map(|window_id| (window_id, None)))
-        .filter_map(|(window_id, stored)| survivor(holders_dir, window_id, stored))
-        .collect()
+/// What judging the rows and records came to.
+#[derive(Default)]
+struct Judged {
+    /// Windows whose holder runs or cannot be told about, to take back.
+    survivors: Vec<Survivor>,
+    /// Rows to mark `lost`: their holder is gone.
+    lost: Vec<String>,
+    /// Rows already `lost`.
+    already_lost: Vec<String>,
+    /// `opening` rows to remove: their window never started.
+    removed: Vec<String>,
+    /// Rows left as they are, since their record could not be read.
+    left: Vec<String>,
 }
 
-fn survivor(holders_dir: &Path, id: String, stored: Option<StoredWindow>) -> Option<Survivor> {
-    let window_id = id.as_str();
-    let record = match read_holder_record(holders_dir, window_id) {
-        Ok(record) => record,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            tracing::warn!(window_id, %error, "cannot read a window holder's record");
-            return None;
+/// Whether a record's holder runs.
+enum Holder {
+    Gone,
+    /// It runs, or the OS cannot tell; `None` when it cannot be named.
+    Runs(Option<ProcessHandle>),
+}
+
+/// The holders directory the records are judged in.
+struct Judge<'a> {
+    holders_dir: &'a Path,
+    instance: &'a OsStr,
+}
+
+impl Judge<'_> {
+    /// Judges `rows`, in the order their windows opened, then the records no
+    /// row names, in name order.
+    fn all(&self, rows: Vec<StoredWindow>) -> Judged {
+        let named: HashSet<String> = rows.iter().map(|row| row.window_id.clone()).collect();
+        let rowless = records_without_rows(self.holders_dir, &named);
+        let mut judged = Judged::default();
+        for row in rows {
+            self.row(row, &mut judged);
         }
-    };
-    if record.window_id != window_id {
-        tracing::warn!(window_id, "a window holder's record names another window");
-        return None;
+        for window_id in rowless {
+            self.rowless(window_id, &mut judged);
+        }
+        judged
     }
-    // A holder that has not started the child would start it on a `Hello`;
-    // it ends by itself once its first `Hello` does not come.
-    record.child_pid?;
-    let Some(start) = record
+
+    fn row(&self, row: StoredWindow, judged: &mut Judged) {
+        let window_id = row.window_id.clone();
+        let record = match self.record(&window_id) {
+            Ok(Some(record)) => record,
+            // A row without a record: a window that never started its holder
+            // (`opening`) or whose holder ended and removed its record.
+            Ok(None) => {
+                match row.state {
+                    RowState::Opening => judged.removed.push(window_id),
+                    RowState::Live => judged.lost.push(window_id),
+                    RowState::Lost => judged.already_lost.push(window_id),
+                }
+                return;
+            }
+            Err(()) => {
+                if row.state == RowState::Lost {
+                    judged.already_lost.push(window_id);
+                } else {
+                    judged.left.push(window_id);
+                }
+                return;
+            }
+        };
+        let holder = holder_of(&window_id, &record);
+        match (row.state, holder) {
+            (RowState::Lost, Holder::Gone) => {
+                self.end_gone(&window_id, &record, Some(&row));
+                judged.already_lost.push(window_id);
+            }
+            (RowState::Lost, Holder::Runs(_)) => judged.already_lost.push(window_id),
+            // A holder that has not started the child would start it on a
+            // `Hello`; it ends by itself once its first `Hello` does not come.
+            (RowState::Opening, holder) if record.child_pid.is_none() => {
+                if matches!(holder, Holder::Gone) {
+                    self.end_gone(&window_id, &record, Some(&row));
+                }
+                judged.removed.push(window_id);
+            }
+            (_, Holder::Gone) => {
+                self.end_gone(&window_id, &record, Some(&row));
+                judged.lost.push(window_id);
+            }
+            (_, Holder::Runs(_)) if record.child_pid.is_none() => judged.left.push(window_id),
+            (_, Holder::Runs(holder)) => judged.survivors.push(Survivor {
+                window_id,
+                stored: Some(row),
+                record,
+                holder,
+                credentials: None,
+            }),
+        }
+    }
+
+    fn rowless(&self, window_id: String, judged: &mut Judged) {
+        let Ok(Some(record)) = self.record(&window_id) else {
+            return;
+        };
+        match holder_of(&window_id, &record) {
+            Holder::Gone => self.end_gone(&window_id, &record, None),
+            Holder::Runs(_) if record.child_pid.is_none() => {}
+            Holder::Runs(holder) => judged.survivors.push(Survivor {
+                window_id,
+                stored: None,
+                record,
+                holder,
+                credentials: None,
+            }),
+        }
+    }
+
+    /// `window_id`'s holder record; `None` when there is none, `Err` when it
+    /// cannot be read or names another window.
+    fn record(&self, window_id: &str) -> Result<Option<HolderRecord>, ()> {
+        match read_holder_record(self.holders_dir, window_id) {
+            Ok(record) if record.window_id == window_id => Ok(Some(record)),
+            Ok(_) => {
+                tracing::warn!(window_id, "a window holder's record names another window");
+                Err(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                tracing::warn!(window_id, %error, "cannot read a window holder's record");
+                Err(())
+            }
+        }
+    }
+
+    /// What is left of a window whose holder is gone: on Unix the child's
+    /// process group, when the child its record names still runs; then the
+    /// holder's files. Removing the files first leaves, if the daemon dies
+    /// here, a `live` row without a record, which the next start marks lost.
+    fn end_gone(&self, window_id: &str, record: &HolderRecord, row: Option<&StoredWindow>) {
+        #[cfg(unix)]
+        end_recorded_child_group(
+            window_id,
+            record,
+            row.and_then(|row| row.values.as_ref())
+                .and_then(|values| values.command.first())
+                .map(String::as_str),
+        );
+        #[cfg(not(unix))]
+        let _ = (record, row);
+        remove_dead_holder_files(&HolderFiles {
+            instance: self.instance,
+            holders_dir: self.holders_dir,
+            window_id,
+        });
+    }
+}
+
+/// Blocking: hands each of `survivors` the credentials folder in `config_dir`
+/// whose file names its window.
+fn give_credentials(survivors: &mut [Survivor], config_dir: &Path) {
+    for (dir, window_id) in crate::window::credentials_folders(config_dir) {
+        let survivor = survivors
+            .iter_mut()
+            .find(|survivor| window_id.as_deref() == Some(survivor.window_id.as_str()));
+        if let Some(survivor) = survivor {
+            survivor.credentials = Some(dir);
+        }
+    }
+}
+
+/// Whether the holder `record` names runs. A record from before the holder's
+/// start was kept has only its pid: a pid no process has is gone, and one a
+/// process has cannot be told from a reused one, so that holder is taken for
+/// running without a handle.
+fn holder_of(window_id: &str, record: &HolderRecord) -> Holder {
+    let start = record
         .holder_start
         .as_deref()
-        .and_then(|start| start.parse::<ProcessStart>().ok())
-    else {
-        tracing::warn!(
-            window_id,
-            "a window holder's record carries no start, so whether it runs cannot be told; \
-             it is left as it is"
-        );
-        return None;
+        .and_then(|start| start.parse::<ProcessStart>().ok());
+    let Some(start) = start else {
+        return match yagura_os::process_start(record.holder_pid) {
+            Ok(None) => Holder::Gone,
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    window_id,
+                    pid = record.holder_pid,
+                    "a window holder's record carries no start and its pid runs, so whether it is \
+                     the holder cannot be told; the window is kept, unconnected"
+                );
+                Holder::Runs(None)
+            }
+            Err(error) => {
+                tracing::warn!(window_id, %error, "whether a window's holder runs cannot be told");
+                Holder::Runs(None)
+            }
+        };
     };
-    let holder = match ProcessHandle::open(record.holder_pid, &start) {
-        Ok(Some(holder)) if holder.liveness() == Liveness::Dead => return None,
-        Ok(Some(holder)) => Some(holder),
-        Ok(None) => return None,
+    match ProcessHandle::open(record.holder_pid, &start) {
+        Ok(Some(holder)) if holder.liveness() == Liveness::Dead => Holder::Gone,
+        Ok(Some(holder)) => Holder::Runs(Some(holder)),
+        Ok(None) => Holder::Gone,
         Err(error) => {
             tracing::warn!(
                 window_id,
                 %error,
                 "whether a window's holder runs cannot be told; the window is kept"
             );
-            None
+            Holder::Runs(None)
         }
+    }
+}
+
+/// Ends the process group the child named by a holder's `record` leads, for a
+/// holder that is gone or is about to be killed outright (neither can end the
+/// group itself): only while that child still runs and is the process its
+/// record names, since while its leader runs the group id names no other
+/// group. Otherwise nothing is ended, and the group the record names is
+/// logged with `command`, the window's argv[0] when known; nothing is read
+/// from any other process. The one place a window's child group is ended
+/// without its holder.
+#[cfg(unix)]
+pub(crate) fn end_recorded_child_group(
+    window_id: &str,
+    record: &HolderRecord,
+    command: Option<&str>,
+) {
+    let Some(child_pid) = record.child_pid.filter(|pid| *pid != 0) else {
+        return;
     };
-    Some(Survivor {
-        window_id: id.clone(),
-        stored,
-        record,
-        holder,
-    })
+    let child = record
+        .child_start
+        .as_deref()
+        .and_then(|start| start.parse::<ProcessStart>().ok())
+        .and_then(|start| ProcessHandle::open(child_pid, &start).ok().flatten())
+        .filter(|child| child.liveness() == Liveness::Alive);
+    let Some(_child) = child else {
+        tracing::warn!(
+            window_id,
+            pgid = child_pid,
+            pid = child_pid,
+            command = command.unwrap_or_default(),
+            "the child a window holder's record names has ended or is another process now; its \
+             process group is not ended"
+        );
+        return;
+    };
+    let ended = yagura_os::ProcessGroup::led_by(child_pid, yagura_os::PROCESS_GROUP_TERM_GRACE)
+        .and_then(|group| group.terminate());
+    if let Err(error) = ended {
+        tracing::warn!(window_id, child_pid, %error, "cannot end a window's process group");
+    }
 }
 
 /// The window ids of the records in `holders_dir` that no row of the table
@@ -243,4 +513,119 @@ fn records_without_rows(holders_dir: &Path, named: &HashSet<String>) -> Vec<Stri
         .collect();
     rowless.sort();
     rowless
+}
+
+/// The slots a 0.3 store kept windows in: those open at its last write, and
+/// those its last start rotated out of them.
+const V0_3_SLOT_CURRENT: i64 = 0;
+const V0_3_SLOT_PREV: i64 = 1;
+
+/// The values of one 0.3 slot row, carried over verbatim: the reader of the
+/// `lost` rows judges them as the untrusted input they are.
+struct SlotRow {
+    command_json: Value,
+    cwd: Value,
+    name: Value,
+    vendor: Value,
+    detection: Value,
+    layout_json: Value,
+    profile: Value,
+    model: Value,
+    effort: Value,
+}
+
+/// Moves, once, the windows a 0.3 store would have offered next for restoring
+/// (its `current` slot when that holds a window, its `prev` slot otherwise)
+/// into `lost` rows of the window table, each under a new window id no row and
+/// no holder's files in `holders_dir` have, and drops the slot tables in the
+/// same transaction: a store without them has been moved. Returns how many
+/// windows were moved.
+///
+/// # Errors
+///
+/// [`StoreError::Sqlite`] when the store cannot be read or written; nothing is
+/// moved then, and the next start tries again.
+pub fn move_0_3_candidates(
+    conn: &mut Connection,
+    holders_dir: Option<&Path>,
+) -> Result<usize, StoreError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let slot_tables: i64 = tx.query_row_fixed(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_windows'",
+        [],
+        |row| row.get(0),
+    )?;
+    if slot_tables == 0 {
+        return Ok(0);
+    }
+    let current: i64 = tx.query_row_fixed(
+        "SELECT COUNT(*) FROM snapshot_windows WHERE slot = ?1",
+        params![V0_3_SLOT_CURRENT],
+        |row| row.get(0),
+    )?;
+    let slot = if current > 0 {
+        V0_3_SLOT_CURRENT
+    } else {
+        V0_3_SLOT_PREV
+    };
+    let rows: Vec<SlotRow> = {
+        let mut statement = tx.prepare_fixed(
+            "SELECT command_json, cwd, name, vendor, detection, layout_json, profile, model, \
+             effort FROM snapshot_windows WHERE slot = ?1 ORDER BY position",
+        )?;
+        let mapped = statement.query_map(params![slot], |row| {
+            Ok(SlotRow {
+                command_json: row.get(0)?,
+                cwd: row.get(1)?,
+                name: row.get(2)?,
+                vendor: row.get(3)?,
+                detection: row.get(4)?,
+                layout_json: row.get(5)?,
+                profile: row.get(6)?,
+                model: row.get(7)?,
+                effort: row.get(8)?,
+            })
+        })?;
+        mapped.collect::<Result<_, _>>()?
+    };
+    let mut moved = 0;
+    for row in rows {
+        let has_row = |window_id: &str| {
+            let count = tx.query_row_fixed(
+                "SELECT COUNT(*) FROM windows WHERE window_id = ?1",
+                params![window_id],
+                |row| row.get::<_, i64>(0),
+            );
+            // An id that cannot be checked is treated as taken.
+            !matches!(count, Ok(0))
+        };
+        let Some(window_id) = crate::window::free_window_id(holders_dir, has_row) else {
+            tracing::warn!("no free window id for a window of the 0.3 store; it is not moved");
+            continue;
+        };
+        tx.execute_fixed(
+            "INSERT INTO windows (window_id, name, cwd, vendor, command_json, detection, profile, \
+             model, effort, layout_json, credentials, state) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'env', 'lost')",
+            params![
+                window_id,
+                row.name,
+                row.cwd,
+                row.vendor,
+                row.command_json,
+                row.detection,
+                row.profile,
+                row.model,
+                row.effort,
+                row.layout_json,
+            ],
+        )?;
+        moved += 1;
+    }
+    tx.execute_batch_fixed(
+        "DROP TABLE snapshot_windows; \
+         DROP TABLE IF EXISTS snapshot_meta;",
+    )?;
+    tx.commit()?;
+    Ok(moved)
 }

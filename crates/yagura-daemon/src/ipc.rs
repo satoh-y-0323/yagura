@@ -75,7 +75,7 @@ use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
 use crate::pty::{AttachGeneration, FrameSend, FrameSink, InputState, PtyError, SendKey, ViewNote};
-use crate::store::{self, SnapshotWindow, StoreError};
+use crate::store::{self, LostWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
 use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
@@ -2289,14 +2289,11 @@ impl IpcServer {
         FrameOutcome::Continue
     }
 
-    /// Answers `list_restore_candidates` from the previous boot's stored
-    /// configuration.
+    /// Answers `list_restore_candidates` from the window table's `lost` rows:
+    /// the windows whose holder ended without their being closed. A window
+    /// taken back, or open now, has no `lost` row, so it is never one.
     ///
-    /// Read-only in every sense: the store is opened read-only, the `prev`
-    /// slot is never rotated or written, and the daemon's live windows are
-    /// not consulted at all -- the candidates describe the *previous* boot,
-    /// so a window that happens to be open now must not appear in, or be
-    /// removed from, this answer.
+    /// Read-only: the store is opened read-only and nothing is written.
     ///
     /// Persistence being disabled (no resolved path) is a normal, empty
     /// answer rather than an error: a first run has nothing to restore, and
@@ -2313,12 +2310,13 @@ impl IpcServer {
         // SQLite is blocking, and a large store makes this read long enough
         // to matter, so it runs off the async worker; otherwise one restore
         // read would stall every other connection this runtime serves.
-        let read = tokio::task::spawn_blocking(move || read_prev_configuration(&db_path)).await;
+        let read = tokio::task::spawn_blocking(move || read_lost_windows(&db_path)).await;
 
         let message = match read {
-            Ok(Ok((rows, taken_at_epoch_s))) => DaemonMessage::RestoreCandidateList {
+            Ok(Ok(rows)) => DaemonMessage::RestoreCandidateList {
                 windows: within_reply_budget(rows.into_iter().map(to_restore_candidate).collect()),
-                taken_at_epoch_s,
+                // A lost row records no time.
+                taken_at_epoch_s: None,
             },
             Ok(Err(err)) => {
                 tracing::warn!(error = %err, "failed to read the restore candidates");
@@ -3139,15 +3137,10 @@ impl IpcServer {
         // `validate_window_name` before sending. A taken or reserved name is
         // `name_taken`.
         let message = match self.registry.rename_window(&entry, name).await {
-            Ok(stored) => {
-                // A successful rename's new name must reach the store before
-                // the reply.
-                self.registry.request_snapshot();
-                DaemonMessage::WindowRenamed {
-                    window_id: entry.window_id().to_string(),
-                    name: stored,
-                }
-            }
+            Ok(stored) => DaemonMessage::WindowRenamed {
+                window_id: entry.window_id().to_string(),
+                name: stored,
+            },
             Err(WindowRenameError::Invalid(err)) => error_msg("invalid_argument", &err.to_string()),
             Err(WindowRenameError::NameTaken(refusal)) => name_taken_msg(&refusal),
         };
@@ -3406,15 +3399,7 @@ impl IpcServer {
                 GateOutcome::Refused(message) => return reply_refused(outbound, &message),
             };
 
-        execute_close(
-            outbound,
-            &self.registry,
-            &self.config,
-            &entry,
-            force,
-            permit,
-        )
-        .await;
+        execute_close(outbound, &self.config, &entry, force, permit).await;
     }
 
     /// Hands work to another window: an existing one (`window_id`) or a new
@@ -4142,24 +4127,19 @@ impl IpcServer {
     }
 }
 
-/// Reads the previous boot's rows and the time they were recorded, through
-/// the store's non-destructive read port (`open_readonly` + the `read_*_conn`
-/// functions).
+/// Reads the `lost` windows through the store's non-destructive read port
+/// (`open_readonly` + `read_lost_windows`).
 ///
 /// Blocking: SQLite work only, run inside `spawn_blocking`.
-fn read_prev_configuration(
-    db_path: &Path,
-) -> Result<(Vec<SnapshotWindow>, Option<i64>), StoreError> {
+fn read_lost_windows(db_path: &Path) -> Result<Vec<LostWindow>, StoreError> {
     let conn = store::open_readonly(db_path)?;
-    let rows = store::read_prev_snapshot_conn(&conn)?;
-    let taken_at_epoch_s = store::read_prev_taken_at_conn(&conn)?;
-    Ok((rows, taken_at_epoch_s))
+    store::read_lost_windows(&conn)
 }
 
 /// Converts one stored row into its wire form. A pure field mapping: the
 /// store's row type stays free of the protocol crate, and the protocol's
 /// candidate stays free of the store's own bounds.
-fn to_restore_candidate(row: SnapshotWindow) -> RestoreCandidate {
+fn to_restore_candidate(row: LostWindow) -> RestoreCandidate {
     RestoreCandidate {
         position: row.position,
         command: row.command,
@@ -4734,13 +4714,12 @@ async fn execute_interrupt(
 /// reach the teardown without having passed one.
 async fn execute_close(
     outbound: &Outbound,
-    registry: &WindowRegistry,
     config: &DaemonConfig,
     entry: &WindowEntry,
     force: bool,
     _permit: Permit<permit::CloseWindow>,
 ) {
-    match close_for_cleanup(registry, config, entry, force).await {
+    match close_for_cleanup(config, entry, force).await {
         Ok(closed) => {
             if closed.exit.is_err() {
                 tracing::warn!(
@@ -4760,13 +4739,11 @@ async fn execute_close(
     });
 }
 
-/// Terminates a window's process tree and takes it out of the restore
-/// candidates, with nobody to answer.
+/// Terminates a window's process tree and removes its row, so it never
+/// becomes a restore candidate, with nobody to answer.
 ///
 /// Shared by the explicit close and by the teardown of a handoff that was
 /// never delivered, so a window is retired the same way whoever retires it.
-/// Only an explicit retirement excludes a window from the restore candidates,
-/// which is why the marking lives here rather than at the reply.
 ///
 /// # Errors
 ///
@@ -4774,7 +4751,6 @@ async fn execute_close(
 /// nothing was marked closed. The window's row is gone either way: it is
 /// removed before the holder is told to end.
 async fn close_for_cleanup(
-    registry: &WindowRegistry,
     config: &DaemonConfig,
     entry: &WindowEntry,
     force: bool,
@@ -4784,7 +4760,6 @@ async fn close_for_cleanup(
         .remove_row_then(control::close_window(entry, force, grace))
         .await?;
     entry.mark_closed();
-    registry.request_snapshot();
     Ok(closed)
 }
 
@@ -5658,9 +5633,7 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
                 error = %store_err,
                 "task binding write failed; closing the window it was opening for"
             );
-            if let Err(close_err) =
-                close_for_cleanup(&registry, &config, &opened.entry, false).await
-            {
+            if let Err(close_err) = close_for_cleanup(&config, &opened.entry, false).await {
                 tracing::warn!(
                     error = %close_err,
                     "cleanup close after a failed binding write also failed"
@@ -5673,9 +5646,7 @@ async fn open_task_window(job: TaskWindowOpen, permit: Permit<OpenWindow>) {
                 "the plan store became unavailable while binding a task window; closing the \
                  window it was opening for"
             );
-            if let Err(close_err) =
-                close_for_cleanup(&registry, &config, &opened.entry, false).await
-            {
+            if let Err(close_err) = close_for_cleanup(&config, &opened.entry, false).await {
                 tracing::warn!(
                     error = %close_err,
                     "cleanup close after a failed binding write also failed"
@@ -6087,7 +6058,7 @@ fn spawn_pending(
                 execute_interrupt(&outbound, &entry, &config, permit).await;
             }
             PermittedAction::Close(force, permit) => {
-                execute_close(&outbound, &registry, &config, &entry, force, permit).await;
+                execute_close(&outbound, &config, &entry, force, permit).await;
             }
             PermittedAction::SendHandoff {
                 text,

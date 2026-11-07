@@ -7,7 +7,7 @@
 //!
 //! Every database lives under `common::unique_temp_dir`. Verification reads that do not
 //! go through `ChatStore` itself use `store::open_readonly` and raw SQL against the chat
-//! tables, the same pattern the session-store tests use for `snapshot_windows`.
+//! tables, the same pattern the session-store tests use for the window table.
 
 use crate::common;
 
@@ -406,136 +406,6 @@ fn last_window_seq_reports_a_windows_own_most_recent_post_or_none() {
             .expect("last_window_seq must succeed for a window that never posted"),
         None,
         "a window that never posted must read back as None, not 0"
-    );
-}
-
-// A real store-thread snapshot writer hammers the same file while chat appends
-// run on a second connection.
-#[test]
-fn append_survives_a_concurrent_snapshot_writer_on_the_same_database_file() {
-    let path = db_path("chat-concurrent-snapshot");
-    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
-
-    let snapshot_store = store::open_store(&path)
-        .expect("open_store must reuse the schema ChatStore::open already migrated");
-    let tx = store::spawn_store_thread(snapshot_store);
-
-    let driver_tx = tx.clone();
-    let driver = std::thread::spawn(move || {
-        for i in 0..200i64 {
-            let _ = driver_tx.send(vec![store::SnapshotWindow {
-                position: 0,
-                command: vec!["cmd.exe".to_string()],
-                cwd: "C:/work".to_string(),
-                name: format!("w{i}"),
-                vendor: None,
-                detection: None,
-                layout_json: None,
-                profile: None,
-                model: None,
-                effort: None,
-            }]);
-        }
-    });
-
-    let limits = generous_limits();
-    let mut errors = 0usize;
-    for i in 0..50i64 {
-        if chat
-            .append_message(
-                window_message("w-a", "Alpha", &format!("body-{i}"), 1_000 + i),
-                &limits,
-            )
-            .is_err()
-        {
-            errors += 1;
-        }
-    }
-
-    driver
-        .join()
-        .expect("the snapshot-driving thread must not panic");
-    drop(tx);
-
-    assert_eq!(
-        errors, 0,
-        "no append_message call may fail while a concurrent snapshot writer holds the file"
-    );
-    assert_eq!(
-        chat_message_seqs(&path).len(),
-        50,
-        "all 50 chat appends must have landed in chat_message"
-    );
-}
-
-// `write_snapshot_or_warn` is called directly from the test thread (not through
-// `spawn_store_thread`), so its warns can actually be counted, while a separate
-// thread keeps `ChatStore::append_message` busy on the same file.
-#[test]
-fn concurrent_write_snapshot_or_warn_calls_do_not_warn_while_chat_appends() {
-    let path = db_path("chat-concurrent-warngate");
-    let mut chat = ChatStore::open(&path).expect("ChatStore::open must succeed");
-
-    // This test measures lock coordination between two IMMEDIATE writers, not the
-    // production 5s busy_timeout budget, so give it headroom against wall-clock jitter.
-    let mut snapshot_conn =
-        rusqlite::Connection::open(&path).expect("a second connection must open");
-    snapshot_conn
-        .pragma_update(None, "busy_timeout", 120_000i64)
-        .expect("busy_timeout must apply to the second connection");
-
-    let limits = generous_limits();
-    let chat_driver = std::thread::spawn(move || {
-        for i in 0..50i64 {
-            let _ = chat.append_message(
-                window_message("w-a", "Alpha", &format!("body-{i}"), 1_000 + i),
-                &limits,
-            );
-        }
-    });
-
-    let gate = store::WarnGate::new();
-    let rows = vec![store::SnapshotWindow {
-        position: 0,
-        command: vec!["cmd.exe".to_string()],
-        cwd: "C:/work".to_string(),
-        name: "final".to_string(),
-        vendor: None,
-        detection: None,
-        layout_json: None,
-        profile: None,
-        model: None,
-        effort: None,
-    }];
-    let (warns, ()) = count_warns(|| {
-        for _ in 0..20 {
-            store::write_snapshot_or_warn(&gate, &mut snapshot_conn, &rows);
-        }
-    });
-
-    chat_driver
-        .join()
-        .expect("the chat-appending thread must not panic");
-
-    assert_eq!(
-        warns, 0,
-        "write_snapshot_or_warn must not warn while a second connection writes chat \
-         appends concurrently"
-    );
-    let names: Vec<String> = {
-        let conn = open_ro(&path);
-        let mut stmt = conn
-            .prepare("SELECT name FROM snapshot_windows ORDER BY position")
-            .expect("the snapshot_windows query must prepare");
-        stmt.query_map([], |row| row.get(0))
-            .expect("the snapshot_windows query must run")
-            .map(|row| row.expect("snapshot_windows row must decode"))
-            .collect()
-    };
-    assert_eq!(
-        names,
-        vec!["final".to_string()],
-        "the last written snapshot configuration must be the one that reads back"
     );
 }
 

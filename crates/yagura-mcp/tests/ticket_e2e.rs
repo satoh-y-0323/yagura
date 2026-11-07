@@ -76,7 +76,7 @@ async fn start_daemon() -> Daemon {
     let ledger = Arc::new(
         tokio::task::spawn_blocking({
             let config = config.clone();
-            move || PlanRuntime::from_config(&config)
+            move || PlanRuntime::from_config(&config, &[])
         })
         .await
         .expect("PlanRuntime::from_config must not panic"),

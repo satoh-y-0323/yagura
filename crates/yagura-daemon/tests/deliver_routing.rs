@@ -179,7 +179,7 @@ impl Scene {
             let config = config.clone();
             Arc::new(
                 tokio::task::spawn_blocking(move || {
-                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&config)
+                    yagura_daemon::ipc::chat::ChatRuntime::from_config(&config, &[])
                 })
                 .await
                 .expect("ChatRuntime::from_config must not panic"),
@@ -189,7 +189,7 @@ impl Scene {
         let ledger = Arc::new(
             tokio::task::spawn_blocking({
                 let config = config.clone();
-                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&config)
+                move || yagura_daemon::ipc::plan::PlanRuntime::from_config(&config, &[])
             })
             .await
             .expect("PlanRuntime::from_config must not panic"),
@@ -1013,8 +1013,7 @@ async fn stored_command(scene: &Scene, name: &str) -> Vec<String> {
     let db = scene.root.join("yagura.db");
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        if let Ok(conn) = yagura_daemon::store::open_readonly(&db)
-            && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
+        if let Some(rows) = crate::common::store_fixtures::window_rows(&db)
             && let Some(row) = rows.into_iter().find(|row| row.name == name)
         {
             return row.command;

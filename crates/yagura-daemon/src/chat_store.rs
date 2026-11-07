@@ -830,22 +830,27 @@ impl ChatStore {
         Ok(())
     }
 
-    /// Settles every delivery still `pending` as never delivered because the
-    /// daemon stopped: the inbox that held it ended with that daemon. Called
-    /// once, when a daemon opens its chat store, before any post of its own.
+    /// Settles every delivery still `pending` to a window not in `remaining`
+    /// (the windows the start found still there, taken back or lost) as never
+    /// delivered because the daemon stopped: no window of that id is left to
+    /// take it. Called once, when a daemon opens its chat store, before any
+    /// post of its own.
     ///
     /// # Errors
     ///
     /// Any [`StoreError`] from the underlying SQLite operation.
-    pub fn settle_pending_after_restart(&mut self) -> Result<(), StoreError> {
+    pub fn settle_pending_after_restart(&mut self, remaining: &[String]) -> Result<(), StoreError> {
+        let remaining = serde_json::to_string(remaining)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_fixed(
-            "UPDATE chat_delivery SET state = ?1, unknown_reason = NULL WHERE state = ?2",
+            "UPDATE chat_delivery SET state = ?1, unknown_reason = NULL WHERE state = ?2 \
+             AND window_id NOT IN (SELECT value FROM json_each(?3))",
             params![
                 room::ChatDeliveryState::UndeliveredRestart.as_str(),
-                room::ChatDeliveryState::Pending.as_str()
+                room::ChatDeliveryState::Pending.as_str(),
+                remaining
             ],
         )?;
         tx.commit()?;

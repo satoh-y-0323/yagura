@@ -15,6 +15,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
 
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -96,7 +97,8 @@ pub(crate) enum RowState {
 #[derive(Debug, Clone)]
 pub(crate) struct StoredWindow {
     pub(crate) window_id: String,
-    pub(crate) values: WindowValues,
+    /// `None` for a `lost` row, and for a row whose values do not read back.
+    pub(crate) values: Option<WindowValues>,
     pub(crate) state: RowState,
 }
 
@@ -166,6 +168,11 @@ enum Command {
     Lost {
         window_id: String,
     },
+    Settle {
+        lost: Vec<String>,
+        removed: Vec<String>,
+        reply: oneshot::Sender<()>,
+    },
     Reserve {
         window_id: String,
         values: WindowValues,
@@ -223,7 +230,8 @@ impl WindowTable {
     }
 
     /// Writes `window_id`'s row again from `values`, `live`, for a window whose
-    /// holder runs without one; a row already there is kept as it is.
+    /// holder runs without one, or whose row's values do not read back; a row
+    /// already there keeps its state and takes `values`.
     pub(crate) async fn restore_row(&self, window_id: &str, values: &WindowValues) -> WindowRow {
         match OpeningRow::reserve(Some(self), window_id, values).await {
             Reservation::Reserved(row) => {
@@ -234,7 +242,26 @@ impl WindowTable {
                     Err(never) => match never {},
                 }
             }
-            Reservation::Taken => WindowRow::taken_back(Some(self.clone()), window_id),
+            Reservation::Taken => {
+                let row = WindowRow::taken_back(Some(self.clone()), window_id);
+                row.update(|| values.clone());
+                row
+            }
+        }
+    }
+
+    /// Writes what the first step of a start judged, and returns once it is
+    /// written: the rows of `lost` turn `lost`, and the `opening` rows of
+    /// `removed` are removed.
+    pub(crate) async fn settle_start(&self, lost: Vec<String>, removed: Vec<String>) {
+        let (reply, written) = oneshot::channel();
+        if self.send(Command::Settle {
+            lost,
+            removed,
+            reply,
+        }) {
+            // A writer that is gone has written nothing more.
+            let _ = written.await;
         }
     }
 
@@ -248,44 +275,91 @@ impl WindowTable {
     }
 }
 
+/// A cell's text, `None` for anything but valid UTF-8 text.
+fn text_of(cell: ValueRef<'_>) -> Option<String> {
+    match cell {
+        ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Every row, in the order the windows were opened. A `lost` row's values are
+/// not read here: only the reader of the restore candidates uses them, and
+/// judges them there. The file is writable by any process of the user, so a
+/// row whose id does not read back is skipped, and a row of another state
+/// whose values do not read back comes without them, its window taking them
+/// from its holder's launch record; either warns once for the read.
 fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
-        "SELECT window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
-         layout_json, session_id, opener, task_plan_id, task_id, credentials, state \
+        "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
+         effort, layout_json, session_id, opener, task_plan_id, task_id, credentials \
          FROM windows ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
-        let command_json: String = row.get(4)?;
-        let credentials: String = row.get(14)?;
-        let state: String = row.get(15)?;
-        Ok(StoredWindow {
-            window_id: row.get(0)?,
-            values: WindowValues {
-                name: row.get(1)?,
-                cwd: row.get(2)?,
-                vendor: row.get(3)?,
-                // A row whose command does not read back is still a window.
-                command: serde_json::from_str(&command_json).unwrap_or_default(),
-                detection: row.get(5)?,
-                profile: row.get(6)?,
-                model: row.get(7)?,
-                effort: row.get(8)?,
-                layout_json: row.get(9)?,
-                session_id: row.get(10)?,
-                opener: row.get(11)?,
-                task_plan_id: row.get(12)?,
-                task_id: row.get(13)?,
-                credentials: credentials_kind(credentials_mode(&credentials)),
-            },
-            state: match state.as_str() {
-                "opening" => RowState::Opening,
-                "live" => RowState::Live,
-                _ => RowState::Lost,
-            },
-        })
+        let Some(window_id) = text_of(row.get_ref(0)?) else {
+            return Ok(None);
+        };
+        let state = match text_of(row.get_ref(1)?).as_deref() {
+            Some("opening") => RowState::Opening,
+            Some("live") => RowState::Live,
+            _ => RowState::Lost,
+        };
+        let values = if state == RowState::Lost {
+            None
+        } else {
+            row_values(row).ok()
+        };
+        Ok(Some(StoredWindow {
+            window_id,
+            values,
+            state,
+        }))
     })?;
-    rows.collect()
+    let mut read = Vec::new();
+    let mut unreadable = false;
+    for row in rows {
+        match row? {
+            Some(row) => {
+                unreadable |= row.state != RowState::Lost && row.values.is_none();
+                read.push(row);
+            }
+            None => unreadable = true,
+        }
+    }
+    if unreadable {
+        tracing::warn!(
+            "one or more window table rows do not read back; their windows take their values \
+             from their holders"
+        );
+    }
+    Ok(read)
 }
+
+/// The values of a row read by [`read_rows`], from its third column on.
+fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
+    let command_json: String = row.get(5)?;
+    let credentials: String = row.get(15)?;
+    Ok(WindowValues {
+        name: row.get(2)?,
+        cwd: row.get(3)?,
+        vendor: row.get(4)?,
+        // A row whose command does not read back is still a window.
+        command: serde_json::from_str(&command_json).unwrap_or_default(),
+        detection: row.get(6)?,
+        profile: row.get(7)?,
+        model: row.get(8)?,
+        effort: row.get(9)?,
+        layout_json: row.get(10)?,
+        session_id: row.get(11)?,
+        opener: row.get(12)?,
+        task_plan_id: row.get(13)?,
+        task_id: row.get(14)?,
+        credentials: credentials_kind(credentials_mode(&credentials)),
+    })
+}
+
+const MARK_LOST_SQL: &str = "UPDATE windows SET state = 'lost' \
+     WHERE window_id = ?1 AND state IN ('opening', 'live')";
 
 fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
     // One warning for the whole run: a broken database must not flood the log.
@@ -305,13 +379,29 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
                 let _ = reply.send(rows);
             }
             Command::Lost { window_id } => {
-                if let Err(error) = conn.execute_fixed(
-                    "UPDATE windows SET state = 'lost' \
-                     WHERE window_id = ?1 AND state IN ('opening', 'live')",
-                    params![window_id],
-                ) {
+                if let Err(error) = conn.execute_fixed(MARK_LOST_SQL, params![window_id]) {
                     warn(error);
                 }
+            }
+            Command::Settle {
+                lost,
+                removed,
+                reply,
+            } => {
+                for window_id in lost {
+                    if let Err(error) = conn.execute_fixed(MARK_LOST_SQL, params![window_id]) {
+                        warn(error);
+                    }
+                }
+                for window_id in removed {
+                    if let Err(error) = conn.execute_fixed(
+                        "DELETE FROM windows WHERE window_id = ?1 AND state = 'opening'",
+                        params![window_id],
+                    ) {
+                        warn(error);
+                    }
+                }
+                let _ = reply.send(());
             }
             Command::Reserve {
                 window_id,

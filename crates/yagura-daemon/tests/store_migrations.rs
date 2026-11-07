@@ -1,9 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// `store::rotate_slots` is called directly here: it is the unit under test.
-// The database is also seeded and read with raw SQL, which only tests may do.
+// The database is seeded and read with raw SQL, which only tests may do.
 #![allow(clippy::disallowed_methods)]
 
-//! Migration, schema and rotation contracts for the SQLite store. Nothing here spawns a
+//! Migration and schema contracts for the SQLite store. Nothing here spawns a
 //! PTY, so the file is OS-independent.
 //!
 //! Seeding and preparation use `rusqlite::Connection::open` directly, since the store
@@ -20,10 +19,7 @@ use crate::common;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use common::store_fixtures::{
-    count_warns, insert_window_row, insert_window_row_with_blob_command,
-    insert_window_row_with_command_json, read_meta, set_meta, slot_rows, temp_store_db,
-};
+use common::store_fixtures::{insert_window_table_row, temp_store_db};
 use yagura_daemon::room::ChatDeliveryState;
 use yagura_daemon::store;
 
@@ -380,39 +376,6 @@ fn expected_schema_v8() -> Vec<(String, String, String)> {
         .iter()
         .map(|(kind, name, sql)| ((*kind).to_string(), (*name).to_string(), (*sql).to_string()))
         .collect()
-}
-
-// `sample_rows` cannot join the other seeding helpers in
-// `tests/common/store_fixtures.rs`: that shared module must not name `store::`, and
-// `SnapshotWindow` does.
-
-fn sample_rows() -> Vec<store::SnapshotWindow> {
-    vec![
-        store::SnapshotWindow {
-            position: 0,
-            command: vec!["cmd.exe".to_string(), "/c".to_string(), "ver".to_string()],
-            cwd: "C:/work/alpha".to_string(),
-            name: "alpha".to_string(),
-            vendor: None,
-            detection: Some("generic-shell".to_string()),
-            layout_json: None,
-            profile: None,
-            model: None,
-            effort: None,
-        },
-        store::SnapshotWindow {
-            position: 1,
-            command: vec!["pwsh.exe".to_string()],
-            cwd: "C:/work/beta".to_string(),
-            name: "beta".to_string(),
-            vendor: Some("neutral".to_string()),
-            detection: None,
-            layout_json: None,
-            profile: None,
-            model: None,
-            effort: None,
-        },
-    ]
 }
 
 #[test]
@@ -1449,32 +1412,6 @@ fn a_future_schema_version_is_refused_and_left_untouched() {
     );
 }
 
-#[test]
-fn writing_a_snapshot_updates_the_single_meta_row() {
-    let db = temp_store_db("store-meta-update");
-    common::store_fixtures::create_schema(&db.path);
-
-    let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-    set_meta(&conn, 0, None);
-    store::write_snapshot_once(&mut conn, &sample_rows())
-        .expect("write_snapshot_once must succeed");
-    drop(conn);
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM snapshot_meta", [], |row| row.get(0))
-        .expect("the meta count must be readable");
-    assert_eq!(
-        count, 1,
-        "snapshot_meta must hold exactly one row (id = 1 is CHECK-constrained)"
-    );
-    let (taken_at, _) = read_meta(&conn);
-    assert_ne!(
-        taken_at, 0,
-        "writing a snapshot must stamp taken_at_epoch_s, replacing the seeded 0"
-    );
-}
-
 /// The default instance's namespace, for the precedence cases below that are
 /// not about instance naming at all.
 fn default_namespace() -> yagura_os::InstanceNamespace {
@@ -1522,105 +1459,6 @@ fn resolve_db_path_follows_the_documented_precedence() {
     );
 }
 
-// The empty-current no-op is what keeps a failed startup from destroying the previous
-// session.
-
-#[test]
-fn rotate_slots_moves_current_into_prev_and_stamps_prev_taken_at() {
-    let db = temp_store_db("store-rotate-nonempty");
-    common::store_fixtures::create_schema(&db.path);
-
-    let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-    insert_window_row(&conn, store::SLOT_PREV, 0, "stale-prev");
-    insert_window_row(&conn, store::SLOT_CURRENT, 0, "current-a");
-    insert_window_row(&conn, store::SLOT_CURRENT, 1, "current-b");
-    set_meta(&conn, 111, None);
-
-    store::rotate_slots(&mut conn).expect("rotate_slots must succeed");
-    drop(conn);
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    assert_eq!(
-        slot_rows(&conn, store::SLOT_PREV),
-        vec![(0, "current-a".to_string()), (1, "current-b".to_string())],
-        "prev must be replaced wholesale by what current held (the stale prev row is gone)"
-    );
-    assert!(
-        slot_rows(&conn, store::SLOT_CURRENT).is_empty(),
-        "current must be empty after rotation: its rows moved to prev, they were not copied"
-    );
-    let (taken_at, prev_taken_at) = read_meta(&conn);
-    assert_eq!(
-        prev_taken_at,
-        Some(111),
-        "prev_taken_at_epoch_s must take over the timestamp current was carrying"
-    );
-    assert_eq!(
-        taken_at, 111,
-        "taken_at_epoch_s stays NOT NULL and keeps its old value until the next write \
-         (it is documented as meaningless in this window, not nulled)"
-    );
-}
-
-#[test]
-fn rotate_slots_is_a_no_op_when_current_is_empty() {
-    let db = temp_store_db("store-rotate-empty");
-    common::store_fixtures::create_schema(&db.path);
-
-    let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-    insert_window_row(&conn, store::SLOT_PREV, 0, "keep-me-a");
-    insert_window_row(&conn, store::SLOT_PREV, 1, "keep-me-b");
-    set_meta(&conn, 222, Some(111));
-
-    store::rotate_slots(&mut conn).expect("rotate_slots must succeed on an empty current");
-    drop(conn);
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    assert_eq!(
-        slot_rows(&conn, store::SLOT_PREV),
-        vec![(0, "keep-me-a".to_string()), (1, "keep-me-b".to_string())],
-        "an empty current must not wipe prev: a start-up that never wrote a snapshot would \
-         otherwise destroy the last recoverable session"
-    );
-    assert_eq!(
-        read_meta(&conn),
-        (222, Some(111)),
-        "the empty-current no-op must leave prev_taken_at_epoch_s untouched as well"
-    );
-}
-
-#[test]
-fn writing_after_rotation_leaves_prev_taken_at_untouched() {
-    let db = temp_store_db("store-rotate-then-write");
-    common::store_fixtures::create_schema(&db.path);
-
-    let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-    insert_window_row(&conn, store::SLOT_CURRENT, 0, "before-rotation");
-    set_meta(&conn, 111, None);
-    store::rotate_slots(&mut conn).expect("rotate_slots must succeed");
-    store::write_snapshot_once(&mut conn, &sample_rows())
-        .expect("write_snapshot_once must succeed after rotation");
-    drop(conn);
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let (taken_at, prev_taken_at) = read_meta(&conn);
-    assert_eq!(
-        prev_taken_at,
-        Some(111),
-        "the meta update must be an UPSERT that touches taken_at_epoch_s only; a REPLACE / \
-         INSERT OR REPLACE deletes the row first and silently nulls prev_taken_at_epoch_s"
-    );
-    assert_ne!(
-        taken_at, 111,
-        "the write must still refresh taken_at_epoch_s"
-    );
-    assert_eq!(
-        slot_rows(&conn, store::SLOT_PREV),
-        vec![(0, "before-rotation".to_string())],
-        "the rotated prev rows must survive the following write"
-    );
-}
-
 /// The size boundary these tests assert against, kept as a local literal so a change to
 /// `store::MAX_COMMAND_JSON_BYTES` has to be mirrored here deliberately.
 const MAX_COMMAND_JSON_BYTES_EXPECTED: usize = 1_048_576;
@@ -1633,118 +1471,6 @@ fn command_json_of_exact_length(total_len: usize) -> String {
         .checked_sub(OVERHEAD)
         .expect("total_len must be at least 4 to hold an empty JSON string");
     format!("[\"{}\"]", "x".repeat(padding_len))
-}
-
-// A storage-class corrupt row (a BLOB written into a TEXT-affinity column) must not fail
-// the whole read: only that row is skipped, and the call still warns exactly once, the
-// same fail-safe contract JSON-content corruption already has.
-
-#[test]
-fn a_storage_class_corrupt_row_in_the_current_slot_is_skipped_not_fatal() {
-    let db = temp_store_db("store-blob-current");
-    common::store_fixtures::create_schema(&db.path);
-
-    {
-        let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-        insert_window_row_with_command_json(&conn, store::SLOT_CURRENT, 0, "ok", "[\"cmd.exe\"]");
-        insert_window_row_with_blob_command(
-            &conn,
-            store::SLOT_CURRENT,
-            1,
-            "blob-corrupt",
-            &[0xff, 0xfe, 0x00, 0x01],
-        );
-    }
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let (warns, result) = count_warns(|| store::read_snapshot_conn(&conn));
-    let rows = result.expect(
-        "a storage-class corrupt row (e.g. a BLOB written into command_json) must not fail \
-         the whole read; it must be skipped like any other corrupt row",
-    );
-
-    let positions: Vec<i64> = rows.iter().map(|row| row.position).collect();
-    assert_eq!(
-        positions,
-        vec![0],
-        "only the well-formed row must survive; the BLOB row must be skipped, not returned"
-    );
-    assert_eq!(
-        warns, 1,
-        "a storage-class corrupt row must warn exactly once, the same as a JSON-content \
-         corrupt row (contract (6b))"
-    );
-}
-
-#[test]
-fn a_storage_class_corrupt_row_in_the_prev_slot_is_skipped_not_fatal() {
-    let db = temp_store_db("store-blob-prev");
-    common::store_fixtures::create_schema(&db.path);
-
-    {
-        let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-        insert_window_row_with_command_json(&conn, store::SLOT_PREV, 0, "ok", "[\"pwsh.exe\"]");
-        insert_window_row_with_blob_command(
-            &conn,
-            store::SLOT_PREV,
-            1,
-            "blob-corrupt",
-            &[0xde, 0xad, 0xbe, 0xef],
-        );
-    }
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let (warns, result) = count_warns(|| store::read_prev_snapshot_conn(&conn));
-    let rows = result.expect(
-        "read_prev_snapshot_conn must degrade the same way read_snapshot_conn does: a \
-         storage-class corrupt row is skipped, not fatal to the whole call",
-    );
-
-    let positions: Vec<i64> = rows.iter().map(|row| row.position).collect();
-    assert_eq!(
-        positions,
-        vec![0],
-        "only the well-formed prev row must survive; the BLOB row must be skipped"
-    );
-    assert_eq!(
-        warns, 1,
-        "a storage-class corrupt row must warn exactly once"
-    );
-}
-
-// A `command_json` value's own byte length is bounded: at or below the boundary the row
-// is a normal restore candidate, above it the row is skipped like any other corrupt row.
-
-#[test]
-fn a_command_json_row_over_the_byte_limit_is_skipped_and_warns_once() {
-    let db = temp_store_db("store-oversized-json");
-    common::store_fixtures::create_schema(&db.path);
-
-    let oversized = command_json_of_exact_length(MAX_COMMAND_JSON_BYTES_EXPECTED + 1);
-    {
-        let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-        insert_window_row_with_command_json(&conn, store::SLOT_CURRENT, 0, "ok", "[\"cmd.exe\"]");
-        insert_window_row_with_command_json(&conn, store::SLOT_CURRENT, 1, "oversized", &oversized);
-    }
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let (warns, rows) = count_warns(|| {
-        store::read_snapshot_conn(&conn)
-            .expect("an oversized command_json row must degrade, not fail the whole read")
-    });
-
-    let positions: Vec<i64> = rows.iter().map(|row| row.position).collect();
-    assert_eq!(
-        positions,
-        vec![0],
-        "a command_json value exceeding {MAX_COMMAND_JSON_BYTES_EXPECTED} bytes must be \
-         skipped and excluded from the restore candidates, even though it is syntactically \
-         valid JSON; found rows: {rows:?}",
-    );
-    assert_eq!(
-        warns, 1,
-        "skipping an oversized row must warn exactly once, the same as any other corrupt row"
-    );
 }
 
 #[test]
@@ -1760,11 +1486,18 @@ fn a_command_json_row_at_exactly_the_byte_limit_is_still_returned() {
     );
     {
         let conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-        insert_window_row_with_command_json(&conn, store::SLOT_CURRENT, 0, "at-limit", &at_limit);
+        insert_window_table_row(
+            &conn,
+            "w00000000",
+            "at-limit",
+            "lost",
+            rusqlite::types::Value::Text(at_limit),
+            rusqlite::types::Value::Null,
+        );
     }
 
     let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let rows = store::read_snapshot_conn(&conn)
+    let rows = store::read_lost_windows(&conn)
         .expect("a well-formed row at exactly the byte limit must read back normally");
 
     assert_eq!(
@@ -1796,7 +1529,7 @@ fn opening_a_store_creates_its_missing_parent_directories() {
 }
 
 // A connection that does not wait on a lock fails at once when another
-// connection (a second daemon, the snapshot writer) is writing the same file.
+// connection (a second daemon, the window table's writer) is writing the same file.
 #[test]
 fn every_store_connection_waits_on_a_locked_database_instead_of_failing_at_once() {
     let db = temp_store_db("store-busy-timeout");
@@ -1811,32 +1544,6 @@ fn every_store_connection_waits_on_a_locked_database_instead_of_failing_at_once(
 
     let read_only = store::open_readonly(&db.path).expect("open_readonly must succeed");
     assert!(busy_timeout(&read_only) > 0);
-}
-
-#[test]
-fn writing_a_snapshot_stamps_the_current_wall_clock_time() {
-    let db = temp_store_db("store-meta-wall-clock");
-    common::store_fixtures::create_schema(&db.path);
-    let epoch_secs = || -> i64 {
-        let elapsed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("the clock is after the Unix epoch");
-        i64::try_from(elapsed.as_secs()).expect("seconds fit in i64")
-    };
-
-    let before = epoch_secs();
-    let mut conn = rusqlite::Connection::open(&db.path).expect("a write connection must open");
-    store::write_snapshot_once(&mut conn, &sample_rows())
-        .expect("write_snapshot_once must succeed");
-    drop(conn);
-    let after = epoch_secs();
-
-    let conn = store::open_readonly(&db.path).expect("open_readonly must succeed");
-    let (taken_at, _) = read_meta(&conn);
-    assert!(
-        (before..=after).contains(&taken_at),
-        "taken_at_epoch_s must be the time of the write: {taken_at} not in {before}..={after}"
-    );
 }
 
 /// Every delivery state this build writes. A new variant stops the match from compiling,

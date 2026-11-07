@@ -997,7 +997,18 @@ fn recorded_process(pid: u32, start: Option<&str>) -> Option<(u32, yagura_os::Pr
 }
 
 fn end_process(handle: &yagura_os::ProcessHandle) {
+    // Watched before the kill: on macOS a process reads as dead while it still
+    // holds its descriptors, the endpoint lock removed next among them.
+    let exit = handle.watch_exit();
     let _ = handle.kill();
+    if let Ok(exit) = exit {
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(exit.wait());
+        });
+        let _ = ended.recv_timeout(crate::HANG_GUARD);
+        return;
+    }
     let deadline = std::time::Instant::now() + crate::HANG_GUARD;
     while handle.liveness() == yagura_os::Liveness::Alive && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));

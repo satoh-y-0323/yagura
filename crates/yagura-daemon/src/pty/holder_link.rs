@@ -989,45 +989,23 @@ fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_
     let Some(holder) = holder else {
         return false;
     };
+    // Watched before anything can end it: its files are removed next, under
+    // its endpoint lock, which it holds until its exit is complete.
+    let exit = holder.watch_exit();
     #[cfg(unix)]
-    end_recorded_child_group(files);
+    if let Ok(record) = read_holder_record(files.holders_dir, files.window_id) {
+        crate::recovery::end_recorded_child_group(files.window_id, &record, None);
+    }
     #[cfg(not(unix))]
     let _ = files;
     if let Err(error) = holder.kill() {
         tracing::warn!(%error, "cannot end a window's holder");
         return true;
     }
-    if let Err(error) = holder.wait() {
+    if let Err(error) = exit.and_then(yagura_os::ExitWatch::wait) {
         tracing::warn!(%error, "cannot wait for a window's holder");
     }
     true
-}
-
-/// Ends the process group the child named by the holder's record leads, when
-/// that child still runs: while its leader runs, the group id names no other
-/// group.
-#[cfg(unix)]
-fn end_recorded_child_group(files: &HolderFiles<'_>) {
-    let Ok(record) = read_holder_record(files.holders_dir, files.window_id) else {
-        return;
-    };
-    let (Some(child_pid), Some(child_start)) = (record.child_pid, record.child_start.as_deref())
-    else {
-        return;
-    };
-    let Ok(child_start) = child_start.parse::<ProcessStart>() else {
-        return;
-    };
-    let runs = open_process(child_pid, &child_start)
-        .is_some_and(|child| child.liveness() == yagura_os::Liveness::Alive);
-    if !runs {
-        return;
-    }
-    let ended = yagura_os::ProcessGroup::led_by(child_pid, yagura_os::PROCESS_GROUP_TERM_GRACE)
-        .and_then(|group| group.terminate());
-    if let Err(error) = ended {
-        tracing::warn!(child_pid, %error, "cannot end a window's process group");
-    }
 }
 
 /// One holder's names.

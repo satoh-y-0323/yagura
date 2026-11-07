@@ -418,8 +418,7 @@ async fn a_location_with_a_quote_opens_the_window_without_hooks_and_the_bridge_b
 async fn recorded_commands(db: &Path) -> Vec<Vec<String>> {
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        if let Ok(conn) = yagura_daemon::store::open_readonly(db)
-            && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
+        if let Some(rows) = crate::common::store_fixtures::window_rows(db)
             && !rows.is_empty()
         {
             return rows.into_iter().map(|row| row.command).collect();

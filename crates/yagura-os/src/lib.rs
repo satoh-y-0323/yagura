@@ -52,7 +52,7 @@ pub use instance::{
 };
 pub use mcp_bridge::{merge_wslenv, resolve_sibling_executable, to_plain_path};
 pub use process_identity::{
-    Liveness, ProcessHandle, ProcessStart, process_liveness, process_start,
+    ExitWatch, Liveness, ProcessHandle, ProcessStart, process_liveness, process_start,
 };
 pub use reap_gate::ReapGate;
 

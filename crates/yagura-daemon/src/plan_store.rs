@@ -738,24 +738,33 @@ impl PlanStore {
     }
 
     /// [`Self::open`], then clears every plan's owner and every task's
-    /// window binding: window ids from a previous process's registry never
-    /// survive a restart, so a new boot must not let a stale id linger as
-    /// though it still named something live. A still-pending instruction
-    /// notice becomes window-closed, since the window it awaited is gone.
-    /// Plans, tasks, dependencies, write targets and user overrides are all
-    /// left untouched.
+    /// window binding that names a window not in `remaining` (the windows
+    /// the start found still there, taken back or lost): such an id names
+    /// nothing any more, so it must not linger as though it did. A
+    /// still-pending instruction notice becomes window-closed, since what
+    /// awaited it ended with the previous daemon. Plans, tasks, dependencies,
+    /// write targets and user overrides are all left untouched.
     ///
     /// # Errors
     ///
     /// Same as [`Self::open`], plus any [`StoreError`] from the clearing
     /// transaction.
-    pub fn open_as_new_boot(db_path: &Path) -> Result<Self, StoreError> {
+    pub fn open_as_new_boot(db_path: &Path, remaining: &[String]) -> Result<Self, StoreError> {
+        let remaining = serde_json::to_string(remaining)?;
         let mut opened = Self::open(db_path)?;
         let tx = opened
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_fixed("UPDATE plan SET owner_window = NULL", [])?;
-        tx.execute_fixed("UPDATE plan_task SET window_id = NULL", [])?;
+        tx.execute_fixed(
+            "UPDATE plan SET owner_window = NULL WHERE owner_window IS NOT NULL \
+             AND owner_window NOT IN (SELECT value FROM json_each(?1))",
+            params![remaining],
+        )?;
+        tx.execute_fixed(
+            "UPDATE plan_task SET window_id = NULL WHERE window_id IS NOT NULL \
+             AND window_id NOT IN (SELECT value FROM json_each(?1))",
+            params![remaining],
+        )?;
         tx.execute_fixed(
             "UPDATE plan_task SET instruction_notice_state = ?1, instruction_notice_at = ?2 \
              WHERE instruction_notice_state = ?3",

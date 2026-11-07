@@ -13,13 +13,17 @@
 
 use crate::common;
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
+use common::store_fixtures::{insert_window_row_with_layout_value, set_meta};
 use common::{read_response, send};
+use rusqlite::types::Value as SqlValue;
+use yagura_daemon::store;
 use yagura_os::{Liveness, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderRecord, encode_holder_record, holder_record_path, read_holder_record,
@@ -573,6 +577,16 @@ async fn a_window_whose_take_back_fails_is_kept_with_its_holder_and_child_alive(
         WindowStatus::Unknown,
         "a window whose take-back failed stays listed Unknown"
     );
+    let candidates = candidate_names(&mut next).await;
+    assert!(
+        !candidates.contains(&info.name),
+        "a window whose holder runs is not lost, so it is no restore candidate: {candidates:?}"
+    );
+    assert_ne!(
+        row_state(&store_db(&sandbox), &window_id).as_deref(),
+        Some("lost"),
+        "a window whose holder runs must not be recorded lost"
+    );
 
     next.kill_keeping_windows();
     assert_eq!(
@@ -582,17 +596,72 @@ async fn a_window_whose_take_back_fails_is_kept_with_its_holder_and_child_alive(
     );
 }
 
+/// Waits until the next daemon lists `window_id` as exited; returns its listing.
+async fn exited_listing(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    window_id: &str,
+) -> WindowInfo {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let info = listed(daemon, sandbox, window_id).await;
+        if info.status == WindowStatus::Exited {
+            return info;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exited window was never taken back as exited: {info:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Closes `window_id`, then waits for `holder` to end; returns the holder files left.
+async fn close_and_wait_for_holder(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    window_id: &str,
+    holder: &ProcessHandle,
+) -> Vec<std::ffi::OsString> {
+    send(
+        &mut daemon.client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_owned(),
+            force: Some(false),
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowClosed { .. } => {}
+        other => panic!("expected window_closed, got {other:?}"),
+    }
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while holder.liveness() != Liveness::Dead {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exited window's holder outlived its close"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    holder_files(sandbox, window_id)
+}
+
 /// A window whose child exited while its daemon was connected, left unclosed, is taken
 /// back by the next daemon as the exited window it was, with its exit code and last
-/// screen; closing it then ends its holder and leaves none of its files.
+/// screen, and so is a window whose child exited while no daemon was there, whose holder
+/// lives on until the window is closed; closing either then ends its holder and leaves
+/// none of its files.
 #[tokio::test]
 async fn an_exited_window_is_taken_back_with_its_last_screen_and_closes_cleanly() {
     let sandbox = Sandbox::new("recover-exited");
     let child = holder_child();
+    let gate = sandbox.tree.path().join("exit-gate");
     sandbox.write_probe_profile("exits", &[&child, "exit", "7"], "");
+    sandbox.write_probe_profile("exits-later", &[&child, "exit", "9", utf8(&gate)], "");
 
     let mut first = sandbox.start().await;
     let window_id = first.open_profile_window(&sandbox, "exits").await;
+    let later_id = first.open_profile_window(&sandbox, "exits-later").await;
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let info = listed(&mut first, &sandbox, &window_id).await;
@@ -607,54 +676,57 @@ async fn an_exited_window_is_taken_back_with_its_last_screen_and_closes_cleanly(
     }
     let record = record_of(&sandbox, &window_id);
     let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    let later_record = record_of(&sandbox, &later_id);
+    let later_holder = handle_of(
+        later_record.holder_pid,
+        later_record.holder_start.as_deref(),
+    );
+    let later_child = handle_of(
+        later_record.child_pid.expect("the record names the child"),
+        later_record.child_start.as_deref(),
+    );
     first.kill_keeping_windows();
-
-    let mut next = sandbox.start().await;
-    let info = listed(&mut next, &sandbox, &window_id).await;
+    std::fs::write(&gate, b"").unwrap();
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    let mut info = info;
-    while info.status != WindowStatus::Exited {
+    while later_child.liveness() != Liveness::Dead {
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the exited window was never taken back as exited: {info:?}"
+            "the gated child never exited while no daemon was there"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        info = listed(&mut next, &sandbox, &window_id).await;
     }
+
+    let mut next = sandbox.start().await;
+    let info = exited_listing(&mut next, &sandbox, &window_id).await;
     assert_eq!(info.exit_code, Some(7), "the exit code must be kept");
     next.output_until(&window_id, "the child's last screen", |text| {
         text.contains("EXITING 7")
     })
     .await;
-
-    send(
-        &mut next.client,
-        &ClientMessage::CloseWindow {
-            window_id: window_id.clone(),
-            force: Some(false),
-        },
-    )
+    let later = exited_listing(&mut next, &sandbox, &later_id).await;
+    assert_eq!(
+        later.exit_code,
+        Some(9),
+        "the exit code of a child that ended while no daemon was there must be kept"
+    );
+    next.output_until(&later_id, "the last screen of the absence", |text| {
+        text.contains("EXITING 9")
+    })
     .await;
-    match read_response(&mut next.client).await {
-        DaemonMessage::WindowClosed { .. } => {}
-        other => panic!("expected window_closed, got {other:?}"),
-    }
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    while holder.liveness() != Liveness::Dead {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the exited window's holder outlived its close"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let prefix = format!("{window_id}.");
-    let left: Vec<_> = std::fs::read_dir(sandbox.holders_dir())
-        .into_iter()
-        .flatten()
-        .map(|entry| entry.unwrap().file_name())
-        .filter(|name| name.to_string_lossy().starts_with(&prefix))
-        .collect();
+    assert_eq!(
+        later_holder.liveness(),
+        Liveness::Alive,
+        "the holder of a window whose child exited while no daemon was there must live \
+         until the window is closed"
+    );
+
+    let left = close_and_wait_for_holder(&mut next, &sandbox, &window_id, &holder).await;
     assert!(left.is_empty(), "closing the exited window left {left:?}");
+    let left = close_and_wait_for_holder(&mut next, &sandbox, &later_id, &later_holder).await;
+    assert!(
+        left.is_empty(),
+        "closing the window whose child exited while no daemon was there left {left:?}"
+    );
 }
 
 /// The files the holders folder keeps for `window_id`.
@@ -734,8 +806,22 @@ async fn closing_a_window_whose_take_back_failed_ends_its_holder_and_leaves_no_f
     let left = holder_files(&sandbox, &window_id);
     assert!(
         left.is_empty(),
-        "closing the window whose take-back failed left {left:?}"
+        "closing the window whose take-back failed left {left:?}; daemon log:
+{}",
+        sandbox.daemon_log()
     );
+    // On Windows the holder's job ends the child's tree; this stand-in has none.
+    #[cfg(unix)]
+    {
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
+        while fake.running().1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "closing the window whose take-back failed left its recorded child running"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 
 /// A window whose holder runs but whose row is gone (here, with the whole database) is
@@ -805,4 +891,700 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
     }
     let left = holder_files(&sandbox, &window_id);
     assert!(left.is_empty(), "closing the window left {left:?}");
+}
+
+/// The session store of the sandbox's instance.
+fn store_db(sandbox: &Sandbox) -> PathBuf {
+    sandbox.data_root().join("yagura.db")
+}
+
+/// The state the window table at `db` records for `window_id`; `None` without a row.
+fn row_state(db: &Path, window_id: &str) -> Option<String> {
+    let conn = store::open_readonly(db).ok()?;
+    conn.query_row(
+        "SELECT state FROM windows WHERE window_id = ?1",
+        [window_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// The names of the window table's rows at `db` in `state`, in the order they opened.
+fn names_in_state(db: &Path, state: &str) -> Vec<String> {
+    let Ok(conn) = store::open_readonly(db) else {
+        return Vec::new();
+    };
+    let Ok(mut statement) =
+        conn.prepare("SELECT name FROM windows WHERE state = ?1 ORDER BY opened_seq")
+    else {
+        return Vec::new();
+    };
+    statement
+        .query_map([state], |row| row.get(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+async fn candidate_names(daemon: &mut RunningDaemon) -> Vec<String> {
+    send(&mut daemon.client, &ClientMessage::ListRestoreCandidates).await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::RestoreCandidateList { windows, .. } => windows
+            .into_iter()
+            .map(|candidate| candidate.name)
+            .collect(),
+        other => panic!("expected restore_candidate_list, got {other:?}"),
+    }
+}
+
+/// Polls `check` until it reports no problem; fails with every problem it last reported
+/// once [`HANG_GUARD`] has passed.
+macro_rules! settle {
+    ($sandbox:expr, $what:expr, $check:block) => {{
+        let deadline = tokio::time::Instant::now() + HANG_GUARD;
+        loop {
+            let problems: Vec<String> = $check;
+            if problems.is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{}:\n- {}\ndaemon log:\n{}",
+                $what,
+                problems.join("\n- "),
+                $sandbox.daemon_log()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }};
+}
+
+/// Removes, as a test ends, the endpoints (Unix) of holders it killed itself, which a
+/// killed holder cannot remove and the next daemon may have left.
+struct KilledEndpoints {
+    holders_dir: PathBuf,
+    instance: String,
+    window_ids: Vec<String>,
+}
+
+impl KilledEndpoints {
+    fn new(sandbox: &Sandbox, window_ids: &[&str]) -> Self {
+        Self {
+            holders_dir: sandbox.holders_dir(),
+            instance: sandbox.instance.clone(),
+            window_ids: window_ids.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+}
+
+impl Drop for KilledEndpoints {
+    fn drop(&mut self) {
+        for window_id in &self.window_ids {
+            yagura_test_support::process::remove_killed_holder_endpoint(
+                &self.holders_dir,
+                Some(OsStr::new(&self.instance)),
+                window_id,
+            );
+        }
+    }
+}
+
+/// Ends a process the test left running, as the test ends.
+struct EndOnDrop(Option<ProcessHandle>);
+
+impl Drop for EndOnDrop {
+    fn drop(&mut self) {
+        if let Some(process) = self.0.take() {
+            let _ = process.kill();
+        }
+    }
+}
+
+/// Kills the process `handle` names and waits until it has ended.
+async fn kill_and_wait(handle: &ProcessHandle, what: &str) {
+    handle.kill().unwrap();
+    wait_dead(handle, what).await;
+}
+
+async fn wait_dead(handle: &ProcessHandle, what: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while handle.liveness() != Liveness::Dead {
+        assert!(tokio::time::Instant::now() < deadline, "{what} never ended");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A window whose holder was ended from outside while no daemon was there is found gone
+/// by the next daemon from its record's pid and start: it is not taken back but becomes
+/// `lost`, a restore candidate, and its holder's files are removed. A window taken back is
+/// no candidate. On Windows the holder's job had ended the child's whole tree.
+#[tokio::test]
+async fn a_window_whose_holder_died_while_no_daemon_was_there_is_lost_and_the_only_candidate() {
+    let sandbox = Sandbox::new("reconcile-lost");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+    let pid_file = sandbox.tree.path().join("grandchild.pid");
+    sandbox.write_probe_profile("tree", &[&holder_child(), "tree", utf8(&pid_file)], "");
+
+    let mut first = sandbox.start().await;
+    let kept = first.open_profile_window(&sandbox, "script").await;
+    let lost = first.open_profile_window(&sandbox, "tree").await;
+    first
+        .output_until(&lost, "the tree's marker", |text| {
+            text.contains("HOLDER-CHILD-TREE")
+        })
+        .await;
+    let kept_name = listed(&mut first, &sandbox, &kept).await.name;
+    let lost_name = listed(&mut first, &sandbox, &lost).await.name;
+    let record = record_of(&sandbox, &lost);
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&lost]);
+    let child = handle_of(
+        record.child_pid.expect("the record names the child"),
+        record.child_start.as_deref(),
+    );
+    let grandchild_pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let grandchild = EndOnDrop(Some(handle_of(
+        grandchild_pid,
+        Some(&start_of(grandchild_pid)),
+    )));
+    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    first.kill_keeping_windows();
+    kill_and_wait(&holder, "the killed holder").await;
+    if cfg!(windows) {
+        wait_dead(&child, "the child of the killed holder's job").await;
+        wait_dead(
+            grandchild.0.as_ref().unwrap(),
+            "the grandchild of the killed holder's job",
+        )
+        .await;
+    }
+
+    let mut next = sandbox.start().await;
+    let db = store_db(&sandbox);
+    settle!(sandbox, "the window whose holder died is not lost", {
+        let mut problems = Vec::new();
+        let ids: Vec<String> = list_windows(&mut next)
+            .await
+            .into_iter()
+            .map(|info| info.window_id)
+            .collect();
+        if !ids.contains(&kept) {
+            problems.push(format!("the live window {kept} is not listed: {ids:?}"));
+        }
+        if ids.contains(&lost) {
+            problems.push(format!("the window whose holder died is listed: {ids:?}"));
+        }
+        let names = candidate_names(&mut next).await;
+        if !names.contains(&lost_name) {
+            problems.push(format!(
+                "the window whose holder died ({lost_name}) is no candidate: {names:?}"
+            ));
+        }
+        if names.contains(&kept_name) {
+            problems.push(format!(
+                "the window taken back ({kept_name}) is a candidate: {names:?}"
+            ));
+        }
+        let state = row_state(&db, &lost);
+        if state.as_deref() != Some("lost") {
+            problems.push(format!(
+                "the dead holder's window row is {state:?}, not lost"
+            ));
+        }
+        let left = holder_files(&sandbox, &lost);
+        if !left.is_empty() {
+            problems.push(format!("the dead holder's files are left: {left:?}"));
+        }
+        problems
+    });
+}
+
+/// What the start sweeps away is decided by the windows that stay: the credentials of a
+/// window taken back and of one whose holder runs but does not let the daemon in are kept,
+/// and so are the plan owners, task bindings and pending chat deliveries of a window taken
+/// back and of a lost one. What names no such window is cleared as before.
+#[tokio::test]
+async fn the_start_keeps_what_belongs_to_windows_that_stay_and_clears_the_rest() {
+    const STRAY: &str = "wstray001";
+    let sandbox = Sandbox::new("reconcile-sweep");
+    // `hex` reads no argument, so the credentials file named on its command line is inert.
+    sandbox.write_probe_profile(
+        "launch",
+        &[&holder_child(), "hex"],
+        "\n[credentials]\nmode = \"launch\"\n\n[hooks]\nargs = [\"--creds\", \"{credentials_file}\"]\n",
+    );
+    let mcp_dir = sandbox.state_root().join("mcp");
+    let folders = || -> BTreeSet<PathBuf> {
+        std::fs::read_dir(&mcp_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("credentials-")
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            })
+            .map(|entry| entry.path())
+            .collect()
+    };
+
+    let mut first = sandbox.start().await;
+    let mut opened = Vec::new();
+    for _ in 0..3 {
+        let before = folders();
+        let window_id = first.open_profile_window(&sandbox, "launch").await;
+        let added: Vec<PathBuf> = folders().difference(&before).cloned().collect();
+        assert_eq!(
+            added.len(),
+            1,
+            "a launch window must have one credentials folder of its own: {added:?}; daemon \
+             log:\n{}",
+            sandbox.daemon_log()
+        );
+        opened.push((window_id, added[0].clone()));
+    }
+    let [
+        (taken, taken_folder),
+        (mute, mute_folder),
+        (lost, lost_folder),
+    ] = <[(String, PathBuf); 3]>::try_from(opened).unwrap();
+    let mute_record = record_of(&sandbox, &mute);
+    let lost_record = record_of(&sandbox, &lost);
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&lost]);
+    first.kill_keeping_windows();
+    let mut mute_fake = replace_holder(
+        &sandbox,
+        &mute_record,
+        "reject",
+        sandbox.tree.path().join("fake.log"),
+    )
+    .await;
+    kill_and_wait(
+        &handle_of(lost_record.holder_pid, lost_record.holder_start.as_deref()),
+        "the killed holder",
+    )
+    .await;
+
+    let stray_folder = mcp_dir.join(format!("credentials-{}", "0".repeat(32)));
+    std::fs::create_dir_all(&stray_folder).unwrap();
+    std::fs::write(
+        stray_folder.join("credentials.json"),
+        format!("{{\"window_id\":\"{STRAY}\",\"token\":\"{OTHER_TOKEN}\"}}"),
+    )
+    .unwrap();
+    let db = store_db(&sandbox);
+    let owners = [
+        ("plan-taken", taken.as_str()),
+        ("plan-lost", lost.as_str()),
+        ("plan-stray", STRAY),
+    ];
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for (seq, (plan_id, owner)) in (1i64..).zip(owners) {
+            conn.execute(
+                "INSERT INTO plan (plan_id, title, cwd, owner_window, created_at, updated_at) \
+                 VALUES (?1, ?1, 'C:/work', ?2, 0, 0)",
+                rusqlite::params![plan_id, owner],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO plan_task (plan_id, task_id, seq, title, window_id) \
+                 VALUES (?1, 'task', 0, 'task', ?2)",
+                rusqlite::params![plan_id, owner],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_message (room_id, seq, at_ms, from_kind, from_name, body, \
+                 mentions_json) VALUES ('main', ?1, 0, 'user', 'user', 'body', '[]')",
+                [seq],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms) \
+                 VALUES ('main', ?1, ?2, 'pending', 0)",
+                rusqlite::params![seq, owner],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO chat_seq (room_id, last_seq) VALUES ('main', 3) \
+             ON CONFLICT(room_id) DO UPDATE SET last_seq = 3",
+            [],
+        )
+        .unwrap();
+    }
+
+    let _next = sandbox.start().await;
+    settle!(sandbox, "the start's sweep did not keep what stays", {
+        let mut problems = Vec::new();
+        for (folder, kept, what) in [
+            (&taken_folder, true, "the window taken back"),
+            (
+                &mute_folder,
+                true,
+                "the window that does not let the daemon in",
+            ),
+            (&lost_folder, false, "the lost window"),
+            (&stray_folder, false, "no window"),
+        ] {
+            if folder.exists() != kept {
+                problems.push(format!(
+                    "the credentials folder of {what} must {}: {}",
+                    if kept { "stay" } else { "be removed" },
+                    folder.display()
+                ));
+            }
+        }
+        let conn = store::open_readonly(&db).unwrap();
+        for (plan_id, owner) in owners {
+            let expected = (owner != STRAY).then(|| owner.to_owned());
+            let (plan_owner, task_window): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT plan.owner_window, plan_task.window_id FROM plan \
+                     JOIN plan_task ON plan_task.plan_id = plan.plan_id WHERE plan.plan_id = ?1",
+                    [plan_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if plan_owner != expected || task_window != expected {
+                problems.push(format!(
+                    "{plan_id}: owner {plan_owner:?} and task binding {task_window:?}, \
+                     expected {expected:?}"
+                ));
+            }
+            let state: String = conn
+                .query_row(
+                    "SELECT state FROM chat_delivery WHERE window_id = ?1",
+                    [owner],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let expected = if owner == STRAY {
+                "undelivered_restart"
+            } else {
+                "pending"
+            };
+            if state != expected {
+                problems.push(format!(
+                    "the delivery to {owner} is {state}, expected {expected}"
+                ));
+            }
+        }
+        problems
+    });
+
+    // A credentials folder lives as long as its window: when the holder of the window that
+    // was kept without a connection ends, the folder goes with the window.
+    let _ = mute_fake.holder.kill();
+    mute_fake.wait_gone("its kill").await;
+    settle!(sandbox, "the credentials folder outlived its window", {
+        let mut problems = Vec::new();
+        if mute_folder.exists() {
+            problems.push(format!(
+                "the credentials folder of the window whose holder ended stayed: {}",
+                mute_folder.display()
+            ));
+        }
+        if !taken_folder.exists() {
+            problems.push(format!(
+                "the credentials folder of the window still running went: {}",
+                taken_folder.display()
+            ));
+        }
+        problems
+    });
+}
+
+/// Records without a row (as an earlier version leaves them) whose holder and child are
+/// gone are removed with the holder's other files, whether or not they carry the
+/// processes' starts, and are no restore candidates.
+#[tokio::test]
+async fn records_of_dead_holders_without_rows_are_removed_and_are_no_candidates() {
+    let sandbox = Sandbox::new("reconcile-rowless");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+
+    let mut first = sandbox.start().await;
+    let with_starts = first.open_profile_window(&sandbox, "script").await;
+    let without_starts = first.open_profile_window(&sandbox, "script").await;
+    let mut names = Vec::new();
+    for window_id in [&with_starts, &without_starts] {
+        names.push(listed(&mut first, &sandbox, window_id).await.name);
+    }
+    let records = [
+        record_of(&sandbox, &with_starts),
+        record_of(&sandbox, &without_starts),
+    ];
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&with_starts, &without_starts]);
+    first.kill_keeping_windows();
+    for record in &records {
+        let child = handle_of(record.child_pid.unwrap(), record.child_start.as_deref());
+        kill_and_wait(&child, "the killed child").await;
+        let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+        kill_and_wait(&holder, "the killed holder").await;
+    }
+    let earlier = HolderRecord {
+        holder_start: None,
+        child_start: None,
+        ..records[1].clone()
+    };
+    std::fs::write(
+        holder_record_path(&sandbox.holders_dir(), &without_starts).unwrap(),
+        encode_holder_record(&earlier),
+    )
+    .unwrap();
+    let db = store_db(&sandbox);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for window_id in [&with_starts, &without_starts] {
+            conn.execute("DELETE FROM windows WHERE window_id = ?1", [window_id])
+                .unwrap();
+        }
+    }
+
+    let mut next = sandbox.start().await;
+    settle!(sandbox, "the dead holders' records are not cleared", {
+        let mut problems = Vec::new();
+        let candidates = candidate_names(&mut next).await;
+        let ids: Vec<String> = list_windows(&mut next)
+            .await
+            .into_iter()
+            .map(|info| info.window_id)
+            .collect();
+        for (window_id, name) in [&with_starts, &without_starts].into_iter().zip(&names) {
+            let left = holder_files(&sandbox, window_id);
+            if !left.is_empty() {
+                problems.push(format!("{window_id}'s files are left: {left:?}"));
+            }
+            if candidates.contains(name) {
+                problems.push(format!(
+                    "{window_id} ({name}) is a candidate: {candidates:?}"
+                ));
+            }
+            if ids.contains(window_id) {
+                problems.push(format!("{window_id} is listed: {ids:?}"));
+            }
+            if let Some(state) = row_state(&db, window_id) {
+                problems.push(format!("{window_id} has a row again: {state}"));
+            }
+        }
+        problems
+    });
+}
+
+/// On Unix, a lost window's child that outlived its killed holder (it ignores the
+/// terminal's hangup) and is still the process its record names is ended with its whole
+/// process group before the window becomes `lost`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lost_windows_child_that_outlived_its_holder_is_ended_with_its_group() {
+    let sandbox = Sandbox::new("reconcile-group");
+    sandbox.write_probe_profile("stubborn", &[&holder_child(), "ignore-end"], "");
+
+    let mut first = sandbox.start().await;
+    let window_id = first.open_profile_window(&sandbox, "stubborn").await;
+    first
+        .output_until(&window_id, "the child ignoring every end", |text| {
+            text.contains("HOLDER-CHILD-IGNORING")
+        })
+        .await;
+    let record = record_of(&sandbox, &window_id);
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&window_id]);
+    let child = EndOnDrop(Some(handle_of(
+        record.child_pid.expect("the record names the child"),
+        record.child_start.as_deref(),
+    )));
+    first.kill_keeping_windows();
+    kill_and_wait(
+        &handle_of(record.holder_pid, record.holder_start.as_deref()),
+        "the killed holder",
+    )
+    .await;
+    assert_eq!(
+        child.0.as_ref().unwrap().liveness(),
+        Liveness::Alive,
+        "the fixture's child must outlive its killed holder"
+    );
+
+    let _next = sandbox.start().await;
+    let db = store_db(&sandbox);
+    settle!(
+        sandbox,
+        "the child that outlived its holder was not ended",
+        {
+            let mut problems = Vec::new();
+            if child.0.as_ref().unwrap().liveness() != Liveness::Dead {
+                problems.push("the child that outlived its holder still runs".to_owned());
+            }
+            let state = row_state(&db, &window_id);
+            if state.as_deref() != Some("lost") {
+                problems.push(format!("the window's row is {state:?}, not lost"));
+            }
+            if !holder_files(&sandbox, &window_id).is_empty() {
+                problems.push("the dead holder's files are left".to_owned());
+            }
+            problems
+        }
+    );
+}
+
+/// On Unix, when the child id a dead holder's record names now belongs to another process
+/// (its start differs), that process and its group are left running; the window still
+/// becomes `lost`.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lost_windows_child_id_taken_by_another_process_is_left_running() {
+    let sandbox = Sandbox::new("reconcile-reused");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+    let mut other = spawn_term_script(&["idle"]);
+
+    let mut first = sandbox.start().await;
+    let window_id = first.open_profile_window(&sandbox, "script").await;
+    let record = record_of(&sandbox, &window_id);
+    first.kill_keeping_windows();
+    let _ = yagura_test_support::process::end_recorded_holder(
+        &sandbox.holders_dir(),
+        Some(OsStr::new(&sandbox.instance)),
+        &record,
+    );
+    let reused = HolderRecord {
+        child_pid: Some(other.id()),
+        ..record.clone()
+    };
+    std::fs::write(
+        holder_record_path(&sandbox.holders_dir(), &window_id).unwrap(),
+        encode_holder_record(&reused),
+    )
+    .unwrap();
+
+    let _next = sandbox.start().await;
+    let db = store_db(&sandbox);
+    settle!(
+        sandbox,
+        "the window whose child id was taken is not lost",
+        {
+            let state = row_state(&db, &window_id);
+            if state.as_deref() == Some("lost") {
+                Vec::new()
+            } else {
+                vec![format!("the window's row is {state:?}, not lost")]
+            }
+        }
+    );
+    let running = other.try_wait().unwrap().is_none();
+    let _ = other.kill();
+    let _ = other.wait();
+    assert!(
+        running,
+        "a process that took over the recorded child's id must not be ended"
+    );
+}
+
+/// The version that shipped the snapshot slots: migrations 001 to 016.
+const V0_3_SCHEMA_VERSION: usize = 16;
+/// The slots of a 0.3 store: the windows open at its last write, and the ones rotated
+/// out of them at the start before.
+const V0_3_SLOT_CURRENT: i64 = 0;
+const V0_3_SLOT_PREV: i64 = 1;
+
+/// Writes a session store as version 0.3 left it in the sandbox's data root: `current`
+/// and `prev` slot rows as `(name, layout)`.
+fn seed_0_3_store(
+    sandbox: &Sandbox,
+    current: &[(&str, Option<&str>)],
+    prev: &[(&str, Option<&str>)],
+) {
+    std::fs::create_dir_all(sandbox.data_root()).unwrap();
+    let mut conn = rusqlite::Connection::open(store_db(sandbox)).unwrap();
+    store::apply_migrations(&mut conn, &store::MIGRATIONS[..V0_3_SCHEMA_VERSION]).unwrap();
+    for (slot, rows) in [(V0_3_SLOT_CURRENT, current), (V0_3_SLOT_PREV, prev)] {
+        for (position, (name, layout)) in (0i64..).zip(rows) {
+            insert_window_row_with_layout_value(
+                &conn,
+                slot,
+                position,
+                name,
+                layout.map_or(SqlValue::Null, |layout| SqlValue::Text(layout.to_owned())),
+            );
+        }
+    }
+    set_meta(&conn, 2000, Some(1000));
+}
+
+fn has_slot_table(db: &Path) -> bool {
+    let conn = store::open_readonly(db).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_windows'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+        > 0
+}
+
+/// The first start over a 0.3 store turns the slot the 0.3 daemon would have offered
+/// next (`current` when it holds a window, `prev` otherwise) into `lost` rows, which are
+/// the restore candidates with their layouts, and drops the slot table; a second start
+/// offers the same candidates once.
+#[tokio::test]
+async fn the_first_start_over_a_0_3_store_moves_its_last_windows_into_lost_rows() {
+    const LAYOUT: &str = "{\"v\":3}";
+    let with_current = Sandbox::new("reconcile-0-3-current");
+    seed_0_3_store(
+        &with_current,
+        &[("c-zero", Some(LAYOUT)), ("c-one", None)],
+        &[("p-zero", None)],
+    );
+    let only_prev = Sandbox::new("reconcile-0-3-prev");
+    seed_0_3_store(&only_prev, &[], &[("p-only", Some(LAYOUT))]);
+
+    for (sandbox, expected, layout_of_first) in [
+        (&with_current, vec!["c-zero", "c-one"], Some(LAYOUT)),
+        (&only_prev, vec!["p-only"], Some(LAYOUT)),
+    ] {
+        let db = store_db(sandbox);
+        for start in ["first", "second"] {
+            let mut daemon = sandbox.start().await;
+            send(&mut daemon.client, &ClientMessage::ListRestoreCandidates).await;
+            let candidates = match read_response(&mut daemon.client).await {
+                DaemonMessage::RestoreCandidateList { windows, .. } => windows,
+                other => panic!("expected restore_candidate_list, got {other:?}"),
+            };
+            let mut problems = Vec::new();
+            let names: Vec<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
+            if names != expected {
+                problems.push(format!("the candidates are {names:?}"));
+            }
+            let layouts: Vec<Option<&str>> = candidates
+                .iter()
+                .map(|c| c.layout_json.as_deref())
+                .collect();
+            if layouts.first().copied().flatten() != layout_of_first
+                || layouts.iter().skip(1).any(Option::is_some)
+            {
+                problems.push(format!("the candidates' layouts are {layouts:?}"));
+            }
+            let lost = names_in_state(&db, "lost");
+            if lost != expected {
+                problems.push(format!("the lost rows are {lost:?}"));
+            }
+            if has_slot_table(&db) {
+                problems.push("the slot table is still there".to_owned());
+            }
+            assert!(
+                problems.is_empty(),
+                "after the {start} start over a 0.3 store, expected the candidates \
+                 {expected:?}:\n- {}\ndaemon log:\n{}",
+                problems.join("\n- "),
+                sandbox.daemon_log()
+            );
+            drop(daemon);
+        }
+    }
 }

@@ -645,7 +645,7 @@ async fn review_state_version_and_marks_survive_a_new_boot() {
     let path = f.path.clone();
     drop(f);
 
-    let store = PlanStore::open_as_new_boot(&path).expect("open_as_new_boot must succeed");
+    let store = PlanStore::open_as_new_boot(&path, &[]).expect("open_as_new_boot must succeed");
     let pending_detail = store.get_plan(&pending).unwrap().unwrap();
     assert_eq!(pending_detail.review, Some(PlanReview::Pending));
 

@@ -39,65 +39,6 @@ pub fn temp_store_db(tag: &str) -> TempStoreDb {
     TempStoreDb { _tree: tree, path }
 }
 
-/// Inserts one `snapshot_windows` row with the given `command_json` verbatim, including
-/// the deliberately malformed values the corrupt-row degradation contracts need.
-pub fn insert_window_row_with_command_json(
-    conn: &rusqlite::Connection,
-    slot: i64,
-    position: i64,
-    name: &str,
-    command_json: &str,
-) {
-    conn.execute(
-        "INSERT INTO snapshot_windows \
-         (slot, position, command_json, cwd, name, vendor, detection) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            slot,
-            position,
-            command_json,
-            "C:/work",
-            name,
-            None::<String>,
-            None::<String>
-        ],
-    )
-    .expect("seeding a snapshot_windows row must succeed");
-}
-
-/// Inserts one well-formed `snapshot_windows` row.
-pub fn insert_window_row(conn: &rusqlite::Connection, slot: i64, position: i64, name: &str) {
-    insert_window_row_with_command_json(conn, slot, position, name, "[\"cmd.exe\"]");
-}
-
-/// Inserts one `snapshot_windows` row whose `command_json` value is a raw `BLOB` rather
-/// than `TEXT`: SQLite's TEXT-affinity conversion applies to INTEGER/REAL values, but a
-/// bound `BLOB` is stored as-is, which makes this a *storage-class* corruption distinct
-/// from the JSON-content corruption `insert_window_row_with_command_json` can plant.
-pub fn insert_window_row_with_blob_command(
-    conn: &rusqlite::Connection,
-    slot: i64,
-    position: i64,
-    name: &str,
-    blob: &[u8],
-) {
-    conn.execute(
-        "INSERT INTO snapshot_windows \
-         (slot, position, command_json, cwd, name, vendor, detection) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            slot,
-            position,
-            blob,
-            "C:/work",
-            name,
-            None::<String>,
-            None::<String>
-        ],
-    )
-    .expect("seeding a BLOB-command_json snapshot_windows row must succeed");
-}
-
 /// Seeds (or updates) the single `snapshot_meta` row.
 pub fn set_meta(conn: &rusqlite::Connection, taken_at: i64, prev_taken_at: Option<i64>) {
     conn.execute(
@@ -108,27 +49,6 @@ pub fn set_meta(conn: &rusqlite::Connection, taken_at: i64, prev_taken_at: Optio
         rusqlite::params![taken_at, prev_taken_at],
     )
     .expect("seeding the snapshot_meta row must succeed");
-}
-
-/// Reads `(taken_at_epoch_s, prev_taken_at_epoch_s)` from the meta row.
-pub fn read_meta(conn: &rusqlite::Connection) -> (i64, Option<i64>) {
-    conn.query_row(
-        "SELECT taken_at_epoch_s, prev_taken_at_epoch_s FROM snapshot_meta WHERE id = 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .expect("the meta row must exist and decode")
-}
-
-/// Reads `(position, name)` of every row in `slot`, ordered by position.
-pub fn slot_rows(conn: &rusqlite::Connection, slot: i64) -> Vec<(i64, String)> {
-    let mut stmt = conn
-        .prepare("SELECT position, name FROM snapshot_windows WHERE slot = ?1 ORDER BY position")
-        .expect("the slot query must prepare");
-    let rows = stmt
-        .query_map([slot], |row| Ok((row.get(0)?, row.get(1)?)))
-        .expect("the slot query must run");
-    rows.map(|row| row.expect("slot row must decode")).collect()
 }
 
 /// A `tracing` subscriber that does nothing except count WARN-level events.
@@ -337,56 +257,59 @@ pub fn insert_window_row_with_layout_value(
     .expect("seeding a snapshot_windows row with an explicit layout_json value must succeed");
 }
 
-/// Inserts one `snapshot_windows` row whose `layout_json` value is `TEXT` storage class
-/// but not valid UTF-8 -- distinct from [`insert_window_row_with_layout_value`]'s `Blob`
-/// variant, a different SQLite storage class entirely. `CAST(x'..' AS TEXT)` forces the
-/// raw bytes to be stored under the `Text` storage class without going through Rust's
-/// UTF-8-checked string types, which could not represent this value at all.
-///
-/// The SQL text is built with `format!` rather than a bound parameter because
-/// `CAST(x'..' AS TEXT)` is a SQL expression, not a value a placeholder can carry; `hex`
-/// is derived here from `invalid_utf8`, never from untrusted input.
-pub fn insert_window_row_with_invalid_utf8_layout(
-    conn: &rusqlite::Connection,
-    slot: i64,
-    position: i64,
-    name: &str,
-    invalid_utf8: &[u8],
-) {
-    let hex: String = invalid_utf8.iter().map(|b| format!("{b:02x}")).collect();
-    let sql = format!(
-        "INSERT INTO snapshot_windows \
-         (slot, position, command_json, cwd, name, vendor, detection, layout_json) \
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, CAST(x'{hex}' AS TEXT))"
-    );
-    conn.execute(
-        &sql,
-        rusqlite::params![slot, position, "[\"cmd.exe\"]", "C:/work", name],
-    )
-    .expect("seeding a snapshot_windows row with an invalid-UTF-8 layout_json must succeed");
+/// One row of the window table, as the values a window was opened with.
+#[derive(Debug, Clone)]
+pub struct TableRow {
+    pub name: String,
+    pub command: Vec<String>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
-/// Polls the current slot of the store at `db_path` until `predicate` holds, then returns
-/// the rows that satisfied it. A read error counts as "not converged yet" (the store
-/// thread may be mid-write), never as a failure, and only the final state is asserted.
-pub async fn wait_for_current_snapshot(
+/// The rows of the window table at `db_path`, in the order the windows opened; `None`
+/// while the table cannot be read.
+pub fn window_rows(db_path: &std::path::Path) -> Option<Vec<TableRow>> {
+    let conn = yagura_daemon::store::open_readonly(db_path).ok()?;
+    let mut statement = conn
+        .prepare(
+            "SELECT name, command_json, profile, model, effort FROM windows ORDER BY opened_seq",
+        )
+        .ok()?;
+    let rows = statement
+        .query_map([], |row| {
+            let command_json: String = row.get(1)?;
+            Ok(TableRow {
+                name: row.get(0)?,
+                command: serde_json::from_str(&command_json).unwrap_or_default(),
+                profile: row.get(2)?,
+                model: row.get(3)?,
+                effort: row.get(4)?,
+            })
+        })
+        .ok()?;
+    rows.collect::<Result<_, _>>().ok()
+}
+
+/// Polls the window table of the store at `db_path` until `predicate` holds, then returns
+/// the rows that satisfied it. A read error counts as "not converged yet" (the table's
+/// writer may be mid-write), never as a failure, and only the final state is asserted.
+pub async fn wait_for_window_rows(
     db_path: &std::path::Path,
     label: &str,
-    predicate: impl Fn(&[yagura_daemon::store::SnapshotWindow]) -> bool,
-) -> Vec<yagura_daemon::store::SnapshotWindow> {
+    predicate: impl Fn(&[TableRow]) -> bool,
+) -> Vec<TableRow> {
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let mut last: Option<Vec<yagura_daemon::store::SnapshotWindow>> = None;
+    let mut last: Option<Vec<TableRow>> = None;
     loop {
-        if let Ok(conn) = yagura_daemon::store::open_readonly(db_path)
-            && let Ok(rows) = yagura_daemon::store::read_snapshot_conn(&conn)
-        {
+        if let Some(rows) = window_rows(db_path) {
             if predicate(&rows) {
                 return rows;
             }
             last = Some(rows);
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for {label}; last observed snapshot: {last:?}");
+            panic!("timed out waiting for {label}; last observed rows: {last:?}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -433,4 +356,56 @@ pub fn opened_seq(db: &std::path::Path, window_id: &str) -> i64 {
         |row| row.get(0),
     )
     .unwrap_or_else(|err| panic!("the row of {window_id} must hold its open order: {err}"))
+}
+
+/// Inserts one row of the window table with `command_json` and `layout_json` stored
+/// verbatim, including the malformed values a reader of the table must degrade.
+pub fn insert_window_table_row(
+    conn: &rusqlite::Connection,
+    window_id: &str,
+    name: &str,
+    state: &str,
+    command_json: rusqlite::types::Value,
+    layout_json: rusqlite::types::Value,
+) {
+    conn.execute(
+        "INSERT INTO windows (window_id, name, cwd, command_json, layout_json, credentials, state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'env', ?6)",
+        rusqlite::params![window_id, name, "C:/work", command_json, layout_json, state],
+    )
+    .expect("seeding a window table row must succeed");
+}
+
+/// Inserts one well-formed `lost` row of the window table.
+pub fn insert_lost_window(conn: &rusqlite::Connection, window_id: &str, name: &str) {
+    insert_window_table_row(
+        conn,
+        window_id,
+        name,
+        "lost",
+        rusqlite::types::Value::Text("[\"cmd.exe\"]".to_owned()),
+        rusqlite::types::Value::Null,
+    );
+}
+
+/// Inserts one `lost` row of the window table whose `layout_json` is `TEXT` storage
+/// class but not valid UTF-8. `CAST(x'..' AS TEXT)` stores the raw bytes under the `Text`
+/// storage class, which Rust's UTF-8-checked strings could not carry; `hex` is derived
+/// here from `invalid_utf8`, never from untrusted input.
+pub fn insert_lost_window_with_invalid_utf8_layout(
+    conn: &rusqlite::Connection,
+    window_id: &str,
+    name: &str,
+    invalid_utf8: &[u8],
+) {
+    let hex: String = invalid_utf8.iter().map(|b| format!("{b:02x}")).collect();
+    let sql = format!(
+        "INSERT INTO windows (window_id, name, cwd, command_json, layout_json, credentials, state) \
+         VALUES (?1, ?2, ?3, ?4, CAST(x'{hex}' AS TEXT), 'env', 'lost')"
+    );
+    conn.execute(
+        &sql,
+        rusqlite::params![window_id, name, "C:/work", "[\"cmd.exe\"]"],
+    )
+    .expect("seeding a window table row with an invalid-UTF-8 layout_json must succeed");
 }
