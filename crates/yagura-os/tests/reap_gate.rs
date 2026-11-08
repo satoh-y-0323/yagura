@@ -42,6 +42,7 @@ fn a_signal_tried_before_the_reap_is_sent_once() {
 fn the_kills_of_a_child_take_its_reap_gate() {
     let _escalate =
         |gate: Arc<yagura_os::ReapGate>| yagura_os::schedule_force_kill(1, Duration::ZERO, gate);
+    #[cfg(windows)]
     let _kill =
         |killer: &yagura_os::pty::PtyKiller, gate: &Arc<yagura_os::ReapGate>| killer.kill(gate);
 }

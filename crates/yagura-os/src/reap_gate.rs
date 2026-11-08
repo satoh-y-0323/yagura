@@ -12,8 +12,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 ///
 /// Neither closure may block on the child's exit: a reap under the lock must
 /// find the child already exited (known first without reaping it, e.g.
-/// through [`crate::pty::PtyChild::wait_for_exit`]), or every signal waits
-/// behind it.
+/// through an exit watch), or every signal waits behind it.
 #[derive(Debug, Default)]
 pub struct ReapGate {
     reaped: Mutex<bool>,

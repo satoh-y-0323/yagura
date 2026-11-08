@@ -26,8 +26,8 @@ sha2.workspace = true
 # is covered by this same entry.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-# Unix windows start their child on a pseudoterminal through it (`pty`); it
-# stays inside this crate.
+# `pty` makes a Unix window child's environment and shell through it
+# (`CommandBuilder`); it stays inside this crate.
 portable-pty.workspace = true
 
 # Linux-only: `platform_unix::user_manager` asks the user's systemd user

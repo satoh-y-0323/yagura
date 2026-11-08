@@ -7,18 +7,49 @@
 use std::io::{ErrorKind, Read, Write};
 use std::sync::mpsc;
 
-use yagura_os::pty::{PtyCommand, PtySize, PtySpawn, spawn};
+use yagura_os::pty::{PtyCommand, PtyControl, PtySize, leader_command, open, start_leader};
 
-fn start_shell(script: &str, size: PtySize) -> PtySpawn {
-    spawn(
-        &PtyCommand {
-            argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
-            cwd: None,
-            env: Vec::new(),
-        },
-        size,
-    )
-    .expect("/bin/sh should start on a pseudoterminal")
+/// A shell started on a new terminal, as a window's watcher starts a child.
+struct Started {
+    control: PtyControl,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    _leader: Leader,
+}
+
+/// The shell's process id. Dropped, it kills and reaps the shell, so a test
+/// leaves no process behind.
+struct Leader(u32);
+
+impl Drop for Leader {
+    fn drop(&mut self) {
+        let pid = self.0 as libc::pid_t;
+        // SAFETY: `pid` is this test's unreaped child, so the id still names it.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let mut status = 0;
+        // SAFETY: `status` is a live stack local; `pid` is this test's child.
+        while unsafe { libc::waitpid(pid, &mut status, 0) } == -1
+            && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted
+        {}
+    }
+}
+
+fn start_shell(script: &str, size: PtySize) -> Started {
+    let pair = open(size).expect("a pseudoterminal should open");
+    let command = leader_command(&PtyCommand {
+        argv: vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+        cwd: None,
+        env: Vec::new(),
+    })
+    .expect("describe /bin/sh");
+    let leader =
+        start_leader(&command, pair.slave).expect("/bin/sh should start on a pseudoterminal");
+    Started {
+        control: pair.control,
+        reader: pair.reader,
+        writer: pair.writer,
+        _leader: Leader(leader),
+    }
 }
 
 /// The child's output, read on a thread so a test can wait for a line.
@@ -60,7 +91,7 @@ impl Output {
     }
 }
 
-// Not 80x24, which is also portable-pty's default size.
+// Not 80x24, a common default size.
 #[test]
 fn the_child_reads_the_size_the_terminal_was_opened_with() {
     let started = start_shell("stty size", PtySize { cols: 90, rows: 33 });

@@ -1,10 +1,8 @@
 //! A window's terminal on Unix.
 //!
-//! Two ways in. [`spawn`] has portable-pty open the pseudoterminal and start
-//! the child as its own session leader, with the child's process group taken
-//! from the child's id the moment it exists. [`open`] opens the terminal alone
-//! and hands its slave out, and [`start_leader`] starts a child on such a
-//! slave: a holder keeps the terminal while its watcher starts the child.
+//! [`open`] opens the terminal alone and hands its slave out, and
+//! [`start_leader`] starts a child on such a slave: a holder keeps the
+//! terminal while its watcher starts the child.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{self, Read, Write};
@@ -16,51 +14,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty};
+use portable_pty::CommandBuilder;
 
 pub use super::input_drain::InputDrain;
 pub use super::tty_mark::EndMarkWriter;
-use super::{UnixProcessGroup, input_drain, tty_mark};
-use crate::pty::{EnvOp, PtyCommand, PtySize, PtySpawn, PtySpawnError};
-use crate::{PROCESS_GROUP_TERM_GRACE, ReapGate};
+use super::{input_drain, tty_mark};
+use crate::pty::{EnvOp, PtyCommand, PtySize};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn pty_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
-}
-
-fn to_portable(size: PtySize) -> portable_pty::PtySize {
-    portable_pty::PtySize {
-        rows: size.rows,
-        cols: size.cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    }
-}
-
-/// The master end a [`PtyControl`] resizes and names the terminal by.
-enum Master {
-    Portable(Box<dyn MasterPty + Send>),
-    Own(OwnedFd),
-}
-
-impl Master {
-    fn resize(&self, size: PtySize) -> io::Result<()> {
-        match self {
-            Self::Portable(master) => master.resize(to_portable(size)).map_err(pty_error),
-            Self::Own(fd) => set_size(fd.as_raw_fd(), size),
-        }
-    }
-
-    fn raw_fd(&self) -> Option<RawFd> {
-        match self {
-            Self::Portable(master) => master.as_raw_fd(),
-            Self::Own(fd) => Some(fd.as_raw_fd()),
-        }
-    }
 }
 
 fn set_size(master: RawFd, size: PtySize) -> io::Result<()> {
@@ -82,7 +44,7 @@ fn set_size(master: RawFd, size: PtySize) -> io::Result<()> {
 /// Closing only releases the handle kept for resizing; the output side stays
 /// open for as long as its reader does.
 pub struct PtyControl {
-    master: Mutex<Option<Master>>,
+    master: Mutex<Option<OwnedFd>>,
 }
 
 impl PtyControl {
@@ -99,7 +61,7 @@ impl PtyControl {
                 "the pseudoterminal is closed",
             ));
         };
-        master.resize(PtySize { cols, rows })
+        set_size(master.as_raw_fd(), PtySize { cols, rows })
     }
 
     /// Releases the handle kept for resizing. Does nothing when already
@@ -161,8 +123,7 @@ impl PtyControl {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "the pseudoterminal is closed")
             })?
-            .raw_fd()
-            .ok_or_else(|| io::Error::other("the pseudoterminal has no descriptor"))?;
+            .as_raw_fd();
         tty_mark::slave_name(fd)
     }
 }
@@ -173,136 +134,6 @@ impl std::fmt::Debug for PtyControl {
             .field("open", &lock(&self.master).is_some())
             .finish_non_exhaustive()
     }
-}
-
-/// The started child, to wait on.
-#[derive(Debug)]
-pub struct PtyChild {
-    child: Box<dyn Child + Send + Sync>,
-    pid: u32,
-}
-
-impl PtyChild {
-    /// The child's process id.
-    #[must_use]
-    pub fn process_id(&self) -> u32 {
-        self.pid
-    }
-
-    /// Blocks until the child exits and returns its exit code.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system's error when waiting fails.
-    pub fn wait(mut self) -> io::Result<i32> {
-        self.child.wait().map(|status| status.exit_code() as i32)
-    }
-
-    /// Blocks until the child exits, leaving it unreaped for [`Self::wait`],
-    /// so its id keeps naming it until then.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system's error when waiting fails.
-    pub fn wait_for_exit(&self) -> io::Result<()> {
-        super::wait_for_exit_without_reaping(self.pid)
-    }
-}
-
-/// Kills the child. Clones act on the same process and work while another
-/// thread waits for it.
-#[derive(Debug)]
-pub struct PtyKiller(Mutex<Box<dyn ChildKiller + Send + Sync>>);
-
-impl PtyKiller {
-    /// Asks the child to end, under `gate`'s lock, unless the child has been
-    /// reaped through `gate`: its id may name another process by then. A
-    /// child that has exited is not an error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the operating system's error when the signal cannot be sent.
-    pub fn kill(&self, gate: &ReapGate) -> io::Result<()> {
-        gate.signal_unless_reaped(|| lock(&self.0).kill())
-            .unwrap_or(Ok(()))
-    }
-}
-
-impl Clone for PtyKiller {
-    fn clone(&self) -> Self {
-        Self(Mutex::new(lock(&self.0).clone_killer()))
-    }
-}
-
-/// Ends a child that was started but cannot be handed over.
-fn reap(mut child: Box<dyn Child + Send + Sync>) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// Starts `command` on a new pseudoterminal as a session leader whose process
-/// group is the child's id.
-pub(crate) fn spawn(command: &PtyCommand, size: PtySize) -> Result<PtySpawn, PtySpawnError> {
-    let spawn_error = PtySpawnError::Spawn;
-    let (program, args) = command.argv.split_first().ok_or_else(|| {
-        spawn_error(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "argv must not be empty",
-        ))
-    })?;
-
-    let pair = portable_pty::native_pty_system()
-        .openpty(to_portable(size))
-        .map_err(|error| spawn_error(pty_error(error)))?;
-    let mut builder = CommandBuilder::new(program);
-    builder.args(args);
-    if let Some(cwd) = &command.cwd {
-        builder.cwd(cwd);
-    }
-    apply_env(&mut builder, &command.env);
-
-    // Taken before the child starts: a failure here (out of descriptors) then
-    // leaves no child to kill, which a failure after the start would.
-    let (writer, reader) = pair
-        .master
-        .take_writer()
-        .and_then(|writer| Ok((writer, pair.master.try_clone_reader()?)))
-        .map_err(|error| spawn_error(pty_error(error)))?;
-    let child = pair
-        .slave
-        .spawn_command(builder)
-        .map_err(|error| spawn_error(pty_error(error)))?;
-    // The parent's copy of the slave must go so the reader sees the end of the
-    // output once every process on the terminal is gone.
-    drop(pair.slave);
-
-    // The group is made from the id of the child just started, not read back
-    // later: a child that exits and is reaped first would no longer have one.
-    let Some(pid) = child.process_id().filter(|&pid| pid != 0) else {
-        reap(child);
-        return Err(spawn_error(io::Error::other(
-            "the started child has no process id",
-        )));
-    };
-    let group = match UnixProcessGroup::led_by(pid, PROCESS_GROUP_TERM_GRACE) {
-        Ok(group) => group,
-        Err(error) => {
-            reap(child);
-            return Err(spawn_error(crate::capture::os_error_to_io(error)));
-        }
-    };
-    let killer = child.clone_killer();
-
-    Ok(PtySpawn {
-        child: PtyChild { child, pid },
-        killer: PtyKiller(Mutex::new(killer)),
-        group,
-        control: PtyControl {
-            master: Mutex::new(Some(Master::Portable(pair.master))),
-        },
-        reader,
-        writer,
-    })
 }
 
 fn apply_env(builder: &mut CommandBuilder, env: &[EnvOp]) {
@@ -375,7 +206,7 @@ pub(crate) fn open(size: PtySize) -> io::Result<PtyPair> {
     let writer = MasterWriter(std::fs::File::from(master.try_clone()?));
     Ok(PtyPair {
         control: PtyControl {
-            master: Mutex::new(Some(Master::Own(master))),
+            master: Mutex::new(Some(master)),
         },
         reader: Box::new(reader),
         writer: Box::new(writer),
@@ -453,7 +284,7 @@ impl std::fmt::Debug for LeaderCommand {
     }
 }
 
-/// The child `command` describes as [`spawn`] would start it: from this
+/// The child `command` describes as a window's child starts: from this
 /// process's environment with `SHELL` set to the user's shell, changed by
 /// `command.env`, in `command.cwd` when it is a directory and the home
 /// directory otherwise. A variable whose name or value is not UTF-8 is left

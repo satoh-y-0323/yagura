@@ -147,29 +147,6 @@ pub fn reap_orphans(leader: u32, gate: &crate::ReapGate) -> io::Result<Vec<u32>>
     })
 }
 
-/// Sends `SIGKILL` to every child of this process except `leader` while
-/// `gate` has not seen it reaped, and returns how many children were
-/// signalled: `0` once the leader is the only child left.
-///
-/// The children are listed and signalled under `gate`'s lock, the lock
-/// [`reap_orphans`] reaps under, so no listed id is reaped and reused before
-/// its signal. Exited, unreaped children are counted too: they are still
-/// children until reaped.
-///
-/// # Errors
-///
-/// Returns the error listing the children fails with, or the error of a
-/// signal that fails other than for a child already gone.
-#[cfg(target_os = "linux")]
-pub fn kill_orphans(leader: u32, gate: &crate::ReapGate) -> io::Result<usize> {
-    with_orphans(leader, gate, |orphans, _| {
-        for &pid in orphans {
-            signal_child(pid, libc::SIGKILL)?;
-        }
-        Ok(orphans.len())
-    })
-}
-
 /// Runs `body` under `gate`'s lock with this process's children other than
 /// `leader` while `gate` has not seen it reaped, and with whether it has. No
 /// listed id is reaped, so none is reused, until `body` returns.
@@ -270,37 +247,6 @@ fn reap_if_exited(pid: u32) -> io::Result<bool> {
             _ => return Err(error),
         }
     }
-}
-
-/// Blocks until every process in `members` has exited (a zombie counts as
-/// exited), or until `limit` has passed, and returns the members still
-/// running then: empty once every one has exited.
-///
-/// Each member's exit is awaited through kqueue, so a member that ends while
-/// others still run does not end the wait. `limit` only bounds the wait; a
-/// limit too far off to be a point in time is no limit.
-///
-/// # Errors
-///
-/// Returns the operating system's error when the exits cannot be watched.
-/// The caller then has no event for the members' end.
-#[cfg(target_os = "macos")]
-pub fn wait_for_members_exit(members: &[u32], limit: Duration) -> io::Result<Vec<u32>> {
-    let deadline = Instant::now().checked_add(limit);
-    let queue = ExitQueue::new()?;
-    let mut remaining = Vec::with_capacity(members.len());
-    for &member in members {
-        if !remaining.contains(&member) && queue.watch(member)? {
-            remaining.push(member);
-        }
-    }
-    while !remaining.is_empty() {
-        let Some(pid) = queue.next_exit(deadline)? else {
-            break;
-        };
-        remaining.retain(|&member| member != pid);
-    }
-    Ok(remaining)
 }
 
 /// One kqueue that processes' exits are watched on and reported from, one

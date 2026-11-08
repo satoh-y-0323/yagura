@@ -28,19 +28,15 @@ mod tty_mark;
 #[cfg(target_os = "linux")]
 mod user_manager;
 
-#[cfg(target_os = "macos")]
-pub use exit_watch::wait_for_members_exit;
 pub use exit_watch::{
     ChildChange, WatcherEvents, WatcherWait, block_child_signal, block_watcher_signals,
     continue_child, hang_up_child, kill_child, reap_exited_child, take_child_change, unreaped_exit,
     wait_child_signal, wait_for_exit_without_reaping,
 };
 #[cfg(target_os = "linux")]
-pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};
+pub use exit_watch::{child_pids, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
-#[cfg(target_os = "macos")]
-pub use process_group::group_member_pids;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use tree_end::{ProcessRow, SignalTarget, TreeEnd, TreeEndHooks, TreeEndRest, window_members};
 #[cfg(target_os = "linux")]

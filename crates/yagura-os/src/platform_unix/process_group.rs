@@ -334,28 +334,6 @@ fn read_group_listing(pgid: libc::pid_t) -> Result<GroupListing, OsError> {
     })
 }
 
-/// The pids of the members of process group `pgid`, zombies included.
-///
-/// # Errors
-///
-/// Returns an error when `pgid` is not a valid group id, the reading fails,
-/// or the group has more members than the reading could hold.
-#[cfg(target_os = "macos")]
-pub fn group_member_pids(pgid: u32) -> std::io::Result<Vec<u32>> {
-    let pgid = libc::pid_t::try_from(pgid).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "group id out of range")
-    })?;
-    match read_group_listing(pgid).map_err(std::io::Error::other)? {
-        GroupListing::Members(pids) => Ok(pids
-            .into_iter()
-            .filter_map(|pid| u32::try_from(pid).ok())
-            .collect()),
-        GroupListing::Full => Err(std::io::Error::other(format!(
-            "the members of group {pgid} did not fit the listing"
-        ))),
-    }
-}
-
 /// Whether a group `killpg` answered with `EPERM` has no live member left,
 /// judged from one `listing` of it. A reading that found no member or may
 /// have missed some proves nothing, so it fails closed.

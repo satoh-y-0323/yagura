@@ -1,15 +1,21 @@
-//! Starting a program on a pseudoterminal, the same way on every platform.
+//! Starting a program on a pseudoterminal.
 //!
-//! [`spawn`] returns the pieces a window is built from: the byte streams, a
-//! handle for resizing and closing the terminal, the child to wait on and to
-//! kill, and the [`ProcessGroup`] that owns everything the child starts. The
-//! group exists from before the child runs its first instruction, so nothing
-//! the child starts can escape it.
+//! On Windows, `spawn` returns the pieces a window is built from: the byte
+//! streams, a handle for resizing and closing the terminal, the child to wait
+//! on and to kill, and the `ProcessGroup` that owns everything the child
+//! starts. The group exists from before the child runs its first instruction,
+//! so nothing the child starts can escape it.
+//!
+//! On Unix, `open` opens the terminal alone and `start_leader` starts the
+//! child on its slave, possibly in another process: a holder keeps the
+//! terminal while its watcher starts the child and owns its tree.
 
 use std::ffi::{OsStr, OsString};
+#[cfg(windows)]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+#[cfg(windows)]
 use crate::ProcessGroup;
 
 #[cfg(not(windows))]
@@ -19,7 +25,9 @@ use crate::platform_windows::conpty as platform;
 
 #[cfg(not(windows))]
 pub use platform::{EndMarkWriter, LeaderCommand, PtyPair};
-pub use platform::{InputDrain, PtyChild, PtyControl, PtyKiller};
+pub use platform::{InputDrain, PtyControl};
+#[cfg(windows)]
+pub use platform::{PtyChild, PtyKiller};
 
 /// The size of a terminal in character cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +76,7 @@ pub struct PtyCommand {
 ///
 /// The fields drop in this order: the group first, which ends the child's
 /// tree, then the terminal.
+#[cfg(windows)]
 pub struct PtySpawn {
     /// Waits for the child.
     pub child: PtyChild,
@@ -84,6 +93,7 @@ pub struct PtySpawn {
     pub writer: Box<dyn Write + Send>,
 }
 
+#[cfg(windows)]
 impl std::fmt::Debug for PtySpawn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PtySpawn")
@@ -93,6 +103,7 @@ impl std::fmt::Debug for PtySpawn {
 }
 
 /// Why [`spawn`] could not start the child.
+#[cfg(windows)]
 #[derive(Debug, thiserror::Error)]
 pub enum PtySpawnError {
     /// The pseudoconsole bundled beside the executable is missing, altered, or
@@ -116,6 +127,7 @@ pub enum PtySpawnError {
 /// [`PtySpawnError::Spawn`] when `argv` is empty or holds a NUL, the program
 /// cannot be found or started, or the child cannot be placed in its group. In
 /// every error case no child is left running.
+#[cfg(windows)]
 pub fn spawn(command: &PtyCommand, size: PtySize) -> Result<PtySpawn, PtySpawnError> {
     platform::spawn(command, size)
 }
@@ -142,9 +154,9 @@ pub fn open(size: PtySize) -> std::io::Result<PtyPair> {
     platform::open(size)
 }
 
-/// What [`start_leader`] would start for `command`: the environment and the
-/// working directory [`spawn`] gives a child, made here and started
-/// elsewhere.
+/// What [`start_leader`] would start for `command`: the base environment
+/// ([`default_env_var`]) changed by `command.env`, and the working directory,
+/// made here and started elsewhere.
 ///
 /// # Errors
 ///
