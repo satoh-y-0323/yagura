@@ -37,6 +37,7 @@ mod record;
 mod session;
 mod terminal;
 mod view;
+pub mod watcher_proto;
 
 /// The most a launch may take on standard input.
 const MAX_LAUNCH_BYTES: u64 = 1024 * 1024;
@@ -155,6 +156,8 @@ fn start(faults: session::Faults) -> Result<session::Ending, String> {
                 holder_start: record::start_of(holder_pid),
                 child_start: None,
                 child_scope: None,
+                watcher_pid: None,
+                watcher_start: None,
             },
             launch.scopes.clone(),
         );

@@ -1375,6 +1375,16 @@ pub struct HolderRecord {
     /// carried.
     #[serde(default)]
     pub child_scope: Option<String>,
+    /// The process id of the holder's watcher, the process that starts the
+    /// child and ends its tree once the holder is gone. `None` for a holder
+    /// that has no watcher, and in a record written before it was carried.
+    #[serde(default)]
+    pub watcher_pid: Option<u32>,
+    /// The watcher's start, as for `holder_start`, so a daemon can tell
+    /// whether the watcher still lives. `None` with `watcher_pid`, and when
+    /// its start could not be read.
+    #[serde(default)]
+    pub watcher_start: Option<String>,
 }
 
 /// Whether `window_id` may name a holder's files and endpoint: ASCII letters,

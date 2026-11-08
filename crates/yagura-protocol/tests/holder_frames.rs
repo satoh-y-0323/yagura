@@ -267,11 +267,18 @@ fn welcome_carries_the_childs_pid_and_one_without_it_reads_as_none() {
 
 /// The record names the holder's and the child's starts, so a pid taken over by
 /// another process is not mistaken for them, and the child's scope, so a holder
-/// that died is ended by that name; a record written before they were carried
-/// reads as having none.
+/// that died is ended by that name, and the watcher's identity (pid and start),
+/// so a daemon can tell whether the watcher still lives; a record written
+/// before they were carried reads as having none, and carrying the watcher
+/// leaves the wire version alone.
 #[test]
 fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without_them() {
-    use yagura_protocol::holder::{HolderRecord, encode_holder_record};
+    use yagura_protocol::holder::{HOLDER_PROTOCOL, HolderRecord, encode_holder_record};
+
+    assert_eq!(
+        HOLDER_PROTOCOL, 2,
+        "a new record field must not bump the wire"
+    );
 
     let record = HolderRecord {
         window_id: "w1".to_owned(),
@@ -282,6 +289,8 @@ fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without
         holder_start: Some("holder-start".to_owned()),
         child_start: Some("child-start".to_owned()),
         child_scope: Some("yagura_w1_child.scope".to_owned()),
+        watcher_pid: Some(12),
+        watcher_start: Some("watcher-start".to_owned()),
     };
     let decoded: HolderRecord = serde_json::from_slice(&encode_holder_record(&record)).unwrap();
     assert_eq!(decoded, record);
@@ -294,6 +303,7 @@ fn the_record_carries_the_holder_and_child_starts_and_an_older_one_reads_without
         (older.holder_start, older.child_start, older.child_scope),
         (None, None, None)
     );
+    assert_eq!((older.watcher_pid, older.watcher_start), (None, None));
 }
 
 /// The frames that carry the terminal kept in the holder: the screen copy and

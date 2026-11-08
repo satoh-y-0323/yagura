@@ -5,3 +5,4 @@ mod holder;
 #[cfg(target_os = "linux")]
 mod orphan_reap_linux;
 mod terminal;
+mod watcher_proto;
