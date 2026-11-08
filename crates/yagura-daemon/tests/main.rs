@@ -30,6 +30,8 @@ mod control_gate;
 mod credentials_door;
 mod credentials_launch;
 mod credentials_launch_injection;
+#[cfg(unix)]
+mod daemon_descriptor_limit_unix;
 mod daemon_health;
 mod daemon_launch;
 mod default_palette;

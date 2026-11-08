@@ -5,6 +5,8 @@ mod bundled_conpty;
 mod config_replace;
 mod config_seed;
 mod debug_forms;
+#[cfg(unix)]
+mod descriptor_limit_unix;
 mod endpoint;
 mod enter_raw_console_input;
 mod existing_file_replace;

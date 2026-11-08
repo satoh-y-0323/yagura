@@ -93,12 +93,30 @@ fn main() -> Result<ExitCode> {
         Err(error) => return Err(error).context("invalid command line"),
     };
 
+    // Before any thread or child exists: a daemon holds a few descriptors for
+    // every window, more than a default soft limit allows for many windows.
+    let descriptor_limit = matches!(command, CliCommand::Run { .. })
+        .then(raise_descriptor_limit)
+        .flatten();
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to build the tokio runtime")?;
 
-    runtime.block_on(async_main(command, credentials))
+    runtime.block_on(async_main(command, credentials, descriptor_limit))
+}
+
+/// Raises the soft descriptor limit; the children started later get the one
+/// from before back.
+#[cfg(unix)]
+fn raise_descriptor_limit() -> Option<std::io::Result<u64>> {
+    Some(yagura_os::platform_unix::raise_descriptor_limit())
+}
+
+#[cfg(not(unix))]
+fn raise_descriptor_limit() -> Option<std::io::Result<u64>> {
+    None
 }
 
 /// Leaves a command line this copy cannot read unanswered: one warning in the
@@ -118,6 +136,7 @@ fn ignore_unreadable_hook(error: &cli::CliError) {
 async fn async_main(
     command: CliCommand,
     credentials: Option<WindowCredentials>,
+    descriptor_limit: Option<std::io::Result<u64>>,
 ) -> Result<ExitCode> {
     // Resolved before anything else that derives from it (the log directory,
     // the endpoint name): every command needs a namespace, and the logger is
@@ -127,6 +146,13 @@ async fn async_main(
         .context("failed to resolve YAGURA_INSTANCE")?;
 
     init_logging(&namespace);
+    match descriptor_limit {
+        Some(Ok(soft)) => tracing::info!("descriptor limit: {soft}"),
+        Some(Err(error)) => {
+            tracing::warn!("the descriptor limit could not be read to raise it: {error}");
+        }
+        None => {}
+    }
 
     let ipc = PlatformIpc::default();
     // Fail-closed on a platform whose identity support is not implemented:

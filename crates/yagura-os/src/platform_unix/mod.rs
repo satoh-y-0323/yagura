@@ -1207,9 +1207,18 @@ pub fn take_inherited_socket(fd: libc::c_int) -> io::Result<std::os::fd::OwnedFd
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
+/// The soft `RLIMIT_NOFILE` this process had before [`raise_descriptor_limit`]
+/// first raised it: what the children it starts get back.
+static SOFT_LIMIT_BEFORE_RAISE: std::sync::OnceLock<libc::rlim_t> = std::sync::OnceLock::new();
+
 /// Raises this process's soft `RLIMIT_NOFILE` as far as it goes (its hard
 /// limit, on macOS no further than `kern.maxfilesperproc`) and returns the
 /// soft limit then in force.
+///
+/// The children this process starts afterwards through this module start
+/// with the soft limit from before the first raise, as a program written for
+/// the default limit (one that sizes a table by it, or calls `select`)
+/// expects.
 ///
 /// # Errors
 ///
@@ -1234,6 +1243,7 @@ pub fn raise_descriptor_limit() -> io::Result<u64> {
         };
         // SAFETY: `raised` is a live local of the type setrlimit(2) reads.
         if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            let _ = SOFT_LIMIT_BEFORE_RAISE.set(limit.rlim_cur);
             limit.rlim_cur = wanted;
         }
     }
@@ -1409,27 +1419,63 @@ const FIRST_UNNAMED_FD: libc::c_int = 3;
 /// # Errors
 ///
 /// Off Linux, returns an I/O error when no finite bound on the fd numbers can
-/// be read (see [`unnamed_fd_bound`]), since the child could not cover them.
+/// be read (see [`unnamed_fd_bound`]), since the child could not cover them,
+/// and everywhere when the limit to give back to the child cannot be read.
 fn start_in_new_session_with_only_stdio(command: &mut Command) -> io::Result<()> {
+    // The bound stays the raised soft value: it must cover every fd this
+    // process may hold at the fork, not only those the child may open.
     let bound = unnamed_fd_bound();
     // Linux needs the bound only if close_range fails, which only the child sees.
     #[cfg(not(target_os = "linux"))]
     let bound = bound.ok_or_else(|| {
         io::Error::other("no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to")
     })?;
+    let restored = limit_to_restore()?;
     // SAFETY: the closure runs in the forked child between fork and exec. It
-    // calls only setsid(2), syscall(2) for close_range(2) and fcntl(2) --
-    // async-signal-safe there -- allocates nothing, takes no lock, and reads
-    // only `bound`, a plain integer moved in from the parent.
+    // calls only setsid(2), syscall(2) for close_range(2), fcntl(2) and
+    // setrlimit(2) -- each a bare system call there -- allocates nothing, takes
+    // no lock, and reads only `bound` and `restored`, plain values moved in
+    // from the parent.
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            mark_unnamed_fds_cloexec(bound)
+            mark_unnamed_fds_cloexec(bound)?;
+            // A child left with the raised limit would size its tables by it or
+            // pass fds past FD_SETSIZE to select, so it is not started at all.
+            if let Some(restored) = restored
+                && libc::setrlimit(libc::RLIMIT_NOFILE, &restored) == -1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         });
     }
     Ok(())
+}
+
+/// The `RLIMIT_NOFILE` a child gets back when [`raise_descriptor_limit`] has
+/// raised this process's soft limit: the soft value from before, under the
+/// hard value now in force. Read in the parent because the child must not
+/// allocate or lock.
+fn limit_to_restore() -> io::Result<Option<libc::rlimit>> {
+    let Some(&before) = SOFT_LIMIT_BEFORE_RAISE.get() else {
+        return Ok(None);
+    };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live out-parameter of the type getrlimit(2) writes.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let before = before.min(limit.rlim_max);
+    Ok((before < limit.rlim_cur).then_some(libc::rlimit {
+        rlim_cur: before,
+        rlim_max: limit.rlim_max,
+    }))
 }
 
 /// One past the highest fd number this process can hold: the `RLIMIT_NOFILE`
