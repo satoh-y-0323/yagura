@@ -147,10 +147,10 @@ impl Drop for UnixProcessGroup {
 /// `Ok(false)` when the group has no live member left (`ESRCH`; on macOS
 /// also `EPERM` when every member is a zombie). Returns `Err` when a live
 /// member could not be signaled, or the group could not be enumerated.
-fn send_signal(pgid: libc::pid_t, signal: i32) -> Result<bool, OsError> {
+pub(crate) fn send_signal(pgid: libc::pid_t, signal: i32) -> Result<bool, OsError> {
     // SAFETY: killpg signals every process in process group `pgid` with
-    // `signal`; `pgid` comes from `UnixProcessGroup::led_by`, which rejects 0
-    // and this process's own process group.
+    // `signal`; every caller rejects 0 and this process's own process group
+    // first (`UnixProcessGroup::led_by`, the tree sweep's `leader_group`).
     let result = unsafe { libc::killpg(pgid, signal) };
     if result == 0 {
         return Ok(true);
@@ -221,28 +221,78 @@ fn list_group_members(
     needed_entries: libc::c_int,
     list: impl FnOnce(&mut [libc::pid_t]) -> libc::c_int,
 ) -> Result<GroupListing, OsError> {
-    let capacity = usize::try_from(needed_entries).map_err(|_| {
-        OsError::Security(format!(
-            "proc_listpgrppids size query failed: {needed_entries}"
-        ))
-    })?;
+    list_pids("proc_listpgrppids", 1, needed_entries, list)
+}
+
+/// [`list_group_members`] for any listing of pids `call` names, whose pids
+/// are all at least `lowest`.
+#[cfg(any(target_os = "macos", test))]
+fn list_pids(
+    call: &str,
+    lowest: libc::pid_t,
+    needed_entries: libc::c_int,
+    list: impl FnOnce(&mut [libc::pid_t]) -> libc::c_int,
+) -> Result<GroupListing, OsError> {
+    let capacity = usize::try_from(needed_entries)
+        .map_err(|_| OsError::Security(format!("{call} size query failed: {needed_entries}")))?;
     if capacity == 0 {
         return Ok(GroupListing::Members(Vec::new()));
     }
     let mut buf: Vec<libc::pid_t> = vec![0; capacity];
     let count = list(&mut buf);
     let count = usize::try_from(count)
-        .map_err(|_| OsError::Security(format!("proc_listpgrppids negative count: {count}")))?;
+        .map_err(|_| OsError::Security(format!("{call} negative count: {count}")))?;
     if count >= capacity {
         return Ok(GroupListing::Full);
     }
     buf.truncate(count);
-    if let Some(&pid) = buf.iter().find(|&&pid| pid <= 0) {
+    if let Some(&pid) = buf.iter().find(|&&pid| pid < lowest) {
         return Err(OsError::Security(format!(
-            "proc_listpgrppids out-of-contract pid: {pid}"
+            "{call} out-of-contract pid: {pid}"
         )));
     }
     Ok(GroupListing::Members(buf))
+}
+
+/// The ids of every process, read again into a larger buffer for as long as
+/// a reading fills its buffer, since a full one may have missed some.
+///
+/// # Errors
+///
+/// Returns the error the reading fails with.
+#[cfg(target_os = "macos")]
+pub(crate) fn all_pids() -> std::io::Result<Vec<u32>> {
+    let mut floor: libc::c_int = 0;
+    loop {
+        // SAFETY: a NULL, zero-length query only asks for the pid count it
+        // would need; it writes through neither pointer.
+        let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        let entries = needed.max(floor);
+        // The kernel's own task is listed as pid 0.
+        let listing = list_pids("proc_listallpids", 0, entries, |buf| {
+            let Some(bytes) = BufferBytes::of(buf) else {
+                return libc::c_int::MAX;
+            };
+            // SAFETY: `buf` is a live allocation of at least `bytes.0` bytes.
+            unsafe { libc::proc_listallpids(buf.as_mut_ptr().cast(), bytes.0) }
+        })
+        .map_err(std::io::Error::other)?;
+        match listing {
+            GroupListing::Members(pids) => {
+                return Ok(pids
+                    .into_iter()
+                    .filter_map(|pid| u32::try_from(pid).ok())
+                    .filter(|&pid| pid != 0)
+                    .collect());
+            }
+            GroupListing::Full => {
+                floor = entries
+                    .checked_mul(2)
+                    .filter(|&next| BufferBytes::fits(next))
+                    .ok_or_else(|| std::io::Error::other("the process list outgrew its buffer"))?;
+            }
+        }
+    }
 }
 
 /// A buffer's length in bytes, the unit `proc_listpgrppids` takes its buffer
@@ -252,6 +302,14 @@ struct BufferBytes(libc::c_int);
 
 #[cfg(target_os = "macos")]
 impl BufferBytes {
+    /// Whether a buffer of `entries` pids can be described in bytes.
+    fn fits(entries: libc::c_int) -> bool {
+        usize::try_from(entries)
+            .ok()
+            .and_then(|entries| entries.checked_mul(std::mem::size_of::<libc::pid_t>()))
+            .is_some_and(|bytes| libc::c_int::try_from(bytes).is_ok())
+    }
+
     fn of(buf: &[libc::pid_t]) -> Option<Self> {
         libc::c_int::try_from(std::mem::size_of_val(buf))
             .ok()

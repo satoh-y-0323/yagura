@@ -162,28 +162,88 @@ pub fn reap_orphans(leader: u32, gate: &crate::ReapGate) -> io::Result<Vec<u32>>
 /// signal that fails other than for a child already gone.
 #[cfg(target_os = "linux")]
 pub fn kill_orphans(leader: u32, gate: &crate::ReapGate) -> io::Result<usize> {
-    gate.hold(|leader_reaped| {
-        let mut signalled = 0;
-        for pid in child_pids()? {
-            if pid == leader && !leader_reaped {
-                continue;
-            }
-            let Ok(target) = libc::pid_t::try_from(pid) else {
-                continue;
-            };
-            // SAFETY: `target` is a child of this process that cannot be
-            // reaped while the gate's lock is held, so the id still names it;
-            // `SIGKILL` is a constant.
-            if unsafe { libc::kill(target, libc::SIGKILL) } != 0 {
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-            }
-            signalled += 1;
+    with_orphans(leader, gate, |orphans, _| {
+        for &pid in orphans {
+            signal_child(pid, libc::SIGKILL)?;
         }
-        Ok(signalled)
+        Ok(orphans.len())
     })
+}
+
+/// Runs `body` under `gate`'s lock with this process's children other than
+/// `leader` while `gate` has not seen it reaped, and with whether it has. No
+/// listed id is reaped, so none is reused, until `body` returns.
+///
+/// # Errors
+///
+/// Returns the error listing the children fails with, or `body`'s.
+#[cfg(target_os = "linux")]
+pub(crate) fn with_orphans<R>(
+    leader: u32,
+    gate: &crate::ReapGate,
+    body: impl FnOnce(&[u32], bool) -> io::Result<R>,
+) -> io::Result<R> {
+    gate.hold(|leader_reaped| {
+        let mut orphans = child_pids()?;
+        orphans.retain(|&pid| pid != leader || leader_reaped);
+        body(&orphans, leader_reaped)
+    })
+}
+
+/// Sends `signal` to this process's unreaped child `pid`; a child already
+/// gone is not an error.
+///
+/// # Errors
+///
+/// Returns the error the signal fails with otherwise.
+pub(crate) fn signal_child(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let Ok(target) = libc::pid_t::try_from(pid) else {
+        return Ok(());
+    };
+    // SAFETY: the caller holds the child unreaped, so the id still names it;
+    // kill takes plain values.
+    if unsafe { libc::kill(target, signal) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Whether this process's unreaped child `pid` has exited, looked at without
+/// reaping it or waiting.
+///
+/// # Errors
+///
+/// Returns the operating system's error, such as `ECHILD` for a process
+/// that is not an unreaped child.
+#[cfg(target_os = "linux")]
+pub(crate) fn child_has_exited(pid: u32) -> io::Result<bool> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: zeroed is a valid `siginfo_t`, which waitid only writes.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live stack local for the call; `WNOWAIT`
+        // leaves the child waitable and `WNOHANG` returns at once.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == 0 {
+            // SAFETY: waitid filled `info`; with WNOHANG and no child ready
+            // it leaves the pid zero.
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 /// The `SIGCHLD`s this process receives, awaited one after another.
@@ -253,75 +313,132 @@ fn reap_if_exited(pid: u32) -> io::Result<bool> {
 /// The caller then has no event for the members' end.
 #[cfg(target_os = "macos")]
 pub fn wait_for_members_exit(members: &[u32], limit: Duration) -> io::Result<Vec<u32>> {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
-
     let deadline = Instant::now().checked_add(limit);
-    // SAFETY: kqueue takes no arguments and returns a new descriptor or -1.
-    let queue = unsafe { libc::kqueue() };
-    if queue == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `queue` is a descriptor just returned to this function alone.
-    let queue = unsafe { OwnedFd::from_raw_fd(queue) };
-
+    let queue = ExitQueue::new()?;
     let mut remaining = Vec::with_capacity(members.len());
     for &member in members {
-        let Ok(pid) = libc::pid_t::try_from(member) else {
-            continue;
-        };
-        if remaining.contains(&member) || !watch_exit(queue.as_raw_fd(), pid)? {
-            continue;
-        }
-        // A member that became a zombie before it was watched may send no event.
-        if !has_exited(pid) {
+        if !remaining.contains(&member) && queue.watch(member)? {
             remaining.push(member);
         }
     }
-
     while !remaining.is_empty() {
-        let timeout = match deadline {
-            Some(deadline) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                Some(timespec_of(left))
-            }
-            None => None,
+        let Some(pid) = queue.next_exit(deadline)? else {
+            break;
         };
-        // SAFETY: zeroed is a valid `kevent`, which kevent only writes.
-        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
-        // SAFETY: no changes are passed; `event` is a live stack local of
-        // the one entry asked for; the timeout is a live local or null,
-        // which blocks.
-        let count = unsafe {
-            libc::kevent(
-                queue.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                &mut event,
-                1,
-                timeout
-                    .as_ref()
-                    .map_or(std::ptr::null(), std::ptr::from_ref),
-            )
-        };
-        if count == -1 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if count == 1
-            && event.filter == libc::EVFILT_PROC
-            && event.fflags & libc::NOTE_EXIT != 0
-            && let Ok(pid) = u32::try_from(event.ident)
-        {
-            remaining.retain(|&member| member != pid);
-        }
+        remaining.retain(|&member| member != pid);
     }
     Ok(remaining)
+}
+
+/// One kqueue that processes' exits are watched on and reported from, one
+/// at a time.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub(crate) struct ExitQueue(std::os::fd::OwnedFd);
+
+#[cfg(target_os = "macos")]
+impl ExitQueue {
+    pub(crate) fn new() -> io::Result<Self> {
+        use std::os::fd::FromRawFd as _;
+
+        // SAFETY: kqueue takes no arguments and returns a new descriptor or -1.
+        let queue = unsafe { libc::kqueue() };
+        if queue == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `queue` is a descriptor just returned to this function alone.
+        Ok(Self(unsafe { std::os::fd::OwnedFd::from_raw_fd(queue) }))
+    }
+
+    /// Watches `pid`'s exit; `false` when `pid` has already exited or is
+    /// gone, so no exit of it will be reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the watch cannot be made.
+    pub(crate) fn watch(&self, pid: u32) -> io::Result<bool> {
+        use std::os::fd::AsRawFd as _;
+
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return Ok(false);
+        };
+        // A process that became a zombie before it was watched may send no
+        // event.
+        Ok(watch_exit(self.0.as_raw_fd(), pid)? && !has_exited(pid))
+    }
+
+    /// Blocks until a watched process's exit is reported and returns its id,
+    /// or returns `None` once `deadline` has passed. No deadline is no limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the queue cannot be read.
+    pub(crate) fn next_exit(&self, deadline: Option<Instant>) -> io::Result<Option<u32>> {
+        loop {
+            let timeout = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
+                    Some(timespec_of(left))
+                }
+                None => None,
+            };
+            if let Some(pid) = self.take(timeout.as_ref())? {
+                return Ok(Some(pid));
+            }
+        }
+    }
+
+    /// The id of a watched process whose exit has been reported and not yet
+    /// taken, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the queue cannot be read.
+    pub(crate) fn reported_exit(&self) -> io::Result<Option<u32>> {
+        self.take(Some(&timespec_of(Duration::ZERO)))
+    }
+
+    /// Takes one event, waiting at most `timeout` (no limit when `None`):
+    /// the exited process's id, or `None` when nothing came.
+    fn take(&self, timeout: Option<&libc::timespec>) -> io::Result<Option<u32>> {
+        use std::os::fd::AsRawFd as _;
+
+        loop {
+            // SAFETY: zeroed is a valid `kevent`, which kevent only writes.
+            let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+            // SAFETY: no changes are passed; `event` is a live stack local of
+            // the one entry asked for; the timeout is a live local or null,
+            // which blocks.
+            let count = unsafe {
+                libc::kevent(
+                    self.0.as_raw_fd(),
+                    std::ptr::null(),
+                    0,
+                    &mut event,
+                    1,
+                    timeout.map_or(std::ptr::null(), std::ptr::from_ref),
+                )
+            };
+            if count == -1 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if count == 1
+                && event.filter == libc::EVFILT_PROC
+                && event.fflags & libc::NOTE_EXIT != 0
+                && let Ok(pid) = u32::try_from(event.ident)
+            {
+                return Ok(Some(pid));
+            }
+            return Ok(None);
+        }
+    }
 }
 
 /// `duration` as a kevent timeout, saturating at the largest one.
@@ -361,7 +478,7 @@ fn watch_exit(queue: libc::c_int, pid: libc::pid_t) -> io::Result<bool> {
 /// Whether `pid` is gone or a zombie. A process that cannot be looked at for
 /// another reason counts as running, so its exit event is waited for.
 #[cfg(target_os = "macos")]
-fn has_exited(pid: libc::pid_t) -> bool {
+pub(crate) fn has_exited(pid: libc::pid_t) -> bool {
     // SAFETY: zeroed is a valid `proc_bsdinfo`, which proc_pidinfo only writes.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>();

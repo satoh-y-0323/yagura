@@ -1244,7 +1244,15 @@ pub type ProcessGroup = platform_windows::JobObject;
 #[cfg(not(windows))]
 pub type ProcessGroup = platform_unix::UnixProcessGroup;
 
-/// How long a [`ProcessGroup`] ended with `terminate` is given between
-/// `SIGTERM` and `SIGKILL`.
+/// How long a window's process tree is given between `SIGTERM` and
+/// `SIGKILL`, by a [`ProcessGroup`] ended with `terminate` and by
+/// [`platform_unix::TreeEnd`].
 #[cfg(not(windows))]
-pub const PROCESS_GROUP_TERM_GRACE: Duration = platform_unix::DEFAULT_TERM_GRACE;
+pub const PROCESS_GROUP_TERM_GRACE: Duration = Duration::from_millis(250);
+
+/// How long the owner of a window's tree waits, from its first `SIGKILL`,
+/// for the processes it signalled to end. Only a process that a `SIGKILL`
+/// does not end (one stuck in the kernel) keeps it waiting that long; it is
+/// then left and reported instead.
+#[cfg(not(windows))]
+pub const TREE_END_LIMIT: Duration = Duration::from_secs(5);

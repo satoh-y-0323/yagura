@@ -22,6 +22,8 @@ mod exit_watch;
 mod input_drain;
 mod process_group;
 pub(crate) mod pty;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod tree_end;
 mod tty_mark;
 #[cfg(target_os = "linux")]
 mod user_manager;
@@ -35,6 +37,8 @@ pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
 #[cfg(target_os = "macos")]
 pub use process_group::group_member_pids;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use tree_end::{ProcessRow, SignalTarget, TreeEnd, TreeEndHooks, TreeEndRest, window_members};
 #[cfg(target_os = "linux")]
 pub use user_manager::{
     ScopeNames, UserManager, UserManagerError, cgroup_dir_of, descendants_outside,

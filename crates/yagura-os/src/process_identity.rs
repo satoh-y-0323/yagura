@@ -11,7 +11,7 @@ use std::io;
 /// value, equal for one process at every reading and different for a
 /// process that later takes the same id. Shown as a string, which is the
 /// form records keep.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProcessStart(String);
 
 impl fmt::Display for ProcessStart {
@@ -69,6 +69,29 @@ pub fn process_liveness(pid: u32, start: &ProcessStart) -> Liveness {
     }
 }
 
+/// What one reading of a process says about its place among the others.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessFacts {
+    pub(crate) ppid: u32,
+    pub(crate) pgid: u32,
+    pub(crate) sid: u32,
+    /// A zombie or a process being torn down.
+    pub(crate) exited: bool,
+    pub(crate) start: ProcessStart,
+}
+
+/// One reading of the process `pid`; `None` when no process has that id.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the process is there but
+/// cannot be read.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn process_facts(pid: u32) -> io::Result<Option<ProcessFacts>> {
+    platform::facts_of(pid)
+}
+
 /// A handle on one running process, opened by its id and checked against
 /// its start: its liveness, the wait for its end and its kill all go
 /// through the same handle, so none of them reaches a process that took
@@ -115,6 +138,13 @@ impl ProcessHandle {
     /// ended.
     pub fn kill(&self) -> io::Result<()> {
         self.0.kill()
+    }
+
+    /// Sends `signal` to the process. A process that has already exited is
+    /// not an error.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn signal(&self, signal: libc::c_int) -> io::Result<()> {
+        self.0.signal(signal)
     }
 
     /// Starts watching for the process's end, to be made before whatever ends
@@ -331,6 +361,37 @@ mod platform {
         Ok(read_stat(pid)?.map(|(_, start)| start))
     }
 
+    /// The parent, group and session ids in a `/proc/<pid>/stat` line: the
+    /// 4th to 6th fields.
+    fn family(stat: &str) -> Option<(u32, u32, u32)> {
+        let (_, after_name) = stat.rsplit_once(')')?;
+        let mut fields = after_name.split_whitespace().skip(1);
+        let ppid = fields.next()?.parse().ok()?;
+        let pgid = fields.next()?.parse().ok()?;
+        let sid = fields.next()?.parse().ok()?;
+        Some((ppid, pgid, sid))
+    }
+
+    pub(super) fn facts_of(pid: u32) -> io::Result<Option<super::ProcessFacts>> {
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let malformed = || io::Error::new(io::ErrorKind::InvalidData, "a malformed stat line");
+        let (state, ticks) = state_and_start(&stat).ok_or_else(malformed)?;
+        let (ppid, pgid, sid) = family(&stat).ok_or_else(malformed)?;
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        Ok(Some(super::ProcessFacts {
+            ppid,
+            pgid,
+            sid,
+            exited: has_exited(state),
+            start: super::ProcessStart(format!("{}:{ticks}", boot.trim())),
+        }))
+    }
+
     #[derive(Debug)]
     pub(super) struct Watch(OwnedFd);
 
@@ -407,13 +468,17 @@ mod platform {
         }
 
         pub(super) fn kill(&self) -> io::Result<()> {
+            self.signal(libc::SIGKILL)
+        }
+
+        pub(super) fn signal(&self, signal: libc::c_int) -> io::Result<()> {
             // SAFETY: the descriptor is open for the call; a null info sends
             // the signal as kill(2) would.
             let result = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
                     self.0.as_raw_fd(),
-                    libc::SIGKILL,
+                    signal,
                     std::ptr::null::<libc::siginfo_t>(),
                     0,
                 )
@@ -446,6 +511,45 @@ mod platform {
 
     /// The process's status and start; `None` when no process has that id.
     fn read_info(pid: libc::pid_t) -> io::Result<Option<(u32, String)>> {
+        Ok(read_bsdinfo(pid)?.map(|info| (info.pbi_status, start_in(&info))))
+    }
+
+    fn start_in(info: &libc::proc_bsdinfo) -> String {
+        format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec)
+    }
+
+    pub(super) fn facts_of(pid: u32) -> io::Result<Option<super::ProcessFacts>> {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return Ok(None);
+        };
+        let Some(info) = read_bsdinfo(pid)? else {
+            return Ok(None);
+        };
+        let exited = info.pbi_status == libc::SZOMB;
+        // SAFETY: getsid takes a plain value.
+        let sid = unsafe { libc::getsid(pid) };
+        // A zombie has no session to report; its session counts for nothing.
+        let sid = if sid == -1 && exited {
+            0
+        } else if sid == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(None);
+            }
+            return Err(error);
+        } else {
+            u32::try_from(sid).unwrap_or(0)
+        };
+        Ok(Some(super::ProcessFacts {
+            ppid: info.pbi_ppid,
+            pgid: info.pbi_pgid,
+            sid,
+            exited,
+            start: super::ProcessStart(start_in(&info)),
+        }))
+    }
+
+    fn read_bsdinfo(pid: libc::pid_t) -> io::Result<Option<libc::proc_bsdinfo>> {
         // SAFETY: zeroed is a valid `proc_bsdinfo`, which proc_pidinfo only
         // writes.
         let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -468,8 +572,7 @@ mod platform {
             }
             return Err(error);
         }
-        let start = format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec);
-        Ok(Some((info.pbi_status, start)))
+        Ok(Some(info))
     }
 
     pub(super) fn start_of(pid: u32) -> io::Result<Option<String>> {
@@ -614,11 +717,15 @@ mod platform {
         /// The start is checked again just before the signal; the gap
         /// between the two is left, macOS having no handle to signal through.
         pub(super) fn kill(&self) -> io::Result<()> {
+            self.signal(libc::SIGKILL)
+        }
+
+        pub(super) fn signal(&self, signal: libc::c_int) -> io::Result<()> {
             if !runs(self.pid, &self.start)? {
                 return Ok(());
             }
             // SAFETY: kill takes plain values.
-            if unsafe { libc::kill(self.pid, libc::SIGKILL) } == 0 {
+            if unsafe { libc::kill(self.pid, signal) } == 0 {
                 return Ok(());
             }
             let error = io::Error::last_os_error();
