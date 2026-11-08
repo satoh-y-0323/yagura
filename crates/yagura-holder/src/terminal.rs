@@ -779,7 +779,7 @@ impl InputWriter {
                             state.focus.open_interval();
                             true
                         } else {
-                            state.focus.close_interval(outputs)
+                            state.focus.close_interval()
                         };
                         if due {
                             state.focus.reconcile(published.modes(), outputs)
@@ -795,7 +795,7 @@ impl InputWriter {
                         let outputs = published.outputs_fed();
                         let mut due = false;
                         for _ in 0..count {
-                            due = state.focus.close_interval(outputs);
+                            due = state.focus.close_interval();
                         }
                         if due {
                             state.focus.reconcile(published.modes(), outputs)

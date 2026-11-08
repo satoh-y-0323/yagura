@@ -49,11 +49,20 @@ impl FocusState {
         self.open_intervals += 1;
     }
 
-    /// Closes a stretch opened by [`FocusState::open_interval`], with
-    /// `outputs` outputs seen. Returns whether a focus-out is due.
-    pub fn close_interval(&mut self, outputs: u64) -> bool {
+    /// Closes a stretch opened by [`FocusState::open_interval`]. Returns
+    /// whether a focus-out is due.
+    ///
+    /// The focus-out still waits only for output past the last input write;
+    /// closing does not move that mark, so output that followed the input
+    /// while the stretch was open lets the focus-out out at once.
+    pub fn close_interval(&mut self) -> bool {
         self.open_intervals = self.open_intervals.saturating_sub(1);
-        self.input_ended(outputs)
+        self.out_of_target()
+    }
+
+    /// Whether the child holds more focus than the target allows.
+    fn out_of_target(&self) -> bool {
+        self.target() == Some(false) && self.told != Some(false)
     }
 
     /// Whether a focus-out waits for the child's next output.
@@ -62,12 +71,12 @@ impl FocusState {
         self.out_deferred
     }
 
-    /// Notes that an input write, or an interval of waiting to write, ended
-    /// with `outputs` outputs seen. Returns whether the child holds more focus
-    /// than the target allows, so a focus-out is due.
+    /// Notes that an input write ended with `outputs` outputs seen. Returns
+    /// whether the child holds more focus than the target allows, so a
+    /// focus-out is due.
     pub fn input_ended(&mut self, outputs: u64) -> bool {
         self.out_after = Some(outputs);
-        self.target() == Some(false) && self.told != Some(false)
+        self.out_of_target()
     }
 
     /// The report that brings the child to the target; empty when the child
@@ -151,5 +160,65 @@ mod tests {
         assert_eq!(stale.reconcile(modes, 3), b"");
         assert_eq!(stale.before_input(modes, 8), b"");
         assert_eq!(stale.reconcile(modes, 8), b"");
+    }
+
+    /// An unfocused window the holder's writer typed into under `intervals`
+    /// open intervals, with `outputs` outputs seen as the input was written.
+    fn typed_under_intervals(intervals: usize, outputs: u64) -> FocusState {
+        let modes = reporting();
+        let mut focus = unfocused_view();
+        assert_eq!(focus.reconcile(modes, 0), b"\x1b[O");
+        let mut opened = Vec::new();
+        for _ in 0..intervals {
+            focus.open_interval();
+            opened.extend(focus.reconcile(modes, outputs));
+        }
+        assert_eq!(opened, b"\x1b[I");
+        assert_eq!(focus.before_input(modes, outputs), b"");
+        assert!(!focus.input_ended(outputs));
+        assert_eq!(focus.reconcile(modes, outputs), b"");
+        focus
+    }
+
+    #[test]
+    fn closing_an_interval_explicitly_lets_out_output_that_followed_the_input() {
+        let modes = reporting();
+
+        let mut quiet = typed_under_intervals(1, 5);
+        assert!(quiet.close_interval());
+        assert_eq!(quiet.reconcile(modes, 5), b"");
+        assert!(quiet.out_deferred());
+        assert_eq!(quiet.reconcile(modes, 6), b"\x1b[O");
+
+        let mut answered = typed_under_intervals(1, 5);
+        assert!(answered.close_interval());
+        assert_eq!(
+            answered.reconcile(modes, 6),
+            b"\x1b[O",
+            "output after the input came before the interval closed, so the focus-out is due now"
+        );
+        assert!(!answered.out_deferred());
+    }
+
+    #[test]
+    fn closing_intervals_a_lost_connection_left_lets_out_output_that_followed_the_input() {
+        let modes = reporting();
+
+        let mut quiet = typed_under_intervals(2, 5);
+        assert!(!quiet.close_interval());
+        assert!(quiet.close_interval());
+        assert_eq!(quiet.reconcile(modes, 5), b"");
+        assert!(quiet.out_deferred());
+        assert_eq!(quiet.reconcile(modes, 6), b"\x1b[O");
+
+        let mut answered = typed_under_intervals(2, 5);
+        assert!(!answered.close_interval());
+        assert!(answered.close_interval());
+        assert_eq!(
+            answered.reconcile(modes, 6),
+            b"\x1b[O",
+            "output after the input came while the connection was lost, so the focus-out is due now"
+        );
+        assert!(!answered.out_deferred());
     }
 }
