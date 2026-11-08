@@ -3,6 +3,10 @@
 //! whether a locale of a given name is installed.
 //!
 //! Neither query changes this process's own locale.
+//!
+//! A part of the operating-system layer kept apart from `yagura-os` so that
+//! only the daemon links macOS's CoreFoundation: the holder and the watcher,
+//! which never ask, stay free of the framework.
 
 /// The user's preferred locale, as a language code and an optional country
 /// (region) code, e.g. `ja` and `JP`.

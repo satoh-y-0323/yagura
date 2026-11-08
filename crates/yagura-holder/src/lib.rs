@@ -37,6 +37,8 @@ mod record;
 mod session;
 mod terminal;
 mod view;
+#[cfg(unix)]
+pub mod watcher;
 pub mod watcher_proto;
 
 /// The most a launch may take on standard input.
@@ -119,6 +121,12 @@ fn log_line(message: &str) -> String {
 }
 
 fn start(faults: session::Faults) -> Result<session::Ending, String> {
+    // Before any thread starts, so every thread inherits it: the holder takes
+    // SIGCHLD only by waiting for it (its watcher's stops and end, and its own
+    // sweep when the watcher is gone), never by a handler on some thread.
+    #[cfg(unix)]
+    yagura_os::platform_unix::block_child_signal()
+        .map_err(|error| format!("cannot block SIGCHLD: {error}"))?;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let [window_id, instance] = args.as_slice() else {
         return Err("usage: yagura-holder <window_id> <instance_id>".to_owned());

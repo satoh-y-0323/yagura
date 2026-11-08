@@ -115,10 +115,26 @@ impl RecordFile {
         Ok(())
     }
 
-    /// Names the started child and its start in the record.
-    pub(crate) fn set_child(&mut self, pid: u32) -> io::Result<()> {
+    /// Where the record is written.
+    #[cfg(unix)]
+    pub(crate) fn path(&self) -> io::Result<PathBuf> {
+        holder_record_path(&self.holders_dir, &self.record.window_id)
+    }
+
+    /// Names the started child and its start in the record, and on Unix the
+    /// watcher that started it, in the same write.
+    pub(crate) fn set_child(
+        &mut self,
+        pid: u32,
+        start: Option<String>,
+        watcher: Option<(u32, Option<String>)>,
+    ) -> io::Result<()> {
         self.record.child_pid = Some(pid);
-        self.record.child_start = start_of(pid);
+        self.record.child_start = start;
+        if let Some((pid, start)) = watcher {
+            self.record.watcher_pid = Some(pid);
+            self.record.watcher_start = start;
+        }
         self.write()
     }
 

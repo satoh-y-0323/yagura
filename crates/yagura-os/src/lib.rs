@@ -1,7 +1,8 @@
 //! The operating-system abstraction boundary of yagura.
 //!
 //! Every other crate in the workspace reaches the operating system through
-//! this crate rather than the platform APIs directly.
+//! the operating-system layer rather than the platform APIs directly: this
+//! crate, and `yagura-locale` for the locale queries only the daemon makes.
 //!
 //! The platform implementations live in
 //! `platform_windows` / `platform_unix` (each compiled only under its own
@@ -27,7 +28,6 @@ pub mod file_replace;
 mod force_kill;
 pub mod hook_path;
 pub mod instance;
-pub mod locale;
 pub mod login_shell;
 pub mod mcp_bridge;
 #[cfg(not(windows))]

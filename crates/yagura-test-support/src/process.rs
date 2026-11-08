@@ -472,8 +472,9 @@ pub fn holder_path() -> PathBuf {
 }
 
 /// Copies into `dir` what a daemon installed there needs beside it to open a
-/// window: the holder and, on Windows, the bundled pseudoconsole pair placed
-/// beside the built holder.
+/// window: the holder and, on Unix, the watcher the holder starts beside
+/// itself, or on Windows the bundled pseudoconsole pair placed beside the
+/// built holder.
 ///
 /// # Panics
 ///
@@ -482,6 +483,11 @@ pub fn install_window_runtime(dir: &Path) {
     let holder = holder_path();
     let name = holder.file_name().expect("the holder path names a file");
     install_exe(&holder, &dir.join(name));
+    #[cfg(unix)]
+    install_exe(
+        &holder.with_file_name("yagura-watcher"),
+        &dir.join("yagura-watcher"),
+    );
     #[cfg(windows)]
     for pair in ["conpty.dll", "OpenConsole.exe"] {
         install_exe(&holder.with_file_name(pair), &dir.join(pair));
@@ -897,12 +903,11 @@ pub fn argv_probe_profile_source(display_name: &str, extra_tables: &str) -> Stri
     format!("{}{extra_tables}", profile_source(display_name, &[program]))
 }
 
-/// Ends every window a record in `holders_dir` names, as a test's last step:
-/// the child's process group (Unix) and the child, then the holder, each only
-/// while the record's pid and start still name a running process; returns the
-/// holder pids it ended. A holder that may outlive its daemon is left running
-/// by the daemon's end, and nothing else ends it. `instance` is the instance
-/// argument the holders were started with (`None` for the default instance).
+/// Ends every window a record in `holders_dir` names, as a test's last step,
+/// as [`end_recorded_holder`] does; returns the holder pids it ended. A holder
+/// that may outlive its daemon is left running by the daemon's end, and
+/// nothing else ends it. `instance` is the instance argument the holders were
+/// started with (`None` for the default instance).
 ///
 /// Waits at most [`crate::HANG_GUARD`] for each process to end and never
 /// panics, so it may run while a failing test unwinds.
@@ -929,30 +934,77 @@ pub fn end_recorded_holders(holders_dir: &Path, instance: Option<&std::ffi::OsSt
     ended
 }
 
-/// Ends the window `record` names as [`end_recorded_holders`] does; returns the
-/// holder's pid when it was still running. On Unix the killed holder's socket
-/// and lock are removed, since it cannot remove them itself.
+/// Ends the window `record` names, each process only while the record's pid
+/// and start still name a running process, and leaves none of them to clean
+/// up; returns the holder's pid when it was still running. With a watcher, the
+/// holder and the watcher end first ([`end_holder_and_watcher`]), then the
+/// child's process group (Unix) and the child; without one, the child first,
+/// then the holder. On Unix the killed holder's socket and lock are removed,
+/// since neither the holder nor its watcher removed them.
 pub fn end_recorded_holder(
     holders_dir: &Path,
     instance: Option<&std::ffi::OsStr>,
     record: &yagura_protocol::holder::HolderRecord,
 ) -> Option<u32> {
-    if let Some(child) = record
+    let child = record
         .child_pid
-        .and_then(|pid| recorded_process(pid, record.child_start.as_deref()))
-    {
-        #[cfg(unix)]
-        if let Ok(group) = libc::pid_t::try_from(child.0) {
-            // SAFETY: plain values; the child leads its own group, and a group
-            // of another id is refused with ESRCH.
-            unsafe { libc::killpg(group, libc::SIGKILL) };
-        }
-        end_process(&child.1);
+        .and_then(|pid| recorded_process(pid, record.child_start.as_deref()));
+    let watched = recorded_watcher(record).is_some();
+    if !watched {
+        end_child(child.as_ref());
     }
-    let holder = recorded_process(record.holder_pid, record.holder_start.as_deref())?;
-    end_process(&holder.1);
+    let holder = end_holder_and_watcher(record);
+    if watched {
+        end_child(child.as_ref());
+    }
     remove_killed_holder_endpoint(holders_dir, instance, &record.window_id);
-    Some(holder.0)
+    holder
+}
+
+/// Ends the holder `record` names and its watcher so that neither ends the
+/// window's tree or removes the holder's files: the holder is stopped, the
+/// watcher killed and seen to end, then the holder killed and seen to end.
+/// Without a running watcher, the holder alone is killed. Returns the
+/// holder's pid when it was still running.
+///
+/// Waits at most [`crate::HANG_GUARD`] for each process to end and never
+/// panics.
+pub fn end_holder_and_watcher(record: &yagura_protocol::holder::HolderRecord) -> Option<u32> {
+    let holder = recorded_process(record.holder_pid, record.holder_start.as_deref());
+    if let Some(watcher) = recorded_watcher(record) {
+        #[cfg(unix)]
+        if let Some((pid, _)) = &holder
+            && let Ok(pid) = libc::pid_t::try_from(*pid)
+        {
+            // SAFETY: plain values; the pid was just opened by its start.
+            unsafe { libc::kill(pid, libc::SIGSTOP) };
+        }
+        end_process(&watcher.1);
+    }
+    let (pid, handle) = holder?;
+    end_process(&handle);
+    Some(pid)
+}
+
+fn recorded_watcher(
+    record: &yagura_protocol::holder::HolderRecord,
+) -> Option<(u32, yagura_os::ProcessHandle)> {
+    recorded_process(record.watcher_pid?, record.watcher_start.as_deref())
+}
+
+fn end_child(child: Option<&(u32, yagura_os::ProcessHandle)>) {
+    let Some((pid, handle)) = child else {
+        return;
+    };
+    #[cfg(unix)]
+    if let Ok(group) = libc::pid_t::try_from(*pid) {
+        // SAFETY: plain values; the child leads its own group, and a group
+        // of another id is refused with ESRCH.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    end_process(handle);
 }
 
 /// Removes the socket and lock (Unix) of `window_id`'s holder in `holders_dir`

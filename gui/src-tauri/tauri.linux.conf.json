@@ -1,5 +1,11 @@
 {
   "bundle": {
-    "targets": ["deb"]
+    "targets": ["deb"],
+    "externalBin": [
+      "binaries/yagura-daemon",
+      "binaries/yagura-holder",
+      "binaries/yagura-watcher",
+      "binaries/yagura-mcp"
+    ]
   }
 }

@@ -51,9 +51,12 @@ path = "src/bin/mcp_cli_stub.rs"
 
 [dependencies]
 yagura-protocol = { path = "../yagura-protocol" }
-# The only way this crate reaches the operating system: transport,
-# endpoint protection, peer identity, process groups and randomness.
+# With `yagura-locale`, the only way this crate reaches the operating system:
+# transport, endpoint protection, peer identity, process groups and randomness.
 yagura-os = { path = "../yagura-os" }
+# The operating-system layer's locale queries, kept out of `yagura-os` so the
+# holder and the watcher do not link macOS's CoreFoundation.
+yagura-locale = { path = "../yagura-locale" }
 tokio.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -103,9 +106,9 @@ unicode-width.workspace = true
 # Windows-only, tests-only: the conhost-reaping regression test enumerates
 # conhost.exe process IDs directly (via Toolhelp32Snapshot) as an independent
 # check, so it does not exercise the production teardown mechanism it is meant
-# to catch a regression in. Every production OS call of this crate
-# goes through `yagura-os`; this dev-dependency is a deliberate, test-only exception
-# to that boundary, needed to build a test oracle independent of the
+# to catch a regression in. Every production OS call of this crate goes
+# through `yagura-os` or `yagura-locale`; this dev-dependency is a deliberate,
+# test-only exception to that boundary, needed to build a test oracle independent of the
 # mechanism it verifies, not a second production dependency on `windows`.
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = [

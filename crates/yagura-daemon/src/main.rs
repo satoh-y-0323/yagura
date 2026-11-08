@@ -213,9 +213,9 @@ async fn async_main(
             .flatten(),
         shell_exists: yagura_os::program::default_is_executable,
         inherited: std::env::vars_os().collect(),
-        preferred_locale: yagura_os::locale::preferred_locale()
+        preferred_locale: yagura_locale::preferred_locale()
             .and_then(|preferred| preferred.utf8_name()),
-        locale_exists: yagura_os::locale::locale_exists,
+        locale_exists: yagura_locale::locale_exists,
         limits: yagura_os::CaptureLimits {
             timeout: yagura_os::LOGIN_ENV_READ_TIMEOUT,
             max_output_bytes: LOGIN_ENV_MAX_OUTPUT_BYTES,

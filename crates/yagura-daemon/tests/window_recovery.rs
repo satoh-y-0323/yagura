@@ -415,9 +415,10 @@ fn spawn_term_script(args: &[&str]) -> Child {
     command.spawn().expect("start term_script")
 }
 
-/// Ends the window's real holder, which its killed daemon left, and puts a stand-in in
-/// its place: at the endpoint `record` names, in a record naming the stand-in and its
-/// child with their starts.
+/// Ends the window's real holder and its watcher, which its killed daemon left, before
+/// either can clean up, so the endpoint's lock is free; then puts a stand-in in its
+/// place: at the endpoint `record` names, in a record naming the stand-in and its child
+/// with their starts and no watcher.
 async fn replace_holder(
     sandbox: &Sandbox,
     record: &HolderRecord,
@@ -462,6 +463,8 @@ async fn replace_holder_with(
         protocol: HOLDER_PROTOCOL,
         holder_start: Some(start_of(holder_pid)),
         child_start: Some(start_of(child_pid)),
+        watcher_pid: None,
+        watcher_start: None,
         ..record.clone()
     };
     std::fs::write(
@@ -1197,6 +1200,16 @@ impl Drop for EndOnDrop {
     }
 }
 
+/// Ends the window's holder and its watcher, the holder stopped first, so that neither
+/// ends the window's tree or removes its files: what is left is the next daemon's.
+fn end_holder_and_watcher(record: &HolderRecord) {
+    assert_eq!(
+        yagura_test_support::process::end_holder_and_watcher(record),
+        Some(record.holder_pid),
+        "the window's holder must still run once its daemon was killed"
+    );
+}
+
 /// Kills the process `handle` names and waits until it has ended.
 async fn kill_and_wait(handle: &ProcessHandle, what: &str) {
     handle.kill().unwrap();
@@ -1248,9 +1261,8 @@ async fn a_window_whose_holder_died_while_no_daemon_was_there_is_lost_and_the_on
         grandchild_pid,
         Some(&start_of(grandchild_pid)),
     )));
-    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
     first.kill_keeping_windows();
-    kill_and_wait(&holder, "the killed holder").await;
+    end_holder_and_watcher(&record);
     if cfg!(windows) {
         wait_dead(&child, "the child of the killed holder's job").await;
         wait_dead(
@@ -1362,11 +1374,7 @@ async fn the_start_keeps_what_belongs_to_windows_that_stay_and_clears_the_rest()
         sandbox.tree.path().join("fake.log"),
     )
     .await;
-    kill_and_wait(
-        &handle_of(lost_record.holder_pid, lost_record.holder_start.as_deref()),
-        "the killed holder",
-    )
-    .await;
+    end_holder_and_watcher(&lost_record);
 
     let stray_folder = mcp_dir.join(format!("credentials-{}", "0".repeat(32)));
     std::fs::create_dir_all(&stray_folder).unwrap();
@@ -1522,9 +1530,15 @@ async fn records_of_dead_holders_without_rows_are_removed_and_are_no_candidates(
     first.kill_keeping_windows();
     for record in &records {
         let child = handle_of(record.child_pid.unwrap(), record.child_start.as_deref());
-        kill_and_wait(&child, "the killed child").await;
-        let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
-        kill_and_wait(&holder, "the killed holder").await;
+        // A watcher would end the tree once the child ends, so it goes first;
+        // without one, the child goes before its holder takes it down.
+        if record.watcher_pid.is_none() {
+            kill_and_wait(&child, "the killed child").await;
+        }
+        end_holder_and_watcher(record);
+        if record.watcher_pid.is_some() {
+            kill_and_wait(&child, "the killed child").await;
+        }
     }
     let earlier = HolderRecord {
         holder_start: None,
@@ -1575,9 +1589,11 @@ async fn records_of_dead_holders_without_rows_are_removed_and_are_no_candidates(
     });
 }
 
-/// On Unix, a lost window's child that outlived its killed holder (it ignores the
-/// terminal's hangup) and is still the process its record names is ended with its whole
-/// process group before the window becomes `lost`.
+/// On Unix, a lost window's child that outlived its killed holder and watcher (it ignores
+/// the terminal's hangup) and is still the process its record names is ended with its
+/// whole process group before the window becomes `lost`. The daemon is killed, then the
+/// holder stopped, the watcher killed and seen to end, and the holder killed: neither of
+/// them ends the tree, so only the next daemon can.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_lost_windows_child_that_outlived_its_holder_is_ended_with_its_group() {
@@ -1606,15 +1622,11 @@ async fn a_lost_windows_child_that_outlived_its_holder_is_ended_with_its_group()
         record.child_start.as_deref(),
     )));
     first.kill_keeping_windows();
-    kill_and_wait(
-        &handle_of(record.holder_pid, record.holder_start.as_deref()),
-        "the killed holder",
-    )
-    .await;
+    end_holder_and_watcher(&record);
     assert_eq!(
         child.0.as_ref().unwrap().liveness(),
         Liveness::Alive,
-        "the fixture's child must outlive its killed holder"
+        "the fixture's child must outlive its killed holder and watcher"
     );
 
     let _next = sandbox.start().await;
@@ -1641,7 +1653,8 @@ async fn a_lost_windows_child_that_outlived_its_holder_is_ended_with_its_group()
 
 /// On Unix, when the child id a dead holder's record names now belongs to another process
 /// (its start differs), that process and its group are left running; the window still
-/// becomes `lost`.
+/// becomes `lost`. The watcher has ended before the record is rewritten, and the
+/// rewritten record names none, so the next daemon reaches the child only by the record.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_lost_windows_child_id_taken_by_another_process_is_left_running() {
@@ -1661,6 +1674,8 @@ async fn a_lost_windows_child_id_taken_by_another_process_is_left_running() {
     );
     let reused = HolderRecord {
         child_pid: Some(other.id()),
+        watcher_pid: None,
+        watcher_start: None,
         ..record.clone()
     };
     std::fs::write(
@@ -1754,9 +1769,10 @@ impl Drop for StopScopes {
 }
 
 /// On Linux with the user's user manager, a window's child is in the scope its holder's
-/// record names. When the holder is killed while no daemon is there, the whole child's
-/// scope ends with it -- the child ignoring SIGTERM and SIGHUP and a grandchild it started
-/// in a session of its own -- and the next daemon makes the window `lost`.
+/// record names. When the holder and its watcher are killed while no daemon is there (the
+/// holder stopped first, so neither ends the tree), the whole child's scope ends with the
+/// holder's -- the child ignoring SIGTERM and SIGHUP and a grandchild it started in a
+/// session of its own -- and the next daemon makes the window `lost`.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "needs the user's systemd user manager; run with --include-ignored where one runs"]
@@ -1820,9 +1836,8 @@ async fn a_linux_window_whose_holder_was_killed_while_no_daemon_was_there_ends_i
         "the fixture's grandchild must start in the child's scope: {}",
         cgroup_of(grandchild_pid)
     );
-    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
     first.kill_keeping_windows();
-    kill_and_wait(&holder, "the killed holder").await;
+    end_holder_and_watcher(&record);
     wait_dead(
         child.0.as_ref().unwrap(),
         "the child in the killed holder's scope",

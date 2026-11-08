@@ -39,12 +39,6 @@ tokio = { workspace = true, features = ["signal"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
 
-# macOS-only: `locale::preferred_locale` reads the user's CFLocale, the one
-# place a Finder-started process can learn its locale without `LANG`. The
-# `-sys` crate is used directly because the safe wrapper has no CFLocale type.
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation-sys = "0.8.7"
-
 # Windows-only: the non-Windows branch (`platform_unix`) must resolve without
 # it so `--target x86_64-unknown-linux-gnu` builds.
 [target.'cfg(windows)'.dependencies]

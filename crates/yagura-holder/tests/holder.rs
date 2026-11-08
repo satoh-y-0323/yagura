@@ -24,10 +24,10 @@ use yagura_test_support::paths::{TempDir, unique_suffix};
 
 const POLL: Duration = Duration::from_millis(20);
 /// Long enough that no test meets the first-connection deadline by accident.
-const NO_DEADLINE_MS: u64 = 600_000;
-const HOLDER: &str = env!("CARGO_BIN_EXE_yagura-holder");
+pub(crate) const NO_DEADLINE_MS: u64 = 600_000;
+pub(crate) const HOLDER: &str = env!("CARGO_BIN_EXE_yagura-holder");
 const FAULT_HOLDER: &str = env!("CARGO_BIN_EXE_holder_fault");
-const CHILD: &str = env!("CARGO_BIN_EXE_holder_child");
+pub(crate) const CHILD: &str = env!("CARGO_BIN_EXE_holder_child");
 const INTRUDER: &str = "intruder";
 const INTRUDER_ENDPOINT_ENV: &str = "YAGURA_HOLDER_TEST_INTRUDER_ENDPOINT";
 const INTRUDER_OUTCOME: &str = "INTRUDER-OUTCOME";
@@ -48,7 +48,7 @@ fn short_id(len: usize) -> String {
 }
 
 /// Creates `path` owner-only, as a holders directory has to be.
-fn private_dir(path: &Path) -> PathBuf {
+pub(crate) fn private_dir(path: &Path) -> PathBuf {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
@@ -66,15 +66,15 @@ fn private_dir(path: &Path) -> PathBuf {
 
 /// One window of one isolated instance: its own holders directory and a
 /// daemon endpoint the instance's own name would not lead to.
-struct Rig {
-    window_id: String,
-    instance: String,
+pub(crate) struct Rig {
+    pub(crate) window_id: String,
+    pub(crate) instance: String,
     holders: PathBuf,
     dir: TempDir,
 }
 
 impl Rig {
-    fn new(label: &str) -> Self {
+    pub(crate) fn new(label: &str) -> Self {
         #[cfg(unix)]
         let dir = yagura_test_support::paths::short_tmp_dir("hold", label);
         #[cfg(windows)]
@@ -89,11 +89,11 @@ impl Rig {
         }
     }
 
-    fn file(&self, name: &str) -> PathBuf {
+    pub(crate) fn file(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
     }
 
-    fn holders_dir(&self) -> PathBuf {
+    pub(crate) fn holders_dir(&self) -> PathBuf {
         self.holders.clone()
     }
 
@@ -118,7 +118,7 @@ impl Rig {
         }
     }
 
-    fn launch(&self, child_args: &[&str], hello_deadline_ms: u64) -> HolderLaunch {
+    pub(crate) fn launch(&self, child_args: &[&str], hello_deadline_ms: u64) -> HolderLaunch {
         let mut argv = vec![CHILD.to_owned()];
         argv.extend(child_args.iter().map(|arg| (*arg).to_owned()));
         HolderLaunch {
@@ -142,7 +142,7 @@ impl Rig {
 
     /// Starts the holder with only the window ID and the instance as
     /// arguments; everything else goes through its stdin.
-    fn start(&self, launch: &HolderLaunch) -> Holder {
+    pub(crate) fn start(&self, launch: &HolderLaunch) -> Holder {
         self.start_with(&encode_holder_launch(launch), Stdio::null())
     }
 
@@ -164,7 +164,11 @@ impl Rig {
     /// Starts the holder with its environment changed by `environment`, on the
     /// holder's command only.
     #[cfg(target_os = "linux")]
-    fn start_in(&self, launch: &HolderLaunch, environment: impl FnOnce(&mut Command)) -> Holder {
+    pub(crate) fn start_in(
+        &self,
+        launch: &HolderLaunch,
+        environment: impl FnOnce(&mut Command),
+    ) -> Holder {
         self.start_exe_with(
             HOLDER,
             &encode_holder_launch(launch),
@@ -173,7 +177,7 @@ impl Rig {
         )
     }
 
-    fn start_exe_with(
+    pub(crate) fn start_exe_with(
         &self,
         exe: &str,
         input: &[u8],
@@ -197,11 +201,14 @@ impl Rig {
         Holder { child }
     }
 
-    async fn record_where(&self, satisfied: impl Fn(&HolderRecord) -> bool) -> HolderRecord {
+    pub(crate) async fn record_where(
+        &self,
+        satisfied: impl Fn(&HolderRecord) -> bool,
+    ) -> HolderRecord {
         record_in(&self.holders_dir(), &self.window_id, satisfied).await
     }
 
-    async fn record(&self) -> HolderRecord {
+    pub(crate) async fn record(&self) -> HolderRecord {
         self.record_where(|_| true).await
     }
 }
@@ -227,12 +234,12 @@ async fn record_in(
     }
 }
 
-struct Holder {
-    child: Child,
+pub(crate) struct Holder {
+    pub(crate) child: Child,
 }
 
 impl Holder {
-    async fn wait_exit(&mut self) -> ExitStatus {
+    pub(crate) async fn wait_exit(&mut self) -> ExitStatus {
         let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -252,7 +259,7 @@ impl Drop for Holder {
 }
 
 /// The test process holding the instance's daemon endpoint, as the daemon does.
-struct DaemonEndpoint {
+pub(crate) struct DaemonEndpoint {
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -262,7 +269,7 @@ impl Drop for DaemonEndpoint {
     }
 }
 
-async fn hold_daemon_endpoint(rig: &Rig) -> DaemonEndpoint {
+pub(crate) async fn hold_daemon_endpoint(rig: &Rig) -> DaemonEndpoint {
     let ipc = PlatformIpc::default();
     let security = ipc.endpoint_security().unwrap();
     let mut listener = ipc
@@ -283,15 +290,15 @@ async fn hold_daemon_endpoint(rig: &Rig) -> DaemonEndpoint {
     DaemonEndpoint { task }
 }
 
-enum Event {
+pub(crate) enum Event {
     Frame(HolderFrame),
     Closed,
     Broken(String),
 }
 
-struct Peer {
+pub(crate) struct Peer {
     events: mpsc::UnboundedReceiver<Event>,
-    writer: WriteHalf<Connection>,
+    pub(crate) writer: WriteHalf<Connection>,
     reader: tokio::task::JoinHandle<()>,
 }
 
@@ -302,7 +309,7 @@ impl Drop for Peer {
 }
 
 impl Peer {
-    async fn connect(endpoint: &str) -> Self {
+    pub(crate) async fn connect(endpoint: &str) -> Self {
         let connection = PlatformIpc::default()
             .connect(endpoint)
             .await
@@ -344,7 +351,7 @@ impl Peer {
     }
 
     /// Connects and is welcomed; returns the record.
-    async fn welcomed(endpoint: &str) -> (Self, String) {
+    pub(crate) async fn welcomed(endpoint: &str) -> (Self, String) {
         let mut peer = Self::connect(endpoint).await;
         peer.send(hello(HOLDER_PROTOCOL)).await;
         match peer.frame().await {
@@ -353,7 +360,7 @@ impl Peer {
         }
     }
 
-    async fn send(&mut self, frame: HolderFrame) {
+    pub(crate) async fn send(&mut self, frame: HolderFrame) {
         self.writer
             .write_all(&encode_holder_frame(&frame))
             .await
@@ -361,14 +368,14 @@ impl Peer {
         self.writer.flush().await.expect("flush to the holder");
     }
 
-    async fn next(&mut self) -> Event {
+    pub(crate) async fn next(&mut self) -> Event {
         tokio::time::timeout(yagura_test_support::HANG_GUARD, self.events.recv())
             .await
             .expect("nothing from the holder within the limit")
             .expect("the reader ended without saying why")
     }
 
-    async fn frame(&mut self) -> HolderFrame {
+    pub(crate) async fn frame(&mut self) -> HolderFrame {
         match self.next().await {
             Event::Frame(frame) => frame,
             Event::Closed => panic!("the holder closed the connection"),
@@ -379,7 +386,7 @@ impl Peer {
     /// Asks for the holder's text until it shows `needle`; returns the
     /// other frames seen on the way. Screen copies are not acknowledged, and
     /// are skipped.
-    async fn text_until(&mut self, needle: &str) -> Vec<HolderFrame> {
+    pub(crate) async fn text_until(&mut self, needle: &str) -> Vec<HolderFrame> {
         let mut others = Vec::new();
         let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
         for id in 1.. {
@@ -412,25 +419,25 @@ impl Peer {
 }
 
 /// A screen copy's rows or its close.
-fn is_copy(frame: &HolderFrame) -> bool {
+pub(crate) fn is_copy(frame: &HolderFrame) -> bool {
     matches!(
         frame,
         HolderFrame::ScreenRows(_) | HolderFrame::ScreenPush(_)
     )
 }
 
-fn hello(protocol: u32) -> HolderFrame {
+pub(crate) fn hello(protocol: u32) -> HolderFrame {
     HolderFrame::Hello {
         protocol,
         daemon_boot: "test-boot".to_owned(),
     }
 }
 
-fn path_arg(path: &Path) -> &str {
+pub(crate) fn path_arg(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
-async fn wait_until(what: &str, satisfied: impl Fn() -> bool) {
+pub(crate) async fn wait_until(what: &str, satisfied: impl Fn() -> bool) {
     let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
     while !satisfied() {
         assert!(Instant::now() < deadline, "never happened: {what}");
@@ -717,9 +724,9 @@ async fn terminate_ends_a_child_ignoring_requests_to_end_and_keeps_its_exit() {
 /// Kills a descendant the holder is not expected to end (or failed to), so a
 /// test leaves nothing behind.
 #[cfg(unix)]
-struct Reaper {
-    pid: libc::pid_t,
-    always: bool,
+pub(crate) struct Reaper {
+    pub(crate) pid: libc::pid_t,
+    pub(crate) always: bool,
 }
 
 #[cfg(unix)]
@@ -1034,7 +1041,7 @@ async fn without_a_successor_a_lost_connection_ends_the_tree_and_the_holder_and_
     assert!(left.is_empty(), "the holder left {left:?}");
 }
 
-fn files_left(rig: &Rig) -> Vec<std::ffi::OsString> {
+pub(crate) fn files_left(rig: &Rig) -> Vec<std::ffi::OsString> {
     std::fs::read_dir(rig.holders_dir())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -1043,7 +1050,7 @@ fn files_left(rig: &Rig) -> Vec<std::ffi::OsString> {
 
 /// Reads past the screen copies to `Exited`, which must be the next other
 /// frame.
-async fn until_exited(peer: &mut Peer) -> Option<i32> {
+pub(crate) async fn until_exited(peer: &mut Peer) -> Option<i32> {
     loop {
         match peer.frame().await {
             frame if is_copy(&frame) => {}
@@ -1054,7 +1061,7 @@ async fn until_exited(peer: &mut Peer) -> Option<i32> {
 }
 
 /// The next frame other than a screen copy.
-async fn next_answer(peer: &mut Peer) -> HolderFrame {
+pub(crate) async fn next_answer(peer: &mut Peer) -> HolderFrame {
     loop {
         match peer.frame().await {
             frame if is_copy(&frame) => {}
@@ -1262,7 +1269,7 @@ async fn assert_window_processes_end(window: Vec<u32>) {
 
 /// The state `ps` shows for `pid`; `None` once it is gone.
 #[cfg(unix)]
-fn ps_state(pid: u32) -> Option<char> {
+pub(crate) fn ps_state(pid: u32) -> Option<char> {
     let output = Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .output()
@@ -1275,7 +1282,7 @@ fn ps_state(pid: u32) -> Option<char> {
 
 /// Gone, or a zombie whose end only its parent has yet to take.
 #[cfg(unix)]
-fn has_ended(pid: u32) -> bool {
+pub(crate) fn has_ended(pid: u32) -> bool {
     ps_state(pid).is_none_or(|state| state == 'Z')
 }
 
@@ -1415,7 +1422,7 @@ async fn the_end_follows_the_childs_tree_and_not_the_terminals_other_writers() {
 
 /// Scope names for a window of `rig`, new for each test.
 #[cfg(target_os = "linux")]
-fn scopes_of(rig: &Rig) -> yagura_protocol::holder::HolderScopes {
+pub(crate) fn scopes_of(rig: &Rig) -> yagura_protocol::holder::HolderScopes {
     yagura_protocol::holder::HolderScopes {
         holder: format!(
             "yagura_test_{}_{}_holder.scope",
@@ -1427,7 +1434,7 @@ fn scopes_of(rig: &Rig) -> yagura_protocol::holder::HolderScopes {
 
 /// The cgroup path `/proc/<pid>/cgroup` names; empty once the process is gone.
 #[cfg(target_os = "linux")]
-fn cgroup_of(pid: u32) -> String {
+pub(crate) fn cgroup_of(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
         .unwrap_or_default()
         .lines()
@@ -1438,7 +1445,7 @@ fn cgroup_of(pid: u32) -> String {
 
 /// The children of every thread of the process `pid`.
 #[cfg(target_os = "linux")]
-fn children_of(pid: u32) -> Vec<u32> {
+pub(crate) fn children_of(pid: u32) -> Vec<u32> {
     let mut children = Vec::new();
     for task in std::fs::read_dir(format!("/proc/{pid}/task"))
         .unwrap()
@@ -1462,7 +1469,7 @@ fn scope_lines(log: &Path) -> usize {
 
 /// Stops, as a test ends, the scopes it may have made.
 #[cfg(target_os = "linux")]
-struct StopScopes(yagura_protocol::holder::HolderScopes);
+pub(crate) struct StopScopes(pub(crate) yagura_protocol::holder::HolderScopes);
 
 #[cfg(target_os = "linux")]
 impl Drop for StopScopes {
@@ -1514,10 +1521,18 @@ async fn without_a_reachable_user_bus_a_window_runs_as_ever_and_its_holder_logs_
         scope_lines(&log) > 0
     })
     .await;
+    let watcher = record
+        .watcher_pid
+        .expect("the holder's record names no watcher");
     assert_eq!(
         children_of(record.holder_pid),
+        vec![watcher],
+        "the holder runs a process beside its watcher"
+    );
+    assert_eq!(
+        children_of(watcher),
         vec![record.child_pid.unwrap()],
-        "the holder runs a process beside the window's child"
+        "the watcher runs a process beside the window's child"
     );
 
     std::fs::write(&gate, b"").unwrap();
@@ -1543,36 +1558,4 @@ async fn without_a_reachable_user_bus_a_window_runs_as_ever_and_its_holder_logs_
         "the holder did not log the failed request once:\n{}",
         std::fs::read_to_string(&log).unwrap_or_default()
     );
-}
-
-/// With the user's user manager running, the holder ends up in the holder's
-/// scope and the window's child in the child's scope.
-#[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the user's systemd user manager; run with --include-ignored where one runs"]
-async fn with_a_user_manager_the_holder_and_its_child_end_up_in_their_scopes() {
-    let rig = Rig::new("scoped");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let gate = rig.file("gate");
-    let scopes = scopes_of(&rig);
-    let _stop = StopScopes(scopes.clone());
-    let launch = HolderLaunch {
-        scopes: Some(scopes.clone()),
-        ..rig.launch(&["exit", "0", path_arg(&gate)], NO_DEADLINE_MS)
-    };
-    let mut holder = rig.start(&launch);
-    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
-    let record = rig.record_where(|record| record.child_pid.is_some()).await;
-    let child = record.child_pid.unwrap();
-
-    wait_until("the holder and the child are in their scopes", || {
-        cgroup_of(record.holder_pid).ends_with(&format!("/{}", scopes.holder))
-            && cgroup_of(child).ends_with(&format!("/{}", scopes.child))
-    })
-    .await;
-
-    std::fs::write(&gate, b"").unwrap();
-    assert_eq!(until_exited(&mut peer).await, Some(0));
-    peer.send(HolderFrame::Terminate { tree: true }).await;
-    holder.wait_exit().await;
 }

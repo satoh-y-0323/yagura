@@ -1,11 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Integration test: the operating-system queries behind the child's base
-//! environment -- whether a locale exists, the user's preferred locale and
-//! the login shell in the password database.
+//! Integration test: the locale queries behind the child's base environment
+//! -- whether a locale exists and the user's preferred locale.
 
-use yagura_os::locale::{PreferredLocale, locale_exists, preferred_locale};
-use yagura_os::login_shell::passwd_login_shell;
+use yagura_locale::{PreferredLocale, locale_exists, preferred_locale};
 
 #[cfg(unix)]
 #[test]
@@ -68,22 +66,4 @@ fn macos_reports_a_preferred_locale_with_a_language() {
     let preferred: Option<PreferredLocale> = preferred_locale();
     let preferred = preferred.expect("macOS always has a current locale");
     assert!(!preferred.language.is_empty());
-}
-
-#[cfg(unix)]
-#[test]
-fn the_password_database_names_an_absolute_login_shell_on_unix() {
-    let shell: Option<std::path::PathBuf> = passwd_login_shell();
-    let shell = shell.expect("the test user has a login shell in the password database");
-    assert!(
-        shell.is_absolute(),
-        "a login shell from the password database is an absolute path"
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn there_is_no_password_database_login_shell_on_windows() {
-    let shell: Option<std::path::PathBuf> = passwd_login_shell();
-    assert!(shell.is_none());
 }

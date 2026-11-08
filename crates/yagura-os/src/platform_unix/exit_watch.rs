@@ -500,3 +500,568 @@ pub(crate) fn has_exited(pid: libc::pid_t) -> bool {
     }
     info.pbi_status == libc::SZOMB
 }
+
+// =========================================================================
+// A holder's watcher and the holder that is its parent
+// =========================================================================
+
+/// Blocks `signals` in the calling thread, and so in every thread it starts
+/// afterwards.
+fn block_signals(signals: &[libc::c_int]) -> io::Result<()> {
+    // SAFETY: zeroed is a valid `sigset_t`, set below through the libc calls.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a live local the calls write.
+    let blocked = unsafe {
+        libc::sigemptyset(&mut set);
+        for &signal in signals {
+            libc::sigaddset(&mut set, signal);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut())
+    };
+    if blocked == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(blocked))
+    }
+}
+
+/// Blocks `SIGCHLD` in the calling thread and every thread it starts
+/// afterwards. Called before a process starts any thread, it leaves the
+/// signal to [`wait_child_signal`] and to the `signalfd` of an owner's
+/// [`crate::platform_unix::TreeEnd`] (Linux), which no handler in another
+/// thread then takes first.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the handler or the mask cannot
+/// be set.
+pub fn block_child_signal() -> io::Result<()> {
+    // macOS discards a signal whose action is to be ignored, the default
+    // `SIGCHLD`'s, even while it is blocked: a handler keeps it pending. It
+    // never runs, the signal being blocked in every thread.
+    extern "C" fn keep_pending(_signal: libc::c_int) {}
+    // SAFETY: zeroed is a valid `sigaction`, filled in below.
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = keep_pending as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    action.sa_flags = libc::SA_RESTART;
+    // SAFETY: `action` is a live local with an empty mask; the handler only
+    // returns, which is async-signal-safe.
+    let set = unsafe {
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut())
+    };
+    if set != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    block_signals(&[libc::SIGCHLD])
+}
+
+/// Waits for a `SIGCHLD` blocked by [`block_child_signal`] and takes it. A
+/// signal that came before the call is taken at once.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the wait fails.
+pub fn wait_child_signal() -> io::Result<()> {
+    // SAFETY: zeroed is a valid `sigset_t`, set below through the libc calls.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a live local the calls write.
+    unsafe {
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+    }
+    loop {
+        let mut taken: libc::c_int = 0;
+        // SAFETY: `set` and `taken` are live locals for the call.
+        let result = unsafe { libc::sigwait(&set, &mut taken) };
+        if result == 0 {
+            return Ok(());
+        }
+        if result != libc::EINTR {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+    }
+}
+
+/// Blocks the signals a holder's watcher takes as events, `SIGTERM` and
+/// `SIGCHLD`, before it starts its child (which [`crate::pty::start_leader`]
+/// gives every signal unblocked) and before [`WatcherWait`] reads them.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the mask cannot be changed.
+pub fn block_watcher_signals() -> io::Result<()> {
+    block_signals(&[libc::SIGTERM, libc::SIGCHLD])
+}
+
+/// A change in the state of a child of this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildChange {
+    /// It was stopped.
+    Stopped,
+    /// It was continued.
+    Continued,
+    /// It exited, and has been reaped.
+    Exited,
+}
+
+/// Takes the next change of this process's child `pid` without waiting: a
+/// stop or a continue as it came, or the exit, reaping the child under
+/// `gate`'s lock. `None` when nothing has changed.
+///
+/// # Errors
+///
+/// Returns the operating system's error, `ECHILD` for a process that is not
+/// an unreaped child.
+pub fn take_child_change(pid: u32, gate: &crate::ReapGate) -> io::Result<Option<ChildChange>> {
+    let Some(code) = child_event(
+        pid,
+        libc::WEXITED | libc::WSTOPPED | libc::WCONTINUED | libc::WNOWAIT,
+    )?
+    else {
+        return Ok(None);
+    };
+    if code == libc::CLD_CONTINUED {
+        child_event(pid, libc::WCONTINUED)?;
+        return Ok(Some(ChildChange::Continued));
+    }
+    if code == libc::CLD_STOPPED || code == libc::CLD_TRAPPED {
+        child_event(pid, libc::WSTOPPED)?;
+        return Ok(Some(ChildChange::Stopped));
+    }
+    gate.reap_with(|| reap_exited(pid))?;
+    Ok(Some(ChildChange::Exited))
+}
+
+/// The `si_code` of the child `pid`'s next event among `flags`, taken
+/// without waiting (`WNOHANG`); `None` when there is none.
+fn child_event(pid: u32, flags: libc::c_int) -> io::Result<Option<libc::c_int>> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: zeroed is a valid `siginfo_t`, which waitid only writes.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live stack local; WNOHANG returns at once.
+        let result = unsafe { libc::waitid(libc::P_PID, id, &mut info, flags | libc::WNOHANG) };
+        if result == 0 {
+            // SAFETY: waitid filled `info`, leaving the pid zero for no event.
+            return Ok((unsafe { info.si_pid() } != 0).then_some(info.si_code));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Sends `SIGCONT` to this process's child `pid` under `gate`'s lock, unless
+/// it has been reaped.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the signal cannot be sent.
+pub fn continue_child(pid: u32, gate: &crate::ReapGate) -> io::Result<()> {
+    gate.signal_unless_reaped(|| signal_child(pid, libc::SIGCONT))
+        .unwrap_or(Ok(()))
+}
+
+/// Sends `SIGHUP` to this process's child `pid`, as closing its terminal
+/// would, under `gate`'s lock unless it has been reaped; a child already gone
+/// is not an error.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the signal cannot be sent.
+pub fn hang_up_child(pid: u32, gate: &crate::ReapGate) -> io::Result<()> {
+    gate.signal_unless_reaped(|| signal_child(pid, libc::SIGHUP))
+        .unwrap_or(Ok(()))
+}
+
+/// Sends `SIGKILL` to this process's child `pid` under `gate`'s lock unless
+/// it has been reaped; a child already gone is not an error.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the signal cannot be sent.
+pub fn kill_child(pid: u32, gate: &crate::ReapGate) -> io::Result<()> {
+    gate.signal_unless_reaped(|| signal_child(pid, libc::SIGKILL))
+        .unwrap_or(Ok(()))
+}
+
+/// The exit of this process's unreaped child `pid`, looked at without
+/// reaping it or waiting: `None` while it runs, else its exit code, `None`
+/// within for an end by a signal.
+///
+/// # Errors
+///
+/// Returns the operating system's error, `ECHILD` for a process that is not
+/// an unreaped child.
+pub fn unreaped_exit(pid: u32) -> io::Result<Option<Option<i32>>> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: zeroed is a valid `siginfo_t`, which waitid only writes.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live stack local; WNOWAIT leaves the child
+        // waitable and WNOHANG returns at once.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == 0 {
+            // SAFETY: waitid filled `info`, leaving the pid zero while the
+            // child runs; the status is the exit code for CLD_EXITED.
+            let (pid, status) = unsafe { (info.si_pid(), info.si_status()) };
+            if pid == 0 {
+                return Ok(None);
+            }
+            return Ok(Some((info.si_code == libc::CLD_EXITED).then_some(status)));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Reaps this process's child `pid` under `gate`'s lock, once
+/// [`unreaped_exit`] has seen it exit. A child already gone is not an error.
+///
+/// # Errors
+///
+/// Returns the operating system's error otherwise.
+pub fn reap_exited_child(pid: u32, gate: &crate::ReapGate) -> io::Result<()> {
+    gate.reap_with(|| reap_exited(pid))
+}
+
+/// Reaps the exited child `pid`, which must not block.
+fn reap_exited(pid: u32) -> io::Result<()> {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Ok(());
+    };
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a live stack local.
+        if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::ECHILD) => return Ok(()),
+            _ => return Err(error),
+        }
+    }
+}
+
+/// What woke a [`WatcherWait`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WatcherEvents {
+    /// The leader exited (told once).
+    pub leader_exited: bool,
+    /// The holder's socket has something to read, or has ended.
+    pub socket: bool,
+    /// A `SIGTERM` came.
+    pub terminated: bool,
+    /// A `SIGCHLD` came (Linux): a child, perhaps an orphan, changed.
+    pub children: bool,
+}
+
+impl WatcherEvents {
+    #[cfg(target_os = "macos")]
+    fn any(self) -> bool {
+        self.leader_exited || self.socket || self.terminated || self.children
+    }
+}
+
+/// The one wait of a holder's watcher: its leader's exit, its holder's
+/// socket and the signals [`block_watcher_signals`] blocked. Linux waits on
+/// the leader's pidfd, the socket and a `signalfd` with `poll`; macOS on one
+/// kqueue.
+#[derive(Debug)]
+pub struct WatcherWait {
+    leader_told: bool,
+    #[cfg(target_os = "linux")]
+    socket: libc::c_int,
+    #[cfg(target_os = "linux")]
+    pidfd: std::os::fd::OwnedFd,
+    #[cfg(target_os = "linux")]
+    signals: std::os::fd::OwnedFd,
+    #[cfg(target_os = "macos")]
+    leader: u32,
+    #[cfg(target_os = "macos")]
+    queue: std::os::fd::OwnedFd,
+    #[cfg(target_os = "macos")]
+    early: WatcherEvents,
+}
+
+#[cfg(target_os = "linux")]
+impl WatcherWait {
+    /// Watches the unreaped child `leader` and `socket`, which must outlive
+    /// the wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when a descriptor cannot be made.
+    pub fn new(leader: u32, socket: std::os::fd::BorrowedFd<'_>) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let pidfd = super::user_manager::pidfd_open(leader)?;
+        // SAFETY: zeroed is a valid `sigset_t`, set below through the libc calls.
+        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `set` is a live local the calls write; -1 asks for a new
+        // descriptor.
+        let fd = unsafe {
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGTERM);
+            libc::sigaddset(&mut set, libc::SIGCHLD);
+            libc::signalfd(-1, &set, libc::SFD_NONBLOCK | libc::SFD_CLOEXEC)
+        };
+        if fd == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            leader_told: false,
+            socket: socket.as_raw_fd(),
+            pidfd,
+            // SAFETY: the descriptor was just returned to this function alone.
+            signals: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+        })
+    }
+
+    /// Waits until something happens, or until `limit` has passed (no limit
+    /// when `None`), and says what did: nothing at the limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the wait fails.
+    pub fn wait(&mut self, limit: Option<std::time::Duration>) -> io::Result<WatcherEvents> {
+        use std::os::fd::AsRawFd as _;
+
+        let timeout = limit.map_or(-1, |limit| {
+            libc::c_int::try_from(limit.as_millis()).unwrap_or(libc::c_int::MAX)
+        });
+        let mut fds = vec![
+            libc::pollfd {
+                fd: self.socket,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.signals.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        if !self.leader_told {
+            fds.push(libc::pollfd {
+                fd: self.pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        let count = libc::nfds_t::try_from(fds.len())
+            .map_err(|_| io::Error::other("too many descriptors to poll"))?;
+        // SAFETY: `fds` is a live vector of `count` entries.
+        if unsafe { libc::poll(fds.as_mut_ptr(), count, timeout) } == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+            return Ok(WatcherEvents::default());
+        }
+        let mut events = WatcherEvents {
+            socket: fds[0].revents != 0,
+            ..WatcherEvents::default()
+        };
+        if fds[1].revents != 0 {
+            self.read_signals(&mut events)?;
+        }
+        if fds.get(2).is_some_and(|fd| fd.revents != 0) {
+            self.leader_told = true;
+            events.leader_exited = true;
+        }
+        Ok(events)
+    }
+
+    fn read_signals(&self, events: &mut WatcherEvents) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        loop {
+            // SAFETY: zeroed is a valid `signalfd_siginfo`, which read writes.
+            let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::signalfd_siginfo>();
+            // SAFETY: `info` is a live local of `size` bytes.
+            let read = unsafe {
+                libc::read(
+                    self.signals.as_raw_fd(),
+                    std::ptr::addr_of_mut!(info).cast(),
+                    size,
+                )
+            };
+            if usize::try_from(read).ok() != Some(size) {
+                let error = io::Error::last_os_error();
+                return match error.kind() {
+                    io::ErrorKind::Interrupted => continue,
+                    io::ErrorKind::WouldBlock => Ok(()),
+                    _ if read >= 0 => Ok(()),
+                    _ => Err(error),
+                };
+            }
+            match libc::c_int::try_from(info.ssi_signo) {
+                Ok(libc::SIGTERM) => events.terminated = true,
+                Ok(libc::SIGCHLD) => events.children = true,
+                _ => {}
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl WatcherWait {
+    /// Watches the unreaped child `leader` and `socket`, which must outlive
+    /// the wait.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the queue cannot be made.
+    pub fn new(leader: u32, socket: std::os::fd::BorrowedFd<'_>) -> io::Result<Self> {
+        use std::os::fd::AsRawFd as _;
+
+        let queue = ExitQueue::new()?;
+        let mut early = WatcherEvents::default();
+        let watched = queue.watch(leader)?;
+        early.leader_exited = !watched;
+        let socket = socket.as_raw_fd();
+        for (ident, filter) in [
+            (
+                libc::uintptr_t::try_from(socket).unwrap_or(0),
+                libc::EVFILT_READ,
+            ),
+            (
+                libc::uintptr_t::try_from(libc::SIGTERM).unwrap_or(0),
+                libc::EVFILT_SIGNAL,
+            ),
+        ] {
+            // SAFETY: zeroed is a valid `kevent`; the fields that matter are
+            // set below.
+            let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+            change.ident = ident;
+            change.filter = filter;
+            change.flags = libc::EV_ADD;
+            // SAFETY: one change from a live stack local, no events asked for.
+            let added = unsafe {
+                libc::kevent(
+                    queue.0.as_raw_fd(),
+                    &change,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if added == -1 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        // A SIGTERM blocked before the queue watched for it is pending only.
+        // SAFETY: zeroed is a valid `sigset_t`, which sigpending writes.
+        let mut pending: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `pending` is a live local of the type the calls take.
+        early.terminated = unsafe {
+            libc::sigpending(&mut pending) == 0 && libc::sigismember(&pending, libc::SIGTERM) == 1
+        };
+        Ok(Self {
+            leader_told: false,
+            leader,
+            queue: queue.0,
+            early,
+        })
+    }
+
+    /// Waits until something happens, or until `limit` has passed (no limit
+    /// when `None`), and says what did: nothing at the limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the wait fails.
+    pub fn wait(&mut self, limit: Option<std::time::Duration>) -> io::Result<WatcherEvents> {
+        use std::os::fd::AsRawFd as _;
+
+        let mut events = std::mem::take(&mut self.early);
+        let timeout = if events.any() {
+            Some(std::time::Duration::ZERO)
+        } else {
+            limit
+        };
+        let timeout = timeout.map(timespec_of);
+        let mut fired: [libc::kevent; 4] =
+            // SAFETY: zeroed is a valid `kevent`, which kevent only writes.
+            unsafe { std::mem::zeroed() };
+        // SAFETY: no changes are passed; `fired` is a live array of the
+        // length passed; the timeout is a live local or null, which blocks.
+        let count = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                fired.as_mut_ptr(),
+                4,
+                timeout
+                    .as_ref()
+                    .map_or(std::ptr::null(), std::ptr::from_ref),
+            )
+        };
+        if count == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        let leader = libc::uintptr_t::try_from(self.leader).unwrap_or(0);
+        for event in fired.iter().take(usize::try_from(count).unwrap_or(0)) {
+            match event.filter {
+                libc::EVFILT_PROC if event.ident == leader => events.leader_exited = true,
+                libc::EVFILT_READ => events.socket = true,
+                libc::EVFILT_SIGNAL => events.terminated = true,
+                _ => {}
+            }
+        }
+        if events.leader_exited {
+            if self.leader_told {
+                events.leader_exited = false;
+            }
+            self.leader_told = true;
+        }
+        Ok(events)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl WatcherWait {
+    /// Not on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Always.
+    pub fn new(_leader: u32, _socket: std::os::fd::BorrowedFd<'_>) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a watcher's wait is not known on this platform",
+        ))
+    }
+
+    /// Not on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Always.
+    pub fn wait(&mut self, _limit: Option<std::time::Duration>) -> io::Result<WatcherEvents> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a watcher's wait is not known on this platform",
+        ))
+    }
+}

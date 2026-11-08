@@ -251,8 +251,8 @@ impl UserManager {
         Ok(Self { conn })
     }
 
-    /// Moves the process `holder` names into a new scope `name` holding it
-    /// alone, and returns once the job is done.
+    /// Moves the processes `members` names (a holder and its watcher) into a
+    /// new scope `name` holding them alone, and returns once the job is done.
     ///
     /// # Errors
     ///
@@ -262,10 +262,11 @@ impl UserManager {
     pub async fn start_holder_scope(
         &self,
         name: &str,
-        holder: BorrowedFd<'_>,
+        members: &[BorrowedFd<'_>],
     ) -> Result<(), UserManagerError> {
+        let fds: Vec<zbus::Fd<'_>> = members.iter().map(|fd| zbus::Fd::from(*fd)).collect();
         let properties = vec![
-            ("PIDFDs", Variant::from(vec![zbus::Fd::from(holder)])),
+            ("PIDFDs", Variant::from(fds)),
             ("CollectMode", Variant::from(COLLECT_MODE)),
         ];
         self.start_scope(name, properties).await

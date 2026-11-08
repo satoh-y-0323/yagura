@@ -30,7 +30,11 @@ mod user_manager;
 
 #[cfg(target_os = "macos")]
 pub use exit_watch::wait_for_members_exit;
-pub use exit_watch::{ChildSignals, wait_for_exit_without_reaping};
+pub use exit_watch::{
+    ChildChange, ChildSignals, WatcherEvents, WatcherWait, block_child_signal,
+    block_watcher_signals, continue_child, hang_up_child, kill_child, reap_exited_child,
+    take_child_change, unreaped_exit, wait_child_signal, wait_for_exit_without_reaping,
+};
 #[cfg(target_os = "linux")]
 pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
@@ -504,6 +508,21 @@ pub struct SocketListener {
     lock: EndpointLock,
 }
 
+impl SocketListener {
+    /// A copy of the descriptor the endpoint's lock is held on, close-on-exec:
+    /// the lock stays held while any copy is open, so a copy is handed only
+    /// to the one process meant to hold the lock on (the holder's watcher).
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the descriptor cannot be
+    /// copied.
+    pub fn lock_descriptor(&self) -> io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::AsFd as _;
+        self.lock._file.as_fd().try_clone_to_owned()
+    }
+}
+
 impl Drop for SocketListener {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
@@ -664,7 +683,9 @@ pub struct EndpointLock {
     path: PathBuf,
 }
 
-fn endpoint_lock_path(endpoint: &Path) -> PathBuf {
+/// The lock file of the endpoint `endpoint`: `<endpoint>.lock`.
+#[must_use]
+pub fn endpoint_lock_path(endpoint: &Path) -> PathBuf {
     let mut lock_path = endpoint.as_os_str().to_owned();
     lock_path.push(".lock");
     PathBuf::from(lock_path)
@@ -919,6 +940,356 @@ fn peer_executable_path(conn: &UnixStream) -> Option<PathBuf> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_executable_path(_conn: &UnixStream) -> Option<PathBuf> {
     None
+}
+
+// =========================================================================
+// A holder and its watcher
+// =========================================================================
+
+/// The most descriptors one received message may carry; more are an error.
+const MOST_RECEIVED_FDS: usize = 256;
+
+/// A connected pair of stream sockets, both close-on-exec.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the pair cannot be made.
+pub fn socket_pair() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    let (one, other) = std::os::unix::net::UnixStream::pair()?;
+    Ok((one.into(), other.into()))
+}
+
+/// The size of a control buffer for `fds` descriptors.
+fn control_space(fds: usize) -> usize {
+    let bytes = libc::c_uint::try_from(fds * std::mem::size_of::<libc::c_int>())
+        .unwrap_or(libc::c_uint::MAX);
+    // SAFETY: CMSG_SPACE only computes a size from its argument.
+    unsafe { libc::CMSG_SPACE(bytes) as usize }
+}
+
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+// A peer gone raises SIGPIPE here, which a Rust program ignores from its start.
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = 0;
+
+/// Writes all of `bytes` to the stream socket `socket`, with `fds` passed
+/// beside the first byte (`SCM_RIGHTS`).
+///
+/// # Errors
+///
+/// Returns the operating system's error, such as `EPIPE` once the peer is
+/// gone and `EINVAL` for more descriptors than one message carries.
+pub fn send_with_descriptors(
+    socket: std::os::fd::BorrowedFd<'_>,
+    bytes: &[u8],
+    fds: &[std::os::fd::BorrowedFd<'_>],
+) -> io::Result<()> {
+    let raw: Vec<libc::c_int> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+    let mut control = vec![0u64; control_space(raw.len()).div_ceil(8)];
+    let mut rest = bytes;
+    let mut first = true;
+    while !rest.is_empty() {
+        let mut iov = libc::iovec {
+            iov_base: rest.as_ptr().cast_mut().cast(),
+            iov_len: rest.len(),
+        };
+        // SAFETY: an all-zero msghdr is an empty header, filled in below.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        if first && !raw.is_empty() {
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = control_space(raw.len()) as _;
+            let data_len = libc::c_uint::try_from(raw.len() * std::mem::size_of::<libc::c_int>())
+                .unwrap_or(libc::c_uint::MAX);
+            // SAFETY: the control buffer is sized for one header followed by
+            // `raw`, so CMSG_FIRSTHDR of it is not null and the copy fits.
+            unsafe {
+                let header = libc::CMSG_FIRSTHDR(&raw const msg);
+                (*header).cmsg_level = libc::SOL_SOCKET;
+                (*header).cmsg_type = libc::SCM_RIGHTS;
+                (*header).cmsg_len = libc::CMSG_LEN(data_len) as _;
+                std::ptr::copy_nonoverlapping(
+                    raw.as_ptr(),
+                    libc::CMSG_DATA(header).cast::<libc::c_int>(),
+                    raw.len(),
+                );
+            }
+        }
+        // SAFETY: `msg` points at buffers that outlive the call.
+        let sent = unsafe { libc::sendmsg(socket.as_raw_fd(), &raw const msg, SEND_FLAGS) };
+        let Ok(sent) = usize::try_from(sent) else {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        };
+        first = false;
+        rest = rest.get(sent..).unwrap_or_default();
+    }
+    Ok(())
+}
+
+/// Reads what the stream socket `socket` has into `buf`, waiting for some,
+/// and adds the descriptors passed beside it to `fds`, each close-on-exec.
+/// Returns how many bytes were read: `0` at the end of the stream.
+///
+/// # Errors
+///
+/// Returns the operating system's error, and an error when the message
+/// carried more descriptors than this side takes at once (256).
+pub fn receive_with_descriptors(
+    socket: std::os::fd::BorrowedFd<'_>,
+    buf: &mut [u8],
+    fds: &mut Vec<std::os::fd::OwnedFd>,
+) -> io::Result<usize> {
+    use std::os::fd::FromRawFd as _;
+
+    let mut control = vec![0u64; control_space(MOST_RECEIVED_FDS).div_ceil(8)];
+    loop {
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        };
+        // SAFETY: an all-zero msghdr is an empty header, filled in below.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = (control.len() * 8) as _;
+        #[cfg(target_os = "linux")]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let flags = 0;
+        // SAFETY: `msg` points at buffers that outlive the call.
+        let read = unsafe { libc::recvmsg(socket.as_raw_fd(), &raw mut msg, flags) };
+        let Ok(read) = usize::try_from(read) else {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        };
+        let mut received = Vec::new();
+        // SAFETY: recvmsg filled `msg`; the walk stays within its control
+        // buffer, and each descriptor read is owned from here on.
+        unsafe {
+            let mut header = libc::CMSG_FIRSTHDR(&raw const msg);
+            while !header.is_null() {
+                if (*header).cmsg_level == libc::SOL_SOCKET
+                    && (*header).cmsg_type == libc::SCM_RIGHTS
+                {
+                    let data = libc::CMSG_DATA(header).cast::<libc::c_int>();
+                    let len = (*header).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
+                    for index in 0..len / std::mem::size_of::<libc::c_int>() {
+                        received.push(std::os::fd::OwnedFd::from_raw_fd(
+                            data.add(index).read_unaligned(),
+                        ));
+                    }
+                }
+                header = libc::CMSG_NXTHDR(&raw const msg, header);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        for fd in &received {
+            set_cloexec(fd.as_raw_fd())?;
+        }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a message carried more descriptors than can be taken",
+            ));
+        }
+        fds.extend(received);
+        return Ok(read);
+    }
+}
+
+fn set_cloexec(fd: libc::c_int) -> io::Result<()> {
+    // SAFETY: F_GETFD and F_SETFD only read and set this process's fd flag.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags == -1 || libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Starts `program`, a holder's watcher, with `socket` as its one descriptor
+/// beside its standard three, which are on `/dev/null`, and the descriptor's
+/// number as its only argument. It starts with an empty environment, in this
+/// process's session and process group.
+///
+/// # Errors
+///
+/// Returns an error when the program cannot be started, and off Linux when
+/// no bound on the descriptors to keep from it can be read.
+// The OS boundary owns this spawn: the holder that calls it is the watcher's
+// parent and reaper, and the ban in `clippy.toml` keeps every other call site
+// from creating a child of its own.
+#[allow(clippy::disallowed_methods)]
+pub fn spawn_watcher(
+    program: &Path,
+    socket: std::os::fd::BorrowedFd<'_>,
+) -> io::Result<std::process::Child> {
+    let fd = socket.as_raw_fd();
+    let bound = unnamed_fd_bound();
+    #[cfg(not(target_os = "linux"))]
+    let bound = bound.ok_or_else(|| {
+        io::Error::other("no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to")
+    })?;
+    let mut command = Command::new(program);
+    command
+        .arg(fd.to_string())
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the closure runs in the forked child between fork and exec. It
+    // calls only syscall(2) for close_range(2) and fcntl(2), allocates
+    // nothing, takes no lock and reads only plain integers moved in.
+    unsafe {
+        command.pre_exec(move || {
+            mark_unnamed_fds_cloexec(bound)?;
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn()
+}
+
+/// Takes the descriptor `fd` this process was started with (by
+/// [`spawn_watcher`]) as its own, close-on-exec, and closes every other
+/// descriptor from 3 up.
+///
+/// # Errors
+///
+/// Returns an error when `fd` is not an open socket or the descriptors
+/// cannot be listed.
+pub fn take_inherited_socket(fd: libc::c_int) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd as _;
+
+    if fd < FIRST_UNNAMED_FD {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a standard stream is not the watcher's socket",
+        ));
+    }
+    // SAFETY: zeroed is a valid `stat`, which fstat only writes.
+    let mut meta: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `meta` is a live local of the type fstat writes.
+    if unsafe { libc::fstat(fd, &mut meta) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if meta.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the watcher's descriptor is not a socket",
+        ));
+    }
+    set_cloexec(fd)?;
+    let open: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    for other in open {
+        if other >= FIRST_UNNAMED_FD && other != fd {
+            // SAFETY: closing a number nothing in this process owns yet; the
+            // listing's own number is closed already and fails harmlessly.
+            unsafe { libc::close(other) };
+        }
+    }
+    // SAFETY: `fd` is an open socket that nothing else in this process owns.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Raises this process's soft `RLIMIT_NOFILE` as far as it goes (its hard
+/// limit, on macOS no further than `kern.maxfilesperproc`) and returns the
+/// soft limit then in force.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the limit cannot be read.
+pub fn raise_descriptor_limit() -> io::Result<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live out-parameter of the type getrlimit(2) writes.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut wanted = limit.rlim_max;
+    if let Some(most) = max_files_per_proc().and_then(|most| libc::rlim_t::try_from(most).ok()) {
+        wanted = wanted.min(most);
+    }
+    if wanted > limit.rlim_cur {
+        let raised = libc::rlimit {
+            rlim_cur: wanted,
+            rlim_max: limit.rlim_max,
+        };
+        // SAFETY: `raised` is a live local of the type setrlimit(2) reads.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+            limit.rlim_cur = wanted;
+        }
+    }
+    Ok(limit.rlim_cur)
+}
+
+/// How many more descriptors this process may open before its soft
+/// `RLIMIT_NOFILE`, keeping `margin` of them aside.
+///
+/// # Errors
+///
+/// Returns the operating system's error when the limit or the open
+/// descriptors cannot be read.
+pub fn spare_descriptors(margin: usize) -> io::Result<usize> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is a live out-parameter of the type getrlimit(2) writes.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let open = std::fs::read_dir("/dev/fd")?.count();
+    let soft = usize::try_from(limit.rlim_cur).unwrap_or(usize::MAX);
+    Ok(soft.saturating_sub(open).saturating_sub(margin))
+}
+
+/// Whether the peer of the stream socket `socket` has closed it, read without
+/// waiting: what is still unread on it is dropped. An error reading counts
+/// as closed.
+#[must_use]
+pub fn peer_has_closed(socket: std::os::fd::BorrowedFd<'_>) -> bool {
+    let mut scratch = [0u8; 4096];
+    loop {
+        // SAFETY: `scratch` is a live buffer of the length passed.
+        let read = unsafe {
+            libc::recv(
+                socket.as_raw_fd(),
+                scratch.as_mut_ptr().cast(),
+                scratch.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        match read {
+            0 => return true,
+            1.. => {}
+            _ => {
+                let error = io::Error::last_os_error();
+                match error.kind() {
+                    io::ErrorKind::Interrupted => {}
+                    io::ErrorKind::WouldBlock => return false,
+                    _ => return true,
+                }
+            }
+        }
+    }
 }
 
 // =========================================================================

@@ -14,7 +14,7 @@ mod holder_endpoint;
 mod hook_path;
 mod host_os;
 mod instance;
-mod locale;
+mod login_shell;
 mod mcp_bridge;
 mod os_peer_executable;
 mod os_security;

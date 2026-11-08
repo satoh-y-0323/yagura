@@ -4,6 +4,12 @@
   },
   "bundle": {
     "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/yagura-daemon",
+      "binaries/yagura-holder",
+      "binaries/yagura-watcher",
+      "binaries/yagura-mcp"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

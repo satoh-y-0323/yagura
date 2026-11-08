@@ -1,0 +1,27 @@
+[package]
+name = "yagura-locale"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# A part of the yagura app, shipped in its installers rather than released to crates.io.
+publish = false
+# The integration tests are one binary (tests/main.rs) rather than one per file.
+autotests = false
+
+# Unix-only: `locale_exists` asks newlocale(3) directly.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# macOS-only: `preferred_locale` reads the user's CFLocale, the one place a
+# Finder-started process can learn its locale without `LANG`. The `-sys`
+# crate is used directly because the safe wrapper has no CFLocale type.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = "0.8.7"
+
+[lints]
+workspace = true
+
+[[test]]
+name = "locale"
+path = "tests/main.rs"

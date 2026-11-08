@@ -5680,6 +5680,7 @@ dependencies = [
  "windows 0.52.0",
  "yagura-build-support",
  "yagura-daemon",
+ "yagura-locale",
  "yagura-os",
  "yagura-protocol",
  "yagura-term",
@@ -5720,6 +5721,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "yagura-locale"
+version = "0.3.0"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "yagura-mcp"
 version = "0.3.0"
 dependencies = [
@@ -5739,7 +5748,6 @@ dependencies = [
 name = "yagura-os"
 version = "0.3.0"
 dependencies = [
- "core-foundation-sys",
  "getrandom 0.4.3",
  "libc",
  "portable-pty",

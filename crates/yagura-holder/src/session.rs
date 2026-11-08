@@ -11,8 +11,12 @@ use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtyKiller, PtySize, PtySpawn, PtySpawnError};
-use yagura_os::{IpcTransport, PlatformIpc, ProcessGroup, ReapGate};
+use yagura_os::pty::{EnvOp, PtyCommand, PtyControl, PtySize};
+#[cfg(windows)]
+use yagura_os::pty::{PtyKiller, PtySpawn, PtySpawnError};
+use yagura_os::{IpcTransport, PlatformIpc};
+#[cfg(windows)]
+use yagura_os::{ProcessGroup, ReapGate};
 use yagura_protocol::holder::{
     HolderEnvOp, HolderFault, HolderFrame, HolderLaunch, HolderSpawnFailure, MAX_HELLO_DEADLINE_MS,
 };
@@ -32,6 +36,7 @@ const CUT_READ_CHUNK: usize = 8192;
 
 /// How long the child has to act on the first, refusable kill before the OS
 /// boundary forces it down (a no-op on Windows, whose kill cannot be refused).
+#[cfg(windows)]
 const TERMINATE_ESCALATION_GRACE: Duration = Duration::from_millis(250);
 
 /// The longest the holder waits, on its way out, for its last frames to be
@@ -69,9 +74,10 @@ struct Shared {
     /// output is fixed: closing it earlier can discard output not yet read.
     #[cfg(unix)]
     mark_writer: Mutex<Option<yagura_os::pty::EndMarkWriter>>,
-    /// The holder's children have changed: some were reaped.
-    #[cfg(target_os = "linux")]
-    children_changed: ChildChanges,
+    /// The child's exit as its watcher told it: its code, `None` within for
+    /// an end by a signal.
+    #[cfg(unix)]
+    leader_exit: Mutex<Option<Option<i32>>>,
     /// The cgroup of the child's scope, once the child was moved into it.
     #[cfg(target_os = "linux")]
     child_cgroup: Mutex<Option<std::path::PathBuf>>,
@@ -118,38 +124,6 @@ enum Cut {
     /// No mark could be written: the output ended where it had been read.
     #[cfg_attr(windows, allow(dead_code))]
     Abandoned,
-}
-
-/// Counts the changes to the holder's children, for a thread that waits for
-/// the next one.
-#[cfg(target_os = "linux")]
-#[derive(Default)]
-struct ChildChanges {
-    count: Mutex<u64>,
-    changed: std::sync::Condvar,
-}
-
-#[cfg(target_os = "linux")]
-impl ChildChanges {
-    fn count(&self) -> u64 {
-        *lock(&self.count)
-    }
-
-    fn note(&self) {
-        *lock(&self.count) += 1;
-        self.changed.notify_all();
-    }
-
-    /// Waits until a change after `seen` has been noted.
-    fn wait_past(&self, seen: u64) {
-        let mut count = lock(&self.count);
-        while *count == seen {
-            count = self
-                .changed
-                .wait(count)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-    }
 }
 
 /// The terminal's output up to its end: the end of file, or the end mark
@@ -294,6 +268,7 @@ pub(crate) enum Event {
 }
 
 /// The child and the handles to reach it.
+#[cfg(windows)]
 struct Child {
     killer: PtyKiller,
     group: Arc<ProcessGroup>,
@@ -305,6 +280,7 @@ struct Child {
     tree_end_started: bool,
 }
 
+#[cfg(windows)]
 impl Child {
     /// Kills before letting go of the input: on Windows closing the input is
     /// itself a kill, and the explicit kill is to decide the exit code.
@@ -334,8 +310,31 @@ impl Child {
     }
 }
 
+/// The child, the watcher that started it and keeps it (Unix), and the
+/// handles to reach them.
+#[cfg(unix)]
+struct Child {
+    pid: u32,
+    start: Option<String>,
+    watcher: Arc<watcher_link::Link>,
+    control: Arc<PtyControl>,
+    terminal: Terminal,
+}
+
+#[cfg(unix)]
+impl Child {
+    /// Asks the watcher to end the child and its tree, then lets go of the
+    /// input. The watcher ends the whole tree however it is asked, so `tree`
+    /// changes nothing here.
+    fn terminate(&mut self, _tree: bool) {
+        self.watcher.terminate();
+        self.terminal.input.close();
+    }
+}
+
 /// Ends the child's process tree, escalating as the group does. Blocks until
 /// the signals are sent, and so until any other caller's call has finished.
+#[cfg(windows)]
 fn end_tree(group: &ProcessGroup) {
     if let Err(error) = group.terminate() {
         crate::log(format_args!(
@@ -344,74 +343,10 @@ fn end_tree(group: &ProcessGroup) {
     }
 }
 
-/// Ends the tree of the exited `leader`, still unreaped, and returns once its
-/// every process has died. The holder is their reaper, so the tree has ended
-/// once the zombie leader is the holder's only child; each reap is a change
-/// to look again at.
-#[cfg(target_os = "linux")]
-fn end_tree_after_exit(group: &ProcessGroup, leader: u32, gate: &ReapGate, shared: &Shared) {
-    use yagura_os::platform_unix::{child_pids, kill_orphans};
-
-    let only_leader = child_pids().is_ok_and(|children| children.iter().all(|&pid| pid == leader));
-    if only_leader {
-        // Nobody is left to be given the grace.
-        if let Err(error) = group.kill_now() {
-            crate::log(format_args!(
-                "failed to end the child's process tree: {error}"
-            ));
-        }
-    } else {
-        end_tree(group);
-    }
-    loop {
-        let seen = shared.children_changed.count();
-        let cgroup = lock(&shared.child_cgroup).clone();
-        if let Some(cgroup) = cgroup
-            && let Err(error) = yagura_os::platform_unix::kill_cgroup(&cgroup)
-        {
-            crate::log(format_args!(
-                "cannot kill the child's scope through its cgroup: {error}"
-            ));
-        }
-        if let Err(error) = group.kill_now() {
-            crate::log(format_args!(
-                "failed to end the child's process group: {error}"
-            ));
-        }
-        match kill_orphans(leader, gate) {
-            Ok(0) => return,
-            Ok(_) => shared.children_changed.wait_past(seen),
-            Err(error) => {
-                crate::log(format_args!(
-                    "cannot end the rest of the child's process tree: {error}"
-                ));
-                return;
-            }
-        }
-    }
-}
-
-/// Ends the tree of the exited `leader` and returns once every member of its
-/// group has exited, or, when the members cannot be watched, once the last
-/// signal is sent.
-#[cfg(target_os = "macos")]
-fn end_tree_after_exit(group: &ProcessGroup, leader: u32, _gate: &ReapGate, _shared: &Shared) {
-    end_tree(group);
-    // Unbounded: this wait is what orders the end mark after every writer.
-    let waited = yagura_os::platform_unix::group_member_pids(leader).and_then(|members| {
-        yagura_os::platform_unix::wait_for_members_exit(&members, std::time::Duration::MAX)
-    });
-    if let Err(error) = waited {
-        crate::log(format_args!(
-            "cannot watch the child's process group end: {error}"
-        ));
-    }
-}
-
 /// Ends the tree of the exited child. Its end is the end of the output that
-/// follows (Windows), or is not known apart from the signals sent.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn end_tree_after_exit(group: &ProcessGroup, _leader: u32, _gate: &ReapGate, _shared: &Shared) {
+/// follows.
+#[cfg(windows)]
+fn end_tree_after_exit(group: &ProcessGroup) {
     end_tree(group);
 }
 
@@ -441,23 +376,6 @@ fn end_output(control: &PtyControl, shared: &Shared) {
     }
 }
 
-/// Reaps the holder's children other than the leader as they exit, for as
-/// long as the window lives, and tells whoever waits for the tree's end.
-#[cfg(target_os = "linux")]
-async fn reap_orphans_as_they_end(
-    mut signals: yagura_os::platform_unix::ChildSignals,
-    leader: u32,
-    gate: Arc<ReapGate>,
-    shared: Arc<Shared>,
-) {
-    while signals.next().await {
-        if let Err(error) = yagura_os::platform_unix::reap_orphans(leader, &gate) {
-            crate::log(format_args!("cannot reap the child's orphans: {error}"));
-        }
-        shared.children_changed.note();
-    }
-}
-
 fn to_env_op(op: &HolderEnvOp) -> EnvOp {
     match op {
         HolderEnvOp::Set { name, value } => EnvOp::Set(name.clone(), value.clone()),
@@ -471,6 +389,7 @@ struct SpawnError {
     detail: String,
 }
 
+#[cfg(windows)]
 impl From<PtySpawnError> for SpawnError {
     fn from(error: PtySpawnError) -> Self {
         let reason = match error {
@@ -502,28 +421,63 @@ fn spawn_thread(name: &str, body: impl FnOnce() + Send + 'static) -> std::io::Re
         .map(drop)
 }
 
+#[cfg(unix)]
+fn spawn_join<R: Send + 'static>(
+    name: &str,
+    body: impl FnOnce() -> R + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<R>> {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(body)
+}
+
+fn pty_command(launch: &HolderLaunch) -> PtyCommand {
+    PtyCommand {
+        argv: launch.argv.clone(),
+        cwd: launch.cwd.clone(),
+        env: launch.env.iter().map(to_env_op).collect(),
+    }
+}
+
+fn terminal_start(launch: &HolderLaunch, fault: Option<HolderFault>) -> TerminalStart {
+    TerminalStart {
+        cols: launch.cols,
+        rows: launch.rows,
+        history_rows: launch.history_rows,
+        palette: launch.palette.clone(),
+        fault,
+    }
+}
+
+/// Starts the threads that keep the child's terminal, write its input and
+/// read its output.
+fn start_terminal_threads(
+    threads: terminal::TerminalThreads,
+    terminal: &Terminal,
+    reader: Box<dyn Read + Send>,
+    shared: &Arc<Shared>,
+) -> std::io::Result<()> {
+    spawn_thread("holder-terminal", threads.model)
+        .and_then(|()| spawn_thread("holder-write", threads.writer))
+        .and_then(|()| {
+            spawn_thread("holder-read", {
+                let shared = Arc::clone(shared);
+                let intake = Arc::clone(&terminal.intake);
+                move || buffer::read_into(Box::new(CutReader::new(reader, shared)), &intake)
+            })
+        })
+}
+
 /// Starts the child on its terminal, with the threads that keep its
 /// terminal, write its input, read its output and wait for its exit. `fault`
 /// is the launch's fault when this holder acts faults out.
+#[cfg(windows)]
 fn spawn_child(
     launch: &HolderLaunch,
     fault: Option<HolderFault>,
     shared: &Arc<Shared>,
     events: &mpsc::UnboundedSender<Event>,
 ) -> Result<Child, SpawnError> {
-    // Every process the child's tree leaves behind becomes the holder's, so
-    // the tree's end can be known from the holder's children.
-    #[cfg(target_os = "linux")]
-    yagura_os::platform_unix::set_child_subreaper().map_err(|error| {
-        SpawnError::other(format!(
-            "cannot become the reaper of the child's tree: {error}"
-        ))
-    })?;
-    let command = PtyCommand {
-        argv: launch.argv.clone(),
-        cwd: launch.cwd.clone(),
-        env: launch.env.iter().map(to_env_op).collect(),
-    };
     let size = PtySize {
         cols: launch.cols,
         rows: launch.rows,
@@ -535,57 +489,42 @@ fn spawn_child(
         control,
         reader,
         writer,
-    } = yagura_os::pty::spawn(&command, size)?;
+    } = yagura_os::pty::spawn(&pty_command(launch), size)?;
     let pid = child.process_id();
     let group = Arc::new(group);
     let control = Arc::new(control);
     let gate = Arc::new(ReapGate::new());
     let (terminal, threads) = terminal::terminal(
-        TerminalStart {
-            cols: launch.cols,
-            rows: launch.rows,
-            history_rows: launch.history_rows,
-            palette: launch.palette.clone(),
-            fault,
-        },
+        terminal_start(launch, fault),
         Arc::clone(&control),
         writer,
         events.clone(),
     );
 
-    let started = spawn_thread("holder-terminal", threads.model)
-        .and_then(|()| spawn_thread("holder-write", threads.writer))
-        .and_then(|()| {
-            spawn_thread("holder-read", {
-                let shared = Arc::clone(shared);
-                let intake = Arc::clone(&terminal.intake);
-                move || buffer::read_into(Box::new(CutReader::new(reader, shared)), &intake)
-            })
-        })
-        .and_then(|()| {
-            spawn_thread("holder-exit", {
-                let shared = Arc::clone(shared);
-                let group = Arc::clone(&group);
-                let gate = Arc::clone(&gate);
-                let control = Arc::clone(&control);
-                move || {
-                    // The monitor is the child's only waiter, and each step
-                    // starts on the one before: the exit, known without
-                    // reaping so the leader's id keeps holding its group;
-                    // the tree's end; the end of its output; the reap.
-                    if let Err(error) = child.wait_for_exit() {
-                        crate::log(format_args!("cannot wait for the child's exit: {error}"));
-                    }
-                    shared.child_ended.store(true, Ordering::SeqCst);
-                    shared.core_wake.notify_one();
-                    end_tree_after_exit(&group, pid, &gate, &shared);
-                    end_output(&control, &shared);
-                    let code = gate.reap_with(|| child.wait().ok());
-                    *shared.exit() = Some(code);
-                    shared.core_wake.notify_one();
+    let started = start_terminal_threads(threads, &terminal, reader, shared).and_then(|()| {
+        spawn_thread("holder-exit", {
+            let shared = Arc::clone(shared);
+            let group = Arc::clone(&group);
+            let gate = Arc::clone(&gate);
+            let control = Arc::clone(&control);
+            move || {
+                // The monitor is the child's only waiter, and each step
+                // starts on the one before: the exit, known without
+                // reaping so the leader's id keeps holding its group;
+                // the tree's end; the end of its output; the reap.
+                if let Err(error) = child.wait_for_exit() {
+                    crate::log(format_args!("cannot wait for the child's exit: {error}"));
                 }
-            })
-        });
+                shared.child_ended.store(true, Ordering::SeqCst);
+                shared.core_wake.notify_one();
+                end_tree_after_exit(&group);
+                end_output(&control, &shared);
+                let code = gate.reap_with(|| child.wait().ok());
+                *shared.exit() = Some(code);
+                shared.core_wake.notify_one();
+            }
+        })
+    });
     // Dropping what was started ends the child's tree with it.
     started.map_err(|error| {
         SpawnError::other(format!("cannot start the holder's threads: {error}"))
@@ -599,6 +538,85 @@ fn spawn_child(
         terminal,
         force_kill_scheduled: false,
         tree_end_started: false,
+    })
+}
+
+/// What a Unix holder hands its watcher beside the child: the endpoint's
+/// lock and where its files are.
+#[cfg(unix)]
+struct Handover {
+    lock: Option<std::os::fd::OwnedFd>,
+    files: watcher_link::HolderFiles,
+}
+
+/// Opens the child's terminal, starts the watcher that starts the child on
+/// it, and starts the threads that keep the terminal, write its input, read
+/// its output and follow the watcher. `fault` is the launch's fault when
+/// this holder acts faults out.
+#[cfg(unix)]
+fn spawn_child(
+    launch: &HolderLaunch,
+    fault: Option<HolderFault>,
+    shared: &Arc<Shared>,
+    events: &mpsc::UnboundedSender<Event>,
+    handover: Handover,
+) -> Result<Child, SpawnError> {
+    // Every process the child's tree leaves behind once the watcher is gone
+    // becomes the holder's, so the holder can end the tree itself then.
+    #[cfg(target_os = "linux")]
+    yagura_os::platform_unix::set_child_subreaper().map_err(|error| {
+        SpawnError::other(format!(
+            "cannot become the reaper of the child's tree: {error}"
+        ))
+    })?;
+    let lock = handover.lock.ok_or_else(|| {
+        SpawnError::other("the endpoint's lock cannot be handed to the watcher".to_owned())
+    })?;
+    let command = yagura_os::pty::leader_command(&pty_command(launch))
+        .map_err(|error| SpawnError::other(format!("cannot prepare the child: {error}")))?;
+    let size = PtySize {
+        cols: launch.cols,
+        rows: launch.rows,
+    };
+    let yagura_os::pty::PtyPair {
+        control,
+        reader,
+        writer,
+        slave,
+    } = yagura_os::pty::open(size)
+        .map_err(|error| SpawnError::other(format!("cannot open the terminal: {error}")))?;
+    let started =
+        watcher_link::start(command, slave, &lock, &handover.files).map_err(SpawnError::other)?;
+    drop(lock);
+    let control = Arc::new(control);
+    let (terminal, threads) = terminal::terminal(
+        terminal_start(launch, fault),
+        Arc::clone(&control),
+        writer,
+        events.clone(),
+    );
+    let link = Arc::clone(&started.link);
+    let (pid, start) = (started.leader, started.leader_start.clone());
+    let running = start_terminal_threads(threads, &terminal, reader, shared).and_then(|()| {
+        let shared = Arc::clone(shared);
+        let control = Arc::clone(&control);
+        spawn_thread("holder-watcher", move || {
+            watcher_link::follow(started, &shared, &control);
+        })
+    });
+    if let Err(error) = running {
+        // The watcher ends the tree it started and is reaped here.
+        link.abandon();
+        return Err(SpawnError::other(format!(
+            "cannot start the holder's threads: {error}"
+        )));
+    }
+    Ok(Child {
+        pid,
+        start,
+        watcher: link,
+        control,
+        terminal,
     })
 }
 
@@ -642,6 +660,9 @@ struct Core {
     exit_told: bool,
     /// Focus intervals the current connection opened and has not closed.
     focus_intervals: usize,
+    /// A copy of the endpoint's lock, until it is handed to the watcher.
+    #[cfg(unix)]
+    endpoint_lock: Option<std::os::fd::OwnedFd>,
 }
 
 /// Serves the window until the holder is to end.
@@ -650,6 +671,14 @@ pub(crate) async fn serve(
     listener: <PlatformIpc as IpcTransport>::Listener,
 ) -> Ending {
     let (events, mut incoming) = mpsc::unbounded_channel();
+    #[cfg(unix)]
+    let endpoint_lock = match listener.lock_descriptor() {
+        Ok(lock) => Some(lock),
+        Err(error) => {
+            crate::log(format_args!("cannot copy the endpoint's lock: {error}"));
+            None
+        }
+    };
     let acceptor = Acceptor::spawn(
         listener,
         events.clone(),
@@ -672,6 +701,8 @@ pub(crate) async fn serve(
         input_drain: None,
         exit_told: false,
         focus_intervals: 0,
+        #[cfg(unix)]
+        endpoint_lock,
     };
     let ending = loop {
         if !core.exit_settled
@@ -867,18 +898,20 @@ impl Core {
                     return Some(self.spawn_failed(accepted, id, &error));
                 }
             };
-            #[cfg(target_os = "linux")]
-            let signals = match yagura_os::platform_unix::ChildSignals::new() {
-                Ok(signals) => signals,
-                Err(error) => {
-                    let error = SpawnError::other(format!(
-                        "cannot learn of the exits of the child's tree: {error}"
-                    ));
-                    return Some(self.spawn_failed(accepted, id, &error));
-                }
-            };
             let shared = Arc::clone(&self.shared);
             let events = self.events.clone();
+            #[cfg(unix)]
+            let spawned = {
+                let handover = match self.handover() {
+                    Ok(handover) => handover,
+                    Err(error) => return Some(self.spawn_failed(accepted, id, &error)),
+                };
+                tokio::task::spawn_blocking(move || {
+                    spawn_child(&launch, fault, &shared, &events, handover)
+                })
+                .await
+            };
+            #[cfg(windows)]
             let spawned =
                 tokio::task::spawn_blocking(move || spawn_child(&launch, fault, &shared, &events))
                     .await;
@@ -886,18 +919,22 @@ impl Core {
                 Ok(Ok(child)) => {
                     let pid = child.pid;
                     #[cfg(target_os = "linux")]
-                    tokio::spawn(reap_orphans_as_they_end(
-                        signals,
-                        pid,
-                        Arc::clone(&child.gate),
-                        Arc::clone(&self.shared),
-                    ));
-                    #[cfg(target_os = "linux")]
                     if let Some(scopes) = self.window.record.written_scopes() {
-                        scopes::ask_for(scopes, pid, &child.gate, &self.shared);
+                        scopes::ask_for(scopes, &child.watcher, &self.shared);
                     }
+                    #[cfg(unix)]
+                    let recorded = self.window.record.set_child(
+                        pid,
+                        child.start.clone(),
+                        Some((child.watcher.pid, child.watcher.start.clone())),
+                    );
+                    #[cfg(windows)]
+                    let recorded =
+                        self.window
+                            .record
+                            .set_child(pid, crate::record::start_of(pid), None);
                     self.child = Some(child);
-                    if let Err(error) = self.window.record.set_child(pid) {
+                    if let Err(error) = recorded {
                         crate::log(format_args!("cannot update the holder record: {error}"));
                     }
                     pid
@@ -934,6 +971,26 @@ impl Core {
         }
         self.conn = Some(conn);
         None
+    }
+
+    /// What the watcher is handed beside the child.
+    #[cfg(unix)]
+    fn handover(&mut self) -> Result<Handover, SpawnError> {
+        let record = self
+            .window
+            .record
+            .path()
+            .map_err(|error| SpawnError::other(format!("cannot name the record: {error}")))?;
+        let socket = std::path::PathBuf::from(&self.window.place.endpoint);
+        let lock = yagura_os::platform_unix::endpoint_lock_path(&socket);
+        Ok(Handover {
+            lock: self.endpoint_lock.take(),
+            files: watcher_link::HolderFiles {
+                record,
+                socket,
+                lock,
+            },
+        })
     }
 
     /// Lets go of a connection that is lost or displaced: what was opened on
@@ -1145,43 +1202,38 @@ impl Core {
 
 /// The systemd user scopes of the holder and its child (Linux), asked for once
 /// the child has started. The window never waits for the answer: the child
-/// runs, and its tree ends, under the holder's own care either way, and a
-/// scope only adds that the tree ends with the holder.
+/// runs, and its tree ends, under the watcher's care either way, and a scope
+/// only adds that the tree ends with the holder and its watcher.
 #[cfg(target_os = "linux")]
 mod scopes {
-    use std::os::fd::{AsFd as _, OwnedFd};
+    use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    use yagura_os::ReapGate;
-    use yagura_os::platform_unix::{
-        UserManager, cgroup_dir_of, descendants_outside, orphan_pidfds, pidfd_open,
-    };
+    use yagura_os::platform_unix::{UserManager, pidfd_open};
 
+    use super::watcher_link::Link;
     use super::{Shared, lock};
     use crate::record::WrittenScopes;
+    use crate::watcher::UNCOUNTED;
 
-    /// Opens the holder's and the leader's pidfds now, the leader's under its
-    /// reap gate so its id still names it, and asks for the scopes on a task
-    /// of their own. A failure is logged once and nothing more is asked.
-    pub(super) fn ask_for(
-        scopes: WrittenScopes,
-        leader: u32,
-        gate: &Arc<ReapGate>,
-        shared: &Arc<Shared>,
-    ) {
+    /// Opens the holder's and the watcher's pidfds now, the watcher's under
+    /// its reap gate so its id still names it, and asks for the scopes on a
+    /// task of their own. A failure is logged once and nothing more is asked.
+    pub(super) fn ask_for(scopes: WrittenScopes, watcher: &Arc<Link>, shared: &Arc<Shared>) {
         let opened = pidfd_open(std::process::id()).and_then(|holder| {
-            let leader = gate
-                .signal_unless_reaped(|| pidfd_open(leader))
+            let watcher = watcher
+                .gate
+                .signal_unless_reaped(|| pidfd_open(watcher.pid))
                 .unwrap_or_else(|| {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        "the child has been reaped",
+                        "the watcher has been reaped",
                     ))
                 })?;
-            Ok((holder, leader))
+            Ok((holder, watcher))
         });
-        let (holder_fd, leader_fd) = match opened {
+        let (holder_fd, watcher_fd) = match opened {
             Ok(fds) => fds,
             Err(error) => {
                 crate::log(format_args!(
@@ -1193,9 +1245,8 @@ mod scopes {
         tokio::spawn(request(
             scopes,
             holder_fd,
-            leader_fd,
-            leader,
-            Arc::clone(gate),
+            watcher_fd,
+            Arc::clone(watcher),
             Arc::clone(shared),
         ));
     }
@@ -1203,9 +1254,8 @@ mod scopes {
     async fn request(
         scopes: WrittenScopes,
         holder_fd: OwnedFd,
-        leader_fd: OwnedFd,
-        leader: u32,
-        gate: Arc<ReapGate>,
+        watcher_fd: OwnedFd,
+        watcher: Arc<Link>,
         shared: Arc<Shared>,
     ) {
         let manager = match UserManager::connect().await {
@@ -1218,11 +1268,11 @@ mod scopes {
             }
         };
         if let Err(error) = manager
-            .start_holder_scope(scopes.holder(), holder_fd.as_fd())
+            .start_holder_scope(scopes.holder(), &[holder_fd.as_fd(), watcher_fd.as_fd()])
             .await
         {
             crate::log(format_args!(
-                "cannot move the holder into its scope: {error}"
+                "cannot move the holder and its watcher into their scope: {error}"
             ));
             return;
         }
@@ -1230,19 +1280,19 @@ mod scopes {
         if shared.child_ended.load(Ordering::SeqCst) {
             return;
         }
-        let orphans = match orphan_pidfds(leader, &gate) {
-            Ok(orphans) => orphans,
-            Err(error) => {
-                crate::log(format_args!(
-                    "cannot name the child's tree to move into its scope: {error}"
-                ));
-                return;
-            }
+        // The watcher answers once the tree is read; nothing when it is gone.
+        let Some(members) = watcher.scope_members().await else {
+            return;
         };
-        let mut members = vec![leader_fd.as_fd()];
-        members.extend(orphans.iter().map(|fd| fd.as_fd()));
+        if members.is_empty() {
+            crate::log(format_args!(
+                "cannot name the child's tree to move into its scope"
+            ));
+            return;
+        }
+        let members_fds: Vec<BorrowedFd<'_>> = members.iter().map(|fd| fd.as_fd()).collect();
         if let Err(error) = manager
-            .start_child_scope(scopes.child(), scopes.holder(), &members)
+            .start_child_scope(scopes.child(), scopes.holder(), &members_fds)
             .await
         {
             crate::log(format_args!(
@@ -1250,27 +1300,431 @@ mod scopes {
             ));
             return;
         }
-        match gate.signal_unless_reaped(|| cgroup_dir_of(leader)) {
-            Some(Ok(Some(cgroup))) => {
-                // Not acted on: how often a child's tree grows before its scope is
-                // made, for whoever reads the log.
-                match descendants_outside(&cgroup) {
-                    Ok(outside) => crate::log(format_args!(
-                        "the child's scope is made; {outside} of the holder's descendants are outside it"
-                    )),
-                    Err(error) => crate::log(format_args!(
-                        "the child's scope is made; its outsiders cannot be counted: {error}"
-                    )),
-                }
-                *lock(&shared.child_cgroup) = Some(cgroup);
+        drop(members_fds);
+        drop(members);
+        let Some((cgroup, outside)) = watcher.scope_ready().await else {
+            return;
+        };
+        if cgroup.is_empty() {
+            crate::log(format_args!(
+                "the child's scope is made; its cgroup cannot be read"
+            ));
+            return;
+        }
+        // Not acted on: how often a child's tree grows past one request, or
+        // before its scope is made, for whoever reads the log.
+        if outside == UNCOUNTED {
+            crate::log(format_args!(
+                "the child's scope is made; its outsiders cannot be counted"
+            ));
+        } else {
+            crate::log(format_args!(
+                "the child's scope is made; {outside} of the window's processes are outside it"
+            ));
+        }
+        *lock(&shared.child_cgroup) = Some(std::path::PathBuf::from(cgroup));
+    }
+}
+
+/// The holder's side of its watcher (Unix): starting it, asking it, and
+/// following it until it ends, then ending the tree in its place if it could
+/// not.
+#[cfg(unix)]
+mod watcher_link {
+    use std::os::fd::{AsFd as _, OwnedFd};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    #[cfg(target_os = "linux")]
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[cfg(target_os = "linux")]
+    use tokio::sync::oneshot;
+    use yagura_os::ReapGate;
+    use yagura_os::platform_unix as os;
+    use yagura_os::pty::{LeaderCommand, PtyControl};
+
+    use super::{Shared, end_output, lock};
+    use crate::watcher::{FrameStream, send_frame};
+    use crate::watcher_proto::WatcherFrame;
+
+    /// The watcher's executable, beside the holder's own.
+    const WATCHER_EXE: &str = "yagura-watcher";
+
+    /// The descriptors kept aside when the holder sweeps in the watcher's
+    /// place.
+    #[cfg(target_os = "linux")]
+    const DESCRIPTOR_MARGIN: usize = 32;
+
+    /// Where the holder's files are, for the watcher to remove once the
+    /// holder is gone.
+    pub(crate) struct HolderFiles {
+        pub(crate) record: PathBuf,
+        pub(crate) socket: PathBuf,
+        pub(crate) lock: PathBuf,
+    }
+
+    fn path_text(path: &std::path::Path) -> Result<String, String> {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} is not UTF-8", path.display()))
+    }
+
+    /// The watcher as the holder reaches it.
+    pub(crate) struct Link {
+        /// The watcher's process id; it is the holder's child.
+        pub(crate) pid: u32,
+        /// The watcher's start, as the record keeps it.
+        pub(crate) start: Option<String>,
+        /// The watcher's signals and reap pass through it.
+        pub(crate) gate: Arc<ReapGate>,
+        socket: Arc<OwnedFd>,
+        terminate_sent: AtomicBool,
+        #[cfg(target_os = "linux")]
+        members: Mutex<Option<oneshot::Sender<Vec<OwnedFd>>>>,
+        #[cfg(target_os = "linux")]
+        ready: Mutex<Option<oneshot::Sender<(String, u32)>>>,
+    }
+
+    impl Link {
+        /// Asks the watcher, once, to end the child's tree.
+        pub(crate) fn terminate(&self) {
+            if !self.terminate_sent.swap(true, Ordering::SeqCst) {
+                let _ = send_frame(self.socket.as_fd(), &WatcherFrame::Terminate, &[]);
             }
-            // The child was reaped meanwhile: its tree has ended.
-            None | Some(Ok(None)) => {}
-            Some(Err(error)) => crate::log(format_args!(
-                "cannot read the cgroup of the child's scope: {error}"
+        }
+
+        /// Has the watcher end the tree and waits for it to end; for a child
+        /// whose window cannot be opened after all.
+        pub(crate) fn abandon(&self) {
+            self.terminate();
+            if os::wait_for_exit_without_reaping(self.pid).is_ok() {
+                let _ = os::reap_exited_child(self.pid, &self.gate);
+            }
+        }
+
+        /// The tree's members for the child's scope, the leader first; empty
+        /// when the watcher could not name them, `None` once it is gone.
+        #[cfg(target_os = "linux")]
+        pub(crate) async fn scope_members(&self) -> Option<Vec<OwnedFd>> {
+            let (sender, receiver) = oneshot::channel();
+            *lock(&self.members) = Some(sender);
+            send_frame(self.socket.as_fd(), &WatcherFrame::ScopeAsk, &[]).ok()?;
+            receiver.await.ok()
+        }
+
+        /// The cgroup of the child's scope as the watcher reads it, and how
+        /// many of the tree's processes are outside it; `None` once the
+        /// watcher is gone.
+        #[cfg(target_os = "linux")]
+        pub(crate) async fn scope_ready(&self) -> Option<(String, u32)> {
+            let (sender, receiver) = oneshot::channel();
+            *lock(&self.ready) = Some(sender);
+            send_frame(self.socket.as_fd(), &WatcherFrame::ScopeMade, &[]).ok()?;
+            receiver.await.ok()
+        }
+    }
+
+    /// The watcher as it has started the child.
+    pub(crate) struct Started {
+        pub(crate) link: Arc<Link>,
+        pub(crate) leader: u32,
+        pub(crate) leader_start: Option<String>,
+        stream: FrameStream,
+    }
+
+    /// Starts the watcher beside this holder's executable, has it start
+    /// `command` on `slave` and hands it the endpoint's `lock`. A watcher
+    /// that cannot be started, speaks another version or cannot start the
+    /// child is ended and reaped, and the reason returned.
+    pub(crate) fn start(
+        command: LeaderCommand,
+        slave: OwnedFd,
+        endpoint_lock: &OwnedFd,
+        files: &HolderFiles,
+    ) -> Result<Started, String> {
+        let program = std::env::current_exe()
+            .map_err(|error| format!("cannot find the holder's own executable: {error}"))?
+            .with_file_name(WATCHER_EXE);
+        let (ours, theirs) =
+            os::socket_pair().map_err(|error| format!("cannot reach a watcher: {error}"))?;
+        let watcher = os::spawn_watcher(&program, theirs.as_fd())
+            .map_err(|error| format!("cannot start the watcher {}: {error}", program.display()))?;
+        drop(theirs);
+        let pid = watcher.id();
+        // Dropping the handle neither waits nor kills: the watcher is reaped
+        // through `gate` alone.
+        drop(watcher);
+        let gate = Arc::new(ReapGate::new());
+        let socket = Arc::new(ours);
+        let mut stream = FrameStream::new(Arc::clone(&socket));
+        let spawn = WatcherFrame::Spawn {
+            argv: command.argv,
+            cwd: command.cwd,
+            env: command.env,
+            record_path: path_text(&files.record)?,
+            socket_path: path_text(&files.socket)?,
+            lock_path: path_text(&files.lock)?,
+        };
+        let started = handshake(&mut stream, &spawn, slave, endpoint_lock);
+        let (leader, leader_start) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = os::kill_child(pid, &gate);
+                if os::wait_for_exit_without_reaping(pid).is_ok() {
+                    let _ = os::reap_exited_child(pid, &gate);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Started {
+            link: Arc::new(Link {
+                pid,
+                start: crate::record::start_of(pid),
+                gate,
+                socket,
+                terminate_sent: AtomicBool::new(false),
+                #[cfg(target_os = "linux")]
+                members: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                ready: Mutex::new(None),
+            }),
+            leader,
+            leader_start,
+            stream,
+        })
+    }
+
+    /// Reads the watcher's version, sends it the child with the terminal and
+    /// the lock, and reads the started child's id and start.
+    fn handshake(
+        stream: &mut FrameStream,
+        spawn: &WatcherFrame,
+        slave: OwnedFd,
+        endpoint_lock: &OwnedFd,
+    ) -> Result<(u32, Option<String>), String> {
+        match stream.next() {
+            Ok(Some((WatcherFrame::Hello { .. }, _))) => {}
+            Ok(Some((other, _))) => {
+                return Err(format!("the watcher first sent {other:?}, not its version"));
+            }
+            Ok(None) => return Err("the watcher ended before it said its version".to_owned()),
+            Err(error) => return Err(format!("cannot read the watcher's version: {error}")),
+        }
+        send_frame(
+            stream.socket(),
+            spawn,
+            &[slave.as_fd(), endpoint_lock.as_fd()],
+        )
+        .map_err(|error| format!("cannot hand the child to the watcher: {error}"))?;
+        // The holder's copy goes, so the output ends once the tree is gone.
+        drop(slave);
+        match stream.next() {
+            Ok(Some((WatcherFrame::LeaderStarted { pid, start }, _))) => Ok((pid, start)),
+            Ok(Some((other, _))) => Err(format!(
+                "the watcher sent {other:?}, not the child it started"
+            )),
+            Ok(None) => Err("the watcher could not start the child".to_owned()),
+            Err(error) => Err(format!("cannot read the started child: {error}")),
+        }
+    }
+
+    /// Follows the watcher until it ends, on the calling thread: resumes it
+    /// whenever it is stopped, and takes its frames on a thread of its own.
+    /// Once it has ended, ends the tree in its place if its sweep was never
+    /// told over, then fixes the end of the child's output and its exit.
+    pub(crate) fn follow(started: Started, shared: &Arc<Shared>, control: &PtyControl) {
+        let Started {
+            link,
+            leader,
+            leader_start,
+            stream,
+        } = started;
+        let reading = super::spawn_join("holder-watcher-read", {
+            let link = Arc::clone(&link);
+            let shared = Arc::clone(shared);
+            move || read_frames(stream, &link, &shared)
+        });
+        wait_for_end(&link);
+        let swept = match reading {
+            Ok(reading) => reading.join().unwrap_or(false),
+            Err(error) => {
+                crate::log(format_args!("cannot read the watcher's frames: {error}"));
+                false
+            }
+        };
+        if !swept {
+            crate::log(format_args!(
+                "the watcher ended before its sweep was over; the holder ends the child's tree"
+            ));
+            sweep_in_place(leader, leader_start.as_deref(), shared);
+        }
+        end_output(control, shared);
+        // An end by a signal is told as 1, as the child's own wait told it.
+        let code = lock(&shared.leader_exit)
+            .take()
+            .map(|code| code.unwrap_or(1));
+        *shared.exit() = Some(code);
+        shared.child_ended.store(true, Ordering::SeqCst);
+        shared.core_wake.notify_one();
+    }
+
+    /// Waits until the watcher has ended and reaps it, resuming it each time
+    /// it is stopped. Woken by `SIGCHLD`, which the holder blocks in every
+    /// thread so only this wait (and a sweep's) takes it.
+    fn wait_for_end(link: &Link) {
+        loop {
+            match os::take_child_change(link.pid, &link.gate) {
+                Ok(Some(os::ChildChange::Exited)) => return,
+                Ok(Some(os::ChildChange::Stopped)) => {
+                    if let Err(error) = os::continue_child(link.pid, &link.gate) {
+                        crate::log(format_args!("cannot resume the stopped watcher: {error}"));
+                    }
+                }
+                Ok(Some(os::ChildChange::Continued)) => {}
+                Ok(None) => {
+                    if let Err(error) = os::wait_child_signal() {
+                        crate::log(format_args!("cannot wait for the watcher: {error}"));
+                        wait_blocking(link);
+                        return;
+                    }
+                }
+                Err(error) => {
+                    crate::log(format_args!("cannot follow the watcher: {error}"));
+                    wait_blocking(link);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn wait_blocking(link: &Link) {
+        if os::wait_for_exit_without_reaping(link.pid).is_ok() {
+            let _ = os::reap_exited_child(link.pid, &link.gate);
+        }
+    }
+
+    /// Takes the watcher's frames until its socket ends; whether it told its
+    /// sweep over.
+    fn read_frames(mut stream: FrameStream, link: &Link, shared: &Shared) -> bool {
+        let mut swept = false;
+        loop {
+            let frame = match stream.next() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(error) => {
+                    crate::log(format_args!("cannot read the watcher's frames: {error}"));
+                    break;
+                }
+            };
+            match frame {
+                (WatcherFrame::LeaderExited { code }, _) => {
+                    *lock(&shared.leader_exit) = Some(code);
+                    shared.child_ended.store(true, Ordering::SeqCst);
+                    shared.core_wake.notify_one();
+                }
+                (WatcherFrame::SweepDone { remaining }, _) => {
+                    swept = true;
+                    if remaining > 0 {
+                        crate::log(format_args!(
+                            "{remaining} of the child's tree could not be ended or waited for"
+                        ));
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                (WatcherFrame::ScopeMembers { .. }, fds) => {
+                    if let Some(sender) = lock(&link.members).take() {
+                        let _ = sender.send(fds);
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                (
+                    WatcherFrame::ScopeReady {
+                        cgroup_path,
+                        outside_members,
+                    },
+                    _,
+                ) => {
+                    if let Some(sender) = lock(&link.ready).take() {
+                        let _ = sender.send((cgroup_path, outside_members));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // A request still waiting has no answer to come.
+        #[cfg(target_os = "linux")]
+        {
+            lock(&link.members).take();
+            lock(&link.ready).take();
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = link;
+        swept
+    }
+
+    /// Ends the child's tree in the watcher's place (Linux): the leader and
+    /// the watcher's orphans came to this holder, the subreaper, as the
+    /// watcher ended, so the holder is their owner now.
+    #[cfg(target_os = "linux")]
+    fn sweep_in_place(leader: u32, _start: Option<&str>, shared: &Shared) {
+        // A leader the watcher already reaped is no child of this holder.
+        if os::unreaped_exit(leader).is_err() {
+            return;
+        }
+        let gate = Arc::new(ReapGate::new());
+        let slots = os::spare_descriptors(DESCRIPTOR_MARGIN).unwrap_or(0);
+        let sweep = os::TreeEnd::owned(leader, Arc::clone(&gate)).exit_watch_slots(slots);
+        let sweep = match lock(&shared.child_cgroup).clone() {
+            Some(cgroup) => sweep.cgroup(cgroup),
+            None => sweep,
+        };
+        log_rest(sweep.run(&mut Plain));
+        if let Ok(Some(code)) = os::unreaped_exit(leader) {
+            lock(&shared.leader_exit).get_or_insert(code);
+            let _ = os::reap_exited_child(leader, &gate);
+        }
+        let _ = os::reap_orphans(leader, &gate);
+    }
+
+    /// Ends the child's tree in the watcher's place (macOS), from outside it:
+    /// the leader went to launchd as the watcher ended.
+    #[cfg(target_os = "macos")]
+    fn sweep_in_place(leader: u32, start: Option<&str>, _shared: &Shared) {
+        let Some(start) = start.and_then(|start| start.parse().ok()) else {
+            crate::log(format_args!(
+                "the child's start is not known; its tree is left to its own end"
+            ));
+            return;
+        };
+        log_rest(os::TreeEnd::not_parent(leader, start).run(&mut Plain));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn sweep_in_place(_leader: u32, _start: Option<&str>, _shared: &Shared) {}
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn log_rest(rest: std::io::Result<os::TreeEndRest>) {
+        match rest {
+            Ok(rest) => {
+                let left = rest.unsent.len() + rest.unended.len() + rest.unwaited;
+                if left > 0 {
+                    crate::log(format_args!(
+                        "{left} of the child's tree could not be ended or waited for"
+                    ));
+                }
+            }
+            Err(error) => crate::log(format_args!(
+                "failed to end the child's process tree: {error}"
             )),
         }
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    struct Plain;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl os::TreeEndHooks for Plain {}
 }
 
 /// Whether a next daemon comes for the window: the one difference between a

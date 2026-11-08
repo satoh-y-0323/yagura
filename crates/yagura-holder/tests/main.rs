@@ -5,4 +5,6 @@ mod holder;
 #[cfg(target_os = "linux")]
 mod orphan_reap_linux;
 mod terminal;
+#[cfg(unix)]
+mod watcher;
 mod watcher_proto;

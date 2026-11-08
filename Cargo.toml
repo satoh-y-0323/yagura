@@ -2,6 +2,7 @@
 members = [
     "crates/yagura-protocol",
     "crates/yagura-os",
+    "crates/yagura-locale",
     "crates/yagura-daemon",
     "crates/yagura-holder",
     "crates/yagura-term",

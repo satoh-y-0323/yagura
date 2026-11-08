@@ -57,20 +57,30 @@ fn ps(pid: u32, field: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-/// The parent of `child_pid`, which must be a `yagura-holder`.
+/// The holder `child_pid` runs under: the parent of its parent, the watcher. Neither is
+/// this process, the daemon; the names only say what the two turned out to be.
 #[cfg(unix)]
 fn holder_of(child_pid: u32) -> u32 {
-    let parent: u32 = ps(child_pid, "ppid")
-        .parse()
-        .unwrap_or_else(|_| panic!("the window's child {child_pid} is not running"));
-    let image = ps(parent, "comm");
+    let parent_of = |pid: u32| -> u32 {
+        ps(pid, "ppid")
+            .parse()
+            .unwrap_or_else(|_| panic!("the process {pid} is not running"))
+    };
+    let watcher = parent_of(child_pid);
+    let holder = parent_of(watcher);
+    let daemon = std::process::id();
     assert!(
-        image.ends_with("yagura-holder"),
-        "the window's child {child_pid} must run under a yagura-holder, its parent {parent} is \
-         {image:?} (this process is {})",
-        std::process::id()
+        watcher != daemon && holder != daemon,
+        "the window's child {child_pid} runs under the daemon {daemon}: its parent is \
+         {watcher}, whose parent is {holder}"
     );
-    parent
+    let (watcher_image, holder_image) = (ps(watcher, "comm"), ps(holder, "comm"));
+    assert!(
+        watcher_image.ends_with("yagura-watcher") && holder_image.ends_with("yagura-holder"),
+        "the window's child {child_pid} must run under a yagura-watcher under a yagura-holder; \
+         its parent {watcher} is {watcher_image:?}, whose parent {holder} is {holder_image:?}"
+    );
+    holder
 }
 
 /// A process watched from while it is known to be alive.
@@ -181,8 +191,8 @@ async fn published_pid(pid_file: &Path) -> u32 {
 }
 
 /// Opens the `profile` window and watches every process it consists of: the holder
-/// its record names, the child, the grandchild and, on Windows, the pseudoconsole
-/// hosts under the holder.
+/// its record names, the child, the grandchild, on Unix the watcher its record names
+/// and, on Windows, the pseudoconsole hosts under the holder.
 async fn open_tree_window(
     daemon: &mut RunningDaemon,
     sandbox: &Sandbox,
@@ -207,6 +217,13 @@ async fn open_tree_window(
         Watch::new("child", child),
         Watch::new("grandchild", grandchild),
     ];
+    #[cfg(unix)]
+    watches.push(Watch::new(
+        "watcher",
+        record
+            .watcher_pid
+            .expect("an opened window's record names its watcher"),
+    ));
     watches.extend(pseudoconsole_hosts(record.holder_pid));
     (window_id, watches)
 }
@@ -255,7 +272,8 @@ async fn a_windows_child_runs_under_a_holder_and_not_under_the_daemon() {
     let entry = registry.get(&window_id).expect("window must exist");
     let child = entry.session().child_process_id();
 
-    // Fails unless the child's parent is a `yagura-holder`, which the daemon is not.
+    // Fails unless the child runs under a watcher under a holder (Unix) or under a
+    // holder (Windows), neither of which is the daemon.
     holder_of(child);
     let _ = yagura_daemon::control::close_window(&entry, true, Duration::from_secs(5)).await;
 }

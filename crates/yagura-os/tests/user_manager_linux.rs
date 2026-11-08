@@ -208,7 +208,7 @@ fn a_request_without_a_reachable_user_bus_fails_and_starts_no_process() {
                 .await
                 .map_err(|error| error.to_string())?;
             manager
-                .start_holder_scope("yagura_test_no_bus_holder.scope", own.as_fd())
+                .start_holder_scope("yagura_test_no_bus_holder.scope", &[own.as_fd()])
                 .await
                 .map_err(|error| error.to_string())
         });
@@ -319,11 +319,12 @@ async fn read_pids(path: &PathBuf) -> Vec<u32> {
     }
 }
 
-/// A holder's scope holds the process its pidfd names once the request's job is
-/// done, and a child's scope bound to it holds the leader; a grandchild in a
-/// session of its own and a member ignoring SIGTERM, started inside, end with
-/// the rest of the child's scope once the holder is killed. A pidfd of a
-/// process already reaped is refused and makes no unit.
+/// A holder's scope holds the processes its pidfds name (the holder and its
+/// watcher) once the request's job is done, and a child's scope bound to it
+/// holds the leader; a grandchild in a session of its own and a member
+/// ignoring SIGTERM, started inside, end with the rest of the child's scope
+/// once the holder and the watcher are killed. A pidfd of a process already
+/// reaped is refused and makes no unit.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the user's systemd user manager; run with --include-ignored where one runs"]
 async fn a_childs_scope_bound_to_its_holders_scope_ends_whole_when_the_holder_is_killed() {
@@ -340,24 +341,29 @@ async fn a_childs_scope_bound_to_its_holders_scope_ends_whole_when_the_holder_is
     let mut left = EndOnDrop::default();
 
     let mut holder = shell("read line", &[]);
+    let mut watcher = shell("read line", &[]);
     let mut leader = shell(LEADER, &[&pid_file]);
     left.0.push(handle_of(holder.id()));
+    left.0.push(handle_of(watcher.id()));
     left.0.push(handle_of(leader.id()));
     let holder_fd = pidfd_of(holder.id());
+    let watcher_fd = pidfd_of(watcher.id());
     let leader_fd = pidfd_of(leader.id());
 
     let manager = yagura_os::platform_unix::UserManager::connect()
         .await
         .expect("reach the user manager");
     manager
-        .start_holder_scope(&names.holder, holder_fd.as_fd())
+        .start_holder_scope(&names.holder, &[holder_fd.as_fd(), watcher_fd.as_fd()])
         .await
         .expect("the holder's scope");
-    assert!(
-        in_scope(holder.id(), &names.holder),
-        "the holder is not in its scope once the job is done: {}",
-        cgroup_of(holder.id())
-    );
+    for (what, pid) in [("the holder", holder.id()), ("the watcher", watcher.id())] {
+        assert!(
+            in_scope(pid, &names.holder),
+            "{what} is not in the holder's scope once the job is done: {}",
+            cgroup_of(pid)
+        );
+    }
     manager
         .start_child_scope(&names.child, &names.holder, &[leader_fd.as_fd()])
         .await
@@ -388,8 +394,10 @@ async fn a_childs_scope_bound_to_its_holders_scope_ends_whole_when_the_holder_is
         );
     }
 
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    for process in [&mut holder, &mut watcher] {
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
     for (what, process) in &members {
         wait_ended(process, what).await;
     }
@@ -400,7 +408,7 @@ async fn a_childs_scope_bound_to_its_holders_scope_ends_whole_when_the_holder_is
     drop(gone.stdin.take());
     gone.wait().unwrap();
     let answer = manager
-        .start_holder_scope(&refused.holder, gone_fd.as_fd())
+        .start_holder_scope(&refused.holder, &[gone_fd.as_fd()])
         .await;
     assert!(
         answer.is_err(),

@@ -51,12 +51,12 @@
 //!   grandchild in a session of its own that ignores them too, writes its
 //!   process id to `pid_file` and prints [`LATE_TREE_MARKER`]. Both then idle,
 //!   so only a kill that cannot be refused ends them.
-//! - `orphans` (Linux): makes itself a child subreaper, starts a child that
-//!   starts [`ORPHANS`] grandchildren in sessions of their own and exits, and
-//!   reaps the orphans through `yagura-os` on each SIGCHLD, never the child.
-//!   Prints `LEADER <pid>` for the child, `ORPHAN <pid>` for each grandchild
-//!   and `REAPED <pid>` for each process reaped, then `ORPHANS-DONE` once
-//!   every orphan is reaped, and stays alive until stdin ends.
+//! - `orphans <pid_file> <count> <stay|leave>` (Unix): starts a child that
+//!   forks `count` grandchildren, each in a session of its own, writes their
+//!   process ids to `pid_file` and exits, so they are left as orphans. Then
+//!   prints [`ORPHANS_MARKER`] and stays alive until stdin ends. With `stay`
+//!   an orphan idles; with `leave` it exits once it is no longer that child's.
+//!   Every orphan ends by itself after [`ORPHAN_BUDGET_SECS`] at the latest.
 
 // Test-only fixture binary, not the holder's production spawn path: it spawns
 // its own descendant to observe tree teardown.
@@ -80,9 +80,15 @@ const END_RACE_MARKER: &[u8] = b"HOLDER-CHILD-END-RACE\r\n";
 const LATE_TREE_WAITING_MARKER: &[u8] = b"HOLDER-CHILD-LATE-TREE-WAITING\r\n";
 #[cfg(unix)]
 const LATE_TREE_MARKER: &[u8] = b"HOLDER-CHILD-LATE-TREE-STARTED\r\n";
-/// The grandchildren `orphans` leaves behind.
-#[cfg(target_os = "linux")]
-const ORPHANS: usize = 10;
+#[cfg(unix)]
+const ORPHANS_MARKER: &[u8] = b"HOLDER-CHILD-ORPHANS
+";
+/// The most orphans `orphans` forks.
+#[cfg(unix)]
+const MOST_ORPHANS: usize = 1024;
+/// How long an orphan lives at most, should nothing end it.
+#[cfg(unix)]
+const ORPHAN_BUDGET_SECS: libc::c_uint = 300;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 const FLOOD_BLOCK: usize = 8192;
 /// How often `size`, `exit` and a gated `script` look again. The fixture has
@@ -119,19 +125,17 @@ fn main() -> io::Result<()> {
         "--term-member" => term_member(Path::new(arg(1))),
         #[cfg(unix)]
         "--escaped-writer" => escaped_writer(),
-        #[cfg(target_os = "linux")]
-        "orphans" => orphans(),
-        #[cfg(target_os = "linux")]
-        "--orphan-leader" => orphan_leader(),
-        #[cfg(target_os = "linux")]
-        "--orphan" => orphan(arg(1)),
+        #[cfg(unix)]
+        "orphans" => orphans(Path::new(arg(1)), arg(2), arg(3)),
+        #[cfg(unix)]
+        "--orphan-forker" => orphan_forker(Path::new(arg(1)), arg(2), arg(3)),
         _ => {
             eprintln!(
                 "usage: holder_child size | hex | flood <count_file> [<total_bytes>] \
                  | tree <pid_file> | exit <code> [<gate_file>] | exit-on-input | ignore-end \
                  | stubborn-tree <pid_file> [<gate_file>] | escaped-holder <pid_file> \
                  | script <input_log> [<gate_file> <hex>] | end-race <info_file> <gate_file> <term_file> \
-                 | late-tree <gate_file> <pid_file> | orphans"
+                 | late-tree <gate_file> <pid_file> | orphans <pid_file> <count> <stay|leave>"
             );
             std::process::exit(2);
         }
@@ -613,77 +617,81 @@ fn end_race(info_file: &Path, gate_file: &Path, term_file: &Path) -> io::Result<
     std::process::exit(0)
 }
 
-#[cfg(target_os = "linux")]
-fn orphans() -> io::Result<()> {
-    // Blocked before any child exists, so every SIGCHLD waits for `sigwait`.
-    // SAFETY: the set is a stack local initialised by sigemptyset before use.
-    let set = unsafe {
-        let mut set = std::mem::zeroed::<libc::sigset_t>();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGCHLD);
-        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        set
-    };
-    yagura_os::platform_unix::set_child_subreaper().map_err(io::Error::other)?;
-    let leader = Command::new(std::env::current_exe()?)
-        .arg("--orphan-leader")
+/// Starts the forker and waits for it, so the orphans it leaves are handed to
+/// the nearest child subreaper above this process.
+#[cfg(unix)]
+fn orphans(pid_file: &Path, count: &str, ending: &str) -> io::Result<()> {
+    let status = Command::new(std::env::current_exe()?)
+        .arg("--orphan-forker")
+        .arg(pid_file)
+        .args([count, ending])
         .stdin(Stdio::null())
-        .spawn()?
-        .id();
-    // The fixture never reaps the leader, so its gate stays unreaped.
-    let leader_gate = yagura_os::ReapGate::new();
-    let mut stdout = io::stdout();
-    stdout.write_all(format!("LEADER {leader}\n").as_bytes())?;
-    let mut orphans_reaped = 0;
-    while orphans_reaped < ORPHANS {
-        let mut signal = 0;
-        // SAFETY: `set` holds the blocked SIGCHLD; `signal` is a stack local.
-        if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let reaped = yagura_os::platform_unix::reap_orphans(leader, &leader_gate)
-            .map_err(io::Error::other)?;
-        for pid in reaped {
-            stdout.write_all(format!("REAPED {pid}\n").as_bytes())?;
-            if pid != leader {
-                orphans_reaped += 1;
-            }
-        }
+        .stdout(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "the orphan forker failed: {status}"
+        )));
     }
-    stdout.write_all(b"ORPHANS-DONE\n")?;
+    let mut stdout = io::stdout();
+    stdout.write_all(ORPHANS_MARKER)?;
+    stdout.flush()?;
     stay_alive()
 }
 
-#[cfg(target_os = "linux")]
-fn orphan_leader() -> io::Result<()> {
-    let exe = std::env::current_exe()?;
-    let leader = std::process::id().to_string();
-    let mut stdout = io::stdout();
-    for _ in 0..ORPHANS {
-        let mut orphan = Command::new(&exe);
-        orphan
-            .args(["--orphan", &leader])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        in_own_session(&mut orphan);
-        let pid = orphan.spawn()?.id();
-        stdout.write_all(format!("ORPHAN {pid}\n").as_bytes())?;
+/// Forks the orphans and exits. A forked orphan calls only async-signal-safe
+/// functions: this process runs no other thread.
+#[cfg(unix)]
+fn orphan_forker(pid_file: &Path, count: &str, ending: &str) -> io::Result<()> {
+    let Ok(count) = count.parse::<usize>() else {
+        std::process::exit(2);
+    };
+    let leave = match ending {
+        "stay" => false,
+        "leave" => true,
+        _ => std::process::exit(2),
+    };
+    if count > MOST_ORPHANS {
+        std::process::exit(2);
     }
+    // SAFETY: getpid takes no arguments and cannot fail.
+    let forker = unsafe { libc::getpid() };
+    let mut pids = Vec::with_capacity(count);
+    for _ in 0..count {
+        // SAFETY: the child runs only async-signal-safe calls and leaves by _exit.
+        match unsafe { libc::fork() } {
+            -1 => return Err(io::Error::last_os_error()),
+            0 => orphan(forker, leave),
+            pid => pids.push(pid.to_string()),
+        }
+    }
+    let staged = pid_file.with_extension("staged");
+    std::fs::write(&staged, pids.join(" "))?;
+    std::fs::rename(&staged, pid_file)?;
     std::process::exit(0)
 }
 
-/// Ends once it is no longer `leader`'s child, so it ends as an orphan.
-#[cfg(target_os = "linux")]
-fn orphan(leader: &str) -> io::Result<()> {
-    let Ok(leader) = leader.parse::<libc::pid_t>() else {
-        std::process::exit(2);
-    };
-    // SAFETY: getppid takes no arguments and cannot fail.
-    while unsafe { libc::getppid() } == leader {
-        std::thread::sleep(POLL);
+#[cfg(unix)]
+fn orphan(forker: libc::pid_t, leave: bool) -> ! {
+    // SAFETY: setsid, alarm, getppid, nanosleep, pause and _exit are
+    // async-signal-safe; SIGALRM's default action ends the orphan.
+    unsafe {
+        if libc::setsid() == -1 {
+            libc::_exit(1);
+        }
+        libc::alarm(ORPHAN_BUDGET_SECS);
+        loop {
+            if !leave {
+                libc::pause();
+            } else if libc::getppid() == forker {
+                let pause = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 10_000_000,
+                };
+                libc::nanosleep(&pause, std::ptr::null_mut());
+            } else {
+                libc::_exit(0);
+            }
+        }
     }
-    std::process::exit(0)
 }

@@ -20,11 +20,17 @@ use std::fmt;
 
 /// The holder-watcher wire version this build speaks. The holder and the
 /// watcher are built from this one constant.
-pub const WATCHER_PROTOCOL: u32 = 1;
+pub const WATCHER_PROTOCOL: u32 = 2;
 
 /// The most descriptors one `SCM_RIGHTS` message carries: Linux's
 /// `SCM_MAX_FD`, past which `sendmsg` fails with `EINVAL`.
 pub const MOST_FDS_PER_SEND: usize = 253;
+
+/// The most processes one request to the user manager names: the session
+/// bus's default `max_message_unix_fds` (dbus-daemon), past which the bus
+/// drops the connection rather than answer. A tree's members past it are
+/// left out of the child's scope.
+pub const MOST_FDS_PER_SCOPE_REQUEST: usize = 16;
 
 /// The largest `length` a frame may declare. A `Spawn` carries a part of the
 /// holder's launch, which is at most 1 MiB; this leaves room for the paths
@@ -42,6 +48,8 @@ const SCOPE_READY: u16 = 5;
 const LEADER_EXITED: u16 = 6;
 const SWEEP_DONE: u16 = 7;
 const TERMINATE: u16 = 8;
+const SCOPE_ASK: u16 = 9;
+const SCOPE_MADE: u16 = 10;
 
 /// A frame between a holder and its watcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,18 +83,25 @@ pub enum WatcherFrame {
         /// when it could not be read.
         start: Option<String>,
     },
-    /// Watcher to holder: the members of the tree to be moved into the
-    /// child's scope; their descriptors follow, at most
-    /// [`MOST_FDS_PER_SEND`] in each message.
+    /// Watcher to holder, answering [`WatcherFrame::ScopeAsk`]: the members
+    /// of the tree to be moved into the child's scope, the leader first, as
+    /// the descriptors sent beside this frame. None when they could not be
+    /// named.
     ScopeMembers {
-        /// How many descriptors follow.
+        /// How many descriptors come with the frame, at most
+        /// [`MOST_FDS_PER_SEND`].
         count: u32,
     },
+    /// Holder to watcher: open the tree's members for the child's scope.
+    ScopeAsk,
     /// Holder to watcher: the child's scope is made.
+    ScopeMade,
+    /// Watcher to holder, answering [`WatcherFrame::ScopeMade`]: where the
+    /// child's scope is, empty when it could not be read.
     ScopeReady {
         /// The scope's cgroup.
         cgroup_path: String,
-        /// The tree's members that could not be moved into it.
+        /// The tree's members outside it.
         outside_members: u32,
     },
     /// Watcher to holder: the leader exited.
@@ -202,6 +217,8 @@ pub fn encode_watcher_frame(frame: &WatcherFrame) -> Vec<u8> {
             SWEEP_DONE
         }
         WatcherFrame::Terminate => TERMINATE,
+        WatcherFrame::ScopeAsk => SCOPE_ASK,
+        WatcherFrame::ScopeMade => SCOPE_MADE,
     };
     let length = u32::try_from(TYPE_LEN + body.0.len()).unwrap_or(u32::MAX);
     let mut out = Vec::with_capacity(LENGTH_LEN + TYPE_LEN + body.0.len());
@@ -286,6 +303,8 @@ fn decode_body(kind: u16, body: &[u8]) -> Result<WatcherFrame, WatcherCodecError
             remaining: reader.u32().ok_or_else(malformed)?,
         },
         TERMINATE => WatcherFrame::Terminate,
+        SCOPE_ASK => WatcherFrame::ScopeAsk,
+        SCOPE_MADE => WatcherFrame::ScopeMade,
         other => return Err(WatcherCodecError::UnknownType(other)),
     };
     if reader.0.is_empty() {

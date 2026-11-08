@@ -13,6 +13,11 @@ autotests = false
 name = "yagura-holder"
 path = "src/main.rs"
 
+# Unix only: the watcher each holder starts beside itself (src/watcher.rs).
+[[bin]]
+name = "yagura-watcher"
+path = "src/watcher_main.rs"
+
 [[bin]]
 name = "holder_child"
 path = "src/bin/holder_child.rs"

@@ -18,7 +18,7 @@ use crate::platform_unix::pty as platform;
 use crate::platform_windows::conpty as platform;
 
 #[cfg(not(windows))]
-pub use platform::EndMarkWriter;
+pub use platform::{EndMarkWriter, LeaderCommand, PtyPair};
 pub use platform::{InputDrain, PtyChild, PtyControl, PtyKiller};
 
 /// The size of a terminal in character cells.
@@ -128,4 +128,41 @@ pub fn spawn(command: &PtyCommand, size: PtySize) -> Result<PtySpawn, PtySpawnEr
 #[must_use]
 pub fn default_env_var(name: &OsStr) -> Option<OsString> {
     platform::default_env_var(name)
+}
+
+/// Opens a new pseudoterminal of `size` with no child on it, for a child to
+/// be started on its slave by [`start_leader`], possibly in another process.
+///
+/// # Errors
+///
+/// Returns the operating system's error when no terminal can be opened,
+/// named or sized.
+#[cfg(not(windows))]
+pub fn open(size: PtySize) -> std::io::Result<PtyPair> {
+    platform::open(size)
+}
+
+/// What [`start_leader`] would start for `command`: the environment and the
+/// working directory [`spawn`] gives a child, made here and started
+/// elsewhere.
+///
+/// # Errors
+///
+/// Returns an error when `argv` is empty or the directory is not UTF-8.
+#[cfg(not(windows))]
+pub fn leader_command(command: &PtyCommand) -> std::io::Result<LeaderCommand> {
+    platform::leader_command(command)
+}
+
+/// Starts `command` on `slave` (from [`open`]) as the leader of a new
+/// session, with the terminal as its controlling terminal, every signal at
+/// its default action and none blocked, and no descriptor but its standard
+/// three; returns its process id, leaving it unreaped for the caller.
+///
+/// # Errors
+///
+/// Returns an error when the program cannot be found or started.
+#[cfg(not(windows))]
+pub fn start_leader(command: &LeaderCommand, slave: std::os::fd::OwnedFd) -> std::io::Result<u32> {
+    platform::start_leader(command, slave)
 }

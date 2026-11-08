@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Stages the release binaries Tauri bundles as sidecars (`bundle.externalBin`):
 // the daemon, the holder the daemon starts for each window from beside itself,
-// and the MCP bridge. `tauri-build` resolves `externalBin` at cargo build time,
-// so every cargo build of the workspace depends on this having run.
+// on Linux and macOS the watcher each holder starts from beside itself, and the
+// MCP bridge. `tauri-build` resolves `externalBin` at cargo build time, so
+// every cargo build of the workspace depends on this having run.
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -12,8 +13,16 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(scriptDir, '..', '..');
 const binariesDir = join(workspaceRoot, 'gui', 'src-tauri', 'binaries');
 
-// The packages staged as sidecars, in the order `bundle.externalBin` names them.
+// The packages the sidecars are built from.
 const SIDECAR_PACKAGES = ['yagura-daemon', 'yagura-holder', 'yagura-mcp'];
+
+// The binaries staged as sidecars, in the order each platform's `bundle.externalBin`
+// names them. The holder's package builds the watcher too; Windows ships none, its job
+// object holding a window's tree.
+const SIDECAR_BINARIES =
+  process.platform === 'win32'
+    ? ['yagura-daemon', 'yagura-holder', 'yagura-mcp']
+    : ['yagura-daemon', 'yagura-holder', 'yagura-watcher', 'yagura-mcp'];
 
 function fail(message) {
   console.error(`prepare-sidecar: ${message}`);
@@ -68,7 +77,7 @@ const exeSuffix = process.platform === 'win32' ? '.exe' : '';
 
 // Step 4: copy each built binary under the host-triple name Tauri expects.
 mkdirSync(binariesDir, { recursive: true });
-for (const name of SIDECAR_PACKAGES) {
+for (const name of SIDECAR_BINARIES) {
   const source = join(targetDirectory, 'release', `${name}${exeSuffix}`);
   if (!existsSync(source)) {
     fail(`no ${name} binary at ${source} after a successful build; nothing to stage.`);
