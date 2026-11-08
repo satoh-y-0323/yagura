@@ -29,9 +29,6 @@ libc.workspace = true
 # Unix windows start their child on a pseudoterminal through it (`pty`); it
 # stays inside this crate.
 portable-pty.workspace = true
-# `signal`: `ChildSignals` awaits SIGCHLD on the caller's runtime. Its one
-# extra crate, `signal-hook-registry`, is already in the graph.
-tokio = { workspace = true, features = ["signal"] }
 
 # Linux-only: `platform_unix::user_manager` asks the user's systemd user
 # manager for a window's scopes over D-Bus, passing processes by pidfd. Pure

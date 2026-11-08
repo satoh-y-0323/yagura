@@ -246,33 +246,6 @@ pub(crate) fn child_has_exited(pid: u32) -> io::Result<bool> {
     }
 }
 
-/// The `SIGCHLD`s this process receives, awaited one after another.
-///
-/// Signals that arrive while nobody awaits are merged into one, so a caller
-/// that reacts to each one looks at every child again rather than counting.
-#[derive(Debug)]
-pub struct ChildSignals(tokio::signal::unix::Signal);
-
-impl ChildSignals {
-    /// Starts receiving `SIGCHLD`. Every signal from here on wakes a later
-    /// [`Self::next`]. Call from within a Tokio runtime that has its I/O
-    /// driver enabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error installing the handler fails with, or when called
-    /// outside such a runtime.
-    pub fn new() -> io::Result<Self> {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).map(Self)
-    }
-
-    /// Waits for the next `SIGCHLD` since the last call returned; `false`
-    /// once no more can arrive.
-    pub async fn next(&mut self) -> bool {
-        self.0.recv().await.is_some()
-    }
-}
-
 /// Reaps the child `pid` if it has exited; `false` while it runs or once it
 /// is gone.
 #[cfg(target_os = "linux")]

@@ -2,13 +2,8 @@
 
 //! Integration test: the frames between a window's holder and its watcher.
 //! The watcher's binary reads the same module without serde, so these tests
-//! pin what both sides must agree on: that every frame survives a round trip,
-//! that a watcher of another version is refused when it first speaks, and how
-//! the watcher's descriptors are split over `SCM_RIGHTS` sends.
-
-/// The most descriptors one `SCM_RIGHTS` message may carry on Linux
-/// (`SCM_MAX_FD`); a longer list fails with `EINVAL`.
-const MOST_FDS_PER_SEND: usize = 253;
+//! pin what both sides must agree on: that every frame survives a round trip
+//! and that a watcher of another version is refused when it first speaks.
 
 fn sample_frames() -> Vec<yagura_holder::watcher_proto::WatcherFrame> {
     use yagura_holder::watcher_proto::{WATCHER_PROTOCOL, WatcherFrame};
@@ -97,25 +92,6 @@ fn a_watchers_first_frame_of_another_version_is_refused() {
         assert!(
             decode_watcher_frame(&bytes).is_err(),
             "a hello of version {other} must not decode"
-        );
-    }
-}
-
-/// A watcher passes the descriptors of the orphans it found to the holder
-/// over `SCM_RIGHTS`; one message carries only so many, so a longer list is
-/// sent in several, none over the limit and none lost.
-#[test]
-fn the_scope_members_are_split_into_sends_within_the_descriptor_limit() {
-    for total in [0, 1, 252, 253, 254, 255, 506, 507, 1000, 100_000] {
-        let batches = yagura_holder::watcher_proto::scope_member_batches(total);
-        assert_eq!(
-            batches.iter().sum::<usize>(),
-            total,
-            "{total} members must all be sent, once"
-        );
-        assert!(
-            batches.iter().all(|&batch| batch <= MOST_FDS_PER_SEND),
-            "{total} members split as {batches:?} sends more than {MOST_FDS_PER_SEND} at once"
         );
     }
 }

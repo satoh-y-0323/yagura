@@ -31,9 +31,9 @@ mod user_manager;
 #[cfg(target_os = "macos")]
 pub use exit_watch::wait_for_members_exit;
 pub use exit_watch::{
-    ChildChange, ChildSignals, WatcherEvents, WatcherWait, block_child_signal,
-    block_watcher_signals, continue_child, hang_up_child, kill_child, reap_exited_child,
-    take_child_change, unreaped_exit, wait_child_signal, wait_for_exit_without_reaping,
+    ChildChange, WatcherEvents, WatcherWait, block_child_signal, block_watcher_signals,
+    continue_child, hang_up_child, kill_child, reap_exited_child, take_child_change, unreaped_exit,
+    wait_child_signal, wait_for_exit_without_reaping,
 };
 #[cfg(target_os = "linux")]
 pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};

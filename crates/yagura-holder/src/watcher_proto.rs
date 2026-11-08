@@ -22,10 +22,6 @@ use std::fmt;
 /// watcher are built from this one constant.
 pub const WATCHER_PROTOCOL: u32 = 2;
 
-/// The most descriptors one `SCM_RIGHTS` message carries: Linux's
-/// `SCM_MAX_FD`, past which `sendmsg` fails with `EINVAL`.
-pub const MOST_FDS_PER_SEND: usize = 253;
-
 /// The most processes one request to the user manager names: the session
 /// bus's default `max_message_unix_fds` (dbus-daemon), past which the bus
 /// drops the connection rather than answer. A tree's members past it are
@@ -89,7 +85,7 @@ pub enum WatcherFrame {
     /// named.
     ScopeMembers {
         /// How many descriptors come with the frame, at most
-        /// [`MOST_FDS_PER_SEND`].
+        /// [`MOST_FDS_PER_SCOPE_REQUEST`].
         count: u32,
     },
     /// Holder to watcher: open the tree's members for the child's scope.
@@ -312,18 +308,6 @@ fn decode_body(kind: u16, body: &[u8]) -> Result<WatcherFrame, WatcherCodecError
     } else {
         Err(malformed())
     }
-}
-
-/// How `total` descriptors are split over `SCM_RIGHTS` messages: the count
-/// of each message in order, none over [`MOST_FDS_PER_SEND`]; empty for none.
-#[must_use]
-pub fn scope_member_batches(total: usize) -> Vec<usize> {
-    let mut batches = vec![MOST_FDS_PER_SEND; total / MOST_FDS_PER_SEND];
-    let rest = total % MOST_FDS_PER_SEND;
-    if rest > 0 {
-        batches.push(rest);
-    }
-    batches
 }
 
 #[derive(Default)]
