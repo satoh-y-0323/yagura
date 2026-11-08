@@ -1136,11 +1136,7 @@ pub fn spawn_watcher(
     socket: std::os::fd::BorrowedFd<'_>,
 ) -> io::Result<std::process::Child> {
     let fd = socket.as_raw_fd();
-    let bound = unnamed_fd_bound();
-    #[cfg(not(target_os = "linux"))]
-    let bound = bound.ok_or_else(|| {
-        io::Error::other("no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to")
-    })?;
+    let mut marker = UnnamedFdMarker::prepare()?;
     let mut command = Command::new(program);
     command
         .arg(fd.to_string())
@@ -1149,11 +1145,12 @@ pub fn spawn_watcher(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: the closure runs in the forked child between fork and exec. It
-    // calls only syscall(2) for close_range(2) and fcntl(2), allocates
-    // nothing, takes no lock and reads only plain integers moved in.
+    // calls only fcntl(2) and what `UnnamedFdMarker::mark` calls, each a bare
+    // system call there; it allocates nothing, takes no lock, and touches only
+    // `fd` and `marker`, moved in from the parent.
     unsafe {
         command.pre_exec(move || {
-            mark_unnamed_fds_cloexec(bound)?;
+            marker.mark()?;
             if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
                 return Err(io::Error::last_os_error());
             }
@@ -1422,26 +1419,18 @@ const FIRST_UNNAMED_FD: libc::c_int = 3;
 /// be read (see [`unnamed_fd_bound`]), since the child could not cover them,
 /// and everywhere when the limit to give back to the child cannot be read.
 fn start_in_new_session_with_only_stdio(command: &mut Command) -> io::Result<()> {
-    // The bound stays the raised soft value: it must cover every fd this
-    // process may hold at the fork, not only those the child may open.
-    let bound = unnamed_fd_bound();
-    // Linux needs the bound only if close_range fails, which only the child sees.
-    #[cfg(not(target_os = "linux"))]
-    let bound = bound.ok_or_else(|| {
-        io::Error::other("no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to")
-    })?;
+    let mut marker = UnnamedFdMarker::prepare()?;
     let restored = limit_to_restore()?;
     // SAFETY: the closure runs in the forked child between fork and exec. It
-    // calls only setsid(2), syscall(2) for close_range(2), fcntl(2) and
-    // setrlimit(2) -- each a bare system call there -- allocates nothing, takes
-    // no lock, and reads only `bound` and `restored`, plain values moved in
-    // from the parent.
+    // calls only setsid(2), setrlimit(2) and what `UnnamedFdMarker::mark`
+    // calls, each a bare system call there; it allocates nothing, takes no
+    // lock, and touches only `marker` and `restored`, moved in from the parent.
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            mark_unnamed_fds_cloexec(bound)?;
+            marker.mark()?;
             // A child left with the raised limit would size its tables by it or
             // pass fds past FD_SETSIZE to select, so it is not started at all.
             if let Some(restored) = restored
@@ -1521,54 +1510,191 @@ fn max_files_per_proc() -> Option<libc::c_int> {
     None
 }
 
-/// Child side: marks every fd from [`FIRST_UNNAMED_FD`] up close-on-exec in
-/// one close_range(2). std's own fds there are close-on-exec already, so only
-/// the ones that would have leaked change.
-#[cfg(target_os = "linux")]
-fn mark_unnamed_fds_cloexec(bound: Option<libc::c_int>) -> io::Result<()> {
-    // The raw syscall, not libc's close_range: that wrapper needs glibc 2.34.
-    // SAFETY: close_range(2) with CLOSE_RANGE_CLOEXEC only sets fd flags of
-    // this process; its arguments are plain integers.
-    let marked = unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            FIRST_UNNAMED_FD as libc::c_uint,
-            libc::c_uint::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    } == 0;
-    if marked {
-        return Ok(());
+/// What a child needs to mark every fd it was not named close-on-exec,
+/// prepared in the parent because the child must not allocate.
+struct UnnamedFdMarker {
+    /// One past the highest fd number at the fork (see [`unnamed_fd_bound`]).
+    /// It stays the raised soft value: it must cover every fd this process
+    /// may hold, not only those the child may open. Linux needs it only if
+    /// close_range fails, which only the child sees.
+    #[cfg(target_os = "linux")]
+    bound: Option<libc::c_int>,
+    #[cfg(not(target_os = "linux"))]
+    bound: libc::c_int,
+    /// Room for the child to list its open fds, so marking costs what is open
+    /// rather than what the soft limit allows: macOS has no close_range.
+    #[cfg(target_os = "macos")]
+    listing: Vec<libc::proc_fdinfo>,
+}
+
+impl UnnamedFdMarker {
+    /// Parent side.
+    ///
+    /// # Errors
+    ///
+    /// Off Linux, returns an I/O error when no finite bound on the fd numbers
+    /// can be read, since the child could not cover them.
+    fn prepare() -> io::Result<Self> {
+        let bound = unnamed_fd_bound();
+        #[cfg(not(target_os = "linux"))]
+        let bound = bound.ok_or_else(|| {
+            io::Error::other(
+                "no finite RLIMIT_NOFILE bound to mark inherited fds close-on-exec up to",
+            )
+        })?;
+        Ok(Self {
+            bound,
+            #[cfg(target_os = "macos")]
+            listing: fd_listing_room(),
+        })
     }
-    // ENOSYS before 5.9, EINVAL before 5.11 (no CLOSE_RANGE_CLOEXEC), EPERM
-    // under seccomp: the loop reaches the same state, and marking is idempotent.
-    let error = io::Error::last_os_error();
-    match bound {
-        Some(bound) => {
-            mark_cloexec_below(bound);
-            Ok(())
+
+    /// Child side: marks every fd from [`FIRST_UNNAMED_FD`] up close-on-exec
+    /// in one close_range(2). std's own fds there are close-on-exec already,
+    /// so only the ones that would have leaked change.
+    #[cfg(target_os = "linux")]
+    fn mark(&mut self) -> io::Result<()> {
+        // The raw syscall, not libc's close_range: that wrapper needs glibc 2.34.
+        // SAFETY: close_range(2) with CLOSE_RANGE_CLOEXEC only sets fd flags of
+        // this process; its arguments are plain integers.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                FIRST_UNNAMED_FD as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        } == 0;
+        if marked {
+            return Ok(());
         }
-        None => Err(error),
+        // ENOSYS before 5.9, EINVAL before 5.11 (no CLOSE_RANGE_CLOEXEC), EPERM
+        // under seccomp: the loop reaches the same state, and marking is idempotent.
+        let error = io::Error::last_os_error();
+        match self.bound {
+            Some(bound) => {
+                mark_cloexec_from(FIRST_UNNAMED_FD, bound);
+                Ok(())
+            }
+            None => Err(error),
+        }
+    }
+
+    /// Child side: marks the open fds this process lists close-on-exec. A
+    /// listing that fails is replaced by trying every number below the bound,
+    /// and one that fills its room is completed that way above its last fd:
+    /// the kernel lists fds in ascending order.
+    #[cfg(target_os = "macos")]
+    fn mark(&mut self) -> io::Result<()> {
+        let Some(count) = list_own_fds(&mut self.listing) else {
+            mark_cloexec_from(FIRST_UNNAMED_FD, self.bound);
+            return Ok(());
+        };
+        let mut next = FIRST_UNNAMED_FD;
+        for info in &self.listing[..count] {
+            mark_cloexec(info.proc_fd);
+            next = next.max(info.proc_fd.saturating_add(1));
+        }
+        if count == self.listing.len() {
+            mark_cloexec_from(next, self.bound);
+        }
+        Ok(())
+    }
+
+    /// Child side: tries every number below the bound.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn mark(&mut self) -> io::Result<()> {
+        mark_cloexec_from(FIRST_UNNAMED_FD, self.bound);
+        Ok(())
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn mark_unnamed_fds_cloexec(bound: libc::c_int) -> io::Result<()> {
-    mark_cloexec_below(bound);
-    Ok(())
+/// Entries kept beyond the kernel's estimate for fds other threads open
+/// between the estimate and the fork.
+#[cfg(target_os = "macos")]
+const FD_LISTING_MARGIN: usize = 32;
+
+/// Parent side: room for a listing of this process's fds. The kernel's
+/// estimate covers its whole fd table; empty when it cannot be read, which
+/// makes the child try every number instead.
+#[cfg(target_os = "macos")]
+fn fd_listing_room() -> Vec<libc::proc_fdinfo> {
+    let entry = std::mem::size_of::<libc::proc_fdinfo>();
+    // SAFETY: a NULL, zero-length query only asks for the size a listing
+    // would need; it writes through no pointer.
+    let estimate = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    let estimate = usize::try_from(estimate).unwrap_or(0);
+    if estimate == 0 {
+        return Vec::new();
+    }
+    let most = usize::try_from(libc::c_int::MAX).unwrap_or(0) / entry;
+    let entries = (estimate / entry)
+        .saturating_add(FD_LISTING_MARGIN)
+        .min(most);
+    vec![
+        libc::proc_fdinfo {
+            proc_fd: -1,
+            proc_fdtype: 0,
+        };
+        entries
+    ]
 }
 
-/// Child side: marks each open fd in `FIRST_UNNAMED_FD..bound` that lacks
-/// `FD_CLOEXEC`, so exec closes it.
-fn mark_cloexec_below(bound: libc::c_int) {
-    for fd in FIRST_UNNAMED_FD..bound {
-        // SAFETY: F_GETFD and F_SETFD only read and set this process's fd
-        // flag; a number that is not open makes F_GETFD return -1.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            }
+/// Child side: lists this process's open fds into `listing` in ascending
+/// order and returns how many it wrote, or `None` when they cannot be listed.
+#[cfg(target_os = "macos")]
+fn list_own_fds(listing: &mut [libc::proc_fdinfo]) -> Option<usize> {
+    let bytes = libc::c_int::try_from(std::mem::size_of_val(listing)).ok()?;
+    if bytes == 0 {
+        return None;
+    }
+    // SAFETY: `listing` is a live buffer of `bytes` bytes of the kernel's own
+    // listing type, and at most that is written. Both calls are bare system
+    // calls: libproc's proc_pidinfo only calls __proc_info (xnu
+    // `libproc.c`), and its kernel side, proc_pidfdlist (`proc_info.c`),
+    // allocates and locks only inside the kernel.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            listing.as_mut_ptr().cast(),
+            bytes,
+        )
+    };
+    let written = usize::try_from(written)
+        .ok()
+        .filter(|&written| written > 0)?;
+    Some((written / std::mem::size_of::<libc::proc_fdinfo>()).min(listing.len()))
+}
+
+/// Child side: marks each open fd in `first..bound` close-on-exec.
+fn mark_cloexec_from(first: libc::c_int, bound: libc::c_int) {
+    for fd in first..bound {
+        mark_cloexec(fd);
+    }
+}
+
+/// Child side: sets `FD_CLOEXEC` on `fd` if it is open, unnamed and lacks it,
+/// so exec closes it.
+fn mark_cloexec(fd: libc::c_int) {
+    if fd < FIRST_UNNAMED_FD {
+        return;
+    }
+    // SAFETY: F_GETFD and F_SETFD only read and set this process's fd flag; a
+    // number that is not open makes F_GETFD return -1.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+            libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
         }
     }
 }
@@ -1836,5 +1962,67 @@ mod tests {
         std::fs::remove_file(&fallback).unwrap();
         std::fs::write(&fallback, b"x").unwrap();
         assert!(resolve().is_err(), "a regular file");
+    }
+
+    // The listing can fail or fill its room (fds opened by other threads after
+    // the parent sized it); either way the fds it did not list still must not
+    // reach the child.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn a_child_inherits_no_unnamed_fd_when_its_fd_listing_fails_or_fills_its_room() {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+
+        // High enough that the shell has nothing of its own there, under the
+        // 256 a default soft limit allows.
+        let leaked: Vec<OwnedFd> = [200, 210, 220]
+            .into_iter()
+            .map(|at| {
+                let null = std::fs::File::open("/dev/null").unwrap();
+                // SAFETY: F_DUPFD only creates a new fd in this process.
+                let fd = unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD, at) };
+                assert!(fd >= at, "{}", io::Error::last_os_error());
+                // SAFETY: `fd` was just created and nothing else owns it.
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                // SAFETY: F_SETFD only clears this process's flag on its own fd.
+                assert_eq!(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) }, 0);
+                fd
+            })
+            .collect();
+        let numbers: Vec<String> = leaked.iter().map(|fd| fd.as_raw_fd().to_string()).collect();
+        let script = format!(
+            "for n in {}; do [ -e /dev/fd/$n ] && echo $n; done; exit 0",
+            numbers.join(" ")
+        );
+        let unlisted = Vec::new();
+        let room_for_one = vec![
+            libc::proc_fdinfo {
+                proc_fd: -1,
+                proc_fdtype: 0,
+            };
+            1
+        ];
+        for (case, listing) in [("failed", unlisted), ("full", room_for_one)] {
+            let mut marker = UnnamedFdMarker {
+                bound: unnamed_fd_bound().unwrap(),
+                listing,
+            };
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", &script]).stdin(Stdio::null());
+            // SAFETY: the closure runs in the forked child and only marks fds,
+            // as the spawns of this module do.
+            unsafe {
+                command.pre_exec(move || marker.mark());
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "",
+                "{case} listing: the child inherited fds it was not named"
+            );
+        }
+        drop(leaked);
     }
 }
