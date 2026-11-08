@@ -1705,3 +1705,328 @@ fn the_holder_fallback_endpoint_fits_sun_path_for_the_longest_parts() {
         );
     }
 }
+
+// =====================================================================
+// Taking an endpoint lock by waiting for its release, and removing an
+// endpoint's files while the caller holds that lock
+// =====================================================================
+
+/// A call running on its own thread, so a test can look at it while it blocks.
+struct Pending<R> {
+    started: mpsc::Receiver<()>,
+    done: mpsc::Receiver<R>,
+}
+
+fn in_thread<R: Send + 'static>(call: impl FnOnce() -> R + Send + 'static) -> Pending<R> {
+    let (started_tx, started) = mpsc::channel();
+    let (done_tx, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = started_tx.send(());
+        let _ = done_tx.send(call());
+    });
+    Pending { started, done }
+}
+
+/// The device and inode of the file at `path`.
+fn file_id(path: &std::path::Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).expect("the file exists");
+    (meta.dev(), meta.ino())
+}
+
+/// The device and inode of the file open as `fd`, or `None` when `fd` is not
+/// open.
+#[cfg(not(target_os = "linux"))]
+fn descriptor_file_id(fd: i32) -> Option<(u64, u64)> {
+    // SAFETY: `stat` is a stack-local that `fstat` fills; a descriptor closed
+    // since it was listed only makes the call fail.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::fstat(fd, &mut stat) };
+    (result == 0).then_some((stat.st_dev as u64, stat.st_ino as u64))
+}
+
+/// Whether this process holds a descriptor on the file `id` names.
+#[cfg(not(target_os = "linux"))]
+fn descriptor_is_open_on(id: (u64, u64)) -> bool {
+    std::fs::read_dir("/dev/fd")
+        .expect("list this process's descriptors")
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .any(|fd| descriptor_file_id(fd) == Some(id))
+}
+
+/// Whether some `flock` request on the file with this inode is queued behind
+/// the lock holder. Only Linux reports waiters (`->` lines of `/proc/locks`).
+#[cfg(target_os = "linux")]
+fn flock_waiter_is_queued(inode: u64) -> bool {
+    let locks = std::fs::read_to_string("/proc/locks").expect("read /proc/locks");
+    locks.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.get(1) == Some(&"->")
+            && fields.contains(&"FLOCK")
+            && fields.iter().any(|field| {
+                let mut parts = field.split(':');
+                let (_major, _minor, ino) = (parts.next(), parts.next(), parts.next());
+                parts.next().is_none() && ino.and_then(|ino| ino.parse::<u64>().ok()) == Some(inode)
+            })
+    })
+}
+
+impl<R> Pending<R> {
+    /// Returns once the call has the lock file `id` names open and is not yet
+    /// done. Linux reports a request queued behind the holder, so the call is
+    /// known to be waiting. Elsewhere only the open file is observable, so a
+    /// call that returns early between its open and its lock request can go
+    /// unnoticed there; the file is open, though, before the holder changes it.
+    fn wait_until_blocked_on(&self, id: (u64, u64)) {
+        self.started
+            .recv_timeout(HANG_GUARD)
+            .expect("the call's thread must start");
+        let deadline = Instant::now() + HANG_GUARD;
+        loop {
+            match self.done.try_recv() {
+                Ok(_) => panic!("the call returned while the lock was still held"),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("the call's thread ended without a result")
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            #[cfg(target_os = "linux")]
+            let waiting = flock_waiter_is_queued(id.1);
+            #[cfg(not(target_os = "linux"))]
+            let waiting = descriptor_is_open_on(id);
+            if waiting {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the call never started waiting behind the lock holder"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn assert_still_blocked_on(&self, id: (u64, u64)) {
+        assert!(
+            self.done.try_recv().is_err(),
+            "the call returned while a process still held the lock"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            flock_waiter_is_queued(id.1),
+            "the call left its wait while a process still held the lock"
+        );
+        #[cfg(not(target_os = "linux"))]
+        let _ = id;
+    }
+
+    fn result(self) -> R {
+        self.done
+            .recv_timeout(HANG_GUARD)
+            .unwrap_or_else(|_| panic!("the call did not return within {HANG_GUARD:?}"))
+    }
+}
+
+/// Starts `/bin/sh -c script` holding a copy of `lock`'s open file
+/// description (the same lock), as a forked child does. The script gets the
+/// lock file's path as `$LOCK` and its `read _` ends when its stdin is closed.
+fn spawn_lock_holder(lock: &std::fs::File, lock_path: &std::path::Path, script: &str) -> Child {
+    use std::os::fd::AsRawFd;
+
+    let fd = lock.as_raw_fd();
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .env("LOCK", lock_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: runs between fork and exec in the child, where `fcntl` on a
+    // descriptor the child already owns is async-signal-safe; it clears
+    // close-on-exec on the child's copy only.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().expect("spawn the lock holder")
+}
+
+/// Lets the holder's script run and returns once the process has ended and
+/// been reaped, so every descriptor it held is closed.
+fn end_lock_holder(holder: &mut Child) {
+    drop(holder.stdin.take());
+    let status = holder.wait().expect("reap the lock holder");
+    assert!(
+        status.success(),
+        "the lock holder's script failed: {status:?}"
+    );
+}
+
+/// The `errno` of a non-blocking exclusive `flock` on `file`, or `None` when
+/// it took the lock.
+fn flock_nb_errno(file: &std::fs::File) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+
+    // SAFETY: `file` owns this open file descriptor for the whole call.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    (result != 0).then(|| std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+}
+
+#[test]
+fn the_blocking_endpoint_lock_returns_only_once_the_last_process_holding_it_has_ended() {
+    let dir = secure_dir();
+    let endpoint = dir.path().join("e.sock");
+    let lock_path = endpoint_lock_path(&endpoint);
+    let held = hold_endpoint_lock(&endpoint);
+    let id = file_id(&lock_path);
+    // Two holders of one lock, as a process and the child it forked. The
+    // fixture's own copy goes away, so only the two children keep the lock.
+    let mut first = spawn_lock_holder(&held, &lock_path, "read _; :");
+    let mut second = spawn_lock_holder(&held, &lock_path, "read _; :");
+    drop(held);
+
+    let acquiring = in_thread({
+        let endpoint = endpoint.clone();
+        move || yagura_os::platform_unix::lock_endpoint_blocking(&endpoint)
+    });
+    acquiring.wait_until_blocked_on(id);
+
+    end_lock_holder(&mut first);
+    acquiring.assert_still_blocked_on(id);
+
+    end_lock_holder(&mut second);
+    let taken = match acquiring.result() {
+        Ok(Some(taken)) => taken,
+        Ok(None) => panic!("the lock file is still named by its path, so the lock is current"),
+        Err(error) => panic!("the lock must be taken once its last holder ended: {error}"),
+    };
+    let probe = std::fs::File::open(&lock_path).expect("open the lock file again");
+    assert_eq!(
+        flock_nb_errno(&probe),
+        Some(libc::EWOULDBLOCK),
+        "the returned lock must be held by the caller"
+    );
+    drop(taken);
+}
+
+/// A holder that removes the lock file on its way out leaves the waiter with a
+/// lock on a file no path names any more, which excludes nobody.
+fn blocking_lock_after_the_holder_ends(script: &str) {
+    let dir = secure_dir();
+    let endpoint = dir.path().join("e.sock");
+    let lock_path = endpoint_lock_path(&endpoint);
+    let held = hold_endpoint_lock(&endpoint);
+    let id = file_id(&lock_path);
+    let mut holder = spawn_lock_holder(&held, &lock_path, script);
+    drop(held);
+
+    let acquiring = in_thread({
+        let endpoint = endpoint.clone();
+        move || yagura_os::platform_unix::lock_endpoint_blocking(&endpoint)
+    });
+    acquiring.wait_until_blocked_on(id);
+    end_lock_holder(&mut holder);
+
+    match acquiring.result() {
+        Ok(None) => {}
+        Ok(Some(_)) => panic!(
+            "a lock taken on a file the path no longer names must be reported as not current"
+        ),
+        Err(error) => panic!("the lock must be taken once the holder ended: {error}"),
+    }
+}
+
+#[test]
+fn the_blocking_endpoint_lock_is_not_current_when_the_holder_removed_the_lock_file() {
+    blocking_lock_after_the_holder_ends(r#"read _; rm -- "$LOCK""#);
+}
+
+#[test]
+fn the_blocking_endpoint_lock_is_not_current_when_the_holder_replaced_the_lock_file() {
+    blocking_lock_after_the_holder_ends(r#"read _; rm -- "$LOCK"; : > "$LOCK""#);
+}
+
+#[test]
+fn files_removed_under_a_held_lock_go_in_full_and_the_callers_lock_stays_held() {
+    let dir = secure_dir();
+    let endpoint = dir.path().join("e.sock");
+    let record = dir.path().join("e.json");
+    std::fs::write(&record, b"{}").expect("write the record");
+    drop(std::os::unix::net::UnixListener::bind(&endpoint).expect("bind the socket"));
+    let held = hold_endpoint_lock(&endpoint);
+    let lock_path = endpoint_lock_path(&endpoint);
+    // A second open file description of the lock's file, to ask later whether
+    // the caller's lock is still held.
+    let probe = std::fs::File::open(&lock_path).expect("open the lock file again");
+
+    let removal = in_thread({
+        let (record, endpoint, lock_path) = (record.clone(), endpoint.clone(), lock_path.clone());
+        move || {
+            yagura_os::platform_unix::remove_endpoint_files_under_lock(
+                &record, &endpoint, &lock_path,
+            )
+        }
+    });
+    removal
+        .result()
+        .expect("removing under a held lock must succeed");
+
+    for (what, path) in [
+        ("record", &record),
+        ("socket", &endpoint),
+        ("lock file", &lock_path),
+    ] {
+        assert!(
+            std::fs::symlink_metadata(path).is_err(),
+            "the {what} was left behind"
+        );
+    }
+    assert_eq!(
+        flock_nb_errno(&probe),
+        Some(libc::EWOULDBLOCK),
+        "the caller must still hold its lock after the files are gone"
+    );
+    drop(held);
+}
+
+#[test]
+fn files_removed_under_a_held_lock_stop_at_a_failing_socket_with_the_record_gone_and_the_lock_file_kept()
+ {
+    let dir = secure_dir();
+    let endpoint = dir.path().join("e.sock");
+    let record = dir.path().join("e.json");
+    std::fs::write(&record, b"{}").expect("write the record");
+    // A directory with content cannot be removed as a file.
+    std::fs::create_dir(&endpoint).expect("create the directory in the socket's place");
+    std::fs::write(endpoint.join("inside"), b"x").expect("fill the directory");
+    let held = hold_endpoint_lock(&endpoint);
+    let lock_path = endpoint_lock_path(&endpoint);
+
+    let removal = in_thread({
+        let (record, endpoint, lock_path) = (record.clone(), endpoint.clone(), lock_path.clone());
+        move || {
+            yagura_os::platform_unix::remove_endpoint_files_under_lock(
+                &record, &endpoint, &lock_path,
+            )
+        }
+    });
+    let outcome = removal.result();
+
+    assert!(
+        outcome.is_err(),
+        "a socket that cannot be removed must be reported"
+    );
+    assert!(
+        std::fs::symlink_metadata(&record).is_err(),
+        "the record goes first, so a stop part-way leaves no record to act on"
+    );
+    assert!(
+        std::fs::symlink_metadata(&lock_path).is_ok(),
+        "the lock file goes last, so it stays when an earlier removal failed"
+    );
+    drop(held);
+}

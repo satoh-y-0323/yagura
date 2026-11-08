@@ -537,6 +537,63 @@ pub fn remove_abandoned_endpoint(endpoint: &Path) -> Result<(), OsError> {
     socket.and(lock_file)
 }
 
+/// Takes the lock on `endpoint` (`<endpoint>.lock`, created owner-only if
+/// missing), blocking until every process holding it has let it go.
+///
+/// The wait has no bound: the kernel wakes it when the last descriptor
+/// holding the lock closes. A signal that interrupts the wait does not end it.
+/// `Ok(None)` means the lock was taken on a file its path no longer names: its
+/// last holder removed it on the way out, so its clean-up is done.
+///
+/// # Errors
+///
+/// Returns [`OsError::Security`] when the lock path names something other
+/// than a regular file, and [`OsError::Io`] when the lock file cannot be
+/// opened, locked or looked up.
+pub fn lock_endpoint_blocking(endpoint: &Path) -> Result<Option<EndpointLock>, OsError> {
+    let lock_path = endpoint_lock_path(endpoint);
+    let file = open_lock_file(&lock_path)?;
+    loop {
+        // SAFETY: `file` owns this open file descriptor for the whole call, and
+        // flock only reads the descriptor and its flags.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            break;
+        }
+        let lock_error = io::Error::last_os_error();
+        if lock_error.raw_os_error() != Some(libc::EINTR) {
+            return Err(OsError::Io(lock_error));
+        }
+    }
+    lock_if_current(file, &lock_path)
+}
+
+/// Removes an endpoint's files while the caller holds its lock: the record,
+/// then the socket, then the lock file. The lock is not taken again (a new
+/// open of the file could not take it), and stays with the caller.
+///
+/// The record goes first, so a removal that stops part-way leaves no record
+/// to act on; the lock file goes last, so nobody locks the path meanwhile. A
+/// file already gone counts as removed.
+///
+/// # Errors
+///
+/// Returns [`OsError::Io`] for the first file that cannot be removed; the
+/// files after it are left in place.
+pub fn remove_endpoint_files_under_lock(
+    record: &Path,
+    socket: &Path,
+    lock_path: &Path,
+) -> Result<(), OsError> {
+    for path in [record, socket, lock_path] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(OsError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
 impl IpcTransport for UnixIpc {
     type Listener = SocketListener;
     type ClientConnection = UnixStream;
@@ -595,9 +652,9 @@ impl IpcTransport for UnixIpc {
 }
 
 /// The lock on an endpoint, taken on the file its lock path named once the
-/// lock was held. Only [`take_lock_if_current`] makes one.
+/// lock was held. Held until dropped.
 #[derive(Debug)]
-struct EndpointLock {
+pub struct EndpointLock {
     // Holds the lock until dropped.
     _file: std::fs::File,
     path: PathBuf,
@@ -634,8 +691,9 @@ fn lock_endpoint(endpoint: &Path) -> Result<EndpointLock, OsError> {
 const LOCK_ATTEMPTS: usize = 8;
 
 fn open_lock_file(lock_path: &Path) -> Result<std::fs::File, OsError> {
-    // O_NONBLOCK keeps a FIFO planted at the path from blocking the open;
-    // O_CLOEXEC keeps a spawned child from holding the lock past our death.
+    // O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
+    // O_CLOEXEC: the lock is handed on only on purpose, to the holder's
+    // watcher; the window's command and its descendants never inherit it.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -675,6 +733,12 @@ fn take_lock_if_current(
         }
         return Err(OsError::Io(lock_error));
     }
+    lock_if_current(file, lock_path)
+}
+
+/// Keeps the lock held on `file`, opened from `lock_path`, when `lock_path`
+/// still names that file; `None` (dropping the lock) when it does not.
+fn lock_if_current(file: std::fs::File, lock_path: &Path) -> Result<Option<EndpointLock>, OsError> {
     let locked = file.metadata().map_err(OsError::Io)?;
     let named = match std::fs::symlink_metadata(lock_path) {
         Ok(named) => named,
