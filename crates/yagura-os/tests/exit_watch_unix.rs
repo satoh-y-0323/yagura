@@ -225,26 +225,16 @@ fn nothing_the_dead_writers_wrote_comes_after_the_end_mark() {
     }
 }
 
-/// The state `ps` shows for `pid`; `None` once it is gone.
-#[cfg(target_os = "macos")]
-fn ps_state(pid: u32) -> Option<char> {
-    let output = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .expect("run ps");
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .chars()
-        .next()
-}
-
-/// Members found by listing the group and waited on one by one; a member
-/// that ends while the wait is under way does not stop it early.
+/// The members of the group `pgid`, listed from the operating system.
 #[cfg(target_os = "macos")]
 #[test]
-fn the_wait_on_a_group_returns_once_every_member_has_exited() {
+fn group_member_pids_lists_every_member_of_a_five_member_group() {
     let mut leader = Command::new("/bin/sh")
-        .args(["-c", "sleep 600 & echo $!; sleep 600 & echo $!; wait"])
+        .args([
+            "-c",
+            "sleep 600 & echo $!; sleep 600 & echo $!; sleep 600 & echo $!; \
+             sleep 600 & echo $!; wait",
+        ])
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -252,36 +242,89 @@ fn the_wait_on_a_group_returns_once_every_member_has_exited() {
         .spawn()
         .unwrap();
     let mut lines = BufReader::new(leader.stdout.take().unwrap()).lines();
-    let mut members = vec![leader.id()];
-    for _ in 0..2 {
-        members.push(lines.next().unwrap().unwrap().trim().parse().unwrap());
+    let mut expected = vec![leader.id()];
+    for _ in 0..4 {
+        expected.push(lines.next().unwrap().unwrap().trim().parse().unwrap());
     }
     let pgid = leader.id();
-    let (done, waited) = mpsc::channel();
-    let watched = members.clone();
-    std::thread::spawn(move || {
-        let result = yagura_os::platform_unix::wait_group_exit(pgid);
-        let living: Vec<u32> = watched
-            .iter()
-            .copied()
-            .filter(|&pid| ps_state(pid).is_some_and(|state| state != 'Z'))
-            .collect();
-        let _ = done.send(result.map(|()| living));
-    });
+    let listed = yagura_os::platform_unix::group_member_pids(pgid);
 
-    for &member in &members[1..] {
+    for &member in &expected[1..] {
         // SAFETY: SIGKILL to a sleeper this test's own child started.
         unsafe { libc::kill(member as libc::pid_t, libc::SIGKILL) };
     }
     // SAFETY: SIGKILL to this test's own child.
     unsafe { libc::kill(pgid as libc::pid_t, libc::SIGKILL) };
-    let living = waited
-        .recv_timeout(HANG_GUARD)
-        .expect("the wait did not return after every member was killed")
-        .expect("the wait failed");
     let _ = leader.wait();
+
+    let mut listed = listed.expect("list the group's members");
+    listed.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        listed, expected,
+        "the listing of a five-member group must name all five members"
+    );
+}
+
+/// The wait on given pids returns once the last of them has exited, and gives
+/// up at the limit it is handed, returning the pids still running.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_wait_on_members_returns_only_after_the_last_exit_and_gives_up_at_the_limit() {
+    // The first part: the wait must not return while one of two members runs.
+    let mut first = Command::new("sleep").arg("600").spawn().unwrap();
+    let mut last = Command::new("sleep").arg("600").spawn().unwrap();
+    let (first_pid, last_pid) = (first.id(), last.id());
+    let (done, waited) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result =
+            yagura_os::platform_unix::wait_for_members_exit(&[first_pid, last_pid], HANG_GUARD);
+        let _ = done.send(result);
+    });
+
+    // SAFETY: SIGKILL to a sleeper this test's own child started.
+    unsafe { libc::kill(first_pid as libc::pid_t, libc::SIGKILL) };
+    yagura_os::platform_unix::wait_for_exit_without_reaping(first_pid)
+        .expect("observe the first member's exit");
     assert!(
-        living.is_empty(),
-        "the wait returned while members {living:?} of {members:?} still ran"
+        matches!(waited.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "the wait returned while the last member still ran"
+    );
+    // SAFETY: SIGKILL to a sleeper this test's own child started.
+    unsafe { libc::kill(last_pid as libc::pid_t, libc::SIGKILL) };
+    let remaining = waited
+        .recv_timeout(HANG_GUARD)
+        .expect("the wait did not return after every member had exited")
+        .expect("the wait failed");
+    assert!(
+        remaining.is_empty(),
+        "every member had exited, yet {remaining:?} was left running"
+    );
+    let _ = first.wait();
+    let _ = last.wait();
+
+    // The second part: a stopped member never exits on its own, so the wait
+    // returns at the limit and names it as still running.
+    let limit = Duration::from_millis(200);
+    let mut stuck = Command::new("sleep").arg("600").spawn().unwrap();
+    let stuck_pid = stuck.id();
+    // SAFETY: SIGSTOP to a sleeper this test's own child started.
+    unsafe { libc::kill(stuck_pid as libc::pid_t, libc::SIGSTOP) };
+    let (done, gave_up) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = yagura_os::platform_unix::wait_for_members_exit(&[stuck_pid], limit);
+        let _ = done.send(result);
+    });
+    let remaining = gave_up
+        .recv_timeout(HANG_GUARD)
+        .expect("the wait did not give up at its limit")
+        .expect("the wait failed");
+    // SAFETY: SIGKILL to the stopped sleeper this test's own child started.
+    unsafe { libc::kill(stuck_pid as libc::pid_t, libc::SIGKILL) };
+    let _ = stuck.wait();
+    assert_eq!(
+        remaining,
+        vec![stuck_pid],
+        "the stopped member must be returned as still running"
     );
 }

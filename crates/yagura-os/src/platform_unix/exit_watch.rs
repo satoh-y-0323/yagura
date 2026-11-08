@@ -2,6 +2,8 @@
 //! reaping it, and those of the rest of its tree.
 
 use std::io;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 /// Blocks until this process's child `pid` has exited, leaving it unreaped:
 /// it stays a zombie, so its id still names it, until it is reaped.
@@ -237,23 +239,23 @@ fn reap_if_exited(pid: u32) -> io::Result<bool> {
     }
 }
 
-/// Blocks until every process in the group `pgid` at the time of the call
-/// has exited (a zombie counts as exited).
+/// Blocks until every process in `members` has exited (a zombie counts as
+/// exited), or until `limit` has passed, and returns the members still
+/// running then: empty once every one has exited.
 ///
-/// The members are listed once, then each one's exit is awaited through
-/// kqueue, so a member that ends while others still run does not end the wait.
+/// Each member's exit is awaited through kqueue, so a member that ends while
+/// others still run does not end the wait. `limit` only bounds the wait; a
+/// limit too far off to be a point in time is no limit.
 ///
 /// # Errors
 ///
-/// Returns the operating system's error when the group cannot be listed or
-/// the exits cannot be watched. The caller then has no event for the group's
-/// end.
+/// Returns the operating system's error when the exits cannot be watched.
+/// The caller then has no event for the members' end.
 #[cfg(target_os = "macos")]
-pub fn wait_group_exit(pgid: u32) -> io::Result<()> {
-    use std::collections::BTreeSet;
+pub fn wait_for_members_exit(members: &[u32], limit: Duration) -> io::Result<Vec<u32>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
-    let mut remaining: BTreeSet<libc::pid_t> = group_members(pgid)?.into_iter().collect();
+    let deadline = Instant::now().checked_add(limit);
     // SAFETY: kqueue takes no arguments and returns a new descriptor or -1.
     let queue = unsafe { libc::kqueue() };
     if queue == -1 {
@@ -262,19 +264,36 @@ pub fn wait_group_exit(pgid: u32) -> io::Result<()> {
     // SAFETY: `queue` is a descriptor just returned to this function alone.
     let queue = unsafe { OwnedFd::from_raw_fd(queue) };
 
-    for &pid in remaining.clone().iter() {
-        if !watch_exit(queue.as_raw_fd(), pid)? {
-            remaining.remove(&pid);
+    let mut remaining = Vec::with_capacity(members.len());
+    for &member in members {
+        let Ok(pid) = libc::pid_t::try_from(member) else {
+            continue;
+        };
+        if remaining.contains(&member) || !watch_exit(queue.as_raw_fd(), pid)? {
+            continue;
+        }
+        // A member that became a zombie before it was watched may send no event.
+        if !has_exited(pid) {
+            remaining.push(member);
         }
     }
-    // A member that became a zombie before it was watched may send no event.
-    remaining.retain(|&pid| !has_exited(pid));
 
     while !remaining.is_empty() {
+        let timeout = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                Some(timespec_of(left))
+            }
+            None => None,
+        };
         // SAFETY: zeroed is a valid `kevent`, which kevent only writes.
         let mut event: libc::kevent = unsafe { std::mem::zeroed() };
         // SAFETY: no changes are passed; `event` is a live stack local of
-        // the one entry asked for, and a null timeout blocks.
+        // the one entry asked for; the timeout is a live local or null,
+        // which blocks.
         let count = unsafe {
             libc::kevent(
                 queue.as_raw_fd(),
@@ -282,7 +301,9 @@ pub fn wait_group_exit(pgid: u32) -> io::Result<()> {
                 0,
                 &mut event,
                 1,
-                std::ptr::null(),
+                timeout
+                    .as_ref()
+                    .map_or(std::ptr::null(), std::ptr::from_ref),
             )
         };
         if count == -1 {
@@ -295,37 +316,21 @@ pub fn wait_group_exit(pgid: u32) -> io::Result<()> {
         if count == 1
             && event.filter == libc::EVFILT_PROC
             && event.fflags & libc::NOTE_EXIT != 0
-            && let Ok(pid) = libc::pid_t::try_from(event.ident)
+            && let Ok(pid) = u32::try_from(event.ident)
         {
-            remaining.remove(&pid);
+            remaining.retain(|&member| member != pid);
         }
     }
-    Ok(())
+    Ok(remaining)
 }
 
-/// The members of the group `pgid`, from `proc_listpgrppids`.
+/// `duration` as a kevent timeout, saturating at the largest one.
 #[cfg(target_os = "macos")]
-fn group_members(pgid: u32) -> io::Result<Vec<libc::pid_t>> {
-    let pgid = libc::pid_t::try_from(pgid)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "group id out of range"))?;
-    let entry = std::mem::size_of::<libc::pid_t>();
-    // SAFETY: a null buffer asks only for the size the list needs.
-    let needed = unsafe { libc::proc_listpgrppids(pgid, std::ptr::null_mut(), 0) };
-    if needed < 0 {
-        return Err(io::Error::last_os_error());
+fn timespec_of(duration: Duration) -> libc::timespec {
+    libc::timespec {
+        tv_sec: libc::time_t::try_from(duration.as_secs()).unwrap_or(libc::time_t::MAX),
+        tv_nsec: libc::c_long::from(duration.subsec_nanos()),
     }
-    // Room for members that join between the two calls.
-    let mut pids: Vec<libc::pid_t> = vec![0; usize::try_from(needed).unwrap_or(0) / entry + 16];
-    let capacity = libc::c_int::try_from(pids.len() * entry)
-        .map_err(|_| io::Error::other("the group's member list is too large"))?;
-    // SAFETY: `pids` is a live allocation of `capacity` bytes.
-    let written = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), capacity) };
-    if written < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    pids.truncate(usize::try_from(written).unwrap_or(0) / entry);
-    pids.retain(|&pid| pid > 0);
-    Ok(pids)
 }
 
 /// Asks `queue` for `pid`'s exit; `false` when `pid` is already gone.

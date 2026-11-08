@@ -27,12 +27,14 @@ mod tty_mark;
 mod user_manager;
 
 #[cfg(target_os = "macos")]
-pub use exit_watch::wait_group_exit;
+pub use exit_watch::wait_for_members_exit;
 pub use exit_watch::{ChildSignals, wait_for_exit_without_reaping};
 #[cfg(target_os = "linux")]
 pub use exit_watch::{child_pids, kill_orphans, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
+#[cfg(target_os = "macos")]
+pub use process_group::group_member_pids;
 #[cfg(target_os = "linux")]
 pub use user_manager::{
     ScopeNames, UserManager, UserManagerError, cgroup_dir_of, descendants_outside,

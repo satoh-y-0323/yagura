@@ -397,7 +397,11 @@ fn end_tree_after_exit(group: &ProcessGroup, leader: u32, gate: &ReapGate, share
 #[cfg(target_os = "macos")]
 fn end_tree_after_exit(group: &ProcessGroup, leader: u32, _gate: &ReapGate, _shared: &Shared) {
     end_tree(group);
-    if let Err(error) = yagura_os::platform_unix::wait_group_exit(leader) {
+    // Unbounded: this wait is what orders the end mark after every writer.
+    let waited = yagura_os::platform_unix::group_member_pids(leader).and_then(|members| {
+        yagura_os::platform_unix::wait_for_members_exit(&members, std::time::Duration::MAX)
+    });
+    if let Err(error) = waited {
         crate::log(format_args!(
             "cannot watch the child's process group end: {error}"
         ));

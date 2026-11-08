@@ -195,56 +195,127 @@ fn any_member_alive(
     members.iter().any(|&member| pgid_of(member) == Some(pgid))
 }
 
-/// Turns a two-call size-query/list pattern into a validated pid list.
-/// `needed_entries` and `list`'s return value are both pid *counts*; the
-/// buffer length `list` receives is *bytes* (the syscall wrapper's unit).
-///
-/// Reachability: the wrapper folds a failed query into a count of zero
-/// rather than a negative value, so only the zero-count guards below fire in
-/// practice; the negative-count guards are unreachable in production and
-/// exist only as a fail-closed contract, exercised by `mod tests`.
+/// One reading of a process group's members.
 #[cfg(any(target_os = "macos", test))]
-fn collect_group_members(
+#[derive(Debug, PartialEq, Eq)]
+enum GroupListing {
+    /// Every member the reading found; empty when it found none.
+    Members(Vec<libc::pid_t>),
+    /// The buffer filled up, so members may be missing from the reading.
+    Full,
+}
+
+/// Turns a two-call size-query/list pattern into one reading of a group.
+///
+/// Both `needed_entries` and `list`'s return value count pids (entries); the
+/// buffer `list` receives is `needed_entries` pids long. Bytes appear only
+/// where the buffer is handed to the system ([`BufferBytes`]). What an empty
+/// or [`GroupListing::Full`] reading means is the caller's to decide.
+///
+/// # Errors
+///
+/// Returns [`OsError::Security`] for a negative size or count, or a listed
+/// pid that is not positive.
+#[cfg(any(target_os = "macos", test))]
+fn list_group_members(
     needed_entries: libc::c_int,
     list: impl FnOnce(&mut [libc::pid_t]) -> libc::c_int,
-) -> Result<Vec<libc::pid_t>, OsError> {
-    if needed_entries < 0 {
-        return Err(OsError::Security(format!(
+) -> Result<GroupListing, OsError> {
+    let capacity = usize::try_from(needed_entries).map_err(|_| {
+        OsError::Security(format!(
             "proc_listpgrppids size query failed: {needed_entries}"
-        )));
+        ))
+    })?;
+    if capacity == 0 {
+        return Ok(GroupListing::Members(Vec::new()));
     }
-    if needed_entries == 0 {
-        return Err(OsError::Security(
-            "proc_listpgrppids size query returned no capacity".to_string(),
-        ));
-    }
-    let capacity = needed_entries as usize;
     let mut buf: Vec<libc::pid_t> = vec![0; capacity];
     let count = list(&mut buf);
-    if count < 0 {
-        return Err(OsError::Security(format!(
-            "proc_listpgrppids negative count: {count}"
-        )));
-    }
-    if count == 0 {
-        return Err(OsError::Security(
-            "proc_listpgrppids no members".to_string(),
-        ));
-    }
-    let count = count as usize;
+    let count = usize::try_from(count)
+        .map_err(|_| OsError::Security(format!("proc_listpgrppids negative count: {count}")))?;
     if count >= capacity {
-        return Err(OsError::Security(format!(
-            "proc_listpgrppids returned {count} members for capacity {capacity}, which cannot \
-             account for every member"
-        )));
+        return Ok(GroupListing::Full);
     }
-    if let Some(&pid) = buf[..count].iter().find(|&&pid| pid <= 0) {
+    buf.truncate(count);
+    if let Some(&pid) = buf.iter().find(|&&pid| pid <= 0) {
         return Err(OsError::Security(format!(
             "proc_listpgrppids out-of-contract pid: {pid}"
         )));
     }
-    buf.truncate(count);
-    Ok(buf)
+    Ok(GroupListing::Members(buf))
+}
+
+/// A buffer's length in bytes, the unit `proc_listpgrppids` takes its buffer
+/// size in, while it counts what it returns in pids.
+#[cfg(target_os = "macos")]
+struct BufferBytes(libc::c_int);
+
+#[cfg(target_os = "macos")]
+impl BufferBytes {
+    fn of(buf: &[libc::pid_t]) -> Option<Self> {
+        libc::c_int::try_from(std::mem::size_of_val(buf))
+            .ok()
+            .map(Self)
+    }
+}
+
+/// Reads the members of group `pgid` from `proc_listpgrppids`.
+#[cfg(target_os = "macos")]
+fn read_group_listing(pgid: libc::pid_t) -> Result<GroupListing, OsError> {
+    // SAFETY: a NULL, zero-length query only asks proc_listpgrppids for the
+    // pid count it would need; it writes through neither pointer.
+    let needed = unsafe { libc::proc_listpgrppids(pgid, std::ptr::null_mut(), 0) };
+    list_group_members(needed, |buf| {
+        // A buffer too large to describe in bytes reads as full, never as a
+        // group without members.
+        let Some(bytes) = BufferBytes::of(buf) else {
+            return libc::c_int::MAX;
+        };
+        // SAFETY: `buf` is a live allocation of at least `bytes.0` bytes.
+        unsafe { libc::proc_listpgrppids(pgid, buf.as_mut_ptr().cast(), bytes.0) }
+    })
+}
+
+/// The pids of the members of process group `pgid`, zombies included.
+///
+/// # Errors
+///
+/// Returns an error when `pgid` is not a valid group id, the reading fails,
+/// or the group has more members than the reading could hold.
+#[cfg(target_os = "macos")]
+pub fn group_member_pids(pgid: u32) -> std::io::Result<Vec<u32>> {
+    let pgid = libc::pid_t::try_from(pgid).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "group id out of range")
+    })?;
+    match read_group_listing(pgid).map_err(std::io::Error::other)? {
+        GroupListing::Members(pids) => Ok(pids
+            .into_iter()
+            .filter_map(|pid| u32::try_from(pid).ok())
+            .collect()),
+        GroupListing::Full => Err(std::io::Error::other(format!(
+            "the members of group {pgid} did not fit the listing"
+        ))),
+    }
+}
+
+/// Whether a group `killpg` answered with `EPERM` has no live member left,
+/// judged from one `listing` of it. A reading that found no member or may
+/// have missed some proves nothing, so it fails closed.
+#[cfg(any(target_os = "macos", test))]
+fn eperm_means_every_member_is_gone_from(
+    pgid: libc::pid_t,
+    listing: GroupListing,
+    pgid_of: impl Fn(libc::pid_t) -> Option<libc::pid_t>,
+) -> Result<bool, OsError> {
+    match listing {
+        GroupListing::Members(members) if members.is_empty() => Err(OsError::Security(format!(
+            "proc_listpgrppids found no member of group {pgid}"
+        ))),
+        GroupListing::Members(members) => Ok(!any_member_alive(pgid, &members, pgid_of)),
+        GroupListing::Full => Err(OsError::Security(format!(
+            "proc_listpgrppids could not hold every member of group {pgid}"
+        ))),
+    }
 }
 
 /// XNU's `killpg1` returns `EPERM` (not `ESRCH`) precisely when the group
@@ -252,22 +323,7 @@ fn collect_group_members(
 /// build); this tells the two cases apart by enumerating the group itself.
 #[cfg(target_os = "macos")]
 fn eperm_means_every_member_is_gone(pgid: libc::pid_t) -> Result<bool, OsError> {
-    // SAFETY: a NULL, zero-length query only asks proc_listpgrppids for the
-    // pid count it would need; it writes through neither pointer.
-    let needed = unsafe { libc::proc_listpgrppids(pgid, std::ptr::null_mut(), 0) };
-    let members = collect_group_members(needed, |buf| {
-        // SAFETY: `buf` is a live allocation of `buf.len()` elements; the
-        // size passed is the corresponding byte count, matching what
-        // proc_listpgrppids documents as `buffersize`.
-        unsafe {
-            libc::proc_listpgrppids(
-                pgid,
-                buf.as_mut_ptr().cast(),
-                std::mem::size_of_val(buf) as libc::c_int,
-            )
-        }
-    })?;
-    Ok(!any_member_alive(pgid, &members, member_pgid))
+    eperm_means_every_member_is_gone_from(pgid, read_group_listing(pgid)?, member_pgid)
 }
 
 /// The process group `pid` is in now, or `None` once it has exited: getpgid's
@@ -346,75 +402,105 @@ mod tests {
         assert_eq!(member_pgid(pid), None);
     }
 
-    // collect_group_members: each of the 6 fail-closed guards, plus the
-    // truncate(count) success path, one variant per test so a mutation that
-    // collapses two guards into one still shows up as a distinct failure.
+    // The member listing and the EPERM judgment take the listing as a value,
+    // so each property is measured apart from the macOS calls.
 
-    /// Every `Err` from `collect_group_members` must name `proc_listpgrppids`
-    /// and the specific guard that rejected it, so no two guards can be
-    /// satisfied by the same vacuous assertion.
-    fn assert_names_the_guard(err: &OsError, guard_phrase: &str) {
-        let OsError::Security(message) = err else {
-            panic!("collect_group_members must report failures as OsError::Security, got {err:?}");
-        };
+    /// A listing that cannot be trusted must fail closed as `Security`.
+    fn assert_fail_closed(err: OsError) {
         assert!(
-            message.contains("proc_listpgrppids"),
-            "every collect_group_members error must name proc_listpgrppids: {message}"
-        );
-        assert!(
-            message.contains(guard_phrase),
-            "expected the identifying phrase {guard_phrase:?} in the error message: {message}"
+            matches!(err, OsError::Security(_)),
+            "an untrusted listing must fail closed as OsError::Security, got {err:?}"
         );
     }
 
     #[test]
-    fn collect_group_members_rejects_a_negative_size_query() {
+    fn listing_fails_closed_on_a_negative_size_query() {
         let list = |_: &mut [libc::pid_t]| -> libc::c_int { 0 };
-        let err =
-            collect_group_members(-1, list).expect_err("a negative size query must be rejected");
-        assert_names_the_guard(&err, "size query failed");
+        assert_fail_closed(
+            list_group_members(-1, list).expect_err("a negative size query must be rejected"),
+        );
     }
 
     #[test]
-    fn collect_group_members_rejects_a_zero_size_query() {
-        let list = |_: &mut [libc::pid_t]| -> libc::c_int { 0 };
-        let err = collect_group_members(0, list)
-            .expect_err("a zero-capacity size query must be rejected");
-        assert_names_the_guard(&err, "size query returned no capacity");
-    }
-
-    #[test]
-    fn collect_group_members_rejects_a_negative_result_count() {
+    fn listing_fails_closed_on_a_negative_count() {
         let list = |_: &mut [libc::pid_t]| -> libc::c_int { -1 };
-        let err =
-            collect_group_members(4, list).expect_err("a negative result count must be rejected");
-        assert_names_the_guard(&err, "negative count");
+        assert_fail_closed(
+            list_group_members(4, list).expect_err("a negative count must be rejected"),
+        );
     }
 
     #[test]
-    fn collect_group_members_rejects_a_zero_result_count() {
-        let list = |_: &mut [libc::pid_t]| -> libc::c_int { 0 };
-        let err = collect_group_members(4, list).expect_err("a zero result count must be rejected");
-        assert_names_the_guard(&err, "no members");
-    }
-
-    #[test]
-    fn collect_group_members_rejects_a_count_at_or_over_capacity() {
-        let list = |buf: &mut [libc::pid_t]| -> libc::c_int { buf.len() as libc::c_int };
-        let err = collect_group_members(4, list)
-            .expect_err("a count that fills the whole buffer must be rejected");
-        assert_names_the_guard(&err, "for capacity");
-    }
-
-    #[test]
-    fn collect_group_members_rejects_an_out_of_contract_pid() {
+    fn listing_fails_closed_on_an_out_of_contract_pid() {
         let list = |buf: &mut [libc::pid_t]| -> libc::c_int {
             buf[0] = 0;
             1
         };
-        let err = collect_group_members(4, list)
-            .expect_err("a pid <= 0 in the filled slice must be rejected");
-        assert_names_the_guard(&err, "out-of-contract pid");
+        assert_fail_closed(
+            list_group_members(4, list)
+                .expect_err("a pid <= 0 in the listed slice must be rejected"),
+        );
+    }
+
+    #[test]
+    fn listing_reports_a_full_buffer_instead_of_a_list_that_may_be_cut_short() {
+        let list = |buf: &mut [libc::pid_t]| -> libc::c_int { buf.len() as libc::c_int };
+        let listing = list_group_members(4, list).expect("a full buffer is not a call failure");
+        assert_eq!(listing, GroupListing::Full);
+    }
+
+    #[test]
+    fn listing_of_a_group_with_no_members_is_an_empty_list_not_a_failure() {
+        let list = |_: &mut [libc::pid_t]| -> libc::c_int { 0 };
+        let listing = list_group_members(4, list).expect("no members is not a call failure");
+        assert_eq!(listing, GroupListing::Members(Vec::new()));
+        let listing = list_group_members(0, list).expect("a zero-capacity query is not a failure");
+        assert_eq!(listing, GroupListing::Members(Vec::new()));
+    }
+
+    #[test]
+    fn eperm_with_an_empty_listing_fails_closed_rather_than_proving_the_group_gone() {
+        let pgid_of = |_: libc::pid_t| -> Option<libc::pid_t> { None };
+        assert_fail_closed(
+            eperm_means_every_member_is_gone_from(123, GroupListing::Members(Vec::new()), pgid_of)
+                .expect_err("an empty listing must not prove the group gone"),
+        );
+    }
+
+    #[test]
+    fn eperm_with_a_full_listing_fails_closed() {
+        let pgid_of = |_: libc::pid_t| -> Option<libc::pid_t> { None };
+        assert_fail_closed(
+            eperm_means_every_member_is_gone_from(123, GroupListing::Full, pgid_of)
+                .expect_err("a full listing may be cut short and must not prove the group gone"),
+        );
+    }
+
+    #[test]
+    fn eperm_means_every_member_is_gone_once_no_listed_member_is_in_the_group() {
+        let pgid_of = |_: libc::pid_t| -> Option<libc::pid_t> { None };
+        let gone = eperm_means_every_member_is_gone_from(
+            123,
+            GroupListing::Members(vec![1, 2, 3]),
+            pgid_of,
+        )
+        .expect("a readable listing is not a failure");
+        assert!(
+            gone,
+            "no listed member is in the group, so every member is gone"
+        );
+    }
+
+    #[test]
+    fn eperm_does_not_mean_gone_while_a_listed_member_is_still_in_the_group() {
+        let pgid_of =
+            |pid: libc::pid_t| -> Option<libc::pid_t> { if pid == 2 { Some(123) } else { None } };
+        let gone = eperm_means_every_member_is_gone_from(
+            123,
+            GroupListing::Members(vec![1, 2, 3]),
+            pgid_of,
+        )
+        .expect("a readable listing is not a failure");
+        assert!(!gone, "member 2 is still in the group, so it is not gone");
     }
 
     // On Linux EPERM from killpg means no member could be signalled, so a
@@ -439,14 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn collect_group_members_truncates_to_the_reported_count() {
+    fn listing_returns_every_member_the_call_reports_and_counts_in_entries() {
+        // Five members in an eight-entry buffer: the buffer is handed over in
+        // entries (pids), and only the reported count of them is the list.
         let list = |buf: &mut [libc::pid_t]| -> libc::c_int {
-            buf[0] = 111;
-            buf[1] = 222;
-            2
+            assert_eq!(buf.len(), 8, "the buffer must be sized in entries");
+            buf[..5].copy_from_slice(&[11, 22, 33, 44, 55]);
+            5
         };
-        let members = collect_group_members(4, list)
+        let listing = list_group_members(8, list)
             .expect("a count below capacity with only positive pids must succeed");
-        assert_eq!(members, vec![111, 222]);
+        assert_eq!(listing, GroupListing::Members(vec![11, 22, 33, 44, 55]));
     }
 }
