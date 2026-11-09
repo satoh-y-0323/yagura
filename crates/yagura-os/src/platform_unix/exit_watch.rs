@@ -711,6 +711,8 @@ pub struct WatcherWait {
     #[cfg(target_os = "macos")]
     leader: u32,
     #[cfg(target_os = "macos")]
+    socket: Option<libc::c_int>,
+    #[cfg(target_os = "macos")]
     queue: std::os::fd::OwnedFd,
     #[cfg(target_os = "macos")]
     early: WatcherEvents,
@@ -748,6 +750,18 @@ impl WatcherWait {
             // SAFETY: the descriptor was just returned to this function alone.
             signals: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
         })
+    }
+
+    /// Stops watching the socket, so a socket at its end no longer wakes the
+    /// wait: what is left to wait for is the leader and the signals.
+    ///
+    /// # Errors
+    ///
+    /// None on Linux.
+    pub fn ignore_socket(&mut self) -> io::Result<()> {
+        // poll skips an entry with a negative descriptor.
+        self.socket = -1;
+        Ok(())
     }
 
     /// Waits until something happens, or until `limit` has passed (no limit
@@ -895,9 +909,48 @@ impl WatcherWait {
         Ok(Self {
             leader_told: false,
             leader,
+            socket: Some(socket),
             queue: queue.0,
             early,
         })
+    }
+
+    /// Stops watching the socket, so a socket at its end no longer wakes the
+    /// wait: what is left to wait for is the leader and the signals.
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's error when the queue refuses to drop
+    /// the socket's filter.
+    pub fn ignore_socket(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+
+        let Some(socket) = self.socket else {
+            return Ok(());
+        };
+        // SAFETY: zeroed is a valid `kevent`; the fields that matter are set
+        // below.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = libc::uintptr_t::try_from(socket).unwrap_or(0);
+        change.filter = libc::EVFILT_READ;
+        change.flags = libc::EV_DELETE;
+        // SAFETY: one change from a live stack local, no events asked for.
+        let deleted = unsafe {
+            libc::kevent(
+                self.queue.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if deleted == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        self.socket = None;
+        self.early.socket = false;
+        Ok(())
     }
 
     /// Waits until something happens, or until `limit` has passed (no limit
@@ -978,6 +1031,18 @@ impl WatcherWait {
     ///
     /// Always.
     pub fn wait(&mut self, _limit: Option<std::time::Duration>) -> io::Result<WatcherEvents> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a watcher's wait is not known on this platform",
+        ))
+    }
+
+    /// Not on this platform.
+    ///
+    /// # Errors
+    ///
+    /// Always.
+    pub fn ignore_socket(&mut self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "a watcher's wait is not known on this platform",

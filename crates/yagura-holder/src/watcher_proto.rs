@@ -9,8 +9,10 @@
 //! In a body, a `u32` and an `i32` are 4 bytes LE, a string is a `u32` LE
 //! byte length and its UTF-8 bytes, a list is a `u32` LE count and its items,
 //! and an `Option` is one byte, 0 for `None` or 1 followed by the value.
-//! Descriptors (the terminal's slave, the endpoint's lock, the scope's
-//! members) travel beside a frame in `SCM_RIGHTS`, never in a body.
+//! Descriptors (the terminal's slave, the endpoint's lock, a copy of the
+//! terminal's master, the scope's members) travel beside a frame in
+//! `SCM_RIGHTS`, never in a body: exactly as many as
+//! [`WatcherFrame::descriptors`] says, sent with the frame's first byte.
 //!
 //! [`WatcherFrame::Hello`] is the watcher's first frame and keeps its type and
 //! body in every version, so a holder can always read the version of the
@@ -20,7 +22,7 @@ use std::fmt;
 
 /// The holder-watcher wire version this build speaks. The holder and the
 /// watcher are built from this one constant.
-pub const WATCHER_PROTOCOL: u32 = 2;
+pub const WATCHER_PROTOCOL: u32 = 3;
 
 /// The most processes one request to the user manager names: the session
 /// bus's default `max_message_unix_fds` (dbus-daemon), past which the bus
@@ -56,7 +58,9 @@ pub enum WatcherFrame {
         protocol: u32,
     },
     /// Holder to watcher: start the child on the terminal's slave, sent with
-    /// the slave and the endpoint's lock.
+    /// three descriptors in this order: the slave, the endpoint's lock, and a
+    /// copy of the terminal's master, which the watcher neither reads nor
+    /// writes and closes to hang the terminal up once it has read the tree.
     Spawn {
         /// The child's command line.
         argv: Vec<String>,
@@ -112,6 +116,18 @@ pub enum WatcherFrame {
     },
     /// Holder to watcher: end the tree.
     Terminate,
+}
+
+impl WatcherFrame {
+    /// How many descriptors travel beside this frame.
+    #[must_use]
+    pub fn descriptors(&self) -> usize {
+        match self {
+            Self::Spawn { .. } => 3,
+            Self::ScopeMembers { count } => usize::try_from(*count).unwrap_or(usize::MAX),
+            _ => 0,
+        }
+    }
 }
 
 /// Why bytes are not a frame.

@@ -72,7 +72,7 @@ impl Drop for Ends {
 }
 
 impl Ends {
-    async fn all_end(&self, why: &str) {
+    pub(crate) async fn all_end(&self, why: &str) {
         for (what, process) in &self.0 {
             ended(process, &format!("{what} ({why})")).await;
         }
@@ -173,7 +173,7 @@ pub(crate) fn read_pids(path: &Path) -> Vec<u32> {
         .collect()
 }
 
-fn process(pid: u32) -> ProcessHandle {
+pub(crate) fn process(pid: u32) -> ProcessHandle {
     let start = yagura_os::process_start(pid)
         .unwrap()
         .unwrap_or_else(|| panic!("the process {pid} is not running"));
@@ -323,6 +323,40 @@ async fn a_killed_watchers_holder_ends_the_window() {
     window.holder.wait_exit().await;
 }
 
+/// With the watcher killed while the child still runs, the holder ends what
+/// the watcher would have: a member in a session of its own that outlives the
+/// SIGTERM that ends its parent is ended too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_watchers_holder_ends_a_member_that_outlives_the_sigterm_ending_its_parent() {
+    let rig = Rig::new("wksess");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let pid_file = rig.file("member");
+    let mut launch = rig.launch(
+        &["stubborn-session-tree", path_arg(&pid_file)],
+        NO_DEADLINE_MS,
+    );
+    launch.awaits_successor = false;
+    let mut holder = rig.start(&launch);
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-TREE").await;
+    let record = rig.record_where(|record| record.child_pid.is_some()).await;
+    let (_, watcher) = watched(&record);
+    let tree = Ends(vec![
+        ("the leader".to_owned(), process(record.child_pid.unwrap())),
+        (
+            "the member in a session of its own".to_owned(),
+            process(read_pids(&pid_file)[0]),
+        ),
+    ]);
+
+    watcher.kill().unwrap();
+    ended(&watcher, "the killed watcher").await;
+    until_exited(&mut peer).await;
+    tree.all_end("its watcher was killed").await;
+    drop(peer);
+    holder.wait_exit().await;
+}
+
 /// A shell that exits ends its tree, a tool it left running by `nohup`
 /// included, and only then is the window's end told.
 #[tokio::test(flavor = "multi_thread")]
@@ -443,6 +477,24 @@ fn assert_holds_no_descriptor_on(pid: u32, lock: (u64, u64), what: &str) {
     }
 }
 
+/// No descriptor of the process `pid` is the master of a terminal.
+#[cfg(target_os = "linux")]
+fn assert_holds_no_terminal_master(pid: u32, what: &str) {
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .flatten()
+    {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            assert_ne!(
+                target,
+                Path::new("/dev/ptmx"),
+                "{what} {pid} holds a terminal's master as {}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
 /// Whether this process can take the lock on `path` without waiting.
 fn lock_is_free(path: &Path) -> bool {
     use std::os::fd::AsRawFd as _;
@@ -456,9 +508,10 @@ fn lock_is_free(path: &Path) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// The endpoint's lock never reaches the window's child: once the holder and
-/// the watcher have both ended without cleaning up, while a leader ignoring
-/// hangups still runs, the lock is free.
+/// The endpoint's lock never reaches the window's child, and nor does the
+/// watcher's copy of the terminal's master: once the holder and the watcher
+/// have both ended without cleaning up, while a leader ignoring hangups still
+/// runs, the lock is free.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_endpoint_lock_never_reaches_the_windows_child() {
     let window = open_tree(Rig::new("locklk"), |_| {}).await;
@@ -467,7 +520,10 @@ async fn the_endpoint_lock_never_reaches_the_windows_child() {
     let assert_child_holds_no_lock = {
         let lock = file_id(Path::new(&lock_path));
         let leader = window.record.child_pid.unwrap();
-        move || assert_holds_no_descriptor_on(leader, lock, "the window's child")
+        move || {
+            assert_holds_no_descriptor_on(leader, lock, "the window's child");
+            assert_holds_no_terminal_master(leader, "the window's child");
+        }
     };
     #[cfg(target_os = "linux")]
     assert_child_holds_no_lock();
@@ -490,6 +546,158 @@ async fn the_endpoint_lock_never_reaches_the_windows_child() {
         lock_is_free(Path::new(&lock_path)),
         "the endpoint's lock is held once the holder and the watcher have ended"
     );
+}
+
+/// The watcher's executable, as the holder starts it.
+const WATCHER: &str = env!("CARGO_BIN_EXE_yagura-watcher");
+
+/// A terminal's master with the name of its slave.
+struct Terminal {
+    master: std::os::fd::OwnedFd,
+    slave_name: std::ffi::CString,
+}
+
+fn open_terminal() -> Terminal {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    // SAFETY: the calls take the descriptor just opened; ptsname's string is
+    // copied before another call can replace it.
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        assert!(
+            master >= 0,
+            "posix_openpt: {}",
+            std::io::Error::last_os_error()
+        );
+        let master = OwnedFd::from_raw_fd(master);
+        let fd = master.as_raw_fd();
+        assert_eq!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+        assert_eq!(libc::grantpt(fd), 0, "grantpt");
+        assert_eq!(libc::unlockpt(fd), 0, "unlockpt");
+        let name = libc::ptsname(fd);
+        assert!(!name.is_null(), "ptsname");
+        Terminal {
+            master,
+            slave_name: std::ffi::CStr::from_ptr(name).to_owned(),
+        }
+    }
+}
+
+/// Opens the terminal's slave by its name, as any process may.
+fn open_slave_by_name(name: &std::ffi::CStr) -> std::io::Result<std::fs::File> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(std::ffi::OsStr::from_bytes(name.to_bytes()))
+}
+
+/// The next frame the watcher sends on `socket`.
+fn next_watcher_frame(
+    socket: std::os::fd::BorrowedFd<'_>,
+    buffer: &mut Vec<u8>,
+) -> yagura_holder::watcher_proto::WatcherFrame {
+    use yagura_holder::watcher_proto::decode_watcher_frame;
+    loop {
+        if let Some((frame, used)) = decode_watcher_frame(buffer).unwrap() {
+            buffer.drain(..used);
+            return frame;
+        }
+        let mut chunk = [0u8; 4096];
+        let mut fds = Vec::new();
+        let read = yagura_os::platform_unix::receive_with_descriptors(socket, &mut chunk, &mut fds)
+            .expect("read the watcher's frame");
+        assert!(read > 0, "the watcher ended before it sent a frame");
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+}
+
+/// A watcher holding a copy of the terminal's master keeps the terminal from
+/// hanging up while it is stopped, though the holder has closed everything it
+/// had: the window's terminal can still be opened by its name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_watcher_keeps_the_terminal_from_hanging_up_when_its_holder_is_gone() {
+    use std::os::fd::AsFd as _;
+    use std::os::unix::net::UnixStream;
+
+    use yagura_holder::watcher_proto::{WATCHER_PROTOCOL, WatcherFrame, encode_watcher_frame};
+
+    let rig = Rig::new("r2");
+    let terminal = open_terminal();
+    let slave = open_slave_by_name(&terminal.slave_name).unwrap();
+    let copy = terminal.master.try_clone().unwrap();
+    let lock = std::fs::File::create(rig.file("lock")).unwrap();
+    std::fs::write(rig.file("record"), b"").unwrap();
+
+    let (ours, theirs) = yagura_os::platform_unix::socket_pair().unwrap();
+    let mut watcher =
+        yagura_os::platform_unix::spawn_watcher(Path::new(WATCHER), theirs.as_fd()).unwrap();
+    drop(theirs);
+    let socket = UnixStream::from(ours);
+    socket.set_read_timeout(Some(HANG_GUARD)).unwrap();
+    let mut buffer = Vec::new();
+    assert_eq!(
+        next_watcher_frame(socket.as_fd(), &mut buffer),
+        WatcherFrame::Hello {
+            protocol: WATCHER_PROTOCOL
+        }
+    );
+    let spawn = WatcherFrame::Spawn {
+        argv: vec![CHILD.to_owned(), "ignore-end".to_owned()],
+        cwd: path_arg(&rig.holders_dir()).to_owned(),
+        env: Vec::new(),
+        record_path: path_arg(&rig.file("record")).to_owned(),
+        socket_path: path_arg(&rig.file("socket")).to_owned(),
+        lock_path: path_arg(&rig.file("lock")).to_owned(),
+    };
+    yagura_os::platform_unix::send_with_descriptors(
+        socket.as_fd(),
+        &encode_watcher_frame(&spawn),
+        &[slave.as_fd(), lock.as_fd(), copy.as_fd()],
+    )
+    .unwrap();
+    drop((slave, lock, copy));
+    let WatcherFrame::LeaderStarted { pid: leader, .. } =
+        next_watcher_frame(socket.as_fd(), &mut buffer)
+    else {
+        panic!("the watcher did not report the child it started");
+    };
+    let ends = Ends(vec![
+        ("the watcher".to_owned(), process(watcher.id())),
+        ("the window's child".to_owned(), process(leader)),
+    ]);
+
+    let watcher_pid = libc::pid_t::try_from(watcher.id()).unwrap();
+    // SAFETY: SIGSTOP to the watcher this test started; waitpid takes its stop.
+    unsafe {
+        assert_eq!(libc::kill(watcher_pid, libc::SIGSTOP), 0);
+        let mut status = 0;
+        assert_eq!(
+            libc::waitpid(watcher_pid, &mut status, libc::WUNTRACED),
+            watcher_pid
+        );
+        assert!(
+            libc::WIFSTOPPED(status),
+            "the watcher did not stop: {status}"
+        );
+    }
+    drop(terminal.master);
+    drop(socket);
+
+    let opened = open_slave_by_name(&terminal.slave_name);
+    assert!(
+        opened.is_ok(),
+        "the terminal hung up while the stopped watcher held its master: {:?}",
+        opened.err()
+    );
+    drop(opened);
+
+    // SAFETY: SIGCONT to the watcher this test started.
+    assert_eq!(unsafe { libc::kill(watcher_pid, libc::SIGCONT) }, 0);
+    ends.all_end("the holder was gone and the watcher went on")
+        .await;
+    watcher.wait().unwrap();
 }
 
 /// A watcher stopped from outside while its holder runs does not keep a

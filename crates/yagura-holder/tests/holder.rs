@@ -721,6 +721,28 @@ async fn terminate_ends_a_child_ignoring_requests_to_end_and_keeps_its_exit() {
     assert_eq!(code, Some(1), "the child was not ended by the kill");
 }
 
+/// A close does not end the input of a child that ignores requests to end and
+/// exits on its first input byte: the child is ended by the kill, not by a
+/// byte the holder writes as the window closes.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn terminate_does_not_end_the_input_of_a_child_before_the_kill() {
+    let rig = Rig::new("ignin");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let mut holder = rig.start(&rig.launch(&["ignore-end-until-input"], NO_DEADLINE_MS));
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-READY").await;
+
+    peer.send(HolderFrame::Terminate { tree: false }).await;
+    let code = until_exited(&mut peer).await;
+    holder.wait_exit().await;
+    assert_eq!(
+        code,
+        Some(1),
+        "the child left by itself on input the holder wrote while closing, not by the kill"
+    );
+}
+
 /// Kills a descendant the holder is not expected to end (or failed to), so a
 /// test leaves nothing behind.
 #[cfg(unix)]
@@ -1418,6 +1440,55 @@ async fn the_end_follows_the_childs_tree_and_not_the_terminals_other_writers() {
 
     peer.send(HolderFrame::Terminate { tree: true }).await;
     holder.wait_exit().await;
+}
+
+/// A child that a hangup ends has a child in a session of its own: the close
+/// finds it before the hangup takes its parent, and ends it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_ends_the_session_child_of_a_child_that_a_hangup_ends() {
+    let rig = Rig::new("hupsess");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let pid_file = rig.file("session-child");
+    let mut holder =
+        rig.start(&rig.launch(&["escaped-holder", path_arg(&pid_file)], NO_DEADLINE_MS));
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-ESCAPED").await;
+    let session_child = crate::watcher::Ends(vec![(
+        "the child's child in a session of its own".to_owned(),
+        crate::watcher::process(pid_in(&pid_file)),
+    )]);
+
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    until_exited(&mut peer).await;
+    holder.wait_exit().await;
+    session_child.all_end("the window was closed").await;
+}
+
+/// A child that SIGTERM ends has a child in a session of its own that outlives
+/// SIGTERM: it is still a member of the window's tree once its parent is gone,
+/// and the close ends it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_ends_a_member_that_outlives_the_sigterm_that_ends_its_parent() {
+    let rig = Rig::new("stubses");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let pid_file = rig.file("member");
+    let mut holder = rig.start(&rig.launch(
+        &["stubborn-session-tree", path_arg(&pid_file)],
+        NO_DEADLINE_MS,
+    ));
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+    peer.text_until("HOLDER-CHILD-TREE").await;
+    let member = crate::watcher::Ends(vec![(
+        "the member in a session of its own".to_owned(),
+        crate::watcher::process(pid_in(&pid_file)),
+    )]);
+
+    peer.send(HolderFrame::Terminate { tree: false }).await;
+    until_exited(&mut peer).await;
+    holder.wait_exit().await;
+    member.all_end("the window was closed").await;
 }
 
 /// Scope names for a window of `rig`, new for each test.

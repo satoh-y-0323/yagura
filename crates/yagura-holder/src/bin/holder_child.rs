@@ -25,10 +25,19 @@
 //!   and SIGHUP on Unix; console control events, the console close included,
 //!   on Windows), prints [`IGNORING_MARKER`] and stays alive, past stdin's end
 //!   too. Only a kill that cannot be refused ends it.
+//! - `ignore-end-until-input`: like `ignore-end`, but prints [`READY_MARKER`]
+//!   and exits with 0 as soon as it reads a byte from stdin. A holder that
+//!   writes input while closing the window ends it by itself; only a kill ends
+//!   it otherwise.
 //! - `stubborn-tree <pid_file> [<gate_file>]`: like `tree`, but the grandchild
 //!   also ignores SIGTERM on Unix, so only a kill that cannot be refused ends
 //!   it. Prints [`TREE_MARKER`]; with `gate_file`, exits with 0 once that file
 //!   exists, otherwise stays alive until stdin ends.
+//! - `stubborn-session-tree <pid_file>` (Unix): ignores SIGHUP, starts a
+//!   grandchild in a session of its own that ignores SIGTERM too, writes its
+//!   process id to `pid_file`, prints [`TREE_MARKER`] and idles. SIGTERM ends
+//!   the child but not the grandchild, which only a kill that cannot be
+//!   refused ends.
 //! - `escaped-holder <pid_file>` (Unix): starts a grandchild in a session of
 //!   its own that keeps the terminal open and never reads it, writes its
 //!   process id to `pid_file`, prints [`ESCAPED_MARKER`] and idles until a
@@ -108,7 +117,10 @@ fn main() -> io::Result<()> {
         "exit" => exit_with(arg(1), args.get(2).map(Path::new)),
         "exit-on-input" => exit_on_input(),
         "ignore-end" => ignore_end(),
+        "ignore-end-until-input" => ignore_end_until_input(),
         "stubborn-tree" => stubborn_tree(Path::new(arg(1)), args.get(2).map(Path::new)),
+        #[cfg(unix)]
+        "stubborn-session-tree" => stubborn_session_tree(Path::new(arg(1))),
         #[cfg(unix)]
         "escaped-holder" => escaped_holder(Path::new(arg(1))),
         "script" => script(
@@ -311,6 +323,23 @@ fn stubborn_tree(pid_file: &Path, gate_file: Option<&Path>) -> io::Result<()> {
     std::process::exit(0)
 }
 
+/// SIGTERM ends this child; the grandchild, a direct child of it in a session
+/// of its own, outlives that.
+#[cfg(unix)]
+fn stubborn_session_tree(pid_file: &Path) -> io::Result<()> {
+    // SAFETY: `signal` only changes this process's disposition of SIGHUP; no
+    // handler function is installed.
+    if unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    let grandchild = spawn_stubborn_grandchild_in(true)?;
+    std::fs::write(pid_file, grandchild.to_string())?;
+    let mut stdout = io::stdout();
+    stdout.write_all(TREE_MARKER)?;
+    stdout.flush()?;
+    idle()
+}
+
 /// The grandchild holds the terminal from another session, so neither the
 /// child's process group nor the end of the child's session reaches it.
 #[cfg(unix)]
@@ -383,6 +412,11 @@ fn ignore_end() -> io::Result<()> {
     stdout.write_all(IGNORING_MARKER)?;
     stdout.flush()?;
     idle()
+}
+
+fn ignore_end_until_input() -> io::Result<()> {
+    ignore_end_requests()?;
+    exit_on_input()
 }
 
 #[cfg(unix)]
@@ -462,11 +496,21 @@ fn spawn_stubborn_grandchild() -> io::Result<u32> {
 
 #[cfg(unix)]
 fn spawn_stubborn_grandchild() -> io::Result<u32> {
+    spawn_stubborn_grandchild_in(false)
+}
+
+#[cfg(unix)]
+fn spawn_stubborn_grandchild_in(own_session: bool) -> io::Result<u32> {
     let ignored = [libc::SIGTERM, libc::SIGHUP];
     // SAFETY: `signal` only changes this process's dispositions; no handler
     // function is installed.
     let previous = ignored.map(|signal| unsafe { libc::signal(signal, libc::SIG_IGN) });
-    let spawned = grandchild_command().and_then(|mut command| command.spawn());
+    let spawned = grandchild_command().and_then(|mut command| {
+        if own_session {
+            in_own_session(&mut command);
+        }
+        command.spawn()
+    });
     for (signal, disposition) in ignored.into_iter().zip(previous) {
         // SAFETY: restores the disposition read above.
         unsafe { libc::signal(signal, disposition) };

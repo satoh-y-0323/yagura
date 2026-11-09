@@ -32,11 +32,15 @@ const SCENE_ENV: &str = "YAGURA_OS_TREE_END_SCENE";
 const PLACEMENT_ENV: &str = "YAGURA_OS_TREE_END_PLACEMENT";
 const COUNT_ENV: &str = "YAGURA_OS_TREE_END_COUNT";
 const THEN_ENV: &str = "YAGURA_OS_TREE_END_THEN";
+const LEADER_ENV: &str = "YAGURA_OS_TREE_END_LEADER";
 /// Prefix of the lines the fixtures report on, apart from libtest's own.
 const TAG: &str = "@tree ";
 
 /// A member that only `SIGKILL` ends.
 const SLEEPER: &str = "trap '' TERM HUP; exec sleep 600";
+/// The same, saying `up` once it ignores the signals, so a `SIGTERM` sent
+/// after that line cannot find it still able to end.
+const ANNOUNCING_SLEEPER: &str = "trap '' TERM HUP; echo up; exec sleep 600";
 
 /// The descriptors an owner keeps free for its own reading, as the watcher
 /// does when it sizes its exit-watch slots from its descriptor limit.
@@ -140,11 +144,14 @@ fn pid_after(line: &str, word: &str) -> Option<u32> {
 
 /// A window's command: starts `COUNT_ENV` members placed as `PLACEMENT_ENV`
 /// says, reports them, then exits or stays as `THEN_ENV` says. Only `SIGKILL`
-/// ends it.
+/// ends it, unless `LEADER_ENV` is `ends-on-term`, when `SIGTERM` does too.
 fn leader() {
-    // SAFETY: ignoring two signals changes only this fixture process.
+    let ends_on_term = std::env::var(LEADER_ENV).as_deref() == Ok("ends-on-term");
+    // SAFETY: ignoring signals changes only this fixture process.
     unsafe {
-        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        if !ends_on_term {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
     let count: usize = env(COUNT_ENV).parse().unwrap();
@@ -153,6 +160,22 @@ fn leader() {
         let pid = match placement.as_str() {
             "group" => sleeper().spawn().unwrap().id(),
             "own-group" => sleeper().process_group(0).spawn().unwrap().id(),
+            "own-session-child" => {
+                let mut member = Command::new("/bin/sh");
+                member
+                    .args(["-c", ANNOUNCING_SLEEPER])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                // The member is to outlive this leader, so it is never waited for here.
+                #[allow(clippy::zombie_processes)]
+                let mut member = as_session_leader(&mut member).spawn().unwrap();
+                let mut up = String::new();
+                BufReader::new(member.stdout.take().unwrap())
+                    .read_line(&mut up)
+                    .unwrap();
+                member.id()
+            }
             "own-session" => {
                 let mut middle = fixture("middle").stdout(Stdio::piped()).spawn().unwrap();
                 let lines = tagged_lines(middle.stdout.take().unwrap(), None);
@@ -722,38 +745,65 @@ fn an_owned_sweep_waits_out_members_ending_one_at_a_time_past_its_rounds() {
     assert_eq!(rest.unwaited, 0, "every member was waited for: {report:?}");
 }
 
+/// Records every send of a sweep and delivers it, except one to `hold`.
+struct Recording {
+    hold: u32,
+    targets: Vec<(char, u32)>,
+}
+
+impl yagura_os::platform_unix::TreeEndHooks for Recording {
+    fn send(
+        &mut self,
+        target: yagura_os::platform_unix::SignalTarget,
+        _signal: libc::c_int,
+        deliver: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        use yagura_os::platform_unix::SignalTarget;
+        match target {
+            SignalTarget::Process(pid) => {
+                self.targets.push(('P', pid));
+                if pid == self.hold {
+                    return Ok(());
+                }
+            }
+            SignalTarget::Group(pgid) => self.targets.push(('G', pgid)),
+            _ => self.targets.push(('C', 0)),
+        }
+        deliver()
+    }
+}
+
+/// Sweeps the tree of `leader_pid` from outside it, as a non-parent entry
+/// does, holding back the send to `hold`; what the sweep left and every send
+/// it made.
+fn sweep_from_outside(
+    leader_pid: u32,
+    hold: u32,
+) -> (yagura_os::platform_unix::TreeEndRest, Vec<(char, u32)>) {
+    use yagura_os::platform_unix::TreeEnd;
+
+    let start = yagura_os::process_start(leader_pid).unwrap().unwrap();
+    let (done, swept) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut hooks = Recording {
+            hold,
+            targets: Vec::new(),
+        };
+        let result = TreeEnd::not_parent(leader_pid, start)
+            .limit(Duration::MAX)
+            .run(&mut hooks);
+        let _ = done.send((result, hooks.targets));
+    });
+    let (result, targets) = swept
+        .recv_timeout(HANG_GUARD)
+        .expect("the non-parent sweep waited for a member it signalled");
+    (result.expect("the non-parent sweep failed"), targets)
+}
+
 /// A sweep from outside the tree returns without waiting for the members it
 /// signalled, and signals nothing outside the window.
 #[test]
 fn a_non_parent_sweep_returns_without_waiting_for_the_members_it_signalled() {
-    use yagura_os::platform_unix::{SignalTarget, TreeEnd, TreeEndHooks};
-
-    struct Hooks {
-        hold: u32,
-        targets: Vec<(char, u32)>,
-    }
-
-    impl TreeEndHooks for Hooks {
-        fn send(
-            &mut self,
-            target: SignalTarget,
-            _signal: libc::c_int,
-            deliver: &mut dyn FnMut() -> std::io::Result<()>,
-        ) -> std::io::Result<()> {
-            match target {
-                SignalTarget::Process(pid) => {
-                    self.targets.push(('P', pid));
-                    if pid == self.hold {
-                        return Ok(());
-                    }
-                }
-                SignalTarget::Group(pgid) => self.targets.push(('G', pgid)),
-                _ => self.targets.push(('C', 0)),
-            }
-            deliver()
-        }
-    }
-
     let outsiders = Outsiders::start();
     let mut command = fixture("leader");
     command
@@ -770,23 +820,8 @@ fn a_non_parent_sweep_returns_without_waiting_for_the_members_it_signalled() {
         .collect();
     let _leftovers = Leftovers(members.iter().copied().chain([leader_pid]).collect());
     let stuck = members[0];
-    let start = yagura_os::process_start(leader_pid).unwrap().unwrap();
 
-    let (done, swept) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut hooks = Hooks {
-            hold: stuck,
-            targets: Vec::new(),
-        };
-        let result = TreeEnd::not_parent(leader_pid, start)
-            .limit(Duration::MAX)
-            .run(&mut hooks);
-        let _ = done.send((result, hooks.targets));
-    });
-    let (result, targets) = swept
-        .recv_timeout(HANG_GUARD)
-        .expect("the non-parent sweep waited for a member it signalled");
-    let rest = result.expect("the non-parent sweep failed");
+    let (rest, targets) = sweep_from_outside(leader_pid, stuck);
     assert!(
         targets.contains(&('P', stuck)),
         "the sweep never signalled the member {stuck}: {targets:?}"
@@ -806,6 +841,51 @@ fn a_non_parent_sweep_returns_without_waiting_for_the_members_it_signalled() {
     let (reaped, reaping) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = reaped.send(leader.wait());
+    });
+    reaping
+        .recv_timeout(HANG_GUARD)
+        .expect("the leader outlived the non-parent sweep")
+        .unwrap();
+    outsiders.assert_untouched(&targets);
+}
+
+/// A member of the window that outlives the SIGTERM ending its parent, the
+/// leader, was read as a member when the sweep began: the sweep from outside
+/// ends it with SIGKILL though the leader is gone by then, and signals
+/// nothing outside the window.
+#[test]
+fn a_non_parent_sweep_ends_a_member_read_at_its_start_that_outlives_the_leader() {
+    let outsiders = Outsiders::start();
+    let mut command = fixture("leader");
+    command
+        .env(PLACEMENT_ENV, "own-session-child")
+        .env(COUNT_ENV, "2")
+        .env(THEN_ENV, "stay")
+        .env(LEADER_ENV, "ends-on-term")
+        .stdout(Stdio::piped());
+    let mut leader = as_session_leader(&mut command).spawn().unwrap();
+    let leader_pid = leader.id();
+    let lines = tagged_lines(leader.stdout.take().unwrap(), Some("ready"));
+    let members: Vec<u32> = lines
+        .iter()
+        .filter_map(|line| pid_after(line, "member "))
+        .collect();
+    let _leftovers = Leftovers(members.iter().copied().chain([leader_pid]).collect());
+    // The leader is reaped as it ends, so it is gone, not a zombie, when the
+    // sweep reads the tree again.
+    let (reaped, reaping) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = reaped.send(leader.wait());
+    });
+
+    let (rest, targets) = sweep_from_outside(leader_pid, 0);
+    assert!(
+        rest.unended.is_empty(),
+        "a non-parent sweep judged members unended, so it waited: {:?}",
+        rest.unended
+    );
+    wait_processes_gone_blocking(&members, |left| {
+        format!("the members {left:?} outlived the leader and the non-parent sweep: {targets:?}")
     });
     reaping
         .recv_timeout(HANG_GUARD)

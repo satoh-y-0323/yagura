@@ -38,7 +38,10 @@ pub use exit_watch::{child_pids, reap_orphans, set_child_subreaper};
 pub(crate) use process_group::DEFAULT_TERM_GRACE;
 pub use process_group::UnixProcessGroup;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use tree_end::{ProcessRow, SignalTarget, TreeEnd, TreeEndHooks, TreeEndRest, window_members};
+pub use tree_end::{
+    PriorMembers, ProcessRow, SignalTarget, TreeEnd, TreeEndHooks, TreeEndRest, read_prior_members,
+    window_members,
+};
 #[cfg(target_os = "linux")]
 pub use user_manager::{
     ScopeNames, UserManager, UserManagerError, cgroup_dir_of, descendants_outside,

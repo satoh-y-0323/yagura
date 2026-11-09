@@ -3,11 +3,19 @@
 //!
 //! The watcher is the child's parent and keeps it unreaped until its sweep is
 //! over, so the child's id keeps naming its process group and session; on
-//! Linux it is the tree's subreaper too. It sweeps once, on the first of four
-//! events: the holder's `Terminate`, the end of the holder's socket (the
-//! holder died), `SIGTERM`, or the child's own exit. It then tells the holder
-//! the sweep is over and ends, removing the holder's files first when the
-//! holder is gone; it holds the endpoint's lock for as long as it lives.
+//! Linux it is the tree's subreaper too. It holds a copy of the terminal's
+//! master, so the terminal does not hang up when the holder ends before the
+//! watcher has read the tree.
+//!
+//! It ends the tree once, on the first of four events: the holder's
+//! `Terminate`, the end of the holder's socket (the holder died), `SIGTERM`,
+//! or the child's own exit. Whatever the event, it reads the tree's members
+//! first, then hangs the terminal up (a `SIGHUP` to the child when the holder
+//! asked, and closing its copy of the master), gives the child a grace period
+//! when it hung the terminal up, and sweeps with the members it read. It then
+//! tells the holder the sweep is over and ends, removing the holder's files
+//! first when the holder is gone; it holds the endpoint's lock for as long as
+//! it lives.
 //!
 //! It runs on one thread, starts no async runtime and reads the frames of
 //! [`crate::watcher_proto`] alone.
@@ -36,7 +44,8 @@ const HANGUP_GRACE: Duration = Duration::from_millis(250);
 /// The descriptors the watcher holds while it sweeps, which the sweep's
 /// waits may not use: its three standard streams, the holder's socket, the
 /// endpoint's lock, and its wait's two (Linux: the leader's pidfd and a
-/// signalfd) and the sweep's two (a signalfd and `cgroup.events`).
+/// signalfd) and the sweep's two (a signalfd and `cgroup.events`). The copy
+/// of the terminal's master is not one: it is closed before the sweep.
 const ALWAYS_HELD: usize = 9;
 
 /// Descriptors kept aside for the reads a sweep makes as it goes.
@@ -46,12 +55,30 @@ const DESCRIPTOR_MARGIN: usize = 32;
 /// counted.
 pub(crate) const UNCOUNTED: u32 = u32::MAX;
 
+/// The descriptors one read of the socket took, and the bytes of the stream
+/// that read covered: they came with the first byte of the frame that starts
+/// among those bytes and carries descriptors.
+struct Batch {
+    start: usize,
+    end: usize,
+    fds: Vec<OwnedFd>,
+}
+
 /// The frames on one end of a holder's socket, with the descriptors that
 /// came beside them.
 pub(crate) struct FrameStream {
     socket: Arc<OwnedFd>,
     buffer: Vec<u8>,
-    fds: VecDeque<OwnedFd>,
+    /// Where in the stream the first byte of `buffer` is.
+    taken: usize,
+    batches: VecDeque<Batch>,
+}
+
+fn wrong_descriptors() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "a frame came with other descriptors than it carries",
+    )
 }
 
 impl FrameStream {
@@ -59,7 +86,8 @@ impl FrameStream {
         Self {
             socket,
             buffer: Vec::new(),
-            fds: VecDeque::new(),
+            taken: 0,
+            batches: VecDeque::new(),
         }
     }
 
@@ -74,7 +102,14 @@ impl FrameStream {
         let mut chunk = [0u8; 4096];
         let mut fds = Vec::new();
         let read = os::receive_with_descriptors(self.socket.as_fd(), &mut chunk, &mut fds)?;
-        self.fds.extend(fds);
+        let start = self.taken.saturating_add(self.buffer.len());
+        if !fds.is_empty() {
+            self.batches.push_back(Batch {
+                start,
+                end: start.saturating_add(read),
+                fds,
+            });
+        }
         self.buffer.extend_from_slice(&chunk[..read]);
         Ok(read > 0)
     }
@@ -84,30 +119,53 @@ impl FrameStream {
     /// # Errors
     ///
     /// [`io::ErrorKind::InvalidData`] for bytes that are not a frame, or a
-    /// frame without the descriptors it carries.
+    /// frame that came with more or fewer descriptors than it carries; the
+    /// descriptors that came with it are closed.
     pub(crate) fn take(&mut self) -> io::Result<Option<(WatcherFrame, Vec<OwnedFd>)>> {
         let Some((frame, used)) = decode_watcher_frame(&self.buffer)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
         else {
             return Ok(None);
         };
+        let begin = self.taken;
         self.buffer.drain(..used);
+        self.taken = self.taken.saturating_add(used);
         if self.buffer.is_empty() {
             // Gives back the room the largest frame so far took.
             self.buffer = Vec::new();
         }
-        let carried = match &frame {
-            WatcherFrame::Spawn { .. } => 2,
-            WatcherFrame::ScopeMembers { count } => *count as usize,
-            _ => 0,
-        };
-        if self.fds.len() < carried {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "a frame came without the descriptors it carries",
-            ));
+        let fds = self.descriptors_of(begin, frame.descriptors())?;
+        Ok(Some((frame, fds)))
+    }
+
+    /// The descriptors of the frame whose first byte is at `begin`, exactly
+    /// `carried` of them. Descriptors no frame can carry any more (every
+    /// frame that starts among the bytes they came with has been taken) are
+    /// closed, and the frame is refused with them.
+    fn descriptors_of(&mut self, begin: usize, carried: usize) -> io::Result<Vec<OwnedFd>> {
+        let mut fds = Vec::new();
+        if carried > 0
+            && self
+                .batches
+                .front()
+                .is_some_and(|batch| batch.start <= begin && begin < batch.end)
+            && let Some(batch) = self.batches.pop_front()
+        {
+            fds = batch.fds;
         }
-        Ok(Some((frame, self.fds.drain(..carried).collect())))
+        let mut unclaimed = false;
+        while self
+            .batches
+            .front()
+            .is_some_and(|batch| batch.end <= self.taken)
+        {
+            self.batches.pop_front();
+            unclaimed = true;
+        }
+        if unclaimed || fds.len() != carried {
+            return Err(wrong_descriptors());
+        }
+        Ok(fds)
     }
 
     /// The next frame, waiting for it; `None` at the socket's end.
@@ -195,6 +253,10 @@ struct Watcher {
     files: HolderFiles,
     /// Holds the endpoint's lock for as long as the watcher lives.
     _lock: OwnedFd,
+    /// The copy of the terminal's master, neither read nor written, held
+    /// until the tree is read: closing it hangs the terminal up once the
+    /// holder is gone.
+    master: Option<OwnedFd>,
     slots: usize,
     leader_told: bool,
     holder_gone: bool,
@@ -236,10 +298,10 @@ fn start() -> io::Result<Watcher> {
             "the holder sent no child to start",
         ));
     };
-    let [slave, lock] = <[OwnedFd; 2]>::try_from(fds).map_err(|_| {
+    let [slave, lock, master] = <[OwnedFd; 3]>::try_from(fds).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            "the child came without its terminal and lock",
+            "the child came without its terminal, lock and master",
         )
     })?;
     let command = yagura_os::pty::LeaderCommand { argv, cwd, env };
@@ -264,6 +326,7 @@ fn start() -> io::Result<Watcher> {
             lock: PathBuf::from(lock_path),
         },
         _lock: lock,
+        master: Some(master),
         slots,
         leader_told: false,
         holder_gone: false,
@@ -278,7 +341,8 @@ struct Plain;
 impl os::TreeEndHooks for Plain {}
 
 impl Watcher {
-    /// Waits for the first event, sweeps, tells the holder and, with the
+    /// Waits for the first event; reads the tree, hangs the terminal up,
+    /// gives the child its grace and sweeps; tells the holder and, with the
     /// holder gone, removes its files.
     fn watch(mut self) {
         // Without its wait the watcher cannot learn of an event: it sweeps now.
@@ -287,13 +351,16 @@ impl Watcher {
             Some(wait) => self.wait_for_cause(wait),
             None => Cause::Ended,
         };
-        if cause == Cause::Terminate
+        // Read before the hangup can end a member's parent: a child the
+        // parent put in a session of its own is found only while it runs.
+        let prior = os::read_prior_members(self.leader, &self.gate).unwrap_or_default();
+        if self.hang_up(cause)
             && let Some(wait) = wait.as_mut()
         {
-            self.hang_up(wait);
+            self.grace(wait);
         }
         drop(wait);
-        let rest = self.sweep();
+        let rest = self.sweep(prior);
         self.finish(&rest);
     }
 
@@ -343,10 +410,28 @@ impl Watcher {
         }
     }
 
-    /// Hangs the child up, as closing a terminal would, and gives it
-    /// [`HANGUP_GRACE`] to exit by itself before the sweep.
-    fn hang_up(&mut self, wait: &mut os::WatcherWait) {
-        let _ = os::hang_up_child(self.leader, &self.gate);
+    /// Hangs the child up as closing a terminal would: with `SIGHUP` when
+    /// the holder asked, and by closing the copy of the master, which hangs
+    /// the terminal up when the holder is gone. Whether it hung either up.
+    fn hang_up(&mut self, cause: Cause) -> bool {
+        let asked = cause == Cause::Terminate;
+        if asked {
+            let _ = os::hang_up_child(self.leader, &self.gate);
+        }
+        drop(self.master.take());
+        if !asked && !self.holder_gone && os::peer_has_closed(self.stream.socket()) {
+            self.holder_gone = true;
+        }
+        asked || self.holder_gone
+    }
+
+    /// Gives a child just hung up [`HANGUP_GRACE`] to exit by itself before
+    /// the sweep, as a shell runs its hangup trap: waits for the child's exit
+    /// alone once the holder's socket has nothing more for it.
+    fn grace(&mut self, wait: &mut os::WatcherWait) {
+        if self.holder_gone && wait.ignore_socket().is_err() {
+            return;
+        }
         let deadline = Instant::now() + HANGUP_GRACE;
         while !self.leader_told {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -363,7 +448,9 @@ impl Watcher {
             if events.children {
                 let _ = os::reap_orphans(self.leader, &self.gate);
             }
-            if events.socket && self.read_holder() == Some(Cause::HolderGone) {
+            // A holder gone, or sending what cannot be read, has nothing
+            // more for the grace.
+            if events.socket && self.read_holder().is_some() && wait.ignore_socket().is_err() {
                 return;
             }
         }
@@ -379,9 +466,10 @@ impl Watcher {
         }
     }
 
-    fn sweep(&self) -> os::TreeEndRest {
-        let sweep =
-            os::TreeEnd::owned(self.leader, Arc::clone(&self.gate)).exit_watch_slots(self.slots);
+    fn sweep(&self, prior: os::PriorMembers) -> os::TreeEndRest {
+        let sweep = os::TreeEnd::owned(self.leader, Arc::clone(&self.gate))
+            .prior_members(prior)
+            .exit_watch_slots(self.slots);
         #[cfg(target_os = "linux")]
         let sweep = match &self.cgroup {
             Some(dir) => sweep.cgroup(dir.clone()),

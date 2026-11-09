@@ -546,7 +546,10 @@ struct WriterState {
     unanswered_bytes: usize,
     /// Set while replies are being dropped, so a flood logs once.
     dropping: bool,
+    /// The input is stopped: nothing more is written.
     closed: bool,
+    /// The writer may be dropped, which ends the child's input.
+    released: bool,
     focus: FocusState,
 }
 
@@ -642,10 +645,11 @@ impl InputWriter {
         }
     }
 
-    /// Lets go of the input: a write in hand stops at its next piece, and
-    /// nothing still queued is written. Each of those writes is answered as
-    /// failed, and then the writer thread ends with [`Event::WriterDone`].
-    pub(crate) fn close(&self) {
+    /// Stops the input: a write in hand stops at its next piece, nothing
+    /// still queued is written and nothing new is taken. Each of those writes
+    /// is answered as failed. The child's input does not end: the writer
+    /// thread keeps the writer until [`Self::release`].
+    pub(crate) fn stop(&self) {
         let mut state = self.state();
         state.closed = true;
         state
@@ -653,6 +657,22 @@ impl InputWriter {
             .retain(|job| matches!(job, WriteJob::Write { .. }));
         state.unanswered_bytes = 0;
         self.ready.notify_one();
+    }
+
+    /// Lets the writer thread drop the writer once the input is stopped and
+    /// every write answered, which ends the child's input, and then end with
+    /// [`Event::WriterDone`].
+    pub(crate) fn release(&self) {
+        let mut state = self.state();
+        state.released = true;
+        self.ready.notify_one();
+    }
+
+    /// Stops the input and lets go of it: [`Self::stop`] and
+    /// [`Self::release`].
+    pub(crate) fn close(&self) {
+        self.stop();
+        self.release();
     }
 
     /// The next job, and whether the input was let go of (so it is not to be
@@ -686,6 +706,16 @@ impl InputWriter {
         }
     }
 
+    fn wait_released(&self) {
+        let mut state = self.state();
+        while !state.released {
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
     /// Writes `bytes` a piece at a time; `false` when a piece failed, or the
     /// input was let go of before the last piece.
     fn write_answered(&self, writer: &mut dyn Write, bytes: &[u8]) -> bool {
@@ -711,6 +741,9 @@ impl InputWriter {
         events: &mpsc::UnboundedSender<Event>,
     ) {
         self.write_jobs(writer.as_mut(), published, intake, events);
+        // Dropped here, not handed back: ending the input writes to the
+        // terminal, which may block on a child that reads nothing.
+        self.wait_released();
         drop(writer);
         let _ = events.send(Event::WriterDone);
     }

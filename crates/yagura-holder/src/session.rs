@@ -323,12 +323,15 @@ struct Child {
 
 #[cfg(unix)]
 impl Child {
-    /// Asks the watcher to end the child and its tree, then lets go of the
-    /// input. The watcher ends the whole tree however it is asked, so `tree`
-    /// changes nothing here.
+    /// Asks the watcher to end the child and its tree, then stops the input
+    /// without ending it: the end of the input would reach the child before
+    /// the watcher has read the tree, and the child could leave by itself
+    /// first. The input ends once the child has (`let_go_of_input`). The
+    /// watcher ends the whole tree however it is asked, so `tree` changes
+    /// nothing here.
     fn terminate(&mut self, _tree: bool) {
         self.watcher.terminate();
-        self.terminal.input.close();
+        self.terminal.input.stop();
     }
 }
 
@@ -585,8 +588,11 @@ fn spawn_child(
         slave,
     } = yagura_os::pty::open(size)
         .map_err(|error| SpawnError::other(format!("cannot open the terminal: {error}")))?;
-    let started =
-        watcher_link::start(command, slave, &lock, &handover.files).map_err(SpawnError::other)?;
+    let master = control.master_copy().map_err(|error| {
+        SpawnError::other(format!("cannot copy the terminal's master: {error}"))
+    })?;
+    let started = watcher_link::start(command, slave, master, &lock, &handover.files)
+        .map_err(SpawnError::other)?;
     drop(lock);
     let control = Arc::new(control);
     let (terminal, threads) = terminal::terminal(
@@ -1437,12 +1443,16 @@ mod watcher_link {
     }
 
     /// Starts the watcher beside this holder's executable, has it start
-    /// `command` on `slave` and hands it the endpoint's `lock`. A watcher
-    /// that cannot be started, speaks another version or cannot start the
-    /// child is ended and reaped, and the reason returned.
+    /// `command` on `slave` and hands it the endpoint's `lock` and `master`,
+    /// a copy of the terminal's master: while the watcher holds it, the
+    /// holder's end does not hang the terminal up before the watcher has
+    /// read the tree. A watcher that cannot be started, speaks another
+    /// version or cannot start the child is ended and reaped, and the reason
+    /// returned.
     pub(crate) fn start(
         command: LeaderCommand,
         slave: OwnedFd,
+        master: OwnedFd,
         endpoint_lock: &OwnedFd,
         files: &HolderFiles,
     ) -> Result<Started, String> {
@@ -1469,7 +1479,7 @@ mod watcher_link {
             socket_path: path_text(&files.socket)?,
             lock_path: path_text(&files.lock)?,
         };
-        let started = handshake(&mut stream, &spawn, slave, endpoint_lock);
+        let started = handshake(&mut stream, &spawn, slave, master, endpoint_lock);
         let (leader, leader_start) = match started {
             Ok(started) => started,
             Err(error) => {
@@ -1498,12 +1508,14 @@ mod watcher_link {
         })
     }
 
-    /// Reads the watcher's version, sends it the child with the terminal and
-    /// the lock, and reads the started child's id and start.
+    /// Reads the watcher's version, sends it the child with the terminal's
+    /// slave, the lock and the copy of the master, and reads the started
+    /// child's id and start.
     fn handshake(
         stream: &mut FrameStream,
         spawn: &WatcherFrame,
         slave: OwnedFd,
+        master: OwnedFd,
         endpoint_lock: &OwnedFd,
     ) -> Result<(u32, Option<String>), String> {
         match stream.next() {
@@ -1517,11 +1529,13 @@ mod watcher_link {
         send_frame(
             stream.socket(),
             spawn,
-            &[slave.as_fd(), endpoint_lock.as_fd()],
+            &[slave.as_fd(), endpoint_lock.as_fd(), master.as_fd()],
         )
         .map_err(|error| format!("cannot hand the child to the watcher: {error}"))?;
-        // The holder's copy goes, so the output ends once the tree is gone.
+        // The holder's copies go: the output ends once the tree is gone, and
+        // the terminal hangs up once the holder and the watcher both are.
         drop(slave);
+        drop(master);
         match stream.next() {
             Ok(Some((WatcherFrame::LeaderStarted { pid, start }, _))) => Ok((pid, start)),
             Ok(Some((other, _))) => Err(format!(

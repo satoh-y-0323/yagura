@@ -70,6 +70,23 @@ impl PtyControl {
         drop(lock(&self.master).take());
     }
 
+    /// A close-on-exec copy of the terminal's master, for another process to
+    /// hold: the terminal hangs up only once every copy of its master is
+    /// closed, so the last holder decides when.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the terminal has been closed or the descriptor
+    /// cannot be copied.
+    pub fn master_copy(&self) -> io::Result<OwnedFd> {
+        lock(&self.master)
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "the pseudoterminal is closed")
+            })?
+            .try_clone()
+    }
+
     /// A new end mark: a run of ASCII digits nobody could know before, made
     /// before it is written so the reader can look for it from the start.
     ///
