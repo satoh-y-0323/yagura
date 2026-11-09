@@ -10,7 +10,7 @@
 
 use crate::common;
 
-use common::real_daemon::Sandbox;
+use common::real_daemon::{RunningDaemon, Sandbox};
 use common::{read_response, send};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
@@ -62,24 +62,7 @@ LONG_VALUE = '{value}'
     );
     let mut daemon = sandbox.start().await;
     let window_id = daemon.open_profile_window(&sandbox, "probe").await;
-    daemon
-        .output_until(&window_id, "the whole report", |text| text.contains(">>"))
-        .await;
-
-    send(
-        &mut daemon.client,
-        &ClientMessage::GetWindowStatus {
-            window_id: window_id.clone(),
-        },
-    )
-    .await;
-    let summary = match read_response(&mut daemon.client).await {
-        DaemonMessage::WindowStatus {
-            last_output_summary,
-            ..
-        } => last_output_summary.expect("a window with output has a summary"),
-        other => panic!("expected window_status, got {other:?}"),
-    };
+    let summary = whole_summary(&mut daemon, &window_id).await;
     let report = format!("<<LONG_VALUE={value}>>");
     assert_eq!(summary, report[report.len() - 500..]);
 }
@@ -100,26 +83,41 @@ async fn the_status_summary_counts_its_500_characters_not_bytes() {
     );
     let mut daemon = sandbox.start().await;
     let window_id = daemon.open_profile_window(&sandbox, "probe").await;
-    daemon
-        .output_until(&window_id, "the whole report", |text| text.contains(">>"))
-        .await;
-
-    send(
-        &mut daemon.client,
-        &ClientMessage::GetWindowStatus {
-            window_id: window_id.clone(),
-        },
-    )
-    .await;
-    let summary = match read_response(&mut daemon.client).await {
-        DaemonMessage::WindowStatus {
-            last_output_summary,
-            ..
-        } => last_output_summary.expect("a window with output has a summary"),
-        other => panic!("expected window_status, got {other:?}"),
-    };
+    let summary = whole_summary(&mut daemon, &window_id).await;
     let report = format!("<<LONG_VALUE={value}>>");
     let mut tail: Vec<char> = report.chars().rev().take(500).collect();
     tail.reverse();
     assert_eq!(summary, tail.into_iter().collect::<String>());
+}
+
+/// The window's status summary once it shows the whole report. The summary is
+/// read from the daemon's copy of the screen, which follows the holder's
+/// screen that `read_output` reads, so the report's end in `read_output` does
+/// not mean the copy has it yet.
+async fn whole_summary(daemon: &mut RunningDaemon, window_id: &str) -> String {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    loop {
+        send(
+            &mut daemon.client,
+            &ClientMessage::GetWindowStatus {
+                window_id: window_id.to_string(),
+            },
+        )
+        .await;
+        let summary = match read_response(&mut daemon.client).await {
+            DaemonMessage::WindowStatus {
+                last_output_summary,
+                ..
+            } => last_output_summary,
+            other => panic!("expected window_status, got {other:?}"),
+        };
+        if let Some(summary) = summary.filter(|summary| summary.ends_with(">>")) {
+            return summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the summary to show the whole report"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
