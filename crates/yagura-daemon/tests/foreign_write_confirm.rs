@@ -184,6 +184,9 @@ async fn a_body_left_beside_a_dialog_is_taken_back_again_once_the_dialog_is_gone
          over"
     );
 
+    // The dialog swallows only what the child reads while it stands; the
+    // take-back goes in front of the carriage return, which the child reports.
+    wait_until_model_shows(&h, &window.id, b"APPROVED").await;
     std::fs::write(&gone, b"").expect("remove the dialog");
     let not_placed = not_placed(answer(call).await);
     assert_eq!(not_placed.reason, NotPlacedReason::Interrupted);

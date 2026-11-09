@@ -1993,6 +1993,8 @@ async fn a_probe_written_behind_a_tall_draft_is_erased_once_another_writer_inter
     })
     .await;
     press(&h, &window_id, b'Q').await;
+    // The dialog swallows only what the child reads while it stands.
+    wait_until_input_log_contains(&log, b"Q").await;
     std::fs::write(&gone, b"").expect("remove the dialog");
     let judgment = ended(call, "another writer's byte must end the call").await;
 
