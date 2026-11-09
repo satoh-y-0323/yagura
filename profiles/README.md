@@ -94,8 +94,9 @@ An older daemon does not know the keys a later release adds. A profile of
 your own that uses one -- for example `env` under `[model]` or `[effort]`,
 `launch_context` under `[delivery]`, `notice` under `[mcp_registration]`,
 `items` and `name` under `[mcp_registration.status]`, the `[credentials]`
-table, the `[hook_events]` table, or `retired` under
-`[mcp_registration.toml_set.entries]` -- is left out of its
+table, the `[hook_events]` table, `retired` under
+`[mcp_registration.toml_set.entries]`, or `launch_only` under `[command]`
+-- is left out of its
 listing with a
 warning. A `{server}` in a `json_entry` `file` is no placeholder to such a
 daemon: it is taken as part of the file's name.
