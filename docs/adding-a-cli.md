@@ -187,6 +187,10 @@ going to change, and when you are done restore it and compare it byte for byte w
   waiting text into its composer while the window waits for input, so its detection definition needs
   a composer and an `[input].probe` (see [Choosing `probe` for a CLI](../crates/yagura-daemon/detection/README.md#choosing-probe-for-a-cli)).
   Write down why, and what would let you drop the workaround (a documented way to wake the CLI).
+- A flag that only the CLI's interactive start takes, and that its other subcommands (the wake,
+  `mcp add`, a model listing) do not, goes into `launch_only` under `[command]` (see
+  [Arguments for starting a window only](../profiles/README.md#arguments-for-starting-a-window-only)),
+  not into the argv itself: every command the daemon builds from the argv would carry it too.
 - Find the characters the CLI's composer takes as a key when one comes first (a shell mode, a help
   view): read the CLI's documentation, type `?` into an empty composer for its help, and try each
   candidate there. List them as `[input].leading_keys` so `send_message` refuses a text starting with

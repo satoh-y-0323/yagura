@@ -681,3 +681,100 @@ fn each_hook_events_table_is_the_sum_of_what_the_handlers_of_that_event_did() {
         assert_eq!(names, wanted, "{id}: the events the table names");
     }
 }
+
+// ---------------------------------------------------------------------
+// The codex family's launch-only argv
+// ---------------------------------------------------------------------
+
+/// A fixture keeping `id`'s shipped `[command]` table except its argv keys, which run
+/// `hook_child` (logging its argv under `logs`) instead, plus the shipped `[delivery]`
+/// table and the shipped `wake_args`.
+fn launch_only_fixture(id: &str, logs: &std::path::Path) -> (String, Vec<String>) {
+    let source = read_doc_verbatim(&format!("../../profiles/{id}.toml"));
+    let shipped: toml::Table = toml::from_str(&source).unwrap();
+    let mut command = shipped["command"].as_table().unwrap().clone();
+    for key in ["default", "windows", "macos", "linux"] {
+        command.remove(key);
+    }
+    let child = [
+        env!("CARGO_BIN_EXE_hook_child").to_string(),
+        yagura_test_support::process::COMPOSER_MARKER.to_string(),
+        yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
+        yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
+        "0".to_string(),
+        "-".to_string(),
+        "--log".to_string(),
+        logs.display().to_string(),
+    ];
+    command.insert(
+        "default".to_string(),
+        toml::Value::Array(child.into_iter().map(toml::Value::String).collect()),
+    );
+    let delivery = shipped["delivery"].clone();
+    let wake_args = delivery["wake_args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{id} must wake by a command with wake_args"))
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_string())
+        .collect();
+    let mut fixture = toml::Table::new();
+    fixture.insert("schema".to_string(), shipped["schema"].clone());
+    fixture.insert("display_name".to_string(), shipped["display_name"].clone());
+    fixture.insert("command".to_string(), toml::Value::Table(command));
+    fixture.insert("delivery".to_string(), delivery);
+    (toml::to_string(&fixture).unwrap(), wake_args)
+}
+
+#[tokio::test]
+async fn the_codex_cli_family_spawns_with_no_daemon_but_wakes_without_it() {
+    for id in ["codex-cli", "wsl-codex-cli"] {
+        let tree = yagura_test_support::paths::TempDir::new("yagura-cli-test", "bundled-no-daemon");
+        let profiles_dir = tree.make_dir("profiles");
+        let logs = tree.make_dir("logs");
+        let (source, wake_args) = launch_only_fixture(id, &logs);
+        common::write_profile(&profiles_dir, id, &source);
+        let (home, registration_cwd) = common::registration_dirs("bundled-no-daemon");
+        let config = yagura_daemon::DaemonConfig {
+            home_dir: Some(home),
+            registration_cwd,
+            profiles_dir: Some(profiles_dir),
+            host_os: ProfileOs::host(),
+            program_lookup: common::empty_lookup(),
+            program_is_executable: std::path::Path::is_file,
+            default_shell: None,
+            ..common::approver_base_config()
+        };
+        let h = common::Harness::start("bundled-no-daemon", config).await;
+        let mut client = h.connect().await;
+        common::send(
+            &mut client,
+            &yagura_protocol::ClientMessage::OpenWindowFromProfile {
+                profile: id.to_string(),
+                cwd: None,
+                name: None,
+                model: None,
+                effort: None,
+                on_name_taken: Default::default(),
+            },
+        )
+        .await;
+        let window_id = match common::read_response(&mut client).await {
+            yagura_protocol::DaemonMessage::WindowOpened { window_id, .. } => window_id,
+            other => panic!("{id}: expected window_opened, got {other:?}"),
+        };
+
+        let args = common::launch_args_logged_in(&logs).await;
+        assert!(
+            args.iter().any(|arg| arg == "--no-daemon"),
+            "{id}: the window's CLI is spawned with --no-daemon; argv: {args:?}"
+        );
+        let entry = h.registry.get(&window_id).unwrap();
+        let wake = entry.wake_command().expect("the profile wakes by command");
+        let woken: Vec<&String> = wake.argv.iter().chain(&wake_args).collect();
+        assert!(
+            !woken.iter().any(|arg| *arg == "--no-daemon"),
+            "{id}: the wake command, which the CLI refuses with --no-daemon, lacks it; got {woken:?}"
+        );
+        h.registry.terminate_all().await;
+    }
+}

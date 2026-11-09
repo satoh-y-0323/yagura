@@ -138,6 +138,10 @@ pub struct ProfileCommand {
     pub macos: Option<Vec<String>>,
     /// Used on [`ProfileOs::Linux`], ahead of `default`.
     pub linux: Option<Vec<String>>,
+    /// Argv elements added to a window's spawn only, on every operating
+    /// system. They never enter [`ProfileLaunch::argv`], so a wake, a
+    /// listing, a registration and a model listing run without them.
+    pub launch_only: Vec<String>,
 }
 
 /// The two launch options a profile can map. Named here only: what each
@@ -472,6 +476,9 @@ pub struct ProfileLaunch {
     /// The profile's `[credentials]` table: how the window's credentials reach
     /// its CLI, and the argv added to the spawn alone.
     pub credentials: ProfileCredentials,
+    /// The `[command]` table's `launch_only` ([`ProfileCommand::launch_only`]),
+    /// added to the spawn alone and never to [`ProfileLaunch::argv`].
+    pub launch_only: Vec<String>,
     /// The profile's registration table, resolved alongside `hooks`: the settings
     /// file entries it owns decide whether a launch may inject them, or --
     /// for a `json_entry`, which writes the CLI's hooks into its own settings
@@ -1030,6 +1037,8 @@ struct RawCommand {
     macos: Option<Vec<String>>,
     #[serde(default)]
     linux: Option<Vec<String>>,
+    #[serde(default)]
+    launch_only: Vec<String>,
 }
 
 /// Parses and validates one profile document.
@@ -1084,6 +1093,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         {
             yagura_protocol::validate_argv_elements(argv)?;
         }
+        yagura_protocol::validate_argv_elements(&command.launch_only)?;
     }
     let (model, model_choices) = match raw.model {
         Some(RawModelOption {
@@ -1164,6 +1174,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         windows: raw_command.windows,
         macos: raw_command.macos,
         linux: raw_command.linux,
+        launch_only: raw_command.launch_only,
     });
 
     Ok(Profile {
@@ -2705,6 +2716,11 @@ pub fn resolve_launch(
     let mut argv = launch_argv(&profile, config)?;
     let additions = launch_option_additions(&profile.options, options)?;
     argv.extend(additions.args);
+    let launch_only = profile
+        .command
+        .as_ref()
+        .map(|command| command.launch_only.clone())
+        .unwrap_or_default();
     let hooks_registration = profile
         .mcp_registration
         .clone()
@@ -2736,6 +2752,7 @@ pub fn resolve_launch(
         mcp: profile.mcp,
         hooks: profile.hooks,
         credentials: profile.credentials,
+        launch_only,
         hooks_registration,
         bridge_listing,
         host_paths: profile.host_paths,

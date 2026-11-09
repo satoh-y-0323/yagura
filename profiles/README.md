@@ -135,6 +135,8 @@ default = ["codex"]            # argv used when no operating-system-specific
 # windows = ["codex"]          # overrides `default` on Windows
 # macos = ["codex"]            # overrides `default` on macOS
 # linux = ["codex"]            # overrides `default` on any other Unix
+# launch_only = ["--flag"]     # argv added to a window's spawn only; see
+                                # "Arguments for starting a window only"
 
 [env]                          # optional table; extra environment variables
 # API_KEY = ""                 # for the launched process
@@ -247,6 +249,21 @@ On any other operating system this profile has nothing to launch: it does not
 appear in any profile listing there, and naming it directly is refused as an
 unknown profile. The `windows` argv itself is
 explained under [WSL profiles](#wsl-profiles).
+
+### Arguments for starting a window only
+
+`launch_only` under `[command]` lists argv elements added to a window's spawn
+only, on every operating system, after the argv chosen above and the launch
+options. Every other command the daemon runs from the profile's argv goes
+without them: a wake by command (`wake_args`), the argv a listing reports and
+an MCP registration builds on, and a model listing (`[model.choices]`). Use it
+for a flag that belongs to starting the CLI's interactive session and that its
+other subcommands do not take. The elements are not recorded with the window,
+so a restored window gets them again from the profile. Each element must be a
+non-empty string without a NUL. The bundled `codex-cli` and `wsl-codex-cli`
+set `launch_only = ["--no-daemon"]`, so a window's tools run in its own process
+tree rather than a shared Codex server, while the wake (`codex queue`) runs as
+before.
 
 ### `[command]` omitted
 
@@ -939,7 +956,10 @@ mode = "launch"
   other injections. They are for a CLI that has to keep the credentials in its
   environment but can be told to withhold them from the tools it runs. They are
   not recorded with the window, so a restored window gets them again from the
-  profile. Each element must be a non-empty string without a NUL.
+  profile. Each element must be a non-empty string without a NUL. They follow
+  the same rules as `[command] launch_only` (see
+  [Arguments for starting a window only](#arguments-for-starting-a-window-only)),
+  which is for a start-up flag rather than for the credentials.
 
 A `[credentials]` table with another key, or a `mode` other than `"env"` and
 `"launch"`, or `{credentials_file}` in a profile whose mode is not `"launch"`,
@@ -976,7 +996,9 @@ and the WSL variants of the first two, use `"launch"`. `codex-cli` and
 command is the one it has recorded as trusted, so the command cannot carry a
 per-window path. Their `launch_args` set both variables to the empty string in
 `shell_environment_policy`, which keeps the real values out of the environment
-of the tools Codex runs. `grok-build`, `antigravity-cli`, `muse-code` and
+of the tools Codex runs. Their `[command] launch_only` adds `--no-daemon` to the
+window's spawn alone, so neither the wake nor the registration carries it.
+`grok-build`, `antigravity-cli`, `muse-code` and
 `shell` (and the WSL variants of the first two) keep `"env"` too: their hooks are
 written into the CLI's own settings by a registration, once for all windows,
 which has no place for a per-window path.

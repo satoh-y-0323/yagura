@@ -12,6 +12,10 @@ detection = "codex-cli"
 
 [command]
 windows = ["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "codex"]
+# `--no-daemon` runs the window's tools in its own process tree, not a shared
+# Codex server. It belongs to starting the window only, so a wake and every
+# other command the daemon runs go without it.
+launch_only = ["--no-daemon"]
 
 [model]
 args = ["-m", "{value}"]

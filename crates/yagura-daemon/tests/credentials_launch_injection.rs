@@ -2,8 +2,8 @@
 
 //! Integration tests: a window opened from a profile whose `[credentials]` mode is
 //! `launch` gets the settings its CLI reads written with the window's own credentials
-//! file named inside (`{credentials_file}`), and `[credentials] launch_args` reach the
-//! argv the window is spawned with and nothing else.
+//! file named inside (`{credentials_file}`), and `[credentials] launch_args` and
+//! `[command] launch_only` reach the argv the window is spawned with and nothing else.
 //!
 //! Every window is a real child (`hook_child`, which logs the argv it received) of an
 //! in-process daemon, so what a CLI would read from disk and from its argv is what is
@@ -20,7 +20,7 @@ use common::{
     read_response, registration_dirs, send, write_profile,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::profile::ProfileOs;
+use yagura_daemon::profile::{ModelChoicesPlan, ProfileOs, parse_profile, resolve_model_choices};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
@@ -38,6 +38,10 @@ const MCP_JSON: &str = "{\"mcpServers\":{\"yagura\":{\"command\":\"${MCP_BRIDGE_
      \"args\":[\"--credentials\",\"{credentials_file}\"]}}}";
 
 const LAUNCH_ARGS: &str = "launch_args = [\"--launch-arg\", \"one\"]";
+
+/// A `[command]` key: argv elements for the spawn only, kept out of every command the
+/// daemon derives from the profile's argv.
+const LAUNCH_ONLY: &str = "launch_only = [\"--launch-only\"]";
 
 /// The `[hooks]` table that writes `HOOKS_JSON` as one file and hands the CLI its path
 /// and the credentials file's.
@@ -432,15 +436,19 @@ async fn recorded_commands(db: &Path) -> Vec<Vec<String>> {
 }
 
 #[tokio::test]
-async fn launch_args_come_before_the_launch_prompt_and_stay_out_of_every_other_command() {
+async fn launch_args_and_launch_only_come_before_the_launch_prompt_and_stay_out_of_every_other_command()
+ {
     let tree = TempDir::new("yagura-cli-test", "cred-inject-launch-args");
     let profiles_dir = tree.make_dir("profiles");
     let detection_dir = tree.make_dir("detection");
     let logs = tree.make_dir("logs");
+    // The leading key line lands in the `[command]` table the fixture writes first.
     let tables = format!(
-        "\n[credentials]\n{LAUNCH_ARGS}\n\n[delivery]\nwake = \"command\"\n\
+        "{LAUNCH_ONLY}\n\n[credentials]\n{LAUNCH_ARGS}\n\n[delivery]\nwake = \"command\"\n\
          wake_args = [\"--woken\", \"{{session}}\", \"{{text}}\"]\n\
-         launch_prompt = [\"--prompt\", \"{{prompt}}\"]\n"
+         launch_prompt = [\"--prompt\", \"{{prompt}}\"]\n\n\
+         [model]\nargs = [\"--model\", \"{{value}}\"]\n\n\
+         [model.choices]\nargs = [\"--list-models\"]\nformat = \"lines\"\nseparator = \"\\t\"\n"
     );
     write_hook_child_profile(&profiles_dir, "args", &logs, &[], &tables);
     let config = handoff_profile_config(
@@ -451,10 +459,42 @@ async fn launch_args_come_before_the_launch_prompt_and_stay_out_of_every_other_c
         Some(policy(&["send_handoff"])),
         30,
     );
+    match resolve_model_choices(&config, "args") {
+        Ok(ModelChoicesPlan::Command {
+            argv, launch_argv, ..
+        }) => assert!(
+            !argv
+                .iter()
+                .chain(&launch_argv)
+                .any(|arg| arg == "--launch-only"),
+            "launch_only is not part of the model choices command; got {argv:?}"
+        ),
+        other => panic!("the profile lists its models by command; got {other:?}"),
+    }
     let h = Harness::start("cred-inject-launch-args", config).await;
     let db = tree.make_dir("store").join("yagura.db");
     yagura_daemon::store::wire_into(&h.registry, Some(db.clone()));
     let mut client = h.connect().await;
+
+    send(&mut client, &ClientMessage::ListProfiles).await;
+    let listed = match read_response(&mut client).await {
+        DaemonMessage::ProfileList { profiles, warnings } => {
+            assert!(
+                warnings.is_empty(),
+                "the profile must load; warnings: {warnings:?}"
+            );
+            profiles
+                .into_iter()
+                .find(|profile| profile.id == "args")
+                .expect("the profile is listed")
+        }
+        other => panic!("expected profile_list, got {other:?}"),
+    };
+    assert!(
+        !listed.command.iter().any(|arg| arg == "--launch-only"),
+        "launch_only is not part of the listed command a registration runs; got {:?}",
+        listed.command
+    );
 
     let reply =
         call_send_handoff_from_profile(&mut client, "args", None, None, "src/foo.rs", "look here")
@@ -472,19 +512,31 @@ async fn launch_args_come_before_the_launch_prompt_and_stay_out_of_every_other_c
         at < prompt_at && prompt_at + 2 == args.len(),
         "launch_args come before the launch prompt, which stays the last argument; argv: {args:?}"
     );
+    let only_at = args
+        .iter()
+        .position(|arg| arg == "--launch-only")
+        .unwrap_or_else(|| panic!("launch_only never reached the spawn's argv; argv: {args:?}"));
+    assert!(
+        only_at < prompt_at && args.iter().filter(|arg| *arg == "--launch-only").count() == 1,
+        "launch_only is added once, before the launch prompt; argv: {args:?}"
+    );
 
     let entry = h.registry.get(&window_id).unwrap();
     let wake = entry.wake_command().expect("the profile wakes by command");
-    assert!(
-        !wake.argv.iter().any(|arg| arg == "--launch-arg"),
-        "launch_args are not part of the wake command; got {:?}",
-        wake.argv
-    );
-    for command in recorded_commands(&db).await {
+    for spawn_only in ["--launch-arg", "--launch-only"] {
         assert!(
-            !command.iter().any(|arg| arg == "--launch-arg"),
-            "launch_args are not part of the recorded command; got {command:?}"
+            !wake.argv.iter().any(|arg| arg == spawn_only),
+            "{spawn_only} is not part of the wake command; got {:?}",
+            wake.argv
         );
+    }
+    for command in recorded_commands(&db).await {
+        for spawn_only in ["--launch-arg", "--launch-only"] {
+            assert!(
+                !command.iter().any(|arg| arg == spawn_only),
+                "{spawn_only} is not part of the recorded command; got {command:?}"
+            );
+        }
     }
     h.registry.terminate_all().await;
 }
@@ -493,4 +545,29 @@ fn value_position(args: &[String], flag: &str) -> usize {
     args.iter()
         .position(|arg| arg == flag)
         .unwrap_or_else(|| panic!("{flag} is missing; argv: {args:?}"))
+}
+
+// =============================================================================
+// (f) launch_only elements follow the argv element rule launch_args do
+// =============================================================================
+
+#[test]
+fn launch_only_elements_are_refused_by_the_same_rule_as_launch_args() {
+    let profile = |launch_only: &str| {
+        format!(
+            "schema = 1\ndisplay_name = \"Only\"\n\n[command]\ndefault = [\"only-program\"]\n\
+             launch_only = {launch_only}\n"
+        )
+    };
+    parse_profile("only", &profile("[\"--flag\", \"k=v\"]"))
+        .expect("launch_only as an array of argv elements is accepted");
+    for (what, value) in [
+        ("an empty element", "[\"--flag\", \"\"]"),
+        ("a NUL element", "[\"--flag\", \"a\\u0000b\"]"),
+    ] {
+        assert!(
+            parse_profile("only", &profile(value)).is_err(),
+            "{what} must be refused"
+        );
+    }
 }

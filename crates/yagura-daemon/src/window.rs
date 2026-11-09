@@ -489,6 +489,9 @@ pub enum InjectionKind {
     /// The `[credentials]` table's `launch_args`: arguments the CLI needs for
     /// its window credentials to stay out of what its tools run.
     LaunchArgs,
+    /// The `[command]` table's `launch_only`: arguments the CLI takes only
+    /// when it starts a window, never when the daemon runs it otherwise.
+    LaunchOnly,
     /// The `[delivery]` table's `launch_prompt`: hands the CLI a first
     /// request at start-up.
     LaunchPrompt,
@@ -505,6 +508,7 @@ impl InjectionKind {
             Self::Mcp => "MCP",
             Self::Hooks => "hooks",
             Self::LaunchArgs => "launch arguments",
+            Self::LaunchOnly => "launch-only arguments",
             Self::LaunchPrompt => "launch prompt",
             Self::LaunchContext => "launch context",
         }

@@ -400,6 +400,8 @@ struct PlannedOpen {
     credentials: crate::profile::CredentialsMode,
     /// The profile's `[credentials] launch_args`, for the spawn's argv only.
     launch_args: Vec<String>,
+    /// The profile's `[command] launch_only`, for the spawn's argv only.
+    launch_only: Vec<String>,
     /// Recorded on the window, so a restore can launch it through the same
     /// profile again.
     launch: LaunchIdentity,
@@ -2864,6 +2866,7 @@ impl IpcServer {
             hooks,
             credentials,
             launch_args: launch.credentials.launch_args.clone(),
+            launch_only: launch.launch_only,
             delivery: launch.delivery,
             wake_command,
             bridge_scan,
@@ -5873,6 +5876,14 @@ async fn open_planned(
         injections.push(CliInjection {
             kind: crate::window::InjectionKind::LaunchArgs,
             args: std::mem::take(&mut planned.launch_args),
+            config_file: None,
+            config_dir: None,
+        });
+    }
+    if !planned.launch_only.is_empty() {
+        injections.push(CliInjection {
+            kind: crate::window::InjectionKind::LaunchOnly,
+            args: std::mem::take(&mut planned.launch_only),
             config_file: None,
             config_dir: None,
         });
