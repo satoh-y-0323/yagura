@@ -455,7 +455,8 @@ const SLOW_WATCHER: &str = env!("CARGO_BIN_EXE_slow_watcher");
 
 /// What a child wrote and ended on stays in the window's text when the
 /// watcher's report that the child started reaches the holder late: macOS
-/// drops the output of a closed terminal that nothing read for about 0.6 s.
+/// drops the output of a closed terminal that nothing read for about half a
+/// second.
 #[tokio::test(flavor = "multi_thread")]
 async fn output_of_a_child_that_ends_at_once_stays_when_its_start_is_reported_late() {
     let rig = Rig::new("lateleader");
