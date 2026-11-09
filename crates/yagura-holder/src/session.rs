@@ -878,6 +878,9 @@ impl Core {
     /// copy of the screen, followed by `Exited` once the child's exit is told.
     async fn accept(&mut self, accepted: Accepted) -> Option<Ending> {
         if let Some(previous) = self.conn.take() {
+            // The terminal thread's frames stop first, so `Displaced` is the
+            // last frame the previous daemon reads.
+            self.close_outlet(&previous);
             previous.send(Reply::Displaced);
             self.lose(previous);
         }

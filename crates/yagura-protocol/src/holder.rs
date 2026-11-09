@@ -109,8 +109,9 @@ pub enum HolderFrame {
         /// The child's exit code.
         code: Option<i32>,
     },
-    /// h -> d, fixed: another daemon has taken the holder over; this
-    /// connection is closed next and is not to be reopened.
+    /// h -> d, fixed: another daemon has taken the holder over; it is the
+    /// last frame on this connection, which is closed next and is not to be
+    /// reopened.
     Displaced,
     /// h -> d, fixed: the holder does not speak the `Hello`'s version.
     VersionRejected {
