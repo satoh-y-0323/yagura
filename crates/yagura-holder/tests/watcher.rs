@@ -450,6 +450,53 @@ async fn without_the_watchers_binary_the_window_does_not_open() {
     holder.wait_exit().await;
 }
 
+/// The slow watcher: reports its child started a second after starting it.
+const SLOW_WATCHER: &str = env!("CARGO_BIN_EXE_slow_watcher");
+
+/// What a child wrote and ended on stays in the window's text when the
+/// watcher's report that the child started reaches the holder late: macOS
+/// drops the output of a closed terminal that nothing read for about 0.6 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn output_of_a_child_that_ends_at_once_stays_when_its_start_is_reported_late() {
+    let rig = Rig::new("lateleader");
+    let _daemon = hold_daemon_endpoint(&rig).await;
+    let beside = rig.file("beside");
+    std::fs::create_dir(&beside).unwrap();
+    let holder_copy = beside.join("yagura-holder");
+    yagura_test_support::process::install_exe(Path::new(HOLDER), &holder_copy);
+    yagura_test_support::process::install_exe(Path::new(SLOW_WATCHER), &beside.join(WATCHER_NAME));
+    let mut holder = rig.start_exe_with(
+        path_arg(&holder_copy),
+        &encode_holder_launch(&rig.launch(&["exit", "0"], NO_DEADLINE_MS)),
+        Stdio::null(),
+        |_| {},
+    );
+    let (mut peer, _) = Peer::welcomed(&rig.record().await.endpoint).await;
+
+    assert_eq!(until_exited(&mut peer).await, Some(0));
+    peer.send(HolderFrame::ReadTail {
+        id: 1,
+        max_lines: 100,
+        max_bytes: 64 * 1024,
+    })
+    .await;
+    loop {
+        match peer.frame().await {
+            frame if is_copy(&frame) => {}
+            HolderFrame::Tail { id: 1, text, .. } => {
+                assert!(
+                    text.contains("EXITING 0"),
+                    "the child's output is not in the text: {text:?}"
+                );
+                break;
+            }
+            other => panic!("expected the text, got {other:?}"),
+        }
+    }
+    peer.send(HolderFrame::Terminate { tree: true }).await;
+    holder.wait_exit().await;
+}
+
 /// The `(device, inode)` of the file `path` names.
 #[cfg(target_os = "linux")]
 fn file_id(path: &Path) -> (u64, u64) {

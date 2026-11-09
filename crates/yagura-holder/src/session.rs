@@ -552,10 +552,10 @@ struct Handover {
     files: watcher_link::HolderFiles,
 }
 
-/// Opens the child's terminal, starts the watcher that starts the child on
-/// it, and starts the threads that keep the terminal, write its input, read
-/// its output and follow the watcher. `fault` is the launch's fault when
-/// this holder acts faults out.
+/// Opens the child's terminal, starts the threads that keep it, write its
+/// input and read its output, then the watcher that starts the child on it
+/// and the thread that follows the watcher. `fault` is the launch's fault
+/// when this holder acts faults out.
 #[cfg(unix)]
 fn spawn_child(
     launch: &HolderLaunch,
@@ -591,9 +591,6 @@ fn spawn_child(
     let master = control.master_copy().map_err(|error| {
         SpawnError::other(format!("cannot copy the terminal's master: {error}"))
     })?;
-    let started = watcher_link::start(command, slave, master, &lock, &handover.files)
-        .map_err(SpawnError::other)?;
-    drop(lock);
     let control = Arc::new(control);
     let (terminal, threads) = terminal::terminal(
         terminal_start(launch, fault),
@@ -601,15 +598,26 @@ fn spawn_child(
         writer,
         events.clone(),
     );
+    // The output is read before the child starts: macOS drops what a child
+    // left unread for about half a second once it has ended. The holder's and
+    // then the watcher's copy of the slave keep the reader waiting until the
+    // child has it. On a failure below, dropping `terminal` ends the other
+    // threads, and the reader ends once nothing has the slave open.
+    start_terminal_threads(threads, &terminal, reader, shared).map_err(|error| {
+        SpawnError::other(format!("cannot start the holder's threads: {error}"))
+    })?;
+    let started = watcher_link::start(command, slave, master, &lock, &handover.files)
+        .map_err(SpawnError::other)?;
+    drop(lock);
     let link = Arc::clone(&started.link);
     let (pid, start) = (started.leader, started.leader_start.clone());
-    let running = start_terminal_threads(threads, &terminal, reader, shared).and_then(|()| {
+    let running = {
         let shared = Arc::clone(shared);
         let control = Arc::clone(&control);
         spawn_thread("holder-watcher", move || {
             watcher_link::follow(started, &shared, &control);
         })
-    });
+    };
     if let Err(error) = running {
         // The watcher ends the tree it started and is reaped here.
         link.abandon();

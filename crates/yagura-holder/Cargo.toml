@@ -27,6 +27,11 @@ path = "src/bin/holder_child.rs"
 name = "holder_fault"
 path = "src/bin/holder_fault.rs"
 
+# Tests only: a watcher that reports its child late. Not shipped.
+[[bin]]
+name = "slow_watcher"
+path = "src/bin/slow_watcher.rs"
+
 [dependencies]
 yagura-os = { path = "../yagura-os" }
 yagura-protocol = { path = "../yagura-protocol" }
