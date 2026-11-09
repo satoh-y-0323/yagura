@@ -2464,3 +2464,62 @@ async fn the_first_start_over_a_0_3_store_moves_its_last_windows_into_lost_rows(
         }
     }
 }
+
+/// A window whose holder is killed from outside while its daemon is connected reads as
+/// exited, its holder's files are removed, and where holders are the daemon's children the
+/// holder is reaped, not left as a zombie.
+#[tokio::test]
+async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_reaped() {
+    let sandbox = Sandbox::new("holder-killed-connected");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+
+    let mut daemon = sandbox.start().await;
+    let window_id = daemon.open_profile_window(&sandbox, "script").await;
+    attach(&mut daemon, &window_id).await;
+    daemon
+        .output_until(&window_id, "the script's marker", |text| {
+            text.contains(SCRIPT_MARKER)
+        })
+        .await;
+    let _endpoint = KilledEndpoints::new(&sandbox, &[&window_id]);
+    let record = record_of(&sandbox, &window_id);
+    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    holder.kill().unwrap();
+
+    // Asked for less than the read's own guard, so a window that never exits is answered
+    // `timeout` and fails with the daemon log instead of a bare read timeout.
+    send(
+        &mut daemon.client,
+        &ClientMessage::WaitForStatus {
+            window_id: window_id.clone(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: HANG_GUARD.as_secs() / 2,
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WaitResult { outcome, .. } if outcome == "reached" => {}
+        other => panic!(
+            "the window {window_id} never read as exited once its holder was killed: \
+             {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+    settle!(
+        sandbox,
+        "the killed holder was not cleaned up after the window read as exited",
+        {
+            let mut problems = Vec::new();
+            let left = holder_files(&sandbox, &window_id);
+            if !left.is_empty() {
+                problems.push(format!("the dead holder's files are left: {left:?}"));
+            }
+            #[cfg(unix)]
+            if process_state(record.holder_pid).starts_with('Z') {
+                problems.push("the killed holder is a zombie, never reaped".to_owned());
+            }
+            problems
+        }
+    );
+}

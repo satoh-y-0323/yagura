@@ -660,9 +660,13 @@ fn run(
     };
     let ready = holder.become_ready(&mut process, launch, log_file, awaits_successor);
     let not_ready = ready.is_err();
-    let (ending, start) = match ready {
-        Ok((endpoint, start)) => (
-            serve(
+    let (ending, named) = match ready {
+        Ok((endpoint, start)) => {
+            // Named while it runs: once a holder dies, the daemon learns of it
+            // only as its connection breaks, and by then the holder is an
+            // unreaped child that no longer opens as running.
+            let named = HolderProcess::name(process.id(), start.as_ref());
+            let ending = serve(
                 &holder,
                 &endpoint,
                 process.id(),
@@ -671,27 +675,26 @@ fn run(
                 sink,
                 opened,
                 awaits_successor,
-            ),
-            start,
-        ),
+            );
+            (ending, named)
+        }
         Err(error) => {
             let _ = opened.send(Err(error));
-            (Ending::Refused, None)
+            (Ending::Refused, HolderProcess::Unknown)
         }
     };
     link.close();
     let mut killed = matches!(ending, Ending::Refused);
     if matches!(ending, Ending::Lost) {
-        let handle = start.and_then(|start| open_process(process.id(), &start));
         let left = on_runtime(after_lost_connection(
             sink,
-            handle.map(Arc::new),
+            &named,
             link.ending(),
             &files,
             lost,
         ));
-        // A holder whose process cannot be named again is still this
-        // daemon's child, which only it can be killed through.
+        // A holder whose process cannot be named is still this daemon's
+        // child, which only it can be killed through.
         killed = matches!(left, Some(AfterLoss::KillLeft));
     }
     if killed {
@@ -745,7 +748,9 @@ fn run_take_back(
         on_welcome,
         lost,
     } = take;
-    let holder = holder.map(Arc::new);
+    let holder = holder.map_or(HolderProcess::Unknown, |holder| {
+        HolderProcess::Named(Arc::new(holder))
+    });
     let at = HolderAt {
         holders_dir: &context.holders_dir,
         window_id: &window_id,
@@ -778,7 +783,7 @@ fn run_take_back(
                 // learns at once that it will not come.
                 drop(on_welcome);
                 link.close();
-                let ended = end_unconnected_holder(holder.as_deref(), &files);
+                let ended = end_unconnected_holder(&holder, &files);
                 if !ended {
                     tracing::warn!(
                         window_id = window_id.as_str(),
@@ -801,7 +806,7 @@ fn run_take_back(
                      started with)"
                 );
                 link.close();
-                stay_refused(sink, holder.as_ref(), ending, &files, lost).await;
+                stay_refused(sink, &holder, ending, &files, lost).await;
             }
             Some(Ok(welcomed)) => {
                 on_welcome(&welcomed.record);
@@ -824,7 +829,7 @@ fn run_take_back(
                     PumpEnd::Displaced => {}
                     PumpEnd::Closed { exited: true } => {
                         // The holder closes once it is told to end, and then ends.
-                        if let Some(holder) = &holder {
+                        if let HolderProcess::Named(holder) = &holder {
                             let _ = holder_ended(holder).await;
                         }
                     }
@@ -834,8 +839,7 @@ fn run_take_back(
                             "the connection to the window's holder was lost; the window stays, \
                              unconnected, until its holder ends or it is closed"
                         );
-                        let left =
-                            after_lost_connection(sink, holder.clone(), ending, &files, lost).await;
+                        let left = after_lost_connection(sink, &holder, ending, &files, lost).await;
                         if matches!(left, AfterLoss::KillLeft) {
                             tracing::warn!(
                                 window_id = window_id.as_str(),
@@ -874,14 +878,30 @@ async fn told_to_end(ending: &mut watch::Receiver<bool>) {
     let _ = ending.wait_for(|ending| *ending).await;
 }
 
-/// The process `pid` that started at `start`; `None` when it has ended or the
-/// OS would not open it.
-fn open_process(pid: u32, start: &ProcessStart) -> Option<ProcessHandle> {
-    match ProcessHandle::open(pid, start) {
-        Ok(handle) => handle,
-        Err(error) => {
-            tracing::warn!(pid, %error, "cannot open a window holder's process");
-            None
+/// A window's holder as the daemon can name it while not connected to it.
+enum HolderProcess {
+    /// Opened while it ran, so its end is seen however late it is waited for.
+    Named(Arc<ProcessHandle>),
+    /// It had already ended when it was looked for.
+    Ended,
+    /// Whether it runs cannot be told: its record carries no start, or the
+    /// OS would not open it. Its end is never taken for granted.
+    Unknown,
+}
+
+impl HolderProcess {
+    /// The holder `pid` that started at `start`.
+    fn name(pid: u32, start: Option<&ProcessStart>) -> Self {
+        let Some(start) = start else {
+            return Self::Unknown;
+        };
+        match ProcessHandle::open(pid, start) {
+            Ok(Some(handle)) => Self::Named(Arc::new(handle)),
+            Ok(None) => Self::Ended,
+            Err(error) => {
+                tracing::warn!(pid, %error, "cannot open a window holder's process");
+                Self::Unknown
+            }
         }
     }
 }
@@ -913,13 +933,14 @@ enum Unconnected {
 }
 
 async fn wait_unconnected(
-    holder: Option<&Arc<ProcessHandle>>,
+    holder: &HolderProcess,
     ending: &mut watch::Receiver<bool>,
 ) -> Unconnected {
     let ended = async {
         match holder {
-            Some(holder) => holder_ended(holder).await,
-            None => std::future::pending().await,
+            HolderProcess::Named(holder) => holder_ended(holder).await,
+            HolderProcess::Ended => {}
+            HolderProcess::Unknown => std::future::pending().await,
         }
     };
     tokio::select! {
@@ -935,7 +956,7 @@ async fn wait_unconnected(
 /// what follows the holder's end is handed on.
 async fn stay_refused(
     sink: &Sink,
-    holder: Option<&Arc<ProcessHandle>>,
+    holder: &HolderProcess,
     mut ending: watch::Receiver<bool>,
     files: &HolderFiles<'_>,
     lost: LostNotice,
@@ -945,7 +966,7 @@ async fn stay_refused(
             lost();
             true
         }
-        Unconnected::Closed => end_unconnected_holder(holder.map(Arc::as_ref), files),
+        Unconnected::Closed => end_unconnected_holder(holder, files),
     };
     if !ended {
         tracing::warn!(
@@ -976,18 +997,18 @@ enum AfterLoss {
 /// on.
 async fn after_lost_connection(
     sink: &Sink,
-    holder: Option<Arc<ProcessHandle>>,
+    holder: &HolderProcess,
     mut ending: watch::Receiver<bool>,
     files: &HolderFiles<'_>,
     lost: LostNotice,
 ) -> AfterLoss {
     sink.lose_screen();
-    let left = match wait_unconnected(holder.as_ref(), &mut ending).await {
+    let left = match wait_unconnected(holder, &mut ending).await {
         Unconnected::HolderEnded => {
             lost();
             AfterLoss::Ended
         }
-        Unconnected::Closed if end_unconnected_holder(holder.as_deref(), files) => AfterLoss::Ended,
+        Unconnected::Closed if end_unconnected_holder(holder, files) => AfterLoss::Ended,
         Unconnected::Closed => AfterLoss::KillLeft,
     };
     sink.exit.publish(None);
@@ -1002,11 +1023,14 @@ async fn after_lost_connection(
 /// outside it, only when no watcher may end it once the holder is killed
 /// ([`sweeps_before_killing_holder`]): the record names none, or the one it
 /// names is dead. On Windows the holder's job ends the child's tree with it.
-/// Returns `false`, doing nothing, when the holder's process cannot be named.
+/// Returns `true`, doing nothing, when the holder has already ended, and
+/// `false`, doing nothing, when its process cannot be named.
 /// The one place a window's holder is killed once its window opened.
-fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_>) -> bool {
-    let Some(holder) = holder else {
-        return false;
+fn end_unconnected_holder(holder: &HolderProcess, files: &HolderFiles<'_>) -> bool {
+    let holder = match holder {
+        HolderProcess::Named(holder) => holder,
+        HolderProcess::Ended => return true,
+        HolderProcess::Unknown => return false,
     };
     // Watched before anything can end it, so its end is not missed.
     let exit = holder.watch_exit();
