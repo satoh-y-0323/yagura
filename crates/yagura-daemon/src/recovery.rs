@@ -41,46 +41,178 @@ pub(crate) struct HolderFiles<'a> {
     pub(crate) window_id: &'a str,
 }
 
-/// Removes the files of a holder whose end is known (it was killed here, or
-/// found gone): on Unix its socket and the socket's lock, under that lock so a
-/// live listener's are never removed, and then its record. Paths are derived
-/// from the holders directory and the window id, never read from the record;
-/// a record naming another endpoint is left, as is a record that is a link.
-pub(crate) fn remove_dead_holder_files(files: &HolderFiles<'_>) {
-    let window_id = files.window_id;
-    let Ok(record_path) = holder_record_path(files.holders_dir, window_id) else {
-        return;
-    };
-    #[cfg(unix)]
-    if !remove_dead_endpoint(files) {
-        return;
+#[cfg(unix)]
+impl HolderFiles<'_> {
+    fn to_owned(&self) -> OwnedHolderFiles {
+        OwnedHolderFiles {
+            instance: self.instance.to_owned(),
+            holders_dir: self.holders_dir.to_owned(),
+            window_id: self.window_id.to_owned(),
+        }
     }
-    match std::fs::symlink_metadata(&record_path) {
+}
+
+/// [`HolderFiles`] owned, to be carried to a thread of their own.
+#[cfg(unix)]
+struct OwnedHolderFiles {
+    instance: std::ffi::OsString,
+    holders_dir: PathBuf,
+    window_id: String,
+}
+
+#[cfg(unix)]
+impl OwnedHolderFiles {
+    fn borrow(&self) -> HolderFiles<'_> {
+        HolderFiles {
+            instance: &self.instance,
+            holders_dir: &self.holders_dir,
+            window_id: &self.window_id,
+        }
+    }
+}
+
+/// What follows the known end of a window's holder, the same for every way
+/// it ended (closed, killed here, or found gone): on Unix, on a thread of its
+/// own, the holder's endpoint lock is taken once every process holding it
+/// (the holder and its watcher) has let it go; under that lock a record still
+/// there has the child's tree ended from outside it, without waiting for any
+/// of it, and the holder's files are removed. `keep` is held until then.
+/// Nothing is waited for here: the caller has published what the window's
+/// end makes known first.
+///
+/// The lock's wait has no bound and is never repeated: the kernel wakes it as
+/// the last holder of the lock closes it. A watcher stopped from outside
+/// keeps it, and the files, until it goes on (and removes them itself) or
+/// dies. Paths are derived from the holders directory and the window id;
+/// a record naming another endpoint, or that is a link, is left in place.
+pub(crate) fn finish_after_holder<K: Send + 'static>(files: &HolderFiles<'_>, keep: K) {
+    #[cfg(unix)]
+    {
+        let owned = files.to_owned();
+        let started = std::thread::Builder::new()
+            .name("holder-release".to_owned())
+            .spawn(move || {
+                finish_under_lock(&owned.borrow());
+                drop(keep);
+            });
+        if let Err(error) = started {
+            tracing::warn!(
+                window_id = files.window_id,
+                %error,
+                "cannot start the thread that ends a gone holder's window; its files are left for \
+                 the next start"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The holder's job ended the child's tree with it, and no lock guards
+        // the record.
+        if let Ok(record_path) = holder_record_path(files.holders_dir, files.window_id)
+            && record_is_removable(files.window_id, &record_path)
+            && let Err(error) = std::fs::remove_file(&record_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                window_id = files.window_id,
+                %error,
+                "cannot remove a window holder's record"
+            );
+        }
+        drop(keep);
+    }
+}
+
+/// Whether the record at `record_path` may be removed: it is not a link.
+fn record_is_removable(window_id: &str, record_path: &Path) -> bool {
+    match std::fs::symlink_metadata(record_path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             tracing::warn!(
                 window_id,
                 "a window holder's record is a link; it is left in place"
             );
+            false
         }
-        Ok(_) => {
-            if let Err(error) = std::fs::remove_file(&record_path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(window_id, %error, "cannot remove a window holder's record");
-            }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(window_id, %error, "cannot read a window holder's record");
+            false
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(window_id, %error, "cannot read a window holder's record"),
     }
 }
 
-/// Removes a gone holder's socket and lock; `false` when its record must stay
-/// (the endpoint is still held, or the record names another one).
+/// Blocking, without a bound: see [`finish_after_holder`].
 #[cfg(unix)]
-fn remove_dead_endpoint(files: &HolderFiles<'_>) -> bool {
-    use yagura_os::{OsError, PeerAuth as _};
+fn finish_under_lock(files: &HolderFiles<'_>) {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    use yagura_os::platform_unix::{
+        endpoint_lock_path, lock_endpoint_blocking, remove_endpoint_files_under_lock,
+    };
 
     let window_id = files.window_id;
+    let Ok(record_path) = holder_record_path(files.holders_dir, window_id) else {
+        return;
+    };
+    let Some(endpoint) = derived_endpoint(files) else {
+        return;
+    };
+    let socket = Path::new(&endpoint);
+    let lock_path = endpoint_lock_path(socket);
+    let left = [record_path.as_path(), socket, lock_path.as_path()]
+        .iter()
+        .any(|path| std::fs::symlink_metadata(path).is_ok());
+    if !left {
+        return;
+    }
+    let lock = match lock_endpoint_blocking(socket) {
+        Ok(Some(lock)) => lock,
+        // Its last holder removed the lock file on the way out, after the rest.
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(window_id, %error, "cannot take a gone holder's endpoint lock");
+            return;
+        }
+    };
+    if !record_is_removable(window_id, &record_path) {
+        return;
+    }
+    match read_holder_record(files.holders_dir, window_id) {
+        Ok(record) if record.window_id != window_id || record.endpoint != endpoint => {
+            tracing::warn!(
+                window_id,
+                "a window holder's record names another window or endpoint; its files are left in \
+                 place"
+            );
+            return;
+        }
+        Ok(record) => end_recorded_tree(window_id, &record),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(window_id, %error, "cannot read a window holder's record"),
+    }
+    match std::fs::symlink_metadata(socket) {
+        Ok(meta) if !meta.file_type().is_socket() => {
+            tracing::warn!(
+                window_id,
+                "a window holder's endpoint is not a socket; its files are left in place"
+            );
+            return;
+        }
+        _ => {}
+    }
+    if let Err(error) = remove_endpoint_files_under_lock(&record_path, socket, &lock_path) {
+        tracing::warn!(window_id, %error, "cannot remove a gone holder's files");
+    }
+    drop(lock);
+}
+
+/// The endpoint a window's holder serves, derived from the instance, the
+/// user and the holders directory, never read from its record.
+#[cfg(unix)]
+fn derived_endpoint(files: &HolderFiles<'_>) -> Option<String> {
+    use yagura_os::PeerAuth as _;
+
     let instance = (!files.instance.is_empty()).then_some(files.instance);
     let derived = yagura_os::resolve_instance_from(instance)
         .map_err(|error| error.to_string())
@@ -88,37 +220,18 @@ fn remove_dead_endpoint(files: &HolderFiles<'_>) -> bool {
             let user_id = yagura_os::PlatformIpc::default()
                 .current_user_id()
                 .map_err(|error| error.to_string())?;
-            yagura_os::holder_endpoint(&user_id, &namespace, files.holders_dir, window_id)
+            yagura_os::holder_endpoint(&user_id, &namespace, files.holders_dir, files.window_id)
                 .map_err(|error| error.to_string())
         });
-    let endpoint = match derived {
-        Ok(endpoint) => endpoint,
+    match derived {
+        Ok(endpoint) => Some(endpoint),
         Err(error) => {
-            tracing::warn!(window_id, %error, "cannot name a window holder's endpoint");
-            return false;
-        }
-    };
-    if let Ok(record) = read_holder_record(files.holders_dir, window_id)
-        && record.endpoint != endpoint
-    {
-        tracing::warn!(
-            window_id,
-            "a window holder's record names another endpoint; its files are left in place"
-        );
-        return false;
-    }
-    match yagura_os::platform_unix::remove_abandoned_endpoint(Path::new(&endpoint)) {
-        Ok(()) => true,
-        Err(OsError::EndpointHeld(_)) => {
             tracing::warn!(
-                window_id,
-                "a window holder's endpoint is still held; its files are left in place"
+                window_id = files.window_id,
+                %error,
+                "cannot name a window holder's endpoint"
             );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(window_id, %error, "cannot remove a window holder's endpoint");
-            true
+            None
         }
     }
 }
@@ -202,6 +315,7 @@ pub async fn take_back_windows(
         return unjudged;
     };
     let credentials_dir = registry.config().mcp_config_dir.clone();
+    let context_files = (context.instance.clone(), context.holders_dir.clone());
     let judged = tokio::task::spawn_blocking(move || {
         let judge = Judge {
             holders_dir: &context.holders_dir,
@@ -226,6 +340,7 @@ pub async fn take_back_windows(
             .settle_start(judged.lost.clone(), judged.removed.clone())
             .await;
     }
+    finish_gone_once_accepting(context_files, judged.gone, begin.clone());
     let mut remaining = Remaining {
         running: judged.left.into_iter().collect(),
         lost: judged.lost.into_iter().chain(judged.already_lost).collect(),
@@ -273,6 +388,9 @@ struct Judged {
     removed: Vec<String>,
     /// Rows left as they are, since their record could not be read.
     left: Vec<String>,
+    /// Windows whose holder is gone, what follows whose end is left until the
+    /// daemon accepts connections.
+    gone: Vec<String>,
 }
 
 /// Whether a record's holder runs.
@@ -285,6 +403,8 @@ enum Holder {
 /// The holders directory the records are judged in.
 struct Judge<'a> {
     holders_dir: &'a Path,
+    // Read only to check a recorded scope's name (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     instance: &'a OsStr,
 }
 
@@ -330,7 +450,7 @@ impl Judge<'_> {
         let holder = holder_of(&window_id, &record);
         match (row.state, holder) {
             (RowState::Lost, Holder::Gone) => {
-                self.end_gone(&window_id, &record, Some(&row));
+                self.end_gone(&window_id, &record, Some(&row), judged);
                 judged.already_lost.push(window_id);
             }
             (RowState::Lost, Holder::Runs(_)) => judged.already_lost.push(window_id),
@@ -338,12 +458,12 @@ impl Judge<'_> {
             // `Hello`; it ends by itself once its first `Hello` does not come.
             (RowState::Opening, holder) if record.child_pid.is_none() => {
                 if matches!(holder, Holder::Gone) {
-                    self.end_gone(&window_id, &record, Some(&row));
+                    self.end_gone(&window_id, &record, Some(&row), judged);
                 }
                 judged.removed.push(window_id);
             }
             (_, Holder::Gone) => {
-                self.end_gone(&window_id, &record, Some(&row));
+                self.end_gone(&window_id, &record, Some(&row), judged);
                 judged.lost.push(window_id);
             }
             (_, Holder::Runs(_)) if record.child_pid.is_none() => judged.left.push(window_id),
@@ -362,7 +482,7 @@ impl Judge<'_> {
             return;
         };
         match holder_of(&window_id, &record) {
-            Holder::Gone => self.end_gone(&window_id, &record, None),
+            Holder::Gone => self.end_gone(&window_id, &record, None, judged),
             Holder::Runs(_) if record.child_pid.is_none() => {}
             Holder::Runs(holder) => judged.survivors.push(Survivor {
                 window_id,
@@ -391,29 +511,26 @@ impl Judge<'_> {
         }
     }
 
-    /// What is left of a window whose holder is gone: on Linux the child's
-    /// scope, by the name its row (or, without a row, its record) keeps; on
-    /// Unix the child's process group, when the child its record names still
-    /// runs; then the holder's files. Removing the files first leaves, if the
-    /// daemon dies here, a `live` row without a record, which the next start
-    /// marks lost.
-    fn end_gone(&self, window_id: &str, record: &HolderRecord, row: Option<&StoredWindow>) {
-        #[cfg(unix)]
-        end_recorded_child_group(
-            window_id,
-            record,
-            row.and_then(|row| row.values.as_ref())
-                .and_then(|values| values.command.first())
-                .map(String::as_str),
-            self.recorded_scope(window_id, record, row).as_deref(),
-        );
-        #[cfg(not(unix))]
+    /// What is left of a window whose holder is gone: on Linux the user
+    /// manager is asked to kill the child's scope, by the name its row (or,
+    /// without a row, its record) keeps; then the window is handed to
+    /// [`finish_after_holder`] once the daemon accepts connections. Its files
+    /// go only after its tree is ended, so a daemon that dies first leaves
+    /// them to the next start's judging.
+    fn end_gone(
+        &self,
+        window_id: &str,
+        record: &HolderRecord,
+        row: Option<&StoredWindow>,
+        judged: &mut Judged,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Some(scope) = self.recorded_scope(window_id, record, row) {
+            kill_scope(window_id, &scope);
+        }
+        #[cfg(not(target_os = "linux"))]
         let _ = (record, row);
-        remove_dead_holder_files(&HolderFiles {
-            instance: self.instance,
-            holders_dir: self.holders_dir,
-            window_id,
-        });
+        judged.gone.push(window_id.to_owned());
     }
 }
 
@@ -444,18 +561,6 @@ impl Judge<'_> {
             return None;
         }
         Some(scope)
-    }
-
-    /// Windows have no scope outside Linux.
-    #[cfg(all(unix, not(target_os = "linux")))]
-    #[allow(clippy::unused_self)]
-    fn recorded_scope(
-        &self,
-        _window_id: &str,
-        _record: &HolderRecord,
-        _row: Option<&StoredWindow>,
-    ) -> Option<String> {
-        None
     }
 }
 
@@ -514,55 +619,75 @@ fn holder_of(window_id: &str, record: &HolderRecord) -> Holder {
     }
 }
 
-/// Ends the process group the child named by a holder's `record` leads, for a
-/// holder that is gone or is about to be killed outright (neither can end the
-/// group itself): only while that child still runs and is the process its
-/// record names, since while its leader runs the group id names no other
-/// group. Otherwise nothing is ended, and the group the record names is
-/// logged with `command`, the window's argv[0] when known; nothing is read
-/// from any other process. On Linux, for a holder that is gone, `child_scope`
-/// is the child's scope name as the window's row keeps it: the user manager
-/// is asked to kill every process in it, which reaches a child that left its
-/// group, and its answer is logged, not waited for. The one place a window's
-/// child group is ended without its holder.
+/// Ends, from outside it, the tree whose leader is the child a holder's
+/// `record` names, without waiting for any of it: only while that child
+/// still runs as the process the record names, so nothing outside the
+/// window is signalled.
 #[cfg(unix)]
-pub(crate) fn end_recorded_child_group(
-    window_id: &str,
-    record: &HolderRecord,
-    command: Option<&str>,
-    child_scope: Option<&str>,
-) {
-    #[cfg(target_os = "linux")]
-    if let Some(scope) = child_scope {
-        kill_scope(window_id, scope);
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = child_scope;
+pub(crate) fn end_recorded_tree(window_id: &str, record: &HolderRecord) {
     let Some(child_pid) = record.child_pid.filter(|pid| *pid != 0) else {
         return;
     };
-    let child = record
+    let Some(start) = record
         .child_start
         .as_deref()
         .and_then(|start| start.parse::<ProcessStart>().ok())
-        .and_then(|start| ProcessHandle::open(child_pid, &start).ok().flatten())
-        .filter(|child| child.liveness() == Liveness::Alive);
-    let Some(_child) = child else {
+    else {
         tracing::warn!(
             window_id,
-            pgid = child_pid,
             pid = child_pid,
-            command = command.unwrap_or_default(),
-            "the child a window holder's record names has ended or is another process now; its \
-             process group is not ended"
+            "a window holder's record carries no start of its child; its tree is not ended"
         );
         return;
     };
-    let ended = yagura_os::ProcessGroup::led_by(child_pid, yagura_os::PROCESS_GROUP_TERM_GRACE)
-        .and_then(|group| group.terminate());
-    if let Err(error) = ended {
-        tracing::warn!(window_id, child_pid, %error, "cannot end a window's process group");
+    match yagura_os::platform_unix::TreeEnd::not_parent(child_pid, start).run(&mut PlainSends) {
+        Ok(rest) => {
+            let left = rest.unsent.len() + rest.unended.len() + rest.unwaited;
+            if left > 0 {
+                tracing::warn!(
+                    window_id,
+                    child_pid,
+                    left,
+                    "part of a window's tree could not be signalled"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(window_id, child_pid, %error, "cannot end a window's tree"),
     }
+}
+
+/// Sends as they are.
+#[cfg(unix)]
+struct PlainSends;
+
+#[cfg(unix)]
+impl yagura_os::platform_unix::TreeEndHooks for PlainSends {}
+
+/// Hands each of the `gone` windows of the holders directory `files` names
+/// (with its instance) to [`finish_after_holder`] once `begin` turns `true`.
+fn finish_gone_once_accepting(
+    (instance, holders_dir): (std::ffi::OsString, PathBuf),
+    gone: Vec<String>,
+    mut begin: watch::Receiver<bool>,
+) {
+    if gone.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        if begin.wait_for(|began| *began).await.is_err() {
+            return;
+        }
+        for window_id in &gone {
+            finish_after_holder(
+                &HolderFiles {
+                    instance: &instance,
+                    holders_dir: &holders_dir,
+                    window_id,
+                },
+                (),
+            );
+        }
+    });
 }
 
 /// Asks the user manager, on a task of its own, to kill every process of the

@@ -10,8 +10,8 @@
 //! before an answer has been taken in when that answer is handed on.
 //!
 //! The link's thread is the only owner of the holder's process: it alone
-//! waits for the holder's end, kills it, and removes the files of a holder it
-//! killed or found gone. It kills a holder only in [`end_unconnected_holder`]
+//! waits for the holder's end, kills it, and hands what follows a holder's
+//! end to [`finish_after_holder`]. It kills a holder only in [`end_unconnected_holder`]
 //! (a window closed while it is not connected to its holder) and for a window
 //! that never opened. A failed take-back itself ends nothing: only the user's
 //! later close of that window does.
@@ -38,7 +38,7 @@ use super::views::ViewSlot;
 use super::{LostNotice, PtyError, PublishedInput, lock_recover};
 use crate::detector::SharedCopy;
 use crate::holder_host::{LinkContext, TakeBackContext};
-use crate::recovery::{HolderFiles, remove_dead_holder_files};
+use crate::recovery::{HolderFiles, finish_after_holder};
 use crate::window_table::RowScopes;
 
 /// How long a holder waits for its first `Hello`; also bounds how long the
@@ -697,6 +697,7 @@ fn run(
     if killed {
         let _ = process.kill();
     }
+    let finishes = killed || matches!(ending, Ending::Served);
     match process.wait() {
         // Whatever the holder could say about it went to its log, if any.
         Ok(code) if not_ready => tracing::warn!(
@@ -710,13 +711,14 @@ fn run(
         Ok(_) => {}
         Err(error) => tracing::warn!(window_id, %error, "cannot wait for the window's holder"),
     }
-    // A killed holder cannot remove its record or endpoint. Other leftovers
-    // (a holder killed from outside, or ended with the daemon's job) are for
-    // the start-up reconciliation, not a second remover here.
-    if killed {
-        remove_dead_holder_files(&files);
+    // A killed holder cannot end its tree or remove its files, nor can one
+    // killed from outside while served; one that ended by itself leaves
+    // nothing to do.
+    if finishes {
+        finish_after_holder(&files, keep);
+    } else {
+        drop(keep);
     }
-    drop(keep);
     drop(live);
 }
 
@@ -776,9 +778,8 @@ fn run_take_back(
                 // learns at once that it will not come.
                 drop(on_welcome);
                 link.close();
-                if end_unconnected_holder(holder.as_deref(), &files) {
-                    remove_dead_holder_files(&files);
-                } else {
+                let ended = end_unconnected_holder(holder.as_deref(), &files);
+                if !ended {
                     tracing::warn!(
                         window_id = window_id.as_str(),
                         "a window closed while it was taken back has a holder that cannot be named; \
@@ -786,6 +787,9 @@ fn run_take_back(
                     );
                 }
                 sink.exit.publish(None);
+                if ended {
+                    finish_after_holder(&files, ());
+                }
             }
             Some(Err(reason)) => {
                 drop(on_welcome);
@@ -797,8 +801,7 @@ fn run_take_back(
                      started with)"
                 );
                 link.close();
-                stay_refused(holder.as_ref(), ending, &files, lost).await;
-                sink.exit.publish(None);
+                stay_refused(sink, holder.as_ref(), ending, &files, lost).await;
             }
             Some(Ok(welcomed)) => {
                 on_welcome(&welcomed.record);
@@ -927,43 +930,50 @@ async fn wait_unconnected(
 
 /// A window whose take-back failed: the failure ends nothing, and the window
 /// stays, unconnected. Once the holder ends by itself, the window's row is
-/// marked lost and the holder's files are removed; once the user closes the
-/// window, it is closed as any unconnected window is.
+/// marked lost; once the user closes the window, it is closed as any
+/// unconnected window is. Either way the window then reads as exited, and
+/// what follows the holder's end is handed on.
 async fn stay_refused(
+    sink: &Sink,
     holder: Option<&Arc<ProcessHandle>>,
     mut ending: watch::Receiver<bool>,
     files: &HolderFiles<'_>,
     lost: LostNotice,
 ) {
-    match wait_unconnected(holder, &mut ending).await {
+    let ended = match wait_unconnected(holder, &mut ending).await {
         Unconnected::HolderEnded => {
             lost();
-            remove_dead_holder_files(files);
+            true
         }
-        Unconnected::Closed if end_unconnected_holder(holder.map(Arc::as_ref), files) => {
-            remove_dead_holder_files(files);
-        }
-        Unconnected::Closed => tracing::warn!(
+        Unconnected::Closed => end_unconnected_holder(holder.map(Arc::as_ref), files),
+    };
+    if !ended {
+        tracing::warn!(
             window_id = files.window_id,
             "the closed window's holder cannot be named; it is left running"
-        ),
+        );
+    }
+    sink.exit.publish(None);
+    if ended {
+        finish_after_holder(files, ());
     }
 }
 
 /// What is left after [`after_lost_connection`].
 enum AfterLoss {
-    /// The holder has ended, and its files are gone.
+    /// The holder has ended, and what follows its end is handed on.
     Ended,
     /// The window was closed and its holder could not be named again: the
-    /// caller kills it if it can, and removes its files.
+    /// caller kills it if it can, and hands on what follows.
     KillLeft,
 }
 
 /// A window whose connection to a holder awaiting a successor was lost with
 /// both still running: what was waiting fails, the window shows no screen
 /// (so its status is `Unknown`), and it stays until its holder ends (its row
-/// is marked lost and its files removed) or it is closed (its holder is
-/// ended). Either way the window then reads as exited.
+/// is marked lost) or it is closed (its holder is ended). Either way the
+/// window then reads as exited, and what follows the holder's end is handed
+/// on.
 async fn after_lost_connection(
     sink: &Sink,
     holder: Option<Arc<ProcessHandle>>,
@@ -975,37 +985,38 @@ async fn after_lost_connection(
     let left = match wait_unconnected(holder.as_ref(), &mut ending).await {
         Unconnected::HolderEnded => {
             lost();
-            remove_dead_holder_files(files);
             AfterLoss::Ended
         }
-        Unconnected::Closed if end_unconnected_holder(holder.as_deref(), files) => {
-            remove_dead_holder_files(files);
-            AfterLoss::Ended
-        }
+        Unconnected::Closed if end_unconnected_holder(holder.as_deref(), files) => AfterLoss::Ended,
         Unconnected::Closed => AfterLoss::KillLeft,
     };
     sink.exit.publish(None);
+    if matches!(left, AfterLoss::Ended) {
+        finish_after_holder(files, ());
+    }
     left
 }
 
 /// Ends the holder of a window closed while the daemon is not connected to
-/// it: on Unix the child's process group first, when the child its record
-/// names still runs (a holder killed outright cannot end it), then the holder,
-/// which is waited for. On Windows the holder's job ends the child's tree with
-/// it. Returns `false`, doing nothing, when the holder's process cannot be
-/// named. The one place a window's holder is killed once its window opened.
+/// it, and waits for it. On Unix the child's tree is ended first, from
+/// outside it, only when no watcher may end it once the holder is killed
+/// ([`sweeps_before_killing_holder`]): the record names none, or the one it
+/// names is dead. On Windows the holder's job ends the child's tree with it.
+/// Returns `false`, doing nothing, when the holder's process cannot be named.
+/// The one place a window's holder is killed once its window opened.
 fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_>) -> bool {
     let Some(holder) = holder else {
         return false;
     };
-    // Watched before anything can end it: its files are removed next, under
-    // its endpoint lock, which it holds until its exit is complete.
+    // Watched before anything can end it, so its end is not missed.
     let exit = holder.watch_exit();
     #[cfg(unix)]
-    if let Ok(record) = read_holder_record(files.holders_dir, files.window_id) {
+    if let Ok(record) = read_holder_record(files.holders_dir, files.window_id)
+        && sweeps_before_killing_holder(watcher_liveness(files.window_id, &record))
+    {
         // No scope is killed by name: the holder runs, and the scope bound to
         // its own, if made, ends as it is killed.
-        crate::recovery::end_recorded_child_group(files.window_id, &record, None, None);
+        crate::recovery::end_recorded_tree(files.window_id, &record);
     }
     #[cfg(not(unix))]
     let _ = files;
@@ -1017,6 +1028,42 @@ fn end_unconnected_holder(holder: Option<&ProcessHandle>, files: &HolderFiles<'_
         tracing::warn!(%error, "cannot wait for a window's holder");
     }
     true
+}
+
+/// Whether an unconnected close ends the child's tree before it kills the
+/// holder, given the liveness of the watcher the holder's record names
+/// (`None` when it names none). A watcher that may live ends the tree once
+/// its holder is gone, and the daemon sending meanwhile would run alongside
+/// it; `Unknown` is never taken for dead.
+#[cfg(unix)]
+fn sweeps_before_killing_holder(watcher: Option<yagura_os::Liveness>) -> bool {
+    matches!(watcher, None | Some(yagura_os::Liveness::Dead))
+}
+
+/// The liveness of the watcher `record` names; `None` when it names none. A
+/// watcher named without a start that can be read cannot be told from
+/// another process, so it reads as `Unknown`.
+#[cfg(unix)]
+fn watcher_liveness(
+    window_id: &str,
+    record: &yagura_protocol::holder::HolderRecord,
+) -> Option<yagura_os::Liveness> {
+    let pid = record.watcher_pid?;
+    let liveness = record
+        .watcher_start
+        .as_deref()
+        .and_then(|start| start.parse::<ProcessStart>().ok())
+        .map_or(yagura_os::Liveness::Unknown, |start| {
+            yagura_os::process_liveness(pid, &start)
+        });
+    if liveness == yagura_os::Liveness::Unknown {
+        tracing::warn!(
+            window_id,
+            watcher_pid = pid,
+            "whether a closed window's watcher runs cannot be told; its tree is left to it"
+        );
+    }
+    Some(liveness)
 }
 
 /// One holder's names.
@@ -1799,6 +1846,33 @@ mod tests {
         })
         .await
         .expect("HANG_GUARD")
+    }
+
+    /// Closing a window while not connected: the daemon ends the child's tree before it
+    /// kills the holder only when no watcher may still end it, that is when the record
+    /// names none or the one it names is dead. A watcher the OS would not tell about is
+    /// never taken for dead.
+    #[cfg(unix)]
+    #[test]
+    fn an_unconnected_close_ends_the_tree_first_only_without_a_watcher_that_may_live() {
+        use yagura_os::Liveness;
+
+        assert!(
+            !sweeps_before_killing_holder(Some(Liveness::Alive)),
+            "a living watcher ends the tree itself once its holder is killed"
+        );
+        assert!(
+            !sweeps_before_killing_holder(Some(Liveness::Unknown)),
+            "a watcher that may live is not taken for dead"
+        );
+        assert!(
+            sweeps_before_killing_holder(Some(Liveness::Dead)),
+            "with a dead watcher, nothing else ends the tree once the holder is killed"
+        );
+        assert!(
+            sweeps_before_killing_holder(None),
+            "a record naming no watcher leaves the tree to the daemon"
+        );
     }
 
     #[tokio::test]

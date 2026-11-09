@@ -985,8 +985,8 @@ async fn closing_a_window_whose_take_back_failed_ends_its_holder_and_leaves_no_f
     }
     fake.wait_gone("the close of the window whose take-back failed")
         .await;
-    // The reply may come before the holder's files are removed; the window's exit is
-    // published only after.
+    // The window's exit is published before its holder's files are removed: they go
+    // under the holder's endpoint lock, which a stopped watcher may still hold.
     send(
         &mut next.client,
         &ClientMessage::WaitForStatus {
@@ -1004,13 +1004,20 @@ async fn closing_a_window_whose_take_back_failed_ends_its_holder_and_leaves_no_f
             sandbox.daemon_log()
         ),
     }
-    let left = holder_files(&sandbox, &window_id);
-    assert!(
-        left.is_empty(),
-        "closing the window whose take-back failed left {left:?}; daemon log:
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let left = holder_files(&sandbox, &window_id);
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "closing the window whose take-back failed left {left:?}; daemon log:
 {}",
-        sandbox.daemon_log()
-    );
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // On Windows the holder's job ends the child's tree; this stand-in has none.
     #[cfg(unix)]
     {
@@ -1705,6 +1712,500 @@ async fn a_lost_windows_child_id_taken_by_another_process_is_left_running() {
         running,
         "a process that took over the recorded child's id must not be ended"
     );
+}
+
+/// The marker the `ignore-end` child prints once it ignores SIGTERM and SIGHUP.
+#[cfg(unix)]
+const IGNORING_MARKER: &str = "HOLDER-CHILD-IGNORING";
+
+/// A daemon of the sandbox whose windows reach no user bus on Linux, so no window gets a
+/// child's scope bound to its holder's: the only writers left to end a window's tree are
+/// its watcher, its holder and the daemon.
+#[cfg(unix)]
+async fn start_without_bus(sandbox: &Sandbox) -> RunningDaemon {
+    #[cfg(target_os = "linux")]
+    let no_bus = format!("unix:path={}", sandbox.tree.path().join("no-bus").display());
+    #[cfg(target_os = "linux")]
+    let launcher_env = [("DBUS_SESSION_BUS_ADDRESS", no_bus.as_str())];
+    #[cfg(not(target_os = "linux"))]
+    let launcher_env: [(&str, &str); 0] = [];
+    sandbox.start_from(&launcher_env).await
+}
+
+/// Opens a window whose child ignores SIGTERM and the terminal's hangup, and waits until
+/// it does.
+#[cfg(unix)]
+async fn open_stubborn(daemon: &mut RunningDaemon, sandbox: &Sandbox) -> String {
+    let window_id = daemon.open_profile_window(sandbox, "stubborn").await;
+    daemon
+        .output_until(&window_id, "the child ignoring every end", |text| {
+            text.contains(IGNORING_MARKER)
+        })
+        .await;
+    window_id
+}
+
+/// The processes of one window as its record names them, each killed as the test ends.
+#[cfg(unix)]
+struct Tree {
+    record: HolderRecord,
+    leader: EndOnDrop,
+    watcher: EndOnDrop,
+    holder: EndOnDrop,
+}
+
+#[cfg(unix)]
+impl Tree {
+    fn of(sandbox: &Sandbox, window_id: &str) -> Self {
+        let record = record_of(sandbox, window_id);
+        let leader = handle_of(
+            record.child_pid.expect("the record names the child"),
+            record.child_start.as_deref(),
+        );
+        let watcher = handle_of(
+            record
+                .watcher_pid
+                .expect("the record names the window's watcher"),
+            record.watcher_start.as_deref(),
+        );
+        let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+        Self {
+            record,
+            leader: EndOnDrop(Some(leader)),
+            watcher: EndOnDrop(Some(watcher)),
+            holder: EndOnDrop(Some(holder)),
+        }
+    }
+
+    fn leader(&self) -> &ProcessHandle {
+        self.leader.0.as_ref().unwrap()
+    }
+
+    fn watcher(&self) -> &ProcessHandle {
+        self.watcher.0.as_ref().unwrap()
+    }
+
+    fn holder(&self) -> &ProcessHandle {
+        self.holder.0.as_ref().unwrap()
+    }
+
+    fn watcher_pid(&self) -> u32 {
+        self.record.watcher_pid.unwrap()
+    }
+
+    /// Stops the holder and then the watcher, each seen stopped: a running holder resumes
+    /// a stopped watcher, so the holder goes first.
+    async fn stop_holder_then_watcher(&self) {
+        stop(self.record.holder_pid, "the window's holder").await;
+        stop(self.watcher_pid(), "the window's watcher").await;
+    }
+}
+
+/// Sends `signal`, a name `kill -s` takes, to `pid`.
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) {
+    let status = Command::new("kill")
+        .args(["-s", signal, &pid.to_string()])
+        .stdin(Stdio::null())
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill -s {signal} {pid} failed: {status}");
+}
+
+/// The state `ps` reports for `pid`; empty once it is gone.
+#[cfg(unix)]
+fn process_state(pid: u32) -> String {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// Stops `pid` and waits until it reads stopped.
+#[cfg(unix)]
+async fn stop(pid: u32, what: &str) {
+    send_signal(pid, "STOP");
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let state = process_state(pid);
+        if state.starts_with('T') {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what} never read stopped: {state:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until the daemon reads `window_id` as exited, which it publishes once it has
+/// handled the end of the window's holder.
+#[cfg(unix)]
+async fn wait_exited(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) {
+    send(
+        &mut daemon.client,
+        &ClientMessage::WaitForStatus {
+            window_id: window_id.to_owned(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: HANG_GUARD.as_secs(),
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WaitResult { outcome, .. } if outcome == "reached" => {}
+        other => panic!(
+            "the window {window_id} never read as exited: {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+}
+
+#[cfg(unix)]
+async fn close(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) {
+    send(
+        &mut daemon.client,
+        &ClientMessage::CloseWindow {
+            window_id: window_id.to_owned(),
+            force: Some(false),
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowClosed { .. } => {}
+        other => panic!(
+            "the window {window_id} must close, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+}
+
+/// On Unix, once a window's watcher and then its holder have died while its daemon runs
+/// (the holder stopped, the watcher killed and seen to end, then the holder killed, so
+/// neither ends the tree or removes the files), the daemon ends the window's tree -- a
+/// child that ignores SIGTERM and the hangup -- and removes the holder's files: for a
+/// window it took back, as it learns of the holder's end and marks the window lost; for a
+/// window it opened, whose holder it can no longer name, once the window is closed.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_windows_tree_is_ended_once_its_watcher_and_then_its_holder_died_under_a_daemon() {
+    let sandbox = Sandbox::new("end-after-watcher");
+    sandbox.write_probe_profile("stubborn", &[&holder_child(), "ignore-end"], "");
+
+    let mut first = start_without_bus(&sandbox).await;
+    let taken = open_stubborn(&mut first, &sandbox).await;
+    first.kill_keeping_windows();
+    let mut next = start_without_bus(&sandbox).await;
+    next.output_until(&taken, "the taken-back window's screen", |text| {
+        text.contains(IGNORING_MARKER)
+    })
+    .await;
+    let opened = open_stubborn(&mut next, &sandbox).await;
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&taken, &opened]);
+    let taken_tree = Tree::of(&sandbox, &taken);
+    let opened_tree = Tree::of(&sandbox, &opened);
+    for tree in [&taken_tree, &opened_tree] {
+        end_holder_and_watcher(&tree.record);
+        assert_eq!(
+            tree.leader().liveness(),
+            Liveness::Alive,
+            "the fixture's child must outlive its killed holder and watcher"
+        );
+    }
+
+    wait_exited(&mut next, &sandbox, &taken).await;
+    let db = store_db(&sandbox);
+    settle!(
+        sandbox,
+        "the taken-back window's tree was not ended once its holder ended",
+        {
+            let mut problems = Vec::new();
+            if taken_tree.leader().liveness() != Liveness::Dead {
+                problems
+                    .push("the child that outlived its holder and watcher still runs".to_owned());
+            }
+            let left = holder_files(&sandbox, &taken);
+            if !left.is_empty() {
+                problems.push(format!("the dead holder's files are left: {left:?}"));
+            }
+            let state = row_state(&db, &taken);
+            if state.as_deref() != Some("lost") {
+                problems.push(format!("the window's row is {state:?}, not lost"));
+            }
+            problems
+        }
+    );
+
+    close(&mut next, &sandbox, &opened).await;
+    settle!(
+        sandbox,
+        "the closed window's tree was not ended after its holder had died",
+        {
+            let mut problems = Vec::new();
+            if opened_tree.leader().liveness() != Liveness::Dead {
+                problems
+                    .push("the child that outlived its holder and watcher still runs".to_owned());
+            }
+            let left = holder_files(&sandbox, &opened);
+            if !left.is_empty() {
+                problems.push(format!("the dead holder's files are left: {left:?}"));
+            }
+            problems
+        }
+    );
+}
+
+/// On Unix, a window whose holder was killed while its watcher was stopped (the holder
+/// stopped first) keeps its tree and its holder's files while the watcher holds the
+/// holder's endpoint lock: the daemon sends nothing to the tree, even once it has handled
+/// the holder's end. Resumed, the watcher ends the tree and removes the files; killed
+/// instead, it leaves both to the daemon, which then ends the tree and removes the files.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_window_whose_holder_died_while_its_watcher_was_stopped_is_ended_once_the_watcher_goes_on_or_dies()
+ {
+    let sandbox = Sandbox::new("end-stopped-watcher");
+    sandbox.write_probe_profile("stubborn", &[&holder_child(), "ignore-end"], "");
+
+    let mut first = start_without_bus(&sandbox).await;
+    let resumed = open_stubborn(&mut first, &sandbox).await;
+    let killed = open_stubborn(&mut first, &sandbox).await;
+    first.kill_keeping_windows();
+    let mut next = start_without_bus(&sandbox).await;
+    for window_id in [&resumed, &killed] {
+        next.output_until(window_id, "the taken-back window's screen", |text| {
+            text.contains(IGNORING_MARKER)
+        })
+        .await;
+    }
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&resumed, &killed]);
+    let resumed_tree = Tree::of(&sandbox, &resumed);
+    let killed_tree = Tree::of(&sandbox, &killed);
+    for tree in [&resumed_tree, &killed_tree] {
+        tree.stop_holder_then_watcher().await;
+        kill_and_wait(tree.holder(), "the stopped holder").await;
+    }
+    for window_id in [&resumed, &killed] {
+        wait_exited(&mut next, &sandbox, window_id).await;
+    }
+    for (tree, window_id) in [(&resumed_tree, &resumed), (&killed_tree, &killed)] {
+        assert_eq!(
+            tree.leader().liveness(),
+            Liveness::Alive,
+            "the window's tree was sent to while its stopped watcher held the endpoint lock; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        assert!(
+            !holder_files(&sandbox, window_id).is_empty(),
+            "the holder's files were removed while its stopped watcher held the endpoint lock"
+        );
+    }
+
+    send_signal(resumed_tree.watcher_pid(), "CONT");
+    settle!(sandbox, "the resumed watcher did not end the window", {
+        let mut problems = Vec::new();
+        if resumed_tree.leader().liveness() != Liveness::Dead {
+            problems.push("the child still runs".to_owned());
+        }
+        let left = holder_files(&sandbox, &resumed);
+        if !left.is_empty() {
+            problems.push(format!("the holder's files are left: {left:?}"));
+        }
+        if resumed_tree.watcher().liveness() != Liveness::Dead {
+            problems.push("the watcher still runs".to_owned());
+        }
+        problems
+    });
+
+    assert_eq!(
+        killed_tree.leader().liveness(),
+        Liveness::Alive,
+        "the window's tree was sent to while its stopped watcher held the endpoint lock"
+    );
+    kill_and_wait(killed_tree.watcher(), "the stopped watcher").await;
+    settle!(
+        sandbox,
+        "the window's tree was not ended once its stopped watcher was killed",
+        {
+            let mut problems = Vec::new();
+            if killed_tree.leader().liveness() != Liveness::Dead {
+                problems
+                    .push("the child that outlived its holder and watcher still runs".to_owned());
+            }
+            let left = holder_files(&sandbox, &killed);
+            if !left.is_empty() {
+                problems.push(format!("the dead holder's files are left: {left:?}"));
+            }
+            problems
+        }
+    );
+}
+
+/// On Unix, closing a window the daemon is not connected to (its take-back waits on a
+/// stopped holder) leaves the window's tree to the watcher its holder's record names: the
+/// daemon kills the holder and sends nothing to the tree while that watcher lives, here
+/// stopped, and the watcher, resumed, ends the tree and removes the files. A record that
+/// names no watcher (a holder from before the watcher) has the daemon end the tree first,
+/// with the window's real watcher still stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_an_unconnected_window_leaves_its_tree_to_the_watcher_its_record_names() {
+    let sandbox = Sandbox::new("close-unconnected");
+    sandbox.write_probe_profile("stubborn", &[&holder_child(), "ignore-end"], "");
+
+    let mut first = start_without_bus(&sandbox).await;
+    let watched = open_stubborn(&mut first, &sandbox).await;
+    let unwatched = open_stubborn(&mut first, &sandbox).await;
+    first.kill_keeping_windows();
+    let _endpoints = KilledEndpoints::new(&sandbox, &[&watched, &unwatched]);
+    let watched_tree = Tree::of(&sandbox, &watched);
+    let unwatched_tree = Tree::of(&sandbox, &unwatched);
+    for tree in [&watched_tree, &unwatched_tree] {
+        tree.stop_holder_then_watcher().await;
+    }
+    let without_watcher = HolderRecord {
+        watcher_pid: None,
+        watcher_start: None,
+        ..unwatched_tree.record.clone()
+    };
+    std::fs::write(
+        holder_record_path(&sandbox.holders_dir(), &unwatched).unwrap(),
+        encode_holder_record(&without_watcher),
+    )
+    .unwrap();
+
+    let mut next = start_without_bus(&sandbox).await;
+    listed(&mut next, &sandbox, &watched).await;
+    listed(&mut next, &sandbox, &unwatched).await;
+
+    close(&mut next, &sandbox, &unwatched).await;
+    wait_dead(unwatched_tree.holder(), "the closed window's holder").await;
+    wait_exited(&mut next, &sandbox, &unwatched).await;
+    settle!(
+        sandbox,
+        "closing a window whose record names no watcher did not end its tree",
+        {
+            if unwatched_tree.leader().liveness() == Liveness::Dead {
+                Vec::new()
+            } else {
+                vec!["the child still runs".to_owned()]
+            }
+        }
+    );
+    assert!(
+        process_state(unwatched_tree.watcher_pid()).starts_with('T'),
+        "the window's real watcher must still be stopped, so it ended nothing"
+    );
+
+    close(&mut next, &sandbox, &watched).await;
+    wait_dead(watched_tree.holder(), "the closed window's holder").await;
+    wait_exited(&mut next, &sandbox, &watched).await;
+    assert_eq!(
+        watched_tree.leader().liveness(),
+        Liveness::Alive,
+        "the daemon sent to the tree of a window whose record names a living watcher; daemon \
+         log:\n{}",
+        sandbox.daemon_log()
+    );
+    assert!(
+        !holder_files(&sandbox, &watched).is_empty(),
+        "the holder's files were removed while its stopped watcher held the endpoint lock"
+    );
+    send_signal(watched_tree.watcher_pid(), "CONT");
+    settle!(
+        sandbox,
+        "the resumed watcher did not end the closed window",
+        {
+            let mut problems = Vec::new();
+            if watched_tree.leader().liveness() != Liveness::Dead {
+                problems.push("the child still runs".to_owned());
+            }
+            let left = holder_files(&sandbox, &watched);
+            if !left.is_empty() {
+                problems.push(format!("the holder's files are left: {left:?}"));
+            }
+            problems
+        }
+    );
+}
+
+/// The holders folder a window registry made of its own in this test process for
+/// `window_id`, found by the record the window's holder keeps there.
+#[cfg(target_os = "macos")]
+fn private_holders_dir(window_id: &str) -> PathBuf {
+    let prefix = format!("yagura-holders-{}-", std::process::id());
+    std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                && dir.join(format!("{window_id}.json")).exists()
+        })
+        .unwrap_or_else(|| panic!("no private holders folder keeps the record of {window_id}"))
+}
+
+/// On macOS, a window served by a registry with a place of its own, whose watcher and then
+/// holder died while it was connected (the holder stopped first, so neither ends the tree
+/// or removes the files), reads as exited, and then has its tree ended and its holder's
+/// files removed. On Linux the holder there may get a scope its child's is bound to, which
+/// the test process's environment decides, so the daemon's part cannot be told apart.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_served_window_whose_watcher_and_then_holder_died_has_its_tree_ended() {
+    let harness =
+        common::Harness::start("served-holder-died", yagura_daemon::DaemonConfig::default()).await;
+    let window_id = harness
+        .open(vec![holder_child(), "ignore-end".to_owned()], None)
+        .await;
+    harness
+        .wait_for_scrollback(&window_id, IGNORING_MARKER.as_bytes())
+        .await;
+    let holders_dir = private_holders_dir(&window_id);
+    let record = read_holder_record(&holders_dir, &window_id).unwrap();
+    let leader = EndOnDrop(Some(handle_of(
+        record.child_pid.expect("the record names the child"),
+        record.child_start.as_deref(),
+    )));
+    let _watcher = EndOnDrop(Some(handle_of(
+        record
+            .watcher_pid
+            .expect("the record names the window's watcher"),
+        record.watcher_start.as_deref(),
+    )));
+    end_holder_and_watcher(&record);
+    assert_eq!(
+        leader.0.as_ref().unwrap().liveness(),
+        Liveness::Alive,
+        "the fixture's child must outlive its killed holder and watcher"
+    );
+
+    common::wait_for_registry_window_exited(&harness.registry, &window_id).await;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let runs = leader.0.as_ref().unwrap().liveness() != Liveness::Dead;
+        let left: Vec<_> = std::fs::read_dir(&holders_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(&format!("{window_id}.")))
+            .collect();
+        if !runs && left.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the served window's tree was not ended after its holder died: the child runs \
+             {runs}, the holder's files left {left:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Whether `name` is a unit name of the form a window's scope has.
