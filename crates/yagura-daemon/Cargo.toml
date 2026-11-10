@@ -70,6 +70,8 @@ toml_edit.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
+# The MCP server a relay session runs (`mcp`).
+rmcp.workspace = true
 
 [features]
 # The daemon's own test seams, kept out of the shipped daemon's code: a read

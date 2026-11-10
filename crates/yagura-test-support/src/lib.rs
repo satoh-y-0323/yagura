@@ -19,5 +19,6 @@ pub mod frame;
 pub mod ipc;
 pub mod paths;
 pub mod process;
+pub mod relay_stdio;
 pub mod scan;
 pub mod view;

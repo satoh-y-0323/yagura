@@ -32,7 +32,8 @@ use yagura_protocol::holder::{
 use yagura_protocol::{ClientMessage, DaemonMessage, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
-use yagura_test_support::process::{holder_path, term_script_path};
+use yagura_test_support::process::{holder_path, relay_path, term_script_path};
+use yagura_test_support::relay_stdio::RelayProcess;
 
 /// The only token shape `StatusToken::from_override` accepts: the first daemon gives it
 /// to every window it opens, and the next daemon draws its own.
@@ -2523,4 +2524,92 @@ async fn a_connected_windows_holder_killed_from_outside_ends_the_window_and_is_r
             problems
         }
     );
+}
+
+/// Reads the daemon's window list until `window_id`'s `mcp_connected` is
+/// `Some(expected)`. No event tells a change of the mark, so its level is read;
+/// how often carries no meaning.
+async fn until_mcp_connected(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    window_id: &str,
+    expected: bool,
+    what: &str,
+) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let info = listed(daemon, sandbox, window_id).await;
+        if info.mcp_connected == Some(expected) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: mcp_connected of {window_id} never became Some({expected}), it is {:?}; \
+             daemon log:\n{}",
+            info.mcp_connected,
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A window's relay names its window to the next daemon after the kill and the
+/// restart without the window typing anything or calling any tool, and a CLI
+/// line it then carries is answered by that daemon's MCP. Killing the relay
+/// clears the window's mark.
+#[tokio::test]
+async fn a_windows_relay_names_its_window_to_the_next_daemon_without_any_call_and_its_end_clears_the_mark()
+ {
+    let sandbox = Sandbox::new("relay-names");
+    let log = sandbox.tree.path().join("input.log");
+    write_script_profile(&sandbox, "script", &log, None);
+    let mut first = sandbox
+        .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
+        .await;
+    let window_id = first.open_profile_window(&sandbox, "script").await;
+
+    let mut relay = RelayProcess::spawn(
+        &relay_path(),
+        &[
+            (yagura_protocol::INSTANCE_ENV, sandbox.instance.as_str()),
+            (yagura_protocol::WINDOW_ID_ENV, window_id.as_str()),
+            (yagura_protocol::STATUS_TOKEN_ENV, TOKEN),
+        ],
+        &[],
+    );
+    until_mcp_connected(&mut first, &sandbox, &window_id, true, "the relay's start").await;
+
+    first.kill_keeping_windows();
+    let mut next = sandbox.start().await;
+    until_mcp_connected(&mut next, &sandbox, &window_id, true, "the next daemon").await;
+
+    relay.send(&common::relay::initialize_line(1)).await;
+    let opened = relay.answer(&serde_json::json!(1)).await;
+    assert!(
+        opened["result"]["protocolVersion"].is_string(),
+        "the next daemon's MCP answers the initialize the relay carries: {opened}"
+    );
+    relay.send(&common::relay::initialized_line()).await;
+    relay
+        .send(&common::relay::tool_call_line(
+            2,
+            "list_windows",
+            serde_json::json!({}),
+            false,
+        ))
+        .await;
+    let listing = common::relay::tool_json(&relay.answer(&serde_json::json!(2)).await);
+    let listed_ids: Vec<&str> = listing["windows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("list_windows answers a windows array: {listing}"))
+        .iter()
+        .filter_map(|window| window["window_id"].as_str())
+        .collect();
+    assert!(
+        listed_ids.contains(&window_id.as_str()),
+        "the next daemon's list_windows, carried by the relay, lists the window: {listing}"
+    );
+
+    relay.kill().await;
+    until_mcp_connected(&mut next, &sandbox, &window_id, false, "the relay's end").await;
 }

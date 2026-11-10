@@ -14,13 +14,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
-use yagura_mcp::ticket_tools::{
+use yagura_daemon::mcp::ticket_tools::{
     AddTicketResultArgs, CreateTicketArgs, GetTicketArgs, ListTicketsArgs, SetMilestoneArgs,
     UpdateTicketArgs, add_ticket_result, create_ticket, get_ticket, list_tickets, set_milestone,
     update_ticket,
 };
-use yagura_mcp::tools::ToolError;
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::tools::ToolError;
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     ClientMessage, DaemonMessage, MilestoneInfo, TicketConfigInfo, TicketFieldInfo, TicketInfo,
     TicketResultInfo, TicketStateInfo, TicketSummary,
@@ -881,33 +881,6 @@ async fn ticket_tools_treat_an_unrecognized_daemon_code_as_internal() {
         let err = call(tool, &transport).await.expect_err("must fail");
 
         assert_eq!(err.code(), "internal", "{tool:?}: got {err:?}");
-    }
-}
-
-#[tokio::test]
-async fn every_ticket_tool_reports_an_older_daemons_unknown_type_refusal_as_unsupported() {
-    for tool in ALL_TICKET_TOOLS {
-        let transport = MockTransport::with_response(Ok(daemon_error(
-            "unknown_type",
-            "the daemon does not recognize this message type",
-        )));
-
-        let err = call(tool, &transport).await.expect_err("must fail");
-
-        assert_eq!(err.code(), "unsupported", "{tool:?}: got {err:?}");
-    }
-}
-
-#[tokio::test]
-async fn every_ticket_tool_reports_a_transport_level_revision_refusal_as_unsupported() {
-    for tool in ALL_TICKET_TOOLS {
-        let transport = MockTransport::with_response(Err(TransportError::Unsupported(
-            "the running daemon is too old for this request".to_string(),
-        )));
-
-        let err = call(tool, &transport).await.expect_err("must fail");
-
-        assert_eq!(err.code(), "unsupported", "{tool:?}: got {err:?}");
     }
 }
 

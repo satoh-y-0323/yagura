@@ -1,5 +1,5 @@
 //! The six MCP ticket tools: argument checks, the `ClientMessage` each sends
-//! over [`crate::transport::DaemonTransport`], and the mapping of the
+//! over [`super::DaemonTransport`], and the mapping of the
 //! daemon's reply onto the MCP tool contract.
 //!
 //! The board's rules belong to the daemon and the user's `tickets.toml`:
@@ -15,11 +15,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::tools::{
+use super::DaemonTransport;
+use super::tools::{
     ToolError, map_daemon_error, map_transport_error, normalize_to_lf, require_non_empty,
     require_present, to_json, unexpected_response,
 };
-use crate::transport::DaemonTransport;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, MilestoneInfo, TicketConfigInfo, TicketSummary,
 };

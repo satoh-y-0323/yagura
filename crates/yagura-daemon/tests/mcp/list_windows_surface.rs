@@ -6,8 +6,8 @@
 
 use std::sync::Mutex;
 
-use yagura_mcp::tools::list_windows;
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::tools::list_windows;
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{ClientMessage, DaemonMessage, WindowInfo, WindowStatus};
 
 struct OneReply(Mutex<Option<DaemonMessage>>);

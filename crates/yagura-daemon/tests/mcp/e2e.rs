@@ -56,16 +56,16 @@ use yagura_test_support::process::{
 use yagura_test_support::scan::contains_subsequence;
 
 use yagura_daemon::control::{ApprovalPolicy, ApprovalSection};
-use yagura_daemon::{DaemonConfig, IpcServer, OpenWindowRequest, WindowEntry, WindowRegistry};
-use yagura_mcp::tools::{
+use yagura_daemon::mcp::tools::{
     CloseWindowArgs, GetWindowStatusArgs, InterruptWindowArgs, OpenWindowArgs, ReadOutputArgs,
     SendHandoffArgs, SendMessageArgs, ToolError, WaitForStatusArgs, close_window,
     get_window_status, interrupt_window, list_windows, open_window, read_output, send_handoff,
     send_message, wait_for_status,
 };
-use yagura_mcp::transport::{
-    DaemonTransport, EndpointTransport, RequesterIdentity, TransportError, WindowIdentity,
-};
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::{DaemonConfig, IpcServer, OpenWindowRequest, WindowEntry, WindowRegistry};
+
+use super::{EndpointTransport, WindowIdentity};
 use yagura_protocol::{
     ApprovalRequest, ApprovalRequesterKind, ClientMessage, DaemonMessage, WindowStatus,
 };

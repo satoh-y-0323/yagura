@@ -834,7 +834,7 @@ fn extract_match_arm_string_literals_ignores_lines_without_a_match_arm() {
 // Every gated tool in `DestructiveTool::ALL` is documented in
 // docs/mcp-setup.md (a "### <tool>" heading, and a mention in the "## Approval
 // Flow" section's opening sentence) and in playbook.toml's comments, and every
-// error code yielded by yagura-mcp's `tools.rs::code()` appears within
+// error code yielded by the daemon's `mcp/tools.rs::code()` appears within
 // docs/mcp-setup.md's "## Error Handling" section. Both checks read the
 // distributed artifacts themselves (never a copy), so a tool added to
 // `DestructiveTool::ALL`, or an error code added to `ErrorCode`, that is not
@@ -888,9 +888,9 @@ fn destructive_tools_are_documented_in_docs_and_playbook() {
 
 #[test]
 fn tools_rs_error_codes_are_documented_in_error_handling_section() {
-    let tools_rs = read_source("../yagura-mcp/src/tools.rs");
+    let tools_rs = read_source("src/mcp/tools.rs");
     let code_fn_body = extract_fn_body_text(&tools_rs, "code")
-        .unwrap_or_else(|| panic!("yagura-mcp/src/tools.rs must define a `fn code(` method"));
+        .unwrap_or_else(|| panic!("yagura-daemon/src/mcp/tools.rs must define a `fn code(` method"));
     let codes = extract_match_arm_string_literals(&code_fn_body);
     assert!(
         !codes.is_empty(),
@@ -907,7 +907,7 @@ fn tools_rs_error_codes_are_documented_in_error_handling_section() {
         .collect();
     assert!(
         missing.is_empty(),
-        "every error code returned by yagura-mcp/src/tools.rs's `fn code()` must appear within \
+        "every error code returned by yagura-daemon/src/mcp/tools.rs's `fn code()` must appear within \
          docs/mcp-setup.md's \"## Error Handling\" section; missing: {missing:?}"
     );
 }

@@ -17,15 +17,15 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use yagura_mcp::plan_tools::{OpenTaskWindowArgs, open_task_window};
-use yagura_mcp::tools::{
+use yagura_daemon::mcp::plan_tools::{OpenTaskWindowArgs, open_task_window};
+use yagura_daemon::mcp::tools::{
     CloseWindowArgs, GetWindowStatusArgs, InterruptWindowArgs, OpenWindowArgs, ReadChatArgs,
     ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendKeysArgs, SendMessageArgs, ToolError,
     WaitForStatusArgs, broadcast_chat, close_window, get_window_status, interrupt_window,
     list_detections, list_profiles, list_windows, open_window, read_chat, read_output, send_chat,
     send_handoff, send_keys, send_message, wait_for_status,
 };
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ClientMessage, ControlKey,
     DaemonMessage, HandoffDelivery, LaunchOptionAlias, LaunchOptionInfo,

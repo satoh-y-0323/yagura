@@ -1,263 +1,429 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// These fixtures exist to start the compiled bridge as a real child process,
-// which is what an MCP client does; the PTY spawn path does not apply.
-#![allow(clippy::disallowed_methods)]
 
-//! Fixtures shared by the tests that drive the compiled `yagura-mcp` binary
-//! over MCP stdio, the way a real MCP client does.
+//! Fixtures shared by the tests that drive the compiled relay (`yagura-mcp`)
+//! as a CLI does, against a stand-in daemon that speaks the daemon's side of
+//! the relay contract (`yagura_protocol::relay`).
 //!
-//! The workspace does not enable `rmcp`'s client features, so the JSON-RPC
-//! lines are written by hand.
+//! The stand-in binds the endpoint of an instance reserved for one test before
+//! the relay starts. Binding claims the name exclusively, so the relay can only
+//! ever reach the stand-in, never a resident daemon.
 
-use std::process::Stdio;
-use std::time::Duration;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use yagura_os::{InstanceNamespace, IpcTransport, PeerAuth, PlatformIpc};
+use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
+use yagura_protocol::{INSTANCE_ENV, frame_decode, frame_encode};
+use yagura_test_support::HANG_GUARD;
+pub use yagura_test_support::relay_stdio::RelayProcess;
 
-/// How long a fixture waits for one line from the bridge before failing: the
-/// one hang guard of every wait.
-pub const LINE_TIMEOUT: Duration = yagura_test_support::HANG_GUARD;
+/// The contract this build's relay speaks.
+pub const CONTRACT: u32 = 1;
 
-/// Variables removed from every spawned bridge's environment first, so no
-/// ambient value from the test runner's shell (e.g. a developer's
-/// `YAGURA_INSTANCE=dev`) can change which daemon it dials or who it claims
-/// to be.
-const CLEARED_ENV: [&str; 4] = [
-    "YAGURA_INSTANCE",
-    "YAGURA_STORE_DB",
-    "YAGURA_WINDOW_ID",
-    "YAGURA_STATUS_TOKEN",
-];
-
-/// The compiled `yagura-mcp` binary running as a child, with its stdio
-/// piped. Killed on drop, so a failing assertion never leaves it running.
-pub struct McpChild {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: i64,
+/// Starts the relay cargo built for this test run against the instance
+/// `instance`, with `env` set and `args` on its command line.
+pub fn spawn_relay(instance: &str, env: &[(&str, &str)], args: &[&OsStr]) -> RelayProcess {
+    let mut all = vec![(INSTANCE_ENV, instance)];
+    all.extend_from_slice(env);
+    RelayProcess::spawn(Path::new(env!("CARGO_BIN_EXE_yagura-mcp")), &all, args)
 }
 
-impl McpChild {
-    /// Starts the binary cargo built for this test run with [`CLEARED_ENV`]
-    /// removed and then `env` applied.
-    pub fn spawn(env: &[(&str, &str)]) -> Self {
-        Self::spawn_with_args(env, &[])
+/// Starts the relay with no instance variable at all.
+pub fn spawn_relay_without_instance(env: &[(&str, &str)]) -> RelayProcess {
+    RelayProcess::spawn(Path::new(env!("CARGO_BIN_EXE_yagura-mcp")), env, &[])
+}
+
+trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+/// A stand-in daemon at one instance's endpoint. Each connection the relay
+/// makes is one attempt: handed to the test by [`FakeDaemon::accept`], or,
+/// while [`FakeDaemon::close_attempts`] is on, read up to its first frame and
+/// closed at once. The endpoint stays bound throughout.
+pub struct FakeDaemon {
+    attempts: mpsc::UnboundedReceiver<FakeConn>,
+    closed: mpsc::UnboundedReceiver<Option<RelayFrame>>,
+    closing: Arc<AtomicBool>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for FakeDaemon {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl FakeDaemon {
+    /// Binds the endpoint of the named instance `instance` and starts
+    /// accepting on it.
+    pub async fn bind(instance: &str) -> Self {
+        let namespace = yagura_os::resolve_instance_from(Some(OsStr::new(instance)))
+            .unwrap_or_else(|err| panic!("{instance:?} must be a valid instance id: {err}"));
+        Self::bind_namespace(&namespace).await
     }
 
-    /// [`McpChild::spawn`] with `args` passed on the command line, the way an MCP
-    /// client's server entry passes them.
-    pub fn spawn_with_args(env: &[(&str, &str)], args: &[&std::ffi::OsStr]) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_yagura-mcp"));
-        command.args(args);
-        for name in CLEARED_ENV {
-            command.env_remove(name);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        let mut child = command
-            .spawn()
-            .expect("failed to spawn the yagura-mcp binary under test");
-        let stdin = child.stdin.take().expect("the child's stdin must be piped");
-        let stdout = child
-            .stdout
-            .take()
-            .expect("the child's stdout must be piped");
-        Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
-        }
-    }
-
-    /// The MCP handshake: `initialize`, then `notifications/initialized`.
-    pub async fn initialize(&mut self) {
-        let response = self
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": { "name": "yagura-mcp-test", "version": "0" }
-                }),
+    /// Binds the endpoint `namespace` resolves to and starts accepting on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the endpoint is already claimed: proceeding would let the
+    /// relay reach whatever owns it.
+    pub async fn bind_namespace(namespace: &InstanceNamespace) -> Self {
+        let ipc = PlatformIpc::default();
+        let user_id = ipc
+            .current_user_id()
+            .expect("current_user_id must resolve in a normal test-runner session");
+        let endpoint = yagura_os::default_endpoint_owning(&user_id, namespace);
+        let security = ipc
+            .endpoint_security()
+            .expect("endpoint_security must succeed in a normal test-runner session");
+        let mut listener = ipc.bind(&endpoint, security).await.unwrap_or_else(|err| {
+            panic!(
+                "cannot claim endpoint {endpoint:?}: {err}. A daemon running under this \
+                 instance must be stopped first; this test does not proceed against an \
+                 endpoint it does not own"
             )
-            .await;
-        assert!(
-            response.get("result").is_some(),
-            "initialize must succeed, got {response}"
-        );
-        self.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-            .await;
-    }
-
-    /// The names `tools/list` returns.
-    pub async fn tool_names(&mut self) -> Vec<String> {
-        let response = self.request("tools/list", json!({})).await;
-        response
-            .pointer("/result/tools")
-            .and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("tools/list must return result.tools, got {response}"))
-            .iter()
-            .map(|tool| {
-                tool.get("name")
-                    .and_then(Value::as_str)
-                    .expect("every listed tool must carry a name")
-                    .to_string()
-            })
-            .collect()
-    }
-
-    /// Calls the tool `name` and returns the whole JSON-RPC response.
-    pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Value {
-        self.request(
-            "tools/call",
-            json!({ "name": name, "arguments": arguments }),
-        )
-        .await
-    }
-
-    pub async fn kill(&mut self) {
-        let _ = self.child.kill().await;
-    }
-
-    /// Sends a `tools/call` for `name` without waiting for its answer, and
-    /// returns the request id to read the answer or cancel the call by.
-    pub async fn start_tool_call(&mut self, name: &str, arguments: Value) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "tools/call",
-            "params": { "name": name, "arguments": arguments },
-        }))
-        .await;
-        id
-    }
-
-    /// Cancels the request `id` the way an MCP client gives up on a call:
-    /// `notifications/cancelled`, which gets no answer of its own.
-    pub async fn cancel(&mut self, id: i64) {
-        self.send(&json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/cancelled",
-            "params": { "requestId": id, "reason": "the client gave up on this call" },
-        }))
-        .await;
-    }
-
-    /// An MCP `ping`, answered by the server itself without reaching the
-    /// daemon. Its answer is read as the next line.
-    pub async fn ping(&mut self) {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": "ping" }))
-            .await;
-        self.response_to(id).await;
-    }
-
-    /// Reads the next line and requires it to be the answer to `id`: no other
-    /// call may have answered in between.
-    pub async fn response_to(&mut self, id: i64) -> Value {
-        let response = self.read_line().await;
-        assert_eq!(
-            response.get("id").and_then(Value::as_i64),
-            Some(id),
-            "expected the answer to request {id} next, got {response}"
-        );
-        response
-    }
-
-    /// Reads one answer per id in `ids`, in whatever order they arrive, and
-    /// returns them in the order of `ids`.
-    pub async fn responses_to(&mut self, ids: &[i64]) -> Vec<Value> {
-        let mut answers: Vec<Option<Value>> = vec![None; ids.len()];
-        for _ in ids {
-            let response = self.read_line().await;
-            let id = response.get("id").and_then(Value::as_i64);
-            let slot = ids
-                .iter()
-                .position(|expected| Some(*expected) == id)
-                .unwrap_or_else(|| panic!("expected an answer to one of {ids:?}, got {response}"));
-            assert!(
-                answers[slot].is_none(),
-                "request {id:?} was answered twice: {response}"
-            );
-            answers[slot] = Some(response);
+        });
+        let (attempt_tx, attempts) = mpsc::unbounded_channel();
+        let (closed_tx, closed) = mpsc::unbounded_channel();
+        let closing = Arc::new(AtomicBool::new(false));
+        let closing_flag = Arc::clone(&closing);
+        let task = tokio::spawn(async move {
+            while let Ok(conn) = ipc.accept(&mut listener).await {
+                let conn = FakeConn::new(Box::new(conn));
+                if closing_flag.load(Ordering::SeqCst) {
+                    let closed_tx = closed_tx.clone();
+                    tokio::spawn(async move {
+                        let mut conn = conn;
+                        let first = conn.first_frame_quietly().await;
+                        drop(conn);
+                        let _ = closed_tx.send(first);
+                    });
+                } else if attempt_tx.send(conn).is_err() {
+                    return;
+                }
+            }
+        });
+        Self {
+            attempts,
+            closed,
+            closing,
+            task,
         }
-        answers.into_iter().map(Option::unwrap).collect()
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Value {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-            .await;
-        let response = self.read_line().await;
-        assert_eq!(
-            response.get("id").and_then(Value::as_i64),
-            Some(id),
-            "expected the response to {method} next, got {response}"
-        );
-        response
+    /// The relay's next attempt, handed to the test.
+    pub async fn accept(&mut self) -> FakeConn {
+        tokio::time::timeout(HANG_GUARD, self.attempts.recv())
+            .await
+            .unwrap_or_else(|_| panic!("the relay made no further attempt to reach the daemon"))
+            .expect("the stand-in daemon stopped accepting")
     }
 
-    async fn send(&mut self, value: &Value) {
-        let mut line = serde_json::to_string(value).expect("serialize a JSON-RPC message");
-        line.push('\n');
-        self.stdin
-            .write_all(line.as_bytes())
-            .await
-            .expect("write to the yagura-mcp child's stdin");
-        self.stdin
-            .flush()
-            .await
-            .expect("flush the yagura-mcp child's stdin");
+    /// From now on, every new attempt is closed at once after its first frame
+    /// (`true`), or handed to the test (`false`).
+    pub fn close_attempts(&self, on: bool) {
+        self.closing.store(on, Ordering::SeqCst);
     }
 
-    async fn read_line(&mut self) -> Value {
-        let mut line = String::new();
-        tokio::time::timeout(LINE_TIMEOUT, self.stdout.read_line(&mut line))
+    /// The first frame of the next attempt closed by
+    /// [`FakeDaemon::close_attempts`], when it was a relay frame.
+    pub async fn closed_attempt(&mut self) -> Option<RelayFrame> {
+        tokio::time::timeout(HANG_GUARD, self.closed.recv())
             .await
-            .unwrap_or_else(|_| {
-                panic!("timed out waiting {LINE_TIMEOUT:?} for a line on yagura-mcp's stdout")
-            })
-            .expect("read a line from the yagura-mcp child's stdout");
-        serde_json::from_str(&line)
-            .unwrap_or_else(|err| panic!("expected a JSON-RPC line, got {line:?}: {err}"))
+            .unwrap_or_else(|_| panic!("the relay made no attempt while attempts were closed"))
+            .expect("the stand-in daemon stopped accepting")
     }
 }
 
-/// A `tools/call` response's `isError` flag and its single text block: the
-/// shape every tool answers in, success or failure.
-pub fn tool_reply(response: &Value) -> (bool, String) {
-    let result = response
+/// The identity and resumption a relay named in its `relay_hello`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hello {
+    pub window_id: Option<String>,
+    pub token: Option<String>,
+    pub resume: Option<RelayResume>,
+}
+
+/// One connection of the relay to the stand-in daemon.
+pub struct FakeConn {
+    stream: Box<dyn Stream>,
+    buffer: Vec<u8>,
+}
+
+impl FakeConn {
+    fn new(stream: Box<dyn Stream>) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+        }
+    }
+
+    /// Reads more bytes into the buffer; `false` once the relay closed.
+    async fn fill(&mut self) -> bool {
+        let mut chunk = vec![0u8; 64 * 1024];
+        match tokio::time::timeout(HANG_GUARD, self.stream.read(&mut chunk)).await {
+            Ok(Ok(0) | Err(_)) => false,
+            Ok(Ok(read)) => {
+                self.buffer.extend_from_slice(&chunk[..read]);
+                true
+            }
+            Err(_) => panic!("timed out waiting for the relay's next frame"),
+        }
+    }
+
+    async fn next_body(&mut self) -> Option<Vec<u8>> {
+        loop {
+            match frame_decode(&self.buffer) {
+                Ok(Some((body, consumed))) => {
+                    let body = body.to_vec();
+                    self.buffer.drain(..consumed);
+                    return Some(body);
+                }
+                Ok(None) => {}
+                Err(err) => panic!("the relay sent a frame the IPC framing refuses: {err:?}"),
+            }
+            if !self.fill().await {
+                return None;
+            }
+        }
+    }
+
+    async fn first_frame_quietly(&mut self) -> Option<RelayFrame> {
+        let body = self.next_body().await?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    /// The next frame, or `None` once the relay closed the connection.
+    /// Panics on a body that is not a relay frame, naming it.
+    pub async fn next_frame_or_closed(&mut self) -> Option<RelayFrame> {
+        let body = self.next_body().await?;
+        Some(serde_json::from_slice(&body).unwrap_or_else(|err| {
+            panic!(
+                "the relay must speak relay frames only ({err}); it sent {}",
+                String::from_utf8_lossy(&body)
+            )
+        }))
+    }
+
+    pub async fn next_frame(&mut self) -> RelayFrame {
+        self.next_frame_or_closed()
+            .await
+            .expect("the relay closed its connection")
+    }
+
+    /// The length the next frame declares, read from its prefix alone: the
+    /// rest of the frame is left unread.
+    pub async fn next_declared_length(&mut self) -> usize {
+        while self.buffer.len() < 4 {
+            assert!(self.fill().await, "the relay closed before its next frame");
+        }
+        let prefix: [u8; 4] = self.buffer[..4].try_into().unwrap();
+        u32::from_le_bytes(prefix) as usize
+    }
+
+    /// The relay's `relay_hello`, which must be its first frame.
+    pub async fn hello(&mut self) -> Hello {
+        match self.next_frame().await {
+            RelayFrame::Hello {
+                contract,
+                window_id,
+                token,
+                resume,
+            } => {
+                assert_eq!(contract, CONTRACT, "the relay names the contract it speaks");
+                Hello {
+                    window_id,
+                    token,
+                    resume,
+                }
+            }
+            other => panic!("the relay's first frame must be relay_hello, got {other:?}"),
+        }
+    }
+
+    pub async fn send(&mut self, frame: &RelayFrame) {
+        let body = serde_json::to_vec(frame).expect("a relay frame encodes");
+        // A relay that already closed is the case's business, not this write's.
+        let _ = self.stream.write_all(&frame_encode(&body)).await;
+    }
+
+    pub async fn welcome(&mut self, tools: &str) {
+        self.send(&RelayFrame::Welcome {
+            contract: CONTRACT,
+            tools: tools.to_string(),
+        })
+        .await;
+    }
+
+    pub async fn refuse(&mut self, kind: RelayRefusedKind, contracts: Vec<u32>) {
+        self.send(&RelayFrame::Refused {
+            kind,
+            contracts,
+            reason: "refused by the stand-in daemon".to_string(),
+        })
+        .await;
+    }
+
+    /// The next frame, which must be `relay_in`: its line as sent and its
+    /// sequence number.
+    pub async fn relay_in(&mut self) -> (String, Option<u64>) {
+        match self.next_frame().await {
+            RelayFrame::In { line, seq } => (line, seq),
+            other => panic!("expected relay_in, got {other:?}"),
+        }
+    }
+
+    /// The next `relay_in`, which must carry a request: its line as JSON and
+    /// its sequence number.
+    pub async fn request(&mut self) -> (Value, u64) {
+        let (line, seq) = self.relay_in().await;
+        let value = parse(&line);
+        let seq = seq.unwrap_or_else(|| panic!("a request must carry a seq, got {line}"));
+        (value, seq)
+    }
+
+    /// Answers the request `request` carried under `seq` with a result naming
+    /// its method, and returns the answer line.
+    pub async fn answer(&mut self, request: &Value, seq: u64, receipt: bool) -> Value {
+        let line = answer_line(request);
+        self.send(&RelayFrame::Out {
+            line: line.to_string(),
+            seq: Some(seq),
+            receipt: receipt.then_some(true),
+        })
+        .await;
+        line
+    }
+
+    /// Answers every request carried until requests with each of the `ids`
+    /// have been carried (and answered), and returns every line carried on the
+    /// way, in order.
+    pub async fn answer_until(&mut self, ids: &[Value]) -> Vec<Value> {
+        let mut carried: Vec<Value> = Vec::new();
+        let seen = |carried: &[Value], id: &Value| {
+            carried
+                .iter()
+                .any(|line| line.get("method").is_some() && line.get("id") == Some(id))
+        };
+        while !ids.iter().all(|id| seen(&carried, id)) {
+            let (line, seq) = self.relay_in().await;
+            let value = parse(&line);
+            if let Some(seq) = seq {
+                self.answer(&value, seq, false).await;
+            }
+            carried.push(value);
+        }
+        carried
+    }
+}
+
+fn parse(line: &str) -> Value {
+    serde_json::from_str(line).unwrap_or_else(|err| panic!("expected a JSON line ({err}): {line}"))
+}
+
+/// The stand-in daemon's answer to `request`: a result naming its method.
+pub fn answer_line(request: &Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "result": {"answered_by": "stand-in", "method": request["method"]},
+    })
+}
+
+/// `initialize` as a CLI that opens with it sends it.
+pub fn initialize_line(id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "yagura-mcp-test", "version": "0"},
+        },
+    })
+}
+
+pub fn initialized_line() -> Value {
+    json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+}
+
+pub fn tools_list_line(id: u64) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": {}})
+}
+
+pub fn ping_line(id: u64) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
+}
+
+pub fn tool_call_line(id: u64, name: &str, arguments: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    })
+}
+
+pub fn cancelled_line(request_id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": request_id, "reason": "the client gave up on this call"},
+    })
+}
+
+/// The word and the text of an error the relay wrote itself to a
+/// `tools/call`: a result with `isError: true` and one text content that
+/// leads with the word.
+pub fn tool_call_error(answer: &Value) -> (String, String) {
+    let result = answer
         .get("result")
-        .unwrap_or_else(|| panic!("a tool call must return a JSON-RPC result, got {response}"));
-    let content = result
-        .get("content")
-        .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("a tool result must carry content, got {response}"));
-    let [block] = content.as_slice() else {
-        panic!("a tool result must carry exactly one content block, got {response}");
-    };
-    let text = block
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("the content block must be text, got {response}"))
+        .unwrap_or_else(|| panic!("a tools/call error is a result with isError, got {answer}"));
+    assert_eq!(
+        result.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "a tools/call error carries isError: true, got {answer}"
+    );
+    let text = result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a tools/call error carries one text content, got {answer}"))
         .to_string();
-    let is_error = result
-        .get("isError")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    (is_error, text)
+    let word = leading_word(&text);
+    (word, text)
+}
+
+/// The word of an error the relay wrote itself to a request other than
+/// `tools/call`: a JSON-RPC error of the relay's code whose `data.code` is the
+/// word and whose message leads with it.
+pub fn rpc_error_word(answer: &Value) -> String {
+    let error = answer
+        .get("error")
+        .unwrap_or_else(|| panic!("expected a JSON-RPC error, got {answer}"));
+    assert_eq!(
+        error.get("code").and_then(Value::as_i64),
+        Some(yagura_protocol::relay::RELAY_ERROR_CODE),
+        "the relay's own error carries its code, got {answer}"
+    );
+    let word = error["data"]["code"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the relay's own error names its word in data.code: {answer}"))
+        .to_string();
+    let message = error["message"].as_str().unwrap_or_default();
+    assert_eq!(
+        leading_word(message),
+        word,
+        "the message leads with the same word, got {answer}"
+    );
+    word
+}
+
+fn leading_word(text: &str) -> String {
+    text.split(':').next().unwrap_or_default().to_string()
 }

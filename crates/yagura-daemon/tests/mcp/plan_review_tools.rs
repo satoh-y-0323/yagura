@@ -8,12 +8,12 @@
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use yagura_mcp::plan_tools::{
+use yagura_daemon::mcp::plan_tools::{
     CreatePlanArgs, GetPlanArgs, OpenTaskWindowArgs, UpdatePlanArgs, create_plan, get_plan,
     list_plans, list_roles, open_task_window, update_plan,
 };
-use yagura_mcp::tools::ToolError;
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::tools::ToolError;
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     AssignmentSource, ClientMessage, DaemonMessage, PlanInfo, PlanReview, PlanSummary,
     PlanTaskInfo, ResolvedAssignment, ReviewMark, RoleEntry, TaskAssignment,

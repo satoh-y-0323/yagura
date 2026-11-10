@@ -1,5 +1,5 @@
 //! The seven MCP plan tools: argument validation, the `ClientMessage` each
-//! sends over [`crate::transport::DaemonTransport`], and the mapping of the
+//! sends over [`super::DaemonTransport`], and the mapping of the
 //! daemon's reply onto the MCP tool contract.
 //!
 //! This module never re-implements the daemon's plan validation (cycles,
@@ -12,11 +12,11 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::tools::{
+use super::DaemonTransport;
+use super::tools::{
     ToolError, map_daemon_error, map_transport_error, normalize_to_lf, require_non_empty,
     require_present, to_json, unexpected_response,
 };
-use crate::transport::DaemonTransport;
 use yagura_protocol::{ClientMessage, DaemonMessage, PlanTaskSpec};
 
 /// Rejects a missing `tasks` argument. A present, empty list is a plan the
@@ -69,7 +69,7 @@ pub struct UpdatePlanArgs {
 pub struct GetPlanArgs {
     /// The plan to read (required, non-empty).
     pub plan_id: Option<String>,
-    /// Narrows the reply to this one task, applied on the bridge's own side
+    /// Narrows the reply to this one task, applied on the MCP layer's side
     /// after the same round trip an unnarrowed `get_plan` makes: the wire
     /// itself carries no `task_id`. Omitted keeps every task.
     pub task_id: Option<String>,
@@ -142,7 +142,7 @@ pub async fn update_plan<T: DaemonTransport>(
 }
 
 /// `get_plan`: `plan_id` is required and non-empty. `task_id`, when given,
-/// narrows the reply to that one task on the bridge's own side, after the
+/// narrows the reply to that one task on the MCP layer's side, after the
 /// same round trip an unnarrowed call makes: a task
 /// window reads only its own instruction through this, not every other
 /// task's.

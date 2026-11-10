@@ -1,14 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! The ticket tools end to end: the compiled `yagura-mcp` binary, spoken to
-//! over MCP stdio the way a client does, against a real in-process daemon
+//! The ticket tools end to end: a relay session, spoken the way a CLI's
+//! relay speaks it, against a real in-process daemon
 //! (`IpcServer` + `WindowRegistry`, with the plan ledger and the ticket store
 //! on one temporary SQLite file) that reads the repository's reference
-//! `tickets.toml`. The bridge claims a real window opened in a temporary
+//! `tickets.toml`. The session claims a real window opened in a temporary
 //! repository, so the daemon sees it exactly as it sees an agent in a window.
 //!
-//! The daemon serves a named instance reserved for this file, so the spawned
-//! bridge can only ever reach it, never a resident daemon.
+//! The daemon serves a named instance reserved for this file, never a
+//! resident daemon.
 //!
 //! `cargo build -p yagura-daemon -p yagura-holder --bins` must have run first:
 //! the `echo_child` and `yagura-holder` binaries are located next to the test
@@ -24,24 +24,22 @@ use yagura_daemon::{
     ipc::{plan::PlanRuntime, ticket::TicketRuntime},
 };
 use yagura_os::{PeerAuth, PlatformIpc};
-use yagura_protocol::{INSTANCE_ENV, STATUS_TOKEN_ENV, WINDOW_ID_ENV};
 use yagura_test_support::ipc::connect_with_retry;
 use yagura_test_support::paths::unique_temp_dir;
 use yagura_test_support::process::echo_child_command;
 
-use crate::common;
-
-use common::{McpChild, tool_reply};
+use super::{McpSession, tool_reply};
 
 const INSTANCE: &str = "mcpticketflow";
 
-/// The only shape `StatusToken::from_override` accepts; it lets the bridge
+/// The only shape `StatusToken::from_override` accepts; it lets the session
 /// hold a valid token for the window the harness opened.
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// A daemon whose workspace is a temporary directory with a bare `.git`
 /// marker, and whose board rules are the repository's reference file.
 struct Daemon {
+    endpoint: String,
     window_id: String,
     server: tokio::task::JoinHandle<Result<(), yagura_daemon::IpcError>>,
     // Keeps the registry, and so the window, alive for the whole test.
@@ -116,6 +114,7 @@ async fn start_daemon() -> Daemon {
         .expect("the window must open")
         .window_id;
     Daemon {
+        endpoint,
         window_id,
         server,
         _registry: registry,
@@ -123,7 +122,7 @@ async fn start_daemon() -> Daemon {
 }
 
 /// Calls `tool` and returns its answer as JSON, failing if the tool failed.
-async fn succeeds(bridge: &mut McpChild, tool: &str, arguments: Value) -> Value {
+async fn succeeds(bridge: &mut McpSession, tool: &str, arguments: Value) -> Value {
     let response = bridge.call_tool(tool, arguments).await;
     let (is_error, text) = tool_reply(&response);
     assert!(!is_error, "{tool} must succeed, got {text}");
@@ -132,7 +131,7 @@ async fn succeeds(bridge: &mut McpChild, tool: &str, arguments: Value) -> Value 
 }
 
 /// Calls `tool` and returns the text of its refusal, failing if it succeeded.
-async fn refused(bridge: &mut McpChild, tool: &str, arguments: Value) -> String {
+async fn refused(bridge: &mut McpSession, tool: &str, arguments: Value) -> String {
     let response = bridge.call_tool(tool, arguments).await;
     let (is_error, text) = tool_reply(&response);
     assert!(is_error, "{tool} must be refused, got {text}");
@@ -142,11 +141,7 @@ async fn refused(bridge: &mut McpChild, tool: &str, arguments: Value) -> String 
 #[tokio::test]
 async fn an_ai_in_a_window_takes_a_ticket_from_todo_to_done_and_makes_a_plan_from_it() {
     let daemon = start_daemon().await;
-    let mut bridge = McpChild::spawn(&[
-        (INSTANCE_ENV, INSTANCE),
-        (WINDOW_ID_ENV, &daemon.window_id),
-        (STATUS_TOKEN_ENV, TOKEN),
-    ]);
+    let mut bridge = McpSession::open(&daemon.endpoint, Some((&daemon.window_id, TOKEN))).await;
     bridge.initialize().await;
 
     // The rules come first: the user's states in board order, and no ticket yet.

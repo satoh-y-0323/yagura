@@ -17,8 +17,8 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use yagura_mcp::tools::{ReadChatArgs, read_chat};
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::tools::{ReadChatArgs, read_chat};
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
 struct MockTransport {

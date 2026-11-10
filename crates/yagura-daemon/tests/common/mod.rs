@@ -3439,6 +3439,7 @@ pub mod detection_rules;
 pub mod docs;
 pub mod global_tracing;
 pub mod real_daemon;
+pub mod relay;
 pub mod store_fixtures;
 pub mod views;
 

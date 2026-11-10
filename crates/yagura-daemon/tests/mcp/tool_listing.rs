@@ -1,18 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// This test observes what a real MCP client receives, so it must start the
-// server as an actual child process rather than call into it in-process.
-#![allow(clippy::disallowed_methods)]
 
 //! What a real MCP client receives from `tools/list`, not the literal source
-//! strings in `main.rs`: some clients silently truncate a long `description`,
-//! so anything a caller needs must survive that truncation.
-
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
-use std::time::Instant;
+//! strings in `server.rs`: some clients silently truncate a long `description`,
+//! so anything a caller needs must survive that truncation. The daemon's MCP
+//! server answers over an in-memory pipe, as it does for a relay session.
 
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use yagura_daemon::mcp::server::YaguraMcpServer;
+
+use super::NoDaemon;
 
 /// Claude Code silently truncates a tool's `description` past this many
 /// characters (observed: `Tool "send_handoff" description truncated from
@@ -52,108 +50,87 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "set_milestone",
 ];
 
-/// Kills the spawned `yagura-mcp` process on drop, so a failing assertion
-/// (which unwinds past the rest of the test) never leaves it running.
-struct ChildGuard(Child);
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Spawns the real `yagura-mcp` binary and speaks the stdio JSON-RPC
-/// handshake up to `tools/list`, returning the response the client actually
-/// receives. The binary never connects to a daemon at startup, so this works
-/// with no daemon running.
+/// Serves the daemon's MCP server on an in-memory pipe and speaks the
+/// JSON-RPC handshake up to `tools/list`, returning the response the client
+/// actually receives. The server needs no daemon to list its tools.
 fn fetch_tools_list() -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yagura-mcp"))
-        .env_remove("YAGURA_WINDOW_ID")
-        .env_remove("YAGURA_STATUS_TOKEN")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn the yagura-mcp binary");
-
-    let mut stdin = child.stdin.take().expect("child stdin was not piped");
-    let stdout = child.stdout.take().expect("child stdout was not piped");
-    let _guard = ChildGuard(child);
-
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
-                    if tx.send(line).is_err() {
-                        break;
-                    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the in-memory server")
+        .block_on(async {
+            let (client, server_end) = tokio::io::duplex(1 << 20);
+            tokio::spawn(async move {
+                if let Ok(running) =
+                    rmcp::serve_server(YaguraMcpServer::new(NoDaemon), server_end).await
+                {
+                    let _ = running.waiting().await;
                 }
-                Err(_) => break,
-            }
-        }
-    });
+            });
+            let (read, mut write) = tokio::io::split(client);
+            let mut lines = BufReader::new(read).lines();
 
-    send_line(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "test", "version": "0" }
-            }
-        }),
-    );
-    recv_response(&rx, 1);
+            send_line(
+                &mut write,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": { "name": "test", "version": "0" }
+                    }
+                }),
+            )
+            .await;
+            recv_response(&mut lines, 1).await;
 
-    send_line(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized"
-        }),
-    );
+            send_line(
+                &mut write,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                }),
+            )
+            .await;
 
-    send_line(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        }),
-    );
-    recv_response(&rx, 2)
+            send_line(
+                &mut write,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {}
+                }),
+            )
+            .await;
+            recv_response(&mut lines, 2).await
+        })
 }
 
-fn send_line(stdin: &mut ChildStdin, value: &Value) {
+async fn send_line(write: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, value: &Value) {
     let mut line = serde_json::to_string(value).expect("serialize a JSON-RPC request");
     line.push('\n');
-    stdin
+    write
         .write_all(line.as_bytes())
-        .expect("write to child stdin");
-    stdin.flush().expect("flush child stdin");
+        .await
+        .expect("write to the server's pipe");
 }
 
-/// Reads lines from `rx` until one parses as a JSON-RPC response whose `id`
-/// matches, or `yagura_test_support::HANG_GUARD` elapses -- never blocks forever.
-fn recv_response(rx: &mpsc::Receiver<String>, want_id: i64) -> Value {
-    let deadline = Instant::now() + yagura_test_support::HANG_GUARD;
+/// Reads lines until one parses as a JSON-RPC response whose `id` matches, or
+/// `yagura_test_support::HANG_GUARD` elapses -- never blocks forever.
+async fn recv_response(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
+    want_id: i64,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            panic!(
-                "timed out waiting {:?} for a response with id {want_id}",
-                yagura_test_support::HANG_GUARD
-            );
-        }
-        let line = rx
-            .recv_timeout(remaining)
-            .unwrap_or_else(|_| panic!("timed out waiting for a response with id {want_id}"));
+        let line = tokio::time::timeout_at(deadline, lines.next_line())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a response with id {want_id}"))
+            .expect("read from the server's pipe")
+            .unwrap_or_else(|| panic!("the server closed before answering id {want_id}"));
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1158,4 +1135,227 @@ fn list_tickets_description_says_to_call_it_first_to_read_the_boards_rules() {
         "list_tickets must say to call it first to read the rules; missing {missing:?}: \
          {description:?}"
     );
+}
+
+/// A daemon double that records the wire type of every request a tool sends
+/// and refuses it with a message naming that type.
+#[derive(Clone, Default)]
+struct WireRecorder {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl yagura_daemon::mcp::DaemonTransport for WireRecorder {
+    fn requester_identity(&self) -> yagura_daemon::mcp::RequesterIdentity {
+        yagura_daemon::mcp::RequesterIdentity::External
+    }
+
+    async fn round_trip(
+        &self,
+        msg: yagura_protocol::ClientMessage,
+    ) -> Result<yagura_protocol::DaemonMessage, yagura_daemon::mcp::TransportError> {
+        let body: Value = serde_json::from_slice(&yagura_protocol::encode_client_message(&msg))
+            .expect("a client message encodes as JSON");
+        let wire = body["type"]
+            .as_str()
+            .expect("every request carries its wire type")
+            .to_string();
+        self.seen.lock().unwrap().push(wire.clone());
+        Ok(yagura_protocol::DaemonMessage::Error {
+            code: "invalid_argument".to_string(),
+            message: format!("daemon received {wire}"),
+            rejected_argument: None,
+        })
+    }
+}
+
+/// One valid call per MCP tool, and the wire type its first request carries.
+fn router_cases() -> Vec<(&'static str, Value, &'static str)> {
+    let task = json!({ "task_id": "a", "title": "A", "depends_on": [], "writes": [] });
+    vec![
+        ("list_windows", json!({}), "list_windows"),
+        (
+            "get_window_status",
+            json!({ "window_id": "w-1" }),
+            "get_window_status",
+        ),
+        (
+            "send_message",
+            json!({ "window_id": "w-1", "text": "hello" }),
+            "send_text",
+        ),
+        (
+            "send_keys",
+            json!({ "window_id": "w-1", "keys": ["enter"] }),
+            "send_keys",
+        ),
+        (
+            "open_window",
+            json!({ "command": ["probe"] }),
+            "open_window",
+        ),
+        (
+            "interrupt_window",
+            json!({ "window_id": "w-1" }),
+            "interrupt_window",
+        ),
+        (
+            "close_window",
+            json!({ "window_id": "w-1" }),
+            "close_window",
+        ),
+        (
+            "wait_for_status",
+            json!({ "window_id": "w-1", "target_status": "idle", "timeout_sec": 1 }),
+            "wait_for_status",
+        ),
+        ("read_output", json!({ "window_id": "w-1" }), "read_output"),
+        ("list_detections", json!({}), "list_detections"),
+        ("list_profiles", json!({}), "list_profiles"),
+        (
+            "send_handoff",
+            json!({ "window_id": "w-1", "reference": "look at this", "note": "please continue" }),
+            "send_handoff",
+        ),
+        ("send_chat", json!({ "body": "hello" }), "send_chat"),
+        (
+            "broadcast_chat",
+            json!({ "body": "hello" }),
+            "broadcast_chat",
+        ),
+        ("read_chat", json!({}), "read_chat"),
+        (
+            "create_plan",
+            json!({ "title": "plan", "tasks": [task.clone()] }),
+            "create_plan",
+        ),
+        (
+            "update_plan",
+            json!({ "plan_id": "p-1", "tasks": [task] }),
+            "update_plan",
+        ),
+        ("get_plan", json!({ "plan_id": "p-1" }), "get_plan"),
+        ("list_plans", json!({}), "list_plans"),
+        ("delete_plan", json!({ "plan_id": "p-1" }), "delete_plan"),
+        ("list_roles", json!({}), "list_roles"),
+        (
+            "open_task_window",
+            json!({ "plan_id": "p-1", "task_id": "a" }),
+            "open_task_window",
+        ),
+        (
+            "send_report",
+            json!({ "outcome": "succeeded", "summary": "done" }),
+            "send_report",
+        ),
+        (
+            "wait_for_report",
+            json!({ "timeout_sec": 0 }),
+            "wait_for_report",
+        ),
+        ("list_tickets", json!({}), "list_tickets"),
+        ("get_ticket", json!({ "ticket": 1 }), "get_ticket"),
+        (
+            "create_ticket",
+            json!({ "title": "a title", "body": "a body" }),
+            "create_ticket",
+        ),
+        (
+            "update_ticket",
+            json!({ "ticket": 1, "state": "in-progress" }),
+            "update_ticket",
+        ),
+        (
+            "add_ticket_result",
+            json!({ "ticket": 1, "text": "merged" }),
+            "add_ticket_result",
+        ),
+        (
+            "set_milestone",
+            json!({ "name": "v1", "title": "Version 1", "position": 1 }),
+            "set_milestone",
+        ),
+    ]
+}
+
+/// Every tool name the server lists is routed to its own tool: a `tools/call`
+/// of it sends that tool's request to the daemon and returns the daemon's
+/// answer to the client.
+#[tokio::test]
+async fn every_listed_tool_name_is_routed_to_its_own_request_and_returns_the_daemons_answer() {
+    let daemon = WireRecorder::default();
+    let (client, server_end) = tokio::io::duplex(1 << 20);
+    let server = YaguraMcpServer::new(daemon.clone());
+    tokio::spawn(async move {
+        if let Ok(running) = rmcp::serve_server(server, server_end).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let (read, mut write) = tokio::io::split(client);
+    let mut lines = BufReader::new(read).lines();
+    send_line(
+        &mut write,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0" }
+            }
+        }),
+    )
+    .await;
+    recv_response(&mut lines, 1).await;
+    send_line(
+        &mut write,
+        &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await;
+    send_line(
+        &mut write,
+        &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} }),
+    )
+    .await;
+    let listing = recv_response(&mut lines, 2).await;
+    let mut listed: Vec<String> = tools_array(&listing)
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("a listed tool has a name")
+                .to_string()
+        })
+        .collect();
+    let cases = router_cases();
+    let mut covered: Vec<String> = cases.iter().map(|(tool, ..)| tool.to_string()).collect();
+    listed.sort();
+    covered.sort();
+    assert_eq!(listed, covered, "every listed tool must have a case here");
+
+    for (id, (tool, arguments, wire)) in (3_i64..).zip(cases) {
+        daemon.seen.lock().unwrap().clear();
+        send_line(
+            &mut write,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments },
+            }),
+        )
+        .await;
+        let response = recv_response(&mut lines, id).await;
+        let result = &response["result"];
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            result["isError"] == json!(true) && text.ends_with(&format!("daemon received {wire}")),
+            "{tool} must reach the daemon as {wire} and return its refusal, got {response}"
+        );
+        assert!(
+            daemon.seen.lock().unwrap().iter().any(|seen| seen == wire),
+            "{tool} must send a {wire} request, sent {:?}",
+            daemon.seen.lock().unwrap()
+        );
+    }
 }

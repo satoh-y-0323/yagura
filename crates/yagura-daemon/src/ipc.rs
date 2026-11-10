@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, WriteHalf};
 use tokio::sync::{
     MutexGuard as AsyncMutexGuard, Notify, Semaphore, broadcast, mpsc, oneshot, watch,
 };
@@ -99,6 +99,15 @@ type Connection = <PlatformIpc as PeerAuth>::Connection;
 
 /// A bound endpoint owning its name, named through the OS boundary.
 type Listener = <PlatformIpc as IpcTransport>::Listener;
+
+/// Proof that a connection came through [`IpcServer::verify_peer`]: only
+/// [`IpcServer::handle_connection`] makes one, and a relay session needs it to
+/// open a connection of its own into the connection body.
+pub(crate) struct VerifiedPeer(());
+
+/// The buffer of one internal connection, each way: it only paces the bytes
+/// of a frame, which is never bounded by it.
+const INTERNAL_CONNECTION_BUFFER: usize = 64 * 1024;
 
 /// Upper bound on a single `send_text` payload. Independent of the frame size
 /// limit: a payload that fits in a frame can still be more text than any
@@ -260,6 +269,16 @@ impl ConnectionState {
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             open_sends: Arc::new(AtomicUsize::new(0)),
             held_read: inbox::HeldSlot::default(),
+        }
+    }
+
+    /// The state of a relay session's own connection, acting as `origin`: the
+    /// identity the session settled, with no window claim of its own and no
+    /// peer executable, so it never becomes an approver.
+    fn internal(conn_id: u64, origin: RequestOrigin) -> Self {
+        Self {
+            origin,
+            ..Self::new(conn_id, None)
         }
     }
 
@@ -1047,6 +1066,8 @@ pub struct IpcServer {
     /// Held only so the registry's notice launcher, which refers to it
     /// weakly, stays live for as long as this server does.
     _notice_agents: Arc<notice_queue::NoticeAgents>,
+    /// How many relay sessions are open, per window and without one.
+    relay_sessions: Arc<crate::mcp::relay_session::SessionCounts>,
 }
 
 impl IpcServer {
@@ -1132,6 +1153,7 @@ impl IpcServer {
             health_checks: Semaphore::new(1),
             palette_store: store_gate::StoreGate::disabled(),
             _notice_agents: notice_agents,
+            relay_sessions: Arc::default(),
         }
     }
 
@@ -1307,28 +1329,97 @@ impl IpcServer {
         yagura_os::is_authorized_peer(peer.as_deref(), owner)
     }
 
-    /// Drives a single accepted connection until it disconnects, is
-    /// superseded, sends `shutdown`, or sends a frame that mandates
-    /// disconnection per the malformed-frame rules.
+    /// Drives a single accepted connection: verifies its peer, then serves it
+    /// as a relay session when its first frame is a `relay_hello`, and as an
+    /// IPC connection otherwise.
     async fn handle_connection(self: Arc<Self>, connection: Connection, owner: &str) {
         if !Self::verify_peer(&connection, owner) {
             tracing::warn!("rejecting ipc connection: peer verification failed");
             return;
         }
+        let verified = VerifiedPeer(());
 
-        // Captured before the split consumes the `Connection`, and
-        // canonicalized here so no later frame has to: one local filesystem
-        // lookup per accepted connection, on the task that already ran
-        // `verify_peer`'s synchronous OS calls, is too short to be worth a
-        // `spawn_blocking` hop.
+        // Captured before the stream is handed on, and canonicalized here so no
+        // later frame has to: one local filesystem lookup per accepted
+        // connection, on the task that already ran `verify_peer`'s synchronous
+        // OS calls, is too short to be worth a `spawn_blocking` hop.
         let peer_executable = PlatformIpc::default()
             .peer_executable(&connection)
             .and_then(|path| path.canonicalize().ok());
 
+        let mut connection = connection;
+        let mut read_buf: Vec<u8> = Vec::new();
+        let mut recv_chunk = [0u8; 8192];
+        loop {
+            match frame_decode(&read_buf) {
+                Ok(Some((body, _))) => {
+                    if crate::mcp::relay_session::is_relay_hello(body) {
+                        crate::mcp::relay_session::serve(self, verified, connection, read_buf)
+                            .await;
+                        return;
+                    }
+                    break;
+                }
+                // The connection body answers an oversized frame itself.
+                Err(FrameError::TooLarge) => break,
+                Ok(None) => match connection.read(&mut recv_chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => read_buf.extend_from_slice(&recv_chunk[..n]),
+                },
+            }
+        }
+
+        let state = ConnectionState::new(
+            self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            peer_executable,
+        );
+        self.serve_connection(connection, state, read_buf).await;
+    }
+
+    /// Opens a connection of a relay session's own into the connection body,
+    /// acting as `origin`, and returns its client end. Dropping that end is the
+    /// connection's end, as a client closing its IPC connection is.
+    pub(crate) fn open_internal_connection(
+        self: &Arc<Self>,
+        _verified: &VerifiedPeer,
+        origin: RequestOrigin,
+    ) -> DuplexStream {
+        let (client, body) = tokio::io::duplex(INTERNAL_CONNECTION_BUFFER);
+        let state =
+            ConnectionState::internal(self.next_conn_id.fetch_add(1, Ordering::Relaxed), origin);
+        let server = Arc::clone(self);
+        tokio::spawn(async move {
+            server.serve_connection(body, state, Vec::new()).await;
+        });
+        client
+    }
+
+    /// The relay sessions open on this server.
+    pub(crate) fn relay_sessions(&self) -> &Arc<crate::mcp::relay_session::SessionCounts> {
+        &self.relay_sessions
+    }
+
+    /// The configuration this server runs with.
+    pub(crate) fn config(&self) -> &DaemonConfig {
+        &self.config
+    }
+
+    /// The connection body: serves one connection whose peer is already
+    /// verified until it disconnects, is superseded, sends `shutdown`, or sends
+    /// a frame that mandates disconnection per the malformed-frame rules.
+    /// `read_buf` holds what was read from it before.
+    async fn serve_connection<S>(
+        self: Arc<Self>,
+        stream: S,
+        mut state: ConnectionState,
+        mut read_buf: Vec<u8>,
+    ) where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
         // Splitting the connection lets the write side block independently of
         // the read side: everything sent goes through the queue `write_loop`
         // drains, so a client that stops reading cannot stall the reader.
-        let (mut reader, writer) = tokio::io::split(connection);
+        let (mut reader, writer) = tokio::io::split(stream);
         let (tx, rx) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAPACITY);
         // Detached: dropping `outbound` at the end of this function closes the
         // queue, and the writer task then flushes what is still queued (e.g.
@@ -1338,16 +1429,49 @@ impl IpcServer {
         // only reason it is reference-counted.
         let outbound = Arc::new(Outbound::new(tx));
 
-        let mut read_buf: Vec<u8> = Vec::new();
         let mut recv_chunk = [0u8; 8192];
-        let mut state = ConnectionState::new(
-            self.next_conn_id.fetch_add(1, Ordering::Relaxed),
-            peer_executable,
-        );
 
         'conn: loop {
             if outbound.is_broken() {
                 break 'conn;
+            }
+
+            // The frames read so far, before reading on: the first may have
+            // been read before this body ran.
+            loop {
+                match frame_decode(&read_buf) {
+                    Ok(Some((body, consumed))) => {
+                        let body_owned = body.to_vec();
+                        read_buf.drain(..consumed);
+                        let outcome = handle_while_reading(
+                            self.handle_frame(&outbound, &body_owned, &mut state),
+                            &mut reader,
+                            &mut read_buf,
+                            &mut recv_chunk,
+                            &outbound,
+                        )
+                        .await;
+                        match outcome {
+                            FrameOutcome::Continue => {}
+                            FrameOutcome::Disconnect => break 'conn,
+                            FrameOutcome::Shutdown => {
+                                // Every window's child process tree must be
+                                // terminated before exiting.
+                                self.registry.terminate_all().await;
+                                let _ = self.shutdown_tx.send(true);
+                                break 'conn;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(FrameError::TooLarge) => {
+                        outbound.reply(&error_msg(
+                            "frame_too_large",
+                            "frame body exceeds maximum size",
+                        ));
+                        break 'conn;
+                    }
+                }
             }
 
             tokio::select! {
@@ -1398,45 +1522,7 @@ impl IpcServer {
                 read_result = reader.read(&mut recv_chunk) => {
                     match read_result {
                         Ok(0) | Err(_) => break 'conn,
-                        Ok(n) => {
-                            read_buf.extend_from_slice(&recv_chunk[..n]);
-                            loop {
-                                match frame_decode(&read_buf) {
-                                    Ok(Some((body, consumed))) => {
-                                        let body_owned = body.to_vec();
-                                        read_buf.drain(..consumed);
-                                        let outcome = handle_while_reading(
-                                            self.handle_frame(&outbound, &body_owned, &mut state),
-                                            &mut reader,
-                                            &mut read_buf,
-                                            &mut recv_chunk,
-                                            &outbound,
-                                        )
-                                        .await;
-                                        match outcome {
-                                            FrameOutcome::Continue => {}
-                                            FrameOutcome::Disconnect => break 'conn,
-                                            FrameOutcome::Shutdown => {
-                                                // Every window's child process
-                                                // tree must be terminated
-                                                // before exiting.
-                                                self.registry.terminate_all().await;
-                                                let _ = self.shutdown_tx.send(true);
-                                                break 'conn;
-                                            }
-                                        }
-                                    }
-                                    Ok(None) => break,
-                                    Err(FrameError::TooLarge) => {
-                                        outbound.reply(&error_msg(
-                                            "frame_too_large",
-                                            "frame body exceeds maximum size",
-                                        ));
-                                        break 'conn;
-                                    }
-                                }
-                            }
-                        }
+                        Ok(n) => read_buf.extend_from_slice(&recv_chunk[..n]),
                     }
                 }
             }
@@ -4479,7 +4565,7 @@ async fn handle_while_reading<R: tokio::io::AsyncRead + Unpin>(
 /// at the first write error. A write error also closes the queue, so the
 /// connection task observes the dead peer instead of queueing frames nobody
 /// will read.
-async fn write_loop(mut writer: WriteHalf<Connection>, mut rx: mpsc::Receiver<Vec<u8>>) {
+async fn write_loop<S: AsyncWrite>(mut writer: WriteHalf<S>, mut rx: mpsc::Receiver<Vec<u8>>) {
     while let Some(frame) = rx.recv().await {
         if writer.write_all(&frame).await.is_err() {
             rx.close();

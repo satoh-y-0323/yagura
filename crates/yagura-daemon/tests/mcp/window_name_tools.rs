@@ -8,9 +8,11 @@
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use yagura_mcp::plan_tools::{OpenTaskWindowArgs, open_task_window};
-use yagura_mcp::tools::{OpenWindowArgs, SendHandoffArgs, ToolError, open_window, send_handoff};
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::plan_tools::{OpenTaskWindowArgs, open_task_window};
+use yagura_daemon::mcp::tools::{
+    OpenWindowArgs, SendHandoffArgs, ToolError, open_window, send_handoff,
+};
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
 /// A transport that answers any request with one scripted response.

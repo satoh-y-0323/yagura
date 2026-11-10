@@ -471,6 +471,27 @@ pub fn holder_path() -> PathBuf {
     path
 }
 
+/// Path to the `yagura-mcp` binary (a window's relay) of the profile the
+/// running test binary was built in.
+///
+/// # Panics
+///
+/// Panics if the running executable's own path cannot be resolved, or if the
+/// relay is not built -- build it with `cargo build -p yagura-mcp --bins`
+/// first.
+#[must_use]
+pub fn relay_path() -> PathBuf {
+    let exe =
+        std::env::current_exe().expect("current_exe should resolve for a running test binary");
+    let path = fixture_bin_dir(&exe).join(format!("yagura-mcp{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.exists(),
+        "yagura-mcp is missing at {}: run `cargo build -p yagura-mcp --bins` before the tests          that start a window's relay",
+        path.display()
+    );
+    path
+}
+
 /// Copies into `dir` what a daemon installed there needs beside it to open a
 /// window: the holder and, on Unix, the watcher the holder starts beside
 /// itself, or on Windows the bundled pseudoconsole pair placed beside the

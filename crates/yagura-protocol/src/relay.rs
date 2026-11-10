@@ -191,3 +191,59 @@ pub fn rpc_error_line(id: &Value, word: &str, sentence: &str) -> String {
 fn error_text(word: &str, sentence: &str) -> String {
     format!("{word}: {sentence}")
 }
+
+/// What a relay or a daemon reads of one JSON-RPC line: only its `method`,
+/// its `id` and, for a notification, `params.requestId` (the request a
+/// `notifications/cancelled` cancels). See [`read_line`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A request: a `method` and an `id` that is not null.
+    Request {
+        /// The request's id.
+        id: Value,
+        /// The request's method.
+        method: String,
+    },
+    /// A notification: a `method` and no `id` (or a null one).
+    Notification {
+        /// The notification's method.
+        method: String,
+        /// Its `params.requestId`, when it has one.
+        cancels: Option<Value>,
+    },
+    /// An answer: an `id` and no `method`.
+    Answer {
+        /// The id of the request it answers.
+        id: Value,
+    },
+    /// Neither: not a JSON object, or an object with no `method` and no `id`.
+    Other,
+}
+
+/// Reads what [`Line`] holds of the JSON-RPC line `line`.
+///
+/// This function does not fail: a line that is not a JSON object is
+/// [`Line::Other`].
+#[must_use]
+pub fn read_line(line: &str) -> Line {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(line) else {
+        return Line::Other;
+    };
+    let method = object
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let id = object.get("id").filter(|id| !id.is_null()).cloned();
+    match (method, id) {
+        (Some(method), Some(id)) => Line::Request { id, method },
+        (Some(method), None) => {
+            let cancels = object
+                .get("params")
+                .and_then(|params| params.get("requestId"))
+                .cloned();
+            Line::Notification { method, cancels }
+        }
+        (None, Some(id)) => Line::Answer { id },
+        (None, None) => Line::Other,
+    }
+}

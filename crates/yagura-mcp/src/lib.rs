@@ -1,11 +1,7 @@
-//! `yagura-mcp`: a thin MCP stdio bridge in front of the yagura daemon.
+//! `yagura-mcp`: the relay a CLI starts as its MCP server.
 //!
-//! Owns no PTYs or child processes: it forwards MCP tool calls to the daemon's
-//! local IPC endpoint and maps the daemon's responses onto the MCP tool
-//! contract.
+//! Owns no PTYs, child processes or MCP tools: it carries the CLI's JSON-RPC
+//! lines to the daemon, which serves MCP, over the relay contract
+//! ([`yagura_protocol::relay`]).
 
-pub mod plan_tools;
-pub mod report_tools;
-pub mod ticket_tools;
-pub mod tools;
-pub mod transport;
+pub mod relay;

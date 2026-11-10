@@ -1,5 +1,5 @@
 //! The two MCP report tools: argument validation, the `ClientMessage` each
-//! sends over [`crate::transport::DaemonTransport`], and the mapping of the
+//! sends over [`super::DaemonTransport`], and the mapping of the
 //! daemon's reply onto the MCP tool contract.
 //!
 //! The size and shape rules for `summary` and `path` belong to the daemon:
@@ -11,11 +11,11 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::tools::{
+use super::DaemonTransport;
+use super::tools::{
     ToolError, map_daemon_error, map_transport_error, require_non_empty, to_json,
     unexpected_response,
 };
-use crate::transport::DaemonTransport;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome};
 
 /// Parses the caller's `outcome` string into the typed [`ReportOutcome`],

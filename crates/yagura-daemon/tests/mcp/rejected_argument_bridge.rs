@@ -5,8 +5,8 @@
 
 use std::sync::Mutex;
 
-use yagura_mcp::tools::{OpenWindowArgs, open_window};
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::tools::{OpenWindowArgs, open_window};
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{ClientMessage, DaemonMessage};
 
 /// A transport that answers any request with one scripted response.
@@ -82,9 +82,10 @@ mod real_daemon {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use yagura_daemon::mcp::tools::{list_windows, open_window};
     use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry};
-    use yagura_mcp::tools::{list_windows, open_window};
-    use yagura_mcp::transport::EndpointTransport;
+
+    use crate::mcp::EndpointTransport;
     use yagura_test_support::ipc::{reply_within, unique_endpoint_name};
 
     use super::open_window_args;

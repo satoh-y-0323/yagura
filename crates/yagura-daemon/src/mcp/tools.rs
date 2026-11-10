@@ -1,5 +1,5 @@
-//! The pure MCP tool logic: argument validation, the `ClientMessage` this
-//! crate sends over [`crate::transport::DaemonTransport`], and the mapping
+//! The pure MCP tool logic: argument validation, the `ClientMessage` the
+//! daemon's MCP layer sends over [`super::DaemonTransport`], and the mapping
 //! of the daemon's reply onto the MCP tool contract.
 //!
 //! It has no I/O of its own (it is generic over `T: DaemonTransport`), so it
@@ -8,16 +8,14 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::transport::{
-    DaemonTransport, RequesterIdentity, TransportError, UNKNOWN_TYPE_CODE, message_kind,
-};
+use super::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     ClientMessage, ControlKey, DaemonMessage, OnNameTaken, WindowStatus, validate_control_keys,
 };
 
 /// The fixed MCP error-code vocabulary, exposed via
 /// [`ToolError::code`]. Mapping it onto the MCP `content` / `isError` JSON
-/// shape is `main.rs`'s job.
+/// shape is `server.rs`'s job.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolError {
     /// The daemon could not be reached (`TransportError::Unavailable`).
@@ -29,8 +27,7 @@ pub enum ToolError {
     /// The daemon reported that the referenced window is not known to it.
     #[error("window not found: {0}")]
     WindowNotFound(String),
-    /// The request used a feature this bridge/daemon does not implement yet,
-    /// or one the running daemon's wire revision is too old to carry.
+    /// The request used a feature the daemon does not implement.
     #[error("unsupported: {0}")]
     Unsupported(String),
     /// The daemon reported that the target window's child process has
@@ -237,7 +234,7 @@ pub struct WaitForStatusArgs {
     /// into the typed wire field; `"unknown"` is refused.
     pub target_status: Option<String>,
     /// Maximum time to wait, in seconds. The wire field is a bare `u64`,
-    /// so this bridge has no default of its own to apply.
+    /// so the MCP layer has no default of its own to apply.
     pub timeout_sec: Option<u64>,
 }
 
@@ -307,6 +304,81 @@ pub struct ReadChatArgs {
     pub limit: Option<u32>,
 }
 
+/// Names the variant of `message` without dumping its payload: a
+/// `DaemonMessage` can carry a window id or a `send_message` body, which must
+/// never end up embedded in an error string via a `{:?}` of the whole value.
+pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
+    match message {
+        DaemonMessage::Attached { .. } => "Attached",
+        DaemonMessage::Frame(_) => "Frame",
+        DaemonMessage::SelectionText { .. } => "SelectionText",
+        DaemonMessage::Exit { .. } => "Exit",
+        DaemonMessage::Pong => "Pong",
+        DaemonMessage::Error { .. } => "Error",
+        DaemonMessage::StatusChanged { .. } => "StatusChanged",
+        DaemonMessage::WindowOpened { .. } => "WindowOpened",
+        DaemonMessage::WindowList { .. } => "WindowList",
+        DaemonMessage::WindowStatus { .. } => "WindowStatus",
+        DaemonMessage::TextSent { .. } => "TextSent",
+        DaemonMessage::KeysSent { .. } => "KeysSent",
+        DaemonMessage::WindowInterrupted { .. } => "WindowInterrupted",
+        DaemonMessage::WindowClosed { .. } => "WindowClosed",
+        DaemonMessage::WaitResult { .. } => "WaitResult",
+        DaemonMessage::WindowRenamed { .. } => "WindowRenamed",
+        DaemonMessage::WindowOutput { .. } => "WindowOutput",
+        DaemonMessage::DetectionList { .. } => "DetectionList",
+        DaemonMessage::RestoreCandidateList { .. } => "RestoreCandidateList",
+        DaemonMessage::WindowLayoutUpdated { .. } => "WindowLayoutUpdated",
+        DaemonMessage::ProfileList { .. } => "ProfileList",
+        DaemonMessage::Identified { .. } => "Identified",
+        DaemonMessage::ApproverRegistered { .. } => "ApproverRegistered",
+        DaemonMessage::ApprovalRequested { .. } => "ApprovalRequested",
+        DaemonMessage::ApprovalWithdrawn { .. } => "ApprovalWithdrawn",
+        DaemonMessage::ApprovalResolved { .. } => "ApprovalResolved",
+        DaemonMessage::HandoffSent { .. } => "HandoffSent",
+        DaemonMessage::ChatPosted { .. } => "ChatPosted",
+        DaemonMessage::ChatMessages { .. } => "ChatMessages",
+        DaemonMessage::ChatChanged { .. } => "ChatChanged",
+        DaemonMessage::ChatParticipantsChanged => "ChatParticipantsChanged",
+        DaemonMessage::ChatHistoryCleared { .. } => "ChatHistoryCleared",
+        DaemonMessage::ChatRoomCleared { .. } => "ChatRoomCleared",
+        DaemonMessage::ChatRoomDeleted { .. } => "ChatRoomDeleted",
+        DaemonMessage::ChatRooms { .. } => "ChatRooms",
+        DaemonMessage::ProtocolRevision { .. } => "ProtocolRevision",
+        DaemonMessage::DaemonHealth { .. } => "DaemonHealth",
+        DaemonMessage::Delivery { .. } => "Delivery",
+        DaemonMessage::SessionRecorded { .. } => "SessionRecorded",
+        DaemonMessage::DeliverConfirmed { .. } => "DeliverConfirmed",
+        DaemonMessage::PlanDetail { .. } => "PlanDetail",
+        DaemonMessage::PlanList { .. } => "PlanList",
+        DaemonMessage::PlanDeleted { .. } => "PlanDeleted",
+        DaemonMessage::RoleList { .. } => "RoleList",
+        DaemonMessage::TaskWindowOpened { .. } => "TaskWindowOpened",
+        DaemonMessage::PlanChanged { .. } => "PlanChanged",
+        DaemonMessage::ReportSent { .. } => "ReportSent",
+        DaemonMessage::Reports { .. } => "Reports",
+        DaemonMessage::ModelChoicesRequested { .. } => "ModelChoicesRequested",
+        DaemonMessage::ModelChoices { .. } => "ModelChoices",
+        DaemonMessage::ModelAliasesSaved { .. } => "ModelAliasesSaved",
+        DaemonMessage::ProfileEnabledSet { .. } => "ProfileEnabledSet",
+        DaemonMessage::ProfileDetail { .. } => "ProfileDetail",
+        DaemonMessage::ProfileCommandSet { .. } => "ProfileCommandSet",
+        DaemonMessage::ApprovalSettings { .. } => "ApprovalSettings",
+        DaemonMessage::AutoApproveSet { .. } => "AutoApproveSet",
+        DaemonMessage::PlanApprovalRequiredSet { .. } => "PlanApprovalRequiredSet",
+        DaemonMessage::McpRegistrationsListed { .. } => "McpRegistrationsListed",
+        DaemonMessage::McpRegistrationStatus { .. } => "McpRegistrationStatus",
+        DaemonMessage::McpRegistrationRequested { .. } => "McpRegistrationRequested",
+        DaemonMessage::McpRegistrationResult { .. } => "McpRegistrationResult",
+        DaemonMessage::TicketWorkspaceList { .. } => "TicketWorkspaceList",
+        DaemonMessage::TicketList { .. } => "TicketList",
+        DaemonMessage::TicketDetail { .. } => "TicketDetail",
+        DaemonMessage::MilestoneSet { .. } => "MilestoneSet",
+        DaemonMessage::TicketChanged { .. } => "TicketChanged",
+        DaemonMessage::HookInputWanted { .. } => "HookInputWanted",
+    }
+}
+
 /// The only `mode` value `send_message` implements; anything else is
 /// `unsupported`.
 const SEND_MESSAGE_MODE_IMMEDIATE: &str = "immediate";
@@ -315,7 +387,6 @@ pub(crate) fn map_transport_error(err: TransportError) -> ToolError {
     match err {
         TransportError::Unavailable(message) => ToolError::DaemonUnavailable(message),
         TransportError::Protocol(message) => ToolError::Internal(message),
-        TransportError::Unsupported(message) => ToolError::Unsupported(message),
     }
 }
 
@@ -327,7 +398,6 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "invalid_argument" => ToolError::InvalidArgument(message),
         "window_not_found" => ToolError::WindowNotFound(message),
         "unsupported" => ToolError::Unsupported(message),
-        UNKNOWN_TYPE_CODE => ToolError::Unsupported(message),
         "child_exited" => ToolError::ChildExited(message),
         "resource_exhausted" => ToolError::ResourceExhausted(message),
         "spawn_failed" => ToolError::SpawnFailed(message),
@@ -559,7 +629,7 @@ pub async fn get_window_status<T: DaemonTransport>(
 /// therefore does not decide how the line is submitted, only that a caller
 /// who wrote LF still gets a terminated line; a caller with several lines to
 /// deliver sends them one at a time, or writes them into a plan task's
-/// `instruction` (see [`crate::plan_tools::create_plan`]).
+/// `instruction` (see [`super::plan_tools::create_plan`]).
 fn normalize_line_endings(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
     let mut previous_was_cr = false;
@@ -708,7 +778,7 @@ pub async fn open_window<T: DaemonTransport>(
 
 /// `interrupt_window`: `window_id` is required and non-empty. The approval
 /// gate, the `Unknown` status gate and the interrupt byte sequence all live
-/// in the daemon; this bridge relays its refusal codes unchanged.
+/// in the daemon; the MCP layer relays its refusal codes unchanged.
 ///
 /// Only `DaemonMessage::WindowInterrupted` counts as success: control
 /// responses are not interchangeable.
@@ -1019,7 +1089,7 @@ fn require_handoff_text(
 /// protocol's own validators before any daemon round trip, so a malformed
 /// request never reaches the approval gate. The envelope's own size limit,
 /// the profile's existence and the readiness wait all belong to the daemon;
-/// this bridge relays its refusal codes unchanged.
+/// the MCP layer relays its refusal codes unchanged.
 ///
 /// Only `DaemonMessage::HandoffSent` counts as success: any other non-error
 /// reply is a daemon contract violation, not a silent delivery.
@@ -1121,7 +1191,7 @@ fn chat_posted_result(
 /// The body is checked with the protocol's own validator before any daemon
 /// round trip, so a malformed post never reaches the approval gate. Mention
 /// resolution, the room's halt state and the approval decision all belong to
-/// the daemon; this bridge relays its refusal codes unchanged.
+/// the daemon; the MCP layer relays its refusal codes unchanged.
 pub async fn send_chat<T: DaemonTransport>(
     transport: &T,
     args: SendChatArgs,

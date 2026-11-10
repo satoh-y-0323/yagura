@@ -12,9 +12,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
-use yagura_mcp::report_tools::{SendReportArgs, WaitForReportArgs, send_report, wait_for_report};
-use yagura_mcp::tools::ToolError;
-use yagura_mcp::transport::{DaemonTransport, RequesterIdentity, TransportError};
+use yagura_daemon::mcp::report_tools::{
+    SendReportArgs, WaitForReportArgs, send_report, wait_for_report,
+};
+use yagura_daemon::mcp::tools::ToolError;
+use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     AwaitingWindow, ClientMessage, DaemonMessage, REPORT_SUMMARY_MAX_BYTES, ReceivedReport,
     ReportOutcome, ReportTaskRef, WindowStatus,
@@ -318,22 +320,9 @@ async fn report_tools_keep_the_daemons_refusal_codes_under_their_own_names() {
 }
 
 #[tokio::test]
-async fn report_tools_map_an_older_daemon_an_unreachable_one_and_a_stray_reply() {
+async fn report_tools_map_an_unreachable_daemon_and_a_stray_reply() {
     for tool in ALL_REPORT_TOOLS {
-        let cases: [(Result<DaemonMessage, TransportError>, &str); 4] = [
-            (
-                Ok(daemon_error(
-                    "unknown_type",
-                    "the daemon does not recognize this message type",
-                )),
-                "unsupported",
-            ),
-            (
-                Err(TransportError::Unsupported(
-                    "the running daemon is too old for this request".to_string(),
-                )),
-                "unsupported",
-            ),
+        let cases: [(Result<DaemonMessage, TransportError>, &str); 2] = [
             (
                 Err(TransportError::Unavailable(
                     "pipe not connected".to_string(),
