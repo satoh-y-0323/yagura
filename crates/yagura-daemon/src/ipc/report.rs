@@ -19,9 +19,12 @@
 //!
 //! Each report inbox is the copy of what the store keeps for its window
 //! ([`crate::parcel_store`]): a report queued is kept, and a drain forgets
-//! them, so a next daemon hands out the reports this one accepted.
+//! them, so a next daemon hands out the reports this one accepted. A report
+//! sent is shown to no waiter and no door until its row is written, and the
+//! reports show in the order they were sent: `send_report` answers for one
+//! whose row could not be written by refusing it, and it never shows.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,7 +38,8 @@ use yagura_protocol::{
 use crate::approval::ApprovalBroker;
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
-use crate::parcel_store::{KeptReport, ParcelStore};
+use crate::inbox::{SaveOutcome, Saving};
+use crate::parcel_store::{KeptReport, Written};
 use crate::plan_permit::{self, PermitError, TaskBinding};
 use crate::pty::lock_recover;
 use crate::store::StoreError;
@@ -65,7 +69,6 @@ pub(super) struct ReportBody {
 /// kept in the registry's store when it has one.
 pub struct ReportInboxes {
     registry: Arc<WindowRegistry>,
-    store: Option<ParcelStore>,
     /// Held across every change to a notice's state and the matching deposit,
     /// revision or withdrawal in the window's own inbox, so the two never
     /// disagree. Taken before that inbox's lock, which never calls back here.
@@ -78,7 +81,11 @@ pub struct ReportInboxes {
 
 #[derive(Default)]
 struct Inbox {
-    reports: Vec<ReceivedReport>,
+    /// The reports shown, oldest first, each at its place in the store.
+    reports: Vec<(i64, ReceivedReport)>,
+    /// The reports sent whose rows are being written, by place: each shows
+    /// once it and every older one here are settled.
+    writing: BTreeMap<i64, Writing>,
     /// Slots promised to a `send_report` whose ledger write is still running.
     reserved: usize,
     waiters: VecDeque<(u64, oneshot::Sender<Vec<ReceivedReport>>)>,
@@ -105,16 +112,26 @@ enum Notice {
     Typed,
 }
 
+/// A report whose row is being written.
+struct Writing {
+    report: ReceivedReport,
+    /// How its write came out, once told.
+    outcome: Option<SaveOutcome>,
+}
+
 impl Inbox {
     fn is_idle(&self) -> bool {
-        self.reports.is_empty() && self.reserved == 0 && self.waiters.is_empty()
+        self.reports.is_empty()
+            && self.writing.is_empty()
+            && self.reserved == 0
+            && self.waiters.is_empty()
     }
 
     /// The places `count` reports take in the store: ahead of the queued
-    /// ones when `older`, behind them otherwise.
+    /// and written ones when `older`, behind them otherwise.
     fn places(&mut self, count: usize, older: bool) -> Vec<i64> {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
-        if self.reports.is_empty() {
+        if self.reports.is_empty() && self.writing.is_empty() {
             self.first_seq = 0;
             self.next_seq = 0;
         }
@@ -144,7 +161,6 @@ impl ReportInboxes {
     #[must_use]
     pub fn new(registry: Arc<WindowRegistry>) -> Self {
         Self {
-            store: registry.parcel_store(),
             registry,
             inboxes: Mutex::new(HashMap::new()),
             next_waiter_id: AtomicU64::new(0),
@@ -157,7 +173,7 @@ impl ReportInboxes {
     fn reserve(self: &Arc<Self>, window_id: &str) -> Option<InboxSlot> {
         let mut inboxes = lock_recover(&self.inboxes);
         let inbox = inboxes.entry(window_id.to_string()).or_default();
-        if inbox.reports.len() + inbox.reserved >= REPORT_INBOX_MAX {
+        if inbox.reports.len() + inbox.writing.len() + inbox.reserved >= REPORT_INBOX_MAX {
             return None;
         }
         inbox.reserved += 1;
@@ -168,9 +184,10 @@ impl ReportInboxes {
         })
     }
 
-    /// Hands `reports` to `window_id`'s oldest waiter, or queues them.
-    /// `older` puts them ahead of what is already queued (a waiter that
-    /// could not take them after all hands them back).
+    /// Hands `reports` to `window_id`'s oldest waiter, or queues them, at
+    /// once: they were accepted before (a waiter that could not take them
+    /// after all hands them back), or the inbox keeps nothing. `older` puts
+    /// them ahead of what is already queued.
     fn put(
         self: &Arc<Self>,
         window_id: &str,
@@ -181,6 +198,7 @@ impl ReportInboxes {
         // Looked up before the inboxes' lock, which the registry's is never
         // taken under.
         let entry = self.registry.get(window_id);
+        let store = self.registry.parcel_store().filter(|_| entry.is_some());
         let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
             let inbox = inboxes.entry(window_id.to_string()).or_default();
@@ -190,38 +208,160 @@ impl ReportInboxes {
             let Some(reports) = hand_to_waiter(inbox, reports) else {
                 return;
             };
+            let places = inbox.places(reports.len(), older);
             // Kept under the same lock a drain forgets them under, so the
-            // store follows the inbox's order.
-            if let Some(store) = self.store.as_ref().filter(|_| entry.is_some()) {
-                let places = inbox.places(reports.len(), older);
-                let kept: Vec<(i64, &ReceivedReport)> = places.into_iter().zip(&reports).collect();
-                store.keep_reports(window_id, &kept);
+            // store follows the inbox's order. Shown whatever the write says:
+            // nothing waits on it.
+            if let Some(store) = &store {
+                let kept: Vec<(i64, &ReceivedReport)> =
+                    places.iter().copied().zip(&reports).collect();
+                drop(store.keep_reports(window_id, &kept));
             }
-            if older {
-                inbox.reports.splice(0..0, reports);
-            } else {
-                inbox.reports.extend(reports);
+            self.queue(
+                inbox,
+                entry.as_deref(),
+                places.into_iter().zip(reports).collect(),
+                older,
+            )
+        };
+        self.after_queue(window_id, entry, deposited);
+    }
+
+    /// Puts `report`, the one a slot was reserved for, in `window_id`'s
+    /// inbox behind the others. With a store it shows only once its row is
+    /// written, and only after every report sent before it is settled; the
+    /// returned [`Saving`] tells its sender how the write came out.
+    fn put_saved(self: &Arc<Self>, window_id: &str, report: ReceivedReport) -> Saving {
+        let entry = self.registry.get(window_id);
+        let Some(store) = self.registry.parcel_store().filter(|_| entry.is_some()) else {
+            self.put(window_id, vec![report], true, false);
+            return Saving::ready();
+        };
+        let (seq, written) = {
+            let mut inboxes = lock_recover(&self.inboxes);
+            let inbox = inboxes.entry(window_id.to_string()).or_default();
+            inbox.reserved = inbox.reserved.saturating_sub(1);
+            let Some(seq) = inbox.places(1, false).first().copied() else {
+                return Saving::ready();
+            };
+            let written = store.keep_reports(window_id, &[(seq, &report)]);
+            inbox.writing.insert(
+                seq,
+                Writing {
+                    report,
+                    outcome: None,
+                },
+            );
+            (seq, written)
+        };
+        let (told, outcome) = oneshot::channel();
+        let inboxes = Arc::clone(self);
+        let window_id = window_id.to_owned();
+        // Settled by a task of its own, so a sender that goes away cannot
+        // leave the reports behind this one held back.
+        tokio::spawn(async move {
+            let outcome = SaveOutcome::of(written.await.unwrap_or(Written::Failed));
+            inboxes.settle_write(&window_id, seq, outcome);
+            let _ = told.send(outcome);
+        });
+        Saving::of(outcome)
+    }
+
+    /// Records how the write of the report at `seq` came out, and shows every
+    /// report whose turn that settles: a report whose row was not written
+    /// leaves, and holds nothing back.
+    fn settle_write(self: &Arc<Self>, window_id: &str, seq: i64, outcome: SaveOutcome) {
+        let entry = self.registry.get(window_id);
+        let store = self.registry.parcel_store();
+        let deposited = {
+            let mut inboxes = lock_recover(&self.inboxes);
+            let Some(inbox) = inboxes.get_mut(window_id) else {
+                return;
+            };
+            if let Some(writing) = inbox.writing.get_mut(&seq) {
+                writing.outcome = Some(outcome);
             }
-            let fell_due = inbox.notice == Notice::Lowered && !inbox.reports.is_empty();
-            if fell_due {
-                inbox.notice = Notice::Due;
-                inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
-            }
-            let pending = inbox.reports.len();
-            // A window that declares no delivery is handed no notice: its
-            // reports stay readable through `wait_for_report`.
-            match entry.as_ref().filter(|entry| entry.delivers()) {
-                Some(entry) if fell_due => Some((deposit_notice(entry, pending), inbox.stretch)),
-                Some(entry) if inbox.notice == Notice::Due => {
-                    // The notice still waiting tells the count as it is now.
-                    let _ = entry
-                        .inbox()
-                        .revise(REPORT_NOTICE_KEY, notice_text(pending));
-                    None
+            let mut settled = Vec::new();
+            while let Some(oldest) = inbox.writing.first_entry() {
+                let Some(outcome) = oldest.get().outcome else {
+                    break;
+                };
+                let (seq, writing) = oldest.remove_entry();
+                if outcome == SaveOutcome::Saved {
+                    settled.push((seq, writing.report));
                 }
-                _ => None,
+            }
+            if settled.is_empty() {
+                if inbox.is_idle() {
+                    inboxes.remove(window_id);
+                }
+                return;
+            }
+            let (seqs, reports): (Vec<i64>, Vec<ReceivedReport>) = settled.into_iter().unzip();
+            match hand_to_waiter(inbox, reports) {
+                Some(reports) => self.queue(
+                    inbox,
+                    entry.as_deref(),
+                    seqs.into_iter().zip(reports).collect(),
+                    false,
+                ),
+                None => {
+                    // A waiter read them: their rows go, as a drain's do.
+                    if let Some(store) = &store {
+                        store.forget_reports(window_id, seqs);
+                    }
+                    return;
+                }
             }
         };
+        self.after_queue(window_id, entry, deposited);
+    }
+
+    /// Queues `reports` (each at its place) in `inbox`, and makes or revises
+    /// the notice of them. Called under the inboxes' lock, so the notice and
+    /// the notice state never disagree.
+    fn queue(
+        &self,
+        inbox: &mut Inbox,
+        entry: Option<&WindowEntry>,
+        reports: Vec<(i64, ReceivedReport)>,
+        older: bool,
+    ) -> Option<(crate::inbox::Deposited, u64)> {
+        if older {
+            inbox.reports.splice(0..0, reports);
+        } else {
+            inbox.reports.extend(reports);
+        }
+        let fell_due = inbox.notice == Notice::Lowered && !inbox.reports.is_empty();
+        if fell_due {
+            inbox.notice = Notice::Due;
+            inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
+        }
+        let pending = inbox.reports.len();
+        // A window that declares no delivery is handed no notice: its
+        // reports stay readable through `wait_for_report`.
+        match entry.filter(|entry| entry.delivers()) {
+            Some(entry) if fell_due => Some((deposit_notice(entry, pending), inbox.stretch)),
+            Some(entry) if inbox.notice == Notice::Due => {
+                // The notice still waiting tells the count as it is now.
+                let _ = entry
+                    .inbox()
+                    .revise(REPORT_NOTICE_KEY, notice_text(pending));
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// What follows queueing reports for `window_id`, outside the inboxes'
+    /// lock: a notice deposited is confirmed once taken, and the window's
+    /// agent is woken.
+    fn after_queue(
+        self: &Arc<Self>,
+        window_id: &str,
+        entry: Option<Arc<WindowEntry>>,
+        deposited: Option<(crate::inbox::Deposited, u64)>,
+    ) {
         let Some(entry) = entry else {
             // Window ids are never reused, so nobody could read it again.
             self.discard(window_id);
@@ -271,14 +411,16 @@ impl ReportInboxes {
     /// between the emptiness check and the waiter's registration.
     fn take_or_wait(self: &Arc<Self>, window_id: &str, may_wait: bool, budget_left: bool) -> Taken {
         let entry = self.registry.get(window_id);
+        let store = self.registry.parcel_store();
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id)
             && !inbox.reports.is_empty()
         {
-            let reports = std::mem::take(&mut inbox.reports);
+            let (seqs, reports): (Vec<i64>, Vec<ReceivedReport>) =
+                std::mem::take(&mut inbox.reports).into_iter().unzip();
             inbox.notice = Notice::Lowered;
-            if let Some(store) = &self.store {
-                store.forget_reports(window_id);
+            if let Some(store) = &store {
+                store.forget_reports(window_id, seqs);
             }
             // The reports it announced were read.
             if let Some(entry) = &entry {
@@ -318,18 +460,11 @@ impl ReportInboxes {
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id) {
             inbox.reports.clear();
+            inbox.writing.clear();
             inbox.notice = Notice::Lowered;
             if inbox.is_idle() {
                 inboxes.remove(window_id);
             }
-        }
-    }
-
-    /// Returns once every report queued or drained so far is written to the
-    /// store (or failed): what answers for an accepted report waits for this.
-    pub(super) async fn kept(&self) {
-        if let Some(store) = &self.store {
-            store.kept().await;
         }
     }
 
@@ -351,7 +486,10 @@ impl ReportInboxes {
             if !inbox.reports.is_empty() {
                 return;
             }
-            inbox.reports = kept.into_iter().map(|kept| kept.report).collect();
+            inbox.reports = kept
+                .into_iter()
+                .map(|kept| (kept.seq, kept.report))
+                .collect();
             inbox.first_seq = first_seq;
             inbox.next_seq = next_seq;
             inbox.notice = Notice::Due;
@@ -456,9 +594,11 @@ struct InboxSlot {
 }
 
 impl InboxSlot {
-    fn deliver(mut self, report: ReceivedReport) {
+    /// Puts `report` in the reserved place; it shows once its row is
+    /// written, which the returned [`Saving`] tells.
+    fn deliver(mut self, report: ReceivedReport) -> Saving {
         self.held = false;
-        self.inboxes.put(&self.window_id, vec![report], true, false);
+        self.inboxes.put_saved(&self.window_id, report)
     }
 }
 
@@ -585,13 +725,8 @@ pub(super) async fn handle_send_report(
         Some(origin) => {
             send_task_report(inboxes, ledger, registry, broker, &entry, &origin, body).await
         }
-        None => send_opener_report(inboxes, registry, &entry, &body),
+        None => send_opener_report(inboxes, registry, &entry, &body).await,
     };
-    // Accepted only once kept: the report and the notice it put in the
-    // parent's inbox.
-    if matches!(reply, DaemonMessage::ReportSent { .. }) {
-        inboxes.kept().await;
-    }
     outbound.reply(&reply);
 }
 
@@ -607,7 +742,7 @@ fn validate_body(body: &ReportBody) -> Result<(), DaemonMessage> {
     Ok(())
 }
 
-fn send_opener_report(
+async fn send_opener_report(
     inboxes: &Arc<ReportInboxes>,
     registry: &WindowRegistry,
     entry: &WindowEntry,
@@ -619,10 +754,18 @@ fn send_opener_report(
     let Some(slot) = inboxes.reserve(&parent) else {
         return inbox_full_msg();
     };
-    slot.deliver(received_report(entry, body, None));
-    DaemonMessage::ReportSent {
-        delivered_to: Some(parent),
-        task: None,
+    let saving = slot.deliver(received_report(entry, body, None));
+    match saving.outcome().await {
+        SaveOutcome::Saved => DaemonMessage::ReportSent {
+            delivered_to: Some(parent),
+            task: None,
+        },
+        // The parent's row is gone: it is closing.
+        SaveOutcome::NoRow => no_parent_msg(),
+        SaveOutcome::Failed => {
+            tracing::warn!("a report's row could not be written; it is refused");
+            plan::internal_msg()
+        }
     }
 }
 
@@ -687,14 +830,27 @@ async fn send_task_report(
         .await;
 
     match decided {
-        Ok(Ok((parent, slot))) => {
+        Ok(Ok((mut parent, slot))) => {
             if let Some(slot) = slot {
                 #[cfg(feature = "fault-injection")]
                 registry
                     .config()
                     .faults
                     .reach(crate::fault_point::FaultPoint::TaskReportHalfWritten);
-                slot.deliver(report);
+                match slot.deliver(report).outcome().await {
+                    SaveOutcome::Saved => {}
+                    // The parent's row is gone: the ledger alone holds it.
+                    SaveOutcome::NoRow => parent = None,
+                    SaveOutcome::Failed => {
+                        tracing::warn!(
+                            "a task report's row in its parent's inbox could not be written"
+                        );
+                        broker.notify_approvers(&DaemonMessage::PlanChanged {
+                            plan_id: plan_id.clone(),
+                        });
+                        return plan::internal_msg();
+                    }
+                }
             }
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: plan_id.clone(),

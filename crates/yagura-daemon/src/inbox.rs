@@ -9,16 +9,19 @@
 //! parcel never reaches the CLI twice.
 //!
 //! An inbox given an [`InboxKeeper`] is the copy of what the store keeps for
-//! its window: each change is sent to the store under the inbox's lock.
+//! its window: each change is sent to the store under the inbox's lock. A
+//! parcel it keeps is shown to no door, push or wait until its row is
+//! written, and the parcels show in the order they were deposited: one whose
+//! row could not be written never shows, and holds nothing back.
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tokio::sync::{oneshot, watch};
 use yagura_protocol::{DaemonMessage, DeliveryStream, WindowStatus};
 
-use crate::parcel_store::{InboxKeeper, KeptParcel};
+use crate::parcel_store::{InboxKeeper, KeptParcel, Written};
 use crate::waiter::StatusAt;
 
 /// Between two parcels, and between the intro and the first parcel.
@@ -430,12 +433,63 @@ pub struct PushBudget {
     pub max: usize,
 }
 
+/// How a deposited parcel's row came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveOutcome {
+    /// Its row is written, or it needs none: it is unsaved, the inbox keeps
+    /// nothing, or it was turned away.
+    Saved,
+    /// Its window has no row to keep it with.
+    NoRow,
+    /// The write failed.
+    Failed,
+}
+
+impl SaveOutcome {
+    pub(crate) fn of(written: Written) -> Self {
+        match written {
+            Written::Rows(0) => Self::NoRow,
+            Written::Rows(_) => Self::Saved,
+            Written::Failed => Self::Failed,
+        }
+    }
+}
+
+/// Yields a deposit's [`SaveOutcome`] once its write has told it.
+pub(crate) struct Saving(Option<oneshot::Receiver<SaveOutcome>>);
+
+impl Saving {
+    /// A deposit that needed no write.
+    pub(crate) fn ready() -> Self {
+        Self(None)
+    }
+
+    /// A deposit whose outcome `outcome` yields; one never told failed.
+    pub(crate) fn of(outcome: oneshot::Receiver<SaveOutcome>) -> Self {
+        Self(Some(outcome))
+    }
+
+    pub(crate) async fn outcome(self) -> SaveOutcome {
+        match self.0 {
+            None => SaveOutcome::Saved,
+            Some(outcome) => outcome.await.unwrap_or(SaveOutcome::Failed),
+        }
+    }
+}
+
 /// One parcel as the inbox holds it: who learns how it left, and what its
 /// push draws on.
 struct Held {
     parcel: Parcel,
     /// Its place in the inbox as the store keeps it: lower is older.
     seq: i64,
+    /// Names it to the write that tells how its row came out.
+    id: u64,
+    /// Whether its row is written (or it needs none): only then may it show.
+    written: bool,
+    /// Whether its depositor woke the window's agent for it, which a parcel
+    /// held back has to be woken for again once it shows.
+    wakes: bool,
     end: Option<oneshot::Sender<ParcelEnd>>,
     budget: Option<PushBudget>,
 }
@@ -487,9 +541,21 @@ struct State {
     next_waiter: u64,
     /// The place the next parcel deposited takes.
     next_seq: i64,
+    next_id: u64,
 }
 
 impl State {
+    /// How many parcels show: the ones ahead of the first whose row is not
+    /// written yet.
+    fn shown(&self) -> usize {
+        self.parcels.iter().take_while(|held| held.written).count()
+    }
+
+    fn take_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
     /// Removes the waiting parcel named `key`; `None` when none waits.
     fn remove_waiting(&mut self, key: &str) -> Option<Held> {
         let position = self
@@ -523,13 +589,60 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Keeps `held` as it is now, unless it is unsaved. Called under the
-    /// inbox's lock, so the store sees the changes in the order the inbox
-    /// made them.
-    fn keep(&self, held: &Held) {
-        if let Some(keeper) = self.keeper.as_ref().filter(|_| held.parcel.saved) {
-            keeper.keep(held.kept());
+    /// Keeps `held`, unless it is unsaved, holding it back from showing
+    /// until its row is written. Called under the inbox's lock, so the store
+    /// sees the changes in the order the inbox made them.
+    fn keep(self: &Arc<Self>, held: &mut Held) -> Saving {
+        let Some(keeper) = self.keeper.as_ref().filter(|_| held.parcel.saved) else {
+            return Saving::ready();
+        };
+        held.written = false;
+        let (told, outcome) = oneshot::channel();
+        let shared = Arc::downgrade(self);
+        let id = held.id;
+        keeper.keep(
+            held.kept(),
+            Box::new(move |written| {
+                let outcome = SaveOutcome::of(written);
+                let wake =
+                    Weak::upgrade(&shared).is_some_and(|shared| shared.settle_write(id, outcome));
+                // A depositor that stopped listening has nothing left to learn.
+                let _ = told.send(outcome);
+                wake
+            }),
+        );
+        Saving::of(outcome)
+    }
+
+    /// Settles the write of parcel `id`: it may show now, or, its row not
+    /// written, it leaves without ever showing. Returns whether that showed a
+    /// parcel whose depositor woke the window's agent for it.
+    fn settle_write(&self, id: u64, outcome: SaveOutcome) -> bool {
+        let mut state = self.lock();
+        let before = state.shown();
+        // A parcel that left before its row was written has nothing to settle.
+        let Some(position) = state.parcels.iter().position(|held| held.id == id) else {
+            return false;
+        };
+        if outcome == SaveOutcome::Saved {
+            if let Some(held) = state.parcels.get_mut(position) {
+                held.written = true;
+            }
+        } else {
+            // Dropped unsettled: its depositor learns from the write instead.
+            state.parcels.remove(position);
         }
+        let after = state.shown();
+        if after == before {
+            return false;
+        }
+        self.wake(&mut state);
+        state
+            .parcels
+            .iter()
+            .take(after)
+            .skip(before)
+            .any(|held| held.wakes)
     }
 
     /// Forgets `held`, which left the inbox for good. Called under the
@@ -572,7 +685,7 @@ impl Shared {
         let mut text: String = intro.chars().take(limit).collect();
         let mut used = text.chars().count();
         let mut taken = Vec::new();
-        while let Some(front) = state.parcels.front() {
+        while let Some(front) = state.parcels.front().filter(|held| held.written) {
             let separator = if text.is_empty() { "" } else { SEPARATOR };
             let needed = separator.chars().count() + front.parcel.text.chars().count();
             if used + needed > limit {
@@ -608,7 +721,7 @@ impl Shared {
     /// Answers the registered wait with what is waiting, when the window can
     /// be pushed to.
     fn wake(&self, state: &mut State) {
-        if state.parcels.is_empty() || !self.pushable() {
+        if state.shown() == 0 || !self.pushable() {
             return;
         }
         let Some(waiter) = state.waiter.take() else {
@@ -773,6 +886,7 @@ impl Inbox {
                 too_long.push(parcel.seq);
                 continue;
             }
+            let id = state.take_id();
             state.parcels.push_back(Held {
                 parcel: Parcel {
                     key: parcel.key,
@@ -781,6 +895,9 @@ impl Inbox {
                     saved: true,
                 },
                 seq: parcel.seq,
+                id,
+                written: true,
+                wakes: false,
                 end: None,
                 budget: None,
             });
@@ -812,23 +929,53 @@ impl Inbox {
     /// key, which is not returned (see [`Parcel::notice`]). A registered wait
     /// is answered when the window can be pushed to.
     pub fn deposit(&self, parcel: Parcel) -> Vec<Parcel> {
-        self.deposit_tracked(parcel, None, None).turned_away
+        self.deposit_as(parcel, None, None, false).0.turned_away
     }
 
     /// [`Self::deposit`], telling the depositor how the parcel leaves the
     /// inbox. `budget` is what a push of it draws on. With `waiting_limit`,
     /// a parcel that would find that many already waiting is turned away
     /// sooner than the capacity alone would. A notice that replaces another
-    /// leaves the replaced one's end dropped unsettled.
+    /// leaves the replaced one's end dropped unsettled. A kept parcel shows
+    /// once its row is written, and one whose row cannot be written leaves
+    /// without ever showing. The depositor wakes the window's agent: one
+    /// held back is woken for again once it shows.
     pub fn deposit_tracked(
         &self,
         parcel: Parcel,
         budget: Option<PushBudget>,
         waiting_limit: Option<usize>,
     ) -> Deposited {
-        let refused = |parcel| Deposited {
-            turned_away: vec![parcel],
-            end: None,
+        self.deposit_as(parcel, budget, waiting_limit, true).0
+    }
+
+    /// [`Self::deposit_tracked`], with [`Saving`] telling the depositor how
+    /// the parcel's row came out, for a depositor that answers for it being
+    /// kept.
+    pub(crate) fn deposit_saved(
+        &self,
+        parcel: Parcel,
+        budget: Option<PushBudget>,
+        waiting_limit: Option<usize>,
+    ) -> (Deposited, Saving) {
+        self.deposit_as(parcel, budget, waiting_limit, true)
+    }
+
+    fn deposit_as(
+        &self,
+        parcel: Parcel,
+        budget: Option<PushBudget>,
+        waiting_limit: Option<usize>,
+        wakes: bool,
+    ) -> (Deposited, Saving) {
+        let refused = |parcel| {
+            (
+                Deposited {
+                    turned_away: vec![parcel],
+                    end: None,
+                },
+                Saving::ready(),
+            )
         };
         if parcel.text.chars().count() > self.shared.spec.max_chars {
             return refused(parcel);
@@ -843,9 +990,13 @@ impl Inbox {
             return refused(parcel);
         }
         let (tx, rx) = oneshot::channel();
+        let id = state.take_id();
         let mut held = Held {
             parcel,
             seq: state.next_seq,
+            id,
+            written: true,
+            wakes,
             end: Some(tx),
             budget,
         };
@@ -854,41 +1005,50 @@ impl Inbox {
         let waiting = state.parcels.iter_mut().find(|waiting| {
             held.parcel.notice && waiting.parcel.notice && waiting.parcel.key == held.parcel.key
         });
-        match waiting {
+        let saving = match waiting {
             Some(waiting) => {
                 tracing::debug!(key = %held.parcel.key, "notice replaced the one waiting under its key");
                 held.seq = waiting.seq;
                 if !held.parcel.saved {
                     self.shared.forget([&*waiting]);
                 }
-                self.shared.keep(&held);
+                let saving = self.shared.keep(&mut held);
                 *waiting = held;
+                saving
             }
             None => {
                 state.next_seq = state.next_seq.saturating_add(1);
-                self.shared.keep(&held);
+                let saving = self.shared.keep(&mut held);
                 state.parcels.push_back(held);
+                saving
             }
-        }
+        };
         self.shared.wake(&mut state);
-        Deposited {
-            turned_away: Vec::new(),
-            end: Some(rx),
-        }
+        (
+            Deposited {
+                turned_away: Vec::new(),
+                end: Some(rx),
+            },
+            saving,
+        )
     }
 
-    /// How many parcels wait to be read; the ones a push carries are not
-    /// counted.
+    /// How many parcels wait to be read; the ones a push carries, and the
+    /// ones held back until their rows are written, are not counted.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.shared.lock().parcels.len()
+        self.shared.lock().shown()
     }
 
-    /// Whether a parcel named `key` is waiting or being pushed.
+    /// Whether a parcel named `key` is waiting to be read or being pushed.
     #[must_use]
     pub fn holds(&self, key: &str) -> bool {
         let state = self.shared.lock();
-        state.parcels.iter().any(|held| held.parcel.key == key)
+        state
+            .parcels
+            .iter()
+            .take(state.shown())
+            .any(|held| held.parcel.key == key)
             || state
                 .carrying
                 .iter()
@@ -980,7 +1140,7 @@ impl Inbox {
             // The replaced wait may have ended already; then nobody reads this.
             let _ = replaced.answer.send(silence());
         }
-        if !state.parcels.is_empty() && self.shared.pushable() {
+        if state.shown() > 0 && self.shared.pushable() {
             let (taken, text) = self.shared.take_within(&mut state, "");
             self.shared.forget(&taken);
             for held in taken {
@@ -1018,6 +1178,7 @@ impl Inbox {
             .lock()
             .parcels
             .front()
+            .filter(|held| held.written)
             .and_then(|held| held.budget.clone())
     }
 
@@ -1028,8 +1189,10 @@ impl Inbox {
         let mut state = self.shared.lock();
         let held = if whole {
             self.shared.take_within(&mut state, "").0
-        } else {
+        } else if state.shown() > 0 {
             state.parcels.pop_front().into_iter().collect()
+        } else {
+            Vec::new()
         };
         let first = held.first()?;
         let text = held
@@ -1179,7 +1342,11 @@ impl Inbox {
         match state.parcels.iter_mut().find(|held| held.parcel.key == key) {
             Some(held) => {
                 held.parcel.text = text;
-                self.shared.keep(held);
+                // A revision leaves the parcel where it shows: its row is
+                // rewritten, and nothing waits on that.
+                if let Some(keeper) = self.shared.keeper.as_ref().filter(|_| held.parcel.saved) {
+                    keeper.keep(held.kept(), Box::new(|_| false));
+                }
                 true
             }
             None => false,

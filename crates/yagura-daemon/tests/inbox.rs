@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use tracing_test::traced_test;
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
 use yagura_daemon::inbox::{DeliverySpec, DoorOutputs, OutputForm, Parcel};
+use yagura_daemon::store;
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryStream, WindowStatus};
 use yagura_test_support::ipc::Connection;
 
@@ -871,4 +873,90 @@ async fn withdrawing_a_waiting_parcel_does_not_disturb_another_that_a_push_carri
     inbox.finish_push(push.id, PushEnd::Failed);
     assert_eq!(pending(&h, &id), 1);
     assert!(inbox.holds("under-way"));
+}
+
+// --- parcels are shown once they are written, in the order they were deposited -----
+
+/// Releases an armed fault when dropped, so a failed case does not leave the parcel
+/// writer stopped behind it.
+struct ReleaseOnDrop(FaultPoints);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A daemon whose kept parcels are written to a database of its own, with `point`
+/// armed on the writer, and a window opened after that so its inbox keeps its parcels.
+async fn start_keeping(
+    tag: &str,
+    point: FaultPoint,
+) -> (Harness, Connection, String, ReleaseOnDrop) {
+    let faults = FaultPoints::arm(point);
+    let guard = ReleaseOnDrop(faults.clone());
+    let db = unique_temp_dir(tag).join("yagura.db");
+    let (h, mut client) = start(tag, |config| config.faults = faults.clone()).await;
+    store::wire_into(&h.registry, Some(db));
+    let id = h.open_idle_window(&mut client).await;
+    (h, client, id, guard)
+}
+
+/// Returns once the writer has stopped (or failed) at the armed point.
+async fn writer_reached(faults: &FaultPoints) {
+    tokio::time::timeout(yagura_test_support::HANG_GUARD, faults.reached())
+        .await
+        .expect("the parcel writer never reached the armed point");
+}
+
+/// Parcels deposited while the parcel writer is stopped are shown to no door until their
+/// rows are written, and then in the order they were deposited.
+#[tokio::test]
+async fn parcels_are_shown_only_once_written_and_in_the_order_deposited() {
+    let (h, mut client, id, guard) =
+        start_keeping("inbox-r15-paused", FaultPoint::WriterPaused).await;
+    deposit(&h, &id, "first", "PARCEL-FIRST");
+    deposit(&h, &id, "second", "PARCEL-SECOND");
+    writer_reached(&guard.0).await;
+
+    assert_eq!(
+        pending(&h, &id),
+        0,
+        "a parcel whose row is not written yet must not be shown"
+    );
+    let early = take(&mut client, &id).await;
+    assert!(
+        early.is_empty(),
+        "nothing is handed out unwritten: {early:?}"
+    );
+
+    guard.0.release();
+    until("both parcels to be shown", || pending(&h, &id) == 2).await;
+    let got = take(&mut client, &id).await;
+    assert!(
+        pos(&got, "PARCEL-FIRST") < pos(&got, "PARCEL-SECOND"),
+        "parcels are shown in the order they were deposited: {got:?}"
+    );
+}
+
+/// A parcel whose row could not be written never shows, and does not hold back the parcel
+/// deposited after it.
+#[tokio::test]
+async fn a_parcel_that_could_not_be_written_never_shows_and_holds_nothing_back() {
+    let (h, mut client, id, guard) = start_keeping("inbox-r15-fails", FaultPoint::WriteFails).await;
+    deposit(&h, &id, "doomed", "PARCEL-DOOMED");
+    writer_reached(&guard.0).await;
+
+    guard.0.release();
+    deposit(&h, &id, "later", "PARCEL-LATER");
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    until("the later parcel to be shown", || inbox.holds("later")).await;
+
+    assert!(
+        !inbox.holds("doomed"),
+        "a parcel whose row was not written must not be shown"
+    );
+    let got = take(&mut client, &id).await;
+    assert!(got.contains("PARCEL-LATER"), "{got:?}");
+    assert!(!got.contains("PARCEL-DOOMED"), "{got:?}");
 }

@@ -160,6 +160,15 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Puts the database a read-write connection opened in WAL mode, so a reader
+/// never stops a writer and a write waits only for another write. The mode is
+/// kept in the file, so a read-only connection, which SQLite refuses to change
+/// it from (`SQLITE_READONLY`), reads it in WAL mode all the same.
+fn apply_write_pragmas(conn: &Connection) -> Result<(), StoreError> {
+    conn.pragma_update_fixed("journal_mode", "WAL")?;
+    Ok(())
+}
+
 /// Applies every migration in `migrations` whose version is newer than the
 /// database's current `user_version`, each in its own transaction: the DDL
 /// runs through `execute_batch` (`PRAGMA`s cannot bind parameters, so
@@ -226,6 +235,7 @@ pub fn open_migrated(db_path: &Path) -> Result<Connection, StoreError> {
             max,
         });
     }
+    apply_write_pragmas(&conn)?;
     apply_migrations(&mut conn, MIGRATIONS)?;
     Ok(conn)
 }
@@ -439,11 +449,31 @@ pub fn wire_into(registry: &Arc<WindowRegistry>, db_path: Option<PathBuf>) {
     }
     registry.set_window_table(crate::window_table::WindowTable::spawn(store.conn));
     match open_migrated(&db_path) {
-        Ok(conn) => registry.set_parcel_store(crate::parcel_store::ParcelStore::spawn(conn)),
+        Ok(conn) => registry.set_parcel_store(crate::parcel_store::ParcelStore::spawn(
+            conn,
+            wake_shown(registry),
+        )),
         Err(err) => tracing::warn!(
             "failed to open the store of kept parcels ({err}); parcels are kept in memory only"
         ),
     }
+}
+
+/// Wakes the delivery agent of a window whose inbox a written row showed
+/// parcels in, as a deposit does, from the parcel writer's thread.
+fn wake_shown(registry: &Arc<WindowRegistry>) -> crate::parcel_store::OnShown {
+    let registry = Arc::downgrade(registry);
+    // The agent runs on the daemon's runtime, which the writer's thread is not in.
+    let runtime = tokio::runtime::Handle::try_current().ok();
+    Box::new(move |window_id| {
+        let (Some(registry), Some(runtime)) = (registry.upgrade(), runtime.as_ref()) else {
+            return;
+        };
+        if let Some(entry) = registry.get(window_id) {
+            let _entered = runtime.enter();
+            registry.wake_notices(&entry);
+        }
+    })
 }
 
 /// Resolves the database path: `explicit` > `YAGURA_STORE_DB` >

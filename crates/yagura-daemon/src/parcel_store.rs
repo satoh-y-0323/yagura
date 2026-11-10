@@ -6,19 +6,21 @@
 //! composer, so a next daemon can take that text back.
 //!
 //! The inboxes in memory are the copy: every change to one is sent here
-//! under that inbox's own lock, so the rows follow the same order, and a
-//! caller that answers for an accepted parcel waits for [`ParcelStore::kept`]
-//! first. A parcel is kept only while its window has a row in the window
+//! under that inbox's own lock, so the rows follow the same order. A kept
+//! parcel or report is shown only once its write tells how it went
+//! ([`Written`]), and a caller that answers for an accepted one answers by
+//! that. A parcel is kept only while its window has a row in the window
 //! table, and leaves with that row (a trigger of the schema), so a closed
 //! window's parcels are gone and a `lost` window's stay.
 //!
 //! The rows are written on a thread of their own, over a connection of their
-//! own, like the window table's.
+//! own, like the window table's. A write's transaction holds no other wait:
+//! what it tells is acted on once it has committed.
 
 use std::sync::mpsc;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Params, params};
 use tokio::sync::oneshot;
 use yagura_protocol::{REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES, ReceivedReport};
 
@@ -43,6 +45,24 @@ const MAX_REPORT_JSON_BYTES: usize = 4 * (REPORT_SUMMARY_MAX_BYTES + REPORT_PATH
 /// writes into a window, so more than a few means a damaged file.
 const MAX_KEPT_MARKS: i64 = 64;
 
+/// How one write of kept rows ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Written {
+    /// Committed, changing this many rows: none when the window has no row
+    /// to keep them with.
+    Rows(usize),
+    /// Failed: nothing changed.
+    Failed,
+}
+
+/// Told, on the writer's thread, how a parcel's write ended; returns whether
+/// that showed parcels its inbox held back.
+pub(crate) type OnWritten = Box<dyn FnOnce(Written) -> bool + Send>;
+
+/// Called, on the writer's thread, with the window whose inbox a write
+/// showed parcels in.
+pub(crate) type OnShown = Box<dyn Fn(&str) + Send>;
+
 /// One parcel of a window's inbox as it is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeptParcel {
@@ -65,6 +85,7 @@ enum Command {
     Keep {
         window_id: String,
         parcel: KeptParcel,
+        written: OnWritten,
     },
     Forget {
         window_id: String,
@@ -77,9 +98,11 @@ enum Command {
     KeepReports {
         window_id: String,
         reports: Vec<(i64, String)>,
+        written: oneshot::Sender<Written>,
     },
     ForgetReports {
         window_id: String,
+        seqs: Vec<i64>,
     },
     LoadReports {
         window_id: String,
@@ -98,10 +121,8 @@ enum Command {
         window_id: String,
         reply: oneshot::Sender<Vec<String>>,
     },
-    Kept {
-        reply: oneshot::Sender<()>,
-    },
-    /// [`Command::Kept`] for a caller that blocks its thread.
+    /// Answered once every command sent before it is done, to a caller that
+    /// blocks its thread.
     #[cfg(feature = "fault-injection")]
     KeptBlocking {
         reply: mpsc::Sender<()>,
@@ -141,10 +162,11 @@ impl std::fmt::Debug for ParcelStore {
 
 impl ParcelStore {
     /// Starts the thread that writes the parcels over `conn`, which must
-    /// already be migrated. The thread ends once every handle is dropped.
-    pub(crate) fn spawn(conn: Connection) -> Self {
+    /// already be migrated, calling `on_shown` for a window whose inbox a
+    /// write showed parcels in. The thread ends once every handle is dropped.
+    pub(crate) fn spawn(conn: Connection, on_shown: OnShown) -> Self {
         let (commands, received) = mpsc::channel::<Command>();
-        std::thread::spawn(move || write_parcels(&conn, &received));
+        std::thread::spawn(move || write_parcels(&conn, &received, &on_shown));
         Self { commands }
     }
 
@@ -152,16 +174,8 @@ impl ParcelStore {
         self.commands.send(command).is_ok()
     }
 
-    /// Returns once every change sent before it is written (or failed).
-    pub(crate) async fn kept(&self) {
-        let (reply, written) = oneshot::channel();
-        if self.send(Command::Kept { reply }) {
-            // A writer that is gone writes nothing more.
-            let _ = written.await;
-        }
-    }
-
-    /// [`ParcelStore::kept`], blocking the calling thread.
+    /// Returns once every change sent before it is written (or failed),
+    /// blocking the calling thread.
     #[cfg(feature = "fault-injection")]
     pub(crate) fn kept_blocking(&self) {
         let (reply, written) = mpsc::channel();
@@ -200,23 +214,35 @@ impl ParcelStore {
         read.await.unwrap_or_default()
     }
 
-    /// Keeps `reports` at the places `seqs` gives them in `window_id`'s
-    /// report inbox.
-    pub(crate) fn keep_reports(&self, window_id: &str, reports: &[(i64, &ReceivedReport)]) {
+    /// Keeps `reports` at the places their seqs give them in `window_id`'s
+    /// report inbox, in one transaction; yields how that was written, and is
+    /// dropped unanswered once the writer is gone.
+    pub(crate) fn keep_reports(
+        &self,
+        window_id: &str,
+        reports: &[(i64, &ReceivedReport)],
+    ) -> oneshot::Receiver<Written> {
         let encoded = reports
             .iter()
             .filter_map(|(seq, report)| Some((*seq, serde_json::to_string(report).ok()?)))
             .collect();
+        let (written, outcome) = oneshot::channel();
         self.send(Command::KeepReports {
             window_id: window_id.to_owned(),
             reports: encoded,
+            written,
         });
+        outcome
     }
 
-    /// Forgets every report kept for `window_id`.
-    pub(crate) fn forget_reports(&self, window_id: &str) {
+    /// Forgets the reports kept at `seqs` for `window_id`.
+    pub(crate) fn forget_reports(&self, window_id: &str, seqs: Vec<i64>) {
+        if seqs.is_empty() {
+            return;
+        }
         self.send(Command::ForgetReports {
             window_id: window_id.to_owned(),
+            seqs,
         });
     }
 }
@@ -236,12 +262,21 @@ impl InboxKeeper {
         }
     }
 
-    /// Keeps `parcel`, replacing what was kept at its place.
-    pub(crate) fn keep(&self, parcel: KeptParcel) {
-        self.store.send(Command::Keep {
+    /// Keeps `parcel`, replacing what was kept at its place, and tells
+    /// `written` how that went. Called under the inbox's lock, which
+    /// `written` takes, so a writer that is gone tells it on a thread of its
+    /// own.
+    pub(crate) fn keep(&self, parcel: KeptParcel, written: OnWritten) {
+        let command = Command::Keep {
             window_id: self.window_id.clone(),
             parcel,
-        });
+            written,
+        };
+        if let Err(mpsc::SendError(Command::Keep { written, .. })) =
+            self.store.commands.send(command)
+        {
+            std::thread::spawn(move || written(Written::Failed));
+        }
     }
 
     /// Forgets the parcels at `seqs`.
@@ -314,34 +349,39 @@ impl MarkKeeper {
     }
 }
 
-fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
+fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown: &OnShown) {
     // One warning for the whole run: a broken database must not flood the log.
     let mut warned = false;
-    let mut warn = |error: rusqlite::Error| {
-        if !std::mem::replace(&mut warned, true) {
-            tracing::warn!(%error, "failed to write the kept parcels; parcels are kept in memory only");
+    let mut written_as = |result: rusqlite::Result<usize>| match result {
+        Ok(rows) => Written::Rows(rows),
+        Err(error) => {
+            if !std::mem::replace(&mut warned, true) {
+                tracing::warn!(%error, "failed to write the kept parcels; parcels are kept in memory only");
+            }
+            Written::Failed
         }
     };
     #[cfg(feature = "fault-injection")]
     let mut faults = crate::fault_point::FaultPoints::default();
     while let Ok(command) = received.recv() {
         #[cfg(feature = "fault-injection")]
-        if command.writes() {
+        let fails = command.writes() && {
             faults.pause_writer();
-            if faults.write_fails() {
-                warn(simulated_write_failure());
-                // A mark's caller waits for the write, failed or not.
-                if let Command::Mark { reply, .. } = command {
-                    let _ = reply.send(());
-                }
-                continue;
-            }
-        }
+            faults.write_fails()
+        };
+        #[cfg(not(feature = "fault-injection"))]
+        let fails = false;
         match command {
-            Command::Keep { window_id, parcel } => {
+            Command::Keep {
+                window_id,
+                parcel,
+                written,
+            } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                if let Err(error) = conn.execute_fixed(
+                let outcome = written_as(run(
+                    conn,
+                    fails,
                     "INSERT INTO inbox_parcels (window_id, seq, key, notice, body) \
                      SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS \
                      (SELECT 1 FROM windows WHERE window_id = ?1) \
@@ -354,18 +394,19 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
                         i64::from(parcel.notice),
                         parcel.text
                     ],
-                ) {
-                    warn(error);
+                ));
+                if written(outcome) {
+                    on_shown(&window_id);
                 }
             }
             Command::Forget { window_id, seqs } => {
                 for seq in seqs {
-                    if let Err(error) = conn.execute_fixed(
+                    written_as(run(
+                        conn,
+                        fails,
                         "DELETE FROM inbox_parcels WHERE window_id = ?1 AND seq = ?2",
                         params![window_id, seq],
-                    ) {
-                        warn(error);
-                    }
+                    ));
                 }
             }
             Command::Load { window_id, reply } => {
@@ -375,25 +416,22 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
                 });
                 let _ = reply.send(parcels);
             }
-            Command::KeepReports { window_id, reports } => {
-                for (seq, report_json) in reports {
-                    if let Err(error) = conn.execute_fixed(
-                        "INSERT INTO report_parcels (window_id, seq, report_json) \
-                         SELECT ?1, ?2, ?3 WHERE EXISTS \
-                         (SELECT 1 FROM windows WHERE window_id = ?1) \
-                         ON CONFLICT(window_id, seq) DO UPDATE SET report_json = excluded.report_json",
-                        params![window_id, seq, report_json],
-                    ) {
-                        warn(error);
-                    }
-                }
+            Command::KeepReports {
+                window_id,
+                reports,
+                written,
+            } => {
+                let outcome = written_as(keep_report_rows(conn, fails, &window_id, &reports));
+                let _ = written.send(outcome);
             }
-            Command::ForgetReports { window_id } => {
-                if let Err(error) = conn.execute_fixed(
-                    "DELETE FROM report_parcels WHERE window_id = ?1",
-                    params![window_id],
-                ) {
-                    warn(error);
+            Command::ForgetReports { window_id, seqs } => {
+                for seq in seqs {
+                    written_as(run(
+                        conn,
+                        fails,
+                        "DELETE FROM report_parcels WHERE window_id = ?1 AND seq = ?2",
+                        params![window_id, seq],
+                    ));
                 }
             }
             Command::LoadReports { window_id, reply } => {
@@ -410,22 +448,22 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
             } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                if let Err(error) = conn.execute_fixed(
+                written_as(run(
+                    conn,
+                    fails,
                     "INSERT OR IGNORE INTO delivery_marks (window_id, body) \
                      SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM windows WHERE window_id = ?1)",
                     params![window_id, body],
-                ) {
-                    warn(error);
-                }
+                ));
                 let _ = reply.send(());
             }
             Command::Unmark { window_id, body } => {
-                if let Err(error) = conn.execute_fixed(
+                written_as(run(
+                    conn,
+                    fails,
                     "DELETE FROM delivery_marks WHERE window_id = ?1 AND body = ?2",
                     params![window_id, body],
-                ) {
-                    warn(error);
-                }
+                ));
             }
             Command::LoadMarks { window_id, reply } => {
                 let marks = read_marks(conn, &window_id).unwrap_or_else(|error| {
@@ -433,9 +471,6 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
                     Vec::new()
                 });
                 let _ = reply.send(marks);
-            }
-            Command::Kept { reply } => {
-                let _ = reply.send(());
             }
             #[cfg(feature = "fault-injection")]
             Command::KeptBlocking { reply } => {
@@ -447,9 +482,48 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
     }
 }
 
-/// The error a write fails with under [`crate::fault_point::FaultPoint::WriteFails`]:
-/// the one a disk that cannot be written returns.
-#[cfg(feature = "fault-injection")]
+/// Runs one write, or fails it as a disk that cannot be written would when
+/// `fails`.
+fn run<P: Params>(
+    conn: &Connection,
+    fails: bool,
+    sql: &'static str,
+    params: P,
+) -> rusqlite::Result<usize> {
+    if fails {
+        return Err(simulated_write_failure());
+    }
+    conn.execute_fixed(sql, params)
+}
+
+/// Writes `reports` for `window_id` in one transaction, returning how many
+/// rows it wrote.
+fn keep_report_rows(
+    conn: &Connection,
+    fails: bool,
+    window_id: &str,
+    reports: &[(i64, String)],
+) -> rusqlite::Result<usize> {
+    if fails {
+        return Err(simulated_write_failure());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut rows = 0;
+    for (seq, report_json) in reports {
+        rows += tx.execute_fixed(
+            "INSERT INTO report_parcels (window_id, seq, report_json) \
+             SELECT ?1, ?2, ?3 WHERE EXISTS \
+             (SELECT 1 FROM windows WHERE window_id = ?1) \
+             ON CONFLICT(window_id, seq) DO UPDATE SET report_json = excluded.report_json",
+            params![window_id, seq, report_json],
+        )?;
+    }
+    tx.commit()?;
+    Ok(rows)
+}
+
+/// The error a write fails with under the `write_fails` fault point: the one
+/// a disk that cannot be written returns.
 fn simulated_write_failure() -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),

@@ -52,6 +52,7 @@ use common::{
     wait_until_status, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
 use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     DaemonMessage, RoomRef, WindowStatus,
@@ -3645,4 +3646,54 @@ async fn a_room_no_window_belongs_to_is_deleted_announced_and_refuses_later_post
     let (again, _window, _conn, seq) = room_with_a_post(&h, &workspace).await;
     assert_eq!(again, room_id);
     assert!(seq > first_seq, "{seq} vs {first_seq}");
+}
+
+/// A post whose envelope cannot be written is not accepted: its poster is told so, and
+/// the destination's inbox and doors show nothing of it. Once writes work again the next
+/// post is accepted and is the only one the destination's door hands out.
+#[tokio::test]
+async fn a_chat_post_that_cannot_be_written_is_refused_and_never_shown() {
+    const LOST: &str = "G3LOST";
+    const KEPT: &str = "G3KEPT";
+    let dir = unique_temp_dir("chat-write-fails");
+    let faults = FaultPoints::arm(FaultPoint::WriteFails);
+    let mut config = chat_config(&dir, &ChatPlaybook::default());
+    config.faults = faults.clone();
+    let db = config
+        .store_db_path_resolved
+        .clone()
+        .expect("chat_config names the chat database");
+    let h = Harness::start_with_chat("chat-write-fails", config).await;
+    yagura_daemon::store::wire_into(&h.registry, Some(db));
+    let mut client = h.connect().await;
+    let unknown_id = open_unknown_participant(&h).await;
+    let poster_id = h.open_idle_window(&mut client).await;
+    identify(&mut client, &poster_id).await;
+
+    expect_error(
+        send_chat_msg(&mut client, None, &format!("hi @{unknown_id} {LOST}")).await,
+        "internal",
+    );
+    let entry = h
+        .registry
+        .get(&unknown_id)
+        .expect("the window is registered");
+    assert_eq!(
+        entry.inbox().pending_count(),
+        0,
+        "a post that was not written must not reach the destination's inbox"
+    );
+
+    faults.release();
+    let posted = expect_chat_posted(
+        send_chat_msg(&mut client, None, &format!("hi @{unknown_id} {KEPT}")).await,
+    );
+    assert_eq!(posted.targets, vec![unknown_id.clone()]);
+    let mut door = h.connect().await;
+    let taken = call_door(&mut door, "take", &unknown_id).await;
+    assert!(taken.contains(KEPT), "{taken:?}");
+    assert!(
+        !taken.contains(LOST),
+        "a post that was not written must not be handed out: {taken:?}"
+    );
 }

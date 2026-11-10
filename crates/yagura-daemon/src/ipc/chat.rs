@@ -6,7 +6,9 @@
 //!
 //! A post reaches each addressed window through that window's inbox: its CLI
 //! takes it through its own doors, or the window's agent pushes it the way the
-//! window's profile declares.
+//! window's profile declares. A post is accepted only once every inbox it went
+//! in has written its row; one that could not be written is refused, and
+//! shows in no inbox.
 //!
 //! A window belongs to exactly one room -- the one its workspace key maps to
 //! -- and `"main"` is the one room every caller may reach. Which room a
@@ -33,7 +35,7 @@ use crate::approval::{ApprovalBroker, ApprovalDraft, ApprovalRoomRef, SubmitErro
 use crate::chat_store::{self, ChatStore, NewChatMessage};
 use crate::config::DaemonConfig;
 use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
-use crate::inbox::{Deposited, Inbox, Parcel, ParcelEnd, PushBudget};
+use crate::inbox::{Deposited, Inbox, Parcel, ParcelEnd, PushBudget, SaveOutcome, Saving};
 use crate::live_policy::{self, PolicyCell};
 use crate::room::{self, ChatLimits, DeliveryOutcome};
 use crate::store::StoreError;
@@ -426,11 +428,11 @@ fn deposit_while_message_exists(
     seq: i64,
     parcel: Parcel,
     budget: PushBudget,
-) -> Result<Option<Deposited>, StoreError> {
+) -> Result<Option<(Deposited, Saving)>, StoreError> {
     if !store.message_exists(room_id, seq)? {
         return Ok(None);
     }
-    Ok(Some(inbox.deposit_tracked(parcel, Some(budget), None)))
+    Ok(Some(inbox.deposit_saved(parcel, Some(budget), None)))
 }
 
 /// The room a request acts on, once [`resolve_room`] has decided it.
@@ -1220,28 +1222,31 @@ async fn complete_post(
         .record_post_outcome(&room_id, is_user_post, mentions_user)
         .await;
 
-    outbound.reply(&DaemonMessage::ChatPosted {
+    let posted = DaemonMessage::ChatPosted {
         room_id: room_id.clone(),
         seq: u64::try_from(seq).unwrap_or(0),
         targets: targets.clone(),
         user: mentions_user,
         unresolved,
         halted: halted_now,
-    });
-
+    };
     // Every post is announced exactly once here unless it has destinations,
     // whose per-delivery pushes below announce it instead. An AI's `@user`
     // mention on a room that is not halted is announced even then.
     let announces_user = !is_user_post && !halted_now && mentions_user;
-    if announces_user || targets.is_empty() {
-        broker.notify_approvers(&DaemonMessage::ChatChanged {
-            room_id: room_id.clone(),
-            seq: u64::try_from(seq).unwrap_or(0),
-            needs_user: announces_user || needs_user_now,
-        });
-    }
+    let announce = || {
+        if announces_user || targets.is_empty() {
+            broker.notify_approvers(&DaemonMessage::ChatChanged {
+                room_id: room_id.clone(),
+                seq: u64::try_from(seq).unwrap_or(0),
+                needs_user: announces_user || needs_user_now,
+            });
+        }
+    };
 
-    if halted_now {
+    if halted_now || targets.is_empty() {
+        outbound.reply(&posted);
+        announce();
         for target_id in &targets {
             chat.record_delivery_and_notify(
                 broker,
@@ -1256,22 +1261,37 @@ async fn complete_post(
     }
 
     #[cfg(feature = "fault-injection")]
-    if !targets.is_empty() {
-        chat.faults
-            .reach(crate::fault_point::FaultPoint::ChatPostCommitted);
+    chat.faults
+        .reach(crate::fault_point::FaultPoint::ChatPostCommitted);
+    let mut placements = Vec::with_capacity(targets.len());
+    for target_id in &targets {
+        placements.push(place_post(chat, registry, &room_id, seq, target_id, &envelope).await);
     }
-    for target_id in targets.iter().cloned() {
-        spawn_delivery_task(
+    // Answered only once every destination's row is written: a post one of
+    // them could not keep is refused, and shows in none of them.
+    let refused = placements
+        .iter()
+        .any(|placement| matches!(placement, Placement::Unwritten { .. }));
+    if refused {
+        outbound.reply(&error_msg(
+            "internal",
+            "failed to keep the chat message for its destinations",
+        ));
+    } else {
+        outbound.reply(&posted);
+        announce();
+    }
+    for placement in placements {
+        settle_placement(
             Arc::clone(chat),
             Arc::clone(registry),
             Arc::clone(broker),
             room_id.clone(),
             seq,
-            target_id,
-            envelope.clone(),
+            placement,
         );
     }
-    if !targets.is_empty() {
+    if !refused {
         spawn_silence_watch(Arc::clone(chat), Arc::clone(broker), room_id, seq, targets);
     }
 }
@@ -1285,63 +1305,104 @@ fn chat_parcel_key(room_id: &str, seq: i64) -> String {
 /// What every chat parcel's key starts with.
 const CHAT_PARCEL_PREFIX: &str = "chat:";
 
-/// Puts the post in `target_id`'s inbox and records how it left: taken by the
-/// window's CLI, or never delivered.
-#[allow(clippy::too_many_arguments)]
-fn spawn_delivery_task(
+/// Where a post stands in one destination's inbox once [`place_post`] has put
+/// it there.
+enum Placement {
+    /// In the inbox, its row written: the inbox tells how it leaves.
+    Placed {
+        target_id: String,
+        entry: Arc<WindowEntry>,
+        deposited: Deposited,
+    },
+    /// Its row could not be written: it never shows, and the post is refused.
+    Unwritten { target_id: String },
+    /// The destination is gone: it was closed, or has no row to keep the
+    /// post with.
+    Gone { target_id: String },
+    /// The post itself is gone, or could not be confirmed: nothing to settle.
+    Nothing,
+}
+
+/// Puts the post in `target_id`'s inbox, returning once the inbox has told
+/// how its row was written.
+async fn place_post(
+    chat: &ChatRuntime,
+    registry: &WindowRegistry,
+    room_id: &str,
+    seq: i64,
+    target_id: &str,
+    envelope: &str,
+) -> Placement {
+    let target_id = target_id.to_owned();
+    let Some(entry) = registry.get(&target_id) else {
+        return Placement::Gone { target_id };
+    };
+    let parcel = Parcel::new(chat_parcel_key(room_id, seq), envelope);
+    let budget = chat.delivery_budget();
+    let inbox = entry.inbox().clone();
+    let room_for_store = room_id.to_owned();
+    let deposited = chat
+        .store
+        .with_store(move |store| {
+            deposit_while_message_exists(store, &inbox, &room_for_store, seq, parcel, budget)
+        })
+        .await;
+    // The post was cleared (or its room deleted) before it could be put in:
+    // there is nothing to deliver, record or announce.
+    let (deposited, saving) = match deposited {
+        Ok(Ok(Some(deposited))) => deposited,
+        Ok(Ok(None)) => return Placement::Nothing,
+        Ok(Err(err)) => {
+            // The delivery stays `pending`; the next daemon start settles it.
+            tracing::warn!(error = %err, "could not confirm the chat post before delivering it");
+            return Placement::Nothing;
+        }
+        Err(_) => return Placement::Nothing,
+    };
+    match saving.outcome().await {
+        SaveOutcome::Saved => Placement::Placed {
+            target_id,
+            entry,
+            deposited,
+        },
+        SaveOutcome::NoRow => Placement::Gone { target_id },
+        SaveOutcome::Failed => Placement::Unwritten { target_id },
+    }
+}
+
+/// Records how `placement` leaves its destination: taken by the window's
+/// CLI, or never delivered. The `pending` row `append_message` wrote is never
+/// left unsettled.
+fn settle_placement(
     chat: Arc<ChatRuntime>,
     registry: Arc<WindowRegistry>,
     broker: Arc<ApprovalBroker>,
     room_id: String,
     seq: i64,
-    target_id: String,
-    envelope: String,
+    placement: Placement,
 ) {
     tokio::spawn(async move {
-        // A destination the registry no longer has (closed between the
-        // roster read and here) is settled the same as one that ends before
-        // its CLI takes the post: the `pending` row `append_message` wrote
-        // must never be left unsettled.
-        let Some(entry) = registry.get(&target_id) else {
-            chat.record_delivery_and_notify(
-                &broker,
-                &room_id,
-                seq,
-                &target_id,
-                DeliveryOutcome::UndeliveredUnknown(None),
-            )
-            .await;
-            return;
-        };
-        let parcel = Parcel::new(chat_parcel_key(&room_id, seq), envelope);
-        let budget = chat.delivery_budget();
-        let inbox = entry.inbox().clone();
-        let room_for_store = room_id.clone();
-        let deposited = chat
-            .store
-            .with_store(move |store| {
-                deposit_while_message_exists(store, &inbox, &room_for_store, seq, parcel, budget)
-            })
-            .await;
-        // The post was cleared (or its room deleted) before it could be put
-        // in: there is nothing to deliver, record or announce.
-        let deposited = match deposited {
-            Ok(Ok(Some(deposited))) => deposited,
-            Ok(Ok(None)) => return,
-            Ok(Err(err)) => {
-                // The delivery stays `pending`; the next daemon start settles it.
-                tracing::warn!(error = %err, "could not confirm the chat post before delivering it");
-                return;
+        let (target_id, outcome) = match placement {
+            Placement::Placed {
+                target_id,
+                entry,
+                deposited,
+            } => match notice_queue::after_deposit(&registry, &entry, deposited) {
+                Ok(end) => {
+                    record_when_left(&chat, &broker, &room_id, seq, &target_id, end).await;
+                    return;
+                }
+                Err(notice_queue::Refused::Full) => {
+                    (target_id, DeliveryOutcome::UndeliveredExhausted)
+                }
+                Err(notice_queue::Refused::Ended) => {
+                    (target_id, DeliveryOutcome::UndeliveredUnknown(None))
+                }
+            },
+            Placement::Unwritten { target_id } | Placement::Gone { target_id } => {
+                (target_id, DeliveryOutcome::UndeliveredUnknown(None))
             }
-            Err(_) => return,
-        };
-        let outcome = match notice_queue::after_deposit(&registry, &entry, deposited) {
-            Ok(end) => {
-                record_when_left(&chat, &broker, &room_id, seq, &target_id, end).await;
-                return;
-            }
-            Err(notice_queue::Refused::Full) => DeliveryOutcome::UndeliveredExhausted,
-            Err(notice_queue::Refused::Ended) => DeliveryOutcome::UndeliveredUnknown(None),
+            Placement::Nothing => return,
         };
         chat.record_delivery_and_notify(&broker, &room_id, seq, &target_id, outcome)
             .await;
@@ -1386,7 +1447,7 @@ fn chat_parcel_of(key: &str) -> Option<(String, i64)> {
     Some((room_id.to_owned(), seq.parse().ok()?))
 }
 
-/// Settles, as [`spawn_delivery_task`] does, the delivery of every chat post
+/// Settles, as [`settle_placement`] does, the delivery of every chat post
 /// a window's inbox read back from the store: a previous daemon put it in, and
 /// it is still `pending` in the room. Runs for every window taken back, before
 /// its doors can be reached.
@@ -1967,7 +2028,7 @@ mod tests {
         let mut store = store_with_room("clear-after-deposit");
         let seq = post(&mut store, &["w-b"]);
         let inbox = inbox();
-        let deposited = deposit_while_message_exists(
+        let (deposited, _saving) = deposit_while_message_exists(
             &store,
             &inbox,
             ROOM,

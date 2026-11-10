@@ -19,7 +19,9 @@ use common::{
 };
 
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
 use yagura_daemon::ipc::report::REPORT_INBOX_MAX;
+use yagura_daemon::store;
 use yagura_protocol::{
     ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec, REPORT_PATH_MAX_BYTES,
     REPORT_SUMMARY_MAX_BYTES, ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus,
@@ -1154,4 +1156,55 @@ async fn a_report_handed_directly_to_a_waiter_never_also_sits_in_the_inbox() {
         leftover.is_empty(),
         "a report handed directly to a waiter must not also sit in the inbox"
     );
+}
+
+/// Every parcel write fails until the returned handle releases it; the daemon's kept
+/// parcels are wired to a database under `dir`.
+async fn start_with_failing_writes(tag: &str) -> (Harness, FaultPoints) {
+    let dir = unique_temp_dir(tag);
+    let faults = FaultPoints::arm(FaultPoint::WriteFails);
+    let mut config = base_config();
+    config.faults = faults.clone();
+    let h = Harness::start(tag, config).await;
+    store::wire_into(&h.registry, Some(dir.join("yagura.db")));
+    (h, faults)
+}
+
+/// A report whose row cannot be written is not accepted: its sender is told so, and
+/// neither the parent's `wait_for_report` nor the parent's doors show it. Once writes
+/// work again the same sender's next report is accepted and is the only one shown.
+#[tokio::test]
+async fn a_report_that_cannot_be_written_is_refused_and_never_shown() {
+    let (h, faults) = start_with_failing_writes("report-write-fails").await;
+    let window_a = h.open(echo_child_command(), None).await;
+    let mut a = h.connect().await;
+    identify(&mut a, &window_a).await;
+    let window_b = call_open_window(&mut a, echo_child_command()).await;
+    let mut b = h.connect().await;
+    identify(&mut b, &window_b).await;
+
+    expect_error(
+        call_send_report(&mut b, ReportOutcome::Succeeded, "never written", None).await,
+        "internal",
+    );
+    let shown = expect_reports(call_wait_for_report(&mut a, 0).await);
+    assert!(
+        shown.is_empty(),
+        "a report that was not written must not be read: {shown:?}"
+    );
+    let parent = h.registry.get(&window_a).expect("the parent window exists");
+    assert_eq!(
+        parent.inbox().pending_count(),
+        0,
+        "a report that was not written must leave nothing at the parent's doors"
+    );
+
+    faults.release();
+    let (delivered_to, _) = expect_report_sent(
+        call_send_report(&mut b, ReportOutcome::Succeeded, "written", None).await,
+    );
+    assert_eq!(delivered_to.as_deref(), Some(window_a.as_str()));
+    let shown = expect_reports(call_wait_for_report(&mut a, 0).await);
+    let summaries: Vec<&str> = shown.iter().map(|report| report.summary.as_str()).collect();
+    assert_eq!(summaries, ["written"]);
 }
