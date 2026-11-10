@@ -1091,7 +1091,28 @@ async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
         );
     }
 
-    drop((child_session, parent_session, as_parent));
+    // No debug line is certain at startup, and a window that draws nothing
+    // never runs the detector: typing a mark makes the parent's screen change
+    // on every OS, and the detector's debug line naming it shows the level held.
+    const MARK: &str = "DEBUG-LEVEL-MARK-3Fv8";
+    let mut typist = yagura_test_support::ipc::connect_with_retry(&endpoint).await;
+    common::attach(&mut typist, &parent).await;
+    common::write_interactive_input(&mut typist, MARK).await;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while !sandbox
+        .daemon_log()
+        .lines()
+        .any(|line| line.contains("DEBUG") && line.contains(MARK))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the detector must log the typed mark at debug level: {:?}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    drop((child_session, parent_session, as_parent, typist));
     let mut shutdown = sandbox.spawn_with_args(&["--shutdown"]);
     let ended = daemon.wait_for_fault_end().await;
     let _ = tokio::task::spawn_blocking(move || shutdown.wait()).await;
