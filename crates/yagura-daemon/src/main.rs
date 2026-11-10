@@ -1223,34 +1223,40 @@ async fn read_one_daemon_message(client: &mut ClientConnection) -> Option<Daemon
 /// stays usable, so it is surfaced as a warning through the file-backed
 /// subscriber once installed.
 fn init_logging(namespace: &yagura_os::InstanceNamespace) {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let level = std::env::var("YAGURA_LOG")
         .ok()
         .and_then(|value| parse_level(&value))
         .unwrap_or(tracing::Level::INFO);
 
-    use tracing_subscriber::Layer as _;
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::util::SubscriberInitExt as _;
-
-    let filter = log_filter(level);
-    match open_log_file(namespace) {
-        Ok((file, restrict_warning)) => {
-            let layer = tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-                .with_filter(filter);
-            let _ = tracing_subscriber::registry().with(layer).try_init();
-            if let Some(reason) = restrict_warning {
-                tracing::warn!("{reason}; the log file may not be owner-restricted");
-            }
-        }
-        Err(reason) => {
-            let layer = tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_filter(filter);
-            let _ = tracing_subscriber::registry().with(layer).try_init();
-            tracing::warn!("{reason}; daemon logs are only visible on stderr for this run");
-        }
+    // The branches choose only where the lines go and in what form; the one
+    // layer below filters both the same way.
+    let (writer, plain, warning) = match open_log_file(namespace) {
+        Ok((file, restrict_warning)) => (
+            BoxMakeWriter::new(std::sync::Mutex::new(file)),
+            true,
+            restrict_warning
+                .map(|reason| format!("{reason}; the log file may not be owner-restricted")),
+        ),
+        Err(reason) => (
+            BoxMakeWriter::new(std::io::stderr),
+            false,
+            Some(format!(
+                "{reason}; daemon logs are only visible on stderr for this run"
+            )),
+        ),
+    };
+    let layer = tracing_subscriber::fmt::layer().with_writer(writer);
+    let layer = if plain { layer.with_ansi(false) } else { layer };
+    let _ = tracing_subscriber::registry()
+        .with(layer.with_filter(log_filter(level)))
+        .try_init();
+    if let Some(warning) = warning {
+        tracing::warn!("{warning}");
     }
 }
 

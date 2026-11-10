@@ -55,9 +55,10 @@ use crate::pty::{
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
+pub use crate::window_table::HooksRoute;
 use crate::window_table::{
     OpeningRow, Reservation, RowScopes, WindowRow, WindowTable, WindowValues, credentials_kind,
-    credentials_mode, hooks_kind, hooks_route, launch_record, recorded_launch,
+    credentials_mode, launch_record, recorded_launch, route_taken_back,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
@@ -239,7 +240,7 @@ fn window_values(
         task_plan_id: task.map(|task| task.plan_id.clone()),
         task_id: task.map(|task| task.task_id.clone()),
         credentials: credentials_kind(provenance.credentials),
-        hooks: Some(hooks_kind(provenance.hooks)),
+        hooks: Some(provenance.hooks),
     }
 }
 
@@ -393,48 +394,6 @@ pub struct WindowProvenance {
     /// ([`plan_credentials_folder`]); the open creates it there. `None` when
     /// the window has no usable place for one.
     pub credentials_dir: Option<PathBuf>,
-}
-
-/// How a window's CLI comes to run the daemon's hooks: the one fact both
-/// whether the window expects status reports and whether it takes part in
-/// delivery are read from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum HooksRoute {
-    /// The daemon arranged no hooks: no reports are expected, and a declared
-    /// `[delivery]` relies on the CLI's own configuration.
-    #[default]
-    Unarranged,
-    /// The launch's `[hooks]` injection. Settled at spawn: it stays only
-    /// when the spawned argv still carries the injection.
-    Injection,
-    /// Hooks the CLI reads from its own settings, whose registered entries
-    /// were read and held at launch.
-    RegisteredEntries,
-    /// The daemon arranged hooks, but they do not reach the CLI: their
-    /// registration did not hold, their settings could not be written, the
-    /// command interpreter would have reinterpreted them, or there was
-    /// nowhere to write them.
-    LeftOut,
-}
-
-impl HooksRoute {
-    /// The route as it really is once the argv is spawned:
-    /// `hooks_in_argv` is whether a `[hooks]` injection is in it.
-    #[must_use]
-    pub fn settle(self, hooks_in_argv: bool) -> Self {
-        match self {
-            _ if hooks_in_argv => Self::Injection,
-            Self::Injection => Self::LeftOut,
-            other => other,
-        }
-    }
-
-    /// Whether the CLI runs hooks the daemon arranged, so it is expected to
-    /// report its turns.
-    #[must_use]
-    pub fn reaches(self) -> bool {
-        matches!(self, Self::Injection | Self::RegisteredEntries)
-    }
 }
 
 /// Whether what the daemon sends of its own accord can reach a CLI: its
@@ -5661,7 +5620,7 @@ impl WindowRegistry {
                 &window_id,
                 status_token.as_hex(),
                 &WindowValues {
-                    hooks: Some(hooks_kind(hooks)),
+                    hooks: Some(hooks),
                     ..values.clone()
                 },
             )
@@ -6823,7 +6782,7 @@ impl WindowRegistry {
                 effort: values.effort.clone(),
             }),
             delivery: profile.delivery,
-            hooks: hooks_route(values.hooks),
+            hooks: route_taken_back(values.hooks),
             wake_command: profile.wake_command,
             credentials: credentials_mode(values.credentials),
             // Only an open creates the folder; a window taken back has its own.
@@ -7037,7 +6996,7 @@ struct ProfileDetermined {
 /// `[delivery]` and its wake command. The defaults, with one line logged, when
 /// the profile cannot be launched any more. The route its hooks take is not
 /// planned again: the window's row and launch record keep the one its open
-/// settled ([`hooks_route`]).
+/// settled ([`route_taken_back`]).
 fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> ProfileDetermined {
     let launch = match crate::profile::resolve_launch(
         config,

@@ -238,30 +238,51 @@ pub enum Line {
     Other,
 }
 
+/// The UTF-8 byte order mark a line may lead with (RFC 8259 §8.1), which the
+/// MCP SDKs ignore.
+const BYTE_ORDER_MARK: char = '\u{FEFF}';
+
 /// Reads what [`Line`] holds of the JSON-RPC line `line`.
 ///
 /// This function does not fail: a line that is not a JSON object is
-/// [`Line::Other`].
+/// [`Line::Other`]. It is [`parse_line`] and then [`Line::of`].
 #[must_use]
 pub fn read_line(line: &str) -> Line {
-    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(line) else {
-        return Line::Other;
-    };
-    let method = object
-        .get("method")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let id = object.get("id").filter(|id| !id.is_null()).cloned();
-    match (method, id) {
-        (Some(method), Some(id)) => Line::Request { id, method },
-        (Some(method), None) => {
-            let cancels = object
-                .get("params")
-                .and_then(|params| params.get("requestId"))
-                .cloned();
-            Line::Notification { method, cancels }
+    parse_line(line).map_or(Line::Other, |value| Line::of(&value))
+}
+
+/// The JSON value the line `line` holds, read the way an MCP SDK reads one:
+/// one leading byte order mark is ignored. `None` when it holds none.
+#[must_use]
+pub fn parse_line(line: &str) -> Option<Value> {
+    let line = line.strip_prefix(BYTE_ORDER_MARK).unwrap_or(line);
+    serde_json::from_str(line).ok()
+}
+
+impl Line {
+    /// What [`Line`] holds of the JSON-RPC message `value`; a value that is
+    /// not a JSON object is [`Line::Other`].
+    #[must_use]
+    pub fn of(value: &Value) -> Self {
+        let Value::Object(object) = value else {
+            return Self::Other;
+        };
+        let method = object
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let id = object.get("id").filter(|id| !id.is_null()).cloned();
+        match (method, id) {
+            (Some(method), Some(id)) => Self::Request { id, method },
+            (Some(method), None) => {
+                let cancels = object
+                    .get("params")
+                    .and_then(|params| params.get("requestId"))
+                    .cloned();
+                Self::Notification { method, cancels }
+            }
+            (None, Some(id)) => Self::Answer { id },
+            (None, None) => Self::Other,
         }
-        (None, Some(id)) => Line::Answer { id },
-        (None, None) => Line::Other,
     }
 }

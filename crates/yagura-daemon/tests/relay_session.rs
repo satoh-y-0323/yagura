@@ -422,44 +422,75 @@ async fn a_session_without_an_opening_enters_statelessly_through_server_discover
 // =====================================================================
 
 /// A session runs four requests at once and holds sixteen more waiting; the
-/// next is answered `resource_exhausted` while all of those still wait.
+/// next is answered `resource_exhausted` while all of those still wait. A
+/// line led by a UTF-8 byte order mark, which rmcp reads as the request after
+/// it, counts the same.
 #[tokio::test]
 async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resource_exhausted() {
     let h = Harness::start("relay-request-limit", config()).await;
     // No detection: the window stays `Unknown`, which completes no wait.
     let window_id = h.open(process::echo_child_command(), None).await;
-    let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
-    initialize(&mut client).await;
 
-    let held = REQUESTS_AT_ONCE + REQUESTS_WAITING;
-    for id in 1..=held {
-        client
-            .request(&tool_call_line(
+    for (what, lead) in [("plain lines", ""), ("lines led by a BOM", "\u{FEFF}")] {
+        let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+        initialize(&mut client).await;
+
+        let held = REQUESTS_AT_ONCE + REQUESTS_WAITING;
+        for id in 1..=held {
+            let line = tool_call_line(
                 id,
                 "wait_for_status",
                 json!({"window_id": window_id, "target_status": "idle", "timeout_sec": 600}),
                 false,
-            ))
+            );
+            client.request_raw(&format!("{lead}{line}")).await;
+        }
+        let past = tool_call_line(held + 1, "list_windows", json!({}), false);
+        let seq = client.request_raw(&format!("{lead}{past}")).await;
+        // rmcp answers a ping itself: answered before the request past the
+        // limit, that request was taken in rather than refused.
+        let sentinel = client
+            .request(&json!({"jsonrpc": "2.0", "id": held + 2, "method": "ping"}))
             .await;
-    }
-    let seq = client
-        .request(&tool_call_line(held + 1, "list_windows", json!({}), false))
-        .await;
-    let (answer, before) = client.answer_with_preceding(seq).await;
+        let mut before = Vec::new();
+        let answer = loop {
+            match client.next_frame().await {
+                RelayFrame::Out {
+                    line,
+                    seq: answered,
+                    ..
+                } => {
+                    let value: Value = serde_json::from_str(&line)
+                        .unwrap_or_else(|err| panic!("relay_out must carry JSON ({err}): {line}"));
+                    if answered == Some(seq) {
+                        break value;
+                    }
+                    assert_ne!(
+                        answered,
+                        Some(sentinel),
+                        "{what}: the request past the limit must be refused at once, but the \
+                         ping sent after it was answered first: {value}"
+                    );
+                    before.push(value);
+                }
+                other => panic!("expected relay_out while waiting for seq {seq}, got {other:?}"),
+            }
+        };
 
-    let (word, text) = tool_call_error(&answer);
-    assert_eq!(
-        word, RESOURCE_EXHAUSTED,
-        "the request past the limit must be refused, got {text}"
-    );
-    let answered_early: Vec<&Value> = before
-        .iter()
-        .filter(|line| line.get("id").and_then(Value::as_u64).is_some())
-        .collect();
-    assert!(
-        answered_early.is_empty(),
-        "the {held} held requests must still wait, got {answered_early:?}"
-    );
+        let (word, text) = tool_call_error(&answer);
+        assert_eq!(
+            word, RESOURCE_EXHAUSTED,
+            "{what}: the request past the limit must be refused, got {text}"
+        );
+        let answered_early: Vec<&Value> = before
+            .iter()
+            .filter(|line| line.get("id").and_then(Value::as_u64).is_some())
+            .collect();
+        assert!(
+            answered_early.is_empty(),
+            "{what}: the {held} held requests must still wait, got {answered_early:?}"
+        );
+    }
 }
 
 // =====================================================================
@@ -472,8 +503,9 @@ fn relay_in_bytes(line: String, seq: Option<u64>) -> Vec<u8> {
     yagura_protocol::frame_encode(&body)
 }
 
-/// A `relay_in` line is one line: a newline or a carriage return in it breaks
-/// the contract, whatever the receiver would make of it.
+/// A `relay_in` line, and each line of a resumed opening, is one line: a
+/// newline or a carriage return in it breaks the contract, whatever the
+/// receiver would make of it.
 #[tokio::test]
 async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
     let h = Harness::start("relay-bad-frames", config()).await;
@@ -500,18 +532,67 @@ async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
         client.send_bytes(&bytes).await;
         client.expect_closed(what).await;
     }
+
+    // The opening a session resumes is the first frame's: no session starts.
+    let (tools, answer) = first_session(&h).await;
+    let mut lines = opening(&answer);
+    lines[2] = format!("{}\n{}", initialized_line(), tools_list(9));
+    let mut client = RelayClient::connect(&h.endpoint).await;
+    client
+        .send(&hello(
+            None,
+            Some(RelayResume {
+                opening: Some(lines),
+                tools,
+            }),
+        ))
+        .await;
+    client
+        .expect_closed("a relay_hello whose resumed opening holds a line with a newline")
+        .await;
 }
 
-/// A line the CLI wrote that is not JSON is carried as it is; the session
-/// goes on.
+/// A line the CLI wrote that is not one JSON-RPC message does not end the
+/// session, and is answered as it is today: nothing for a line that is not
+/// JSON or that answers no request, an `Invalid Request` error for JSON that
+/// is no JSON-RPC message.
 #[tokio::test]
 async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
+    const INVALID_REQUEST_CODE: i64 = -32600;
     let h = Harness::start("relay-bad-line", config()).await;
     let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
     initialize(&mut client).await;
 
-    client.carry("{not json").await;
-    expect_the_session_serves(&mut client, 1, false).await;
+    let null_id_error =
+        json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "x"}})
+            .to_string();
+    let cases: [(&str, &str, Option<i64>); 3] = [
+        ("a line that is not JSON", "{not json", None),
+        (
+            "JSON that is no JSON-RPC message",
+            "[1]",
+            Some(INVALID_REQUEST_CODE),
+        ),
+        ("an error answer whose id is null", &null_id_error, None),
+    ];
+    for (id, (what, line, expected)) in (1u64..).zip(cases) {
+        client.carry(line).await;
+        let seq = client
+            .request(&tool_call_line(id, "list_windows", json!({}), false))
+            .await;
+        let (listed, before) = client.answer_with_preceding(seq).await;
+        tool_json(&listed);
+        let codes: Vec<Option<i64>> = before
+            .iter()
+            .map(|answer| answer["error"]["code"].as_i64())
+            .collect();
+        assert_eq!(
+            codes,
+            expected.map(Some).into_iter().collect::<Vec<_>>(),
+            "{what} must be answered as before (an error of the code, or nothing), got {before:?}"
+        );
+    }
+    expect_the_session_serves(&mut client, 4, false).await;
 }
 
 // =====================================================================
@@ -1130,5 +1211,46 @@ async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
     assert!(
         hits.is_empty(),
         "a tool call's arguments and result must not reach the daemon log, found: {hits:#?}"
+    );
+}
+
+/// rmcp ends a session whose first line answers no request it made, naming the
+/// line it received; the daemon's warning of it names only the kind.
+#[tokio::test]
+async fn a_session_whose_first_line_is_an_answer_is_logged_without_the_line() {
+    const NONCE: &str = "NONCE-INIT-ERROR-4Rt8Wm";
+    const STOPPED: &str = "a relay session's MCP server stopped";
+    let sandbox = common::real_daemon::Sandbox::new("relay-init-error-log");
+    let _daemon = sandbox.start().await;
+
+    let (mut client, _) = RelayClient::welcomed(sandbox.endpoint(), hello(None, None)).await;
+    client
+        .carry(&json!({"jsonrpc": "2.0", "id": 1, "result": {"n": NONCE}}).to_string())
+        .await;
+    client
+        .expect_closed("a session whose MCP server stopped")
+        .await;
+
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    let log = loop {
+        let log = sandbox.daemon_log();
+        if log.lines().any(|line| line.contains(STOPPED)) {
+            break log;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon must warn that the session's MCP server stopped: {log:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let hits: Vec<&str> = log.lines().filter(|line| line.contains(NONCE)).collect();
+    assert!(
+        hits.is_empty(),
+        "the line rmcp received must not reach the daemon log, found: {hits:#?}"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains(STOPPED) && line.contains("expected_initialize_request")),
+        "the warning names why the session's MCP server stopped: {log:?}"
     );
 }

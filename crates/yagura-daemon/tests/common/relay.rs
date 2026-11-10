@@ -142,6 +142,11 @@ impl RelayClient {
     /// Carries a JSON-RPC request with the next relay sequence number and
     /// returns that number.
     pub async fn request(&mut self, line: &Value) -> u64 {
+        self.request_raw(&line.to_string()).await
+    }
+
+    /// [`Self::request`] for a line carried as written, whatever it holds.
+    pub async fn request_raw(&mut self, line: &str) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.send(&RelayFrame::In {

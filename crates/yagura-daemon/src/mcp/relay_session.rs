@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rmcp::model::{ClientNotification, ClientRequest, ServerConfig, ServerResult};
+use rmcp::model::{ClientNotification, ClientRequest, ErrorCode, ServerConfig, ServerResult};
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData, RoleServer, Service};
 use serde_json::{Value, json};
@@ -27,11 +27,11 @@ use tokio::io::{
 use tokio::sync::{Semaphore, watch};
 use yagura_protocol::relay::{
     HELD_LINES_MAX, Line, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
-    SUPPORTED_CONTRACTS, is_one_line, read_line, tool_call_error_line,
+    SUPPORTED_CONTRACTS, is_one_line, parse_line, read_line, tool_call_error_line,
 };
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, FrameError, MAX_FRAME_BODY_LEN, decode_daemon_message,
-    encode_client_message, frame_decode, frame_encode,
+    ClientMessage, DaemonMessage, FrameError, decode_daemon_message, encode_client_message,
+    frame_decode, frame_encode,
 };
 
 use super::server::YaguraMcpServer;
@@ -56,9 +56,9 @@ const RMCP_PIPE_BUFFER: usize = 64 * 1024;
 /// Read size of the relay connection.
 const READ_CHUNK_LEN: usize = 8192;
 
-/// The most bytes of notifications a session holds before rmcp chose how it
-/// runs: as many lines as it holds, each as long as a frame body carries.
-const HELD_BYTES_MAX: usize = HELD_LINES_MAX * MAX_FRAME_BODY_LEN;
+/// The `error.message` of the `Invalid Request` error a session answers a
+/// CLI line with that holds JSON but no JSON-RPC message, as rmcp words it.
+const INVALID_REQUEST_MESSAGE: &str = "Invalid request";
 
 /// Whether `body`, the first frame of a connection, opens a relay session.
 pub(crate) fn is_relay_hello(body: &[u8]) -> bool {
@@ -160,15 +160,15 @@ struct ContractBroken;
 fn lines_are_one_line(frame: &RelayFrame) -> bool {
     match frame {
         RelayFrame::In { line, .. } => is_one_line(line),
-        RelayFrame::Hello {
-            resume:
-                Some(RelayResume {
-                    opening: Some(lines),
-                    ..
-                }),
-            ..
-        } => lines.iter().all(|line| is_one_line(line)),
-        _ => true,
+        RelayFrame::Hello { resume, .. } => resume
+            .as_ref()
+            .and_then(|resume| resume.opening.as_ref())
+            .is_none_or(|lines| lines.iter().all(|line| is_one_line(line))),
+        RelayFrame::Welcome { .. }
+        | RelayFrame::Refused { .. }
+        | RelayFrame::Out { .. }
+        | RelayFrame::Done { .. }
+        | RelayFrame::Dropped { .. } => true,
     }
 }
 
@@ -514,11 +514,22 @@ impl Rmcp {
     }
 
     /// Feeds one line to rmcp; `false` once it stopped reading.
-    async fn feed(&mut self, line: &str) -> bool {
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
+    async fn feed(&mut self, line: &Accounted) -> bool {
+        let mut bytes = Vec::with_capacity(line.0.len() + 1);
+        bytes.extend_from_slice(line.0.as_bytes());
         bytes.push(b'\n');
         self.lines_in.write_all(&bytes).await.is_ok()
+    }
+}
+
+/// A CLI line as the session read it: the JSON value it accounted for,
+/// written again. rmcp reads only these, so it never reads a line the session
+/// read otherwise, and each is one line of compact JSON.
+struct Accounted(String);
+
+impl Accounted {
+    fn of(value: &Value) -> Self {
+        Self(value.to_string())
     }
 }
 
@@ -616,25 +627,30 @@ fn id_key(id: &Value) -> String {
 /// The lines a resumed opening holds: the CLI's `initialize`, the answer it
 /// was given, and `notifications/initialized` when it sent one.
 struct Opening {
-    request: String,
+    request: Accounted,
     answer: Value,
-    initialized: Option<String>,
+    initialized: Option<Accounted>,
 }
 
 impl Opening {
+    /// Picks the lines as a session reads them ([`parse_line`], [`Line::of`]).
     fn read(lines: &[String]) -> Option<Self> {
         let mut request = None;
         let mut answer = None;
         let mut initialized = None;
         for line in lines {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
+            let Some(value) = parse_line(line) else {
                 continue;
             };
-            match value.get("method").and_then(Value::as_str) {
-                Some("initialize") => request = Some(line.clone()),
-                Some("notifications/initialized") => initialized = Some(line.clone()),
-                Some(_) => {}
-                None => answer = Some(value),
+            match Line::of(&value) {
+                Line::Request { method, .. } if method == "initialize" => {
+                    request = Some(Accounted::of(&value));
+                }
+                Line::Notification { method, .. } if method == "notifications/initialized" => {
+                    initialized = Some(Accounted::of(&value));
+                }
+                Line::Answer { .. } => answer = Some(value),
+                Line::Request { .. } | Line::Notification { .. } | Line::Other => {}
             }
         }
         Some(Self {
@@ -751,17 +767,18 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                     _ => continue,
                 };
                 match carried.carry(&line, seq, chosen) {
-                    Carry::Feed => {
+                    Carry::Feed(line) => {
                         if !rmcp.feed(&line).await {
                             return;
                         }
                     }
-                    Carry::Hold => held.hold(line),
+                    Carry::Hold(line) => held.hold(line),
                     Carry::Answer(out) => {
                         if !send(writer, &out).await {
                             return;
                         }
                     }
+                    Carry::Drop => {}
                 }
             }
             line = rmcp.lines_out.next_line() => {
@@ -806,26 +823,24 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
 }
 
 /// The notifications a session holds until rmcp chose how it runs, at most
-/// [`HELD_LINES_MAX`] of them and [`HELD_BYTES_MAX`] bytes. One past either is
-/// dropped, as a relay drops one it cannot hold: a notification has no
-/// answer to give instead.
+/// [`HELD_LINES_MAX`] of them. One past them is dropped, as a relay drops one
+/// it cannot hold: a notification has no answer to give instead.
+///
+/// Each came in one frame, so they hold about `HELD_LINES_MAX` ×
+/// [`yagura_protocol::MAX_FRAME_BODY_LEN`] bytes at most.
 #[derive(Default)]
 struct HeldNotifications {
-    lines: Vec<String>,
-    bytes: usize,
+    lines: Vec<Accounted>,
 }
 
 impl HeldNotifications {
-    fn hold(&mut self, line: String) {
-        let bytes = self.bytes.saturating_add(line.len());
-        if self.lines.len() < HELD_LINES_MAX && bytes <= HELD_BYTES_MAX {
-            self.bytes = bytes;
+    fn hold(&mut self, line: Accounted) {
+        if self.lines.len() < HELD_LINES_MAX {
             self.lines.push(line);
         }
     }
 
-    fn take(&mut self) -> Vec<String> {
-        self.bytes = 0;
+    fn take(&mut self) -> Vec<Accounted> {
         std::mem::take(&mut self.lines)
     }
 }
@@ -841,11 +856,13 @@ struct Carried {
 
 /// What the session does with a line from the CLI.
 enum Carry {
-    Feed,
+    Feed(Accounted),
     /// A notification rmcp cannot take before it chose how the session runs.
-    Hold,
+    Hold(Accounted),
     /// The session answers it itself.
     Answer(RelayFrame),
+    /// A line that is no JSON-RPC message, and has no answer.
+    Drop,
 }
 
 impl Carried {
@@ -858,7 +875,14 @@ impl Carried {
     }
 
     fn carry(&mut self, line: &str, seq: Option<u64>, chosen: bool) -> Carry {
-        match read_line(line) {
+        let Some(value) = parse_line(line) else {
+            tracing::debug!(
+                kind = "not_json",
+                "a relay session dropped a line that is no JSON-RPC message"
+            );
+            return Carry::Drop;
+        };
+        match Line::of(&value) {
             Line::Request { id, method } => {
                 let key = id_key(&id);
                 if method == "tools/call" {
@@ -879,7 +903,7 @@ impl Carried {
                 if let Some(seq) = seq {
                     self.seqs.insert(key, seq);
                 }
-                Carry::Feed
+                Carry::Feed(Accounted::of(&value))
             }
             Line::Notification { method, cancels } => {
                 // rmcp answers no request the CLI cancelled.
@@ -892,9 +916,14 @@ impl Carried {
                     }
                     self.seqs.remove(&key);
                 }
-                if chosen { Carry::Feed } else { Carry::Hold }
+                if chosen {
+                    Carry::Feed(Accounted::of(&value))
+                } else {
+                    Carry::Hold(Accounted::of(&value))
+                }
             }
-            Line::Answer { .. } | Line::Other => Carry::Feed,
+            Line::Answer { .. } => Carry::Feed(Accounted::of(&value)),
+            Line::Other => unclassified(&value, seq),
         }
     }
 
@@ -912,6 +941,33 @@ impl Carried {
             .flatten();
         (self.seqs.remove(&key), taken)
     }
+}
+
+/// What a session does with `value`, a CLI line's JSON that is no request,
+/// notification or answer: an error answer that names no request has no
+/// answer, and anything else is an `Invalid Request` with no `id`, as
+/// JSON-RPC 2.0 answers a message whose id cannot be read.
+fn unclassified(value: &Value, seq: Option<u64>) -> Carry {
+    if value.get("error").is_some() {
+        tracing::debug!(
+            kind = "answer_without_id",
+            "a relay session dropped a line that is no JSON-RPC message"
+        );
+        return Carry::Drop;
+    }
+    tracing::debug!(
+        kind = "not_a_message",
+        "a relay session answered a line that is no JSON-RPC message"
+    );
+    let invalid = json!({
+        "jsonrpc": "2.0",
+        "error": {"code": ErrorCode::INVALID_REQUEST.0, "message": INVALID_REQUEST_MESSAGE},
+    });
+    Carry::Answer(RelayFrame::Out {
+        line: invalid.to_string(),
+        seq,
+        receipt: None,
+    })
 }
 
 tokio::task_local! {

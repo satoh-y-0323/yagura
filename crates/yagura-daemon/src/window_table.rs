@@ -15,16 +15,16 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc};
 
-use rusqlite::types::ValueRef;
+use rusqlite::types::{ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, params};
-use serde::Serialize;
+use serde::de::IntoDeserializer as _;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use yagura_protocol::holder::HolderScopes;
 
 use crate::profile::CredentialsMode;
 use crate::pty::lock_recover;
 use crate::sql::FixedSql;
-use crate::window::HooksRoute;
 
 /// A window's values as its row and its holder's launch record carry them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -43,9 +43,9 @@ pub(crate) struct WindowValues {
     pub(crate) task_plan_id: Option<String>,
     pub(crate) task_id: Option<String>,
     pub(crate) credentials: &'static str,
-    /// The spelling of the route the window's hooks take ([`hooks_kind`]);
-    /// `None` until the window's spawn settled it.
-    pub(crate) hooks: Option<&'static str>,
+    /// The route the window's hooks take; `None` until the window's spawn
+    /// settled it.
+    pub(crate) hooks: Option<HooksRoute>,
 }
 
 /// The spelling of `mode` in the table and the launch record.
@@ -87,34 +87,77 @@ pub(crate) fn credentials_mode(kind: &str) -> CredentialsMode {
     }
 }
 
-/// The spelling of `route` in the table and the launch record.
-pub(crate) fn hooks_kind(route: HooksRoute) -> &'static str {
-    match route {
-        HooksRoute::Unarranged => "unarranged",
-        HooksRoute::Injection => "injection",
-        HooksRoute::RegisteredEntries => "registered_entries",
-        HooksRoute::LeftOut => "left_out",
+/// How a window's CLI comes to run the daemon's hooks: the one fact both
+/// whether the window expects status reports and whether it takes part in
+/// delivery are read from.
+///
+/// Its spelling in the table and the launch record is its serde name, both
+/// ways ([`route_named`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HooksRoute {
+    /// The daemon arranged no hooks: no reports are expected, and a declared
+    /// `[delivery]` relies on the CLI's own configuration.
+    #[default]
+    Unarranged,
+    /// The launch's `[hooks]` injection. Settled at spawn: it stays only
+    /// when the spawned argv still carries the injection.
+    Injection,
+    /// Hooks the CLI reads from its own settings, whose registered entries
+    /// were read and held at launch.
+    RegisteredEntries,
+    /// The daemon arranged hooks, but they do not reach the CLI: their
+    /// registration did not hold, their settings could not be written, the
+    /// command interpreter would have reinterpreted them, or there was
+    /// nowhere to write them.
+    LeftOut,
+}
+
+impl HooksRoute {
+    /// The route as it really is once the argv is spawned:
+    /// `hooks_in_argv` is whether a `[hooks]` injection is in it.
+    #[must_use]
+    pub fn settle(self, hooks_in_argv: bool) -> Self {
+        match self {
+            _ if hooks_in_argv => Self::Injection,
+            Self::Injection => Self::LeftOut,
+            other => other,
+        }
+    }
+
+    /// Whether the CLI runs hooks the daemon arranged, so it is expected to
+    /// report its turns.
+    #[must_use]
+    pub fn reaches(self) -> bool {
+        matches!(self, Self::Injection | Self::RegisteredEntries)
     }
 }
 
 /// The route `kind` names in the table and the launch record, back as what a
-/// window taken back is built with. No spelling (a row written before the
-/// window's spawn settled it, a record of an older holder) or any other one is
-/// `LeftOut`: a route not known is taken for hooks that do not reach the CLI.
-pub(crate) fn hooks_route(kind: Option<&str>) -> HooksRoute {
-    [
-        HooksRoute::Unarranged,
-        HooksRoute::Injection,
-        HooksRoute::RegisteredEntries,
-    ]
-    .into_iter()
-    .find(|route| kind == Some(hooks_kind(*route)))
-    .unwrap_or(HooksRoute::LeftOut)
+/// window is built with. Any spelling that is no route's is `LeftOut`: a
+/// route not known is taken for hooks that do not reach the CLI.
+pub(crate) fn route_named(kind: &str) -> HooksRoute {
+    let kind: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+        kind.into_deserializer();
+    HooksRoute::deserialize(kind).unwrap_or(HooksRoute::LeftOut)
 }
 
-/// `kind` as read from the table or a launch record, in its own spelling.
-fn read_hooks(kind: Option<&str>) -> Option<&'static str> {
-    kind.map(|kind| hooks_kind(hooks_route(Some(kind))))
+/// The route a window taken back is built with: `LeftOut` without one (a row
+/// written before the window's spawn settled it, a record of an older holder).
+pub(crate) fn route_taken_back(hooks: Option<HooksRoute>) -> HooksRoute {
+    hooks.unwrap_or(HooksRoute::LeftOut)
+}
+
+impl ToSql for HooksRoute {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(kind)) => Ok(ToSqlOutput::from(kind)),
+            Ok(other) => Err(rusqlite::Error::ToSqlConversionFailure(
+                format!("a hooks route spelled as {other}").into(),
+            )),
+            Err(error) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+        }
+    }
 }
 
 /// Where a row's window stands, as the table records it.
@@ -214,7 +257,7 @@ pub(crate) fn recorded_launch(record: &str, window_id: &str) -> Option<RecordedL
             task_plan_id: values.task_plan_id,
             task_id: values.task_id,
             credentials: credentials_kind(credentials_mode(&values.credentials)),
-            hooks: read_hooks(values.hooks.as_deref()),
+            hooks: values.hooks.as_deref().map(route_named),
         },
     })
 }
@@ -416,7 +459,7 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
         task_plan_id: row.get(13)?,
         task_id: row.get(14)?,
         credentials: credentials_kind(credentials_mode(&credentials)),
-        hooks: read_hooks(text_of(row.get_ref(17)?).as_deref()),
+        hooks: text_of(row.get_ref(17)?).as_deref().map(route_named),
     })
 }
 

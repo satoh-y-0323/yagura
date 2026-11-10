@@ -1063,6 +1063,12 @@ fn daemon_home(sandbox: &Sandbox) -> PathBuf {
 /// definition so its window can take part in chat, with a `[delivery]` table and
 /// [`REGISTRATION`]. Returns the definitions' directory the sandbox's daemons read.
 fn write_hooked_profile(sandbox: &Sandbox, log: &Path) -> PathBuf {
+    write_delivery_profile(sandbox, HOOKED_PROFILE, log, REGISTRATION)
+}
+
+/// [`write_hooked_profile`] for the profile `id`, whose `tables` follow its `[delivery]`
+/// table in place of [`REGISTRATION`].
+fn write_delivery_profile(sandbox: &Sandbox, id: &str, log: &Path, tables: &str) -> PathBuf {
     let detections = sandbox.tree.make_dir("hooked-detections");
     common::write_control_definition(&detections);
     let argv = [holder_child(), "script".to_owned(), utf8(log).to_owned()]
@@ -1072,10 +1078,10 @@ fn write_hooked_profile(sandbox: &Sandbox, log: &Path) -> PathBuf {
         .join(", ");
     common::write_profile(
         &sandbox.profiles_dir,
-        HOOKED_PROFILE,
+        id,
         &format!(
-            "schema = 1\ndisplay_name = \"{HOOKED_PROFILE}\"\ndetection = \"{}\"\n\n\
-             [command]\ndefault = [{argv}]\n\n[delivery]\nwake = \"none\"\n{REGISTRATION}",
+            "schema = 1\ndisplay_name = \"{id}\"\ndetection = \"{}\"\n\n\
+             [command]\ndefault = [{argv}]\n\n[delivery]\nwake = \"none\"\n{tables}",
             common::CONTROL_DETECTION_NAME
         ),
     );
@@ -1350,22 +1356,40 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
 /// its profile plans or its registration holds by then: one opened while the hooks entry
 /// was not there is still answered at once as one nothing reaches and takes no part in
 /// chat, though the entry is there when the next daemon takes it back, and one opened
-/// with the entry still takes part.
+/// with the entry still takes part. So do one whose profile arranges no hooks and one
+/// whose launch injects them: every route that reaches a CLI is kept.
 #[tokio::test]
 async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
+    const UNARRANGED_PROFILE: &str = "unarranged";
+    const INJECTED_PROFILE: &str = "injected";
     let sandbox = Sandbox::new("recover-hooks");
     let log = sandbox.tree.path().join("input.log");
     let detections = write_hooked_profile(&sandbox, &log);
+    write_delivery_profile(&sandbox, UNARRANGED_PROFILE, &log, "");
+    // The injected arguments land where the script child takes a gate file and its
+    // bytes: a gate that never exists, and bytes it never writes.
+    let never = sandbox.tree.path().join("never-gate");
+    write_delivery_profile(
+        &sandbox,
+        INJECTED_PROFILE,
+        &log,
+        &format!("\n[hooks]\nargs = ['{}', '00']\n", utf8(&never)),
+    );
 
     let mut first = start_hooked(&sandbox, &detections).await;
     let left_out = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
     write_registered_hooks(&sandbox);
     let registered = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    let unarranged = first
+        .open_profile_window(&sandbox, UNARRANGED_PROFILE)
+        .await;
+    let injected = first.open_profile_window(&sandbox, INJECTED_PROFILE).await;
+    let reach = [registered.as_str(), unarranged.as_str(), injected.as_str()];
     assert_undeliverable(&mut first, &sandbox, &left_out, "the fixture, as opened").await;
     assert_roster(
         &mut first,
         &sandbox,
-        &[&registered],
+        &reach,
         &[&left_out],
         "the fixture, as opened",
     )
@@ -1373,17 +1397,204 @@ async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
     first.kill_keeping_windows();
 
     let mut next = start_hooked(&sandbox, &detections).await;
-    listed(&mut next, &sandbox, &left_out).await;
-    listed(&mut next, &sandbox, &registered).await;
+    for window_id in [&left_out, &registered, &unarranged, &injected] {
+        listed(&mut next, &sandbox, window_id).await;
+    }
     assert_undeliverable(&mut next, &sandbox, &left_out, "taken back with its row").await;
     assert_roster(
         &mut next,
         &sandbox,
-        &[&registered],
+        &reach,
         &[&left_out],
         "taken back with their rows",
     )
     .await;
+}
+
+/// Has `child` report `summary` to the window that opened it; returns the window the
+/// report was delivered to.
+async fn report_from(sandbox: &Sandbox, child: &str, summary: &str) -> Option<String> {
+    let mut as_child = connect(sandbox).await;
+    common::identify(&mut as_child, child).await;
+    send(
+        &mut as_child,
+        &ClientMessage::SendReport {
+            outcome: yagura_protocol::ReportOutcome::Succeeded,
+            summary: summary.to_owned(),
+            path: None,
+        },
+    )
+    .await;
+    match read_response(&mut as_child).await {
+        DaemonMessage::ReportSent { delivered_to, .. } => delivered_to,
+        other => panic!("expected report_sent, got {other:?}"),
+    }
+}
+
+/// A window `opener` opens over a connection identified as it.
+async fn opened_by(sandbox: &Sandbox, opener: &str) -> String {
+    let mut as_opener = connect(sandbox).await;
+    common::identify(&mut as_opener, opener).await;
+    common::call_open_window(
+        &mut as_opener,
+        yagura_test_support::process::echo_child_command(),
+    )
+    .await
+}
+
+/// The `(seq, summary)` of each report the store keeps for `window_id`, by place.
+fn kept_reports(db: &Path, window_id: &str) -> Vec<(i64, String)> {
+    let conn = store::open_readonly(db).expect("open the store");
+    let mut statement = conn
+        .prepare("SELECT seq, report_json FROM report_parcels WHERE window_id = ?1 ORDER BY seq")
+        .unwrap();
+    statement
+        .query_map([window_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (seq, json) = row.unwrap();
+            let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+            (
+                seq,
+                report["summary"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The text a hook door takes from `window_id`'s inbox now.
+async fn door_output(sandbox: &Sandbox, window_id: &str) -> String {
+    let mut door = connect(sandbox).await;
+    send(&mut door, &deliver_take(window_id, TOKEN)).await;
+    match read_response(&mut door).await {
+        DaemonMessage::Delivery { output, .. } => output,
+        other => panic!(
+            "expected delivery, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+}
+
+/// A window rebuilt from its launch record, over the placeholder it was taken back as,
+/// numbers its reports on from the places the store kept, even once another window is
+/// numbered for the first time; its notice of what was kept comes once, before that of
+/// the next stretch of reports.
+#[tokio::test]
+async fn a_window_rebuilt_from_its_launch_record_numbers_its_reports_on_and_is_noticed_once() {
+    const NOTICE: &str = "[yagura report]";
+    let sandbox = Sandbox::new("recover-report-seq");
+    let log = sandbox.tree.path().join("input.log");
+    let detections = write_hooked_profile(&sandbox, &log);
+    write_registered_hooks(&sandbox);
+
+    let mut first = start_hooked(&sandbox, &detections).await;
+    let parent = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    let parent_name = listed(&mut first, &sandbox, &parent).await.name;
+    let child = opened_by(&sandbox, &parent).await;
+    assert_eq!(
+        report_from(&sandbox, &child, "KEPT-REPORT")
+            .await
+            .as_deref(),
+        Some(parent.as_str())
+    );
+    first.kill_keeping_windows();
+    // The row goes, and its trigger with the reports it kept; they are kept again,
+    // which only the window its launch record's values build reads.
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        let mut statement = db
+            .prepare("SELECT seq, report_json FROM report_parcels WHERE window_id = ?1")
+            .unwrap();
+        let kept: Vec<(i64, String)> = statement
+            .query_map([&parent], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        drop(statement);
+        assert_eq!(kept.len(), 1, "the fixture keeps the parent's one report");
+        db.execute("DELETE FROM windows WHERE window_id = ?1", [&parent])
+            .unwrap();
+        for (seq, json) in &kept {
+            db.execute(
+                "INSERT INTO report_parcels (window_id, seq, report_json) VALUES (?1, ?2, ?3)",
+                rusqlite::params![parent, seq, json],
+            )
+            .unwrap();
+        }
+    }
+
+    let mut next = start_hooked(&sandbox, &detections).await;
+    until_named(&mut next, &sandbox, &parent, &parent_name).await;
+    let kept_notice = door_output(&sandbox, &parent).await;
+    assert_eq!(
+        count(kept_notice.as_bytes(), NOTICE.as_bytes()),
+        1,
+        "the rebuilt window is noticed once of the report kept for it: {kept_notice:?}"
+    );
+
+    // Another window numbered for the first time.
+    let other_parent = common::call_open_window(
+        &mut next.client,
+        yagura_test_support::process::echo_child_command(),
+    )
+    .await;
+    let other_child = opened_by(&sandbox, &other_parent).await;
+    assert_eq!(
+        report_from(&sandbox, &other_child, "OTHER-REPORT")
+            .await
+            .as_deref(),
+        Some(other_parent.as_str())
+    );
+    assert_eq!(
+        report_from(&sandbox, &child, "NEXT-REPORT")
+            .await
+            .as_deref(),
+        Some(parent.as_str())
+    );
+    let kept = kept_reports(&store_db(&sandbox), &parent);
+    let summaries: Vec<&str> = kept.iter().map(|(_, summary)| summary.as_str()).collect();
+    assert_eq!(
+        summaries,
+        ["KEPT-REPORT", "NEXT-REPORT"],
+        "the next report takes a place of its own behind the kept one: {kept:?}"
+    );
+
+    let mut as_parent = connect(&sandbox).await;
+    common::identify(&mut as_parent, &parent).await;
+    send(
+        &mut as_parent,
+        &ClientMessage::WaitForReport { timeout_sec: 0 },
+    )
+    .await;
+    match read_response(&mut as_parent).await {
+        DaemonMessage::Reports { reports, .. } => assert_eq!(
+            reports
+                .iter()
+                .map(|report| report.summary.as_str())
+                .collect::<Vec<_>>(),
+            ["KEPT-REPORT", "NEXT-REPORT"]
+        ),
+        other => panic!("expected reports, got {other:?}"),
+    }
+    // The next stretch's notice bounds what came of the first.
+    assert_eq!(
+        report_from(&sandbox, &child, "LATER-REPORT")
+            .await
+            .as_deref(),
+        Some(parent.as_str())
+    );
+    let later_notice = door_output(&sandbox, &parent).await;
+    assert_eq!(
+        count(later_notice.as_bytes(), NOTICE.as_bytes()),
+        1,
+        "only the next stretch's notice follows the first: {later_notice:?}"
+    );
+    assert!(
+        later_notice.contains("1 pending report(s)"),
+        "the notice that follows is the next stretch's: {later_notice:?}"
+    );
 }
 
 /// The session store of the sandbox's instance.

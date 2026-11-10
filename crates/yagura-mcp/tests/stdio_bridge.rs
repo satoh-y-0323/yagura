@@ -162,6 +162,21 @@ async fn a_relay_carries_each_cli_line_in_a_relay_in_and_writes_each_relay_out_l
     assert_ne!(seq, first_seq, "each request carries its own seq");
     let answer = conn.answer(&request, seq, false).await;
     assert_eq!(relay.answer(&json!(2)).await, answer);
+
+    // A UTF-8 byte order mark before a request, which MCP readers skip, leaves
+    // it a request.
+    relay
+        .send_raw(&format!("\u{FEFF}{}", tools_list_line(3)))
+        .await;
+    let (line, seq) = conn.relay_in().await;
+    let seq = seq.unwrap_or_else(|| {
+        panic!("a request led by a byte order mark is carried with a seq, got {line:?}")
+    });
+    let request: Value = serde_json::from_str(line.strip_prefix('\u{FEFF}').unwrap_or(&line))
+        .unwrap_or_else(|err| panic!("the request is carried whole ({err}): {line:?}"));
+    assert_eq!(request, tools_list_line(3));
+    let answer = conn.answer(&request, seq, false).await;
+    assert_eq!(relay.answer(&json!(3)).await, answer);
 }
 
 #[tokio::test]

@@ -186,6 +186,8 @@ impl Sandbox {
             "YAGURA_STATUS_TOKEN",
             "YAGURA_STATUS_TOKEN_OVERRIDE",
             "YAGURA_MCP_BRIDGE",
+            // The level a case asks for, or the daemon's default.
+            "YAGURA_LOG",
             fault_point::POINT_ENV,
             fault_point::SIGNAL_ENV,
             "NoDefaultCurrentDirectoryInExePath",
