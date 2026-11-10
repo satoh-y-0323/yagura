@@ -6,8 +6,9 @@
 //! - the length-prefixed JSON framing (LPJF) used on top of the IPC transport
 //!   (Windows named pipe / Unix domain socket),
 //! - the two message enums (`ClientMessage` for client-to-daemon, `DaemonMessage`
-//!   for daemon-to-client) with their internally-tagged JSON representation, and
-//! - the frames between the daemon and a window's holder ([`holder`]).
+//!   for daemon-to-client) with their internally-tagged JSON representation,
+//! - the frames between the daemon and a window's holder ([`holder`]), and
+//! - the frames between the daemon and a window's MCP relay ([`relay`]).
 //!
 //! # How this wire may be extended
 //!
@@ -203,6 +204,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod holder;
 mod input_modes;
+pub mod relay;
 
 pub use input_modes::{
     InputModes, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, KITTY_SUPPORTED_FLAGS, MouseTracking,

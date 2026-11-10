@@ -25,6 +25,7 @@ mod plan_review_protocol;
 mod profile_enabled_protocol;
 mod protocol_v2;
 mod registration_notice_protocol;
+mod relay_frames;
 mod report_gap;
 mod report_protocol;
 mod required_revision;
