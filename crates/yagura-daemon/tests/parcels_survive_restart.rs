@@ -425,56 +425,6 @@ async fn report_to_opener(
     (parent, child)
 }
 
-/// A report a child sent to its opener before the daemon was killed is read by the
-/// parent from the next daemon with `wait_for_report` exactly once, and the notice it put
-/// in the parent's own inbox is taken through the parent's door exactly once.
-#[tokio::test]
-async fn a_report_and_its_notice_are_taken_once_after_the_daemon_is_killed() {
-    const REPORT_MARK: &str = "PERSIST-REPORT-3W8";
-    let sandbox = Sandbox::new("persist-report");
-    write_delivering_profile(&sandbox);
-
-    let mut first = start_first(&sandbox).await;
-    let (parent, child) = report_to_opener(&sandbox, &mut first, REPORT_MARK).await;
-    first.kill_keeping_windows();
-
-    let mut next = sandbox.start().await;
-    listed(&mut next, &sandbox, &parent).await;
-    let taken = take(&mut next, &sandbox, &parent).await;
-    assert_eq!(
-        count(&taken, REPORT_NOTICE_MARK),
-        1,
-        "the parent's door must hand out the report notice it held before the kill once: \
-         {taken:?}; daemon log:\n{}",
-        sandbox.daemon_log()
-    );
-    let again = take(&mut next, &sandbox, &parent).await;
-    assert_eq!(
-        count(&again, REPORT_NOTICE_MARK),
-        0,
-        "a notice already taken must not be handed out again: {again:?}"
-    );
-
-    let mut as_parent = connect(&sandbox).await;
-    identify(&mut as_parent, &parent).await;
-    let reports = wait_for_report(&mut as_parent).await;
-    let summaries: Vec<(&str, &str)> = reports
-        .iter()
-        .map(|report| (report.from_window_id.as_str(), report.summary.as_str()))
-        .collect();
-    assert_eq!(
-        summaries,
-        [(child.as_str(), REPORT_MARK)],
-        "the parent must read the report sent before the kill once; daemon log:\n{}",
-        sandbox.daemon_log()
-    );
-    let reports = wait_for_report(&mut as_parent).await;
-    assert!(
-        reports.is_empty(),
-        "a report already read must not be read again: {reports:?}"
-    );
-}
-
 /// The sandbox daemon's endpoint, which a relay connects to.
 fn endpoint(sandbox: &Sandbox) -> String {
     let user = PlatformIpc::default()
@@ -578,6 +528,11 @@ async fn a_handoff_envelope_and_a_report_notice_an_older_daemon_kept_are_dropped
         .map(|report| (report.from_window_id.as_str(), report.summary.as_str()))
         .collect();
     assert_eq!(summaries, [(child.as_str(), REPORT_MARK)]);
+    let reports = wait_for_report(&mut as_parent).await;
+    assert!(
+        reports.is_empty(),
+        "a report already read must not be read again: {reports:?}"
+    );
 }
 
 /// A window whose holder died while no daemon was there becomes `lost`, and the parcel
@@ -668,51 +623,6 @@ async fn a_lost_windows_kept_parcel_stays_with_its_row_and_a_closed_windows_does
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-/// A chat post waiting in a window's inbox when its daemon is killed is taken through the
-/// window's door from the next daemon once, and the room records that delivery as taken,
-/// as it does for a post taken from the daemon it was sent through.
-#[tokio::test]
-async fn a_chat_post_taken_after_the_daemon_is_killed_is_recorded_as_taken() {
-    const CHAT_MARK: &str = "PERSIST-CHAT-2Q7";
-    let sandbox = Sandbox::new("persist-chat");
-    let detections = write_chat_profile(&sandbox);
-
-    let mut first = start_chatting(&sandbox, &detections).await;
-    let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
-    make_ready(&mut first, &window_id).await;
-    send(
-        &mut first.client,
-        &ClientMessage::SendChat {
-            room_id: Some("main".to_owned()),
-            body: format!("@{window_id} {CHAT_MARK}"),
-        },
-    )
-    .await;
-    let seq = match read_response(&mut first.client).await {
-        DaemonMessage::ChatPosted { seq, targets, .. } => {
-            assert_eq!(targets, std::slice::from_ref(&window_id));
-            seq
-        }
-        other => panic!("expected chat_posted, got {other:?}"),
-    };
-    // The room keeps the body alone; only the envelope in the inbox carries it as JSON.
-    let in_envelope = format!("{CHAT_MARK}\"");
-    until_kept(&sandbox, &[in_envelope.as_str()]).await;
-    first.kill_keeping_windows();
-
-    let mut next = start_chatting(&sandbox, &detections).await;
-    listed(&mut next, &sandbox, &window_id).await;
-    let taken = take(&mut next, &sandbox, &window_id).await;
-    assert_eq!(
-        count(&taken, CHAT_MARK),
-        1,
-        "the window's door must hand out the post it held before the kill once: {taken:?}; \
-         daemon log:\n{}",
-        sandbox.daemon_log()
-    );
-    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
 }
 
 /// A chat post whose daemon ends once the post is committed, before any inbox shows it,

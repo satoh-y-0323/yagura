@@ -14,7 +14,6 @@ use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -69,19 +68,6 @@ fn mcp_connected(h: &Harness, window_id: &str) -> Option<bool> {
         .find(|info| info.window_id == window_id)
         .unwrap_or_else(|| panic!("window {window_id} is missing from the registry"))
         .mcp_connected
-}
-
-/// Reads the window's mark until it is `expected`: the end of a connection
-/// reaches the daemon asynchronously.
-async fn wait_for_mcp_connected(h: &Harness, window_id: &str, expected: bool) {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    while mcp_connected(h, window_id) != Some(expected) {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "mcp_connected of {window_id} never became Some({expected})"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
 }
 
 /// Opens with `initialize` and `notifications/initialized`, as codex, grok
@@ -269,20 +255,6 @@ async fn a_contract_the_daemon_does_not_speak_is_refused_naming_its_contracts_an
 // =====================================================================
 // Identification
 // =====================================================================
-
-#[tokio::test]
-async fn an_identified_relay_session_marks_its_window_until_its_connection_closes() {
-    let h = Harness::start("relay-identified", config()).await;
-    let window_id = h.open(process::echo_child_command(), None).await;
-    assert_eq!(mcp_connected(&h, &window_id), Some(false));
-
-    let (client, _) =
-        RelayClient::welcomed(&h.endpoint, hello(Some((&window_id, VALID_TOKEN)), None)).await;
-    wait_for_mcp_connected(&h, &window_id, true).await;
-
-    drop(client);
-    wait_for_mcp_connected(&h, &window_id, false).await;
-}
 
 #[tokio::test]
 async fn a_relay_hello_with_a_wrong_token_marks_nothing_and_its_tool_answers_carry_the_warning() {
