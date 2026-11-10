@@ -977,3 +977,55 @@ async fn a_receipt_from_another_session_neither_releases_nor_removes_a_carried_r
         "a receipt from another session must not remove the report the carrier never received"
     );
 }
+
+/// A take held between the inbox and its request's answer: the CLI cancels
+/// the call there, so the request is gone before the take reaches it.
+#[tokio::test]
+async fn a_report_taken_and_cancelled_before_its_answer_comes_back_once() {
+    const MARK: &str = "RECEIPT-CANCELLED-4R9";
+    let faults = yagura_daemon::fault_point::FaultPoints::arm(
+        yagura_daemon::fault_point::FaultPoint::ReportTakenUnanswered,
+    );
+    let h = Harness::start(
+        "relay-receipt-cancelled",
+        DaemonConfig {
+            faults: faults.clone(),
+            ..config()
+        },
+    )
+    .await;
+    let (parent, child) = report_to_parent(&h, MARK).await;
+
+    let mut session = window_session(&h.endpoint, &parent).await;
+    session
+        .request(&tool_call_line(
+            1,
+            "wait_for_report",
+            json!({"timeout_sec": 0}),
+            false,
+        ))
+        .await;
+    tokio::time::timeout(HANG_GUARD, faults.reached())
+        .await
+        .expect("the take must reach the point before its answer");
+    session.carry(&cancelled_line(1).to_string()).await;
+    after_frames(&mut session, 2).await;
+    faults.release();
+
+    let again = take_reports(&mut session, 3, COME_BACK_SECS).await;
+    let keys = report_keys(&again.reports);
+    assert_eq!(
+        keys.iter()
+            .map(|(from, summary, _)| (from.as_str(), summary.as_str()))
+            .collect::<Vec<_>>(),
+        [(child.as_str(), MARK)],
+        "a report taken for a call cancelled before its answer must come back"
+    );
+    session.send(&RelayFrame::Done { seq: again.seq }).await;
+    let after = take_reports(&mut session, 4, 0).await;
+    assert!(
+        after.reports.is_empty(),
+        "the report that came back is handed out once: {:?}",
+        after.reports
+    );
+}
