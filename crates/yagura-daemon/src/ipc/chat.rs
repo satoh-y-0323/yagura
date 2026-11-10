@@ -268,7 +268,10 @@ impl ChatRuntime {
                 };
                 store.settle_parcel_end(&end, || {
                     #[cfg(feature = "fault-injection")]
-                    faults.reach(crate::fault_point::FaultPoint::ParcelEndHalfSettled);
+                    {
+                        faults.reach(crate::fault_point::FaultPoint::ParcelEndHalfSettled);
+                        faults.reach(crate::fault_point::FaultPoint::DoorBeforeSettle);
+                    }
                 })
             })
             .await;

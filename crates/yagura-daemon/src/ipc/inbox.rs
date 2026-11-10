@@ -40,31 +40,30 @@ pub(super) fn take_message(entry: &WindowEntry, spec: Option<&DeliverySpec>) -> 
 
 /// Answers `deliver_context`.
 pub(super) fn handle_context(entry: &WindowEntry, outbound: &Outbound, intro: &str) {
-    #[cfg(feature = "fault-injection")]
-    let waiting = entry.inbox().pending_count();
     outbound.reply(&context_message(entry, intro, None));
-    #[cfg(feature = "fault-injection")]
-    reach_door_before_settle(entry, waiting);
 }
 
 /// Answers `deliver_take`.
 pub(super) fn handle_take(entry: &WindowEntry, outbound: &Outbound) {
-    #[cfg(feature = "fault-injection")]
-    let waiting = entry.inbox().pending_count();
     outbound.reply(&take_message(entry, None));
-    #[cfg(feature = "fault-injection")]
-    reach_door_before_settle(entry, waiting);
 }
 
-/// Ends the daemon at [`crate::fault_point::FaultPoint::DoorBeforeSettle`]
-/// once a door's answer has taken some of the `waiting` parcels.
+/// Marks a door's answer as under way for
+/// [`crate::fault_point::FaultPoint::DoorBeforeSettle`], before the answer
+/// takes anything; returns how many parcels are waiting.
 #[cfg(feature = "fault-injection")]
-fn reach_door_before_settle(entry: &WindowEntry, waiting: usize) {
-    if entry.inbox().pending_count() < waiting {
-        entry
-            .faults()
-            .reach(crate::fault_point::FaultPoint::DoorBeforeSettle);
-    }
+pub(super) fn door_answering(entry: &WindowEntry) -> usize {
+    entry.faults().door_answering();
+    entry.inbox().pending_count()
+}
+
+/// Ends the answer marked by [`door_answering`]; whether it took some of the
+/// `waiting` parcels, so its connection's next event is waited for.
+#[cfg(feature = "fault-injection")]
+pub(super) fn door_answered(entry: &WindowEntry, waiting: usize) -> bool {
+    let took = entry.inbox().pending_count() < waiting;
+    entry.faults().door_answered(took);
+    took
 }
 
 /// Answers `deliver_wait` at once when a parcel can be pushed, and otherwise
