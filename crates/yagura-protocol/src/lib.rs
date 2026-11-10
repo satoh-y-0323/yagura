@@ -202,7 +202,7 @@
 //! `deliver_take`, `deliver_wait` and `run_hook` gain `held`, and a held read's parcels
 //! stay the daemon's until the door sends `deliver_done` on the same
 //! connection, answered with `deliver_confirmed`. A read without `held` is
-//! settled before it is answered, as before. A caller establishes
+//! settled before it is answered. A caller establishes
 //! [`DELIVER_DONE_MIN_REVISION`] before sending a held read or `deliver_done`.
 
 use std::collections::{BTreeMap, BTreeSet};

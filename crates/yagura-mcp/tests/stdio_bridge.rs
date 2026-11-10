@@ -81,8 +81,8 @@ fn request_ids(lines: &[Value]) -> BTreeSet<u64> {
 }
 
 /// What a `daemon_restarted` answer must point the model to: the read paths
-/// that tell whether a call took effect (rev15 §9-1 and rev15.1 §D), and the
-/// two tools whose second effect the user ruled on (`send_keys`: look at the
+/// that tell whether a call took effect, and the
+/// two tools whose second effect is not harmless (`send_keys`: look at the
 /// screen instead of sending again; `send_message`: look, then call again if
 /// it did not arrive).
 fn assert_restart_guidance(text: &str) {
@@ -226,7 +226,7 @@ async fn a_relay_given_a_missing_credentials_file_names_no_window() {
     assert_names_no_window(&hello, "a missing credentials file");
 }
 
-// --- R2: the requests a lost connection leaves open --------------------------
+// --- the requests a lost connection leaves open --------------------------
 
 #[tokio::test]
 async fn a_sent_tool_call_is_answered_daemon_restarted_once_the_connection_ends_without_waiting_for_a_daemon()
@@ -358,7 +358,7 @@ async fn a_relay_outside_a_window_answers_every_sent_request_daemon_restarted_on
     assert_eq!(word, DAEMON_RESTARTED, "{text}");
 }
 
-// --- R3: requests while no daemon is reached (the user's ruling Y) ----------
+// --- requests while no daemon is reached ------------------------------------
 
 #[tokio::test]
 async fn a_window_relay_holds_requests_while_no_daemon_is_reached_and_once_back_answers_held_tool_calls_unavailable()
@@ -560,7 +560,7 @@ async fn a_relay_outside_a_window_opened_with_initialize_resumes_its_opening_on_
     assert_eq!(relay.answer(&json!(4)).await, answer);
 }
 
-// --- R4: each kind of refusal -----------------------------------------------
+// --- each kind of refusal -----------------------------------------------
 
 #[tokio::test]
 async fn after_a_limit_refusal_the_next_cli_request_names_the_relay_once_more() {
@@ -646,7 +646,7 @@ async fn after_a_session_mismatch_refusal_the_relay_stops_reading_and_ends() {
     relay.exited().await;
 }
 
-// --- R5: cancelled answers, receipts, sizes ---------------------------------
+// --- cancelled answers, receipts, sizes ---------------------------------
 
 #[tokio::test]
 async fn a_cancelled_requests_receipt_answer_is_not_written_and_is_reported_dropped_and_a_written_one_done()
@@ -764,7 +764,7 @@ async fn a_line_the_relay_cannot_carry_is_answered_invalid_request_alone_and_oth
     assert_eq!(word, INVALID_REQUEST, "{text}");
 }
 
-// --- R17: a window's relay catches up by itself -----------------------------
+// --- a window's relay catches up by itself -----------------------------
 //
 // No CLI line is sent until the counted attempt is received: every attempt
 // counted here is one the relay made on its own.
