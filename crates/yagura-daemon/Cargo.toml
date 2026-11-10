@@ -82,8 +82,8 @@ rmcp.workspace = true
 # `fault_point` (`DaemonConfig::faults`, armed in a daemon process through
 # `YAGURA_FAULT_POINT`): `handoff_deposited`, `write_fails`,
 # `parcel_end_half_settled`, `task_report_half_written`, `writer_paused`,
-# `chat_post_committed`, `before_send_commit`, `after_send_key` and
-# `door_before_settle`. Enabled for this crate's own tests through the self
+# `chat_post_committed`, `before_send_commit`, `after_send_key`,
+# `door_before_settle` and `report_taken_unanswered`. Enabled for this crate's own tests through the self
 # dev-dependency below; never in a shipped build. The holder and the terminal
 # model have no such feature.
 fault-injection = []

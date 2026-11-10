@@ -249,6 +249,9 @@ struct ConnectionState {
     /// confirms it with `deliver_done`; dropped with the connection, it puts
     /// the parcels back.
     held_read: inbox::HeldSlot,
+    /// On a relay session's connection for `wait_for_report`: where the
+    /// reports it takes go, uncommitted, for the relay's receipt to commit.
+    report_receipt: Option<report::ReportReceipt>,
 }
 
 impl ConnectionState {
@@ -269,15 +272,21 @@ impl ConnectionState {
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             open_sends: Arc::new(AtomicUsize::new(0)),
             held_read: inbox::HeldSlot::default(),
+            report_receipt: None,
         }
     }
 
     /// The state of a relay session's own connection, acting as `origin`: the
     /// identity the session settled, with no window claim of its own and no
     /// peer executable, so it never becomes an approver.
-    fn internal(conn_id: u64, origin: RequestOrigin) -> Self {
+    fn internal(
+        conn_id: u64,
+        origin: RequestOrigin,
+        report_receipt: Option<report::ReportReceipt>,
+    ) -> Self {
         Self {
             origin,
+            report_receipt,
             ..Self::new(conn_id, None)
         }
     }
@@ -1378,15 +1387,20 @@ impl IpcServer {
 
     /// Opens a connection of a relay session's own into the connection body,
     /// acting as `origin`, and returns its client end. Dropping that end is the
-    /// connection's end, as a client closing its IPC connection is.
+    /// connection's end, as a client closing its IPC connection is. A
+    /// `report_receipt` is where its `wait_for_report` hands what it takes.
     pub(crate) fn open_internal_connection(
         self: &Arc<Self>,
         _verified: &VerifiedPeer,
         origin: RequestOrigin,
+        report_receipt: Option<report::ReportReceipt>,
     ) -> DuplexStream {
         let (client, body) = tokio::io::duplex(INTERNAL_CONNECTION_BUFFER);
-        let state =
-            ConnectionState::internal(self.next_conn_id.fetch_add(1, Ordering::Relaxed), origin);
+        let state = ConnectionState::internal(
+            self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            origin,
+            report_receipt,
+        );
         let server = Arc::clone(self);
         tokio::spawn(async move {
             server.serve_connection(body, state, Vec::new()).await;

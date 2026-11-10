@@ -1,6 +1,7 @@
 //! The points a test of the daemon arms to stand the daemon at one moment of
-//! its work: the daemon ends itself there, or its parcel writer fails or
-//! stops there until the test releases it. Each point is named by the
+//! its work: the daemon ends itself there, or its parcel writer, or a
+//! relay session's take of reports, fails or stops there until the test
+//! releases it. Each point is named by the
 //! property it stands for, not by the code it sits in, so a change that moves
 //! the property moves the point with it.
 //!
@@ -52,11 +53,15 @@ pub enum FaultPoint {
     /// A door has confirmed a held read that took kept parcels, and the end
     /// of what it took is not committed yet. The daemon ends there.
     DoorBeforeSettle,
+    /// A relay session's `wait_for_report` has taken its reports, and its
+    /// answer is not handed to the session yet. Every such take stops there
+    /// until the fault is released. Released only in-process.
+    ReportTakenUnanswered,
 }
 
 impl FaultPoint {
     /// Every point, in the order of [`FaultPoint::name`]'s table.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::HandoffDeposited,
         Self::WriteFails,
         Self::ParcelEndHalfSettled,
@@ -66,6 +71,7 @@ impl FaultPoint {
         Self::BeforeSendCommit,
         Self::AfterSendKey,
         Self::DoorBeforeSettle,
+        Self::ReportTakenUnanswered,
     ];
 
     /// The point's name, as [`POINT_ENV`] carries it.
@@ -81,6 +87,7 @@ impl FaultPoint {
             Self::BeforeSendCommit => "before_send_commit",
             Self::AfterSendKey => "after_send_key",
             Self::DoorBeforeSettle => "door_before_settle",
+            Self::ReportTakenUnanswered => "report_taken_unanswered",
         }
     }
 
@@ -90,11 +97,19 @@ impl FaultPoint {
         Self::ALL.into_iter().find(|point| point.name() == name)
     }
 
-    /// Whether the daemon ends itself at this point; the others act on the
-    /// parcel writer.
+    /// Whether the daemon ends itself at this point; the others stop or fail
+    /// its work until released.
     #[must_use]
     pub const fn ends_daemon(self) -> bool {
-        !matches!(self, Self::WriteFails | Self::WriterPaused)
+        !matches!(
+            self,
+            Self::WriteFails | Self::WriterPaused | Self::ReportTakenUnanswered
+        )
+    }
+
+    /// Whether only the test's own process can release this point.
+    const fn in_process_only(self) -> bool {
+        matches!(self, Self::WriterPaused | Self::ReportTakenUnanswered)
     }
 }
 
@@ -122,6 +137,8 @@ struct Armed {
     signal: Option<PathBuf>,
     released: Mutex<bool>,
     release: Condvar,
+    /// [`Armed::released`] for a task that waits without blocking its thread.
+    released_watch: watch::Sender<bool>,
     reached: watch::Sender<bool>,
     /// Waited on before the daemon ends at a point, so what the daemon handed
     /// its writer before the point is written and nothing after it.
@@ -142,6 +159,7 @@ impl FaultPoints {
                 signal,
                 released: Mutex::new(false),
                 release: Condvar::new(),
+                released_watch: watch::channel(false).0,
                 reached: watch::channel(false).0,
                 store: Mutex::new(None),
             })),
@@ -155,8 +173,9 @@ impl FaultPoints {
     /// # Errors
     ///
     /// [`FaultArmError::Unknown`] when [`POINT_ENV`] names no point, and
-    /// [`FaultArmError::InProcessOnly`] for [`FaultPoint::WriterPaused`],
-    /// which nothing outside the process can release.
+    /// [`FaultArmError::InProcessOnly`] for [`FaultPoint::WriterPaused`] and
+    /// [`FaultPoint::ReportTakenUnanswered`], which nothing outside the
+    /// process can release.
     pub fn from_env() -> Result<Self, FaultArmError> {
         let Some(name) = std::env::var_os(POINT_ENV) else {
             return Ok(Self::default());
@@ -164,7 +183,7 @@ impl FaultPoints {
         let name = name.to_string_lossy();
         let point = FaultPoint::from_name(&name)
             .ok_or_else(|| FaultArmError::Unknown(name.into_owned()))?;
-        if point == FaultPoint::WriterPaused {
+        if point.in_process_only() {
             return Err(FaultArmError::InProcessOnly(point.name()));
         }
         Ok(Self::armed(
@@ -184,6 +203,7 @@ impl FaultPoints {
         if let Some(armed) = &self.armed {
             *armed.lock_released() = true;
             armed.release.notify_all();
+            armed.released_watch.send_replace(true);
         }
     }
 
@@ -272,6 +292,25 @@ impl FaultPoints {
                 .wait(released)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// Stops a relay session's `wait_for_report` between taking its reports
+    /// and handing its answer to the session, until the fault is released.
+    pub(crate) async fn hold_report_taken(&self) {
+        let Some(armed) = self
+            .armed
+            .as_ref()
+            .filter(|armed| armed.point == FaultPoint::ReportTakenUnanswered)
+        else {
+            return;
+        };
+        let mut released = armed.released_watch.subscribe();
+        if *released.borrow_and_update() {
+            return;
+        }
+        armed.reached.send_replace(true);
+        // The sender lives in `armed`, which this borrow keeps.
+        let _ = released.wait_for(|released| *released).await;
     }
 }
 

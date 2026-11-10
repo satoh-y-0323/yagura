@@ -748,3 +748,232 @@ async fn a_session_opened_with_initialize_answers_tool_calls_and_declares_tools_
     );
     expect_the_session_serves(&mut client, 1, false).await;
 }
+
+// =====================================================================
+// A report wait_for_report took is gone only once the relay received it
+// =====================================================================
+
+/// Opens a parent window and a child it opened, and has the child report
+/// `summary` to the parent; returns the parent's and the child's ids.
+async fn report_to_parent(h: &Harness, summary: &str) -> (String, String) {
+    let parent = h.open(process::echo_child_command(), None).await;
+    let mut as_parent = h.connect().await;
+    common::identify(&mut as_parent, &parent).await;
+    let child = common::call_open_window(&mut as_parent, process::echo_child_command()).await;
+    let mut as_child = h.connect().await;
+    common::identify(&mut as_child, &child).await;
+    common::send(
+        &mut as_child,
+        &yagura_protocol::ClientMessage::SendReport {
+            outcome: yagura_protocol::ReportOutcome::Succeeded,
+            summary: summary.to_string(),
+            path: None,
+        },
+    )
+    .await;
+    match common::read_response(&mut as_child).await {
+        yagura_protocol::DaemonMessage::ReportSent { delivered_to, .. } => {
+            assert_eq!(delivered_to.as_deref(), Some(parent.as_str()));
+        }
+        other => panic!("expected report_sent, got {other:?}"),
+    }
+    (parent, child)
+}
+
+/// A window's relay session opened with `initialize`.
+pub(crate) async fn window_session(endpoint: &str, window_id: &str) -> RelayClient {
+    let (mut client, _) =
+        RelayClient::welcomed(endpoint, hello(Some((window_id, VALID_TOKEN)), None)).await;
+    initialize(&mut client).await;
+    client
+}
+
+/// What one `wait_for_report` answer carried.
+pub(crate) struct Took {
+    pub(crate) seq: u64,
+    pub(crate) reports: Vec<Value>,
+    pub(crate) receipt: Option<bool>,
+}
+
+/// How long a `wait_for_report` expecting a report to come back may park: it
+/// returns as the report reaches the inbox, and this only bounds a report
+/// that never does, below the reader's own [`HANG_GUARD`].
+pub(crate) const COME_BACK_SECS: u64 = HANG_GUARD.as_secs() - 10;
+
+/// Calls `wait_for_report` with `timeout_sec` and reads up to its answer,
+/// acknowledging nothing: the caller decides what the relay says back.
+pub(crate) async fn take_reports(client: &mut RelayClient, id: u64, timeout_sec: u64) -> Took {
+    let seq = client
+        .request(&tool_call_line(
+            id,
+            "wait_for_report",
+            json!({"timeout_sec": timeout_sec}),
+            false,
+        ))
+        .await;
+    loop {
+        match client.next_frame().await {
+            RelayFrame::Out {
+                line,
+                seq: Some(answered),
+                receipt,
+            } if answered == seq => {
+                let answer: Value = serde_json::from_str(&line)
+                    .unwrap_or_else(|err| panic!("relay_out must carry JSON ({err}): {line}"));
+                let reports = tool_json(&answer)["reports"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("wait_for_report answers its reports, got {answer}"))
+                    .clone();
+                return Took {
+                    seq,
+                    reports,
+                    receipt,
+                };
+            }
+            RelayFrame::Out { .. } => {}
+            other => panic!("expected relay_out while waiting for seq {seq}, got {other:?}"),
+        }
+    }
+}
+
+/// The `(from_window_id, summary, at_ms)` of each report.
+pub(crate) fn report_keys(reports: &[Value]) -> Vec<(String, String, u64)> {
+    reports
+        .iter()
+        .map(|report| {
+            (
+                report["from_window_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                report["summary"].as_str().unwrap_or_default().to_string(),
+                report["at_ms"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Returns once the daemon has read every frame sent on `client` before this
+/// request (a session reads its frames in order), or has closed the
+/// connection over one of them.
+async fn after_frames(client: &mut RelayClient, id: u64) {
+    let seq = client
+        .request(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}))
+        .await;
+    while let Some(frame) = client.next_frame_or_closed().await {
+        if matches!(frame, RelayFrame::Out { seq: Some(answered), .. } if answered == seq) {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_report_whose_answer_was_not_received_comes_again_and_one_received_does_not() {
+    const MARK: &str = "RECEIPT-UNACKED-5Q1";
+    let h = Harness::start("relay-receipt-unacked", config()).await;
+    let (parent, child) = report_to_parent(&h, MARK).await;
+
+    let mut first = window_session(&h.endpoint, &parent).await;
+    let took = take_reports(&mut first, 1, 0).await;
+    let keys = report_keys(&took.reports);
+    assert_eq!(
+        keys.iter()
+            .map(|(from, summary, _)| (from.as_str(), summary.as_str()))
+            .collect::<Vec<_>>(),
+        [(child.as_str(), MARK)],
+        "the first wait_for_report takes the report"
+    );
+    drop(first);
+
+    let mut second = window_session(&h.endpoint, &parent).await;
+    let again = take_reports(&mut second, 1, COME_BACK_SECS).await;
+    assert_eq!(
+        report_keys(&again.reports),
+        keys,
+        "a report whose answer was never received must come again, the same one"
+    );
+    assert_eq!(
+        again.receipt,
+        Some(true),
+        "an answer carrying reports asks the relay for a receipt"
+    );
+    second.send(&RelayFrame::Done { seq: again.seq }).await;
+    let after = take_reports(&mut second, 2, 0).await;
+    assert!(
+        after.reports.is_empty(),
+        "a received report is not handed out again: {:?}",
+        after.reports
+    );
+    drop(second);
+
+    let mut third = window_session(&h.endpoint, &parent).await;
+    let later = take_reports(&mut third, 1, 0).await;
+    assert!(
+        later.reports.is_empty(),
+        "a received report is gone for the next session too: {:?}",
+        later.reports
+    );
+}
+
+#[tokio::test]
+async fn a_report_whose_answer_the_relay_dropped_comes_again_in_the_same_session() {
+    const MARK: &str = "RECEIPT-DROPPED-8T2";
+    let h = Harness::start("relay-receipt-dropped", config()).await;
+    let (parent, _) = report_to_parent(&h, MARK).await;
+
+    let mut session = window_session(&h.endpoint, &parent).await;
+    let took = take_reports(&mut session, 1, 0).await;
+    let keys = report_keys(&took.reports);
+    assert_eq!(keys.len(), 1, "the first wait_for_report takes the report");
+    session.send(&RelayFrame::Dropped { seq: took.seq }).await;
+
+    let again = take_reports(&mut session, 2, COME_BACK_SECS).await;
+    assert_eq!(
+        report_keys(&again.reports),
+        keys,
+        "a report whose answer the relay dropped must come again, the same one"
+    );
+}
+
+/// `relay_done` and `relay_dropped` name a sequence number of their own
+/// session: another window's session, or another session of the same window,
+/// using the same number neither releases nor removes the report.
+#[tokio::test]
+async fn a_receipt_from_another_session_neither_releases_nor_removes_a_carried_report() {
+    const MARK: &str = "RECEIPT-FOREIGN-2M7";
+    let h = Harness::start("relay-receipt-foreign", config()).await;
+    let (parent, _) = report_to_parent(&h, MARK).await;
+    let other_window = h.open(process::echo_child_command(), None).await;
+
+    let mut carrier = window_session(&h.endpoint, &parent).await;
+    let took = take_reports(&mut carrier, 1, 0).await;
+    let keys = report_keys(&took.reports);
+    assert_eq!(keys.len(), 1, "the first wait_for_report takes the report");
+
+    for (what, window_id) in [
+        ("another window's session", other_window.as_str()),
+        ("another session of the same window", parent.as_str()),
+    ] {
+        let mut intruder = window_session(&h.endpoint, window_id).await;
+        intruder.send(&RelayFrame::Dropped { seq: took.seq }).await;
+        intruder.send(&RelayFrame::Done { seq: took.seq }).await;
+        after_frames(&mut intruder, 90).await;
+
+        let mut reader = window_session(&h.endpoint, &parent).await;
+        let seen = take_reports(&mut reader, 1, 0).await;
+        assert!(
+            seen.reports.is_empty(),
+            "a receipt from {what} must not hand out a report another session carries: {:?}",
+            seen.reports
+        );
+    }
+
+    drop(carrier);
+    let mut next = window_session(&h.endpoint, &parent).await;
+    let again = take_reports(&mut next, 1, COME_BACK_SECS).await;
+    assert_eq!(
+        report_keys(&again.reports),
+        keys,
+        "a receipt from another session must not remove the report the carrier never received"
+    );
+}

@@ -6,6 +6,11 @@
 //! back as `relay_out`. Every request a tool makes runs on a connection of the
 //! session's own into the IPC connection body, so MCP stays a thin layer over
 //! the IPC; when the relay connection ends, every one of them ends with it.
+//!
+//! The reports a `wait_for_report` takes stay the session's ([`Receipts`])
+//! until the relay acknowledges the answer that carried them: `relay_done`
+//! commits them, and `relay_dropped`, a cancel before the answer, or the end
+//! of the session puts them back in the inbox.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -32,6 +37,7 @@ use yagura_protocol::{
 use super::server::YaguraMcpServer;
 use super::{DaemonTransport, RequesterIdentity, TransportError};
 use crate::control::RequestOrigin;
+use crate::ipc::report::{ReportReceipt, TakenReports};
 use crate::ipc::{IpcServer, VerifiedPeer};
 
 /// How many sessions may be identified as one window at once.
@@ -255,6 +261,7 @@ pub(crate) async fn serve<S>(
     };
 
     let (closed_tx, closed_rx) = watch::channel(false);
+    let receipts = Arc::new(Receipts::default());
     let transport = SessionTransport {
         server,
         verified,
@@ -262,14 +269,24 @@ pub(crate) async fn serve<S>(
         requester: identity.requester,
         permits: Semaphore::new(REQUESTS_AT_ONCE),
         closed: closed_rx,
+        receipts: Arc::clone(&receipts),
     };
-    let mut rmcp = Rmcp::start(YaguraMcpServer::new(transport));
-    run_session(&mut frames, &mut writer, &mut rmcp, contract, resume).await;
+    let mut rmcp = Rmcp::start(YaguraMcpServer::new(transport), Arc::clone(&receipts));
+    run_session(
+        &mut frames,
+        &mut writer,
+        &mut rmcp,
+        &receipts,
+        contract,
+        resume,
+    )
+    .await;
 
     // Every connection a call holds into the connection body ends here, which
     // is how the body learns that their requester left.
     closed_tx.send_replace(true);
     rmcp.task.abort();
+    receipts.close();
     drop(identity.claim);
 }
 
@@ -300,7 +317,7 @@ async fn identify(
     window_id: String,
     token: String,
 ) -> Identity {
-    let mut connection = server.open_internal_connection(verified, RequestOrigin::External);
+    let mut connection = server.open_internal_connection(verified, RequestOrigin::External, None);
     let reply = exchange(
         &mut connection,
         &ClientMessage::Identify { window_id, token },
@@ -377,6 +394,7 @@ pub(crate) struct SessionTransport {
     permits: Semaphore,
     /// Turns `true` when the relay connection ends.
     closed: watch::Receiver<bool>,
+    receipts: Arc<Receipts>,
 }
 
 fn session_ended() -> TransportError {
@@ -399,14 +417,31 @@ impl DaemonTransport for SessionTransport {
             () = &mut ended => return Err(session_ended()),
             permit = self.permits.acquire() => permit.map_err(|_| session_ended())?,
         };
-        let mut connection = self
-            .server
-            .open_internal_connection(&self.verified, self.origin.clone());
-        tokio::select! {
+        // A take of reports stays this call's until its answer is out.
+        let call = matches!(msg, ClientMessage::WaitForReport { .. })
+            .then(|| CALL.try_with(Clone::clone).ok())
+            .flatten();
+        let (receipt, mut taken) = match call {
+            Some(_) => {
+                let (receipt, taken) = ReportReceipt::channel();
+                (Some(receipt), Some(taken))
+            }
+            None => (None, None),
+        };
+        let mut connection =
+            self.server
+                .open_internal_connection(&self.verified, self.origin.clone(), receipt);
+        let answer = tokio::select! {
             biased;
             () = &mut ended => Err(session_ended()),
             answer = exchange(&mut connection, &msg) => answer,
+        }?;
+        // Handed before the answer was written, so it is here by now.
+        if let (Some(call), Some(Ok(taken))) = (call, taken.as_mut().map(|taken| taken.try_recv()))
+        {
+            self.receipts.hold(call, taken);
         }
+        Ok(answer)
     }
 }
 
@@ -423,12 +458,13 @@ struct Rmcp {
 }
 
 impl Rmcp {
-    fn start(server: YaguraMcpServer<SessionTransport>) -> Self {
+    fn start(server: YaguraMcpServer<SessionTransport>, receipts: Arc<Receipts>) -> Self {
         let (lifecycle_tx, lifecycle) = watch::channel(false);
         let tools = tool_summary();
         let service = LifecycleWatch {
             inner: server,
             chosen: lifecycle_tx,
+            receipts,
         };
         let (rmcp_end, session_end) = tokio::io::duplex(RMCP_PIPE_BUFFER);
         let task = tokio::spawn(async move {
@@ -469,7 +505,8 @@ fn tool_summary() -> String {
         .collect()
 }
 
-/// The rmcp service, watched for the moment rmcp chooses how the session runs.
+/// The rmcp service, watched for the moment rmcp chooses how the session runs,
+/// and for the end of each tool call.
 ///
 /// rmcp chooses it on `initialize` or on the first request of a stateless
 /// session other than `server/discover` (and `ping`, which it answers itself),
@@ -479,6 +516,7 @@ fn tool_summary() -> String {
 struct LifecycleWatch<S> {
     inner: S,
     chosen: watch::Sender<bool>,
+    receipts: Arc<Receipts>,
 }
 
 impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
@@ -490,7 +528,22 @@ impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
         if !matches!(request, ClientRequest::DiscoverRequest(_)) {
             self.chosen.send_replace(true);
         }
-        self.inner.handle_request(request, context).await
+        if !matches!(request, ClientRequest::CallToolRequest(_)) {
+            return self.inner.handle_request(request, context).await;
+        }
+        let call = serde_json::to_value(&context.id)
+            .map(|id| id_key(&id))
+            .unwrap_or_default();
+        let cancelled = context.ct.clone();
+        let result = CALL
+            .scope(call.clone(), self.inner.handle_request(request, context))
+            .await;
+        // rmcp cancels the token only on a cancel before the answer is out,
+        // and then drops the answer.
+        let answered = !cancelled.is_cancelled()
+            && matches!(&result, Ok(ServerResult::CallToolResult(r)) if r.is_error != Some(true));
+        self.receipts.returned(&call, answered);
+        result
     }
 
     async fn handle_notification(
@@ -603,6 +656,7 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
     frames: &mut FramesIn<S>,
     writer: &mut WriteHalf<S>,
     rmcp: &mut Rmcp,
+    receipts: &Arc<Receipts>,
     contract: u32,
     resume: Option<RelayResume>,
 ) {
@@ -632,7 +686,7 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
         }
     }
 
-    let mut carried = Carried::default();
+    let mut carried = Carried::new(Arc::clone(receipts));
     let mut chosen = *rmcp.lifecycle.borrow();
     let mut held: Vec<String> = Vec::new();
     loop {
@@ -641,10 +695,17 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 let Ok(Some(frame)) = frame else {
                     return;
                 };
-                // `relay_done` and `relay_dropped` acknowledge answers that ask
-                // for a receipt, and this session asks for none.
-                let RelayFrame::In { line, seq } = frame else {
-                    continue;
+                let (line, seq) = match frame {
+                    RelayFrame::In { line, seq } => (line, seq),
+                    RelayFrame::Done { seq } => {
+                        receipts.done(seq);
+                        continue;
+                    }
+                    RelayFrame::Dropped { seq } => {
+                        receipts.dropped(seq);
+                        continue;
+                    }
+                    _ => continue,
                 };
                 match carried.carry(&line, seq, chosen) {
                     Carry::Feed => {
@@ -664,10 +725,24 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 let Ok(Some(line)) = line else {
                     return;
                 };
-                let seq = carried.answered(&line);
-                let out = RelayFrame::Out { line, seq, receipt: None };
+                let (seq, taken) = carried.answered(&line);
+                let (receipt, unreceipted) = match (seq, taken) {
+                    // Carried from the moment the answer is handed on, so the
+                    // relay's receipt always finds it.
+                    (Some(seq), Some(taken)) => {
+                        receipts.carry(seq, taken);
+                        (Some(true), None)
+                    }
+                    (_, taken) => (None, taken),
+                };
+                let out = RelayFrame::Out { line, seq, receipt };
                 if !send(writer, &out).await {
                     return;
+                }
+                // An answer to a request without a sequence number cannot be
+                // acknowledged: it counts as received once written.
+                if let Some(taken) = unreceipted {
+                    taken.commit();
                 }
             }
             changed = rmcp.lifecycle.changed(), if !chosen => {
@@ -688,12 +763,12 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
 }
 
 /// The requests a session carried and has not seen answered.
-#[derive(Default)]
 struct Carried {
     /// The relay's sequence number of each request, by JSON-RPC id.
     seqs: HashMap<String, u64>,
     /// The `tools/call` requests in flight, by JSON-RPC id.
     calls: HashSet<String>,
+    receipts: Arc<Receipts>,
 }
 
 /// What the session does with a line from the CLI.
@@ -706,6 +781,14 @@ enum Carry {
 }
 
 impl Carried {
+    fn new(receipts: Arc<Receipts>) -> Self {
+        Self {
+            seqs: HashMap::new(),
+            calls: HashSet::new(),
+            receipts,
+        }
+    }
+
     fn carry(&mut self, line: &str, seq: Option<u64>, chosen: bool) -> Carry {
         match read_line(line) {
             Line::Request { id, method } => {
@@ -736,7 +819,9 @@ impl Carried {
                     && let Some(cancelled) = cancels
                 {
                     let key = id_key(&cancelled);
-                    self.calls.remove(&key);
+                    if self.calls.remove(&key) {
+                        self.receipts.cancel(&key);
+                    }
                     self.seqs.remove(&key);
                 }
                 if chosen { Carry::Feed } else { Carry::Hold }
@@ -745,13 +830,149 @@ impl Carried {
         }
     }
 
-    /// The sequence number of the request `line` answers, if it answers one.
-    fn answered(&mut self, line: &str) -> Option<u64> {
+    /// The sequence number of the request `line` answers, if it answers one,
+    /// and the reports that answer carries.
+    fn answered(&mut self, line: &str) -> (Option<u64>, Option<TakenReports>) {
         let Line::Answer { id } = read_line(line) else {
-            return None;
+            return (None, None);
         };
         let key = id_key(&id);
-        self.calls.remove(&key);
-        self.seqs.remove(&key)
+        let taken = self
+            .calls
+            .remove(&key)
+            .then(|| self.receipts.answered(&key))
+            .flatten();
+        (self.seqs.remove(&key), taken)
+    }
+}
+
+tokio::task_local! {
+    /// The JSON-RPC id key of the tool call a task runs.
+    static CALL: String;
+}
+
+/// How many cancels of calls still running a session remembers at once.
+const CANCELS_REMEMBERED: usize = REQUESTS_AT_ONCE + REQUESTS_WAITING;
+
+/// The reports a session's `wait_for_report` calls took, from the take until
+/// the relay's receipt of the answer that carried them. Memory only: a daemon
+/// that dies leaves their rows for the next one to hand out again.
+///
+/// Every taken value dropped here goes back to its inbox, so each method lets
+/// go of the lock before dropping.
+#[derive(Default)]
+pub(crate) struct Receipts {
+    state: Mutex<ReceiptState>,
+}
+
+#[derive(Default)]
+struct ReceiptState {
+    /// Taken by a call whose answer is not handed on yet, by JSON-RPC id key.
+    answering: HashMap<String, TakenReports>,
+    /// Calls the CLI cancelled while they still ran.
+    cancelled: HashSet<String>,
+    /// Calls that returned and whose answer is not read yet.
+    returned: HashSet<String>,
+    /// Carried by an answer that asked for a receipt, by its sequence number.
+    carried: HashMap<u64, TakenReports>,
+    closed: bool,
+}
+
+impl Receipts {
+    fn state(&self) -> std::sync::MutexGuard<'_, ReceiptState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `call` took `taken`; it goes back at once when the call was cancelled.
+    fn hold(&self, call: String, taken: TakenReports) {
+        let released = {
+            let mut state = self.state();
+            if state.closed || state.cancelled.contains(&call) {
+                Some(taken)
+            } else {
+                state.answering.insert(call, taken)
+            }
+        };
+        drop(released);
+    }
+
+    /// `call`'s handler returned; without an answer that carries what it
+    /// took, that goes back.
+    fn returned(&self, call: &str, answered: bool) {
+        let released = {
+            let mut state = self.state();
+            if state.cancelled.remove(call) {
+                state.answering.remove(call)
+            } else {
+                state.returned.insert(call.to_owned());
+                if answered {
+                    None
+                } else {
+                    state.answering.remove(call)
+                }
+            }
+        };
+        drop(released);
+    }
+
+    /// The CLI cancelled `call`, still in flight: what it took goes back, and
+    /// what it takes from now on does too.
+    fn cancel(&self, call: &str) {
+        let released = {
+            let mut state = self.state();
+            let still_running = !state.returned.remove(call);
+            if still_running && state.cancelled.len() < CANCELS_REMEMBERED {
+                state.cancelled.insert(call.to_owned());
+            }
+            state.answering.remove(call)
+        };
+        drop(released);
+    }
+
+    /// `call`'s answer is being handed on: what it carries, if anything.
+    fn answered(&self, call: &str) -> Option<TakenReports> {
+        let mut state = self.state();
+        state.returned.remove(call);
+        state.cancelled.remove(call);
+        state.answering.remove(call)
+    }
+
+    /// The answer of `seq`, which asks for a receipt, carries `taken`.
+    fn carry(&self, seq: u64, taken: TakenReports) {
+        let released = {
+            let mut state = self.state();
+            if state.closed {
+                Some(taken)
+            } else {
+                state.carried.insert(seq, taken)
+            }
+        };
+        drop(released);
+    }
+
+    /// `relay_done`: the answer of `seq` was written to the CLI.
+    fn done(&self, seq: u64) {
+        let received = self.state().carried.remove(&seq);
+        if let Some(taken) = received {
+            taken.commit();
+        }
+    }
+
+    /// `relay_dropped`: the answer of `seq` was not written.
+    fn dropped(&self, seq: u64) {
+        let released = self.state().carried.remove(&seq);
+        drop(released);
+    }
+
+    /// The session ended: everything taken and not received goes back.
+    fn close(&self) {
+        let released = {
+            let mut state = self.state();
+            state.closed = true;
+            let answering: Vec<TakenReports> = state.answering.drain().map(|(_, t)| t).collect();
+            let carried: Vec<TakenReports> = state.carried.drain().map(|(_, t)| t).collect();
+            (answering, carried)
+        };
+        drop(released);
     }
 }

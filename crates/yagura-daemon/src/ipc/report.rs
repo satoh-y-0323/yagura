@@ -18,8 +18,10 @@
 //! while it waits; emptying the report inbox withdraws it.
 //!
 //! Each report inbox is the copy of what the store keeps for its window
-//! ([`crate::parcel_store`]): a report queued is kept, and a drain forgets
-//! them, so a next daemon hands out the reports this one accepted. A report
+//! ([`crate::parcel_store`]): a report queued is kept, and a take forgets it
+//! once the take is committed ([`TakenReports`]), so a next daemon hands out
+//! the reports this one accepted and nobody received. A client of its own
+//! commits as it answers; a relay session commits on the relay's receipt. A report
 //! sent is shown to no waiter and no door until its row is written, and the
 //! reports show in the order they were sent: `send_report` answers for one
 //! whose row could not be written by refusing it, and it never shows.
@@ -89,7 +91,10 @@ struct Inbox {
     writing: BTreeMap<i64, Writing>,
     /// Slots promised to a `send_report` whose ledger write is still running.
     reserved: usize,
-    waiters: VecDeque<(u64, oneshot::Sender<Vec<ReceivedReport>>)>,
+    /// Reports taken and neither committed nor put back yet. Their rows and
+    /// places are still theirs.
+    out: usize,
+    waiters: VecDeque<(u64, oneshot::Sender<TakenReports>)>,
     notice: Notice,
     /// The current non-empty stretch's number, unique across the inbox being
     /// recreated, so a notice written for one stretch is never recorded
@@ -125,6 +130,7 @@ impl Inbox {
         self.reports.is_empty()
             && self.writing.is_empty()
             && self.reserved == 0
+            && self.out == 0
             && self.waiters.is_empty()
     }
 
@@ -132,7 +138,7 @@ impl Inbox {
     /// and written ones when `older`, behind them otherwise.
     fn places(&mut self, count: usize, older: bool) -> Vec<i64> {
         let count = i64::try_from(count).unwrap_or(i64::MAX);
-        if self.reports.is_empty() && self.writing.is_empty() {
+        if self.reports.is_empty() && self.writing.is_empty() && self.out == 0 {
             self.first_seq = 0;
             self.next_seq = 0;
         }
@@ -152,7 +158,7 @@ impl Inbox {
 
 /// What [`ReportInboxes::take_or_wait`] decided.
 enum Taken {
-    Ready(Vec<ReceivedReport>),
+    Ready(TakenReports),
     Waiting(WaitRegistration),
     NoWaiterBudget,
 }
@@ -174,7 +180,9 @@ impl ReportInboxes {
     fn reserve(self: &Arc<Self>, window_id: &str) -> Option<InboxSlot> {
         let mut inboxes = lock_recover(&self.inboxes);
         let inbox = inboxes.entry(window_id.to_string()).or_default();
-        if inbox.reports.len() + inbox.writing.len() + inbox.reserved >= REPORT_INBOX_MAX {
+        if inbox.reports.len() + inbox.writing.len() + inbox.reserved + inbox.out
+            >= REPORT_INBOX_MAX
+        {
             return None;
         }
         inbox.reserved += 1;
@@ -206,24 +214,21 @@ impl ReportInboxes {
             if from_slot {
                 inbox.reserved = inbox.reserved.saturating_sub(1);
             }
-            let Some(reports) = hand_to_waiter(inbox, reports) else {
-                return;
-            };
             let places = inbox.places(reports.len(), older);
-            // Kept under the same lock a drain forgets them under, so the
-            // store follows the inbox's order. Shown whatever the write says:
+            // Kept under the same lock a take forgets them under, so the
+            // store follows the inbox's order. Kept even for a waiter, whose
+            // take may not be committed. Shown whatever the write says:
             // nothing waits on it.
             if let Some(store) = &store {
                 let kept: Vec<(i64, &ReceivedReport)> =
                     places.iter().copied().zip(&reports).collect();
                 drop(store.keep_reports(window_id, &kept));
             }
-            self.queue(
-                inbox,
-                entry.as_deref(),
-                places.into_iter().zip(reports).collect(),
-                older,
-            )
+            let placed = places.into_iter().zip(reports).collect();
+            let Some(reports) = self.hand_to_waiter(inbox, window_id, placed) else {
+                return;
+            };
+            self.queue(inbox, entry.as_deref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
     }
@@ -310,7 +315,6 @@ impl ReportInboxes {
     /// leaves, and holds nothing back.
     fn settle_write(self: &Arc<Self>, window_id: &str, seq: i64, outcome: SaveOutcome) {
         let entry = self.registry.get(window_id);
-        let store = self.registry.parcel_store();
         let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
             let Some(inbox) = inboxes.get_mut(window_id) else {
@@ -335,40 +339,26 @@ impl ReportInboxes {
                 }
                 return;
             }
-            let (seqs, reports): (Vec<i64>, Vec<ReceivedReport>) = settled.into_iter().unzip();
-            match hand_to_waiter(inbox, reports) {
-                Some(reports) => self.queue(
-                    inbox,
-                    entry.as_deref(),
-                    seqs.into_iter().zip(reports).collect(),
-                    false,
-                ),
-                None => {
-                    // A waiter read them: their rows go, as a drain's do.
-                    if let Some(store) = &store {
-                        store.forget_reports(window_id, seqs);
-                    }
-                    return;
-                }
-            }
+            let Some(reports) = self.hand_to_waiter(inbox, window_id, settled) else {
+                return;
+            };
+            self.queue(inbox, entry.as_deref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
     }
 
-    /// Queues `reports` (each at its place) in `inbox`, and makes or revises
-    /// the notice of them. Called under the inboxes' lock, so the notice and
-    /// the notice state never disagree.
+    /// Queues `reports` in `inbox`, each in the order of its place, and makes
+    /// or revises the notice of them. Called under the inboxes' lock, so the
+    /// notice and the notice state never disagree.
     fn queue(
         &self,
         inbox: &mut Inbox,
         entry: Option<&WindowEntry>,
         reports: Vec<(i64, ReceivedReport)>,
-        older: bool,
     ) -> Option<(crate::inbox::Deposited, u64)> {
-        if older {
-            inbox.reports.splice(0..0, reports);
-        } else {
-            inbox.reports.extend(reports);
+        for (seq, report) in reports {
+            let at = inbox.reports.partition_point(|(queued, _)| *queued < seq);
+            inbox.reports.insert(at, (seq, report));
         }
         let fell_due = inbox.notice == Notice::Lowered && !inbox.reports.is_empty();
         if fell_due {
@@ -443,34 +433,28 @@ impl ReportInboxes {
         }
     }
 
-    /// Drains `window_id`'s inbox, or -- when it is empty, waiting is asked
+    /// Takes what `window_id`'s inbox queues, uncommitted ([`TakenReports`]),
+    /// or -- when it is empty, waiting is asked
     /// for and the connection may hold one more wait -- parks a waiter on it.
     /// One lock covers both, so a report can never slip into the inbox
     /// between the emptiness check and the waiter's registration.
     fn take_or_wait(self: &Arc<Self>, window_id: &str, may_wait: bool, budget_left: bool) -> Taken {
         let entry = self.registry.get(window_id);
-        let store = self.registry.parcel_store();
         let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id)
             && !inbox.reports.is_empty()
         {
-            let (seqs, reports): (Vec<i64>, Vec<ReceivedReport>) =
-                std::mem::take(&mut inbox.reports).into_iter().unzip();
+            let reports = std::mem::take(&mut inbox.reports);
+            inbox.out += reports.len();
             inbox.notice = Notice::Lowered;
-            if let Some(store) = &store {
-                store.forget_reports(window_id, seqs);
-            }
             // The reports it announced were read.
             if let Some(entry) = &entry {
                 let _ = entry.inbox().withdraw(REPORT_NOTICE_KEY);
             }
-            if inbox.is_idle() {
-                inboxes.remove(window_id);
-            }
-            return Taken::Ready(reports);
+            return Taken::Ready(self.taken(window_id, reports));
         }
         if !may_wait {
-            return Taken::Ready(Vec::new());
+            return Taken::Ready(self.taken(window_id, Vec::new()));
         }
         if !budget_left {
             return Taken::NoWaiterBudget;
@@ -489,6 +473,76 @@ impl ReportInboxes {
             rx,
             settled: false,
         })
+    }
+
+    /// `reports`, counted out of `window_id`'s inbox, as a take.
+    fn taken(
+        self: &Arc<Self>,
+        window_id: &str,
+        reports: Vec<(i64, ReceivedReport)>,
+    ) -> TakenReports {
+        TakenReports {
+            inboxes: Arc::clone(self),
+            window_id: window_id.to_owned(),
+            reports,
+        }
+    }
+
+    /// Offers `reports` to the waiters in arrival order, returning them when
+    /// no waiter is still listening. Called under the inboxes' lock.
+    fn hand_to_waiter(
+        self: &Arc<Self>,
+        inbox: &mut Inbox,
+        window_id: &str,
+        mut reports: Vec<(i64, ReceivedReport)>,
+    ) -> Option<Vec<(i64, ReceivedReport)>> {
+        while let Some((_, waiter)) = inbox.waiters.pop_front() {
+            let count = reports.len();
+            inbox.out += count;
+            match waiter.send(self.taken(window_id, reports)) {
+                Ok(()) => return None,
+                Err(mut returned) => {
+                    // Disarmed here: dropping it would take this same lock.
+                    inbox.out = inbox.out.saturating_sub(count);
+                    reports = returned.disarm();
+                }
+            }
+        }
+        Some(reports)
+    }
+
+    /// Puts `reports`, taken and not committed, back in `window_id`'s inbox
+    /// at their own places: ahead of every report that came after them, and
+    /// their rows untouched.
+    fn put_back(self: &Arc<Self>, window_id: &str, reports: Vec<(i64, ReceivedReport)>) {
+        let entry = self.registry.get(window_id);
+        let deposited = {
+            let mut inboxes = lock_recover(&self.inboxes);
+            let inbox = inboxes.entry(window_id.to_string()).or_default();
+            inbox.out = inbox.out.saturating_sub(reports.len());
+            let Some(reports) = self.hand_to_waiter(inbox, window_id, reports) else {
+                return;
+            };
+            self.queue(inbox, entry.as_deref(), reports)
+        };
+        self.after_queue(window_id, entry, deposited);
+    }
+
+    /// Forgets the rows of the reports a committed take carried.
+    fn commit_taken(&self, window_id: &str, seqs: Vec<i64>) {
+        let store = self.registry.parcel_store();
+        let mut inboxes = lock_recover(&self.inboxes);
+        // Sent under the lock places are given under, so a place given after
+        // this is never forgotten by it.
+        if let Some(store) = &store {
+            store.forget_reports(window_id, seqs.clone());
+        }
+        if let Some(inbox) = inboxes.get_mut(window_id) {
+            inbox.out = inbox.out.saturating_sub(seqs.len());
+            if inbox.is_idle() {
+                inboxes.remove(window_id);
+            }
+        }
     }
 
     /// Drops everything queued for `window_id`, whose window can no longer
@@ -592,21 +646,6 @@ impl std::fmt::Debug for ReportInboxes {
             .field("inboxes", &lock_recover(&self.inboxes).len())
             .finish_non_exhaustive()
     }
-}
-
-/// Offers `reports` to the waiters in arrival order, returning them when no
-/// waiter is still listening.
-fn hand_to_waiter(
-    inbox: &mut Inbox,
-    mut reports: Vec<ReceivedReport>,
-) -> Option<Vec<ReceivedReport>> {
-    while let Some((_, waiter)) = inbox.waiters.pop_front() {
-        match waiter.send(reports) {
-            Ok(()) => return None,
-            Err(returned) => reports = returned,
-        }
-    }
-    Some(reports)
 }
 
 /// Puts the notice of `pending` reports in `entry`'s inbox. Called under the
@@ -748,6 +787,74 @@ impl Drop for Placing {
     }
 }
 
+/// Reports taken out of a window's inbox whose rows are still kept.
+/// Committed ([`TakenReports::commit`]), their rows go; dropped, they go back
+/// to the inbox at their own places, so a take that reaches nobody loses
+/// nothing.
+pub(crate) struct TakenReports {
+    inboxes: Arc<ReportInboxes>,
+    window_id: String,
+    reports: Vec<(i64, ReceivedReport)>,
+}
+
+impl TakenReports {
+    fn is_empty(&self) -> bool {
+        self.reports.is_empty()
+    }
+
+    /// The reports, as an answer carries them.
+    fn reports(&self) -> Vec<ReceivedReport> {
+        self.reports
+            .iter()
+            .map(|(_, report)| report.clone())
+            .collect()
+    }
+
+    /// Forgets the reports' rows: they were received.
+    pub(crate) fn commit(mut self) {
+        let seqs = self.disarm().into_iter().map(|(seq, _)| seq).collect();
+        self.inboxes.commit_taken(&self.window_id, seqs);
+    }
+
+    /// [`Self::commit`], returning the reports.
+    fn into_committed(mut self) -> Vec<ReceivedReport> {
+        let (seqs, reports) = self.disarm().into_iter().unzip();
+        self.inboxes.commit_taken(&self.window_id, seqs);
+        reports
+    }
+
+    /// Takes the reports out, so dropping this puts nothing back.
+    fn disarm(&mut self) -> Vec<(i64, ReceivedReport)> {
+        std::mem::take(&mut self.reports)
+    }
+}
+
+impl Drop for TakenReports {
+    fn drop(&mut self) {
+        if !self.reports.is_empty() {
+            let reports = self.disarm();
+            self.inboxes.put_back(&self.window_id, reports);
+        }
+    }
+}
+
+/// Where a relay session's `wait_for_report` hands the reports it took: to
+/// the session's request, uncommitted, for the relay's receipt to commit.
+pub(crate) struct ReportReceipt(oneshot::Sender<TakenReports>);
+
+impl ReportReceipt {
+    /// A receipt and the end its request reads the take from.
+    pub(crate) fn channel() -> (Self, oneshot::Receiver<TakenReports>) {
+        let (tx, rx) = oneshot::channel();
+        (Self(tx), rx)
+    }
+
+    /// Hands `taken` to the request; put back when the request is gone.
+    fn hand(self, taken: TakenReports) {
+        drop(self.0.send(taken));
+    }
+}
+
 /// A `wait_for_report` parked on an empty inbox. Dropped before it settles
 /// (its task aborted because the connection ended), it withdraws itself and
 /// puts back anything already handed to it, so an abort racing a hand-off
@@ -756,23 +863,23 @@ struct WaitRegistration {
     inboxes: Arc<ReportInboxes>,
     window_id: String,
     id: u64,
-    rx: oneshot::Receiver<Vec<ReceivedReport>>,
+    rx: oneshot::Receiver<TakenReports>,
     settled: bool,
 }
 
 impl WaitRegistration {
-    async fn wait(mut self, timeout: Duration) -> Vec<ReceivedReport> {
+    async fn wait(mut self, timeout: Duration) -> Option<TakenReports> {
         let received = tokio::time::timeout(timeout, &mut self.rx).await;
         self.settled = true;
         match received {
-            Ok(Ok(reports)) => reports,
-            Ok(Err(_)) | Err(_) => self.withdraw().unwrap_or_default(),
+            Ok(Ok(taken)) => Some(taken),
+            Ok(Err(_)) | Err(_) => self.withdraw(),
         }
     }
 
     /// Leaves the waiter queue, returning whatever was handed over before
     /// it did. Read under the inbox lock, so no hand-off can land after it.
-    fn withdraw(&mut self) -> Option<Vec<ReceivedReport>> {
+    fn withdraw(&mut self) -> Option<TakenReports> {
         let mut inboxes = lock_recover(&self.inboxes.inboxes);
         if let Some(inbox) = inboxes.get_mut(&self.window_id) {
             inbox.waiters.retain(|(id, _)| *id != self.id);
@@ -786,11 +893,9 @@ impl WaitRegistration {
 
 impl Drop for WaitRegistration {
     fn drop(&mut self) {
-        if self.settled {
-            return;
-        }
-        if let Some(reports) = self.withdraw() {
-            self.inboxes.put(&self.window_id, reports, false, true);
+        if !self.settled {
+            // Dropped after the inboxes' lock is left, which puts it back.
+            drop(self.withdraw());
         }
     }
 }
@@ -1055,9 +1160,10 @@ pub(super) async fn handle_wait_for_report(
         return;
     }
     let budget_left = state.live_waiter_count() < config.max_waiters_per_conn;
+    let receipt = state.report_receipt.take();
     match inboxes.take_or_wait(&window_id, timeout_sec > 0, budget_left) {
-        Taken::Ready(reports) => {
-            reply_reports(inboxes, ledger, outbound, &window_id, reports).await
+        Taken::Ready(taken) => {
+            answer_taken(inboxes, ledger, outbound, &window_id, Some(taken), receipt).await
         }
         Taken::NoWaiterBudget => outbound.reply(&error_msg(
             "resource_exhausted",
@@ -1072,12 +1178,42 @@ pub(super) async fn handle_wait_for_report(
             state.waiters.push(tokio::spawn(async move {
                 // A wait its requester's CLI has dropped takes nothing: the
                 // dropped registration puts back what reached it.
-                let reports = tokio::select! {
-                    reports = registration.wait(timeout) => reports,
-                    () = request_left(&mut left) => Vec::new(),
+                let taken = tokio::select! {
+                    taken = registration.wait(timeout) => taken,
+                    () = request_left(&mut left) => None,
                 };
-                reply_reports(&inboxes, &ledger, &outbound, &window_id, reports).await;
+                answer_taken(&inboxes, &ledger, &outbound, &window_id, taken, receipt).await;
             }));
+        }
+    }
+}
+
+/// Answers with what a take took. Through a relay session's `receipt` the
+/// take goes to the session's request uncommitted, and comes back to the
+/// inbox when that request is gone; otherwise it is committed and answered.
+async fn answer_taken(
+    inboxes: &Arc<ReportInboxes>,
+    ledger: &PlanRuntime,
+    outbound: &Outbound,
+    window_id: &str,
+    taken: Option<TakenReports>,
+    receipt: Option<ReportReceipt>,
+) {
+    match (taken.filter(|taken| !taken.is_empty()), receipt) {
+        (Some(taken), Some(receipt)) => {
+            #[cfg(feature = "fault-injection")]
+            inboxes.registry.config().faults.hold_report_taken().await;
+            let reports = taken.reports();
+            // Handed before the answer, so the request has it once answered.
+            receipt.hand(taken);
+            outbound.reply(&DaemonMessage::Reports {
+                reports,
+                awaiting: None,
+            });
+        }
+        (taken, _) => {
+            let reports = taken.map(TakenReports::into_committed).unwrap_or_default();
+            reply_reports(inboxes, ledger, outbound, window_id, reports).await;
         }
     }
 }
@@ -1212,10 +1348,7 @@ mod tests {
         inboxes.put(window, vec![report("first")], false, false);
         let (_, first_stretch) = inboxes.due_notice(window).expect("first stretch is due");
 
-        assert!(matches!(
-            inboxes.take_or_wait(window, false, true),
-            Taken::Ready(drained) if drained.len() == 1
-        ));
+        assert_eq!(drained(inboxes.take_or_wait(window, false, true)).len(), 1);
 
         inboxes.put(window, vec![report("second")], false, false);
         assert!(inboxes.due_notice(window).is_some());
@@ -1328,7 +1461,7 @@ mod tests {
 
     fn drained(taken: Taken) -> Vec<ReceivedReport> {
         match taken {
-            Taken::Ready(reports) => reports,
+            Taken::Ready(taken) => taken.into_committed(),
             _ => panic!("expected the inbox to answer at once"),
         }
     }
@@ -1412,7 +1545,11 @@ mod tests {
         let staying = waiting(inboxes.take_or_wait(window, true, true));
         drop(leaving);
         inboxes.put(window, vec![report("for the other")], false, false);
-        let reports = staying.wait(Duration::from_secs(30)).await;
+        let reports = staying
+            .wait(Duration::from_secs(30))
+            .await
+            .map(TakenReports::into_committed)
+            .unwrap_or_default();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].summary, "for the other");
     }

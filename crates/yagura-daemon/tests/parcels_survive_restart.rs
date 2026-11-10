@@ -475,6 +475,52 @@ async fn a_report_and_its_notice_are_taken_once_after_the_daemon_is_killed() {
     );
 }
 
+/// The sandbox daemon's endpoint, which a relay connects to.
+fn endpoint(sandbox: &Sandbox) -> String {
+    let user = PlatformIpc::default()
+        .current_user_id()
+        .expect("the current user id must resolve");
+    yagura_os::default_endpoint(&user, &sandbox.namespace())
+}
+
+/// A report the parent's relay took with `wait_for_report` but never said it received
+/// stays kept: the next daemon hands the same report out again, with the same sender and
+/// the same `at_ms`.
+#[tokio::test]
+async fn a_report_taken_through_a_relay_without_a_receipt_is_taken_again_after_the_daemon_is_killed()
+ {
+    const REPORT_MARK: &str = "PERSIST-RECEIPT-6H3";
+    let sandbox = Sandbox::new("persist-receipt");
+    write_delivering_profile(&sandbox);
+
+    let mut first = start_first(&sandbox).await;
+    let (parent, child) = report_to_opener(&sandbox, &mut first, REPORT_MARK).await;
+    let mut relay = crate::relay_session::window_session(&endpoint(&sandbox), &parent).await;
+    let took = crate::relay_session::take_reports(&mut relay, 1, 0).await;
+    let keys = crate::relay_session::report_keys(&took.reports);
+    assert_eq!(
+        keys.iter()
+            .map(|(from, summary, _)| (from.as_str(), summary.as_str()))
+            .collect::<Vec<_>>(),
+        [(child.as_str(), REPORT_MARK)],
+        "the parent's relay takes the report from the first daemon"
+    );
+    first.kill_keeping_windows();
+    drop(relay);
+
+    let mut next = sandbox.start().await;
+    listed(&mut next, &sandbox, &parent).await;
+    let mut relay = crate::relay_session::window_session(&endpoint(&sandbox), &parent).await;
+    let again = crate::relay_session::take_reports(&mut relay, 1, 0).await;
+    assert_eq!(
+        crate::relay_session::report_keys(&again.reports),
+        keys,
+        "the next daemon must hand out the report the relay never received, with the same \
+         sender and at_ms; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+}
+
 /// A store an older daemon left, keeping a handoff's envelope and a report notice in a
 /// window's inbox rows, is cleared of both by the next daemon: its door hands out neither,
 /// the only notice it hands out is the one derived from the report the parent still has to

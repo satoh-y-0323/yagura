@@ -889,8 +889,9 @@ fn destructive_tools_are_documented_in_docs_and_playbook() {
 #[test]
 fn tools_rs_error_codes_are_documented_in_error_handling_section() {
     let tools_rs = read_source("src/mcp/tools.rs");
-    let code_fn_body = extract_fn_body_text(&tools_rs, "code")
-        .unwrap_or_else(|| panic!("yagura-daemon/src/mcp/tools.rs must define a `fn code(` method"));
+    let code_fn_body = extract_fn_body_text(&tools_rs, "code").unwrap_or_else(|| {
+        panic!("yagura-daemon/src/mcp/tools.rs must define a `fn code(` method")
+    });
     let codes = extract_match_arm_string_literals(&code_fn_body);
     assert!(
         !codes.is_empty(),
