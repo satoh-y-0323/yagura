@@ -277,6 +277,35 @@ impl ReportInboxes {
         self.after_queue(window_id, entry, deposited);
     }
 
+    /// Gives back the slot reserved for `report`, gives it the next place and
+    /// holds it in `writing` under that place. `keep` runs under the same lock
+    /// with the place, before the report is held.
+    fn hold_place<R>(
+        &self,
+        window_id: &str,
+        entry: Option<&Arc<WindowEntry>>,
+        report: ReceivedReport,
+        keep: impl FnOnce(i64, &ReceivedReport) -> R,
+    ) -> (i64, R) {
+        let mut inboxes = lock_recover(&self.inboxes);
+        let inbox = inboxes.entry(window_id.to_string()).or_default();
+        inbox.reserved = inbox.reserved.saturating_sub(1);
+        let seq = self
+            .places(window_id, entry, 1, false)
+            .first()
+            .copied()
+            .unwrap_or_default();
+        let kept = keep(seq, &report);
+        inbox.writing.insert(
+            seq,
+            Writing {
+                report,
+                outcome: None,
+            },
+        );
+        (seq, kept)
+    }
+
     /// Puts `report`, the one a slot was reserved for, in `window_id`'s
     /// inbox behind the others. With a store it shows only once its row is
     /// written, and only after every report sent before it is settled; the
@@ -287,27 +316,9 @@ impl ReportInboxes {
             self.put(window_id, vec![report], true, false);
             return Saving::ready();
         };
-        let (seq, written) = {
-            let mut inboxes = lock_recover(&self.inboxes);
-            let inbox = inboxes.entry(window_id.to_string()).or_default();
-            inbox.reserved = inbox.reserved.saturating_sub(1);
-            let Some(seq) = self
-                .places(window_id, entry.as_ref(), 1, false)
-                .first()
-                .copied()
-            else {
-                return Saving::ready();
-            };
-            let written = store.keep_reports(window_id, &[(seq, &report)]);
-            inbox.writing.insert(
-                seq,
-                Writing {
-                    report,
-                    outcome: None,
-                },
-            );
-            (seq, written)
-        };
+        let (seq, written) = self.hold_place(window_id, entry.as_ref(), report, |seq, report| {
+            store.keep_reports(window_id, &[(seq, report)])
+        });
         let (told, outcome) = oneshot::channel();
         let inboxes = Arc::clone(self);
         let window_id = window_id.to_owned();
@@ -338,21 +349,7 @@ impl ReportInboxes {
             };
         }
         let report_json = serde_json::to_string(&report).ok();
-        let mut inboxes = lock_recover(&self.inboxes);
-        let inbox = inboxes.entry(window_id.to_string()).or_default();
-        inbox.reserved = inbox.reserved.saturating_sub(1);
-        let seq = self
-            .places(window_id, entry.as_ref(), 1, false)
-            .first()
-            .copied()
-            .unwrap_or_default();
-        inbox.writing.insert(
-            seq,
-            Writing {
-                report,
-                outcome: None,
-            },
-        );
+        let (seq, ()) = self.hold_place(window_id, entry.as_ref(), report, |_, _| ());
         Placing::Kept {
             inboxes: Arc::clone(self),
             window_id: window_id.to_owned(),
@@ -739,9 +736,7 @@ impl InboxSlot {
         self.held = false;
         self.inboxes.put_saved(&self.window_id, report)
     }
-}
 
-impl InboxSlot {
     /// Decides the place `report` takes behind the others, for a caller that
     /// writes the report's row itself, in the transaction that writes what
     /// the report is for.
