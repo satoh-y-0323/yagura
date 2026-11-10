@@ -131,8 +131,16 @@ async fn call_door(
     let token = common::VALID_TOKEN.to_string();
     let window_id = window_id.to_string();
     let message = match door {
-        "context" => ClientMessage::DeliverContext { window_id, token },
-        "take" => ClientMessage::DeliverTake { window_id, token },
+        "context" => ClientMessage::DeliverContext {
+            window_id,
+            token,
+            held: false,
+        },
+        "take" => ClientMessage::DeliverTake {
+            window_id,
+            token,
+            held: false,
+        },
         other => panic!("no door named {other}"),
     };
     let (output, _, _) = common::expect_delivery(common::call_door(client, &message).await);

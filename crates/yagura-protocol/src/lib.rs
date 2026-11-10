@@ -197,6 +197,13 @@
 //! attached to a window, it comes after the frames for everything that
 //! window's daemon side had received when the `ping` was read (see
 //! [`ClientMessage::Ping`]). The messages keep their shape.
+//!
+//! Revision 33 lets a door confirm a take before it prints: `deliver_context`,
+//! `deliver_take`, `deliver_wait` and `run_hook` gain `held`, and a held read's parcels
+//! stay the daemon's until the door sends `deliver_done` on the same
+//! connection, answered with `deliver_confirmed`. A read without `held` is
+//! settled before it is answered, as before. A caller establishes
+//! [`DELIVER_DONE_MIN_REVISION`] before sending a held read or `deliver_done`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,7 +228,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 32;
+pub const PROTOCOL_REVISION: u32 = 33;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -374,6 +381,14 @@ pub const TICKETS_MIN_REVISION: u32 = 29;
 /// An older daemon refuses it by name, so a hook command built for this
 /// revision does nothing useful against it.
 pub const HOOK_EVENTS_MIN_REVISION: u32 = 31;
+
+/// The first wire revision that understands a held inbox read (`held: true`)
+/// and [`ClientMessage::DeliverDone`].
+///
+/// An older daemon ignores `held` and settles the read before answering, and
+/// refuses `deliver_done` by name, so a door establishes this revision before
+/// holding a read.
+pub const DELIVER_DONE_MIN_REVISION: u32 = 33;
 
 /// The most vendors one [`DefaultPalettes`] may assign a palette to; the
 /// daemon refuses a larger one as `invalid_argument`.
@@ -3013,6 +3028,10 @@ pub enum ClientMessage {
         window_id: String,
         /// That window's own token.
         token: String,
+        /// Whether the door confirms with [`ClientMessage::DeliverDone`]
+        /// before it prints; absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
     /// A CLI's turn-start hook takes the parcels waiting in the window's
     /// inbox; answered with [`DaemonMessage::Delivery`].
@@ -3021,6 +3040,10 @@ pub enum ClientMessage {
         window_id: String,
         /// That window's own token.
         token: String,
+        /// Whether the door confirms with [`ClientMessage::DeliverDone`]
+        /// before it prints; absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
     /// An idle window's hook waits for a parcel. The daemon answers with
     /// [`DaemonMessage::Delivery`] when one arrives, or with an empty one
@@ -3031,7 +3054,15 @@ pub enum ClientMessage {
         window_id: String,
         /// That window's own token.
         token: String,
+        /// Whether the door confirms with [`ClientMessage::DeliverDone`]
+        /// before it prints; absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
+    /// A door confirms the held read its connection was answered with,
+    /// before it prints; answered with [`DaemonMessage::DeliverConfirmed`].
+    /// Only the connection that was answered can confirm it.
+    DeliverDone,
     /// A CLI's hook tells the daemon its session identifier; answered with
     /// [`DaemonMessage::SessionRecorded`].
     ReportSession {
@@ -3356,6 +3387,10 @@ pub enum ClientMessage {
         /// `None` on the first request.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<Vec<HookInputValue>>,
+        /// Whether the door confirms with [`ClientMessage::DeliverDone`]
+        /// before it prints; absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
 }
 
@@ -3490,6 +3525,11 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         ClientMessage::ClearChatRoom { .. } | ClientMessage::DeleteChatRoom { .. } => {
             CHAT_ROOM_REMOVAL_MIN_REVISION
         }
+        ClientMessage::DeliverContext { held: true, .. }
+        | ClientMessage::DeliverTake { held: true, .. }
+        | ClientMessage::DeliverWait { held: true, .. }
+        | ClientMessage::RunHook { held: true, .. }
+        | ClientMessage::DeliverDone => DELIVER_DONE_MIN_REVISION,
         ClientMessage::DeliverContext { .. }
         | ClientMessage::DeliverTake { .. }
         | ClientMessage::DeliverWait { .. }
@@ -3877,6 +3917,13 @@ pub enum DaemonMessage {
         stream: DeliveryStream,
         /// The exit code the hook ends with.
         exit_code: u8,
+    },
+    /// Response to [`ClientMessage::DeliverDone`]. `withdrawn` means the
+    /// parcels were taken back before the confirmation, so the door prints
+    /// nothing.
+    DeliverConfirmed {
+        /// Whether the held read was withdrawn instead of settled.
+        withdrawn: bool,
     },
     /// Response to [`ClientMessage::ReportSession`].
     SessionRecorded {
@@ -5169,6 +5216,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "deliver_context",
     "deliver_take",
     "deliver_wait",
+    "deliver_done",
     "report_session",
     "list_ticket_workspaces",
     "list_tickets",
@@ -5241,6 +5289,7 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "mcp_registration_requested",
     "mcp_registration_result",
     "delivery",
+    "deliver_confirmed",
     "session_recorded",
     "ticket_workspace_list",
     "ticket_list",

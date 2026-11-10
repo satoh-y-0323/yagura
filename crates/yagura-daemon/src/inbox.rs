@@ -8,6 +8,11 @@
 //! the parcels it carries are out of reach of the doors until it ends, so one
 //! parcel never reaches the CLI twice.
 //!
+//! A door's read takes its parcels into a [`DoorHold`]: they stay the
+//! daemon's, out of reach of every other door and push, until the door
+//! confirms the read ([`DoorHold::confirm`]), which commits their end before
+//! the door prints. A hold dropped unconfirmed puts them back.
+//!
 //! An inbox given an [`InboxKeeper`] is the copy of what the store keeps for
 //! its window: each change is sent to the store under the inbox's lock. A
 //! parcel it keeps is shown to no door, push or wait until its row is
@@ -613,13 +618,27 @@ impl Recorded {
 
 struct Waiter {
     id: u64,
-    answer: oneshot::Sender<DaemonMessage>,
+    answer: oneshot::Sender<DoorRead>,
+}
+
+/// Parcels a door's read has taken out of the inbox and its door has not
+/// confirmed yet.
+struct DoorHeld {
+    id: u64,
+    held: Vec<Held>,
+    /// Raised when one of them was withdrawn before the confirmation: the
+    /// door prints nothing, and the others go back.
+    withdrawn: bool,
+    /// Raised once the confirmation has started: nothing withdraws them now.
+    confirming: bool,
 }
 
 #[derive(Default)]
 struct State {
     parcels: VecDeque<Held>,
     carrying: Vec<Carried>,
+    doors: Vec<DoorHeld>,
+    /// Names pushes and door holds alike, to the writer that settles them.
     next_push: u64,
     /// How the inbox ended, once it has: nothing more is accepted.
     closed: Option<ParcelEnd>,
@@ -642,13 +661,19 @@ impl State {
         self.next_id
     }
 
-    /// Removes the waiting parcel named `key`; `None` when none waits.
+    /// Removes the waiting parcel named `key`, or the one a door holds
+    /// unconfirmed, whose door then prints nothing; `None` when neither.
     fn remove_waiting(&mut self, key: &str) -> Option<Held> {
-        let position = self
-            .parcels
-            .iter()
-            .position(|held| held.parcel.key == key)?;
-        self.parcels.remove(position)
+        if let Some(position) = self.parcels.iter().position(|held| held.parcel.key == key) {
+            return self.parcels.remove(position);
+        }
+        let door = self
+            .doors
+            .iter_mut()
+            .find(|door| !door.confirming && door.held.iter().any(|held| held.parcel.key == key))?;
+        let position = door.held.iter().position(|held| held.parcel.key == key)?;
+        door.withdrawn = true;
+        Some(door.held.remove(position))
     }
 
     /// How many waiting parcels are not notices: the ones the capacity bounds.
@@ -661,6 +686,8 @@ impl State {
 }
 
 struct Shared {
+    /// Itself, for the holds it hands out.
+    me: Weak<Shared>,
     state: Mutex<State>,
     capacity: usize,
     spec: DeliverySpec,
@@ -852,17 +879,213 @@ impl Shared {
             return;
         };
         let (taken, text) = self.take_within(state, "");
-        if waiter.answer.send(self.wake_message(&text)).is_err() {
+        let read = DoorRead {
+            message: self.wake_message(&text),
+            hold: self.hold(state, taken),
+        };
+        if let Err(mut read) = waiter.answer.send(read) {
             // The wait ended between the registration and now: nobody read the
             // answer, so the parcels go back in front of the ones that arrived.
-            for held in taken.into_iter().rev() {
-                state.parcels.push_front(held);
+            if let Some(id) = read.hold.id.take()
+                && let Some(door) = state.remove_door(id)
+            {
+                self.put_back(state, door.held);
+            }
+        }
+    }
+
+    /// Holds `taken` for a door until it confirms them.
+    fn hold(&self, state: &mut State, taken: Vec<Held>) -> DoorHold {
+        if taken.is_empty() {
+            return DoorHold::empty();
+        }
+        state.next_push += 1;
+        let id = state.next_push;
+        state.doors.push(DoorHeld {
+            id,
+            held: taken,
+            withdrawn: false,
+            confirming: false,
+        });
+        DoorHold {
+            shared: self.me.clone(),
+            id: Some(id),
+        }
+    }
+
+    /// Puts `held`, which no door took after all, back where its place in
+    /// the inbox is; or ends it with the inbox, once that has ended.
+    fn put_back(&self, state: &mut State, held: Vec<Held>) {
+        if let Some(closed) = state.closed {
+            for held in held {
+                held.settle(closed);
             }
             return;
         }
-        self.forget_ended(&taken);
-        for held in taken {
-            held.settle(ParcelEnd::Taken);
+        for held in held {
+            let position = state
+                .parcels
+                .iter()
+                .position(|waiting| waiting.seq > held.seq)
+                .unwrap_or(state.parcels.len());
+            state.parcels.insert(position, held);
+        }
+        self.wake(state);
+    }
+
+    /// Commits the end of what door hold `id` took, before its door prints:
+    /// the rows of the kept parcels are forgotten, with the chat delivery each
+    /// carries recorded as taken, in one transaction; then each depositor
+    /// learns it was taken. Returns whether it was withdrawn instead, and the
+    /// rest put back.
+    async fn confirm(self: Arc<Self>, id: u64) -> bool {
+        let (rows, recorded) = {
+            let mut state = self.lock();
+            let Some(door) = state.doors.iter_mut().find(|door| door.id == id) else {
+                return true;
+            };
+            if door.withdrawn {
+                if let Some(door) = state.remove_door(id) {
+                    self.put_back(&mut state, door.held);
+                }
+                return true;
+            }
+            door.confirming = true;
+            let mut rows = Vec::new();
+            if self.keeper.is_some() {
+                for held in door.held.iter_mut().filter(|held| held.parcel.saved) {
+                    if held.delivery.is_none() && held.depositor_forgets {
+                        continue;
+                    }
+                    rows.push(RowEnd {
+                        parcel: held.kept(),
+                        delivery: held.delivery.clone(),
+                    });
+                    held.settled = true;
+                }
+            }
+            (rows, Arc::new(Mutex::new(Recorded::Waiting(Vec::new()))))
+        };
+        if let Some(keeper) = self.keeper.as_ref().filter(|_| !rows.is_empty()) {
+            let committed = Arc::clone(&recorded);
+            let settled = keeper.settle_push(
+                id,
+                rows,
+                None,
+                Box::new(move || Recorded::commit(&committed)),
+            );
+            let _ = settled.await;
+        }
+        let mut state = self.lock();
+        if let Some(door) = state.remove_door(id) {
+            for mut held in door.held {
+                match (held.settled && held.delivery.is_some(), held.end.take()) {
+                    (true, Some(end)) => Recorded::tell(&recorded, end),
+                    (_, end) => {
+                        held.end = end;
+                        held.settle(ParcelEnd::Taken);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether door hold `id` took a parcel whose row the store keeps.
+    fn door_keeps_rows(&self, id: u64) -> bool {
+        self.keeper.is_some()
+            && self
+                .lock()
+                .doors
+                .iter()
+                .any(|door| door.id == id && door.held.iter().any(|held| held.parcel.saved))
+    }
+
+    /// Puts back what door hold `id` took: its door went away unconfirmed.
+    fn release_door(&self, id: u64) {
+        let mut state = self.lock();
+        if let Some(door) = state.remove_door(id) {
+            self.put_back(&mut state, door.held);
+        }
+    }
+}
+
+impl State {
+    fn remove_door(&mut self, id: u64) -> Option<DoorHeld> {
+        let position = self.doors.iter().position(|door| door.id == id)?;
+        Some(self.doors.remove(position))
+    }
+}
+
+/// What a door is answered with, and the parcels that answer took.
+pub struct DoorRead {
+    /// The answer.
+    pub message: DaemonMessage,
+    /// The parcels it carries, held until the door confirms them.
+    pub hold: DoorHold,
+}
+
+impl DoorRead {
+    /// The answer that makes a hook print nothing and succeed, taking nothing.
+    #[must_use]
+    pub fn silent() -> Self {
+        Self {
+            message: silence(),
+            hold: DoorHold::empty(),
+        }
+    }
+}
+
+/// The parcels a door's answer took, out of reach of every other door and
+/// push until [`Self::confirm`] ends them; dropped unconfirmed, they go back.
+pub struct DoorHold {
+    shared: Weak<Shared>,
+    /// `None` once ended, or when the answer took nothing.
+    id: Option<u64>,
+}
+
+impl std::fmt::Debug for DoorHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DoorHold")
+            .field("holds", &self.id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DoorHold {
+    fn empty() -> Self {
+        Self {
+            shared: Weak::new(),
+            id: None,
+        }
+    }
+
+    /// Whether it holds a parcel whose row the store keeps.
+    #[must_use]
+    pub fn keeps_rows(&self) -> bool {
+        match (self.id, self.shared.upgrade()) {
+            (Some(id), Some(shared)) => shared.door_keeps_rows(id),
+            _ => false,
+        }
+    }
+
+    /// Confirms the read: once the end of what it took is committed, its
+    /// depositors learn it was taken. Returns whether it was withdrawn
+    /// before that instead, in which case the door prints nothing and the
+    /// parcels it did not lose go back. A future dropped early still
+    /// finishes the confirmation.
+    pub async fn confirm(mut self) -> bool {
+        let (Some(id), Some(shared)) = (self.id.take(), self.shared.upgrade()) else {
+            return false;
+        };
+        tokio::spawn(shared.confirm(id)).await.unwrap_or(true)
+    }
+}
+
+impl Drop for DoorHold {
+    fn drop(&mut self) {
+        if let (Some(id), Some(shared)) = (self.id.take(), self.shared.upgrade()) {
+            shared.release_door(id);
         }
     }
 }
@@ -881,7 +1104,7 @@ pub fn silence() -> DaemonMessage {
 pub enum Wait {
     /// A parcel could be pushed at once: this is the answer, and nothing is
     /// registered.
-    Answered(Box<DaemonMessage>),
+    Answered(Box<DoorRead>),
     /// The wait is registered. It ends when `answer` yields, or when `guard`
     /// is dropped (the connection the wait came from is gone).
     Registered {
@@ -889,7 +1112,7 @@ pub enum Wait {
         guard: WaitGuard,
         /// Yields the answer once a parcel arrives or a newer wait replaces
         /// this one.
-        answer: oneshot::Receiver<DaemonMessage>,
+        answer: oneshot::Receiver<DoorRead>,
     },
 }
 
@@ -1037,7 +1260,8 @@ impl Inbox {
             keeper.forget(too_long);
         }
         Self {
-            shared: Arc::new(Shared {
+            shared: Arc::new_cyclic(|me| Shared {
+                me: me.clone(),
                 state: Mutex::new(state),
                 capacity,
                 spec,
@@ -1205,7 +1429,8 @@ impl Inbox {
         self.shared.lock().shown()
     }
 
-    /// Whether a parcel named `key` is waiting to be read or being pushed.
+    /// Whether a parcel named `key` is waiting to be read, being pushed, or
+    /// held for a door.
     #[must_use]
     pub fn holds(&self, key: &str) -> bool {
         let state = self.shared.lock();
@@ -1218,6 +1443,10 @@ impl Inbox {
                 .carrying
                 .iter()
                 .any(|carried| carried.held.iter().any(|held| held.parcel.key == key))
+            || state
+                .doors
+                .iter()
+                .any(|door| door.held.iter().any(|held| held.parcel.key == key))
     }
 
     /// Runs `hook` at the start of the next [`Self::withdraw`], before it
@@ -1243,7 +1472,10 @@ impl Inbox {
     ) -> Vec<(ChatDelivery, oneshot::Receiver<ParcelEnd>)> {
         let mut state = self.shared.lock();
         let State {
-            parcels, carrying, ..
+            parcels,
+            carrying,
+            doors,
+            ..
         } = &mut *state;
         parcels
             .iter_mut()
@@ -1252,6 +1484,7 @@ impl Inbox {
                     .iter_mut()
                     .flat_map(|carried| carried.held.iter_mut()),
             )
+            .chain(doors.iter_mut().flat_map(|door| door.held.iter_mut()))
             .filter(|held| held.end.is_none() && !held.settled)
             .filter_map(|held| {
                 let delivery = delivery_of(&held.parcel.key)?;
@@ -1271,55 +1504,47 @@ impl Inbox {
     }
 
     /// The answer for a CLI's start-up: `intro`, then the parcels that fit
-    /// behind it. The parcels it carries are taken.
-    pub fn context(&self, intro: &str) -> DaemonMessage {
-        self.context_by(intro, &self.shared.spec)
-    }
-
-    /// [`Inbox::context`] answering by `spec` instead of the inbox's own.
-    pub fn context_by(&self, intro: &str, spec: &DeliverySpec) -> DaemonMessage {
+    /// behind it, answering by `spec` or the inbox's own. The parcels it
+    /// carries are held for its door.
+    pub fn read_context(&self, intro: &str, spec: Option<&DeliverySpec>) -> DoorRead {
+        let spec = spec.unwrap_or(&self.shared.spec);
         self.read(intro, &spec.output.context, spec.max_chars)
     }
 
-    fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DaemonMessage {
-        let mut state = self.shared.lock();
-        let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
-        self.shared.forget_ended(&taken);
-        for held in taken {
-            held.settle(ParcelEnd::Taken);
-        }
-        self.shared.read_message(form, &text)
-    }
-
     /// The answer for the start of a turn: the parcels that fit in one
-    /// answer, which are taken.
-    pub fn take(&self) -> DaemonMessage {
-        self.take_by(&self.shared.spec)
-    }
-
-    /// [`Inbox::take`] answering by `spec` instead of the inbox's own.
-    pub fn take_by(&self, spec: &DeliverySpec) -> DaemonMessage {
+    /// answer, held for its door, as [`Self::read_context`] answers.
+    pub fn read_take(&self, spec: Option<&DeliverySpec>) -> DoorRead {
+        let spec = spec.unwrap_or(&self.shared.spec);
         self.read("", &spec.output.take, spec.max_chars)
     }
 
+    fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DoorRead {
+        let mut state = self.shared.lock();
+        let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
+        DoorRead {
+            message: self.shared.read_message(form, &text),
+            hold: self.shared.hold(&mut state, taken),
+        }
+    }
+
     /// Registers a wait for the window, replacing the one registered before:
-    /// that one is answered with nothing to print and a success exit.
+    /// that one is answered with nothing to print and a success exit. The
+    /// parcels an answer carries are held for its door.
     pub fn wait(&self) -> Wait {
         let mut state = self.shared.lock();
         if state.closed.is_some() {
-            return Wait::Answered(Box::new(silence()));
+            return Wait::Answered(Box::new(DoorRead::silent()));
         }
         if let Some(replaced) = state.waiter.take() {
             // The replaced wait may have ended already; then nobody reads this.
-            let _ = replaced.answer.send(silence());
+            let _ = replaced.answer.send(DoorRead::silent());
         }
         if state.shown() > 0 && self.shared.pushable() {
             let (taken, text) = self.shared.take_within(&mut state, "");
-            self.shared.forget_ended(&taken);
-            for held in taken {
-                held.settle(ParcelEnd::Taken);
-            }
-            return Wait::Answered(Box::new(self.shared.wake_message(&text)));
+            return Wait::Answered(Box::new(DoorRead {
+                message: self.shared.wake_message(&text),
+                hold: self.shared.hold(&mut state, taken),
+            }));
         }
         state.next_waiter += 1;
         let id = state.next_waiter;
@@ -1630,7 +1855,7 @@ impl Inbox {
             held.settle(end);
         }
         if let Some(waiter) = state.waiter.take() {
-            let _ = waiter.answer.send(silence());
+            let _ = waiter.answer.send(DoorRead::silent());
         }
     }
 }

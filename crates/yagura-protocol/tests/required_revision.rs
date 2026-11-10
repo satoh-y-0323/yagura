@@ -309,15 +309,19 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
         ClientMessage::DeliverContext {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
+            held: false,
         },
         ClientMessage::DeliverTake {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
+            held: false,
         },
         ClientMessage::DeliverWait {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
+            held: false,
         },
+        ClientMessage::DeliverDone,
         ClientMessage::ReportSession {
             window_id: "w1".to_string(),
             token: "tok".to_string(),
@@ -365,6 +369,7 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             profile: "p".to_string(),
             name: "Stop".to_string(),
             input: None,
+            held: false,
         },
     ]
 }
@@ -510,6 +515,7 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::DeliverContext { .. }
                         | ClientMessage::DeliverTake { .. }
                         | ClientMessage::DeliverWait { .. }
+                        | ClientMessage::DeliverDone
                         | ClientMessage::ReportSession { .. }
                         | ClientMessage::ListTicketWorkspaces
                         | ClientMessage::ListTickets { .. }
@@ -929,18 +935,19 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_two() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_three() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
         profile: "p".to_string(),
         name: "Stop".to_string(),
         input: None,
+        held: false,
     };
     assert_eq!(
         required_protocol_revision(&message),
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 32);
+    assert_eq!(PROTOCOL_REVISION, 33);
 }

@@ -915,6 +915,10 @@ async fn send_status_event(
 /// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
 /// with the exit code the window's profile declares. A refusal prints nothing
 /// to stdout and ends with 1, which is never a code a hook reads as a wake.
+///
+/// A delivery is printed only once the daemon has confirmed it
+/// (`deliver_done`), so a daemon that ends in between leaves its parcels for
+/// the next one instead of having them printed and handed out again.
 async fn run_hook_door(
     ipc: &PlatformIpc,
     endpoint: &str,
@@ -924,10 +928,23 @@ async fn run_hook_door(
 ) -> Result<ExitCode> {
     let WindowCredentials { window_id, token } = credentials;
     let waits = matches!(command, CliCommand::DeliverWait { .. });
+    let held = true;
     let message = match command {
-        CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext { window_id, token },
-        CliCommand::DeliverTake { .. } => ClientMessage::DeliverTake { window_id, token },
-        CliCommand::DeliverWait { .. } => ClientMessage::DeliverWait { window_id, token },
+        CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext {
+            window_id,
+            token,
+            held,
+        },
+        CliCommand::DeliverTake { .. } => ClientMessage::DeliverTake {
+            window_id,
+            token,
+            held,
+        },
+        CliCommand::DeliverWait { .. } => ClientMessage::DeliverWait {
+            window_id,
+            token,
+            held,
+        },
         CliCommand::ReportSession { .. } => {
             let Some(session) = session.filter(|s| is_session_id(s)) else {
                 return Ok(ExitCode::SUCCESS);
@@ -953,12 +970,47 @@ async fn run_hook_door(
             .await
             .context("the daemon did not answer")?
     };
+    if let Some(DaemonMessage::SessionRecorded { .. }) = answer {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let Some(answer) = confirmed(&mut client, answer).await else {
+        return Ok(ExitCode::SUCCESS);
+    };
     match answer {
-        Some(DaemonMessage::SessionRecorded { .. }) => Ok(ExitCode::SUCCESS),
-        // The daemon went away while a wait was registered: nothing to wake for.
+        // The daemon went away before it answered or confirmed: nothing to
+        // wake for, and nothing was taken.
         None if waits => Ok(ExitCode::SUCCESS),
         answer => finish_with_answer(answer),
     }
+}
+
+/// The daemon's `answer` once a delivery in it is confirmed on `client`, to be
+/// printed only then; `None` when what it carried was withdrawn in the
+/// meantime, so there is nothing to print.
+async fn confirmed(
+    client: &mut ClientConnection,
+    answer: Option<DaemonMessage>,
+) -> Option<Option<DaemonMessage>> {
+    match answer {
+        Some(delivery @ DaemonMessage::Delivery { .. }) => match confirm_delivery(client).await {
+            Some(DaemonMessage::DeliverConfirmed { withdrawn: false }) => Some(Some(delivery)),
+            Some(DaemonMessage::DeliverConfirmed { withdrawn: true }) => None,
+            other => Some(other),
+        },
+        answer => Some(answer),
+    }
+}
+
+/// Sends `deliver_done` on `client` and reads the daemon's confirmation;
+/// `None` when the daemon gave none.
+async fn confirm_delivery(client: &mut ClientConnection) -> Option<DaemonMessage> {
+    send_hook_request(client, &ClientMessage::DeliverDone)
+        .await
+        .ok()?;
+    tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(client))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Sends one request of a hook door on `client`.
@@ -1033,6 +1085,7 @@ async fn exchange_hook_event(
         profile: profile.to_string(),
         name: event.to_string(),
         input,
+        held: true,
     };
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --hook")
@@ -1057,6 +1110,9 @@ async fn exchange_hook_event(
             .await
             .context("the daemon did not answer")?;
     }
+    let Some(answer) = confirmed(&mut client, answer).await else {
+        return Ok(ExitCode::SUCCESS);
+    };
     finish_with_answer(answer)
 }
 

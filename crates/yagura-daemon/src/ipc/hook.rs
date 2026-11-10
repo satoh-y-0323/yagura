@@ -9,11 +9,11 @@
 
 use yagura_protocol::{DaemonMessage, HookInputValue, HookPointer, HookPointerKind};
 
-use crate::inbox::{DeliverySpec, silence};
+use crate::inbox::{DeliverySpec, DoorRead};
 use crate::profile::{self, validate_profile_id};
 use crate::profile_hook_events::{HookDeliver, HookEvent, is_hook_event_name};
 
-use super::inbox::{context_message, take_message};
+use super::inbox::{HeldSlot, answer_read};
 use super::{IpcServer, Outbound, error_msg};
 
 /// What a profile says about one event: the event, and how that profile's CLI
@@ -37,18 +37,33 @@ fn wanted_pointers(event: &HookEvent) -> Vec<HookPointer> {
     skip_if.chain(session).collect()
 }
 
+/// One `run_hook` request as it was read.
+pub(super) struct HookRequest<'a> {
+    pub(super) window_id: &'a str,
+    pub(super) token: &'a str,
+    pub(super) profile_id: &'a str,
+    pub(super) name: &'a str,
+    pub(super) input: Option<Vec<HookInputValue>>,
+}
+
 impl IpcServer {
-    /// Answers `run_hook`. See [`crate::profile_hook_events::HookEvent`] for the
-    /// order the parts of an event run in.
+    /// Answers `run_hook`, holding what it takes in `held` for the door's
+    /// `deliver_done`, or settling it first when `None`. See
+    /// [`crate::profile_hook_events::HookEvent`] for the order the parts of an
+    /// event run in.
     pub(super) async fn handle_run_hook(
         &self,
         outbound: &Outbound,
-        window_id: &str,
-        token: &str,
-        profile_id: &str,
-        name: &str,
-        input: Option<Vec<HookInputValue>>,
+        request: HookRequest<'_>,
+        held: Option<&HeldSlot>,
     ) {
+        let HookRequest {
+            window_id,
+            token,
+            profile_id,
+            name,
+            input,
+        } = request;
         let Some(entry) = self
             .authenticate_window(outbound, "run_hook", token, Some(window_id))
             .await
@@ -70,7 +85,7 @@ impl IpcServer {
                 event = name,
                 "run_hook names an event its profile does not define; nothing was done"
             );
-            outbound.reply(&silence());
+            answer_read(&entry, outbound, DoorRead::silent(), held).await;
             return;
         };
 
@@ -93,7 +108,7 @@ impl IpcServer {
         let mut values = values.into_iter();
 
         if event.skip_if.is_some() && !matches!(values.next(), Some(HookInputValue::Absent)) {
-            outbound.reply(&silence());
+            answer_read(&entry, outbound, DoorRead::silent(), held).await;
             return;
         }
         if event.session.is_some()
@@ -111,14 +126,14 @@ impl IpcServer {
                 "run_hook could not record the event's status; continuing"
             );
         }
-        let answer = match event.deliver {
-            Some(HookDeliver::Context) => {
-                context_message(&entry, self.chat.intro_for(&entry), delivery.as_ref())
-            }
-            Some(HookDeliver::Take) => take_message(&entry, delivery.as_ref()),
-            None => silence(),
+        let read = match event.deliver {
+            Some(HookDeliver::Context) => entry
+                .inbox()
+                .read_context(self.chat.intro_for(&entry), delivery.as_ref()),
+            Some(HookDeliver::Take) => entry.inbox().read_take(delivery.as_ref()),
+            None => DoorRead::silent(),
         };
-        outbound.reply(&answer);
+        answer_read(&entry, outbound, read, held).await;
     }
 
     /// Reads `profile_id` and picks `name` out of its `[hook_events]`. The read

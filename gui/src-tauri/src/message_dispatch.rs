@@ -410,9 +410,11 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         // neither `send_report` nor `wait_for_report`.
         | DaemonMessage::ReportSent { .. }
         | DaemonMessage::Reports { .. }
-        // Delivery and SessionRecorded answer the doors a CLI's hook reads a
-        // window's inbox through; this client never sends those.
+        // Delivery, DeliverConfirmed and SessionRecorded answer the doors a
+        // CLI's hook reads a window's inbox through; this client never sends
+        // those.
         | DaemonMessage::Delivery { .. }
+        | DaemonMessage::DeliverConfirmed { .. }
         | DaemonMessage::SessionRecorded { .. }
         // MilestoneSet is never received: the GUI only reads tickets.
         | DaemonMessage::MilestoneSet { .. }

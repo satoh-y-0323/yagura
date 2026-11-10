@@ -49,9 +49,8 @@ pub enum FaultPoint {
     /// A typed push has pressed the submit key, and the push has not ended
     /// yet. The daemon ends there.
     AfterSendKey,
-    /// A door's answer has taken parcels, the door's connection has moved on
-    /// (its next frame, or its end), and the settlement of a taken chat
-    /// delivery is not committed yet. The daemon ends there.
+    /// A door has confirmed a held read that took kept parcels, and the end
+    /// of what it took is not committed yet. The daemon ends there.
     DoorBeforeSettle,
 }
 
@@ -127,18 +126,6 @@ struct Armed {
     /// Waited on before the daemon ends at a point, so what the daemon handed
     /// its writer before the point is written and nothing after it.
     store: Mutex<Option<ParcelStore>>,
-    /// Where a door's answer stands, for [`FaultPoint::DoorBeforeSettle`].
-    door: Mutex<Door>,
-    door_changed: Condvar,
-}
-
-/// Where a door's answer stands: the settlement of what it took waits for the
-/// door's connection to move on, so the door has read its answer by then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Door {
-    Idle,
-    Answering,
-    MovedOn,
 }
 
 impl FaultPoints {
@@ -157,8 +144,6 @@ impl FaultPoints {
                 release: Condvar::new(),
                 reached: watch::channel(false).0,
                 store: Mutex::new(None),
-                door: Mutex::new(Door::Idle),
-                door_changed: Condvar::new(),
             })),
         }
     }
@@ -226,62 +211,12 @@ impl FaultPoints {
         }
     }
 
-    /// Marks a door's answer as under way, before it takes anything: a
-    /// settlement it starts then waits for the door's connection to move on.
-    pub(crate) fn door_answering(&self) {
-        if let Some(armed) = self.door_armed() {
-            let mut door = armed.lock_door();
-            if *door == Door::Idle {
-                *door = Door::Answering;
-            }
-        }
-    }
-
-    /// Ends the door's answer marked by [`Self::door_answering`]: when it took
-    /// nothing, nothing waits for its connection.
-    pub(crate) fn door_answered(&self, took: bool) {
-        if took {
-            return;
-        }
-        if let Some(armed) = self.door_armed() {
-            let mut door = armed.lock_door();
-            if *door == Door::Answering {
-                *door = Door::Idle;
-                armed.door_changed.notify_all();
-            }
-        }
-    }
-
-    /// The connection of a door whose answer took parcels has had its next
-    /// event: a frame, or its end.
-    pub(crate) fn door_moved_on(&self) {
-        if let Some(armed) = self.door_armed() {
-            let mut door = armed.lock_door();
-            if *door == Door::Answering {
-                *door = Door::MovedOn;
-                armed.door_changed.notify_all();
-            }
-        }
-    }
-
-    fn door_armed(&self) -> Option<&Armed> {
-        self.armed
-            .as_deref()
-            .filter(|armed| armed.point == FaultPoint::DoorBeforeSettle)
-    }
-
     /// Ends the daemon when `point` is the armed one that ends it.
-    /// [`FaultPoint::DoorBeforeSettle`] blocks the calling thread until the
-    /// door's connection has moved on, and does nothing without a door's
-    /// answer under way.
     pub(crate) fn reach(&self, point: FaultPoint) {
         let Some(armed) = self.armed.as_ref().filter(|armed| armed.point == point) else {
             return;
         };
         if !point.ends_daemon() {
-            return;
-        }
-        if point == FaultPoint::DoorBeforeSettle && !armed.door_moved_on() {
             return;
         }
         armed.reached.send_replace(true);
@@ -343,22 +278,6 @@ impl FaultPoints {
 impl Armed {
     fn lock_released(&self) -> MutexGuard<'_, bool> {
         self.released.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn lock_door(&self) -> MutexGuard<'_, Door> {
-        self.door.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Waits out a door's answer under way; whether its connection moved on.
-    fn door_moved_on(&self) -> bool {
-        let mut door = self.lock_door();
-        while *door == Door::Answering {
-            door = self
-                .door_changed
-                .wait(door)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        *door == Door::MovedOn
     }
 
     fn is_released(&self) -> bool {

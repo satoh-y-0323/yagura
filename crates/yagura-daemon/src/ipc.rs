@@ -236,11 +236,10 @@ struct ConnectionState {
     /// whose requester left can still take its own body back; they count
     /// against the same per-connection budget as `waiters`.
     open_sends: Arc<AtomicUsize>,
-    /// Whether a door's answer on this connection took parcels and the
-    /// connection has not moved on since
-    /// ([`crate::fault_point::FaultPoint::DoorBeforeSettle`]).
-    #[cfg(feature = "fault-injection")]
-    door_answered: bool,
+    /// The held read this connection was answered with, until its door
+    /// confirms it with `deliver_done`; dropped with the connection, it puts
+    /// the parcels back.
+    held_read: inbox::HeldSlot,
 }
 
 impl ConnectionState {
@@ -260,17 +259,7 @@ impl ConnectionState {
             closed: watch::channel(false).0,
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             open_sends: Arc::new(AtomicUsize::new(0)),
-            #[cfg(feature = "fault-injection")]
-            door_answered: false,
-        }
-    }
-
-    /// Tells `faults` this connection moved on after a door's answer that
-    /// took parcels.
-    #[cfg(feature = "fault-injection")]
-    fn door_moved_on(&mut self, faults: &crate::fault_point::FaultPoints) {
-        if std::mem::take(&mut self.door_answered) {
-            faults.door_moved_on();
+            held_read: inbox::HeldSlot::default(),
         }
     }
 
@@ -1416,8 +1405,6 @@ impl IpcServer {
                                     Ok(Some((body, consumed))) => {
                                         let body_owned = body.to_vec();
                                         read_buf.drain(..consumed);
-                                        #[cfg(feature = "fault-injection")]
-                                        state.door_moved_on(&self.config.faults);
                                         let outcome = handle_while_reading(
                                             self.handle_frame(&outbound, &body_owned, &mut state),
                                             &mut reader,
@@ -1460,8 +1447,6 @@ impl IpcServer {
         // opposite: it is never aborted, because the ledger entry it owns has
         // to be withdrawn (which it does itself, once told the connection is
         // gone) rather than leaked into the approvers' queues forever.
-        #[cfg(feature = "fault-injection")]
-        state.door_moved_on(&self.config.faults);
         let _ = state.closed.send(true);
         state.abort_waiters();
         self.broker.unregister_approver(state.conn_id);
@@ -1843,43 +1828,50 @@ impl IpcServer {
                 });
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverContext { window_id, token }) => {
+            Ok(ClientMessage::DeliverContext {
+                window_id,
+                token,
+                held,
+            }) => {
                 if let Some(entry) = self
                     .authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
                     .await
                 {
-                    #[cfg(feature = "fault-injection")]
-                    let waiting = inbox::door_answering(&entry);
-                    inbox::handle_context(&entry, outbound, self.chat.intro_for(&entry));
-                    #[cfg(feature = "fault-injection")]
-                    {
-                        state.door_answered |= inbox::door_answered(&entry, waiting);
-                    }
+                    let intro = self.chat.intro_for(&entry);
+                    let held = held.then_some(&state.held_read);
+                    inbox::handle_context(&entry, outbound, intro, held).await;
                 }
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverTake { window_id, token }) => {
+            Ok(ClientMessage::DeliverTake {
+                window_id,
+                token,
+                held,
+            }) => {
                 if let Some(entry) = self
                     .authenticate_window(outbound, "deliver_take", &token, Some(&window_id))
                     .await
                 {
-                    #[cfg(feature = "fault-injection")]
-                    let waiting = inbox::door_answering(&entry);
-                    inbox::handle_take(&entry, outbound);
-                    #[cfg(feature = "fault-injection")]
-                    {
-                        state.door_answered |= inbox::door_answered(&entry, waiting);
-                    }
+                    inbox::handle_take(&entry, outbound, held.then_some(&state.held_read)).await;
                 }
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverWait { window_id, token }) => {
+            Ok(ClientMessage::DeliverWait {
+                window_id,
+                token,
+                held,
+            }) => {
                 if let Some(entry) = self
                     .authenticate_window(outbound, "deliver_wait", &token, Some(&window_id))
                     .await
                 {
-                    inbox::handle_wait(&entry, outbound, state, self.config.max_waiters_per_conn);
+                    let max_waiters = self.config.max_waiters_per_conn;
+                    inbox::handle_wait(&entry, outbound, state, max_waiters, held).await;
                 }
+                FrameOutcome::Continue
+            }
+            Ok(ClientMessage::DeliverDone) => {
+                inbox::handle_done(outbound, &state.held_read).await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ReportSession {
@@ -1901,8 +1893,16 @@ impl IpcServer {
                 profile,
                 name,
                 input,
+                held,
             }) => {
-                self.handle_run_hook(outbound, &window_id, &token, &profile, &name, input)
+                let request = hook::HookRequest {
+                    window_id: &window_id,
+                    token: &token,
+                    profile_id: &profile,
+                    name: &name,
+                    input,
+                };
+                self.handle_run_hook(outbound, request, held.then_some(&state.held_read))
                     .await;
                 FrameOutcome::Continue
             }

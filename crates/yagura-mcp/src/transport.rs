@@ -50,6 +50,7 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::DaemonHealth { .. } => "DaemonHealth",
         DaemonMessage::Delivery { .. } => "Delivery",
         DaemonMessage::SessionRecorded { .. } => "SessionRecorded",
+        DaemonMessage::DeliverConfirmed { .. } => "DeliverConfirmed",
         DaemonMessage::PlanDetail { .. } => "PlanDetail",
         DaemonMessage::PlanList { .. } => "PlanList",
         DaemonMessage::PlanDeleted { .. } => "PlanDeleted",

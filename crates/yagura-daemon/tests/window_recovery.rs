@@ -491,6 +491,7 @@ fn deliver_take(window_id: &str, token: &str) -> ClientMessage {
     ClientMessage::DeliverTake {
         window_id: window_id.to_owned(),
         token: token.to_owned(),
+        held: false,
     }
 }
 

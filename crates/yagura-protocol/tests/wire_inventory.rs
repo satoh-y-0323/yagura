@@ -709,9 +709,22 @@ fn client_message_corpus() -> Vec<ClientMessage> {
         wire_sample!(ClientMessage::DeleteChatRoom { room_id }),
         wire_sample!(ClientMessage::GetProtocolRevision),
         wire_sample!(ClientMessage::GetDaemonHealth),
-        wire_sample!(ClientMessage::DeliverContext { window_id, token }),
-        wire_sample!(ClientMessage::DeliverTake { window_id, token }),
-        wire_sample!(ClientMessage::DeliverWait { window_id, token }),
+        wire_sample!(ClientMessage::DeliverContext {
+            window_id,
+            token,
+            held
+        }),
+        wire_sample!(ClientMessage::DeliverTake {
+            window_id,
+            token,
+            held
+        }),
+        wire_sample!(ClientMessage::DeliverWait {
+            window_id,
+            token,
+            held
+        }),
+        wire_sample!(ClientMessage::DeliverDone),
         wire_sample!(ClientMessage::ReportSession {
             window_id,
             token,
@@ -811,6 +824,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             profile,
             name,
             input,
+            held,
         }),
     ]
 }
@@ -926,6 +940,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             exit_code,
         }),
         wire_sample!(DaemonMessage::SessionRecorded { held }),
+        wire_sample!(DaemonMessage::DeliverConfirmed { withdrawn }),
         wire_sample!(DaemonMessage::PlanDetail { plan }),
         wire_sample!(DaemonMessage::PlanList { plans }),
         wire_sample!(DaemonMessage::PlanDeleted { plan_id }),

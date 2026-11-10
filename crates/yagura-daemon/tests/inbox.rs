@@ -93,6 +93,7 @@ fn take_msg(window_id: &str) -> ClientMessage {
     ClientMessage::DeliverTake {
         window_id: window_id.into(),
         token: VALID_TOKEN.into(),
+        held: false,
     }
 }
 
@@ -100,6 +101,7 @@ fn context_msg(window_id: &str) -> ClientMessage {
     ClientMessage::DeliverContext {
         window_id: window_id.into(),
         token: VALID_TOKEN.into(),
+        held: false,
     }
 }
 
@@ -107,6 +109,7 @@ fn wait_msg(window_id: &str) -> ClientMessage {
     ClientMessage::DeliverWait {
         window_id: window_id.into(),
         token: VALID_TOKEN.into(),
+        held: false,
     }
 }
 
@@ -314,14 +317,17 @@ async fn a_wrong_or_malformed_token_returns_nothing_and_takes_nothing() {
             ClientMessage::DeliverTake {
                 window_id: id.clone(),
                 token: token.into(),
+                held: false,
             },
             ClientMessage::DeliverContext {
                 window_id: id.clone(),
                 token: token.into(),
+                held: false,
             },
             ClientMessage::DeliverWait {
                 window_id: id.clone(),
                 token: token.into(),
+                held: false,
             },
         ] {
             expect_error(call_door(&mut client, &msg).await, "auth_failed");

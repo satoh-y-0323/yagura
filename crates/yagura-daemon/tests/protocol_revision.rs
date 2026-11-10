@@ -92,4 +92,8 @@ fn revision_relationship_holds_without_pinning_a_literal() {
         yagura_protocol::LAUNCH_OPTIONS_MIN_REVISION <= yagura_protocol::PROTOCOL_REVISION,
         "this build must implement at least the wire revision the launch-option threshold names"
     );
+    assert!(
+        yagura_protocol::DELIVER_DONE_MIN_REVISION <= yagura_protocol::PROTOCOL_REVISION,
+        "this build must implement the wire revision a door checks before it holds a take"
+    );
 }

@@ -627,6 +627,7 @@ async fn call_take(client: &mut Connection, window_id: &str) -> String {
             &ClientMessage::DeliverTake {
                 window_id: window_id.to_string(),
                 token: VALID_TOKEN.to_string(),
+                held: false,
             },
         )
         .await,
