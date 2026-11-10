@@ -1924,6 +1924,9 @@ pub struct WindowEntry {
     /// The bodies a previous daemon of the instance left marked for this
     /// window, taken back by whoever next holds `input_lock`.
     left_marks: Mutex<Vec<String>>,
+    /// The registry's [`DaemonConfig::faults`].
+    #[cfg(feature = "fault-injection")]
+    faults: crate::fault_point::FaultPoints,
 }
 
 impl WindowEntry {
@@ -3891,6 +3894,8 @@ impl WindowEntry {
                 TakeBackRegistration::Keep
             }
         };
+        #[cfg(feature = "fault-injection")]
+        self.reach_before_send_commit();
         match self.run_judged_steps(&plan, seq, registration).await? {
             JudgedSteps::Written(outcome) => Ok(placed(outcome, seq + own_writes)),
             JudgedSteps::Moved { at } => Ok(declined(NotPlacedReason::Interrupted, Some(at))),
@@ -4666,6 +4671,8 @@ impl WindowEntry {
         submit_step: &SubmitStep,
         seq: u64,
     ) -> PtyResult<SubmitJudgment> {
+        #[cfg(feature = "fault-injection")]
+        self.reach_before_send_commit();
         let status_before_submit = self.current_status();
         match self
             .write_judged(&submit_step.bytes, seq, TakeBackRegistration::Empty)
@@ -4769,6 +4776,22 @@ impl WindowEntry {
     /// The parcels waiting for this window's CLI.
     pub fn inbox(&self) -> &Inbox {
         &self.inbox
+    }
+
+    /// The point this window's daemon has armed.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn faults(&self) -> &crate::fault_point::FaultPoints {
+        &self.faults
+    }
+
+    /// Ends the daemon at [`crate::fault_point::FaultPoint::BeforeSendCommit`]
+    /// when a typed push is about to press its first submit key.
+    #[cfg(feature = "fault-injection")]
+    fn reach_before_send_commit(&self) {
+        if self.inbox.push_before_submit_key() {
+            self.faults
+                .reach(crate::fault_point::FaultPoint::BeforeSendCommit);
+        }
     }
 
     /// The `[delivery]` table of the profile this window was launched from.
@@ -6218,6 +6241,8 @@ impl WindowRegistry {
             row,
             marks,
             left_marks: Mutex::new(Vec::new()),
+            #[cfg(feature = "fault-injection")]
+            faults: self.config().faults.clone(),
         })
     }
 
@@ -6361,6 +6386,8 @@ impl WindowRegistry {
     /// Installs where every window opened or taken back from now on keeps its
     /// inbox's parcels (`store::wire_into` is its only caller).
     pub(crate) fn set_parcel_store(&self, store: ParcelStore) {
+        #[cfg(feature = "fault-injection")]
+        self.config.faults.attach(&store);
         *lock_recover(&self.parcel_store) = Some(store);
     }
 

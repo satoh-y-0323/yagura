@@ -100,6 +100,30 @@ enum Command {
     Kept {
         reply: oneshot::Sender<()>,
     },
+    /// [`Command::Kept`] for a caller that blocks its thread.
+    #[cfg(feature = "fault-injection")]
+    KeptBlocking {
+        reply: mpsc::Sender<()>,
+    },
+    /// The fault the writer acts out from now on.
+    #[cfg(feature = "fault-injection")]
+    ArmWriter(crate::fault_point::FaultPoints),
+}
+
+impl Command {
+    /// Whether the command changes the database.
+    #[cfg(feature = "fault-injection")]
+    fn writes(&self) -> bool {
+        matches!(
+            self,
+            Self::Keep { .. }
+                | Self::Forget { .. }
+                | Self::KeepReports { .. }
+                | Self::ForgetReports { .. }
+                | Self::Mark { .. }
+                | Self::Unmark { .. }
+        )
+    }
 }
 
 /// The writer of one database's kept parcels.
@@ -134,6 +158,21 @@ impl ParcelStore {
             // A writer that is gone writes nothing more.
             let _ = written.await;
         }
+    }
+
+    /// [`ParcelStore::kept`], blocking the calling thread.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn kept_blocking(&self) {
+        let (reply, written) = mpsc::channel();
+        if self.send(Command::KeptBlocking { reply }) {
+            let _ = written.recv();
+        }
+    }
+
+    /// Has the writer act out `faults` from its next command on.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn arm_writer(&self, faults: crate::fault_point::FaultPoints) {
+        self.send(Command::ArmWriter(faults));
     }
 
     /// The parcels kept for `window_id`'s inbox, oldest first.
@@ -282,7 +321,21 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
             tracing::warn!(%error, "failed to write the kept parcels; parcels are kept in memory only");
         }
     };
+    #[cfg(feature = "fault-injection")]
+    let mut faults = crate::fault_point::FaultPoints::default();
     while let Ok(command) = received.recv() {
+        #[cfg(feature = "fault-injection")]
+        if command.writes() {
+            faults.pause_writer();
+            if faults.write_fails() {
+                warn(simulated_write_failure());
+                // A mark's caller waits for the write, failed or not.
+                if let Command::Mark { reply, .. } = command {
+                    let _ = reply.send(());
+                }
+                continue;
+            }
+        }
         match command {
             Command::Keep { window_id, parcel } => {
                 // Kept only while the window has a row, which takes it along
@@ -383,8 +436,24 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>) {
             Command::Kept { reply } => {
                 let _ = reply.send(());
             }
+            #[cfg(feature = "fault-injection")]
+            Command::KeptBlocking { reply } => {
+                let _ = reply.send(());
+            }
+            #[cfg(feature = "fault-injection")]
+            Command::ArmWriter(armed) => faults = armed,
         }
     }
+}
+
+/// The error a write fails with under [`crate::fault_point::FaultPoint::WriteFails`]:
+/// the one a disk that cannot be written returns.
+#[cfg(feature = "fault-injection")]
+fn simulated_write_failure() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+        Some("simulated write failure".to_owned()),
+    )
 }
 
 /// A cell's text, `None` for anything but valid UTF-8 text within

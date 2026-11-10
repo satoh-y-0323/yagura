@@ -5427,6 +5427,12 @@ async fn deliver_handoff(job: DeliveryJob) {
             return;
         }
     };
+    #[cfg(feature = "fault-injection")]
+    if entry.inbox().holds(&key) {
+        config
+            .faults
+            .reach(crate::fault_point::FaultPoint::HandoffDeposited);
+    }
 
     let answer = await_handoff_end(&entry, &key, end, &mut closed, &config).await;
     tracing::info!(

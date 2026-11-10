@@ -14,8 +14,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use yagura_daemon::fault_point::{self, FaultPoint};
 use yagura_daemon::terminal_identity::launcher_terminal_names;
 use yagura_protocol::{ClientMessage, DaemonMessage};
+use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, InstanceEndpoint, connect_with_retry};
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::env_probe_path;
@@ -179,6 +181,8 @@ impl Sandbox {
             "YAGURA_STATUS_TOKEN",
             "YAGURA_STATUS_TOKEN_OVERRIDE",
             "YAGURA_MCP_BRIDGE",
+            fault_point::POINT_ENV,
+            fault_point::SIGNAL_ENV,
             "NoDefaultCurrentDirectoryInExePath",
         ] {
             command.env_remove(name);
@@ -223,6 +227,26 @@ impl Sandbox {
     pub async fn start_from(&self, launcher_env: &[(&str, &str)]) -> RunningDaemon {
         self.connect_to(self.spawn_daemon(&daemon_bin(), launcher_env, true, &[]))
             .await
+    }
+
+    /// [`Sandbox::start`] with `point` armed: the daemon ends itself there, or
+    /// its parcel writer fails while the file `signal` exists (see
+    /// [`fault_point::FaultPoint`]). Without `signal` a failing writer never
+    /// recovers.
+    // The common module is built whole into the one test binary, whether or not
+    // a test arms a fault point.
+    #[allow(dead_code)]
+    pub async fn start_at_fault(&self, point: FaultPoint, signal: Option<&Path>) -> RunningDaemon {
+        let signal = signal.map(|path| {
+            path.to_str()
+                .expect("the fault signal path must be UTF-8")
+                .to_string()
+        });
+        let mut env = vec![(fault_point::POINT_ENV, point.name())];
+        if let Some(signal) = signal.as_deref() {
+            env.push((fault_point::SIGNAL_ENV, signal));
+        }
+        self.start_from(&env).await
     }
 
     /// [`Sandbox::start`] with `args` added to the daemon's command line.
@@ -318,6 +342,41 @@ impl RunningDaemon {
     /// windows' holders to whatever they do when their daemon goes away.
     pub fn kill_keeping_windows(mut self) {
         self.holders = None;
+    }
+
+    /// Waits for a daemon started by [`Sandbox::start_at_fault`] to end itself
+    /// at its point, leaving its windows' holders as
+    /// [`RunningDaemon::kill_keeping_windows`] does, and returns how it ended.
+    /// The wait is for the process's end itself; [`HANG_GUARD`] only bounds
+    /// it, killing the daemon when it runs out.
+    // As for `Sandbox::start_at_fault`.
+    #[allow(dead_code)]
+    pub async fn wait_for_fault_end(mut self) -> std::process::ExitStatus {
+        self.holders = None;
+        let pid = self.child.id();
+        let handle = yagura_os::process_start(pid)
+            .expect("the daemon's start must be readable")
+            .and_then(|start| {
+                yagura_os::ProcessHandle::open(pid, &start)
+                    .expect("the daemon must be openable while it runs")
+            });
+        // `None`: it has already exited, and only its status is left to read.
+        if let Some(handle) = handle {
+            let handle = std::sync::Arc::new(handle);
+            let waiter = std::sync::Arc::clone(&handle);
+            let ended = tokio::time::timeout(
+                HANG_GUARD,
+                tokio::task::spawn_blocking(move || waiter.wait()),
+            )
+            .await;
+            if ended.is_err() {
+                let _ = handle.kill();
+                panic!("the daemon {pid} did not end at its fault point within {HANG_GUARD:?}");
+            }
+        }
+        self.child
+            .wait()
+            .expect("the ended daemon must be waitable")
     }
 
     pub async fn open_profile_window(&mut self, sandbox: &Sandbox, profile: &str) -> String {

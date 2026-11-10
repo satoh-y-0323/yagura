@@ -525,6 +525,15 @@ async fn async_main(
     config.home_dir = home_dir;
     config.registration_cwd =
         yagura_os::default_state_base_dir().map(|base| registration_cwd(&base, &namespace));
+    // Armed before the registry takes its copy, so every clone shares it.
+    #[cfg(feature = "fault-injection")]
+    {
+        config.faults = yagura_daemon::fault_point::FaultPoints::from_env()
+            .context("failed to arm the fault point")?;
+        if let Some(point) = config.faults.point() {
+            tracing::warn!(point = point.name(), "fault point armed");
+        }
+    }
 
     let registry = Arc::new(WindowRegistry::new(config.clone()));
 

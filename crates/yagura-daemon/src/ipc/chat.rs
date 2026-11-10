@@ -66,6 +66,9 @@ pub struct ChatRuntime {
     /// Whether this daemon was built with no chat at all, rather than with
     /// a chat that failed to come up.
     unwired: bool,
+    /// The daemon's [`DaemonConfig::faults`].
+    #[cfg(feature = "fault-injection")]
+    faults: crate::fault_point::FaultPoints,
 }
 
 impl ChatRuntime {
@@ -81,6 +84,8 @@ impl ChatRuntime {
             chat_delivery_max: 32,
             open_deliveries: Arc::new(AtomicUsize::new(0)),
             unwired: false,
+            #[cfg(feature = "fault-injection")]
+            faults: crate::fault_point::FaultPoints::default(),
         }
     }
 
@@ -144,6 +149,8 @@ impl ChatRuntime {
                     chat_delivery_max: config.chat_delivery_max,
                     open_deliveries: Arc::new(AtomicUsize::new(0)),
                     unwired: false,
+                    #[cfg(feature = "fault-injection")]
+                    faults: config.faults.clone(),
                 }
             }
             Err(err) => {
@@ -1248,6 +1255,11 @@ async fn complete_post(
         return;
     }
 
+    #[cfg(feature = "fault-injection")]
+    if !targets.is_empty() {
+        chat.faults
+            .reach(crate::fault_point::FaultPoint::ChatPostCommitted);
+    }
     for target_id in targets.iter().cloned() {
         spawn_delivery_task(
             Arc::clone(chat),
@@ -1354,6 +1366,15 @@ async fn record_when_left(
         Ok(ParcelEnd::Stopped) => return,
         Ok(ParcelEnd::Closed) | Err(_) => DeliveryOutcome::UndeliveredUnknown(None),
     };
+    // Taken and turned away are the ends that forget the parcel's kept row.
+    #[cfg(feature = "fault-injection")]
+    if matches!(
+        outcome,
+        DeliveryOutcome::Taken | DeliveryOutcome::UndeliveredExhausted
+    ) {
+        chat.faults
+            .reach(crate::fault_point::FaultPoint::ParcelEndHalfSettled);
+    }
     chat.record_delivery_and_notify(broker, room_id, seq, target_id, outcome)
         .await;
 }

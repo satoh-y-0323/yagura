@@ -425,6 +425,12 @@ pub struct DaemonConfig {
     /// launch. A test seam (the `fault-injection` feature only).
     #[cfg(feature = "fault-injection")]
     pub holder_fault: Option<yagura_protocol::holder::HolderFault>,
+
+    /// The point this daemon stops or ends at (see [`crate::fault_point`]);
+    /// nothing armed by default. A test seam (the `fault-injection` feature
+    /// only).
+    #[cfg(feature = "fault-injection")]
+    pub faults: crate::fault_point::FaultPoints,
 }
 
 /// The holder beside the running executable, under the rule for a test
@@ -720,6 +726,8 @@ impl Default for DaemonConfig {
             holder_place: None,
             #[cfg(feature = "fault-injection")]
             holder_fault: None,
+            #[cfg(feature = "fault-injection")]
+            faults: crate::fault_point::FaultPoints::default(),
         }
     }
 }

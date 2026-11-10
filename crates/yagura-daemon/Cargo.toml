@@ -75,10 +75,15 @@ sha2.workspace = true
 # The daemon's own test seams, kept out of the shipped daemon's code: a read
 # of the screen copy that panics (`DetectionEngine::poison_reading_after_calls`),
 # a resize that fails (`PtySession::fail_next_resize`), a detection driver that
-# panics (`WindowEntry::inject_detector_driver_panic`) and the fault a window's
-# holder is asked to act out (`DaemonConfig::holder_fault`). Enabled for this
-# crate's own tests through the self dev-dependency below; never in a shipped
-# build. The holder and the terminal model have no such feature.
+# panics (`WindowEntry::inject_detector_driver_panic`), the fault a window's
+# holder is asked to act out (`DaemonConfig::holder_fault`) and the points of
+# `fault_point` (`DaemonConfig::faults`, armed in a daemon process through
+# `YAGURA_FAULT_POINT`): `handoff_deposited`, `write_fails`,
+# `parcel_end_half_settled`, `task_report_half_written`, `writer_paused`,
+# `chat_post_committed`, `before_send_commit`, `after_send_key` and
+# `door_before_settle`. Enabled for this crate's own tests through the self
+# dev-dependency below; never in a shipped build. The holder and the terminal
+# model have no such feature.
 fault-injection = []
 
 [build-dependencies]

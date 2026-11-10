@@ -675,6 +675,11 @@ async fn send_task_report(
     match decided {
         Ok(Ok((parent, slot))) => {
             if let Some(slot) = slot {
+                #[cfg(feature = "fault-injection")]
+                registry
+                    .config()
+                    .faults
+                    .reach(crate::fault_point::FaultPoint::TaskReportHalfWritten);
                 slot.deliver(report);
             }
             broker.notify_approvers(&DaemonMessage::PlanChanged {

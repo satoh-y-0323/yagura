@@ -7,6 +7,8 @@ mod config_file;
 mod config_rewrite;
 pub mod control;
 pub mod detector;
+#[cfg(feature = "fault-injection")]
+pub mod fault_point;
 pub mod handoff;
 pub mod health;
 pub mod holder_host;

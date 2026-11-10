@@ -352,6 +352,13 @@ async fn type_once(
     });
     let changes = entry.subscribe_status();
     let (attempt, left) = type_push(entry, &push, &agents.config, carried, held.is_some()).await;
+    #[cfg(feature = "fault-injection")]
+    if *push.submitted.borrow() {
+        agents
+            .config
+            .faults
+            .reach(crate::fault_point::FaultPoint::AfterSendKey);
+    }
     drop(held);
     entry.note_notice_attempt();
     let outcome = match attempt {

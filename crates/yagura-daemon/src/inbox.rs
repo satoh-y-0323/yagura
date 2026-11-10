@@ -1044,6 +1044,16 @@ impl Inbox {
             .any(|carried| carried.id == id && *carried.withdrawn.borrow())
     }
 
+    /// Whether a push is under way that has not pressed its submit key.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn push_before_submit_key(&self) -> bool {
+        self.shared
+            .lock()
+            .carrying
+            .iter()
+            .any(|carried| !*carried.submitted.borrow())
+    }
+
     /// Ends push `id`: what it carried is taken, goes back in front of the
     /// inbox, or is turned away.
     pub fn finish_push(&self, id: u64, end: PushEnd) {
