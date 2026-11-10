@@ -37,6 +37,7 @@ use crate::config::DaemonConfig;
 use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
 use crate::inbox::{Deposited, Parcel, ParcelEnd, PushBudget, SaveOutcome, Unwritten};
 use crate::live_policy::{self, PolicyCell};
+use crate::parcel_store::ChatDelivery;
 use crate::room::{self, ChatLimits, DeliveryOutcome};
 use crate::store::StoreError;
 use crate::window::{HooksRoute, WindowEntry, WindowParticipation, WindowRegistry, takes_delivery};
@@ -1350,7 +1351,14 @@ fn post_in_one_transaction(
                 continue;
             };
             let parcel = Parcel::new(chat_parcel_key(&room_id, seq), envelope.clone());
-            let (deposited, row) = entry.inbox().deposit_with_row(parcel, Some(budget.clone()));
+            let delivery = ChatDelivery {
+                room_id: room_id.clone(),
+                seq,
+            };
+            let (deposited, row) =
+                entry
+                    .inbox()
+                    .deposit_with_row(parcel, Some(budget.clone()), delivery);
             if deposited.end.is_none() {
                 let outcome = match notice_queue::after_deposit(&registry, &entry, deposited) {
                     Err(notice_queue::Refused::Full) => DeliveryOutcome::UndeliveredExhausted,
@@ -1430,6 +1438,11 @@ async fn record_when_left(
     end: oneshot::Receiver<ParcelEnd>,
 ) {
     let outcome = match end.await {
+        // The push's settling recorded it with the row's removal.
+        Ok(ParcelEnd::TakenRecorded) => {
+            chat.announce_change(broker, room_id, seq).await;
+            return;
+        }
         Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
         Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
         // The next daemon settles it.
@@ -1450,11 +1463,14 @@ async fn record_when_left(
     }
 }
 
-/// The room and sequence number a chat parcel's `key` names: the inverse of
+/// The chat delivery a chat parcel's `key` names: the inverse of
 /// [`chat_parcel_key`].
-fn chat_parcel_of(key: &str) -> Option<(String, i64)> {
+fn chat_parcel_of(key: &str) -> Option<ChatDelivery> {
     let (room_id, seq) = key.strip_prefix(CHAT_PARCEL_PREFIX)?.rsplit_once(':')?;
-    Some((room_id.to_owned(), seq.parse().ok()?))
+    Some(ChatDelivery {
+        room_id: room_id.to_owned(),
+        seq: seq.parse().ok()?,
+    })
 }
 
 /// Settles, as [`settle_placement`] does, the delivery of every chat post
@@ -1472,10 +1488,7 @@ pub(super) fn settle_kept_deliveries(
         if !chat.store.is_enabled() {
             return;
         }
-        for (key, end) in entry.inbox().adopt_kept(CHAT_PARCEL_PREFIX) {
-            let Some((room_id, seq)) = chat_parcel_of(&key) else {
-                continue;
-            };
+        for (ChatDelivery { room_id, seq }, end) in entry.inbox().adopt_kept(chat_parcel_of) {
             let chat = Arc::clone(&chat);
             let broker = Arc::clone(&broker);
             let target_id = entry.window_id().to_owned();

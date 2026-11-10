@@ -269,7 +269,7 @@ fn write_delivery(
     window_id: &str,
     outcome: DeliveryOutcome,
     at_ms: i64,
-) -> Result<bool, StoreError> {
+) -> rusqlite::Result<bool> {
     let state = outcome.state().as_str();
     let reason = outcome.unknown_reason().map(UnknownReason::as_wire);
     let written = conn.execute_fixed(
@@ -282,6 +282,58 @@ fn write_delivery(
         params![room_id, seq, window_id, state, at_ms, reason],
     )?;
     Ok(written > 0)
+}
+
+/// Forgets a parcel's kept row and records the delivery it carried over
+/// `conn`, which the caller holds a transaction on: the body of
+/// [`ChatStore::settle_parcel_end`], shared with the parcel writer's settling
+/// of a push. `between` runs after the row is forgotten and before the
+/// delivery is written. Returns whether a delivery was written: not when the
+/// message is gone.
+///
+/// # Errors
+///
+/// Any SQLite error of the two writes.
+pub(crate) fn settle_parcel_end_in(
+    conn: &Connection,
+    end: &ParcelEndRecord<'_>,
+    between: impl FnOnce(),
+) -> rusqlite::Result<bool> {
+    parcel_store::forget_parcel_row(conn, end.window_id, end.parcel_key)?;
+    between();
+    write_delivery(
+        conn,
+        end.room_id,
+        end.seq,
+        end.window_id,
+        end.outcome,
+        end.at_ms,
+    )
+}
+
+/// Records one destination's delivery of `(room_id, seq)` as pending again
+/// over `conn`, which the caller holds a transaction on: a push's settling
+/// recorded it taken, and its submit key did not go out. Returns whether a
+/// delivery was written: not when the message is gone.
+///
+/// # Errors
+///
+/// Any SQLite error of the write.
+pub(crate) fn reopen_delivery_in(
+    conn: &Connection,
+    room_id: &str,
+    seq: i64,
+    window_id: &str,
+    at_ms: i64,
+) -> rusqlite::Result<bool> {
+    write_delivery(
+        conn,
+        room_id,
+        seq,
+        window_id,
+        DeliveryOutcome::Pending,
+        at_ms,
+    )
 }
 
 /// Appends `msg` inside `tx` and applies the limits: the body of
@@ -859,16 +911,7 @@ impl ChatStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        parcel_store::forget_parcel_row(&tx, end.window_id, end.parcel_key)?;
-        between();
-        let written = write_delivery(
-            &tx,
-            end.room_id,
-            end.seq,
-            end.window_id,
-            end.outcome,
-            end.at_ms,
-        )?;
+        let written = settle_parcel_end_in(&tx, end, between)?;
         tx.commit()?;
         Ok(written)
     }

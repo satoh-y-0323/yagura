@@ -16,12 +16,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::real_daemon::{RunningDaemon, Sandbox};
-use common::store_fixtures::store_holds;
+use common::store_fixtures::{inbox_parcel_keys, store_holds};
 use common::{
     CLEAR_CTRL_U, PASTE_END, SubmitDefinitionInput, line_ends_outside_paste, read_response, send,
     wait_until_input_log_contains, wait_until_status, write_profile, write_submit_definition,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use yagura_daemon::fault_point::FaultPoint;
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderFrame, HolderFrameBuffer, encode_holder_frame, read_holder_record,
@@ -74,6 +75,30 @@ fn write_window_profile(
     reflect: &str,
     receive_mode: &str,
 ) {
+    write_profile_with_tables(sandbox, id, log, reflect, receive_mode, "");
+}
+
+/// [`write_window_profile`] for a window that takes what the daemon sends of its own
+/// accord (a chat post) and is not woken: the daemon types it into the composer.
+fn write_typed_into_profile(sandbox: &Sandbox, id: &str, log: &Path, receive_mode: &str) {
+    write_profile_with_tables(
+        sandbox,
+        id,
+        log,
+        "0",
+        receive_mode,
+        "\n[delivery]\nwake = \"none\"\n",
+    );
+}
+
+fn write_profile_with_tables(
+    sandbox: &Sandbox,
+    id: &str,
+    log: &Path,
+    reflect: &str,
+    receive_mode: &str,
+    tables: &str,
+) {
     let child = submit_child_path();
     let argv = [
         utf8(&child),
@@ -100,7 +125,7 @@ fn write_window_profile(
         id,
         &format!(
             "schema = 1\ndisplay_name = \"{id}\"\ndetection = \"{DEFINITION}\"\n\n[command]\n\
-             default = [{}]\n",
+             default = [{}]\n{tables}",
             argv.join(", ")
         ),
     );
@@ -123,7 +148,8 @@ impl World {
             .join("playbook.toml");
         std::fs::write(
             &playbook,
-            "[approval]\nauto_approve = [\"open_window\", \"close_window\", \"send_message\"]\n",
+            "[approval]\nauto_approve = [\"open_window\", \"close_window\", \"send_message\", \
+             \"send_chat\"]\n",
         )
         .unwrap();
         Self {
@@ -133,12 +159,32 @@ impl World {
     }
 
     async fn start(&self, sandbox: &Sandbox) -> RunningDaemon {
-        sandbox
-            .start_from(&[
-                ("YAGURA_DETECTION_DIR", utf8(&self.detections)),
-                ("YAGURA_PLAYBOOK", utf8(&self.playbook)),
-            ])
-            .await
+        self.start_with(sandbox, &[]).await
+    }
+
+    /// [`World::start`] with `extra` added to the daemon's environment.
+    async fn start_with(&self, sandbox: &Sandbox, extra: &[(&str, &str)]) -> RunningDaemon {
+        let mut env = vec![
+            ("YAGURA_DETECTION_DIR", utf8(&self.detections)),
+            ("YAGURA_PLAYBOOK", utf8(&self.playbook)),
+        ];
+        env.extend_from_slice(extra);
+        sandbox.start_from(&env).await
+    }
+
+    /// [`World::start`] with `point` armed: the daemon ends itself there, or, for
+    /// [`FaultPoint::WriteFails`], its parcel writer fails while `signal` exists.
+    async fn start_at(
+        &self,
+        sandbox: &Sandbox,
+        point: FaultPoint,
+        signal: Option<&Path>,
+    ) -> RunningDaemon {
+        let mut extra = vec![(yagura_daemon::fault_point::POINT_ENV, point.name())];
+        if let Some(signal) = signal {
+            extra.push((yagura_daemon::fault_point::SIGNAL_ENV, utf8(signal)));
+        }
+        self.start_with(sandbox, &extra).await
     }
 }
 
@@ -639,4 +685,324 @@ async fn the_start_leaves_a_draft_alone_and_a_body_that_does_not_stand_alone() {
         String::from_utf8_lossy(&beside_read[after_probe..])
     );
     assert_body_kept_out_of_the_log(&sandbox, &[BODY, APPENDED]);
+}
+
+/// Posts `body` to the `main` room on `client` and returns the posting's seq.
+async fn post_chat(client: &mut Connection, body: String) -> u64 {
+    send(
+        client,
+        &ClientMessage::SendChat {
+            room_id: Some("main".to_owned()),
+            body,
+        },
+    )
+    .await;
+    match read_response(client).await {
+        DaemonMessage::ChatPosted { seq, .. } => seq,
+        other => panic!("expected chat_posted, got {other:?}"),
+    }
+}
+
+/// The delivery state the `main` room records for message `seq` to `window_id`.
+async fn chat_delivery_state(client: &mut Connection, seq: u64, window_id: &str) -> Option<String> {
+    send(
+        client,
+        &ClientMessage::ReadChat {
+            room_id: Some("main".to_owned()),
+            after_seq: Some(0),
+            limit: None,
+        },
+    )
+    .await;
+    let messages = match read_response(client).await {
+        DaemonMessage::ChatMessages { messages, .. } => messages,
+        other => panic!("expected chat_messages, got {other:?}"),
+    };
+    messages
+        .into_iter()
+        .find(|message| message.seq == seq)?
+        .deliveries
+        .into_iter()
+        .find(|delivery| delivery.window_id == window_id)
+        .map(|delivery| delivery.state)
+}
+
+/// Waits until the room records message `seq` as taken by `window_id`.
+async fn until_chat_taken(client: &mut Connection, sandbox: &Sandbox, seq: u64, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let state = chat_delivery_state(client, seq, window_id).await;
+        if state.as_deref() == Some("taken") {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post must end up recorded as taken, not {state:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Waits until the daemon lists `window_id`: the window has been taken back.
+async fn until_window_listed(client: &mut Connection, sandbox: &Sandbox, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        send(client, &ClientMessage::ListWindows).await;
+        match read_response(client).await {
+            DaemonMessage::WindowList { windows } => {
+                if windows.iter().any(|info| info.window_id == window_id) {
+                    return;
+                }
+            }
+            other => panic!("expected window_list, got {other:?}"),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never listed the window {window_id}; daemon log:
+{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Waits until the daemon's log holds `needle`.
+async fn until_daemon_log_contains(sandbox: &Sandbox, needle: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while !sandbox.daemon_log().contains(needle) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the daemon never logged {needle:?}; daemon log:
+{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Waits until the session store keeps no parcel for `window_id`.
+async fn until_no_parcel_kept(sandbox: &Sandbox, window_id: &str, what: &str) {
+    let db = store_db(sandbox);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let kept = inbox_parcel_keys(&db, window_id);
+        if kept.as_ref().is_some_and(Vec::is_empty) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: the store still keeps {kept:?} for the window; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A chat post whose push ends the daemon after its body is in the composer and before
+/// its submit key: the next daemon takes the body back out of the composer and types the
+/// post once, so the window takes one line carrying it once, and the room records it taken.
+#[tokio::test]
+async fn a_push_cut_before_its_submit_key_is_typed_once_by_the_next_daemon() {
+    const MARK: &str = "PUSH-BEFORE-KEY-5V2";
+    const SENT: &str = "SENT-BEFORE.";
+    let sandbox = Sandbox::new("push-before-key");
+    let world = World::new(&sandbox);
+    let log = sandbox.tree.path().join("before-key-input.log");
+    write_typed_into_profile(&sandbox, "push-before-key", &log, "-");
+
+    let mut first = world
+        .start_at(&sandbox, FaultPoint::BeforeSendCommit, None)
+        .await;
+    let window_id = first.open_profile_window(&sandbox, "push-before-key").await;
+    wait_until_status(&mut first.client, &window_id, WindowStatus::WaitingInput).await;
+    let seq = post_chat(&mut first.client, format!("@{window_id} {MARK}")).await;
+    let ended = first.wait_for_fault_end().await;
+    assert!(
+        !ended.success(),
+        "the daemon must end itself before the push presses its submit key: {ended:?}"
+    );
+
+    let mut next = world.start(&sandbox).await;
+    wait_until_status(&mut next.client, &window_id, WindowStatus::WaitingInput).await;
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
+    let mut typing = viewer(&sandbox, &window_id).await;
+    let read = read_before(&mut typing, &log, SENT).await;
+    let screen = next
+        .output_until(&window_id, "a line taken by the window", |text| {
+            !submitted(text).is_empty()
+        })
+        .await;
+    let lines = submitted(&screen);
+    assert_eq!(
+        lines.len(),
+        1,
+        "the window must take the post as one line; screen:\n{screen}\ndaemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    assert_eq!(
+        count(lines[0].as_bytes(), MARK.as_bytes()),
+        1,
+        "the line must carry the post once, with nothing of the cut push in front of it: {:?}",
+        lines[0]
+    );
+    assert_eq!(
+        line_ends_outside_paste(&read),
+        1,
+        "only one line may be submitted; the child read {:?}",
+        String::from_utf8_lossy(&read)
+    );
+    assert_body_kept_out_of_the_log(&sandbox, &[MARK]);
+}
+
+/// A chat post whose push ends the daemon after its submit key: the post reached the
+/// window, so the next daemon does not type it again, and the room records it taken.
+#[tokio::test]
+async fn a_push_cut_after_its_submit_key_is_not_typed_again_by_the_next_daemon() {
+    const MARK: &str = "PUSH-AFTER-KEY-8C4";
+    const SENT: &str = "SENT-AFTER.";
+    let sandbox = Sandbox::new("push-after-key");
+    let world = World::new(&sandbox);
+    let log = sandbox.tree.path().join("after-key-input.log");
+    write_typed_into_profile(&sandbox, "push-after-key", &log, "-");
+
+    let mut first = world
+        .start_at(&sandbox, FaultPoint::AfterSendKey, None)
+        .await;
+    let window_id = first.open_profile_window(&sandbox, "push-after-key").await;
+    wait_until_status(&mut first.client, &window_id, WindowStatus::WaitingInput).await;
+    let seq = post_chat(&mut first.client, format!("@{window_id} {MARK}")).await;
+    let ended = first.wait_for_fault_end().await;
+    assert!(
+        !ended.success(),
+        "the daemon must end itself after the push pressed its submit key: {ended:?}"
+    );
+
+    let mut next = world.start(&sandbox).await;
+    until_window_listed(&mut next.client, &sandbox, &window_id).await;
+    // Taken is the end of a delivery: a retyped post would be read below, after it.
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
+    let mut typing = viewer(&sandbox, &window_id).await;
+    let read = read_before(&mut typing, &log, SENT).await;
+    assert_eq!(
+        count(&read, MARK.as_bytes()),
+        1,
+        "the post must be typed once, not again by the next daemon; the child read {:?}; \
+         daemon log:\n{}",
+        String::from_utf8_lossy(&read),
+        sandbox.daemon_log()
+    );
+    assert_eq!(
+        line_ends_outside_paste(&read),
+        1,
+        "only one line may be submitted; the child read {:?}",
+        String::from_utf8_lossy(&read)
+    );
+    assert_body_kept_out_of_the_log(&sandbox, &[MARK]);
+}
+
+/// A post already in a window's inbox when the parcel writer starts failing is typed
+/// once and its submit key is pressed, not typed and taken back again and again. Once
+/// writes work again, the next write that succeeds also removes the post's row and
+/// records its delivery as taken, so a daemon killed after that does not type it again.
+#[tokio::test]
+async fn a_push_whose_commit_fails_is_typed_once_and_its_row_goes_with_the_next_write() {
+    const MARK: &str = "PUSH-COMMIT-FAILS-3T9";
+    const OTHER: &str = "PUSH-NEXT-WRITE-6Y1";
+    const REFUSED: &str = "PUSH-REFUSED-2D8";
+    const SENT: &str = "SENT-COMMIT.";
+    let sandbox = Sandbox::new("push-commit-fails");
+    let world = World::new(&sandbox);
+    let log = sandbox.tree.path().join("commit-fails-input.log");
+    let other_log = sandbox.tree.path().join("commit-fails-other-input.log");
+    let probe_may_be_read = sandbox.tree.path().join("commit-fails-probe-may-be-read");
+    // The writer fails while this file exists; it does not exist yet.
+    let failing = sandbox.tree.path().join("commit-fails-while-present");
+    write_typed_into_profile(
+        &sandbox,
+        "push-commit-fails",
+        &log,
+        &format!("hold-probe|{}", utf8(&probe_may_be_read)),
+    );
+    write_typed_into_profile(&sandbox, "push-commit-other", &other_log, "-");
+
+    let mut first = world
+        .start_at(&sandbox, FaultPoint::WriteFails, Some(&failing))
+        .await;
+    let window_id = first
+        .open_profile_window(&sandbox, "push-commit-fails")
+        .await;
+    let other = first
+        .open_profile_window(&sandbox, "push-commit-other")
+        .await;
+    wait_until_status(&mut first.client, &window_id, WindowStatus::WaitingInput).await;
+    wait_until_status(&mut first.client, &other, WindowStatus::WaitingInput).await;
+    let seq = post_chat(&mut first.client, format!("@{window_id} {MARK}")).await;
+    // The post is saved and in the inbox; its push has typed it and waits for the probe
+    // behind it, which the child holds unread. Writes fail from here on.
+    wait_until_input_log_contains(&log, MARK.as_bytes()).await;
+    std::fs::write(&failing, b"").unwrap();
+    std::fs::write(&probe_may_be_read, b"").unwrap();
+
+    let screen = first
+        .output_until(&window_id, "a line taken by the window", |text| {
+            !submitted(text).is_empty()
+        })
+        .await;
+    assert_eq!(
+        submitted(&screen).len(),
+        1,
+        "the push must press its submit key although its commit failed; screen:\n{screen}\n\
+         daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    let mut typing = viewer(&sandbox, &window_id).await;
+    let read = read_before(&mut typing, &log, SENT).await;
+    assert_eq!(
+        count(&read, MARK.as_bytes()),
+        1,
+        "the post must be typed once, not typed and taken back again; the child read {:?}",
+        String::from_utf8_lossy(&read)
+    );
+
+    // The push has ended and its removal failed: a failed write is logged once, and the
+    // parcel writer works in order, so a post refused for being unwritable comes after it.
+    until_daemon_log_contains(&sandbox, "failed to write the kept parcels").await;
+    send(
+        &mut first.client,
+        &ClientMessage::SendChat {
+            room_id: Some("main".to_owned()),
+            body: format!("@{other} {REFUSED}"),
+        },
+    )
+    .await;
+    match read_response(&mut first.client).await {
+        DaemonMessage::Error { code, .. } => assert_eq!(code, "internal"),
+        other => panic!("a post that cannot be written must be refused, got {other:?}"),
+    }
+
+    // Writes work again; the next write to succeed is another window's post.
+    std::fs::remove_file(&failing).unwrap();
+    post_chat(&mut first.client, format!("@{other} {OTHER}")).await;
+    until_chat_taken(&mut first.client, &sandbox, seq, &window_id).await;
+    until_no_parcel_kept(
+        &sandbox,
+        &window_id,
+        "the failed removal must be written again by the next write that succeeds",
+    )
+    .await;
+    first.kill_keeping_windows();
+
+    let mut next = world.start(&sandbox).await;
+    until_window_listed(&mut next.client, &sandbox, &window_id).await;
+    let mut typing = viewer(&sandbox, &window_id).await;
+    let read = read_before(&mut typing, &log, "SENT-RESTART.").await;
+    assert_eq!(
+        count(&read, MARK.as_bytes()),
+        1,
+        "the next daemon must not type the post again; the child read {:?}; daemon log:\n{}",
+        String::from_utf8_lossy(&read),
+        sandbox.daemon_log()
+    );
+    assert_body_kept_out_of_the_log(&sandbox, &[MARK, OTHER, REFUSED]);
 }

@@ -24,6 +24,8 @@ use rusqlite::{Connection, Params, params};
 use tokio::sync::oneshot;
 use yagura_protocol::{REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES, ReceivedReport};
 
+use crate::chat_store::{ParcelEndRecord, reopen_delivery_in, settle_parcel_end_in};
+use crate::room::DeliveryOutcome;
 use crate::sql::FixedSql;
 
 /// The most parcels one window's inbox reads back: the file is writable by
@@ -62,6 +64,58 @@ pub(crate) type OnWritten = Box<dyn FnOnce(Written) -> bool + Send>;
 /// Called, on the writer's thread, with the window whose inbox a write
 /// showed parcels in.
 pub(crate) type OnShown = Box<dyn Fn(&str) + Send>;
+
+/// Called, on the writer's thread, once a push's settling has committed.
+pub(crate) type OnSettled = Box<dyn FnOnce() + Send>;
+
+/// The chat delivery a kept parcel carries: recorded with its row's removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChatDelivery {
+    pub(crate) room_id: String,
+    pub(crate) seq: i64,
+}
+
+/// One kept row a push's settling forgets, and its undoing writes back.
+#[derive(Debug, Clone)]
+pub(crate) struct RowEnd {
+    pub(crate) parcel: KeptParcel,
+    /// The chat delivery the row's removal records as taken, and its undoing
+    /// as pending again.
+    pub(crate) delivery: Option<ChatDelivery>,
+}
+
+/// What a typed push commits right before its first submit key, or writes
+/// back when that key did not go out: the rows of what it carries, and the
+/// delivery mark of its body.
+struct PushRows {
+    window_id: String,
+    push_id: u64,
+    rows: Vec<RowEnd>,
+    mark: Option<String>,
+}
+
+impl PushRows {
+    fn is_push(&self, window_id: &str, push_id: u64) -> bool {
+        self.window_id == window_id && self.push_id == push_id
+    }
+
+    fn shares_a_row(&self, other: &Self) -> bool {
+        self.window_id == other.window_id
+            && self
+                .rows
+                .iter()
+                .any(|row| other.rows.iter().any(|o| o.parcel.seq == row.parcel.seq))
+    }
+}
+
+/// A write the writer owes: it failed, and is written again behind the next
+/// write that succeeds.
+enum Owed {
+    /// A push's settling; `settled` is called once it commits.
+    Settle { rows: PushRows, settled: OnSettled },
+    /// The undoing of a settling that committed.
+    Undo(PushRows),
+}
 
 /// One parcel of a window's inbox as it is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +175,17 @@ enum Command {
         window_id: String,
         reply: oneshot::Sender<Vec<String>>,
     },
+    /// Answered once the settling has committed, or has failed and is owed.
+    SettlePush {
+        rows: PushRows,
+        settled: OnSettled,
+        reply: oneshot::Sender<()>,
+    },
+    /// Answered once the undoing has committed, or has failed and is owed.
+    UnsettlePush {
+        rows: PushRows,
+        reply: oneshot::Sender<()>,
+    },
     /// Answered once every command sent before it is done, to a caller that
     /// blocks its thread.
     #[cfg(feature = "fault-injection")]
@@ -144,6 +209,8 @@ impl Command {
                 | Self::ForgetReports { .. }
                 | Self::Mark { .. }
                 | Self::Unmark { .. }
+                | Self::SettlePush { .. }
+                | Self::UnsettlePush { .. }
         )
     }
 }
@@ -289,6 +356,54 @@ impl InboxKeeper {
             seqs,
         });
     }
+
+    /// Forgets `rows` and the delivery mark of `mark` in one transaction for
+    /// push `push_id`, calling `settled` once that commits. Yields once it
+    /// has committed, or has failed and is owed behind the writer's next
+    /// write that succeeds; at once when the writer is gone.
+    pub(crate) fn settle_push(
+        &self,
+        push_id: u64,
+        rows: Vec<RowEnd>,
+        mark: Option<String>,
+        settled: OnSettled,
+    ) -> oneshot::Receiver<()> {
+        let (reply, done) = oneshot::channel();
+        self.store.send(Command::SettlePush {
+            rows: self.push_rows(push_id, rows, mark),
+            settled,
+            reply,
+        });
+        done
+    }
+
+    /// Undoes push `push_id`'s settling, whose submit key did not go out:
+    /// `rows` are kept again with their chat deliveries pending, and the mark
+    /// of `mark` with them, in one transaction. A settling still owed is
+    /// dropped instead, as it never committed. Yields as
+    /// [`Self::settle_push`] does.
+    pub(crate) fn unsettle_push(
+        &self,
+        push_id: u64,
+        rows: Vec<RowEnd>,
+        mark: Option<String>,
+    ) -> oneshot::Receiver<()> {
+        let (reply, done) = oneshot::channel();
+        self.store.send(Command::UnsettlePush {
+            rows: self.push_rows(push_id, rows, mark),
+            reply,
+        });
+        done
+    }
+
+    fn push_rows(&self, push_id: u64, rows: Vec<RowEnd>, mark: Option<String>) -> PushRows {
+        PushRows {
+            window_id: self.window_id.clone(),
+            push_id,
+            rows,
+            mark,
+        }
+    }
 }
 
 /// What one window's deliveries keep their marks through. A body is the
@@ -349,18 +464,39 @@ impl MarkKeeper {
     }
 }
 
-fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown: &OnShown) {
-    // One warning for the whole run: a broken database must not flood the log.
-    let mut warned = false;
-    let mut written_as = |result: rusqlite::Result<usize>| match result {
-        Ok(rows) => Written::Rows(rows),
-        Err(error) => {
-            if !std::mem::replace(&mut warned, true) {
-                tracing::warn!(%error, "failed to write the kept parcels; parcels are kept in memory only");
+/// How the writer's writes have gone this run.
+#[derive(Default)]
+struct WriteLog {
+    /// One warning for the whole run: a broken database must not flood the
+    /// log.
+    warned: bool,
+    /// Whether a write succeeded since this was last cleared.
+    wrote: bool,
+}
+
+impl WriteLog {
+    fn written_as(&mut self, result: rusqlite::Result<usize>) -> Written {
+        match result {
+            Ok(rows) => {
+                self.wrote = true;
+                Written::Rows(rows)
             }
-            Written::Failed
+            Err(error) => {
+                if !std::mem::replace(&mut self.warned, true) {
+                    tracing::warn!(%error, "failed to write the kept parcels; parcels are kept in memory only");
+                }
+                Written::Failed
+            }
         }
-    };
+    }
+}
+
+fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown: &OnShown) {
+    let mut log = WriteLog::default();
+    // A push's settling or undoing that failed: its submit key went out (or
+    // did not) regardless, so it is written again behind the next write that
+    // succeeds.
+    let mut owed: Vec<Owed> = Vec::new();
     #[cfg(feature = "fault-injection")]
     let mut faults = crate::fault_point::FaultPoints::default();
     while let Ok(command) = received.recv() {
@@ -379,7 +515,7 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                let outcome = written_as(run(
+                let outcome = log.written_as(run(
                     conn,
                     fails,
                     KEEP_PARCEL_SQL,
@@ -397,10 +533,10 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             }
             Command::Forget { window_id, seqs } => {
                 for seq in seqs {
-                    written_as(run(
+                    log.written_as(run(
                         conn,
                         fails,
-                        "DELETE FROM inbox_parcels WHERE window_id = ?1 AND seq = ?2",
+                        FORGET_PARCEL_AT_SQL,
                         params![window_id, seq],
                     ));
                 }
@@ -417,12 +553,12 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 reports,
                 written,
             } => {
-                let outcome = written_as(keep_report_rows(conn, fails, &window_id, &reports));
+                let outcome = log.written_as(keep_report_rows(conn, fails, &window_id, &reports));
                 let _ = written.send(outcome);
             }
             Command::ForgetReports { window_id, seqs } => {
                 for seq in seqs {
-                    written_as(run(
+                    log.written_as(run(
                         conn,
                         fails,
                         "DELETE FROM report_parcels WHERE window_id = ?1 AND seq = ?2",
@@ -444,22 +580,11 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                written_as(run(
-                    conn,
-                    fails,
-                    "INSERT OR IGNORE INTO delivery_marks (window_id, body) \
-                     SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM windows WHERE window_id = ?1)",
-                    params![window_id, body],
-                ));
+                log.written_as(run(conn, fails, KEEP_MARK_SQL, params![window_id, body]));
                 let _ = reply.send(());
             }
             Command::Unmark { window_id, body } => {
-                written_as(run(
-                    conn,
-                    fails,
-                    "DELETE FROM delivery_marks WHERE window_id = ?1 AND body = ?2",
-                    params![window_id, body],
-                ));
+                log.written_as(run(conn, fails, FORGET_MARK_SQL, params![window_id, body]));
             }
             Command::LoadMarks { window_id, reply } => {
                 let marks = read_marks(conn, &window_id).unwrap_or_else(|error| {
@@ -468,6 +593,35 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 });
                 let _ = reply.send(marks);
             }
+            Command::SettlePush {
+                rows,
+                settled,
+                reply,
+            } => {
+                // A settling of the same rows takes the place of an undoing
+                // still owed: the two cancel out.
+                owed.retain(|owed| !matches!(owed, Owed::Undo(undo) if undo.shares_a_row(&rows)));
+                write_owed(
+                    conn,
+                    fails,
+                    &mut log,
+                    &mut owed,
+                    Owed::Settle { rows, settled },
+                );
+                let _ = reply.send(());
+            }
+            Command::UnsettlePush { rows, reply } => {
+                let before = owed.len();
+                owed.retain(|owed| {
+                    !matches!(owed, Owed::Settle { rows: settle, .. }
+                        if settle.is_push(&rows.window_id, rows.push_id))
+                });
+                // A settling that never committed has nothing to undo.
+                if owed.len() == before {
+                    write_owed(conn, fails, &mut log, &mut owed, Owed::Undo(rows));
+                }
+                let _ = reply.send(());
+            }
             #[cfg(feature = "fault-injection")]
             Command::KeptBlocking { reply } => {
                 let _ = reply.send(());
@@ -475,8 +629,108 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             #[cfg(feature = "fault-injection")]
             Command::ArmWriter(armed) => faults = armed,
         }
+        if std::mem::take(&mut log.wrote) && !owed.is_empty() {
+            for write in std::mem::take(&mut owed) {
+                write_owed(conn, fails, &mut log, &mut owed, write);
+            }
+            log.wrote = false;
+        }
     }
 }
+
+/// Writes `write` in one transaction, calling a settling's `settled` once it
+/// commits, or keeps it in `owed` when that fails.
+fn write_owed(
+    conn: &Connection,
+    fails: bool,
+    log: &mut WriteLog,
+    owed: &mut Vec<Owed>,
+    write: Owed,
+) {
+    let result = if fails {
+        Err(simulated_write_failure())
+    } else {
+        match &write {
+            Owed::Settle { rows, .. } => settle_push_rows(conn, rows),
+            Owed::Undo(rows) => undo_push_rows(conn, rows),
+        }
+    };
+    match (log.written_as(result), write) {
+        (Written::Rows(_), Owed::Settle { settled, .. }) => settled(),
+        (Written::Rows(_), Owed::Undo(_)) => {}
+        (Written::Failed, write) => owed.push(write),
+    }
+}
+
+/// Forgets what `push` names in one transaction, returning how many rows it
+/// changed.
+fn settle_push_rows(conn: &Connection, push: &PushRows) -> rusqlite::Result<usize> {
+    let at_ms = i64::try_from(crate::ipc::now_ms()).unwrap_or(i64::MAX);
+    let window_id = push.window_id.as_str();
+    let tx = conn.unchecked_transaction()?;
+    let mut rows = 0;
+    for row in &push.rows {
+        match &row.delivery {
+            None => {
+                rows +=
+                    tx.execute_fixed(FORGET_PARCEL_AT_SQL, params![window_id, row.parcel.seq])?;
+            }
+            Some(delivery) => {
+                let end = ParcelEndRecord {
+                    room_id: &delivery.room_id,
+                    seq: delivery.seq,
+                    window_id,
+                    parcel_key: &row.parcel.key,
+                    outcome: DeliveryOutcome::Taken,
+                    at_ms,
+                };
+                rows += usize::from(settle_parcel_end_in(&tx, &end, || {})?);
+            }
+        }
+    }
+    if let Some(body) = &push.mark {
+        rows += tx.execute_fixed(FORGET_MARK_SQL, params![window_id, body])?;
+    }
+    tx.commit()?;
+    Ok(rows)
+}
+
+/// Writes back what [`settle_push_rows`] forgot for `push` in one
+/// transaction, returning how many rows it changed.
+fn undo_push_rows(conn: &Connection, push: &PushRows) -> rusqlite::Result<usize> {
+    let at_ms = i64::try_from(crate::ipc::now_ms()).unwrap_or(i64::MAX);
+    let window_id = push.window_id.as_str();
+    let tx = conn.unchecked_transaction()?;
+    let mut rows = 0;
+    for row in &push.rows {
+        rows += keep_parcel_row(&tx, window_id, &row.parcel)?;
+        if let Some(delivery) = &row.delivery {
+            rows += usize::from(reopen_delivery_in(
+                &tx,
+                &delivery.room_id,
+                delivery.seq,
+                window_id,
+                at_ms,
+            )?);
+        }
+    }
+    if let Some(body) = &push.mark {
+        rows += tx.execute_fixed(KEEP_MARK_SQL, params![window_id, body])?;
+    }
+    tx.commit()?;
+    Ok(rows)
+}
+
+/// Forgets a parcel kept at its place in its window's inbox.
+const FORGET_PARCEL_AT_SQL: &str = "DELETE FROM inbox_parcels WHERE window_id = ?1 AND seq = ?2";
+
+/// Keeps the delivery mark of one body in its window, while the window has a
+/// row, which takes it along when it goes.
+const KEEP_MARK_SQL: &str = "INSERT OR IGNORE INTO delivery_marks (window_id, body) \
+     SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM windows WHERE window_id = ?1)";
+
+/// Forgets the delivery mark of one body in its window.
+const FORGET_MARK_SQL: &str = "DELETE FROM delivery_marks WHERE window_id = ?1 AND body = ?2";
 
 /// Runs one write, or fails it as a disk that cannot be written would when
 /// `fails`.

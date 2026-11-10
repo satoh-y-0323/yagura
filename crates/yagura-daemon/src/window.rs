@@ -1737,6 +1737,63 @@ impl Drop for TakeBackScope<'_> {
     }
 }
 
+/// The push a [`WindowEntry::submit_message`] call types for.
+struct PushSettling {
+    push_id: u64,
+    /// The body the call marked, which the settling forgets with the rows.
+    mark: Option<String>,
+    /// The mark the settling took along, which its undoing keeps again.
+    took_mark: Option<String>,
+}
+
+/// A push settled right before its submit key, until the key's write tells
+/// whether it went out.
+#[must_use]
+struct SettledPush {
+    push_id: u64,
+}
+
+/// How the write of a settled push's submit key came out.
+enum SubmitKeyWrite {
+    /// The key went out: the push has reached the CLI, and its settling
+    /// stands.
+    Written,
+    /// The key was not written (another writer moved the ledger, or the
+    /// write failed): the settling is undone before the push puts its
+    /// parcels back.
+    NotWritten,
+}
+
+impl SubmitKeyWrite {
+    fn of<T>(result: &PtyResult<T>, written: impl FnOnce(&T) -> bool) -> Self {
+        match result {
+            Ok(value) if written(value) => Self::Written,
+            // A failed write may still have delivered the key; a second
+            // delivery is chosen over a lost one.
+            Ok(_) | Err(_) => Self::NotWritten,
+        }
+    }
+}
+
+/// Clears a call's [`PushSettling`] on drop, however the call ends.
+struct PushSettlingScope<'a> {
+    entry: &'a WindowEntry,
+}
+
+impl PushSettlingScope<'_> {
+    fn took_mark(&self) -> bool {
+        lock_recover(&self.entry.push_settling)
+            .as_ref()
+            .is_some_and(|settling| settling.took_mark.is_some())
+    }
+}
+
+impl Drop for PushSettlingScope<'_> {
+    fn drop(&mut self) {
+        *lock_recover(&self.entry.push_settling) = None;
+    }
+}
+
 /// One place in a window's queue for its delivery turn, given back on drop.
 struct TurnWaiterPlace<'a> {
     waiters: &'a AtomicUsize,
@@ -1892,6 +1949,9 @@ pub struct WindowEntry {
     take_back_call: Mutex<Option<TakeBackCall>>,
     /// What that call has of its own in the composer.
     own_part: Mutex<OwnPart>,
+    /// The push that call types for, settled right before its first submit
+    /// key; `None` between calls and for a call that types no push.
+    push_settling: Mutex<Option<PushSettling>>,
     /// Whether a delivery agent is running for this window. The agent itself
     /// lives in the IPC layer and is started through
     /// [`WindowRegistry::wake_notices`].
@@ -2417,6 +2477,22 @@ impl WindowEntry {
         stage: SendStage,
         requester: Option<watch::Receiver<bool>>,
     ) -> PtyResult<SubmitJudgment> {
+        self.submit_message_for(body, residue, stage, requester, None)
+            .await
+    }
+
+    /// [`WindowEntry::submit_message`] typing push `push_id` of this
+    /// window's inbox: right before the first submit key, the push is settled
+    /// ([`Inbox::settle_push`]), so the key never goes out while the store
+    /// still holds what it hands over.
+    pub(crate) async fn submit_message_for(
+        &self,
+        body: &str,
+        residue: Option<ComposerResidue<'_>>,
+        stage: SendStage,
+        requester: Option<watch::Receiver<bool>>,
+        push_id: Option<u64>,
+    ) -> PtyResult<SubmitJudgment> {
         let _focus = self.session.open_focus_interval();
         let mut requester = Requester(requester);
         let Some(_guard) = self.lock_input(&mut requester).await else {
@@ -2428,16 +2504,53 @@ impl WindowEntry {
             return Ok(declined(NotPlacedReason::NoComposer, None));
         }
         let marks = self.mark_delivery(body).await;
+        *lock_recover(&self.push_settling) = push_id.map(|push_id| PushSettling {
+            push_id,
+            mark: marks.is_some().then(|| body.to_owned()),
+            took_mark: None,
+        });
+        let settling = PushSettlingScope { entry: self };
         let judgment = self
             .judge_and_check(body, residue, stage, &mut requester)
             .await;
         // The mark stays while the body may: a next daemon takes it back.
         if let Some(marks) = marks
+            && !settling.took_mark()
             && !matches!(&judgment, Ok(judgment) if leaves_envelope(judgment))
         {
             marks.unmark(body);
         }
         judgment
+    }
+
+    /// Settles the push the running call types for, once, right before its
+    /// first submit key. A death after this and before the key leaves the
+    /// body in the composer unmarked: a next daemon reads it as someone
+    /// else's draft and waits for it to go (`foreign_draft`), since taking it
+    /// back would lose what the store already records as taken.
+    async fn settle_push_before_submit_key(&self) -> Option<SettledPush> {
+        let (push_id, mark) = lock_recover(&self.push_settling)
+            .as_mut()
+            .map(|settling| (settling.push_id, settling.mark.take()))?;
+        if !self.inbox.settle_push(push_id, mark.clone()).await {
+            return None;
+        }
+        if let Some(settling) = lock_recover(&self.push_settling).as_mut() {
+            settling.took_mark = mark;
+        }
+        Some(SettledPush { push_id })
+    }
+
+    /// Lets a settled push's settling stand once its submit key went out, or
+    /// undoes it, with the mark it took, when the key did not.
+    async fn after_submit_key(&self, settled: Option<SettledPush>, key: SubmitKeyWrite) {
+        let (Some(SettledPush { push_id }), SubmitKeyWrite::NotWritten) = (settled, key) else {
+            return;
+        };
+        let mark = lock_recover(&self.push_settling)
+            .as_mut()
+            .and_then(|settling| settling.took_mark.take());
+        self.inbox.unsettle_push(push_id, mark).await;
     }
 
     /// [`WindowEntry::submit_message`] once it holds the input lock and the
@@ -3896,7 +4009,11 @@ impl WindowEntry {
         };
         #[cfg(feature = "fault-injection")]
         self.reach_before_send_commit();
-        match self.run_judged_steps(&plan, seq, registration).await? {
+        let settled = self.settle_push_before_submit_key().await;
+        let steps = self.run_judged_steps(&plan, seq, registration).await;
+        let key = SubmitKeyWrite::of(&steps, |steps| matches!(steps, JudgedSteps::Written(_)));
+        self.after_submit_key(settled, key).await;
+        match steps? {
             JudgedSteps::Written(outcome) => Ok(placed(outcome, seq + own_writes)),
             JudgedSteps::Moved { at } => Ok(declined(NotPlacedReason::Interrupted, Some(at))),
         }
@@ -4673,11 +4790,14 @@ impl WindowEntry {
     ) -> PtyResult<SubmitJudgment> {
         #[cfg(feature = "fault-injection")]
         self.reach_before_send_commit();
+        let settled = self.settle_push_before_submit_key().await;
         let status_before_submit = self.current_status();
-        match self
+        let written = self
             .write_judged(&submit_step.bytes, seq, TakeBackRegistration::Empty)
-            .await?
-        {
+            .await;
+        let key = SubmitKeyWrite::of(&written, |written| *written == GuardedWrite::Written);
+        self.after_submit_key(settled, key).await;
+        match written? {
             GuardedWrite::Written => Ok(placed(
                 SubmitOutcome {
                     status_before_submit,
@@ -6230,6 +6350,7 @@ impl WindowRegistry {
             interrupt_bytes: self.config().interrupt_bytes.clone(),
             take_back_call: Mutex::new(None),
             own_part: Mutex::new(OwnPart::default()),
+            push_settling: Mutex::new(None),
             agent_running: Mutex::new(false),
             notice_wake: Notify::new(),
             notice_attempts: AtomicU64::new(0),

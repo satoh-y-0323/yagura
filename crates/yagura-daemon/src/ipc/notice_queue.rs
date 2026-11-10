@@ -521,7 +521,7 @@ async fn type_push(
         0,
         carried,
         budget,
-        Some(&push.submitted),
+        Some(push),
     )
     .await;
     match delivered {
@@ -556,7 +556,13 @@ async fn type_push(
         DeliveryEnd::WriteFailed(err, guard) => {
             drop(guard);
             tracing::warn!(window_id = entry.window_id(), error = %err, "notice write failed");
-            (Attempt::Declined("write_failed"), None)
+            // Past the submit key the text has reached the CLI: put back, it
+            // would be typed a second time.
+            if *push.submitted.borrow() {
+                (Attempt::Written("write_failed", Instant::now()), None)
+            } else {
+                (Attempt::Declined("write_failed"), None)
+            }
         }
         DeliveryEnd::Skipped => (Attempt::Declined("skipped"), None),
         DeliveryEnd::Exhausted(Scarce::TurnWaiters) => {

@@ -65,7 +65,7 @@ use crate::handoff::{
     compose_envelope, compose_task_notice, is_ready,
 };
 use crate::health;
-use crate::inbox::{Parcel, ParcelEnd, PushBudget, Withdrawal};
+use crate::inbox::{Parcel, ParcelEnd, Push, PushBudget, Withdrawal};
 use crate::input::{SubmitOutcome, SubmitPlan, plan_raw_write};
 use crate::input_encode::{self, ClientWrite, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
@@ -4458,7 +4458,7 @@ async fn write_loop(mut writer: WriteHalf<Connection>, mut rx: mpsc::Receiver<Ve
 
 /// Milliseconds since the Unix epoch, saturating to `u64::MAX` on overflow and
 /// `0` on a clock set before the epoch: it only orders and displays records.
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -4716,7 +4716,7 @@ async fn execute_send_text(
         None => SubmitRequest::RawMessage(plan_raw_write(text)),
     };
 
-    match submit_line_to_pty(entry, request, requester)
+    match submit_line_to_pty(entry, request, requester, None)
         .await
         .map(|judgment| judgment.placement)
     {
@@ -4878,7 +4878,8 @@ async fn close_for_cleanup(
 /// Executes one submit request on an agent's behalf: the only point that
 /// writes into a window's PTY for `send_text` and `send_handoff` alike.
 /// `requester` is handed to [`WindowEntry::submit_raw_gated`] and
-/// [`WindowEntry::submit_message`] as is.
+/// [`WindowEntry::submit_message`] as is; `push_id` names the push of the
+/// window's inbox a judged line types, settled before its submit key.
 ///
 /// # Errors
 ///
@@ -4889,6 +4890,7 @@ async fn submit_line_to_pty(
     entry: &WindowEntry,
     request: SubmitRequest<'_>,
     requester: Option<watch::Receiver<bool>>,
+    push_id: Option<u64>,
 ) -> Result<SubmitJudgment, PtyError> {
     match request {
         SubmitRequest::RawMessage(plan) => entry.submit_raw_gated(&plan, requester).await,
@@ -4896,7 +4898,11 @@ async fn submit_line_to_pty(
             body,
             residue,
             stage,
-        } => entry.submit_message(body, residue, stage, requester).await,
+        } => {
+            entry
+                .submit_message_for(body, residue, stage, requester, push_id)
+                .await
+        }
     }
 }
 
@@ -4967,9 +4973,10 @@ fn requester_left(closed: &Option<watch::Receiver<bool>>) -> bool {
 /// `ready_hold_wait_ms` is the caller's own prior readiness wait, carried
 /// onward into the verdict. `carried` is what an earlier call for the
 /// same delivery left in the composer (`None` for a first call); the residue
-/// this call leaves is returned in [`DeliveryEnd::Finished`]. `submitted` is
-/// raised when the submit key is pressed, for a caller that answers its
-/// requester before the delivery's cleanup is done.
+/// this call leaves is returned in [`DeliveryEnd::Finished`]. `push` is the
+/// push of `entry`'s inbox the text is, settled right before its first submit
+/// key; its `submitted` is raised when that key is pressed, for a caller that
+/// answers its requester before the delivery's cleanup is done.
 #[allow(clippy::too_many_arguments)] // each is a distinct input of the one delivery
 async fn run_delivery<'a>(
     entry: &'a WindowEntry,
@@ -4979,7 +4986,7 @@ async fn run_delivery<'a>(
     mut ready_hold_wait_ms: u128,
     carried: Option<CarriedResidue>,
     budget: SharedBudget,
-    submitted: Option<&watch::Sender<bool>>,
+    push: Option<&Push>,
 ) -> DeliveryEnd<'a> {
     // Open for the whole delivery, its waits included, so the child holds the
     // focus from the first wait on a screen it may draw only when focused.
@@ -5107,7 +5114,8 @@ async fn run_delivery<'a>(
             residue,
             stage,
         };
-        let judgment = match submit_line_to_pty(entry, request, closed.clone()).await {
+        let push_id = push.map(|push| push.id);
+        let judgment = match submit_line_to_pty(entry, request, closed.clone(), push_id).await {
             Ok(judgment) => judgment,
             Err(err) => {
                 return DeliveryEnd::WriteFailed(err, guard);
@@ -5125,8 +5133,8 @@ async fn run_delivery<'a>(
                 // what follows (a resend's probe included) runs to its end
                 // instead of stopping with a probe left in the composer.
                 closed = None;
-                if let Some(submitted) = submitted {
-                    submitted.send_replace(true);
+                if let Some(push) = push {
+                    push.submitted.send_replace(true);
                 }
                 foreign_draft = false;
                 last_submit = Some(outcome);
@@ -5471,7 +5479,9 @@ async fn await_handoff_end(
             biased;
             ended = &mut end => {
                 return match ended {
-                    Ok(ParcelEnd::Taken) => sent(HandoffDelivery::Taken),
+                    Ok(ParcelEnd::Taken | ParcelEnd::TakenRecorded) => {
+                        sent(HandoffDelivery::Taken)
+                    }
                     Ok(ParcelEnd::TurnedAway) => SlotExhausted::Daemon.to_message(),
                     Ok(ParcelEnd::Closed | ParcelEnd::Stopped) => child_exited_msg(),
                     // Dropped unsettled: it was withdrawn under way, and its

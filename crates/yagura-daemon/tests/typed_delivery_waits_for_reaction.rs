@@ -243,3 +243,167 @@ async fn the_next_typed_text_waits_for_the_window_to_react_to_the_previous_one()
     wait_for_submitted(&h, &receiver, SECOND).await;
     h.registry.terminate_all().await;
 }
+
+/// Lets the parcel writer go on however the test ends, so a failed case never
+/// leaves its thread stopped.
+struct ReleaseOnDrop(yagura_daemon::fault_point::FaultPoints);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// The delivery state room `room_id` records for message `seq` to `window_id`.
+async fn chat_delivery_state(
+    client: &mut Connection,
+    room_id: &str,
+    seq: u64,
+    window_id: &str,
+) -> Option<String> {
+    send(
+        client,
+        &ClientMessage::ReadChat {
+            room_id: Some(room_id.to_owned()),
+            after_seq: Some(0),
+            limit: None,
+        },
+    )
+    .await;
+    let messages = loop {
+        match read_response(client).await {
+            DaemonMessage::ChatChanged { .. } => {}
+            DaemonMessage::ChatMessages { messages, .. } => break messages,
+            other => panic!("expected chat_messages, got {other:?}"),
+        }
+    };
+    messages
+        .into_iter()
+        .find(|message| message.seq == seq)?
+        .deliveries
+        .into_iter()
+        .find(|delivery| delivery.window_id == window_id)
+        .map(|delivery| delivery.state)
+}
+
+/// A push settles its post as taken right before its submit key. When another
+/// writer moves the window's input in between, the key is not written: the
+/// settling is undone, so the store keeps the post's row and records its delivery
+/// as pending again, which is what a next daemon of the instance types from.
+#[tokio::test]
+async fn a_push_whose_submit_key_is_not_written_keeps_its_post_pending_in_the_store() {
+    use crate::common::store_fixtures::inbox_parcel_keys;
+    use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
+
+    let dir = unique_temp_dir("typed-delivery-unsettle");
+    let faults = FaultPoints::arm(FaultPoint::WriterPaused);
+    let _release = ReleaseOnDrop(faults.clone());
+    let mut config: DaemonConfig = chat_config(&dir, &ChatPlaybook::default());
+    config.faults = faults.clone();
+    let db = config
+        .store_db_path_resolved
+        .clone()
+        .expect("chat_config names the chat database");
+    let h = Harness::start_with_chat("typed-delivery-unsettle", config).await;
+    yagura_daemon::store::wire_into(&h.registry, Some(db.clone()));
+    write_definition(&dir, "receiver");
+    let mut probe = h.connect().await;
+    let receiver = open_receiver(&h, "receiver").await;
+    wait_until_status(&mut probe, &receiver, WindowStatus::WaitingInput).await;
+
+    let mut receiver_conn = h.connect().await;
+    identify(&mut receiver_conn, &receiver).await;
+    let sender = call_open_window(&mut receiver_conn, echo_child_command()).await;
+    let mut sender_conn = h.connect().await;
+    identify(&mut sender_conn, &sender).await;
+    let mut viewer = h.connect().await;
+    send(
+        &mut viewer,
+        &ClientMessage::AttachView {
+            window_id: receiver.clone(),
+            size: None,
+        },
+    )
+    .await;
+    match read_response(&mut viewer).await {
+        DaemonMessage::Attached { .. } => {}
+        other => panic!("expected attached, got {other:?}"),
+    }
+
+    send(
+        &mut sender_conn,
+        &ClientMessage::SendChat {
+            room_id: None,
+            body: format!("@parent {FIRST}"),
+        },
+    )
+    .await;
+    let (room_id, seq) = loop {
+        match read_response(&mut sender_conn).await {
+            DaemonMessage::ChatChanged { .. } => {}
+            DaemonMessage::ChatPosted {
+                room_id,
+                seq,
+                targets,
+                ..
+            } => {
+                assert_eq!(targets, vec![receiver.clone()]);
+                break (room_id, seq);
+            }
+            other => panic!("expected chat_posted, got {other:?}"),
+        }
+    };
+
+    // The receiver's profile keeps no delivery mark, so the writer's first write
+    // is the push's settling: the push now waits for it, its body confirmed in
+    // the composer and its submit key not written.
+    tokio::time::timeout(yagura_test_support::HANG_GUARD, faults.reached())
+        .await
+        .expect("the push never reached its settling");
+    let entry = h
+        .registry
+        .get(&receiver)
+        .expect("the receiver is registered");
+    let before = entry.write_seq();
+    send(&mut viewer, &ClientMessage::Text { text: "z".into() }).await;
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while entry.write_seq() == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the person's key never reached the receiver"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    faults.release();
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while entry.notice_attempts() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the push never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        !submitted(&h, &receiver, FIRST),
+        "the submit key must not go out behind another writer's input; screen text: {}",
+        h.flattened_scrollback_keeping_osc_payload(&receiver)
+    );
+    let mut reader = h.connect().await;
+    identify(&mut reader, &sender).await;
+    assert_eq!(
+        chat_delivery_state(&mut reader, &room_id, seq, &receiver)
+            .await
+            .as_deref(),
+        Some("pending"),
+        "a post whose submit key was not written must be recorded as pending again"
+    );
+    let kept = inbox_parcel_keys(&db, &receiver).expect("read the kept parcels");
+    assert_eq!(
+        kept.len(),
+        1,
+        "the post's row must be kept again for a next daemon to type: {kept:?}"
+    );
+    h.registry.terminate_all().await;
+}
