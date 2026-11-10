@@ -20,6 +20,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use yagura_protocol::UnknownReason;
 
+use crate::parcel_store::{self, KeptParcel};
 use crate::room::{self, DeliveryOutcome};
 use crate::sql::FixedSql;
 use crate::store::{self, StoreError};
@@ -50,6 +51,56 @@ pub struct Appended {
     pub seq: i64,
     /// Set when this post halted the room.
     pub halt: Option<room::HaltReason>,
+}
+
+/// How a parcel left a window's inbox, to be recorded with its row's removal.
+pub(crate) struct ParcelEndRecord<'a> {
+    pub(crate) room_id: &'a str,
+    pub(crate) seq: i64,
+    pub(crate) window_id: &'a str,
+    /// The key the parcel's row is kept under.
+    pub(crate) parcel_key: &'a str,
+    pub(crate) outcome: DeliveryOutcome,
+    pub(crate) at_ms: i64,
+}
+
+/// What a post asks of its room besides being stored.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PostEffects {
+    /// The user speaks: the room's halt and `needs_user` are lifted.
+    pub(crate) user_post: bool,
+    /// An unresolved `@user` mention raises `needs_user`.
+    pub(crate) mentions_user: bool,
+}
+
+/// One destination's share of a post, decided at the post's seq and written
+/// in the post's own transaction.
+pub(crate) enum Share {
+    /// The post is kept for the window's inbox: its row is written with the
+    /// post, and the delivery stays `pending`.
+    Row {
+        window_id: String,
+        parcel: KeptParcel,
+    },
+    /// The post does not reach the window: its delivery is settled with the
+    /// post.
+    Settled {
+        window_id: String,
+        outcome: DeliveryOutcome,
+    },
+}
+
+/// What [`ChatStore::append_and_place`] committed.
+#[derive(Debug)]
+pub(crate) struct Posted {
+    pub(crate) seq: i64,
+    /// Whether the room is halted once the post is in.
+    pub(crate) halted: bool,
+    /// The room's `needs_user` once the post is in.
+    pub(crate) needs_user: bool,
+    /// The windows a [`Share::Row`] could not be kept for, having no row of
+    /// their own: their delivery is settled as never delivered.
+    pub(crate) unkept: Vec<String>,
 }
 
 /// One persisted chat message, as read back.
@@ -189,6 +240,105 @@ fn row_to_room_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
         needs_user: needs_user != 0,
         halted,
     })
+}
+
+/// `room_id`'s halt and `needs_user` over `conn`, which may be inside a
+/// transaction of its own.
+fn read_room_status(conn: &Connection, room_id: &str) -> Result<RoomStatus, StoreError> {
+    let (reason, at_ms, needs_user): (Option<String>, Option<i64>, i64) = conn.query_row_fixed(
+        "SELECT halted_reason, halted_at_ms, needs_user FROM chat_room WHERE room_id = ?1",
+        params![room_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let halted = match (reason.as_deref(), at_ms) {
+        (Some(reason_str), Some(at_ms)) => parse_halt_reason(reason_str).map(|r| (r, at_ms)),
+        _ => None,
+    };
+    Ok(RoomStatus {
+        halted,
+        needs_user: needs_user != 0,
+    })
+}
+
+/// Writes one destination's delivery outcome, unless the message is gone.
+/// Returns whether a row was written.
+fn write_delivery(
+    conn: &Connection,
+    room_id: &str,
+    seq: i64,
+    window_id: &str,
+    outcome: DeliveryOutcome,
+    at_ms: i64,
+) -> Result<bool, StoreError> {
+    let state = outcome.state().as_str();
+    let reason = outcome.unknown_reason().map(UnknownReason::as_wire);
+    let written = conn.execute_fixed(
+        "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms, unknown_reason) \
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6 \
+         WHERE EXISTS (SELECT 1 FROM chat_message WHERE room_id = ?1 AND seq = ?2) \
+         ON CONFLICT(room_id, seq, window_id) DO UPDATE SET \
+         state = excluded.state, at_ms = excluded.at_ms, \
+         unknown_reason = excluded.unknown_reason",
+        params![room_id, seq, window_id, state, at_ms, reason],
+    )?;
+    Ok(written > 0)
+}
+
+/// Appends `msg` inside `tx` and applies the limits: the body of
+/// [`ChatStore::append_message`].
+fn append_in(
+    tx: &rusqlite::Transaction<'_>,
+    msg: NewChatMessage,
+    limits: &room::ChatLimits,
+) -> Result<Appended, StoreError> {
+    let room_exists: bool = tx.query_row_fixed(
+        "SELECT EXISTS(SELECT 1 FROM chat_room WHERE room_id = ?1)",
+        params![msg.room_id],
+        |row| row.get(0),
+    )?;
+    if !room_exists {
+        return Err(StoreError::RoomGone {
+            room_id: msg.room_id,
+        });
+    }
+
+    let seq = next_seq(tx, &msg.room_id)?;
+    insert_message(
+        tx,
+        &msg.room_id,
+        seq,
+        msg.at_ms,
+        &msg.from_kind,
+        msg.from_window_id.as_deref(),
+        &msg.from_name,
+        &msg.body,
+        &msg.mentions,
+        msg.mentions_user,
+        msg.broadcast,
+    )?;
+    insert_pending_deliveries(tx, &msg.room_id, seq, &msg.mentions, msg.at_ms)?;
+    evict_past_history_max(tx, &msg.room_id, limits.history_max)?;
+
+    let history = load_history(tx, &msg.room_id)?;
+    let halt = room::evaluate_limits(&history, limits);
+    if let Some(reason) = halt {
+        apply_halt(tx, &msg.room_id, reason, msg.at_ms)?;
+        let notice_seq = next_seq(tx, &msg.room_id)?;
+        insert_message(
+            tx,
+            &msg.room_id,
+            notice_seq,
+            msg.at_ms,
+            "system",
+            None,
+            "system",
+            &format!("the room halted ({})", halt_reason_str(reason)),
+            &[],
+            true,
+            false,
+        )?;
+    }
+    Ok(Appended { seq, halt })
 }
 
 /// Lifts `room_id`'s halt and its `needs_user` flag.
@@ -626,57 +776,101 @@ impl ChatStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let appended = append_in(&tx, msg, limits)?;
+        tx.commit()?;
+        Ok(appended)
+    }
 
-        let room_exists: bool = tx.query_row_fixed(
-            "SELECT EXISTS(SELECT 1 FROM chat_room WHERE room_id = ?1)",
-            params![msg.room_id],
-            |row| row.get(0),
-        )?;
-        if !room_exists {
-            return Err(StoreError::RoomGone {
-                room_id: msg.room_id,
-            });
-        }
-
-        let seq = next_seq(&tx, &msg.room_id)?;
-        insert_message(
-            &tx,
-            &msg.room_id,
-            seq,
-            msg.at_ms,
-            &msg.from_kind,
-            msg.from_window_id.as_deref(),
-            &msg.from_name,
-            &msg.body,
-            &msg.mentions,
-            msg.mentions_user,
-            msg.broadcast,
-        )?;
-        insert_pending_deliveries(&tx, &msg.room_id, seq, &msg.mentions, msg.at_ms)?;
-        evict_past_history_max(&tx, &msg.room_id, limits.history_max)?;
-
-        let history = load_history(&tx, &msg.room_id)?;
-        let halt = room::evaluate_limits(&history, limits);
-        if let Some(reason) = halt {
-            apply_halt(&tx, &msg.room_id, reason, msg.at_ms)?;
-            let notice_seq = next_seq(&tx, &msg.room_id)?;
-            insert_message(
-                &tx,
-                &msg.room_id,
-                notice_seq,
-                msg.at_ms,
-                "system",
-                None,
-                "system",
-                &format!("the room halted ({})", halt_reason_str(reason)),
-                &[],
-                true,
-                false,
+    /// [`Self::append_message`] for a post that goes on to inboxes, with
+    /// everything the post decides written in the same transaction: its
+    /// effects on the room, and each destination's share, which `place` gives
+    /// once the post has its seq and the room's halt is known. A destination's
+    /// kept row is written with the post, and a destination the post does not
+    /// reach has its delivery settled with it.
+    ///
+    /// `place` runs inside the transaction and must not wait on anything that
+    /// waits on the database.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append_message`], and any error `place` returns. Nothing is
+    /// written then.
+    pub(crate) fn append_and_place(
+        &mut self,
+        msg: NewChatMessage,
+        limits: &room::ChatLimits,
+        effects: PostEffects,
+        place: impl FnOnce(i64, bool) -> Result<Vec<Share>, StoreError>,
+    ) -> Result<Posted, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let at_ms = msg.at_ms;
+        let room_id = msg.room_id.clone();
+        let Appended { seq, .. } = append_in(&tx, msg, limits)?;
+        if effects.user_post {
+            lift_halt_and_needs_user(&tx, &room_id)?;
+        } else if effects.mentions_user {
+            tx.execute_fixed(
+                "UPDATE chat_room SET needs_user = 1 WHERE room_id = ?1",
+                params![room_id],
             )?;
         }
-
+        let status = read_room_status(&tx, &room_id)?;
+        let halted = status.halted.is_some();
+        let mut unkept = Vec::new();
+        for share in place(seq, halted)? {
+            match share {
+                Share::Row { window_id, parcel } => {
+                    if parcel_store::keep_parcel_row(&tx, &window_id, &parcel)? == 0 {
+                        let outcome = DeliveryOutcome::UndeliveredUnknown(None);
+                        write_delivery(&tx, &room_id, seq, &window_id, outcome, at_ms)?;
+                        unkept.push(window_id);
+                    }
+                }
+                Share::Settled { window_id, outcome } => {
+                    write_delivery(&tx, &room_id, seq, &window_id, outcome, at_ms)?;
+                }
+            }
+        }
         tx.commit()?;
-        Ok(Appended { seq, halt })
+        Ok(Posted {
+            seq,
+            halted,
+            needs_user: status.needs_user,
+            unkept,
+        })
+    }
+
+    /// Settles a parcel's end: its kept row is forgotten and the delivery it
+    /// carried is recorded in one transaction, so a daemon that ends between
+    /// them leaves neither or both. `between` runs after the row is forgotten
+    /// and before the delivery is written. Returns whether a delivery was
+    /// written: not when the message is gone.
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying SQLite operations.
+    pub(crate) fn settle_parcel_end(
+        &mut self,
+        end: &ParcelEndRecord<'_>,
+        between: impl FnOnce(),
+    ) -> Result<bool, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        parcel_store::forget_parcel_row(&tx, end.window_id, end.parcel_key)?;
+        between();
+        let written = write_delivery(
+            &tx,
+            end.room_id,
+            end.seq,
+            end.window_id,
+            end.outcome,
+            end.at_ms,
+        )?;
+        tx.commit()?;
+        Ok(written)
     }
 
     /// Sets (or updates) one window's delivery outcome for `(room_id, seq)`.
@@ -701,22 +895,12 @@ impl ChatStore {
         outcome: DeliveryOutcome,
         at_ms: i64,
     ) -> Result<bool, StoreError> {
-        let state = outcome.state().as_str();
-        let reason = outcome.unknown_reason().map(UnknownReason::as_wire);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let written = tx.execute_fixed(
-            "INSERT INTO chat_delivery (room_id, seq, window_id, state, at_ms, unknown_reason) \
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6 \
-             WHERE EXISTS (SELECT 1 FROM chat_message WHERE room_id = ?1 AND seq = ?2) \
-             ON CONFLICT(room_id, seq, window_id) DO UPDATE SET \
-             state = excluded.state, at_ms = excluded.at_ms, \
-             unknown_reason = excluded.unknown_reason",
-            params![room_id, seq, window_id, state, at_ms, reason],
-        )?;
+        let written = write_delivery(&tx, room_id, seq, window_id, outcome, at_ms)?;
         tx.commit()?;
-        Ok(written > 0)
+        Ok(written)
     }
 
     /// Whether the message `(room_id, seq)` is still stored: `false` once its
@@ -943,20 +1127,7 @@ impl ChatStore {
     ///
     /// Any [`StoreError`] from the underlying SQLite operation.
     pub fn room_status(&self, room_id: &str) -> Result<RoomStatus, StoreError> {
-        let (reason, at_ms, needs_user): (Option<String>, Option<i64>, i64) =
-            self.conn.query_row_fixed(
-                "SELECT halted_reason, halted_at_ms, needs_user FROM chat_room WHERE room_id = ?1",
-                params![room_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-        let halted = match (reason.as_deref(), at_ms) {
-            (Some(reason_str), Some(at_ms)) => parse_halt_reason(reason_str).map(|r| (r, at_ms)),
-            _ => None,
-        };
-        Ok(RoomStatus {
-            halted,
-            needs_user: needs_user != 0,
-        })
+        read_room_status(&self.conn, room_id)
     }
 
     /// Every persisted delivery for `room_id`, grouped by the message seq it

@@ -382,11 +382,7 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 let outcome = written_as(run(
                     conn,
                     fails,
-                    "INSERT INTO inbox_parcels (window_id, seq, key, notice, body) \
-                     SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS \
-                     (SELECT 1 FROM windows WHERE window_id = ?1) \
-                     ON CONFLICT(window_id, seq) DO UPDATE SET \
-                     key = excluded.key, notice = excluded.notice, body = excluded.body",
+                    KEEP_PARCEL_SQL,
                     params![
                         window_id,
                         parcel.seq,
@@ -510,21 +506,74 @@ fn keep_report_rows(
     let tx = conn.unchecked_transaction()?;
     let mut rows = 0;
     for (seq, report_json) in reports {
-        rows += tx.execute_fixed(
-            "INSERT INTO report_parcels (window_id, seq, report_json) \
-             SELECT ?1, ?2, ?3 WHERE EXISTS \
-             (SELECT 1 FROM windows WHERE window_id = ?1) \
-             ON CONFLICT(window_id, seq) DO UPDATE SET report_json = excluded.report_json",
-            params![window_id, seq, report_json],
-        )?;
+        rows += keep_report_row(&tx, window_id, *seq, report_json)?;
     }
     tx.commit()?;
     Ok(rows)
 }
 
+/// Keeps a parcel at its place in its window's inbox, while the window has a
+/// row to keep it with.
+const KEEP_PARCEL_SQL: &str = "INSERT INTO inbox_parcels (window_id, seq, key, notice, body) \
+     SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS \
+     (SELECT 1 FROM windows WHERE window_id = ?1) \
+     ON CONFLICT(window_id, seq) DO UPDATE SET \
+     key = excluded.key, notice = excluded.notice, body = excluded.body";
+
+/// Writes `parcel` for `window_id` over `conn`, which may be inside a
+/// transaction of its own, returning how many rows it wrote: none when the
+/// window has no row.
+pub(crate) fn keep_parcel_row(
+    conn: &Connection,
+    window_id: &str,
+    parcel: &KeptParcel,
+) -> rusqlite::Result<usize> {
+    conn.execute_fixed(
+        KEEP_PARCEL_SQL,
+        params![
+            window_id,
+            parcel.seq,
+            parcel.key,
+            i64::from(parcel.notice),
+            parcel.text
+        ],
+    )
+}
+
+/// Forgets the parcel named `key` in `window_id`'s inbox over `conn`, which
+/// may be inside a transaction of its own.
+pub(crate) fn forget_parcel_row(
+    conn: &Connection,
+    window_id: &str,
+    key: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute_fixed(
+        "DELETE FROM inbox_parcels WHERE window_id = ?1 AND key = ?2",
+        params![window_id, key],
+    )
+}
+
+/// Writes the report `report_json` at `seq` in `window_id`'s report inbox over
+/// `conn`, which may be inside a transaction of its own, returning how many
+/// rows it wrote: none when the window has no row.
+pub(crate) fn keep_report_row(
+    conn: &Connection,
+    window_id: &str,
+    seq: i64,
+    report_json: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute_fixed(
+        "INSERT INTO report_parcels (window_id, seq, report_json) \
+         SELECT ?1, ?2, ?3 WHERE EXISTS \
+         (SELECT 1 FROM windows WHERE window_id = ?1) \
+         ON CONFLICT(window_id, seq) DO UPDATE SET report_json = excluded.report_json",
+        params![window_id, seq, report_json],
+    )
+}
+
 /// The error a write fails with under the `write_fails` fault point: the one
 /// a disk that cannot be written returns.
-fn simulated_write_failure() -> rusqlite::Error {
+pub(crate) fn simulated_write_failure() -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
         Some("simulated write failure".to_owned()),

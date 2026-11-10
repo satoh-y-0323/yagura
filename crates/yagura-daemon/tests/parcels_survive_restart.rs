@@ -102,6 +102,15 @@ fn write_chat_profile(sandbox: &Sandbox) -> PathBuf {
 /// [`start_first`] for a daemon whose playbook also lets a chat post through, reading
 /// detection definitions from `detections`.
 async fn start_chatting(sandbox: &Sandbox, detections: &Path) -> RunningDaemon {
+    start_chatting_with(sandbox, detections, None).await
+}
+
+/// [`start_chatting`] with `point` armed when given: the daemon ends itself there.
+async fn start_chatting_with(
+    sandbox: &Sandbox,
+    detections: &Path,
+    point: Option<FaultPoint>,
+) -> RunningDaemon {
     let playbook = sandbox
         .tree
         .make_dir("persist-chat-playbook")
@@ -115,17 +124,19 @@ async fn start_chatting(sandbox: &Sandbox, detections: &Path) -> RunningDaemon {
     let detections = detections
         .to_str()
         .expect("the detections path must be UTF-8");
-    sandbox
-        .start_from(&[
-            ("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN),
-            ("YAGURA_PLAYBOOK", playbook),
-            ("YAGURA_DETECTION_DIR", detections),
-        ])
-        .await
+    let mut env = vec![
+        ("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN),
+        ("YAGURA_PLAYBOOK", playbook),
+        ("YAGURA_DETECTION_DIR", detections),
+    ];
+    if let Some(point) = point {
+        env.push((fault_point::POINT_ENV, point.name()));
+    }
+    sandbox.start_from(&env).await
 }
 
-/// The delivery state the `main` room records for message `seq` to `window_id`.
-async fn chat_delivery_state(client: &mut Connection, seq: u64, window_id: &str) -> Option<String> {
+/// The `main` room's messages.
+async fn room_messages(client: &mut Connection) -> Vec<yagura_protocol::ChatMessage> {
     send(
         client,
         &ClientMessage::ReadChat {
@@ -135,17 +146,57 @@ async fn chat_delivery_state(client: &mut Connection, seq: u64, window_id: &str)
         },
     )
     .await;
-    let messages = match read_response(client).await {
+    match read_response(client).await {
         DaemonMessage::ChatMessages { messages, .. } => messages,
         other => panic!("expected chat_messages, got {other:?}"),
-    };
-    messages
+    }
+}
+
+/// The delivery state the `main` room records for message `seq` to `window_id`.
+async fn chat_delivery_state(client: &mut Connection, seq: u64, window_id: &str) -> Option<String> {
+    room_messages(client)
+        .await
         .into_iter()
         .find(|message| message.seq == seq)?
         .deliveries
         .into_iter()
         .find(|delivery| delivery.window_id == window_id)
         .map(|delivery| delivery.state)
+}
+
+/// The seq of the `main` room's message whose body carries `mark`: a post whose poster was
+/// never answered is found by what it said.
+async fn chat_seq_of(client: &mut Connection, sandbox: &Sandbox, mark: &str) -> u64 {
+    room_messages(client)
+        .await
+        .into_iter()
+        .find(|message| message.body.contains(mark))
+        .unwrap_or_else(|| {
+            panic!(
+                "the room holds no message carrying {mark}; daemon log:
+{}",
+                sandbox.daemon_log()
+            )
+        })
+        .seq
+}
+
+/// Waits until the room records message `seq` as taken by `window_id`.
+async fn until_chat_taken(client: &mut Connection, sandbox: &Sandbox, seq: u64, window_id: &str) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let state = chat_delivery_state(client, seq, window_id).await;
+        if state.as_deref() == Some("taken") {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post taken after the restart must be recorded as taken, not {state:?}; daemon              log:
+{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Another connection to the sandbox's daemon.
@@ -612,18 +663,234 @@ async fn a_chat_post_taken_after_the_daemon_is_killed_is_recorded_as_taken() {
          daemon log:\n{}",
         sandbox.daemon_log()
     );
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
-        if state.as_deref() == Some("taken") {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the post taken after the restart must be recorded as taken, not {state:?}; daemon \
-             log:\n{}",
-            sandbox.daemon_log()
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
+}
+
+/// A chat post whose daemon ends once the post is committed, before any inbox shows it,
+/// was never answered to its poster; the next daemon still hands it to its destination
+/// once, and the room records that delivery as taken rather than leaving it pending.
+#[tokio::test]
+async fn a_chat_post_committed_as_the_daemon_ends_is_taken_once_by_the_next_daemon() {
+    const CHAT_MARK: &str = "PERSIST-COMMITTED-7H3";
+    let sandbox = Sandbox::new("persist-chat-committed");
+    let detections = write_chat_profile(&sandbox);
+
+    let mut first =
+        start_chatting_with(&sandbox, &detections, Some(FaultPoint::ChatPostCommitted)).await;
+    let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
+    make_ready(&mut first, &window_id).await;
+    send(
+        &mut first.client,
+        &ClientMessage::SendChat {
+            room_id: Some("main".to_owned()),
+            body: format!("@{window_id} {CHAT_MARK}"),
+        },
+    )
+    .await;
+    let ended = first.wait_for_fault_end().await;
+    assert!(
+        !ended.success(),
+        "the daemon must end itself once the post is committed: {ended:?}"
+    );
+
+    let mut next = start_chatting(&sandbox, &detections).await;
+    listed(&mut next, &sandbox, &window_id).await;
+    let seq = chat_seq_of(&mut next.client, &sandbox, CHAT_MARK).await;
+    let taken = take(&mut next, &sandbox, &window_id).await;
+    assert_eq!(
+        count(&taken, CHAT_MARK),
+        1,
+        "the window's door must hand out the post committed before the daemon ended once: \
+         {taken:?}; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
+}
+
+/// A chat post taken through its window's door as the daemon ends: the parcel leaving the
+/// inbox and the room's record of the delivery are one change. Whichever way the next
+/// daemon finds it, the delivery is pending while the post is still kept for the window,
+/// and taken once it is not; never pending with nothing kept.
+#[tokio::test]
+async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row_in_step() {
+    const CHAT_MARK: &str = "PERSIST-ENDING-4R9";
+    let sandbox = Sandbox::new("persist-chat-ending");
+    let detections = write_chat_profile(&sandbox);
+
+    let mut first = start_chatting_with(
+        &sandbox,
+        &detections,
+        Some(FaultPoint::ParcelEndHalfSettled),
+    )
+    .await;
+    let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
+    make_ready(&mut first, &window_id).await;
+    let seq = post_chat(&mut first.client, format!("@{window_id} {CHAT_MARK}")).await;
+    // Taking it ends the parcel; the daemon ends before it could answer or settle.
+    send(
+        &mut first.client,
+        &ClientMessage::DeliverTake {
+            window_id: window_id.clone(),
+            token: VALID_TOKEN.to_owned(),
+        },
+    )
+    .await;
+    let ended = first.wait_for_fault_end().await;
+    assert!(
+        !ended.success(),
+        "the daemon must end itself as the parcel ends: {ended:?}"
+    );
+
+    let mut next = start_chatting(&sandbox, &detections).await;
+    listed(&mut next, &sandbox, &window_id).await;
+    let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
+    // The room keeps the body alone; only the envelope of a kept parcel carries it as JSON.
+    let kept = store_holds(&store_db(&sandbox), &format!("{CHAT_MARK}\""));
+    assert!(
+        matches!(
+            (state.as_deref(), kept),
+            (Some("pending"), true) | (Some("taken"), false)
+        ),
+        "the delivery is {state:?} while the post is {} for the window; daemon log:\n{}",
+        if kept { "kept" } else { "not kept" },
+        sandbox.daemon_log()
+    );
+    if kept {
+        let taken = take(&mut next, &sandbox, &window_id).await;
+        assert_eq!(count(&taken, CHAT_MARK), 1, "taken: {taken:?}");
+        until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
     }
+}
+
+/// A plan task, as the planning window writes it, for a window of [`PROFILE`].
+fn report_task(task_id: &str) -> yagura_protocol::PlanTaskSpec {
+    yagura_protocol::PlanTaskSpec {
+        task_id: task_id.to_owned(),
+        title: "do the thing".to_owned(),
+        role: None,
+        profile: Some(PROFILE.to_owned()),
+        model: None,
+        effort: None,
+        depends_on: Vec::new(),
+        writes: vec![format!("{task_id}.txt")],
+        instruction: None,
+    }
+}
+
+/// A task window whose daemon ends while its report is half written: the plan ledger
+/// and the parent's reports never disagree afterwards. The next daemon shows the report
+/// both in `get_plan` and to the parent's `wait_for_report`, or in neither.
+#[tokio::test]
+async fn a_task_report_half_written_as_the_daemon_ends_shows_in_both_places_or_neither() {
+    const REPORT_MARK: &str = "PERSIST-TASK-REPORT-8N2";
+    let sandbox = Sandbox::new("persist-task-report");
+    write_delivering_profile(&sandbox);
+
+    // A plan that needs no approval, so its task window opens at once.
+    let playbook = sandbox
+        .tree
+        .make_dir("persist-plan-playbook")
+        .join("playbook.toml");
+    std::fs::write(
+        &playbook,
+        "[approval]\nauto_approve = [\"open_window\", \"close_window\"]\n\n[plans]\nrequire_approval = false\n",
+    )
+    .unwrap();
+    let playbook = playbook.to_str().expect("the playbook path must be UTF-8");
+    let mut first = sandbox
+        .start_from(&[
+            ("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN),
+            ("YAGURA_PLAYBOOK", playbook),
+            (
+                fault_point::POINT_ENV,
+                FaultPoint::TaskReportHalfWritten.name(),
+            ),
+        ])
+        .await;
+    let parent = first.open_profile_window(&sandbox, PROFILE).await;
+    let mut as_parent = connect(&sandbox).await;
+    identify(&mut as_parent, &parent).await;
+    send(
+        &mut as_parent,
+        &ClientMessage::CreatePlan {
+            title: "plan".to_owned(),
+            tasks: vec![report_task("t1")],
+            ticket: None,
+        },
+    )
+    .await;
+    let plan_id = match read_response(&mut as_parent).await {
+        DaemonMessage::PlanDetail { plan } => plan.plan_id,
+        other => panic!("expected plan_detail, got {other:?}"),
+    };
+    send(
+        &mut as_parent,
+        &ClientMessage::OpenTaskWindow {
+            plan_id: plan_id.clone(),
+            task_id: "t1".to_owned(),
+            name: None,
+        },
+    )
+    .await;
+    let task_window = match read_response(&mut as_parent).await {
+        DaemonMessage::TaskWindowOpened { window_id, .. } => window_id,
+        other => panic!("expected task_window_opened, got {other:?}"),
+    };
+    let mut as_task = connect(&sandbox).await;
+    identify(&mut as_task, &task_window).await;
+    send(
+        &mut as_task,
+        &ClientMessage::SendReport {
+            outcome: ReportOutcome::Succeeded,
+            summary: REPORT_MARK.to_owned(),
+            path: None,
+        },
+    )
+    .await;
+    let ended = first.wait_for_fault_end().await;
+    assert!(
+        !ended.success(),
+        "the daemon must end itself while the task report is half written: {ended:?}"
+    );
+
+    let mut next = sandbox
+        .start_from(&[
+            ("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN),
+            ("YAGURA_PLAYBOOK", playbook),
+        ])
+        .await;
+    listed(&mut next, &sandbox, &parent).await;
+    let mut as_parent = connect(&sandbox).await;
+    identify(&mut as_parent, &parent).await;
+    send(
+        &mut as_parent,
+        &ClientMessage::GetPlan {
+            plan_id: plan_id.clone(),
+        },
+    )
+    .await;
+    let plan = match read_response(&mut as_parent).await {
+        DaemonMessage::PlanDetail { plan } => plan,
+        other => panic!("expected plan_detail, got {other:?}"),
+    };
+    let in_plan: Vec<String> = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == "t1")
+        .and_then(|task| task.report.as_ref())
+        .map(|report| report.summary.clone())
+        .into_iter()
+        .collect();
+    let reports = wait_for_report(&mut as_parent).await;
+    let to_parent: Vec<String> = reports
+        .iter()
+        .map(|report| report.summary.clone())
+        .collect();
+    assert_eq!(
+        in_plan,
+        to_parent,
+        "get_plan shows the task report as {in_plan:?} while the parent reads {to_parent:?}; \
+         daemon log:\n{}",
+        sandbox.daemon_log()
+    );
 }

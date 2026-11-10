@@ -41,6 +41,7 @@ use crate::control::RequestOrigin;
 use crate::inbox::{SaveOutcome, Saving};
 use crate::parcel_store::{KeptReport, Written};
 use crate::plan_permit::{self, PermitError, TaskBinding};
+use crate::plan_store::ParentReportRow;
 use crate::pty::lock_recover;
 use crate::store::StoreError;
 use crate::window::{TaskOrigin, WindowEntry, WindowLiveness, WindowRegistry};
@@ -265,6 +266,43 @@ impl ReportInboxes {
             let _ = told.send(outcome);
         });
         Saving::of(outcome)
+    }
+
+    /// [`Self::put_saved`] for a caller that writes the row itself: decides
+    /// the report's place and holds it back, until [`Placing::finish`].
+    fn place_saved(self: &Arc<Self>, window_id: &str, report: ReceivedReport) -> Placing {
+        let entry = self.registry.get(window_id);
+        if self
+            .registry
+            .parcel_store()
+            .filter(|_| entry.is_some())
+            .is_none()
+        {
+            return Placing::Memory {
+                inboxes: Arc::clone(self),
+                window_id: window_id.to_owned(),
+                report: Some(report),
+            };
+        }
+        let report_json = serde_json::to_string(&report).ok();
+        let mut inboxes = lock_recover(&self.inboxes);
+        let inbox = inboxes.entry(window_id.to_string()).or_default();
+        inbox.reserved = inbox.reserved.saturating_sub(1);
+        let seq = inbox.places(1, false).first().copied().unwrap_or_default();
+        inbox.writing.insert(
+            seq,
+            Writing {
+                report,
+                outcome: None,
+            },
+        );
+        Placing::Kept {
+            inboxes: Arc::clone(self),
+            window_id: window_id.to_owned(),
+            seq,
+            report_json,
+            settled: false,
+        }
     }
 
     /// Records how the write of the report at `seq` came out, and shows every
@@ -602,10 +640,110 @@ impl InboxSlot {
     }
 }
 
+impl InboxSlot {
+    /// Decides the place `report` takes behind the others, for a caller that
+    /// writes the report's row itself, in the transaction that writes what
+    /// the report is for.
+    fn place(mut self, report: ReceivedReport) -> Placing {
+        self.held = false;
+        self.inboxes.place_saved(&self.window_id, report)
+    }
+}
+
 impl Drop for InboxSlot {
     fn drop(&mut self) {
         if self.held {
             self.inboxes.release(&self.window_id);
+        }
+    }
+}
+
+/// A report on its way into its parent's inbox, whose row the caller writes
+/// itself. Dropped before [`Placing::finish`], it counts as a write that
+/// failed: the report never shows.
+enum Placing {
+    /// The inbox keeps its reports: the report holds its place until its row
+    /// is written.
+    Kept {
+        inboxes: Arc<ReportInboxes>,
+        window_id: String,
+        seq: i64,
+        /// `None` when the report could not be encoded to keep.
+        report_json: Option<String>,
+        settled: bool,
+    },
+    /// The inbox keeps nothing: the report shows at once.
+    Memory {
+        inboxes: Arc<ReportInboxes>,
+        window_id: String,
+        report: Option<ReceivedReport>,
+    },
+}
+
+impl Placing {
+    /// The row to write, when the report is kept.
+    fn row(&self) -> Option<ParentReportRow<'_>> {
+        match self {
+            Self::Kept {
+                window_id,
+                seq,
+                report_json: Some(report_json),
+                ..
+            } => Some(ParentReportRow {
+                window_id,
+                seq: *seq,
+                report_json,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Tells how many rows the report's row came to once written: the report
+    /// shows, or, its parent having no row to keep it with, leaves.
+    fn finish(mut self, rows: usize) -> SaveOutcome {
+        match &mut self {
+            Self::Kept {
+                inboxes,
+                window_id,
+                seq,
+                settled,
+                ..
+            } => {
+                *settled = true;
+                let outcome = SaveOutcome::of(Written::Rows(rows));
+                inboxes.settle_write(window_id, *seq, outcome);
+                outcome
+            }
+            Self::Memory {
+                inboxes,
+                window_id,
+                report,
+            } => {
+                if let Some(report) = report.take() {
+                    inboxes.put(window_id, vec![report], true, false);
+                }
+                SaveOutcome::Saved
+            }
+        }
+    }
+}
+
+impl Drop for Placing {
+    fn drop(&mut self) {
+        match self {
+            Self::Kept {
+                inboxes,
+                window_id,
+                seq,
+                settled: false,
+                ..
+            } => inboxes.settle_write(window_id, *seq, SaveOutcome::Failed),
+            Self::Memory {
+                inboxes,
+                window_id,
+                report: Some(_),
+            } => inboxes.release(window_id),
+            _ => {}
         }
     }
 }
@@ -814,44 +952,44 @@ async fn send_task_report(
                 .map_err(TaskReportRefusal::Permit)?;
             let parent =
                 plan_permit::resolve_owner_parent(store, &registry_in_store, permit.plan_id());
-            let slot = match parent.as_deref() {
+            let placing = match parent.as_deref() {
                 Some(parent) => Some(
                     inboxes_in_store
                         .reserve(parent)
-                        .ok_or(TaskReportRefusal::InboxFull)?,
+                        .ok_or(TaskReportRefusal::InboxFull)?
+                        .place(report),
                 ),
                 None => None,
             };
-            store
-                .write_task_report(&permit, outcome, &summary, path.as_deref())
+            // The report and its parent's row are one transaction: a daemon
+            // that ends between them holds both or neither.
+            let rows = store
+                .write_task_report_kept(
+                    &permit,
+                    outcome,
+                    &summary,
+                    path.as_deref(),
+                    placing.as_ref().and_then(Placing::row),
+                    || {
+                        #[cfg(feature = "fault-injection")]
+                        registry_in_store
+                            .config()
+                            .faults
+                            .reach(crate::fault_point::FaultPoint::TaskReportHalfWritten);
+                    },
+                )
                 .map_err(TaskReportRefusal::Write)?;
-            Ok((parent, slot))
+            let parent = match placing.map(|placing| placing.finish(rows)) {
+                // The parent's row is gone: the ledger alone holds it.
+                Some(SaveOutcome::NoRow) | None => None,
+                Some(_) => parent,
+            };
+            Ok(parent)
         })
         .await;
 
     match decided {
-        Ok(Ok((mut parent, slot))) => {
-            if let Some(slot) = slot {
-                #[cfg(feature = "fault-injection")]
-                registry
-                    .config()
-                    .faults
-                    .reach(crate::fault_point::FaultPoint::TaskReportHalfWritten);
-                match slot.deliver(report).outcome().await {
-                    SaveOutcome::Saved => {}
-                    // The parent's row is gone: the ledger alone holds it.
-                    SaveOutcome::NoRow => parent = None,
-                    SaveOutcome::Failed => {
-                        tracing::warn!(
-                            "a task report's row in its parent's inbox could not be written"
-                        );
-                        broker.notify_approvers(&DaemonMessage::PlanChanged {
-                            plan_id: plan_id.clone(),
-                        });
-                        return plan::internal_msg();
-                    }
-                }
-            }
+        Ok(Ok(parent)) => {
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: plan_id.clone(),
             });

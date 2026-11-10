@@ -433,6 +433,15 @@ pub struct PushBudget {
     pub max: usize,
 }
 
+/// Who writes a deposited parcel's row.
+#[derive(Clone, Copy)]
+enum Keeping {
+    /// The inbox's own keeper.
+    Keeper,
+    /// The depositor, in a transaction of its own.
+    Depositor,
+}
+
 /// How a deposited parcel's row came out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SaveOutcome {
@@ -477,6 +486,36 @@ impl Saving {
     }
 }
 
+/// A parcel deposited by a depositor that writes its row itself, in a
+/// transaction of its own: held back from every door until [`Self::settle`]
+/// tells how that went. Dropped unsettled, it counts as a write that failed.
+pub(crate) struct Unwritten {
+    shared: Weak<Shared>,
+    id: u64,
+    settled: bool,
+}
+
+impl Unwritten {
+    /// Tells how the row's write came out: the parcel shows, or, its row not
+    /// written, leaves without ever showing.
+    pub(crate) fn settle(mut self, outcome: SaveOutcome) {
+        self.settled = true;
+        if let Some(shared) = self.shared.upgrade() {
+            shared.settle_write(self.id, outcome);
+        }
+    }
+}
+
+impl Drop for Unwritten {
+    fn drop(&mut self) {
+        if !self.settled
+            && let Some(shared) = self.shared.upgrade()
+        {
+            shared.settle_write(self.id, SaveOutcome::Failed);
+        }
+    }
+}
+
 /// One parcel as the inbox holds it: who learns how it left, and what its
 /// push draws on.
 struct Held {
@@ -490,6 +529,10 @@ struct Held {
     /// Whether its depositor woke the window's agent for it, which a parcel
     /// held back has to be woken for again once it shows.
     wakes: bool,
+    /// Whether its depositor forgets its row itself, in the same transaction
+    /// that settles what the parcel was for, once it is taken or turned
+    /// away: the inbox then leaves that row alone.
+    depositor_forgets: bool,
     end: Option<oneshot::Sender<ParcelEnd>>,
     budget: Option<PushBudget>,
 }
@@ -614,6 +657,34 @@ impl Shared {
         Saving::of(outcome)
     }
 
+    /// [`Self::keep`], or, for a depositor that writes the row itself, holds
+    /// `held` back and hands the row to write to `row`.
+    fn keep_by(
+        self: &Arc<Self>,
+        held: &mut Held,
+        keeping: Keeping,
+        row: &mut Option<(KeptParcel, Unwritten)>,
+    ) -> Saving {
+        match keeping {
+            Keeping::Keeper => self.keep(held),
+            Keeping::Depositor => {
+                if self.keeper.is_some() && held.parcel.saved {
+                    held.written = false;
+                    held.depositor_forgets = true;
+                    *row = Some((
+                        held.kept(),
+                        Unwritten {
+                            shared: Arc::downgrade(self),
+                            id: held.id,
+                            settled: false,
+                        },
+                    ));
+                }
+                Saving::ready()
+            }
+        }
+    }
+
     /// Settles the write of parcel `id`: it may show now, or, its row not
     /// written, it leaves without ever showing. Returns whether that showed a
     /// parcel whose depositor woke the window's agent for it.
@@ -656,6 +727,12 @@ impl Shared {
                     .collect(),
             );
         }
+    }
+
+    /// [`Self::forget`] for parcels that were taken or turned away: a parcel
+    /// whose depositor forgets its row itself keeps it until then.
+    fn forget_ended<'a>(&self, held: impl IntoIterator<Item = &'a Held>) {
+        self.forget(held.into_iter().filter(|held| !held.depositor_forgets));
     }
 
     /// Whether the daemon may push to the window: not while it cannot tell
@@ -736,7 +813,7 @@ impl Shared {
             }
             return;
         }
-        self.forget(&taken);
+        self.forget_ended(&taken);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
@@ -898,6 +975,7 @@ impl Inbox {
                 id,
                 written: true,
                 wakes: false,
+                depositor_forgets: false,
                 end: None,
                 budget: None,
             });
@@ -961,6 +1039,21 @@ impl Inbox {
         self.deposit_as(parcel, budget, waiting_limit, true)
     }
 
+    /// [`Self::deposit_tracked`] for a depositor that writes the parcel's row
+    /// itself, in one transaction with what the parcel is for. The row to
+    /// write comes back with the [`Unwritten`] that holds the parcel back
+    /// until the depositor tells how the write came out; `None` when the
+    /// inbox keeps nothing. The parcel's row is forgotten by its depositor
+    /// too, once it is taken or turned away.
+    pub(crate) fn deposit_with_row(
+        &self,
+        parcel: Parcel,
+        budget: Option<PushBudget>,
+    ) -> (Deposited, Option<(KeptParcel, Unwritten)>) {
+        let (deposited, _, row) = self.deposit_by(parcel, budget, None, true, Keeping::Depositor);
+        (deposited, row)
+    }
+
     fn deposit_as(
         &self,
         parcel: Parcel,
@@ -968,6 +1061,19 @@ impl Inbox {
         waiting_limit: Option<usize>,
         wakes: bool,
     ) -> (Deposited, Saving) {
+        let (deposited, saving, _) =
+            self.deposit_by(parcel, budget, waiting_limit, wakes, Keeping::Keeper);
+        (deposited, saving)
+    }
+
+    fn deposit_by(
+        &self,
+        parcel: Parcel,
+        budget: Option<PushBudget>,
+        waiting_limit: Option<usize>,
+        wakes: bool,
+        keeping: Keeping,
+    ) -> (Deposited, Saving, Option<(KeptParcel, Unwritten)>) {
         let refused = |parcel| {
             (
                 Deposited {
@@ -975,6 +1081,7 @@ impl Inbox {
                     end: None,
                 },
                 Saving::ready(),
+                None,
             )
         };
         if parcel.text.chars().count() > self.shared.spec.max_chars {
@@ -997,9 +1104,11 @@ impl Inbox {
             id,
             written: true,
             wakes,
+            depositor_forgets: false,
             end: Some(tx),
             budget,
         };
+        let mut row = None;
         // A notice is one per key: the newer word takes the older one's place
         // in the queue, and the older depositor's end is dropped unsettled.
         let waiting = state.parcels.iter_mut().find(|waiting| {
@@ -1012,13 +1121,13 @@ impl Inbox {
                 if !held.parcel.saved {
                     self.shared.forget([&*waiting]);
                 }
-                let saving = self.shared.keep(&mut held);
+                let saving = self.shared.keep_by(&mut held, keeping, &mut row);
                 *waiting = held;
                 saving
             }
             None => {
                 state.next_seq = state.next_seq.saturating_add(1);
-                let saving = self.shared.keep(&mut held);
+                let saving = self.shared.keep_by(&mut held, keeping, &mut row);
                 state.parcels.push_back(held);
                 saving
             }
@@ -1030,6 +1139,7 @@ impl Inbox {
                 end: Some(rx),
             },
             saving,
+            row,
         )
     }
 
@@ -1069,7 +1179,8 @@ impl Inbox {
     /// Gives each parcel the store kept whose depositor is gone and whose key
     /// starts with `prefix` a new end, so whoever answers for such parcels
     /// learns how each leaves the inbox. A parcel is adopted once; returns
-    /// the adopted parcels' keys with their ends.
+    /// the adopted parcels' keys with their ends. Whoever adopts a parcel
+    /// forgets its row itself, once it is taken or turned away.
     pub fn adopt_kept(&self, prefix: &str) -> Vec<(String, oneshot::Receiver<ParcelEnd>)> {
         let mut state = self.shared.lock();
         let State {
@@ -1086,6 +1197,7 @@ impl Inbox {
             .map(|held| {
                 let (tx, rx) = oneshot::channel();
                 held.end = Some(tx);
+                held.depositor_forgets = true;
                 (held.parcel.key.clone(), rx)
             })
             .collect()
@@ -1111,7 +1223,7 @@ impl Inbox {
     fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DaemonMessage {
         let mut state = self.shared.lock();
         let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
-        self.shared.forget(&taken);
+        self.shared.forget_ended(&taken);
         for held in taken {
             held.settle(ParcelEnd::Taken);
         }
@@ -1142,7 +1254,7 @@ impl Inbox {
         }
         if state.shown() > 0 && self.shared.pushable() {
             let (taken, text) = self.shared.take_within(&mut state, "");
-            self.shared.forget(&taken);
+            self.shared.forget_ended(&taken);
             for held in taken {
                 held.settle(ParcelEnd::Taken);
             }
@@ -1252,13 +1364,13 @@ impl Inbox {
         let carried = state.carrying.remove(position);
         match end {
             PushEnd::Taken => {
-                self.shared.forget(&carried.held);
+                self.shared.forget_ended(&carried.held);
                 for held in carried.held {
                     held.settle(ParcelEnd::Taken);
                 }
             }
             PushEnd::TurnedAway => {
-                self.shared.forget(&carried.held);
+                self.shared.forget_ended(&carried.held);
                 for held in carried.held {
                     held.settle(ParcelEnd::TurnedAway);
                 }

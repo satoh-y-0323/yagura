@@ -716,6 +716,13 @@ fn read_task_writes(
         .map_err(StoreError::from)
 }
 
+/// A report's row in its parent's report inbox, written with the report.
+pub(crate) struct ParentReportRow<'a> {
+    pub(crate) window_id: &'a str,
+    pub(crate) seq: i64,
+    pub(crate) report_json: &'a str,
+}
+
 /// A connection to the plan ledger's own tables, migrated to schema v7. This
 /// type has no query port of its own for authorization: it stores and
 /// returns rows, and [`crate::plan_permit`] is what decides who may reach
@@ -1235,6 +1242,30 @@ impl PlanStore {
         summary: &str,
         path: Option<&str>,
     ) -> Result<(), StoreError> {
+        self.write_task_report_kept(permit, outcome, summary, path, None, || {})
+            .map(|_| ())
+    }
+
+    /// [`Self::write_task_report`], with the report's row in its parent's
+    /// report inbox written in the same transaction: the plan and the parent
+    /// hold the report together or not at all. `between` runs after the
+    /// report is written and before the row is. Returns how many rows the
+    /// parent's row came to: none when the parent has no row to keep it with
+    /// (or no row was asked for).
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying transaction. Nothing is written
+    /// then.
+    pub(crate) fn write_task_report_kept(
+        &mut self,
+        permit: &ReportPermit,
+        outcome: yagura_protocol::ReportOutcome,
+        summary: &str,
+        path: Option<&str>,
+        parent_row: Option<ParentReportRow<'_>>,
+        between: impl FnOnce(),
+    ) -> Result<usize, StoreError> {
         let plan_id = permit.plan_id();
         let task_id = permit.task_id();
         let outcome_column = report_outcome_to_column(outcome);
@@ -1247,8 +1278,15 @@ impl PlanStore {
              report_path = ?5, reported_at = ?6 WHERE plan_id = ?1 AND task_id = ?2",
             params![plan_id, task_id, outcome_column, summary, path, reported_at],
         )?;
+        between();
+        let rows = match parent_row {
+            Some(row) => {
+                crate::parcel_store::keep_report_row(&tx, row.window_id, row.seq, row.report_json)?
+            }
+            None => 0,
+        };
         tx.commit()?;
-        Ok(())
+        Ok(rows)
     }
 
     /// Records `state` as `permit`'s task's instruction-notice state: exactly
