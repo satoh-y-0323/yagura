@@ -285,16 +285,31 @@ pub struct Parcel {
     /// What the CLI reads.
     pub text: String,
     notice: bool,
+    saved: bool,
 }
 
 impl Parcel {
-    /// A parcel of `text` named `key`.
+    /// A parcel of `text` named `key`, kept in the store (when the inbox has
+    /// one) so a next daemon hands it out.
     #[must_use]
     pub fn new(key: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             text: text.into(),
             notice: false,
+            saved: true,
+        }
+    }
+
+    /// This parcel held in memory alone: it ends with the daemon, and no
+    /// next daemon hands it out. A kind of parcel moved to unsaved needs a
+    /// migration in the same change that deletes the rows older daemons kept
+    /// for it, or a next daemon still hands those out.
+    #[must_use]
+    pub fn unsaved(self) -> Self {
+        Self {
+            saved: false,
+            ..self
         }
     }
 
@@ -508,10 +523,11 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Keeps `held` as it is now. Called under the inbox's lock, so the store
-    /// sees the changes in the order the inbox made them.
+    /// Keeps `held` as it is now, unless it is unsaved. Called under the
+    /// inbox's lock, so the store sees the changes in the order the inbox
+    /// made them.
     fn keep(&self, held: &Held) {
-        if let Some(keeper) = &self.keeper {
+        if let Some(keeper) = self.keeper.as_ref().filter(|_| held.parcel.saved) {
             keeper.keep(held.kept());
         }
     }
@@ -520,7 +536,12 @@ impl Shared {
     /// inbox's lock.
     fn forget<'a>(&self, held: impl IntoIterator<Item = &'a Held>) {
         if let Some(keeper) = &self.keeper {
-            keeper.forget(held.into_iter().map(|held| held.seq).collect());
+            keeper.forget(
+                held.into_iter()
+                    .filter(|held| held.parcel.saved)
+                    .map(|held| held.seq)
+                    .collect(),
+            );
         }
     }
 
@@ -757,6 +778,7 @@ impl Inbox {
                     key: parcel.key,
                     text: parcel.text,
                     notice: parcel.notice,
+                    saved: true,
                 },
                 seq: parcel.seq,
                 end: None,
@@ -836,6 +858,9 @@ impl Inbox {
             Some(waiting) => {
                 tracing::debug!(key = %held.parcel.key, "notice replaced the one waiting under its key");
                 held.seq = waiting.seq;
+                if !held.parcel.saved {
+                    self.shared.forget([&*waiting]);
+                }
                 self.shared.keep(&held);
                 *waiting = held;
             }

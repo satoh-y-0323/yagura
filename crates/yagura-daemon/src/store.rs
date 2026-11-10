@@ -143,6 +143,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/017_windows.sql"),
     include_str!("../migrations/018_parcels.sql"),
     include_str!("../migrations/019_delivery_marks.sql"),
+    include_str!("../migrations/020_unsaved_parcels.sql"),
 ];
 
 /// The schema version recorded in the database's `user_version`: `0` for a
@@ -191,7 +192,8 @@ pub fn apply_migrations(
 /// application, ownership narrowing, version check and migration order never
 /// drift apart between the two.
 ///
-/// Non-destructive: it never deletes data, and a database from a newer
+/// Non-destructive: it deletes nothing but the rows a migration retires
+/// (kept parcels of a kind no longer kept), and a database from a newer
 /// schema version is refused untouched rather than migrated or written to
 /// (fail-safe) -- the only case where this returns
 /// [`StoreError::FutureSchemaVersion`].

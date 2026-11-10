@@ -448,3 +448,55 @@ pub fn insert_lost_window_with_invalid_utf8_layout(
     )
     .expect("seeding a window table row with an invalid-UTF-8 layout_json must succeed");
 }
+
+/// The `user_version` of a session store a daemon that kept handoff envelopes and report
+/// notices in `inbox_parcels` left behind: the last schema before they stopped being kept.
+const SCHEMA_KEEPING_UNSAVED_PARCELS: i64 = 19;
+
+/// Rewrites the session store at `db` (no daemon running on it) into what a daemon that
+/// kept every parcel left for `window_id`: a handoff's envelope carrying `envelope` and a
+/// report notice carrying `notice`, in place of whatever notice the store holds, and the
+/// schema version it had before those were dropped.
+pub fn seed_parcels_an_older_daemon_kept(
+    db: &std::path::Path,
+    window_id: &str,
+    envelope: &str,
+    notice: &str,
+) {
+    let conn = rusqlite::Connection::open(db).expect("the session store must open");
+    conn.execute(
+        "DELETE FROM inbox_parcels WHERE window_id = ?1 AND key = 'report'",
+        [window_id],
+    )
+    .expect("clearing the report notice row must succeed");
+    let next_seq: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM inbox_parcels WHERE window_id = ?1",
+            [window_id],
+            |row| row.get(0),
+        )
+        .expect("the next parcel seq must be readable");
+    for (offset, key, notice_flag, body) in [
+        (0, "handoff:seeded:1", 0, envelope),
+        (1, "report", 1, notice),
+    ] {
+        conn.execute(
+            "INSERT INTO inbox_parcels (window_id, seq, key, notice, body)              VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![window_id, next_seq + offset, key, notice_flag, body],
+        )
+        .expect("seeding an inbox parcel row must succeed");
+    }
+    conn.pragma_update(None, "user_version", SCHEMA_KEEPING_UNSAVED_PARCELS)
+        .expect("rewinding the schema version must succeed");
+}
+
+/// The keys of the `inbox_parcels` rows kept for `window_id`, by seq; `None` while the
+/// store cannot be read.
+pub fn inbox_parcel_keys(db: &std::path::Path, window_id: &str) -> Option<Vec<String>> {
+    let conn = yagura_daemon::store::open_readonly(db).ok()?;
+    let mut statement = conn
+        .prepare("SELECT key FROM inbox_parcels WHERE window_id = ?1 ORDER BY seq")
+        .ok()?;
+    let rows = statement.query_map([window_id], |row| row.get(0)).ok()?;
+    rows.collect::<Result<_, _>>().ok()
+}

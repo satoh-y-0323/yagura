@@ -1,4 +1,5 @@
-//! The parcels kept in `yagura.db`: what each window's inbox holds and what
+//! The parcels kept in `yagura.db`: what each window's inbox holds, but for
+//! its unsaved parcels (`Parcel::unsaved` in `inbox.rs`), and what
 //! each window's report inbox holds, so a next daemon of the instance hands
 //! out what this one accepted; and each window's delivery marks, the body of
 //! every delivery that may have left the daemon's text in the window's

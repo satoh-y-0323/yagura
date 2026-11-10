@@ -5360,8 +5360,7 @@ async fn wait_for_submit_evidence(
 }
 
 /// Names each handoff's parcel, so the one this handoff put in a window's
-/// inbox can be withdrawn and no other; with the daemon run's nonce, also
-/// none a previous daemon kept.
+/// inbox can be withdrawn and no other.
 static NEXT_HANDOFF_PARCEL: AtomicU64 = AtomicU64::new(1);
 
 /// Puts a handoff's envelope in its window's inbox and answers once the
@@ -5413,7 +5412,9 @@ async fn deliver_handoff(job: DeliveryJob) {
     let end = match notice_queue::deposit(
         &registry,
         &entry,
-        Parcel::new(key.clone(), envelope),
+        // A next daemon never hands out an envelope whose sender it cannot
+        // answer: the daemon's end withdraws it.
+        Parcel::new(key.clone(), envelope).unsaved(),
         budget,
         Some(config.max_turn_waiters_per_window),
     ) {
@@ -5443,11 +5444,6 @@ async fn deliver_handoff(job: DeliveryJob) {
     // Given back before the answer, so a caller holding the answer also has
     // its budget back.
     drop(slot);
-    // What the answer says of the envelope holds for a next daemon too: one
-    // taken or withdrawn is no longer kept.
-    if let Some(store) = registry.parcel_store() {
-        store.kept().await;
-    }
     outbound.reply(&answer);
 }
 

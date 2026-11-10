@@ -211,14 +211,7 @@ impl ReportInboxes {
             // A window that declares no delivery is handed no notice: its
             // reports stay readable through `wait_for_report`.
             match entry.as_ref().filter(|entry| entry.delivers()) {
-                Some(entry) if fell_due => {
-                    let parcel =
-                        crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending));
-                    Some((
-                        entry.inbox().deposit_tracked(parcel, None, None),
-                        inbox.stretch,
-                    ))
-                }
+                Some(entry) if fell_due => Some((deposit_notice(entry, pending), inbox.stretch)),
                 Some(entry) if inbox.notice == Notice::Due => {
                     // The notice still waiting tells the count as it is now.
                     let _ = entry
@@ -341,23 +334,36 @@ impl ReportInboxes {
     }
 
     /// Queues `kept`, the reports the store kept for `window_id`'s inbox,
-    /// for a window taken back as the daemon starts; their notice, if it
-    /// still waits, is in the window's own inbox and counts as due.
-    pub(super) fn restore(&self, window_id: &str, kept: Vec<KeptReport>) {
+    /// for a window taken back as the daemon starts. The notice is not kept:
+    /// it is derived from the reports, so a window that is handed notices
+    /// gets one for them, as when they first arrived.
+    pub(super) fn restore(self: &Arc<Self>, window_id: &str, kept: Vec<KeptReport>) {
         let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
             return;
         };
         let (first_seq, next_seq) = (first.seq, last.seq.saturating_add(1));
-        let mut inboxes = lock_recover(&self.inboxes);
-        let inbox = inboxes.entry(window_id.to_string()).or_default();
-        if !inbox.reports.is_empty() {
-            return;
+        // Looked up before the inboxes' lock, which the registry's is never
+        // taken under.
+        let entry = self.registry.get(window_id);
+        let deposited = {
+            let mut inboxes = lock_recover(&self.inboxes);
+            let inbox = inboxes.entry(window_id.to_string()).or_default();
+            if !inbox.reports.is_empty() {
+                return;
+            }
+            inbox.reports = kept.into_iter().map(|kept| kept.report).collect();
+            inbox.first_seq = first_seq;
+            inbox.next_seq = next_seq;
+            inbox.notice = Notice::Due;
+            inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
+            entry
+                .as_ref()
+                .filter(|entry| entry.delivers())
+                .map(|entry| (deposit_notice(entry, inbox.reports.len()), inbox.stretch))
+        };
+        if let (Some(entry), Some((deposited, stretch))) = (entry, deposited) {
+            self.confirm_when_taken(&entry, deposited, stretch);
         }
-        inbox.reports = kept.into_iter().map(|kept| kept.report).collect();
-        inbox.first_seq = first_seq;
-        inbox.next_seq = next_seq;
-        inbox.notice = Notice::Due;
-        inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -425,6 +431,14 @@ fn hand_to_waiter(
         }
     }
     Some(reports)
+}
+
+/// Puts the notice of `pending` reports in `entry`'s inbox. Called under the
+/// report inboxes' lock, so the notice and the notice state never disagree.
+fn deposit_notice(entry: &WindowEntry, pending: usize) -> crate::inbox::Deposited {
+    // Derived from the reports, which are kept, so the notice itself is not.
+    let parcel = crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending)).unsaved();
+    entry.inbox().deposit_tracked(parcel, None, None)
 }
 
 /// The one line handed to a parent with `pending` reports waiting. Only the
