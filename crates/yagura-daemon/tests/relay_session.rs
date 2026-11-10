@@ -1016,3 +1016,98 @@ async fn a_report_taken_and_cancelled_before_its_answer_comes_back_once() {
         after.reports
     );
 }
+
+// =====================================================================
+// A tool call's arguments and result stay out of the daemon's log
+// =====================================================================
+
+/// What a window's screen shows, read over `client`.
+async fn screen_of(client: &mut yagura_test_support::ipc::Connection, window_id: &str) -> String {
+    common::send(
+        client,
+        &yagura_protocol::ClientMessage::ReadOutput {
+            window_id: window_id.to_string(),
+            lines: Some(500),
+        },
+    )
+    .await;
+    match common::read_response(client).await {
+        yagura_protocol::DaemonMessage::WindowOutput { text, .. } => text,
+        other => panic!("expected window_output, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_tool_calls_arguments_and_result_stay_out_of_a_debug_daemon_log() {
+    // Carried by a report: its summary reaches the parent only as a tool result, so
+    // no window's screen ever shows it.
+    const NONCE: &str = "NONCE-RMCP-LOG-7Hk2Qx9";
+    let sandbox = common::real_daemon::Sandbox::new("relay-rmcp-log");
+    let mut daemon = sandbox
+        .start_from(&[
+            ("YAGURA_LOG", "debug"),
+            ("YAGURA_STATUS_TOKEN_OVERRIDE", VALID_TOKEN),
+        ])
+        .await;
+    let endpoint = sandbox.endpoint().to_string();
+
+    let parent = common::call_open_window(&mut daemon.client, process::echo_child_command()).await;
+    let mut as_parent = yagura_test_support::ipc::connect_with_retry(&endpoint).await;
+    common::identify(&mut as_parent, &parent).await;
+    let child = common::call_open_window(&mut as_parent, process::echo_child_command()).await;
+
+    let mut child_session = window_session(&endpoint, &child).await;
+    let sent = child_session
+        .request(&tool_call_line(
+            1,
+            "send_report",
+            json!({"outcome": "succeeded", "summary": NONCE}),
+            false,
+        ))
+        .await;
+    let answer = child_session.answer(sent).await;
+    assert_eq!(
+        tool_json(&answer)["delivered_to"].as_str(),
+        Some(parent.as_str()),
+        "the report must reach the parent"
+    );
+
+    let mut parent_session = window_session(&endpoint, &parent).await;
+    let took = take_reports(&mut parent_session, 1, 0).await;
+    assert_eq!(
+        report_keys(&took.reports)
+            .iter()
+            .map(|(_, summary, _)| summary.as_str())
+            .collect::<Vec<_>>(),
+        [NONCE],
+        "the parent's wait_for_report must carry the report"
+    );
+
+    for window in [&parent, &child] {
+        let screen = screen_of(&mut daemon.client, window).await;
+        assert!(
+            !screen.contains(NONCE),
+            "the nonce must not be drawn on window {window}'s screen: {screen:?}"
+        );
+    }
+
+    drop((child_session, parent_session, as_parent));
+    let mut shutdown = sandbox.spawn_with_args(&["--shutdown"]);
+    let ended = daemon.wait_for_fault_end().await;
+    let _ = tokio::task::spawn_blocking(move || shutdown.wait()).await;
+    assert!(
+        ended.success(),
+        "the daemon must end cleanly, got {ended:?}"
+    );
+
+    let log = sandbox.daemon_log();
+    assert!(
+        log.contains("DEBUG"),
+        "the daemon must have logged at debug level: {log:?}"
+    );
+    let hits: Vec<&str> = log.lines().filter(|line| line.contains(NONCE)).collect();
+    assert!(
+        hits.is_empty(),
+        "a tool call's arguments and result must not reach the daemon log, found: {hits:#?}"
+    );
+}

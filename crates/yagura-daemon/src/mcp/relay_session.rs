@@ -497,7 +497,10 @@ impl Rmcp {
                 Ok(running) => {
                     let _ = running.waiting().await;
                 }
-                Err(err) => tracing::warn!(error = %err, "a relay session's MCP server stopped"),
+                Err(err) => tracing::warn!(
+                    kind = initialize_error_kind(&err),
+                    "a relay session's MCP server stopped"
+                ),
             }
         });
         let (lines_out, lines_in) = tokio::io::split(session_end);
@@ -516,6 +519,21 @@ impl Rmcp {
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
         self.lines_in.write_all(&bytes).await.is_ok()
+    }
+}
+
+/// Names the failure without its payload: the variants' `Display` carries the
+/// received frame, result or error data verbatim.
+fn initialize_error_kind(err: &rmcp::service::ServerInitializeError) -> &'static str {
+    use rmcp::service::ServerInitializeError as E;
+    match err {
+        E::ExpectedInitializeRequest(_) => "expected_initialize_request",
+        E::ConnectionClosed(_) => "connection_closed",
+        E::UnexpectedInitializeResponse(_) => "unexpected_initialize_response",
+        E::InitializeFailed(_) => "initialize_failed",
+        E::TransportError { .. } => "transport_error",
+        E::Cancelled => "cancelled",
+        _ => "other",
     }
 }
 

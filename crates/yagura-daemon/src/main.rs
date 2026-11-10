@@ -1228,22 +1228,39 @@ fn init_logging(namespace: &yagura_os::InstanceNamespace) {
         .and_then(|value| parse_level(&value))
         .unwrap_or(tracing::Level::INFO);
 
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let filter = log_filter(level);
     match open_log_file(namespace) {
         Ok((file, restrict_warning)) => {
-            let _ = tracing_subscriber::fmt()
-                .with_max_level(level)
+            let layer = tracing_subscriber::fmt::layer()
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(file))
-                .try_init();
+                .with_filter(filter);
+            let _ = tracing_subscriber::registry().with(layer).try_init();
             if let Some(reason) = restrict_warning {
                 tracing::warn!("{reason}; the log file may not be owner-restricted");
             }
         }
         Err(reason) => {
-            let _ = tracing_subscriber::fmt().with_max_level(level).try_init();
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(filter);
+            let _ = tracing_subscriber::registry().with(layer).try_init();
             tracing::warn!("{reason}; daemon logs are only visible on stderr for this run");
         }
     }
+}
+
+/// The daemon's own targets log at `level`; rmcp is held to `ERROR` whatever
+/// `level` is, because its `DEBUG`/`INFO`/`WARN` events carry tool arguments,
+/// tool results, notifications and received frames verbatim.
+fn log_filter(level: tracing::Level) -> tracing_subscriber::filter::Targets {
+    tracing_subscriber::filter::Targets::new()
+        .with_default(level)
+        .with_target("rmcp", tracing_subscriber::filter::LevelFilter::ERROR)
 }
 
 fn parse_level(value: &str) -> Option<tracing::Level> {

@@ -139,6 +139,11 @@ impl Sandbox {
         self.state_root().join("holders")
     }
 
+    /// The endpoint the instance's daemon serves, for a client to connect to.
+    pub fn endpoint(&self) -> &str {
+        self.endpoint.endpoint()
+    }
+
     pub fn daemon_log(&self) -> String {
         std::fs::read_to_string(self.state_root().join("logs").join("daemon.log"))
             .unwrap_or_else(|err| format!("<no daemon log: {err}>"))
