@@ -57,7 +57,7 @@ use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 use crate::window_table::{
     OpeningRow, Reservation, RowScopes, WindowRow, WindowTable, WindowValues, credentials_kind,
-    credentials_mode, launch_record, recorded_launch,
+    credentials_mode, hooks_kind, hooks_route, launch_record, recorded_launch,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
@@ -239,6 +239,7 @@ fn window_values(
         task_plan_id: task.map(|task| task.plan_id.clone()),
         task_id: task.map(|task| task.task_id.clone()),
         credentials: credentials_kind(provenance.credentials),
+        hooks: Some(hooks_kind(provenance.hooks)),
     }
 }
 
@@ -379,7 +380,8 @@ pub struct WindowProvenance {
     pub delivery: Option<ProfileDelivery>,
     /// How the window's CLI comes to run the daemon's hooks. Given by the
     /// caller as planned and settled by [`WindowRegistry`] at spawn, from
-    /// what the spawned argv really carries ([`HooksRoute::settle`]).
+    /// what the spawned argv really carries ([`HooksRoute::settle`]). A
+    /// window taken back has the one its row or launch record kept.
     pub hooks: HooksRoute,
     /// The profile's own program, run to wake the window's CLI when its
     /// `[delivery]` table wakes by command.
@@ -5323,7 +5325,7 @@ impl ParticipationSignal {
 /// [`WindowRegistry::set_window_opened_hook`].
 type WindowOpenedHook = Box<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
 
-/// [`WindowRegistry::set_kept_parcels_hook`].
+/// [`WindowRegistry::add_kept_parcels_hook`].
 pub(crate) type KeptParcelsHook = Arc<dyn Fn(&Arc<WindowEntry>) + Send + Sync>;
 
 /// Starts or wakes one window's notice delivery agent; see
@@ -5375,10 +5377,10 @@ pub struct WindowRegistry {
     /// when chat is disabled or this registry predates chat entirely (most
     /// tests): a registry never knows what a chat participant is on its own.
     window_opened_hook: Mutex<Option<WindowOpenedHook>>,
-    /// Answers for the parcels a window's inbox read back from the store,
-    /// whose depositors are gone. `None` until an IPC server is built on this
-    /// registry.
-    kept_parcels_hook: Mutex<Option<KeptParcelsHook>>,
+    /// Answer for what the store kept for a window taken back, whose
+    /// depositors are gone, as each entry of it is built. None until an IPC
+    /// server is built on this registry.
+    kept_parcels_hooks: Mutex<Vec<KeptParcelsHook>>,
     /// Starts or wakes a window's notice delivery agent. `None` until an IPC
     /// server is built on this registry: notices queued before then wait.
     notice_launcher: Mutex<Option<NoticeLauncher>>,
@@ -5445,7 +5447,7 @@ impl WindowRegistry {
             parcel_store: Mutex::new(None),
             status_token_override,
             window_opened_hook: Mutex::new(None),
-            kept_parcels_hook: Mutex::new(None),
+            kept_parcels_hooks: Mutex::new(Vec::new()),
             notice_launcher: Mutex::new(None),
             workspace_walks,
             mcp_config_write: AsyncMutex::new(()),
@@ -5635,25 +5637,38 @@ impl WindowRegistry {
         };
 
         // The id and token exist before the spawn, so they can be injected
-        // into the child environment.
-        let values = window_values(
-            &provenance,
-            &name,
-            &cwd_string,
-            vendor.as_ref(),
-            &command,
-            detection.as_ref(),
-        );
+        // into the child environment. The route is the spawn's to settle, so
+        // the `opening` row carries none.
+        let values = WindowValues {
+            hooks: None,
+            ..window_values(
+                &provenance,
+                &name,
+                &cwd_string,
+                vendor.as_ref(),
+                &command,
+                detection.as_ref(),
+            )
+        };
         let (window_id, row) = self.reserve_window_id(&values).await?;
         let status_token = self.acquire_status_token();
         let opening = self.begin_opening(&window_id, &name);
         drop(open_guard);
 
         let palette = self.default_palette_for(vendor.as_deref());
-        let record = launch_record(&window_id, status_token.as_hex(), &values);
+        let record = |hooks: HooksRoute| {
+            launch_record(
+                &window_id,
+                status_token.as_hex(),
+                &WindowValues {
+                    hooks: Some(hooks_kind(hooks)),
+                    ..values.clone()
+                },
+            )
+        };
         let lost = row.lost_notice();
         let scopes = row.scopes();
-        let ((session, hooks_injected), row) = row
+        let ((session, hooks), row) = row
             .open(self.spawn_pty_for_window(
                 &command,
                 &resolved_cwd,
@@ -5664,7 +5679,7 @@ impl WindowRegistry {
                 extra_profile_env,
                 &prepared,
                 palette,
-                provenance.credentials,
+                (provenance.hooks, provenance.credentials),
                 credentials_folder.as_ref(),
             ))
             .await?;
@@ -5686,7 +5701,7 @@ impl WindowRegistry {
         // were dropped on the way (gate, file, shim) neither expect reports
         // nor take part in delivery.
         let provenance = WindowProvenance {
-            hooks: provenance.hooks.settle(hooks_injected),
+            hooks,
             ..provenance
         };
         if provenance.hooks.reaches() {
@@ -5724,6 +5739,8 @@ impl WindowRegistry {
             detected_rx,
             Some(&opening),
         );
+        // The row takes the route the spawn settled.
+        entry.update_row();
         // Registered above, so a hook that spawns a watcher observes an entry
         // the registry can already look up by id.
         if let Some(hook) = lock_recover(&self.window_opened_hook).as_ref() {
@@ -5976,7 +5993,9 @@ impl WindowRegistry {
     /// own `[env]` table; empty for an `OpenWindow` request). `injections`
     /// are appended to `argv` in order for this spawn only. The window's
     /// terminal answers color queries with `palette` from the start. The
-    /// holder keeps `record` in memory only.
+    /// holder keeps the launch record `record` builds from the route `hooks`
+    /// settles to in memory only; the settled route is returned with the
+    /// session.
     ///
     /// This is the registry's one spawn call site; `resolution` is what
     /// [`Self::resolve_window_program`] resolved `argv[0]` to.
@@ -5988,14 +6007,18 @@ impl WindowRegistry {
         resolved_cwd: &std::path::Path,
         status_token: &StatusToken,
         window_id: &str,
-        (record, lost, scopes): (String, LostNotice, Option<RowScopes>),
+        (record, lost, scopes): (
+            impl FnOnce(HooksRoute) -> String,
+            LostNotice,
+            Option<RowScopes>,
+        ),
         resolution: &program::Resolution,
         extra_profile_env: &[(String, String)],
         injections: &[PreparedInjection],
         palette: Palette,
-        credentials: CredentialsMode,
+        (hooks, credentials): (HooksRoute, CredentialsMode),
         credentials_folder: Option<&CredentialsFolder>,
-    ) -> Result<(PtySession, bool), WindowOpenError> {
+    ) -> Result<(PtySession, HooksRoute), WindowOpenError> {
         let platform = self.config.host_os.platform();
         let launched = credentials == CredentialsMode::Launch;
         let has_credentials_file = launched
@@ -6057,6 +6080,7 @@ impl WindowRegistry {
         // decision sees them too.
         let spawn_argv = program::into_spawn_argv(resolution, &full_argv, platform);
         let spawn_argv: Vec<&str> = spawn_argv.iter().map(String::as_str).collect();
+        let hooks = hooks.settle(hooks_injected);
 
         let removed_env: &[&str] = if launched {
             &[WINDOW_ID_ENV, STATUS_TOKEN_ENV]
@@ -6071,7 +6095,7 @@ impl WindowRegistry {
                 extra_env: &extra_env,
                 removed_env,
                 palette: Some(palette),
-                record,
+                record: record(hooks),
                 lost,
                 scopes,
             },
@@ -6080,7 +6104,7 @@ impl WindowRegistry {
         )
         .await
         .map_err(|err| WindowOpenError::SpawnFailed(err.to_string()))?;
-        Ok((session, hooks_injected))
+        Ok((session, hooks))
     }
 
     /// Resolves `argv[0]` to the executable the window will run, through
@@ -6543,8 +6567,10 @@ impl WindowRegistry {
     /// launch record then gives back the window's token. A window with a row
     /// takes the values the row keeps; one without takes only its id, and the
     /// values the launch record keeps (with its row written again) once the
-    /// holder lets the daemon in. Not refused by the window limits: the window
-    /// already exists. The chat introduction is not sent again.
+    /// holder lets the daemon in. A row without the route its hooks take
+    /// waits the same way, for the route alone. Not refused by the window
+    /// limits: the window already exists. The chat introduction is not sent
+    /// again.
     ///
     /// # Errors
     ///
@@ -6564,11 +6590,15 @@ impl WindowRegistry {
         let (token_tx, status_token) = watch::channel(None);
         let (recorded_tx, recorded_rx) = oneshot::channel::<RowlessWelcome>();
         // A row whose values do not read back counts as none: the launch
-        // record gives them back, and the row is written again from them.
+        // record gives them back, and the row is written again from them. A
+        // row without the route its hooks take (written before the spawn
+        // settled it, or before the table kept it) keeps its other values,
+        // and takes the route from the launch record.
         let stored = stored.and_then(|stored| stored.values);
-        let needs_values = stored.is_none();
+        let needs_values = stored.as_ref().is_none_or(|values| values.hooks.is_none());
         let on_welcome: Box<dyn FnOnce(&str) + Send> = {
             let window_id = window_id.clone();
+            let kept = stored.clone().filter(|_| needs_values);
             Box::new(move |record: &str| {
                 let recorded = recorded_launch(record, &window_id);
                 let token = recorded
@@ -6582,12 +6612,21 @@ impl WindowRegistry {
                         "the holder's launch record carries no token for the window; its status events are refused"
                     );
                 }
-                match recorded.filter(|_| needs_values) {
+                let values = match kept {
+                    Some(kept) => Some(WindowValues {
+                        hooks: recorded.and_then(|recorded| recorded.values.hooks),
+                        ..kept
+                    }),
+                    None => recorded
+                        .filter(|_| needs_values)
+                        .map(|recorded| recorded.values),
+                };
+                match values {
                     // The token waits for the window built from the values, so
                     // a request checked against it is served by that window.
-                    Some(recorded) => {
+                    Some(values) => {
                         let _ = recorded_tx.send(RowlessWelcome {
-                            values: recorded.values,
+                            values,
                             token,
                             token_tx,
                         });
@@ -6610,13 +6649,18 @@ impl WindowRegistry {
             })
         };
         let (values, row, known) = match stored {
-            Some(values) => (
+            Some(values) if !needs_values => (
                 values,
                 WindowRow::taken_back(self.window_table(), &window_id),
                 true,
             ),
-            None => (
-                unknown_values(&window_id),
+            // The command decides how the session encodes keys, which the
+            // window built from the values goes on to use.
+            kept => (
+                WindowValues {
+                    command: kept.map(|kept| kept.command).unwrap_or_default(),
+                    ..unknown_values(&window_id)
+                },
                 WindowRow::taken_back(None, &window_id),
                 false,
             ),
@@ -6779,7 +6823,7 @@ impl WindowRegistry {
                 effort: values.effort.clone(),
             }),
             delivery: profile.delivery,
-            hooks: profile.hooks,
+            hooks: hooks_route(values.hooks),
             wake_command: profile.wake_command,
             credentials: credentials_mode(values.credentials),
             // Only an open creates the folder; a window taken back has its own.
@@ -6830,8 +6874,8 @@ impl WindowRegistry {
         if let Some(marks) = entry.marks.as_ref().filter(|_| known) {
             entry.keep_left_marks(marks.marks().await);
         }
-        let kept_parcels_hook = lock_recover(&self.kept_parcels_hook).clone();
-        if let Some(hook) = kept_parcels_hook {
+        let kept_parcels_hooks = lock_recover(&self.kept_parcels_hooks).clone();
+        for hook in kept_parcels_hooks {
             hook(&entry);
         }
         Ok((entry, detector_handle, detected_rx))
@@ -6852,12 +6896,12 @@ impl WindowRegistry {
         *lock_recover(&self.window_opened_hook) = Some(hook);
     }
 
-    /// Installs `hook`, which answers for the parcels a window's inbox read
-    /// back from the store, and runs it for every window registered so far;
-    /// a window taken back from then on runs it as it is built, before it
-    /// can be reached.
-    pub(crate) fn set_kept_parcels_hook(&self, hook: KeptParcelsHook) {
-        *lock_recover(&self.kept_parcels_hook) = Some(Arc::clone(&hook));
+    /// Adds `hook`, which answers for what the store kept for a window taken
+    /// back, and runs it for every window registered so far; every entry of a
+    /// window taken back from then on runs it as it is built, before it can
+    /// be reached.
+    pub(crate) fn add_kept_parcels_hook(&self, hook: KeptParcelsHook) {
+        lock_recover(&self.kept_parcels_hooks).push(Arc::clone(&hook));
         let entries: Vec<Arc<WindowEntry>> = lock_recover(&self.entries).clone();
         for entry in &entries {
             hook(entry);
@@ -6977,6 +7021,7 @@ fn unknown_values(window_id: &str) -> WindowValues {
         task_plan_id: None,
         task_id: None,
         credentials: credentials_kind(CredentialsMode::Env),
+        hooks: None,
     }
 }
 
@@ -6984,16 +7029,15 @@ fn unknown_values(window_id: &str) -> WindowValues {
 #[derive(Default)]
 struct ProfileDetermined {
     delivery: Option<ProfileDelivery>,
-    hooks: HooksRoute,
     wake_command: Option<WakeCommand>,
 }
 
 /// What the profile `profile` determines for a window taken back, resolved
 /// against the profiles this daemon loaded the way an open plans it: its
-/// `[delivery]`, the route its hooks take, and its wake command. The defaults,
-/// with one line logged, when the profile cannot be launched any more. How an
-/// open settled its hooks (left out or not) is not kept, so the route is the
-/// one the profile plans.
+/// `[delivery]` and its wake command. The defaults, with one line logged, when
+/// the profile cannot be launched any more. The route its hooks take is not
+/// planned again: the window's row and launch record keep the one its open
+/// settled ([`hooks_route`]).
 fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> ProfileDetermined {
     let launch = match crate::profile::resolve_launch(
         config,
@@ -7008,21 +7052,10 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
                 window_id,
                 profile,
                 %error,
-                "the profile of a window taken back cannot be resolved; its delivery, hooks and wake command take the defaults"
+                "the profile of a window taken back cannot be resolved; its delivery and wake command take the defaults"
             );
             return ProfileDetermined::default();
         }
-    };
-    let hooks = if launch.hooks.is_some() {
-        HooksRoute::Injection
-    } else if launch
-        .hooks_registration
-        .as_ref()
-        .is_some_and(crate::mcp_registration::McpRegistrationSpec::owns_entries)
-    {
-        HooksRoute::RegisteredEntries
-    } else {
-        HooksRoute::Unarranged
     };
     let wake_command = launch
         .delivery
@@ -7034,7 +7067,6 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
         });
     ProfileDetermined {
         delivery: launch.delivery,
-        hooks,
         wake_command,
     }
 }

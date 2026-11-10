@@ -486,6 +486,8 @@ pub fn seed_parcels_an_older_daemon_kept(
         )
         .expect("seeding an inbox parcel row must succeed");
     }
+    conn.execute("ALTER TABLE windows DROP COLUMN hooks", [])
+        .expect("dropping the column a later schema added must succeed");
     conn.pragma_update(None, "user_version", SCHEMA_KEEPING_UNSAVED_PARCELS)
         .expect("rewinding the schema version must succeed");
 }

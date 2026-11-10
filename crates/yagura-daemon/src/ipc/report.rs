@@ -85,6 +85,10 @@ pub struct ReportInboxes {
     /// window's entry lives, so a row is only ever written and forgotten for
     /// one report. Taken under the inboxes' lock, and takes no other.
     places: Mutex<HashMap<String, Places>>,
+    /// What the store kept for each window taken back as the daemon starts,
+    /// until the window's entry is built ([`Self::bind_taken_back`]). Taken
+    /// under the inboxes' lock, before the places' lock.
+    unbound: Mutex<HashMap<String, KeptReports>>,
 }
 
 #[derive(Default)]
@@ -105,6 +109,34 @@ struct Inbox {
     /// recreated, so a notice written for one stretch is never recorded
     /// against a later one.
     stretch: u64,
+    /// The stretch whose notice was put in a window entry's inbox, and that
+    /// entry: a window built again over the same holder has an inbox of its
+    /// own, which the notice is put in once more.
+    noticed: Option<(u64, Weak<WindowEntry>)>,
+}
+
+impl Inbox {
+    /// Whether this stretch's notice is yet to be put in `entry`'s inbox.
+    fn notice_owed_to(&self, entry: &Arc<WindowEntry>) -> bool {
+        self.notice == Notice::Due
+            && !self.noticed.as_ref().is_some_and(|(stretch, noticed)| {
+                *stretch == self.stretch && std::ptr::eq(noticed.as_ptr(), Arc::as_ptr(entry))
+            })
+    }
+
+    /// Puts this stretch's notice in `entry`'s inbox.
+    fn notice(&mut self, entry: &Arc<WindowEntry>) -> (crate::inbox::Deposited, u64) {
+        self.noticed = Some((self.stretch, Arc::downgrade(entry)));
+        (deposit_notice(entry, self.reports.len()), self.stretch)
+    }
+
+    fn is_idle(&self) -> bool {
+        self.reports.is_empty()
+            && self.writing.is_empty()
+            && self.reserved == 0
+            && self.out == 0
+            && self.waiters.is_empty()
+    }
 }
 
 /// The places one window's reports have been given in the store.
@@ -156,16 +188,6 @@ struct Writing {
     outcome: Option<SaveOutcome>,
 }
 
-impl Inbox {
-    fn is_idle(&self) -> bool {
-        self.reports.is_empty()
-            && self.writing.is_empty()
-            && self.reserved == 0
-            && self.out == 0
-            && self.waiters.is_empty()
-    }
-}
-
 /// What [`ReportInboxes::take_or_wait`] decided.
 enum Taken {
     Ready(TakenReports),
@@ -183,6 +205,7 @@ impl ReportInboxes {
             next_waiter_id: AtomicU64::new(0),
             next_stretch: AtomicU64::new(0),
             places: Mutex::new(HashMap::new()),
+            unbound: Mutex::new(HashMap::new()),
         }
     }
 
@@ -272,7 +295,7 @@ impl ReportInboxes {
             let Some(reports) = self.hand_to_waiter(inbox, window_id, placed) else {
                 return;
             };
-            self.queue(inbox, entry.as_deref(), reports)
+            self.queue(inbox, entry.as_ref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
     }
@@ -391,7 +414,7 @@ impl ReportInboxes {
             let Some(reports) = self.hand_to_waiter(inbox, window_id, settled) else {
                 return;
             };
-            self.queue(inbox, entry.as_deref(), reports)
+            self.queue(inbox, entry.as_ref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
     }
@@ -402,7 +425,7 @@ impl ReportInboxes {
     fn queue(
         &self,
         inbox: &mut Inbox,
-        entry: Option<&WindowEntry>,
+        entry: Option<&Arc<WindowEntry>>,
         reports: Vec<(i64, ReceivedReport)>,
     ) -> Option<(crate::inbox::Deposited, u64)> {
         for (seq, report) in reports {
@@ -418,7 +441,7 @@ impl ReportInboxes {
         // A window that declares no delivery is handed no notice: its
         // reports stay readable through `wait_for_report`.
         match entry.filter(|entry| entry.delivers()) {
-            Some(entry) if fell_due => Some((deposit_notice(entry, pending), inbox.stretch)),
+            Some(entry) if inbox.notice_owed_to(entry) => Some(inbox.notice(entry)),
             Some(entry) if inbox.notice == Notice::Due => {
                 // The notice still waiting tells the count as it is now.
                 let _ = entry
@@ -572,7 +595,7 @@ impl ReportInboxes {
             let Some(reports) = self.hand_to_waiter(inbox, window_id, reports) else {
                 return;
             };
-            self.queue(inbox, entry.as_deref(), reports)
+            self.queue(inbox, entry.as_ref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
     }
@@ -608,50 +631,66 @@ impl ReportInboxes {
         }
     }
 
-    /// Queues the reports the store kept for `window_id`'s inbox, for a
-    /// window taken back as the daemon starts, and gives its next reports
-    /// places past every row kept, read back or not. The notice is not kept:
-    /// it is derived from the reports, so a window that is handed notices
-    /// gets one for them, as when they first arrived.
-    pub(super) fn restore(self: &Arc<Self>, window_id: &str, kept: KeptReports) {
-        let Some((first_seq, last_seq)) = kept.places else {
-            return;
-        };
-        // Looked up before the inboxes' lock, which the registry's is never
-        // taken under.
-        let Some(entry) = self.registry.get(window_id) else {
-            return;
-        };
+    /// Holds what the store kept for the windows taken back as the daemon
+    /// starts, each until its window's entry is built.
+    pub(super) fn keep_unbound(&self, kept: Vec<(String, KeptReports)>) {
+        lock_recover(&self.unbound).extend(kept);
+    }
+
+    /// Ties `entry`, a window taken back just built, to its reports: its
+    /// places follow it, the reports the store kept for it are queued the
+    /// first time, and a window that is handed notices gets one for them.
+    /// The notice is not kept: it is derived from the reports, as when they
+    /// first arrived. A window built again over the same holder (a
+    /// placeholder made whole) is tied again, keeping every place given.
+    pub(super) fn bind_taken_back(self: &Arc<Self>, entry: &Arc<WindowEntry>) {
+        let window_id = entry.window_id();
         let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
-            lock_recover(&self.places).insert(
-                window_id.to_owned(),
-                Places {
-                    entry: Arc::downgrade(&entry),
-                    first_seq,
-                    next_seq: last_seq.saturating_add(1),
-                },
-            );
-            if kept.reports.is_empty() {
-                return;
+            let kept = lock_recover(&self.unbound).remove(window_id);
+            {
+                let mut places = lock_recover(&self.places);
+                match (
+                    places.get_mut(window_id),
+                    kept.as_ref().and_then(|kept| kept.places),
+                ) {
+                    (Some(places), _) => places.entry = Arc::downgrade(entry),
+                    (None, Some((first_seq, last_seq))) => {
+                        places.insert(
+                            window_id.to_owned(),
+                            Places {
+                                entry: Arc::downgrade(entry),
+                                first_seq,
+                                next_seq: last_seq.saturating_add(1),
+                            },
+                        );
+                    }
+                    (None, None) => {}
+                }
             }
-            let inbox = inboxes.entry(window_id.to_string()).or_default();
-            if !inbox.reports.is_empty() {
-                return;
+            if let Some(kept) =
+                kept.filter(|kept| kept.places.is_some() && !kept.reports.is_empty())
+            {
+                let inbox = inboxes.entry(window_id.to_owned()).or_default();
+                if inbox.reports.is_empty() {
+                    inbox.reports = kept
+                        .reports
+                        .into_iter()
+                        .map(|kept| (kept.seq, kept.report))
+                        .collect();
+                    inbox.notice = Notice::Due;
+                    inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
+                }
             }
-            inbox.reports = kept
-                .reports
-                .into_iter()
-                .map(|kept| (kept.seq, kept.report))
-                .collect();
-            inbox.notice = Notice::Due;
-            inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
-            entry
-                .delivers()
-                .then(|| (deposit_notice(&entry, inbox.reports.len()), inbox.stretch))
+            // A placeholder delivers nothing; the window built from its
+            // values is handed the notice.
+            inboxes
+                .get_mut(window_id)
+                .filter(|inbox| entry.delivers() && inbox.notice_owed_to(entry))
+                .map(|inbox| inbox.notice(entry))
         };
         if let Some((deposited, stretch)) = deposited {
-            self.confirm_when_taken(&entry, deposited, stretch);
+            self.confirm_when_taken(entry, deposited, stretch);
         }
     }
 

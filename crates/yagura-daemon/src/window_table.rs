@@ -24,6 +24,7 @@ use yagura_protocol::holder::HolderScopes;
 use crate::profile::CredentialsMode;
 use crate::pty::lock_recover;
 use crate::sql::FixedSql;
+use crate::window::HooksRoute;
 
 /// A window's values as its row and its holder's launch record carry them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -42,6 +43,9 @@ pub(crate) struct WindowValues {
     pub(crate) task_plan_id: Option<String>,
     pub(crate) task_id: Option<String>,
     pub(crate) credentials: &'static str,
+    /// The spelling of the route the window's hooks take ([`hooks_kind`]);
+    /// `None` until the window's spawn settled it.
+    pub(crate) hooks: Option<&'static str>,
 }
 
 /// The spelling of `mode` in the table and the launch record.
@@ -81,6 +85,36 @@ pub(crate) fn credentials_mode(kind: &str) -> CredentialsMode {
     } else {
         CredentialsMode::Env
     }
+}
+
+/// The spelling of `route` in the table and the launch record.
+pub(crate) fn hooks_kind(route: HooksRoute) -> &'static str {
+    match route {
+        HooksRoute::Unarranged => "unarranged",
+        HooksRoute::Injection => "injection",
+        HooksRoute::RegisteredEntries => "registered_entries",
+        HooksRoute::LeftOut => "left_out",
+    }
+}
+
+/// The route `kind` names in the table and the launch record, back as what a
+/// window taken back is built with. No spelling (a row written before the
+/// window's spawn settled it, a record of an older holder) or any other one is
+/// `LeftOut`: a route not known is taken for hooks that do not reach the CLI.
+pub(crate) fn hooks_route(kind: Option<&str>) -> HooksRoute {
+    [
+        HooksRoute::Unarranged,
+        HooksRoute::Injection,
+        HooksRoute::RegisteredEntries,
+    ]
+    .into_iter()
+    .find(|route| kind == Some(hooks_kind(*route)))
+    .unwrap_or(HooksRoute::LeftOut)
+}
+
+/// `kind` as read from the table or a launch record, in its own spelling.
+fn read_hooks(kind: Option<&str>) -> Option<&'static str> {
+    kind.map(|kind| hooks_kind(hooks_route(Some(kind))))
 }
 
 /// Where a row's window stands, as the table records it.
@@ -148,6 +182,9 @@ pub(crate) fn recorded_launch(record: &str, window_id: &str) -> Option<RecordedL
         task_plan_id: Option<String>,
         task_id: Option<String>,
         credentials: String,
+        // Absent from the record of a holder older than the field.
+        #[serde(default)]
+        hooks: Option<String>,
     }
     #[derive(serde::Deserialize)]
     struct Recorded {
@@ -177,6 +214,7 @@ pub(crate) fn recorded_launch(record: &str, window_id: &str) -> Option<RecordedL
             task_plan_id: values.task_plan_id,
             task_id: values.task_id,
             credentials: credentials_kind(credentials_mode(&values.credentials)),
+            hooks: read_hooks(values.hooks.as_deref()),
         },
     })
 }
@@ -314,7 +352,7 @@ fn read_rows(conn: &Connection) -> rusqlite::Result<Vec<StoredWindow>> {
     let mut statement = conn.prepare_fixed(
         "SELECT window_id, state, name, cwd, vendor, command_json, detection, profile, model, \
          effort, layout_json, session_id, opener, task_plan_id, task_id, credentials, \
-         child_scope FROM windows ORDER BY opened_seq",
+         child_scope, hooks FROM windows ORDER BY opened_seq",
     )?;
     let rows = statement.query_map([], |row| {
         let Some(window_id) = text_of(row.get_ref(0)?) else {
@@ -378,6 +416,7 @@ fn row_values(row: &rusqlite::Row<'_>) -> rusqlite::Result<WindowValues> {
         task_plan_id: row.get(13)?,
         task_id: row.get(14)?,
         credentials: credentials_kind(credentials_mode(&credentials)),
+        hooks: read_hooks(text_of(row.get_ref(17)?).as_deref()),
     })
 }
 
@@ -482,8 +521,8 @@ fn insert_opening(
         "INSERT INTO windows \
          (window_id, name, cwd, vendor, command_json, detection, profile, model, effort, \
          layout_json, session_id, opener, task_plan_id, task_id, credentials, child_scope, \
-         state) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+         hooks, state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
          'opening') \
          ON CONFLICT(window_id) DO NOTHING",
         params![
@@ -503,6 +542,7 @@ fn insert_opening(
             values.task_id,
             values.credentials,
             child_scope,
+            values.hooks,
         ],
     )
 }
@@ -517,7 +557,8 @@ fn update_values(
     conn.execute_fixed(
         "UPDATE windows SET name = ?2, cwd = ?3, vendor = ?4, command_json = ?5, \
          detection = ?6, profile = ?7, model = ?8, effort = ?9, layout_json = ?10, \
-         session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15 \
+         session_id = ?11, opener = ?12, task_plan_id = ?13, task_id = ?14, credentials = ?15, \
+         hooks = ?16 \
          WHERE window_id = ?1",
         params![
             window_id,
@@ -535,6 +576,7 @@ fn update_values(
             values.task_plan_id,
             values.task_id,
             values.credentials,
+            values.hooks,
         ],
     )
 }

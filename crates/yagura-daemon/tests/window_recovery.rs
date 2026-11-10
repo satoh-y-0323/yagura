@@ -7,7 +7,8 @@
 //! and child running, and the next daemon of the instance takes each window back under
 //! the same id, starting `Unknown`, with the screen, the input modes and the token it had.
 //! A window whose holder does not welcome the next daemon stays listed and closable, and
-//! its holder and child are not ended for it.
+//! its holder and child are not ended for it. A window taken back keeps the hook route
+//! its open settled, with its row or from its holder's launch record.
 //!
 //! Each case runs real daemon processes one after the other in one sandbox instance.
 
@@ -29,7 +30,7 @@ use yagura_os::{Liveness, PeerAuth, PlatformIpc, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderRecord, encode_holder_record, holder_record_path, read_holder_record,
 };
-use yagura_protocol::{ClientMessage, DaemonMessage, WindowInfo, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{holder_path, relay_path, term_script_path};
@@ -1034,45 +1035,287 @@ async fn closing_a_window_whose_take_back_failed_ends_its_holder_and_leaves_no_f
     }
 }
 
-/// A window whose holder runs but whose row is gone (here, with the whole database) is
-/// taken back all the same: listed under its id at once, and given its values from the
-/// launch record its holder keeps once the holder lets the next daemon in, with its
-/// token. Closing it ends its holder and leaves none of its files.
-#[tokio::test]
-async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
-    let sandbox = Sandbox::new("recover-rowless");
-    let log = sandbox.tree.path().join("input.log");
-    write_script_profile(&sandbox, "script", &log, None);
+/// The profile of a window whose hooks reach its CLI only through a registration's entry.
+const HOOKED_PROFILE: &str = "hooked";
 
-    let mut first = sandbox
-        .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
-        .await;
-    let window_id = first.open_profile_window(&sandbox, "script").await;
-    let name = listed(&mut first, &sandbox, &window_id).await.name;
-    let record = record_of(&sandbox, &window_id);
-    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
-    first.kill_keeping_windows();
-    for file in ["yagura.db", "yagura.db-wal", "yagura.db-shm"] {
-        let _ = std::fs::remove_file(sandbox.data_root().join(file));
-    }
+/// Where the registration keeps its hooks entry, under the daemon's home directory.
+const HOOKS_FILE: &str = "hc/hooks.json";
 
-    let mut next = sandbox.start().await;
-    let info = listed(&mut next, &sandbox, &window_id).await;
-    assert_eq!(
-        info.status,
-        WindowStatus::Unknown,
-        "a window taken back starts Unknown"
+/// A registration whose only owned entry is a hooks file: a launch counts on the hooks
+/// only while that file holds the entry.
+const REGISTRATION: &str = "\n[mcp_registration]\nadd = [\"mcp\", \"add\", \"{server}\"]\n\
+     remove = [\"mcp\", \"remove\", \"{server}\"]\n\n\
+     [mcp_registration.status]\nfile = \"hc/mcp.json\"\nformat = \"json\"\n\
+     command = \"/mcpServers/{server}/command\"\n\n\
+     [mcp_registration.json_entry]\nfile = \"hc/hooks.json\"\n\n\
+     [mcp_registration.json_entry.entries]\n\
+     \"/hooks/{server}\" = { Stop = [{ type = \"command\", command = \"run-hook\" }] }\n";
+
+/// The name the hand-written launch record of an older holder gives its window.
+const OLD_RECORD_NAME: &str = "old-record";
+
+/// The home directory every daemon of the sandbox resolves, on every OS.
+fn daemon_home(sandbox: &Sandbox) -> PathBuf {
+    sandbox.tree.make_dir("home")
+}
+
+/// Writes [`HOOKED_PROFILE`]: the script child logging to `log`, under the control
+/// definition so its window can take part in chat, with a `[delivery]` table and
+/// [`REGISTRATION`]. Returns the definitions' directory the sandbox's daemons read.
+fn write_hooked_profile(sandbox: &Sandbox, log: &Path) -> PathBuf {
+    let detections = sandbox.tree.make_dir("hooked-detections");
+    common::write_control_definition(&detections);
+    let argv = [holder_child(), "script".to_owned(), utf8(log).to_owned()]
+        .iter()
+        .map(|arg| format!("'{arg}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    common::write_profile(
+        &sandbox.profiles_dir,
+        HOOKED_PROFILE,
+        &format!(
+            "schema = 1\ndisplay_name = \"{HOOKED_PROFILE}\"\ndetection = \"{}\"\n\n\
+             [command]\ndefault = [{argv}]\n\n[delivery]\nwake = \"none\"\n{REGISTRATION}",
+            common::CONTROL_DETECTION_NAME
+        ),
     );
+    detections
+}
+
+/// Writes the hooks entry [`REGISTRATION`] owns for the sandbox's instance, as
+/// registering the CLI would.
+fn write_registered_hooks(sandbox: &Sandbox) {
+    let target =
+        yagura_daemon::mcp_registration::RegistrationTarget::for_instance(Some(&sandbox.instance));
+    let path = daemon_home(sandbox).join(HOOKS_FILE);
+    std::fs::create_dir_all(path.parent().expect("a parent")).unwrap();
+    let entry = serde_json::json!({
+        "hooks": { target.server(): { "Stop": [{ "type": "command", "command": "run-hook" }] } }
+    });
+    std::fs::write(&path, entry.to_string()).unwrap();
+}
+
+/// Starts a daemon of the sandbox whose home is [`daemon_home`], which reads the
+/// definitions in `detections`, gives the windows it opens [`TOKEN`] and lets a handoff
+/// through without a human.
+async fn start_hooked(sandbox: &Sandbox, detections: &Path) -> RunningDaemon {
+    let playbook = sandbox
+        .tree
+        .make_dir("hooked-playbook")
+        .join("playbook.toml");
+    std::fs::write(
+        &playbook,
+        "[approval]\nauto_approve = [\"open_window\", \"close_window\", \"send_handoff\"]\n",
+    )
+    .unwrap();
+    let home = daemon_home(sandbox);
+    sandbox
+        .start_from(&[
+            ("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN),
+            ("YAGURA_PLAYBOOK", utf8(&playbook)),
+            ("YAGURA_DETECTION_DIR", utf8(detections)),
+            (
+                if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+                utf8(&home),
+            ),
+        ])
+        .await
+}
+
+/// The answer to a handoff sent to `window_id`.
+async fn handoff_answer(daemon: &mut RunningDaemon, window_id: &str) -> DaemonMessage {
+    send(
+        &mut daemon.client,
+        &ClientMessage::SendHandoff {
+            window_id: Some(window_id.to_owned()),
+            profile: None,
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            reference: "window-recovery".to_owned(),
+            note: "HOOK-ROUTE-NOTE".to_owned(),
+        },
+    )
+    .await;
+    read_response(&mut daemon.client).await
+}
+
+/// Asserts a handoff to `window_id` is answered at once as one nothing could deliver.
+async fn assert_undeliverable(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    window_id: &str,
+    what: &str,
+) {
+    match handoff_answer(daemon, window_id).await {
+        DaemonMessage::HandoffSent {
+            delivery: HandoffDelivery::UndeliveredNoDelivery,
+            opened: false,
+            ..
+        } => {}
+        other => panic!(
+            "{what}: a handoff to a window whose hooks were left out must be answered at once \
+             as undelivered_no_delivery, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+}
+
+/// The ids of the windows the `main` room lists as its participants.
+async fn main_roster(daemon: &mut RunningDaemon) -> Vec<String> {
+    send(
+        &mut daemon.client,
+        &ClientMessage::ReadChat {
+            room_id: Some("main".to_owned()),
+            after_seq: Some(0),
+            limit: None,
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::ChatMessages { roster, .. } => roster
+            .into_iter()
+            .map(|participant| participant.window_id)
+            .collect(),
+        other => panic!("expected chat_messages, got {other:?}"),
+    }
+}
+
+/// Asserts the `main` room lists `takes_part` and none of `left_out`.
+async fn assert_roster(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    takes_part: &[&str],
+    left_out: &[&str],
+    what: &str,
+) {
+    let roster = main_roster(daemon).await;
+    for window_id in takes_part {
+        assert!(
+            roster.iter().any(|id| id == window_id),
+            "{what}: the window {window_id} whose hooks reach its CLI takes part in chat: \
+             {roster:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+    }
+    for window_id in left_out {
+        assert!(
+            !roster.iter().any(|id| id == window_id),
+            "{what}: the window {window_id} whose hooks were left out takes no part in chat: \
+             {roster:?}"
+        );
+    }
+}
+
+/// Waits until the window taken back without a row has the name its launch record keeps,
+/// so it is the window built from the record's values.
+async fn until_named(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str, name: &str) {
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    let mut info = info;
+    let mut info = listed(daemon, sandbox, window_id).await;
     while info.name != name {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the window never took the name its launch record keeps ({name:?}): {info:?}"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        info = listed(&mut next, &sandbox, &window_id).await;
+        info = listed(daemon, sandbox, window_id).await;
     }
+}
+
+/// [`launch_record`] as a holder older than the hook route a record carries hands it
+/// back: its window's values name [`HOOKED_PROFILE`], and no route.
+fn old_launch_record(window_id: &str, token: &str) -> String {
+    let mut record: serde_json::Value = serde_json::from_str(&launch_record(window_id, token))
+        .expect("the hand-written launch record is JSON");
+    record["window"]["profile"] = HOOKED_PROFILE.into();
+    record["window"]["name"] = OLD_RECORD_NAME.into();
+    record.to_string()
+}
+
+/// A window whose holder runs but whose row is gone (here, with the whole database) is
+/// taken back all the same: listed under its id at once, and given its values from the
+/// launch record its holder keeps once the holder lets the next daemon in, with its
+/// token and the hook route its open settled. A record of an older holder, which names
+/// no route, is read as hooks left out. Closing it ends its holder and leaves none of
+/// its files.
+#[tokio::test]
+async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
+    let sandbox = Sandbox::new("recover-rowless");
+    let log = sandbox.tree.path().join("input.log");
+    let detections = write_hooked_profile(&sandbox, &log);
+
+    let mut first = start_hooked(&sandbox, &detections).await;
+    // Opened before the hooks entry is there, so its hooks are left out.
+    let window_id = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    write_registered_hooks(&sandbox);
+    let registered = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    let older = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    assert_roster(
+        &mut first,
+        &sandbox,
+        &[&registered],
+        &[&window_id],
+        "the fixture, as opened",
+    )
+    .await;
+    let name = listed(&mut first, &sandbox, &window_id).await.name;
+    let registered_name = listed(&mut first, &sandbox, &registered).await.name;
+    let record = record_of(&sandbox, &window_id);
+    let older_record = record_of(&sandbox, &older);
+    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    first.kill_keeping_windows();
+    for file in ["yagura.db", "yagura.db-wal", "yagura.db-shm"] {
+        let _ = std::fs::remove_file(sandbox.data_root().join(file));
+    }
+    let fakes = sandbox.tree.make_dir("fake");
+    let older_launch = fakes.join("older.record");
+    std::fs::write(&older_launch, old_launch_record(&older, TOKEN)).unwrap();
+    let mut older_fake = replace_holder_with(
+        &sandbox,
+        &older_record,
+        &["gate", utf8(&older_launch)],
+        fakes.join("older.log"),
+    )
+    .await;
+
+    let mut next = start_hooked(&sandbox, &detections).await;
+    let info = listed(&mut next, &sandbox, &window_id).await;
+    assert_eq!(
+        info.status,
+        WindowStatus::Unknown,
+        "a window taken back starts Unknown"
+    );
+    until_named(&mut next, &sandbox, &window_id, &name).await;
+    until_named(&mut next, &sandbox, &registered, &registered_name).await;
+    listed(&mut next, &sandbox, &older).await;
+    older_fake
+        .wait_logged("the next daemon's Hello", hello_logged)
+        .await;
+    older_fake.answer("welcome");
+    until_named(&mut next, &sandbox, &older, OLD_RECORD_NAME).await;
+    assert_undeliverable(
+        &mut next,
+        &sandbox,
+        &window_id,
+        "taken back from its launch record",
+    )
+    .await;
+    assert_undeliverable(
+        &mut next,
+        &sandbox,
+        &older,
+        "taken back from an older holder's launch record",
+    )
+    .await;
+    assert_roster(
+        &mut next,
+        &sandbox,
+        &[&registered],
+        &[&window_id, &older],
+        "taken back from launch records",
+    )
+    .await;
     assert_eq!(
         status_event_refusal(&mut next, &window_id, TOKEN).await,
         None,
@@ -1101,6 +1344,46 @@ async fn a_window_without_a_row_is_taken_back_from_its_holders_launch_record() {
     }
     let left = holder_files(&sandbox, &window_id);
     assert!(left.is_empty(), "closing the window left {left:?}");
+}
+
+/// A window taken back with its row keeps the hook route its open settled, not the one
+/// its profile plans or its registration holds by then: one opened while the hooks entry
+/// was not there is still answered at once as one nothing reaches and takes no part in
+/// chat, though the entry is there when the next daemon takes it back, and one opened
+/// with the entry still takes part.
+#[tokio::test]
+async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
+    let sandbox = Sandbox::new("recover-hooks");
+    let log = sandbox.tree.path().join("input.log");
+    let detections = write_hooked_profile(&sandbox, &log);
+
+    let mut first = start_hooked(&sandbox, &detections).await;
+    let left_out = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    write_registered_hooks(&sandbox);
+    let registered = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    assert_undeliverable(&mut first, &sandbox, &left_out, "the fixture, as opened").await;
+    assert_roster(
+        &mut first,
+        &sandbox,
+        &[&registered],
+        &[&left_out],
+        "the fixture, as opened",
+    )
+    .await;
+    first.kill_keeping_windows();
+
+    let mut next = start_hooked(&sandbox, &detections).await;
+    listed(&mut next, &sandbox, &left_out).await;
+    listed(&mut next, &sandbox, &registered).await;
+    assert_undeliverable(&mut next, &sandbox, &left_out, "taken back with its row").await;
+    assert_roster(
+        &mut next,
+        &sandbox,
+        &[&registered],
+        &[&left_out],
+        "taken back with their rows",
+    )
+    .await;
 }
 
 /// The session store of the sandbox's instance.

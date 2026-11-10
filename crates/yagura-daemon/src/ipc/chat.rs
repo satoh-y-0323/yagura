@@ -1484,7 +1484,7 @@ pub(super) fn settle_kept_deliveries(
 ) {
     let chat = Arc::clone(chat);
     let broker = Arc::clone(broker);
-    registry.set_kept_parcels_hook(Arc::new(move |entry: &Arc<WindowEntry>| {
+    registry.add_kept_parcels_hook(Arc::new(move |entry: &Arc<WindowEntry>| {
         if !chat.store.is_enabled() {
             return;
         }

@@ -1212,11 +1212,14 @@ impl IpcServer {
     /// Answers for what the store kept for the windows taken back as the
     /// daemon starts: each window's report inbox queues its reports, and the
     /// chat posts in each window's inbox have their deliveries settled once
-    /// taken. Called once, before the server accepts connections.
+    /// taken, as each entry of the window is built (a placeholder made whole
+    /// later included). Called once, before the server accepts connections.
     pub async fn restore_kept_parcels(&self) {
-        for (window_id, kept) in crate::recovery::kept_reports(&self.registry).await {
-            self.reports.restore(&window_id, kept);
-        }
+        self.reports
+            .keep_unbound(crate::recovery::kept_reports(&self.registry).await);
+        let reports = Arc::clone(&self.reports);
+        self.registry
+            .add_kept_parcels_hook(Arc::new(move |entry| reports.bind_taken_back(entry)));
         chat::settle_kept_deliveries(&self.registry, &self.chat, &self.broker);
     }
 
