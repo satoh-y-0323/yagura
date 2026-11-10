@@ -42,12 +42,9 @@ impl HeldRead {
     /// instead. `by_door` when its door confirmed it.
     async fn settle(self, by_door: bool) -> bool {
         #[cfg(feature = "fault-injection")]
-        if self.hold.keeps_rows() {
-            use crate::fault_point::FaultPoint;
-            self.faults.reach(FaultPoint::ParcelEndHalfSettled);
-            if by_door {
-                self.faults.reach(FaultPoint::DoorBeforeSettle);
-            }
+        if by_door && self.hold.keeps_rows() {
+            self.faults
+                .reach(crate::fault_point::FaultPoint::DoorBeforeSettle);
         }
         #[cfg(not(feature = "fault-injection"))]
         let _ = by_door;

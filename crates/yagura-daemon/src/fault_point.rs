@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::parcel_store::ParcelStore;
+use crate::parcel_store::{ParcelStore, WaitedStore};
 
 /// The variable a daemon process reads the name of its armed point from.
 pub const POINT_ENV: &str = "YAGURA_FAULT_POINT";
@@ -33,7 +33,8 @@ pub enum FaultPoint {
     /// fault is released.
     WriteFails,
     /// A parcel's end has removed its kept row, and the chat delivery it
-    /// carried is not settled yet. The daemon ends there.
+    /// carried is not settled yet, inside the one change that does both. The
+    /// daemon ends there.
     ParcelEndHalfSettled,
     /// A task window's report is in the plan ledger, and its parent's report
     /// inbox does not hold it yet. The daemon ends there.
@@ -141,8 +142,9 @@ struct Armed {
     released_watch: watch::Sender<bool>,
     reached: watch::Sender<bool>,
     /// Waited on before the daemon ends at a point, so what the daemon handed
-    /// its writer before the point is written and nothing after it.
-    store: Mutex<Option<ParcelStore>>,
+    /// its writer before the point is written and nothing after it. It does
+    /// not keep the writer, which holds these points itself.
+    store: Mutex<Option<WaitedStore>>,
 }
 
 impl FaultPoints {
@@ -218,27 +220,24 @@ impl FaultPoints {
         let _ = reached.wait_for(|reached| *reached).await;
     }
 
-    /// Hands the parcel writer of `store` what it acts on, or keeps `store` to
-    /// be waited on before the daemon ends at its point.
+    /// Hands the parcel writer of `store` what it acts on, and keeps `store`
+    /// to be waited on before the daemon ends at its point.
     pub(crate) fn attach(&self, store: &ParcelStore) {
         let Some(armed) = &self.armed else {
             return;
         };
         if armed.point.ends_daemon() {
-            *armed.store.lock().unwrap_or_else(PoisonError::into_inner) = Some(store.clone());
-        } else {
-            store.arm_writer(self.clone());
+            *armed.store.lock().unwrap_or_else(PoisonError::into_inner) = Some(store.waited());
         }
+        store.arm_writer(self.clone());
     }
 
-    /// Ends the daemon when `point` is the armed one that ends it.
+    /// Ends the daemon when `point` is the armed one that ends it, once its
+    /// parcel writer has written what was handed to it before.
     pub(crate) fn reach(&self, point: FaultPoint) {
-        let Some(armed) = self.armed.as_ref().filter(|armed| armed.point == point) else {
+        let Some(armed) = self.ending_at(point) else {
             return;
         };
-        if !point.ends_daemon() {
-            return;
-        }
         armed.reached.send_replace(true);
         let store = armed
             .store
@@ -248,11 +247,24 @@ impl FaultPoints {
         if let Some(store) = store {
             store.kept_blocking();
         }
-        tracing::warn!(
-            point = point.name(),
-            "fault point reached; ending the daemon"
-        );
-        std::process::abort();
+        end_daemon(point);
+    }
+
+    /// [`Self::reach`] on the parcel writer's own thread, which cannot wait
+    /// for itself: it has done every command handed to it before the one at
+    /// hand, whose transaction never commits.
+    pub(crate) fn reach_on_writer(&self, point: FaultPoint) {
+        let Some(armed) = self.ending_at(point) else {
+            return;
+        };
+        armed.reached.send_replace(true);
+        end_daemon(point);
+    }
+
+    fn ending_at(&self, point: FaultPoint) -> Option<&Armed> {
+        self.armed
+            .as_deref()
+            .filter(|armed| armed.point == point && point.ends_daemon())
     }
 
     /// Whether the parcel writer's next write fails.
@@ -312,6 +324,23 @@ impl FaultPoints {
         // The sender lives in `armed`, which this borrow keeps.
         let _ = released.wait_for(|released| *released).await;
     }
+}
+
+fn end_daemon(point: FaultPoint) -> ! {
+    tracing::warn!(
+        point = point.name(),
+        "fault point reached; ending the daemon"
+    );
+    std::process::abort();
+}
+
+/// The error a write fails with while [`FaultPoint::WriteFails`] holds: the
+/// one a disk that cannot be written returns.
+pub(crate) fn simulated_write_failure() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+        Some("simulated write failure".to_owned()),
+    )
 }
 
 impl Armed {

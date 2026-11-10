@@ -1374,7 +1374,7 @@ fn post_in_one_transaction(
                 #[cfg(feature = "fault-injection")]
                 if faults.write_fails() {
                     return Err(StoreError::Sqlite(
-                        crate::parcel_store::simulated_write_failure(),
+                        crate::fault_point::simulated_write_failure(),
                     ));
                 }
                 shares.push(Share::Row {

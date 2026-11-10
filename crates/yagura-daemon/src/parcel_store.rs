@@ -17,7 +17,7 @@
 //! own, like the window table's. A write's transaction holds no other wait:
 //! what it tells is acted on once it has committed.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Params, params};
@@ -218,12 +218,41 @@ impl Command {
 /// The writer of one database's kept parcels.
 #[derive(Clone)]
 pub(crate) struct ParcelStore {
-    commands: mpsc::Sender<Command>,
+    commands: Arc<mpsc::Sender<Command>>,
 }
 
 impl std::fmt::Debug for ParcelStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParcelStore").finish_non_exhaustive()
+    }
+}
+
+/// A [`ParcelStore`] waited on without keeping its writer: the writer's own
+/// fault points hold it.
+#[cfg(feature = "fault-injection")]
+#[derive(Clone)]
+pub(crate) struct WaitedStore(std::sync::Weak<mpsc::Sender<Command>>);
+
+#[cfg(feature = "fault-injection")]
+impl std::fmt::Debug for WaitedStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaitedStore").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+impl WaitedStore {
+    /// Returns once every change sent before it is written (or failed),
+    /// blocking the calling thread; at once when the writer is gone.
+    pub(crate) fn kept_blocking(&self) {
+        let Some(commands) = self.0.upgrade() else {
+            return;
+        };
+        let (reply, written) = mpsc::channel();
+        if commands.send(Command::KeptBlocking { reply }).is_ok() {
+            drop(commands);
+            let _ = written.recv();
+        }
     }
 }
 
@@ -234,21 +263,19 @@ impl ParcelStore {
     pub(crate) fn spawn(conn: Connection, on_shown: OnShown) -> Self {
         let (commands, received) = mpsc::channel::<Command>();
         std::thread::spawn(move || write_parcels(&conn, &received, &on_shown));
-        Self { commands }
+        Self {
+            commands: Arc::new(commands),
+        }
     }
 
     fn send(&self, command: Command) -> bool {
         self.commands.send(command).is_ok()
     }
 
-    /// Returns once every change sent before it is written (or failed),
-    /// blocking the calling thread.
+    /// This store, to wait on without keeping its writer.
     #[cfg(feature = "fault-injection")]
-    pub(crate) fn kept_blocking(&self) {
-        let (reply, written) = mpsc::channel();
-        if self.send(Command::KeptBlocking { reply }) {
-            let _ = written.recv();
-        }
+    pub(crate) fn waited(&self) -> WaitedStore {
+        WaitedStore(Arc::downgrade(&self.commands))
     }
 
     /// Has the writer act out `faults` from its next command on.
@@ -491,22 +518,79 @@ impl WriteLog {
     }
 }
 
-fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown: &OnShown) {
-    let mut log = WriteLog::default();
-    // A push's settling or undoing that failed: its submit key went out (or
-    // did not) regardless, so it is written again behind the next write that
-    // succeeds.
-    let mut owed: Vec<Owed> = Vec::new();
+/// The parcel writer: its connection, and how its writes have gone.
+struct Writer<'a> {
+    conn: &'a Connection,
+    log: WriteLog,
+    /// A push's settling or undoing that failed: its submit key went out (or
+    /// did not) regardless, so it is written again behind the next write that
+    /// succeeds.
+    owed: Vec<Owed>,
     #[cfg(feature = "fault-injection")]
-    let mut faults = crate::fault_point::FaultPoints::default();
+    faults: crate::fault_point::FaultPoints,
+    /// Whether the armed fault fails the writes of the command at hand.
+    #[cfg(feature = "fault-injection")]
+    failing: bool,
+}
+
+impl Writer<'_> {
+    /// Runs one write of the command at hand and tells how it went. Every
+    /// write of the writer goes through here, the one place a fault fails it.
+    fn write(&mut self, write: impl FnOnce(&Connection) -> rusqlite::Result<usize>) -> Written {
+        #[cfg(feature = "fault-injection")]
+        if self.failing {
+            return self
+                .log
+                .written_as(Err(crate::fault_point::simulated_write_failure()));
+        }
+        self.log.written_as(write(self.conn))
+    }
+
+    fn run<P: Params>(&mut self, sql: &'static str, params: P) -> Written {
+        self.write(|conn| conn.execute_fixed(sql, params))
+    }
+
+    /// Writes `write` in one transaction, calling a settling's `settled` once
+    /// it commits, or keeps it owed when that fails.
+    fn write_owed(&mut self, write: Owed) {
+        #[cfg(feature = "fault-injection")]
+        let faults = self.faults.clone();
+        let half_settled = move || {
+            #[cfg(feature = "fault-injection")]
+            faults.reach_on_writer(crate::fault_point::FaultPoint::ParcelEndHalfSettled);
+        };
+        let written = match &write {
+            Owed::Settle { rows, .. } => {
+                self.write(|conn| settle_push_rows(conn, rows, &half_settled))
+            }
+            Owed::Undo(rows) => self.write(|conn| undo_push_rows(conn, rows)),
+        };
+        match (written, write) {
+            (Written::Rows(_), Owed::Settle { settled, .. }) => settled(),
+            (Written::Rows(_), Owed::Undo(_)) => {}
+            (Written::Failed, write) => self.owed.push(write),
+        }
+    }
+}
+
+fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown: &OnShown) {
+    let mut writer = Writer {
+        conn,
+        log: WriteLog::default(),
+        owed: Vec::new(),
+        #[cfg(feature = "fault-injection")]
+        faults: crate::fault_point::FaultPoints::default(),
+        #[cfg(feature = "fault-injection")]
+        failing: false,
+    };
     while let Ok(command) = received.recv() {
         #[cfg(feature = "fault-injection")]
-        let fails = command.writes() && {
-            faults.pause_writer();
-            faults.write_fails()
-        };
-        #[cfg(not(feature = "fault-injection"))]
-        let fails = false;
+        {
+            writer.failing = command.writes() && {
+                writer.faults.pause_writer();
+                writer.faults.write_fails()
+            };
+        }
         match command {
             Command::Keep {
                 window_id,
@@ -515,9 +599,7 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                let outcome = log.written_as(run(
-                    conn,
-                    fails,
+                let outcome = writer.run(
                     KEEP_PARCEL_SQL,
                     params![
                         window_id,
@@ -526,19 +608,14 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                         i64::from(parcel.notice),
                         parcel.text
                     ],
-                ));
+                );
                 if written(outcome) {
                     on_shown(&window_id);
                 }
             }
             Command::Forget { window_id, seqs } => {
                 for seq in seqs {
-                    log.written_as(run(
-                        conn,
-                        fails,
-                        FORGET_PARCEL_AT_SQL,
-                        params![window_id, seq],
-                    ));
+                    writer.run(FORGET_PARCEL_AT_SQL, params![window_id, seq]);
                 }
             }
             Command::Load { window_id, reply } => {
@@ -553,17 +630,15 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 reports,
                 written,
             } => {
-                let outcome = log.written_as(keep_report_rows(conn, fails, &window_id, &reports));
+                let outcome = writer.write(|conn| keep_report_rows(conn, &window_id, &reports));
                 let _ = written.send(outcome);
             }
             Command::ForgetReports { window_id, seqs } => {
                 for seq in seqs {
-                    log.written_as(run(
-                        conn,
-                        fails,
+                    writer.run(
                         "DELETE FROM report_parcels WHERE window_id = ?1 AND seq = ?2",
                         params![window_id, seq],
-                    ));
+                    );
                 }
             }
             Command::LoadReports { window_id, reply } => {
@@ -580,11 +655,11 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             } => {
                 // Kept only while the window has a row, which takes it along
                 // when it goes.
-                log.written_as(run(conn, fails, KEEP_MARK_SQL, params![window_id, body]));
+                writer.run(KEEP_MARK_SQL, params![window_id, body]);
                 let _ = reply.send(());
             }
             Command::Unmark { window_id, body } => {
-                log.written_as(run(conn, fails, FORGET_MARK_SQL, params![window_id, body]));
+                writer.run(FORGET_MARK_SQL, params![window_id, body]);
             }
             Command::LoadMarks { window_id, reply } => {
                 let marks = read_marks(conn, &window_id).unwrap_or_else(|error| {
@@ -600,25 +675,21 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
             } => {
                 // A settling of the same rows takes the place of an undoing
                 // still owed: the two cancel out.
-                owed.retain(|owed| !matches!(owed, Owed::Undo(undo) if undo.shares_a_row(&rows)));
-                write_owed(
-                    conn,
-                    fails,
-                    &mut log,
-                    &mut owed,
-                    Owed::Settle { rows, settled },
-                );
+                writer
+                    .owed
+                    .retain(|owed| !matches!(owed, Owed::Undo(undo) if undo.shares_a_row(&rows)));
+                writer.write_owed(Owed::Settle { rows, settled });
                 let _ = reply.send(());
             }
             Command::UnsettlePush { rows, reply } => {
-                let before = owed.len();
-                owed.retain(|owed| {
+                let before = writer.owed.len();
+                writer.owed.retain(|owed| {
                     !matches!(owed, Owed::Settle { rows: settle, .. }
                         if settle.is_push(&rows.window_id, rows.push_id))
                 });
                 // A settling that never committed has nothing to undo.
-                if owed.len() == before {
-                    write_owed(conn, fails, &mut log, &mut owed, Owed::Undo(rows));
+                if writer.owed.len() == before {
+                    writer.write_owed(Owed::Undo(rows));
                 }
                 let _ = reply.send(());
             }
@@ -627,44 +698,25 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 let _ = reply.send(());
             }
             #[cfg(feature = "fault-injection")]
-            Command::ArmWriter(armed) => faults = armed,
+            Command::ArmWriter(armed) => writer.faults = armed,
         }
-        if std::mem::take(&mut log.wrote) && !owed.is_empty() {
-            for write in std::mem::take(&mut owed) {
-                write_owed(conn, fails, &mut log, &mut owed, write);
+        if std::mem::take(&mut writer.log.wrote) && !writer.owed.is_empty() {
+            for write in std::mem::take(&mut writer.owed) {
+                writer.write_owed(write);
             }
-            log.wrote = false;
+            writer.log.wrote = false;
         }
-    }
-}
-
-/// Writes `write` in one transaction, calling a settling's `settled` once it
-/// commits, or keeps it in `owed` when that fails.
-fn write_owed(
-    conn: &Connection,
-    fails: bool,
-    log: &mut WriteLog,
-    owed: &mut Vec<Owed>,
-    write: Owed,
-) {
-    let result = if fails {
-        Err(simulated_write_failure())
-    } else {
-        match &write {
-            Owed::Settle { rows, .. } => settle_push_rows(conn, rows),
-            Owed::Undo(rows) => undo_push_rows(conn, rows),
-        }
-    };
-    match (log.written_as(result), write) {
-        (Written::Rows(_), Owed::Settle { settled, .. }) => settled(),
-        (Written::Rows(_), Owed::Undo(_)) => {}
-        (Written::Failed, write) => owed.push(write),
     }
 }
 
 /// Forgets what `push` names in one transaction, returning how many rows it
-/// changed.
-fn settle_push_rows(conn: &Connection, push: &PushRows) -> rusqlite::Result<usize> {
+/// changed. `half_settled` runs inside it, after each chat parcel's row is
+/// forgotten and before its delivery is recorded.
+fn settle_push_rows(
+    conn: &Connection,
+    push: &PushRows,
+    half_settled: &dyn Fn(),
+) -> rusqlite::Result<usize> {
     let at_ms = i64::try_from(crate::ipc::now_ms()).unwrap_or(i64::MAX);
     let window_id = push.window_id.as_str();
     let tx = conn.unchecked_transaction()?;
@@ -684,7 +736,7 @@ fn settle_push_rows(conn: &Connection, push: &PushRows) -> rusqlite::Result<usiz
                     outcome: DeliveryOutcome::Taken,
                     at_ms,
                 };
-                rows += usize::from(settle_parcel_end_in(&tx, &end, || {})?);
+                rows += usize::from(settle_parcel_end_in(&tx, &end, half_settled)?);
             }
         }
     }
@@ -732,31 +784,13 @@ const KEEP_MARK_SQL: &str = "INSERT OR IGNORE INTO delivery_marks (window_id, bo
 /// Forgets the delivery mark of one body in its window.
 const FORGET_MARK_SQL: &str = "DELETE FROM delivery_marks WHERE window_id = ?1 AND body = ?2";
 
-/// Runs one write, or fails it as a disk that cannot be written would when
-/// `fails`.
-fn run<P: Params>(
-    conn: &Connection,
-    fails: bool,
-    sql: &'static str,
-    params: P,
-) -> rusqlite::Result<usize> {
-    if fails {
-        return Err(simulated_write_failure());
-    }
-    conn.execute_fixed(sql, params)
-}
-
 /// Writes `reports` for `window_id` in one transaction, returning how many
 /// rows it wrote.
 fn keep_report_rows(
     conn: &Connection,
-    fails: bool,
     window_id: &str,
     reports: &[(i64, String)],
 ) -> rusqlite::Result<usize> {
-    if fails {
-        return Err(simulated_write_failure());
-    }
     let tx = conn.unchecked_transaction()?;
     let mut rows = 0;
     for (seq, report_json) in reports {
@@ -822,15 +856,6 @@ pub(crate) fn keep_report_row(
          (SELECT 1 FROM windows WHERE window_id = ?1) \
          ON CONFLICT(window_id, seq) DO UPDATE SET report_json = excluded.report_json",
         params![window_id, seq, report_json],
-    )
-}
-
-/// The error a write fails with under the `write_fails` fault point: the one
-/// a disk that cannot be written returns.
-pub(crate) fn simulated_write_failure() -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-        Some("simulated write failure".to_owned()),
     )
 }
 
