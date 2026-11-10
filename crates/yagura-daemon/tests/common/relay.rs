@@ -264,21 +264,3 @@ pub fn tool_json(answer: &Value) -> Value {
         .unwrap_or_else(|| panic!("a tool result carries one text content, got {answer}"));
     serde_json::from_str(text).unwrap_or_else(|err| panic!("the text is JSON ({err}): {text}"))
 }
-
-/// The word an error answer leads with, in either shape an error takes: a
-/// `tools/call` result with `isError` and one text content, or a JSON-RPC
-/// error. `None` for any other answer.
-pub fn error_word(answer: &Value) -> Option<String> {
-    let leading = |text: &str| text.split(':').next().map(str::to_string);
-    if let Some(error) = answer.get("error") {
-        if let Some(code) = error["data"]["code"].as_str() {
-            return Some(code.to_string());
-        }
-        return error["message"].as_str().and_then(leading);
-    }
-    let result = answer.get("result")?;
-    if result.get("isError").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    result["content"][0]["text"].as_str().and_then(leading)
-}

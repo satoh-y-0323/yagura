@@ -18,8 +18,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use common::relay::{
-    RelayClient, cancelled_line, discover_line, error_word, hello, initialize_line,
-    initialized_line, roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
+    RelayClient, cancelled_line, discover_line, hello, initialize_line, initialized_line,
+    roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
 };
 use common::{
     Harness, SubmitDefinitionInput, VALID_TOKEN, approver_base_config, policy, unique_temp_dir,
@@ -34,6 +34,7 @@ use yagura_protocol::relay::{
 };
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::process;
+use yagura_test_support::relay_stdio::tool_call_error;
 
 /// Well-formed, but not the token the harness gives its windows.
 const WRONG_TOKEN: &str = "fedcba9876543210fedcba9876543210";
@@ -446,10 +447,10 @@ async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resourc
         .await;
     let (answer, before) = client.answer_with_preceding(seq).await;
 
+    let (word, text) = tool_call_error(&answer);
     assert_eq!(
-        error_word(&answer).as_deref(),
-        Some(RESOURCE_EXHAUSTED),
-        "the request past the limit must be refused, got {answer}"
+        word, RESOURCE_EXHAUSTED,
+        "the request past the limit must be refused, got {text}"
     );
     let answered_early: Vec<&Value> = before
         .iter()
@@ -465,9 +466,19 @@ async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resourc
 // Frames that break the contract
 // =====================================================================
 
+/// A `relay_in` frame as the IPC framing carries it.
+fn relay_in_bytes(line: String, seq: Option<u64>) -> Vec<u8> {
+    let body = serde_json::to_vec(&RelayFrame::In { line, seq }).unwrap();
+    yagura_protocol::frame_encode(&body)
+}
+
+/// A `relay_in` line is one line: a newline or a carriage return in it breaks
+/// the contract, whatever the receiver would make of it.
 #[tokio::test]
 async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
     let h = Harness::start("relay-bad-frames", config()).await;
+    let tools_list =
+        |id: u64| json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}).to_string();
 
     let oversized = u32::try_from(MAX_FRAME_BODY_LEN + 1)
         .unwrap()
@@ -475,10 +486,14 @@ async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
         .to_vec();
     let untyped = yagura_protocol::frame_encode(br#"{"line":"{}"}"#);
     let unreadable = yagura_protocol::frame_encode(b"not a relay frame");
+    let two_requests = relay_in_bytes(format!("{}\n{}", tools_list(1), tools_list(2)), None);
+    let carriage_return = relay_in_bytes(tools_list(1).replacen(',', ",\r", 1), Some(1));
     for (what, bytes) in [
         ("a frame over the size limit", oversized),
         ("a frame without a type", untyped),
         ("a body that is no relay frame", unreadable),
+        ("a relay_in line holding two requests", two_requests),
+        ("a relay_in line holding a carriage return", carriage_return),
     ] {
         let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
         initialize(&mut client).await;

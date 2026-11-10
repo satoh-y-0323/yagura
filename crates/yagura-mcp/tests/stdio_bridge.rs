@@ -702,8 +702,12 @@ async fn a_cancelled_requests_receipt_answer_is_not_written_and_is_reported_drop
     );
 }
 
+/// A line the relay cannot carry is too large for a frame, or holds a carriage
+/// return: a `relay_in` line is one line, and the relay does not leave the
+/// daemon's reader to split it.
 #[tokio::test]
-async fn a_line_too_large_for_a_frame_is_answered_invalid_request_alone_and_other_requests_go_on() {
+async fn a_line_the_relay_cannot_carry_is_answered_invalid_request_alone_and_other_requests_go_on()
+{
     const INSTANCE: &str = "mcprelay-r5size";
     let mut daemon = FakeDaemon::bind(INSTANCE).await;
     let mut relay = window_relay(INSTANCE);
@@ -727,6 +731,22 @@ async fn a_line_too_large_for_a_frame_is_answered_invalid_request_alone_and_othe
         }))
         .await;
 
+    let with_carriage_return = |line: Value| line.to_string().replacen(',', ",\r", 1);
+    relay
+        .send_raw(&with_carriage_return(tool_call_line(
+            4,
+            "list_windows",
+            json!({}),
+        )))
+        .await;
+    relay
+        .send_raw(&with_carriage_return(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {},
+        })))
+        .await;
+
     relay
         .send(&tool_call_line(3, "list_windows", json!({})))
         .await;
@@ -734,11 +754,14 @@ async fn a_line_too_large_for_a_frame_is_answered_invalid_request_alone_and_othe
     assert_eq!(
         request["id"],
         json!(3),
-        "neither oversized line is carried; the next request is"
+        "none of the lines that cannot be carried is carried; the next request is"
     );
     let third = conn.answer(&request, seq, false).await;
     let first = conn.answer(&pending, pending_seq, false).await;
-    assert_eq!(answers(&mut relay, &[1, 3]).await, vec![first, third]);
+    let got = answers(&mut relay, &[1, 3, 4]).await;
+    assert_eq!(got[..2], [first, third]);
+    let (word, text) = tool_call_error(&got[2]);
+    assert_eq!(word, INVALID_REQUEST, "{text}");
 }
 
 // --- R17: a window's relay catches up by itself -----------------------------

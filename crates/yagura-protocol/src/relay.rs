@@ -44,6 +44,21 @@ pub const INVALID_REQUEST: &str = "invalid_request";
 /// The daemon refused the relay's session ([`RelayFrame::Refused`]).
 pub const RELAY_REFUSED: &str = "relay_refused";
 
+/// The most lines of one kind (requests, or notifications) a side holds while
+/// it cannot hand them on: a relay while no daemon carries them, and a daemon
+/// while its MCP server has not yet chosen how the session runs.
+pub const HELD_LINES_MAX: usize = 16;
+
+/// Whether `line` is one line, as [`RelayFrame::In::line`] and the lines of
+/// [`RelayResume::opening`] must be: it holds no `\n` and no `\r`.
+///
+/// `\r` is refused too so that where one line ends does not rest on how a
+/// receiver, or a later version of one, splits lines.
+#[must_use]
+pub fn is_one_line(line: &str) -> bool {
+    !line.contains(['\n', '\r'])
+}
+
 /// One frame of the relay contract.
 ///
 /// Each variant's doc names its sender: "relay" is the window's relay, and
@@ -89,7 +104,9 @@ pub enum RelayFrame {
     /// Sent by the relay: one JSON-RPC line from the CLI.
     #[serde(rename = "relay_in")]
     In {
-        /// The line as the CLI wrote it, without its newline.
+        /// The line as the CLI wrote it, without its newline. It is one line
+        /// ([`is_one_line`]): a daemon closes a session whose relay sends one
+        /// that is not, and a relay does not send a CLI line that is not.
         line: String,
         /// The relay's sequence number, on a request only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,8 +144,9 @@ pub enum RelayFrame {
 /// What a relay sends in [`RelayFrame::Hello::resume`] when it connects again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayResume {
-    /// The JSON-RPC lines the CLI opened with and their answers, in order;
-    /// absent when the CLI opened without `initialize`.
+    /// The JSON-RPC lines the CLI opened with and their answers, in order,
+    /// each one line ([`is_one_line`]); absent when the CLI opened without
+    /// `initialize`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening: Option<Vec<String>>,
     /// The previous [`RelayFrame::Welcome::tools`].

@@ -28,9 +28,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use yagura_os::{IpcTransport, PlatformIpc};
 use yagura_protocol::relay::{
-    DAEMON_RESTARTED, DAEMON_UNAVAILABLE, INVALID_REQUEST, Line, RELAY_REFUSED, RESOURCE_EXHAUSTED,
-    RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS, read_line, rpc_error_line,
-    tool_call_error_line,
+    DAEMON_RESTARTED, DAEMON_UNAVAILABLE, HELD_LINES_MAX, INVALID_REQUEST, Line, RELAY_REFUSED,
+    RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS,
+    is_one_line, read_line, rpc_error_line, tool_call_error_line,
 };
 use yagura_protocol::{
     FrameError, MAX_FRAME_BODY_LEN, WindowCredentials, frame_decode, frame_encode,
@@ -45,7 +45,7 @@ pub const RELAY_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The most requests a relay holds while it cannot carry them. A request past
 /// it is answered `resource_exhausted`.
-pub const HELD_REQUESTS_MAX: usize = 16;
+pub const HELD_REQUESTS_MAX: usize = HELD_LINES_MAX;
 
 /// The contract this relay speaks: the newest one this build knows.
 const CONTRACT: u32 = SUPPORTED_CONTRACTS[SUPPORTED_CONTRACTS.len() - 1];
@@ -93,6 +93,9 @@ const HELD_FULL_TEXT: &str = "the relay already holds as many calls as it may wh
 
 const TOO_LARGE_TEXT: &str =
     "the request is too large to carry to the yagura daemon, so it was not sent and did nothing.";
+
+const NOT_ONE_LINE_TEXT: &str = "the request holds a carriage return, which cannot be carried to \
+    the yagura daemon, so it was not sent and did nothing.";
 
 type Connection = <PlatformIpc as IpcTransport>::ClientConnection;
 
@@ -291,11 +294,34 @@ fn encode(frame: &RelayFrame) -> Option<Vec<u8>> {
         .map(|body| frame_encode(&body))
 }
 
-/// The `relay_in` frame carrying `line`, or `None` when its body would exceed
-/// the frame body limit.
-fn in_frame(line: String, seq: Option<u64>) -> Option<Arc<Vec<u8>>> {
-    let body = serde_json::to_vec(&RelayFrame::In { line, seq }).ok()?;
-    (body.len() <= MAX_FRAME_BODY_LEN).then(|| Arc::new(frame_encode(&body)))
+/// The `relay_in` frame carrying `line`, or why it cannot carry it: the line
+/// is not one line ([`is_one_line`]), or the body would exceed the frame body
+/// limit.
+fn in_frame(line: String, seq: Option<u64>) -> Result<Arc<Vec<u8>>, Uncarried> {
+    if !is_one_line(&line) {
+        return Err(Uncarried::NotOneLine);
+    }
+    let body =
+        serde_json::to_vec(&RelayFrame::In { line, seq }).map_err(|_| Uncarried::TooLarge)?;
+    if body.len() > MAX_FRAME_BODY_LEN {
+        return Err(Uncarried::TooLarge);
+    }
+    Ok(Arc::new(frame_encode(&body)))
+}
+
+/// Why a CLI line cannot go in a `relay_in` frame.
+enum Uncarried {
+    NotOneLine,
+    TooLarge,
+}
+
+impl Uncarried {
+    fn text(&self) -> &'static str {
+        match self {
+            Self::NotOneLine => NOT_ONE_LINE_TEXT,
+            Self::TooLarge => TOO_LARGE_TEXT,
+        }
+    }
 }
 
 fn refusal_text(kind: RelayRefusedKind, reason: &str) -> String {
@@ -642,7 +668,7 @@ impl Relay {
             Line::Request { id, method } => self.on_request(line, id, method),
             Line::Notification { method, cancels } => self.on_notification(line, &method, cancels),
             Line::Answer { .. } | Line::Other => {
-                if let Some(frame) = in_frame(line, None) {
+                if let Ok(frame) = in_frame(line, None) {
                     self.carry(&frame);
                 }
             }
@@ -661,9 +687,12 @@ impl Relay {
         self.next_seq += 1;
         let opens = method == INITIALIZE && self.opening.answer.is_none();
         let opening_line = opens.then(|| line.clone());
-        let Some(frame) = in_frame(line, Some(seq)) else {
-            self.answer_error(&id, &method, INVALID_REQUEST, TOO_LARGE_TEXT);
-            return;
+        let frame = match in_frame(line, Some(seq)) {
+            Ok(frame) => frame,
+            Err(uncarried) => {
+                self.answer_error(&id, &method, INVALID_REQUEST, uncarried.text());
+                return;
+            }
         };
         if let Some(opening_line) = opening_line {
             self.opening.request = Some((id.clone(), opening_line));
@@ -722,19 +751,20 @@ impl Relay {
             self.sent.retain(|_, request| request.id != *cancelled);
         }
         let up = matches!(self.link, Link::Up { .. });
-        if method == INITIALIZED
+        let initialized = (method == INITIALIZED
             && self.opening.answer.is_some()
-            && self.opening.initialized.is_none()
-        {
-            self.opening.initialized = Some(line.clone());
+            && self.opening.initialized.is_none())
+        .then(|| line.clone());
+        let Ok(frame) = in_frame(line, None) else {
+            return;
+        };
+        if let Some(initialized) = initialized {
+            self.opening.initialized = Some(initialized);
             if !up {
                 // The next session's resumed opening carries it.
                 return;
             }
         }
-        let Some(frame) = in_frame(line, None) else {
-            return;
-        };
         match self.link {
             Link::Up { .. } => self.carry(&frame),
             Link::Refused { .. } => {}

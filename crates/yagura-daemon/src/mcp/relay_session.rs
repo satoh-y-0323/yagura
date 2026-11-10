@@ -26,12 +26,12 @@ use tokio::io::{
 };
 use tokio::sync::{Semaphore, watch};
 use yagura_protocol::relay::{
-    Line, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS,
-    read_line, tool_call_error_line,
+    HELD_LINES_MAX, Line, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
+    SUPPORTED_CONTRACTS, is_one_line, read_line, tool_call_error_line,
 };
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, FrameError, decode_daemon_message, encode_client_message,
-    frame_decode, frame_encode,
+    ClientMessage, DaemonMessage, FrameError, MAX_FRAME_BODY_LEN, decode_daemon_message,
+    encode_client_message, frame_decode, frame_encode,
 };
 
 use super::server::YaguraMcpServer;
@@ -55,6 +55,10 @@ const RMCP_PIPE_BUFFER: usize = 64 * 1024;
 
 /// Read size of the relay connection.
 const READ_CHUNK_LEN: usize = 8192;
+
+/// The most bytes of notifications a session holds before rmcp chose how it
+/// runs: as many lines as it holds, each as long as a frame body carries.
+const HELD_BYTES_MAX: usize = HELD_LINES_MAX * MAX_FRAME_BODY_LEN;
 
 /// Whether `body`, the first frame of a connection, opens a relay session.
 pub(crate) fn is_relay_hello(body: &[u8]) -> bool {
@@ -146,9 +150,27 @@ struct FramesIn<S> {
     chunk: Box<[u8; READ_CHUNK_LEN]>,
 }
 
-/// A frame that breaks the contract: over the size limit, or a body that is
-/// no relay frame.
+/// A frame that breaks the contract: over the size limit, a body that is no
+/// relay frame, or a CLI line in it that is not one line.
 struct ContractBroken;
+
+/// Whether every CLI line `frame` carries is one line. Checked as a frame
+/// arrives, so no line reaches rmcp, which splits on `\n`, as more than the
+/// one the session accounted for.
+fn lines_are_one_line(frame: &RelayFrame) -> bool {
+    match frame {
+        RelayFrame::In { line, .. } => is_one_line(line),
+        RelayFrame::Hello {
+            resume:
+                Some(RelayResume {
+                    opening: Some(lines),
+                    ..
+                }),
+            ..
+        } => lines.iter().all(|line| is_one_line(line)),
+        _ => true,
+    }
+}
 
 impl<S: AsyncRead> FramesIn<S> {
     /// The next frame, or `Ok(None)` once the relay closed the connection.
@@ -157,7 +179,10 @@ impl<S: AsyncRead> FramesIn<S> {
         loop {
             match frame_decode(&self.buf) {
                 Ok(Some((body, consumed))) => {
-                    let frame = serde_json::from_slice(body).map_err(|_| ContractBroken);
+                    let frame = serde_json::from_slice(body)
+                        .ok()
+                        .filter(lines_are_one_line)
+                        .ok_or(ContractBroken);
                     self.buf.drain(..consumed);
                     return frame.map(Some);
                 }
@@ -688,7 +713,7 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
 
     let mut carried = Carried::new(Arc::clone(receipts));
     let mut chosen = *rmcp.lifecycle.borrow();
-    let mut held: Vec<String> = Vec::new();
+    let mut held = HeldNotifications::default();
     loop {
         tokio::select! {
             frame = frames.next() => {
@@ -713,7 +738,7 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                             return;
                         }
                     }
-                    Carry::Hold => held.push(line),
+                    Carry::Hold => held.hold(line),
                     Carry::Answer(out) => {
                         if !send(writer, &out).await {
                             return;
@@ -751,7 +776,7 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 }
                 if *rmcp.lifecycle.borrow() {
                     chosen = true;
-                    for line in std::mem::take(&mut held) {
+                    for line in held.take() {
                         if !rmcp.feed(&line).await {
                             return;
                         }
@@ -759,6 +784,31 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 }
             }
         }
+    }
+}
+
+/// The notifications a session holds until rmcp chose how it runs, at most
+/// [`HELD_LINES_MAX`] of them and [`HELD_BYTES_MAX`] bytes. One past either is
+/// dropped, as a relay drops one it cannot hold: a notification has no
+/// answer to give instead.
+#[derive(Default)]
+struct HeldNotifications {
+    lines: Vec<String>,
+    bytes: usize,
+}
+
+impl HeldNotifications {
+    fn hold(&mut self, line: String) {
+        let bytes = self.bytes.saturating_add(line.len());
+        if self.lines.len() < HELD_LINES_MAX && bytes <= HELD_BYTES_MAX {
+            self.bytes = bytes;
+            self.lines.push(line);
+        }
+    }
+
+    fn take(&mut self) -> Vec<String> {
+        self.bytes = 0;
+        std::mem::take(&mut self.lines)
     }
 }
 

@@ -21,7 +21,7 @@ use yagura_os::{InstanceNamespace, IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
 use yagura_protocol::{INSTANCE_ENV, frame_decode, frame_encode};
 use yagura_test_support::HANG_GUARD;
-pub use yagura_test_support::relay_stdio::RelayProcess;
+pub use yagura_test_support::relay_stdio::{RelayProcess, rpc_error_word, tool_call_error};
 
 /// The contract this build's relay speaks.
 pub const CONTRACT: u32 = 1;
@@ -377,53 +377,4 @@ pub fn cancelled_line(request_id: u64) -> Value {
         "method": "notifications/cancelled",
         "params": {"requestId": request_id, "reason": "the client gave up on this call"},
     })
-}
-
-/// The word and the text of an error the relay wrote itself to a
-/// `tools/call`: a result with `isError: true` and one text content that
-/// leads with the word.
-pub fn tool_call_error(answer: &Value) -> (String, String) {
-    let result = answer
-        .get("result")
-        .unwrap_or_else(|| panic!("a tools/call error is a result with isError, got {answer}"));
-    assert_eq!(
-        result.get("isError").and_then(Value::as_bool),
-        Some(true),
-        "a tools/call error carries isError: true, got {answer}"
-    );
-    let text = result["content"][0]["text"]
-        .as_str()
-        .unwrap_or_else(|| panic!("a tools/call error carries one text content, got {answer}"))
-        .to_string();
-    let word = leading_word(&text);
-    (word, text)
-}
-
-/// The word of an error the relay wrote itself to a request other than
-/// `tools/call`: a JSON-RPC error of the relay's code whose `data.code` is the
-/// word and whose message leads with it.
-pub fn rpc_error_word(answer: &Value) -> String {
-    let error = answer
-        .get("error")
-        .unwrap_or_else(|| panic!("expected a JSON-RPC error, got {answer}"));
-    assert_eq!(
-        error.get("code").and_then(Value::as_i64),
-        Some(yagura_protocol::relay::RELAY_ERROR_CODE),
-        "the relay's own error carries its code, got {answer}"
-    );
-    let word = error["data"]["code"]
-        .as_str()
-        .unwrap_or_else(|| panic!("the relay's own error names its word in data.code: {answer}"))
-        .to_string();
-    let message = error["message"].as_str().unwrap_or_default();
-    assert_eq!(
-        leading_word(message),
-        word,
-        "the message leads with the same word, got {answer}"
-    );
-    word
-}
-
-fn leading_word(text: &str) -> String {
-    text.split(':').next().unwrap_or_default().to_string()
 }
