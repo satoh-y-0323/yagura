@@ -7,6 +7,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The minimum supported Rust version is now 1.89** (it was 1.88), which `rusqlite` 0.41 requires. See [`docs/building.md`](docs/building.md).
 - **`get_window_status`'s `last_output_summary` is now the last 500 characters the window's screen shows**, its wrapped rows joined as `read_output` joins them, rather than the last 500 characters of `read_output`'s text: rows that scrolled off the top are no longer part of it. The daemon answers it from what it holds, so a window whose terminal does not answer no longer holds up its status. See [`docs/mcp-setup.md`](docs/mcp-setup.md#get_window_status).
 - **Four default keys change on Windows and Linux, and two on macOS**, so that they no longer take keys the CLIs in your windows use. Windows and Linux: next window `Ctrl+Tab` is now `Ctrl+Shift+f`, previous window `Ctrl+Shift+Tab` is now `Ctrl+Shift+b`, settings `Ctrl+,` is now `Ctrl+Shift+s`, next window needing you `Ctrl+Shift+a` is now `Ctrl+Shift+j`. macOS: next window `Ctrl+Tab` is now `Shift+Meta+]`, previous window `Ctrl+Shift+Tab` is now `Shift+Meta+[`. To get the earlier keys back, set them in Settings > Keyboard or in `keymap.toml`. See [`docs/keymap.md`](docs/keymap.md#default-keys).
 - **The IPC protocol is now revision 32.** The request `run_hook`, which the new `--hook` door sends, and the daemon's answer `hook_input_wanted`, which asks the door for the few values of the hook's input an event reads, are new. A `pong` now comes only once the daemon has fed a window every byte of output it had received before the `ping`, so a client can wait on it; the frames themselves are unchanged.
@@ -50,6 +51,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - **A message no longer waits forever when a CLI's dialog takes the probe typed behind it.** Before, a dialog that opened while a message was being typed could take the probe as its own input, and the delivery then waited for a probe that would never show. It now types the next probe of the sequence once the dialog is gone, and declines the write, leaving nothing of its own behind, when every probe went unanswered.
 - **A delivery no longer cuts the end off an envelope, or leaves its probes in front of what you type, after a dialog took one of them.** It took back as many probes as it had typed, not as many as the input line showed, so a probe a dialog had taken made it erase one character of the envelope, and probes typed behind an earlier unanswered one were not taken back once someone else's key ended the delivery.
 - **A CLI's hook that reports right after the window starts is no longer refused while the window is still opening.** Its status report, and its requests for the window's messages, now wait for the window to finish opening, as the CLI's own connection already did.
+
+### Security
+
+- **The SQLite the daemon bundles is now 3.54.1** (it was 3.53.2), which fixes RUSTSEC-2026-0459. It comes with `rusqlite` 0.41, the first release that uses a `libsqlite3-sys` bundling it.
 
 ## [0.3.0] - 2026-10-29
 

@@ -68,11 +68,7 @@ fn state_rows(db: &Path) -> Vec<Row> {
         let mut statement = conn
             .prepare(&format!("SELECT * FROM \"{table}\""))
             .expect("read a table");
-        let names: Vec<String> = statement
-            .column_names()
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
+        let names: Vec<String> = statement.column_names().map(str::to_owned).collect();
         let mut query = statement.query([]).expect("read a table");
         while let Some(row) = query.next().expect("read a row") {
             let cells: Row = names

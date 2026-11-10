@@ -5,7 +5,7 @@ provided yet, or to work on yagura itself.
 
 ## Prerequisites
 
-- Rust 1.88 or later (`rust-toolchain.toml` selects the stable channel)
+- Rust 1.89 or later (`rust-toolchain.toml` selects the stable channel)
 - Node.js 24 or later, for the GUI
 - The system libraries Tauri 2 needs on your OS -- see
   [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/). On Windows this is the
