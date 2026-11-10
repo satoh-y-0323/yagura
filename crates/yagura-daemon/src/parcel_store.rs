@@ -135,6 +135,17 @@ pub(crate) struct KeptReport {
     pub(crate) report: ReceivedReport,
 }
 
+/// What the store keeps for one window's report inbox.
+#[derive(Debug, Default)]
+pub(crate) struct KeptReports {
+    /// The reports that read back, oldest first, bounded by
+    /// [`MAX_KEPT_REPORTS`].
+    pub(crate) reports: Vec<KeptReport>,
+    /// The lowest and highest place of every row kept, read back or not:
+    /// `None` when none is kept.
+    pub(crate) places: Option<(i64, i64)>,
+}
+
 enum Command {
     Keep {
         window_id: String,
@@ -160,7 +171,7 @@ enum Command {
     },
     LoadReports {
         window_id: String,
-        reply: oneshot::Sender<Vec<KeptReport>>,
+        reply: oneshot::Sender<KeptReports>,
     },
     Mark {
         window_id: String,
@@ -296,14 +307,14 @@ impl ParcelStore {
         read.await.unwrap_or_default()
     }
 
-    /// The reports kept for `window_id`'s report inbox, oldest first.
-    pub(crate) async fn load_reports(&self, window_id: &str) -> Vec<KeptReport> {
+    /// What is kept for `window_id`'s report inbox.
+    pub(crate) async fn load_reports(&self, window_id: &str) -> KeptReports {
         let (reply, read) = oneshot::channel();
         if !self.send(Command::LoadReports {
             window_id: window_id.to_owned(),
             reply,
         }) {
-            return Vec::new();
+            return KeptReports::default();
         }
         read.await.unwrap_or_default()
     }
@@ -642,9 +653,9 @@ fn write_parcels(conn: &Connection, received: &mpsc::Receiver<Command>, on_shown
                 }
             }
             Command::LoadReports { window_id, reply } => {
-                let reports = read_reports(conn, &window_id).unwrap_or_else(|error| {
+                let reports = read_report_inbox(conn, &window_id).unwrap_or_else(|error| {
                     tracing::warn!(window_id, %error, "failed to read a window's kept reports");
-                    Vec::new()
+                    KeptReports::default()
                 });
                 let _ = reply.send(reports);
             }
@@ -908,6 +919,23 @@ fn read_parcels(conn: &Connection, window_id: &str) -> rusqlite::Result<Vec<Kept
         );
     }
     Ok(parcels)
+}
+
+/// `window_id`'s kept reports, with the places of every row it keeps.
+fn read_report_inbox(conn: &Connection, window_id: &str) -> rusqlite::Result<KeptReports> {
+    let places = conn.query_row_fixed(
+        "SELECT MIN(seq), MAX(seq) FROM report_parcels WHERE window_id = ?1",
+        params![window_id],
+        |row| {
+            Ok(row
+                .get::<_, Option<i64>>(0)?
+                .zip(row.get::<_, Option<i64>>(1)?))
+        },
+    )?;
+    Ok(KeptReports {
+        reports: read_reports(conn, window_id)?,
+        places,
+    })
 }
 
 /// `window_id`'s kept reports, oldest first, bounded by [`MAX_KEPT_REPORTS`];

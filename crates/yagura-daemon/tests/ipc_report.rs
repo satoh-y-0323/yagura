@@ -1208,3 +1208,96 @@ async fn a_report_that_cannot_be_written_is_refused_and_never_shown() {
     let summaries: Vec<&str> = shown.iter().map(|report| report.summary.as_str()).collect();
     assert_eq!(summaries, ["written"]);
 }
+
+/// The summaries of the reports the store keeps for `window_id`'s inbox, in their
+/// order: what the next daemon hands that window.
+#[allow(clippy::disallowed_methods)] // a test reads the table with fixed text of its own
+fn kept_report_summaries(db: &Path, window_id: &str) -> Vec<String> {
+    let conn = store::open_readonly(db).expect("open the store");
+    let mut statement = conn
+        .prepare("SELECT report_json FROM report_parcels WHERE window_id = ?1 ORDER BY seq")
+        .expect("prepare the report rows");
+    statement
+        .query_map([window_id], |row| row.get::<_, String>(0))
+        .expect("read the report rows")
+        .map(|json| {
+            let report: ReceivedReport =
+                serde_json::from_str(&json.expect("a report row")).expect("a kept report");
+            report.summary
+        })
+        .collect()
+}
+
+/// A task window's report taken and committed by its plan's owner is forgotten in the
+/// store, while the parcel writer is held back from that forgetting, and another task's
+/// report reaches the owner in the meantime: once the writer goes on, the store still
+/// keeps the second report for the next daemon, and not the first.
+#[tokio::test]
+async fn a_task_report_sent_while_the_writer_forgets_a_taken_one_is_still_kept_for_the_next_daemon()
+{
+    let dir = unique_temp_dir("report-seq-kept");
+    let profiles_dir = dir.join("profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create profiles dir");
+    write_plain_profile(&profiles_dir, "report-task-profile", "Report Task Profile");
+    let faults = FaultPoints::arm(FaultPoint::WriterPaused);
+    let mut config = report_ledger_config(&dir, profiles_dir, &[]);
+    config.faults = faults.clone();
+    let db = dir.join("plan.db");
+    let (h, _locks) = Harness::start_with_ledger("report-seq-kept", config).await;
+    store::wire_into(&h.registry, Some(db.clone()));
+
+    let mut owner = h.connect().await;
+    let owner_window = open_and_identify(&h, &mut owner).await;
+    let plan = create_ok(
+        &mut owner,
+        "plan",
+        vec![
+            task_with_profile("t1", "report-task-profile"),
+            task_with_profile("t2", "report-task-profile"),
+        ],
+    )
+    .await;
+    let mut bound = Vec::new();
+    for task_id in ["t1", "t2"] {
+        let (_, _, window, _) =
+            expect_task_window_opened(open_task_window(&mut owner, &plan.plan_id, task_id).await);
+        let mut client = h.connect().await;
+        identify(&mut client, &window).await;
+        bound.push(client);
+    }
+
+    let (delivered_to, _) = expect_report_sent(
+        call_send_report(&mut bound[0], ReportOutcome::Succeeded, "report A", None).await,
+    );
+    assert_eq!(delivered_to.as_deref(), Some(owner_window.as_str()));
+    let taken = expect_reports(call_wait_for_report(&mut owner, 0).await);
+    let summaries: Vec<&str> = taken.iter().map(|report| report.summary.as_str()).collect();
+    assert_eq!(summaries, ["report A"]);
+    tokio::time::timeout(yagura_test_support::HANG_GUARD, faults.reached())
+        .await
+        .expect("the writer must be handed the forgetting of the taken report");
+
+    let (delivered_to, _) = expect_report_sent(
+        call_send_report(&mut bound[1], ReportOutcome::Succeeded, "report B", None).await,
+    );
+    assert_eq!(delivered_to.as_deref(), Some(owner_window.as_str()));
+
+    faults.release();
+    // A report from another child goes through the same writer behind the forgetting,
+    // so its answer comes once the forgetting is done.
+    let mut parent = h.connect().await;
+    let parent_window = open_and_identify(&h, &mut parent).await;
+    let child_window = call_open_window(&mut parent, echo_child_command()).await;
+    let mut child = h.connect().await;
+    identify(&mut child, &child_window).await;
+    let (delivered_to, _) = expect_report_sent(
+        call_send_report(&mut child, ReportOutcome::Succeeded, "report C", None).await,
+    );
+    assert_eq!(delivered_to.as_deref(), Some(parent_window.as_str()));
+
+    assert_eq!(
+        kept_report_summaries(&db, &owner_window),
+        ["report B"],
+        "the store must keep the report the owner has not read, and not the one it took"
+    );
+}

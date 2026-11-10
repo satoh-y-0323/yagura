@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -41,7 +41,7 @@ use crate::approval::ApprovalBroker;
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
 use crate::inbox::{SaveOutcome, Saving};
-use crate::parcel_store::{KeptReport, Written};
+use crate::parcel_store::{KeptReports, Written};
 use crate::plan_permit::{self, PermitError, TaskBinding};
 use crate::plan_store::ParentReportRow;
 use crate::pty::lock_recover;
@@ -80,6 +80,11 @@ pub struct ReportInboxes {
     /// Numbers every inbox's stretches. Kept outside the inboxes because an
     /// idle inbox is dropped and recreated, which would reuse its numbers.
     next_stretch: AtomicU64,
+    /// Each window's places in the store, kept outside the inboxes for the
+    /// same reason: a place given once is never given again while the
+    /// window's entry lives, so a row is only ever written and forgotten for
+    /// one report. Taken under the inboxes' lock, and takes no other.
+    places: Mutex<HashMap<String, Places>>,
 }
 
 #[derive(Default)]
@@ -100,10 +105,36 @@ struct Inbox {
     /// recreated, so a notice written for one stretch is never recorded
     /// against a later one.
     stretch: u64,
-    /// The place the store keeps the oldest queued report at.
+}
+
+/// The places one window's reports have been given in the store.
+struct Places {
+    /// The window they number, whose entry going lets them go: its id is
+    /// never reused, and no row is written for a window without one.
+    entry: Weak<WindowEntry>,
+    /// The lowest place given, which a report put ahead goes below.
     first_seq: i64,
     /// The place the next report queued behind the others takes.
     next_seq: i64,
+}
+
+impl Places {
+    /// `count` places ahead of every one given when `older`, behind them
+    /// otherwise.
+    fn give(&mut self, count: usize, older: bool) -> Vec<i64> {
+        let count = i64::try_from(count).unwrap_or(i64::MAX);
+        let start = if older {
+            self.first_seq = self.first_seq.saturating_sub(count);
+            self.first_seq
+        } else {
+            let start = self.next_seq;
+            self.next_seq = self.next_seq.saturating_add(count);
+            start
+        };
+        (0..count)
+            .map(|offset| start.saturating_add(offset))
+            .collect()
+    }
 }
 
 /// Where the inbox's current non-empty stretch stands on its notice.
@@ -133,27 +164,6 @@ impl Inbox {
             && self.out == 0
             && self.waiters.is_empty()
     }
-
-    /// The places `count` reports take in the store: ahead of the queued
-    /// and written ones when `older`, behind them otherwise.
-    fn places(&mut self, count: usize, older: bool) -> Vec<i64> {
-        let count = i64::try_from(count).unwrap_or(i64::MAX);
-        if self.reports.is_empty() && self.writing.is_empty() && self.out == 0 {
-            self.first_seq = 0;
-            self.next_seq = 0;
-        }
-        let start = if older {
-            self.first_seq = self.first_seq.saturating_sub(count);
-            self.first_seq
-        } else {
-            let start = self.next_seq;
-            self.next_seq = self.next_seq.saturating_add(count);
-            start
-        };
-        (0..count)
-            .map(|offset| start.saturating_add(offset))
-            .collect()
-    }
 }
 
 /// What [`ReportInboxes::take_or_wait`] decided.
@@ -172,7 +182,41 @@ impl ReportInboxes {
             inboxes: Mutex::new(HashMap::new()),
             next_waiter_id: AtomicU64::new(0),
             next_stretch: AtomicU64::new(0),
+            places: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The places `count` reports for `entry`'s window take in the store:
+    /// ahead of every place given when `older`, behind them otherwise. A
+    /// window whose entry is gone keeps nothing, so it is numbered from
+    /// nothing. Called under the inboxes' lock.
+    fn places(
+        &self,
+        window_id: &str,
+        entry: Option<&Arc<WindowEntry>>,
+        count: usize,
+        older: bool,
+    ) -> Vec<i64> {
+        let Some(entry) = entry else {
+            let mut unkept = Places {
+                entry: Weak::new(),
+                first_seq: 0,
+                next_seq: 0,
+            };
+            return unkept.give(count, older);
+        };
+        let mut places = lock_recover(&self.places);
+        if !places.contains_key(window_id) {
+            places.retain(|_, places| places.entry.strong_count() > 0);
+        }
+        places
+            .entry(window_id.to_owned())
+            .or_insert_with(|| Places {
+                entry: Arc::downgrade(entry),
+                first_seq: 0,
+                next_seq: 0,
+            })
+            .give(count, older)
     }
 
     /// Promises `window_id` one more report, or `None` when its inbox is
@@ -214,7 +258,7 @@ impl ReportInboxes {
             if from_slot {
                 inbox.reserved = inbox.reserved.saturating_sub(1);
             }
-            let places = inbox.places(reports.len(), older);
+            let places = self.places(window_id, entry.as_ref(), reports.len(), older);
             // Kept under the same lock a take forgets them under, so the
             // store follows the inbox's order. Kept even for a waiter, whose
             // take may not be committed. Shown whatever the write says:
@@ -247,7 +291,11 @@ impl ReportInboxes {
             let mut inboxes = lock_recover(&self.inboxes);
             let inbox = inboxes.entry(window_id.to_string()).or_default();
             inbox.reserved = inbox.reserved.saturating_sub(1);
-            let Some(seq) = inbox.places(1, false).first().copied() else {
+            let Some(seq) = self
+                .places(window_id, entry.as_ref(), 1, false)
+                .first()
+                .copied()
+            else {
                 return Saving::ready();
             };
             let written = store.keep_reports(window_id, &[(seq, &report)]);
@@ -293,7 +341,11 @@ impl ReportInboxes {
         let mut inboxes = lock_recover(&self.inboxes);
         let inbox = inboxes.entry(window_id.to_string()).or_default();
         inbox.reserved = inbox.reserved.saturating_sub(1);
-        let seq = inbox.places(1, false).first().copied().unwrap_or_default();
+        let seq = self
+            .places(window_id, entry.as_ref(), 1, false)
+            .first()
+            .copied()
+            .unwrap_or_default();
         inbox.writing.insert(
             seq,
             Writing {
@@ -530,13 +582,12 @@ impl ReportInboxes {
 
     /// Forgets the rows of the reports a committed take carried.
     fn commit_taken(&self, window_id: &str, seqs: Vec<i64>) {
-        let store = self.registry.parcel_store();
-        let mut inboxes = lock_recover(&self.inboxes);
-        // Sent under the lock places are given under, so a place given after
-        // this is never forgotten by it.
-        if let Some(store) = &store {
+        // Sent once the rows were written, as a report shows only then; and
+        // no place is given twice, so this never reaches another report's row.
+        if let Some(store) = self.registry.parcel_store() {
             store.forget_reports(window_id, seqs.clone());
         }
+        let mut inboxes = lock_recover(&self.inboxes);
         if let Some(inbox) = inboxes.get_mut(window_id) {
             inbox.out = inbox.out.saturating_sub(seqs.len());
             if inbox.is_idle() {
@@ -560,38 +611,49 @@ impl ReportInboxes {
         }
     }
 
-    /// Queues `kept`, the reports the store kept for `window_id`'s inbox,
-    /// for a window taken back as the daemon starts. The notice is not kept:
+    /// Queues the reports the store kept for `window_id`'s inbox, for a
+    /// window taken back as the daemon starts, and gives its next reports
+    /// places past every row kept, read back or not. The notice is not kept:
     /// it is derived from the reports, so a window that is handed notices
     /// gets one for them, as when they first arrived.
-    pub(super) fn restore(self: &Arc<Self>, window_id: &str, kept: Vec<KeptReport>) {
-        let (Some(first), Some(last)) = (kept.first(), kept.last()) else {
+    pub(super) fn restore(self: &Arc<Self>, window_id: &str, kept: KeptReports) {
+        let Some((first_seq, last_seq)) = kept.places else {
             return;
         };
-        let (first_seq, next_seq) = (first.seq, last.seq.saturating_add(1));
         // Looked up before the inboxes' lock, which the registry's is never
         // taken under.
-        let entry = self.registry.get(window_id);
+        let Some(entry) = self.registry.get(window_id) else {
+            return;
+        };
         let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
+            lock_recover(&self.places).insert(
+                window_id.to_owned(),
+                Places {
+                    entry: Arc::downgrade(&entry),
+                    first_seq,
+                    next_seq: last_seq.saturating_add(1),
+                },
+            );
+            if kept.reports.is_empty() {
+                return;
+            }
             let inbox = inboxes.entry(window_id.to_string()).or_default();
             if !inbox.reports.is_empty() {
                 return;
             }
             inbox.reports = kept
+                .reports
                 .into_iter()
                 .map(|kept| (kept.seq, kept.report))
                 .collect();
-            inbox.first_seq = first_seq;
-            inbox.next_seq = next_seq;
             inbox.notice = Notice::Due;
             inbox.stretch = self.next_stretch.fetch_add(1, Ordering::Relaxed);
             entry
-                .as_ref()
-                .filter(|entry| entry.delivers())
-                .map(|entry| (deposit_notice(entry, inbox.reports.len()), inbox.stretch))
+                .delivers()
+                .then(|| (deposit_notice(&entry, inbox.reports.len()), inbox.stretch))
         };
-        if let (Some(entry), Some((deposited, stretch))) = (entry, deposited) {
+        if let Some((deposited, stretch)) = deposited {
             self.confirm_when_taken(&entry, deposited, stretch);
         }
     }
