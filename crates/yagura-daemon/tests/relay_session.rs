@@ -424,29 +424,45 @@ async fn a_session_without_an_opening_enters_statelessly_through_server_discover
 /// A session runs four requests at once and holds sixteen more waiting; the
 /// next is answered `resource_exhausted` while all of those still wait. A
 /// line led by a UTF-8 byte order mark, which rmcp reads as the request after
-/// it, counts the same. A request whose id is an integer written as a float,
-/// which rmcp answers under the integer, leaves the count once answered.
+/// it, counts the same. A cancel whose id is null, which rmcp reads as no
+/// message and so cancels nothing, frees nothing either. Calls under one id,
+/// which rmcp runs each as its own, count one by one. A request whose id is
+/// an integer written as a float, which rmcp answers under the integer, leaves
+/// the count once answered.
 #[tokio::test]
 async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resource_exhausted() {
     let h = Harness::start("relay-request-limit", config()).await;
     // No detection: the window stays `Unknown`, which completes no wait.
     let window_id = h.open(process::echo_child_command(), None).await;
 
-    for (what, lead) in [("plain lines", ""), ("lines led by a BOM", "\u{FEFF}")] {
+    for (what, lead, cancel_under_a_null_id, one_id) in [
+        ("plain lines", "", false, false),
+        ("lines led by a BOM", "\u{FEFF}", false, false),
+        ("calls cancelled under a null id", "", true, false),
+        ("calls under one id", "", false, true),
+    ] {
         let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
         initialize(&mut client).await;
 
         let held = REQUESTS_AT_ONCE + REQUESTS_WAITING;
+        let id_of = |id: u64| if one_id { 1 } else { id };
         for id in 1..=held {
             let line = tool_call_line(
-                id,
+                id_of(id),
                 "wait_for_status",
                 json!({"window_id": window_id, "target_status": "idle", "timeout_sec": 600}),
                 false,
             );
             client.request_raw(&format!("{lead}{line}")).await;
         }
-        let past = tool_call_line(held + 1, "list_windows", json!({}), false);
+        if cancel_under_a_null_id {
+            for id in 1..=held {
+                let mut cancel = cancelled_line(id);
+                cancel["id"] = Value::Null;
+                client.carry(&cancel.to_string()).await;
+            }
+        }
+        let past = tool_call_line(id_of(held + 1), "list_windows", json!({}), false);
         let seq = client.request_raw(&format!("{lead}{past}")).await;
         // rmcp answers a ping itself: answered before the request past the
         // limit, that request was taken in rather than refused.
@@ -604,7 +620,8 @@ async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
 /// session, and is answered as rmcp answers it: nothing for a line that is
 /// not JSON or that answers no request, an `Invalid Request` error without an
 /// id for JSON that is no JSON-RPC message, an error-like line without
-/// `jsonrpc` among them, and one whose `error` is malformed.
+/// `jsonrpc` among them, and one whose `error` is malformed. A request rmcp
+/// cannot read takes no place among the session's tool calls.
 #[tokio::test]
 async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
     const INVALID_REQUEST_CODE: i64 = -32600;
@@ -658,6 +675,57 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
             "{what}: an answer to a line whose id cannot be read carries no id, got {before:?}"
         );
     }
+
+    // Requests rmcp reads no request out of take no place among the tool
+    // calls a session runs and holds, however many come.
+    let past_the_limit = REQUESTS_AT_ONCE + REQUESTS_WAITING + 1;
+    let mut answered_otherwise = Vec::new();
+    for n in 0..past_the_limit {
+        let id = 100 + n;
+        let mut unreadable = tool_call_line(id, "list_windows", json!({}), false);
+        let what = match n % 3 {
+            0 => {
+                unreadable.as_object_mut().unwrap().remove("jsonrpc");
+                "a tools/call without jsonrpc"
+            }
+            1 => {
+                unreadable["jsonrpc"] = json!("1.0");
+                "a tools/call of another jsonrpc version"
+            }
+            _ => {
+                unreadable["result"] = json!({});
+                "a tools/call that also holds a result"
+            }
+        };
+        client.request_raw(&unreadable.to_string()).await;
+        // rmcp answers an unreadable line before it reads the next one.
+        let ping = client
+            .request(&json!({"jsonrpc": "2.0", "id": 200 + n, "method": "ping"}))
+            .await;
+        let (_, before) = client.answer_with_preceding(ping).await;
+        let codes: Vec<Option<i64>> = before
+            .iter()
+            .map(|answer| answer["error"]["code"].as_i64())
+            .collect();
+        if codes != [Some(INVALID_REQUEST_CODE)] || before.iter().any(|a| a.get("id").is_some()) {
+            answered_otherwise.push((what, before));
+        }
+    }
+    let seq = client
+        .request(&tool_call_line(300, "list_windows", json!({}), false))
+        .await;
+    let listed = client.answer(seq).await;
+    assert_ne!(
+        listed["result"]["isError"], true,
+        "a tools/call after {past_the_limit} requests rmcp reads no request out of must be \
+         served, not refused as if they ran, got {listed}"
+    );
+    tool_json(&listed);
+    assert!(
+        answered_otherwise.is_empty(),
+        "each request rmcp reads no request out of must be answered as rmcp answers it (an \
+         Invalid Request error without an id), got {answered_otherwise:?}"
+    );
     expect_the_session_serves(&mut client, 6, false).await;
 }
 

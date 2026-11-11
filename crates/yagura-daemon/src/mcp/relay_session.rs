@@ -15,9 +15,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rmcp::model::{ClientNotification, ClientRequest, ServerConfig, ServerResult};
+use rmcp::model::{
+    CallToolResult, ClientJsonRpcMessage, ClientNotification, ClientRequest, ContentBlock,
+    JsonRpcMessage, RequestId, ServerConfig, ServerResult,
+};
 use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
 use rmcp::{ErrorData, RoleServer, Service};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{
@@ -27,7 +32,7 @@ use tokio::io::{
 use tokio::sync::{Semaphore, watch};
 use yagura_protocol::relay::{
     HELD_LINES_MAX, Line, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
-    SUPPORTED_CONTRACTS, is_one_line, parse_line, read_line, tool_call_error_line,
+    SUPPORTED_CONTRACTS, is_one_line, parse_line,
 };
 use yagura_protocol::{
     ClientMessage, DaemonMessage, FrameError, decode_daemon_message, encode_client_message,
@@ -485,6 +490,7 @@ impl Rmcp {
         let service = LifecycleWatch {
             inner: server,
             chosen: lifecycle_tx,
+            calls: Semaphore::new(REQUESTS_AT_ONCE + REQUESTS_WAITING),
             receipts,
         };
         let (rmcp_end, session_end) = tokio::io::duplex(RMCP_PIPE_BUFFER);
@@ -516,6 +522,16 @@ impl Rmcp {
         bytes.push(b'\n');
         self.lines_in.write_all(&bytes).await.is_ok()
     }
+
+    /// Feeds `lines` in order; `false` once rmcp stopped reading.
+    async fn feed_all(&mut self, lines: &[Accounted]) -> bool {
+        for line in lines {
+            if !self.feed(line).await {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// A CLI line as the session read it: the JSON value it accounted for,
@@ -526,6 +542,12 @@ struct Accounted(String);
 impl Accounted {
     fn of(value: &Value) -> Self {
         Self(value.to_string())
+    }
+
+    /// Whether rmcp reads it: rmcp drops a line past its limit, newline
+    /// included, unread and unanswered.
+    fn fits(&self) -> bool {
+        self.0.len() < DEFAULT_MAX_LINE_LENGTH
     }
 }
 
@@ -563,10 +585,26 @@ fn tool_summary() -> String {
 /// and only then hands that request to the server. Before that it ends the
 /// session on any notification, so the session holds notifications until it
 /// sees rmcp hand over such a request.
+///
+/// The tool calls a session runs and holds are counted here, on the requests
+/// rmcp runs, so a line rmcp reads no request out of or drops takes no place.
 struct LifecycleWatch<S> {
     inner: S,
     chosen: watch::Sender<bool>,
+    /// A place for each tool call from the moment rmcp hands it over until its
+    /// handler returns: answered, cancelled or failed.
+    calls: Semaphore,
     receipts: Arc<Receipts>,
+}
+
+/// The answer to a tool call past the [`REQUESTS_AT_ONCE`] running and the
+/// [`REQUESTS_WAITING`] waiting, worded as a relay words its own errors
+/// (`tool_call_error_line`).
+fn refused_call() -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{RESOURCE_EXHAUSTED}: the session already runs and holds as many tool calls as it \
+         may; call again once one of them has answered"
+    ))])
 }
 
 impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
@@ -581,9 +619,10 @@ impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
         if !matches!(request, ClientRequest::CallToolRequest(_)) {
             return self.inner.handle_request(request, context).await;
         }
-        let call = serde_json::to_value(&context.id)
-            .map(|id| id_key(&id))
-            .unwrap_or_default();
+        let Ok(_place) = self.calls.try_acquire() else {
+            return Ok(ServerResult::CallToolResult(refused_call()));
+        };
+        let call = call_key(&context.id);
         let cancelled = context.ct.clone();
         let result = CALL
             .scope(call.clone(), self.inner.handle_request(request, context))
@@ -615,9 +654,10 @@ impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
     }
 }
 
-/// A JSON-RPC id as a key: its JSON text, so `1` and `"1"` stay apart.
-fn id_key(id: &Value) -> String {
-    id.to_string()
+/// A request id rmcp runs under, as a key: its JSON text, so `1` and `"1"`
+/// stay apart.
+fn call_key(id: &RequestId) -> String {
+    id.clone().into_json_value().to_string()
 }
 
 /// The lines a resumed opening holds: the CLI's `initialize`, the answer it
@@ -763,17 +803,12 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                     _ => continue,
                 };
                 match carried.carry(&line, seq, chosen) {
-                    Carry::Feed(line) => {
-                        if !rmcp.feed(&line).await {
+                    Carry::Feed(lines) => {
+                        if !rmcp.feed_all(&lines).await {
                             return;
                         }
                     }
-                    Carry::Hold(line) => held.hold(line),
-                    Carry::Answer(out) => {
-                        if !send(writer, &out).await {
-                            return;
-                        }
-                    }
+                    Carry::Hold(lines) => lines.into_iter().for_each(|line| held.hold(line)),
                     Carry::Drop => {}
                 }
             }
@@ -781,7 +816,9 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 let Ok(Some(line)) = line else {
                     return;
                 };
-                let (seq, taken) = carried.answered(&line);
+                let Some(Answered { line, seq, taken }) = carried.answered(line) else {
+                    continue;
+                };
                 let (receipt, unreceipted) = match (seq, taken) {
                     // Carried from the moment the answer is handed on, so the
                     // relay's receipt always finds it.
@@ -807,10 +844,8 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                 }
                 if *rmcp.lifecycle.borrow() {
                     chosen = true;
-                    for line in held.take() {
-                        if !rmcp.feed(&line).await {
-                            return;
-                        }
+                    if !rmcp.feed_all(&held.take()).await {
+                        return;
                     }
                 }
             }
@@ -841,102 +876,177 @@ impl HeldNotifications {
     }
 }
 
-/// The requests a session carried and has not seen answered.
+/// The requests rmcp read from the session and has not answered.
+///
+/// rmcp runs each request under the id it carries and answers it under that
+/// id, so requests the CLI sent under one id would share one answer, one
+/// cancel and one receipt there. Each request therefore reaches rmcp under an
+/// id of the session's own, in the order the session read it, and its answer
+/// goes back under the CLI's id. The server accepts no subscription, the one
+/// other place rmcp names a request by its id.
 struct Carried {
-    /// The relay's sequence number of each request, by JSON-RPC id.
-    seqs: HashMap<String, u64>,
-    /// The `tools/call` requests in flight, by JSON-RPC id.
-    calls: HashSet<String>,
+    /// The session's id for the next request rmcp reads.
+    next: i64,
+    /// The requests rmcp has not answered, by the session's id.
+    requests: HashMap<i64, Request>,
     receipts: Arc<Receipts>,
+}
+
+/// One request rmcp runs under the session's id.
+struct Request {
+    /// Its id as the CLI sent it, read as rmcp reads one.
+    id: RequestId,
+    /// The relay's sequence number of it.
+    seq: Option<u64>,
+    /// Whether it is a tool call, which [`Receipts`] keeps track of.
+    call: bool,
 }
 
 /// What the session does with a line from the CLI.
 enum Carry {
-    Feed(Accounted),
-    /// A notification rmcp cannot take before it chose how the session runs.
-    Hold(Accounted),
-    /// The session answers it itself.
-    Answer(RelayFrame),
-    /// A line that holds no JSON, which rmcp would not answer either.
+    Feed(Vec<Accounted>),
+    /// Notifications rmcp cannot take before it chose how the session runs.
+    Hold(Vec<Accounted>),
+    /// A line rmcp would not answer either.
     Drop,
+}
+
+/// An answer rmcp wrote, as the relay gets it.
+struct Answered {
+    line: String,
+    /// The relay's sequence number of the request it answers.
+    seq: Option<u64>,
+    /// The reports it carries.
+    taken: Option<TakenReports>,
 }
 
 impl Carried {
     fn new(receipts: Arc<Receipts>) -> Self {
         Self {
-            seqs: HashMap::new(),
-            calls: HashSet::new(),
+            next: 1,
+            requests: HashMap::new(),
             receipts,
         }
     }
 
     fn carry(&mut self, line: &str, seq: Option<u64>, chosen: bool) -> Carry {
-        let Some(value) = parse_line(line) else {
+        let Some(mut value) = parse_line(line) else {
             tracing::debug!(
                 kind = "not_json",
                 "a relay session dropped a line that is no JSON-RPC message"
             );
             return Carry::Drop;
         };
-        match Line::of(&value) {
-            Line::Request { id, method } => {
-                let key = id_key(&id);
-                if method == "tools/call" {
-                    if self.calls.len() >= REQUESTS_AT_ONCE + REQUESTS_WAITING {
-                        return Carry::Answer(RelayFrame::Out {
-                            line: tool_call_error_line(
-                                &id,
-                                RESOURCE_EXHAUSTED,
-                                "the session already runs and holds as many tool calls as it may; \
-                                 call again once one of them has answered",
-                            ),
-                            seq,
-                            receipt: None,
-                        });
-                    }
-                    self.calls.insert(key.clone());
+        let (lines, notification) = match ClientJsonRpcMessage::deserialize(&value) {
+            Ok(JsonRpcMessage::Request(request)) => {
+                let ours = self.next;
+                self.next += 1;
+                value["id"] = Value::from(ours);
+                let line = Accounted::of(&value);
+                if line.fits() {
+                    let call = matches!(request.request, ClientRequest::CallToolRequest(_));
+                    let id = request.id;
+                    self.requests.insert(ours, Request { id, seq, call });
                 }
-                if let Some(seq) = seq {
-                    self.seqs.insert(key, seq);
-                }
-                Carry::Feed(Accounted::of(&value))
+                (vec![line], false)
             }
-            Line::Notification { method, cancels } => {
-                // rmcp answers no request the CLI cancelled.
-                if method == "notifications/cancelled"
-                    && let Some(cancelled) = cancels
-                {
-                    let key = id_key(&cancelled);
-                    if self.calls.remove(&key) {
-                        self.receipts.cancel(&key);
+            Ok(JsonRpcMessage::Notification(notification)) => match notification.notification {
+                ClientNotification::CancelledNotification(cancelled) => {
+                    match cancelled.params.request_id {
+                        Some(cancelled) => (self.cancel(&value, &cancelled), true),
+                        None => (vec![Accounted::of(&value)], true),
                     }
-                    self.seqs.remove(&key);
                 }
-                if chosen {
-                    Carry::Feed(Accounted::of(&value))
-                } else {
-                    Carry::Hold(Accounted::of(&value))
-                }
+                _ => (vec![Accounted::of(&value)], true),
+            },
+            // Neither is a request rmcp runs: it answers or drops them.
+            Ok(JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_)) | Err(_) => {
+                (vec![Accounted::of(&value)], false)
             }
-            // rmcp reads a request only out of a `method` and an `id` it
-            // takes, so neither is one it runs: rmcp answers or drops it.
-            Line::Answer { .. } | Line::Other => Carry::Feed(Accounted::of(&value)),
+        };
+        let count = lines.len();
+        let lines: Vec<Accounted> = lines.into_iter().filter(Accounted::fits).collect();
+        if lines.len() < count {
+            tracing::debug!(
+                kind = "oversized",
+                "a relay session dropped a line past the length rmcp reads"
+            );
+        }
+        match (lines.is_empty(), notification && !chosen) {
+            (true, _) => Carry::Drop,
+            (false, false) => Carry::Feed(lines),
+            (false, true) => Carry::Hold(lines),
         }
     }
 
-    /// The sequence number of the request `line` answers, if it answers one,
-    /// and the reports that answer carries.
-    fn answered(&mut self, line: &str) -> (Option<u64>, Option<TakenReports>) {
-        let Line::Answer { id } = read_line(line) else {
-            return (None, None);
+    /// The cancel `value` of the CLI's request `cancelled`, once for each
+    /// request rmcp runs under that id; none when it runs none.
+    fn cancel(&mut self, value: &Value, cancelled: &RequestId) -> Vec<Accounted> {
+        let ours: Vec<i64> = self
+            .requests
+            .iter()
+            .filter(|(_, request)| request.id == *cancelled)
+            .map(|(ours, _)| *ours)
+            .collect();
+        let mut lines = Vec::with_capacity(ours.len());
+        for ours in ours {
+            let mut value = value.clone();
+            value["params"]["requestId"] = Value::from(ours);
+            let line = Accounted::of(&value);
+            // rmcp drops it unread, and so cancels nothing.
+            if !line.fits() {
+                lines.push(line);
+                continue;
+            }
+            if let Some(request) = self.requests.remove(&ours)
+                && request.call
+            {
+                self.receipts.cancel(&call_key(&RequestId::Number(ours)));
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// `line` as the relay gets it: an answer goes back under the CLI's id,
+    /// with the sequence number of the request it answers and the reports it
+    /// carries. `None` for an answer to a request the CLI cancelled.
+    fn answered(&mut self, line: String) -> Option<Answered> {
+        let unchanged = |line| Answered {
+            line,
+            seq: None,
+            taken: None,
         };
-        let key = id_key(&id);
-        let taken = self
-            .calls
-            .remove(&key)
-            .then(|| self.receipts.answered(&key))
+        let Ok(mut value) = serde_json::from_str::<Value>(&line) else {
+            return Some(unchanged(line));
+        };
+        let ours = match value.get("id").filter(|id| !id.is_null()) {
+            Some(id) if value.get("method").is_none() => match RequestId::deserialize(id) {
+                Ok(RequestId::Number(ours)) => Some(ours),
+                Ok(RequestId::String(_)) | Err(_) => None,
+            },
+            // A request or notification of rmcp's own, or an answer to no id.
+            _ => return Some(unchanged(line)),
+        };
+        let Some((ours, request)) =
+            ours.and_then(|ours| self.requests.remove(&ours).map(|request| (ours, request)))
+        else {
+            tracing::debug!(
+                kind = "cancelled",
+                "a relay session dropped an answer to a request the CLI cancelled"
+            );
+            return None;
+        };
+        value["id"] = request.id.into_json_value();
+        let taken = request
+            .call
+            .then(|| self.receipts.answered(&call_key(&RequestId::Number(ours))))
             .flatten();
-        (self.seqs.remove(&key), taken)
+        Some(Answered {
+            line: value.to_string(),
+            seq: request.seq,
+            taken,
+        })
     }
 }
 
