@@ -1,8 +1,9 @@
 //! The window table in `yagura.db`: one row for each window this daemon opened
 //! and has not closed, so a next daemon can tell which windows should exist.
 //!
-//! A row is written `opening` before the window's holder starts, turns `live`
-//! once the holder let the daemon in, follows the window's values, and is
+//! A row is written `opening` before the window's holder starts, takes the
+//! values the start settled before the holder starts too, turns `live` once
+//! the holder let the daemon in, follows the window's values, and is
 //! removed before the holder is told to end. [`OpeningRow::open`] and
 //! [`WindowRow::remove_then`] are the only ways to start and end a window
 //! around its row, so neither order can be written the other way round.
@@ -286,6 +287,8 @@ enum Command {
     Update {
         window_id: String,
         values: WindowValues,
+        /// Told whether the row took `values`.
+        reply: Option<oneshot::Sender<bool>>,
     },
     Remove {
         window_id: String,
@@ -532,9 +535,20 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
                     warn(error);
                 }
             }
-            Command::Update { window_id, values } => {
-                if let Err(error) = update_values(conn, &window_id, &values) {
-                    warn(error);
+            Command::Update {
+                window_id,
+                values,
+                reply,
+            } => {
+                let written = match update_values(conn, &window_id, &values) {
+                    Ok(changed) => changed > 0,
+                    Err(error) => {
+                        warn(error);
+                        false
+                    }
+                };
+                if let Some(reply) = reply {
+                    let _ = reply.send(written);
                 }
             }
             Command::Remove { window_id, reply } => {
@@ -672,7 +686,22 @@ impl WindowRow {
         table.send(Command::Update {
             window_id: self.window_id.clone(),
             values: values(),
+            reply: None,
         });
+    }
+
+    /// [`Self::update`], returning what tells once the row took the values.
+    /// The row's lock is held only while the values are read and sent, never
+    /// while the write is awaited.
+    pub(crate) fn update_waited(&self, values: impl FnOnce() -> WindowValues) -> PendingWrite {
+        let Some(table) = &self.table else {
+            return PendingWrite::NoRow;
+        };
+        let _ordered = lock_recover(&self.updates);
+        if self.removed.load(Ordering::SeqCst) {
+            return PendingWrite::NoRow;
+        }
+        PendingWrite::sent(table, &self.window_id, values())
     }
 
     /// Removes the row and, only once it is gone, runs `end`, which tells the
@@ -710,6 +739,66 @@ impl WindowRow {
 impl Drop for WindowRow {
     fn drop(&mut self) {
         let _ = self.remove(false);
+    }
+}
+
+/// The row could not take the values: the write failed, the row is not in
+/// the table, or the writer is gone.
+#[derive(Debug)]
+pub(crate) struct RowUnwritten;
+
+/// A value write sent to a window's row, to be awaited outside every lock.
+pub(crate) enum PendingWrite {
+    /// The window has no row, or its row is being removed: nothing is written.
+    NoRow,
+    /// The writer is gone, so nothing was sent.
+    Unsent,
+    Sent(oneshot::Receiver<bool>),
+}
+
+impl PendingWrite {
+    fn sent(table: &WindowTable, window_id: &str, values: WindowValues) -> Self {
+        let (reply, written) = oneshot::channel();
+        if table.send(Command::Update {
+            window_id: window_id.to_owned(),
+            values,
+            reply: Some(reply),
+        }) {
+            Self::Sent(written)
+        } else {
+            Self::Unsent
+        }
+    }
+
+    /// Returns once the write is done; `Ok` also for a window without a row.
+    pub(crate) async fn written(self) -> Result<(), RowUnwritten> {
+        match self {
+            Self::NoRow => Ok(()),
+            Self::Unsent => Err(RowUnwritten),
+            // A reply dropped unsent is a writer that ended before writing.
+            Self::Sent(written) => match written.await {
+                Ok(true) => Ok(()),
+                Ok(false) | Err(_) => Err(RowUnwritten),
+            },
+        }
+    }
+}
+
+/// What writes an `opening` row's values before its window's holder starts.
+pub(crate) struct OpeningWrite {
+    table: Option<WindowTable>,
+    window_id: String,
+}
+
+impl OpeningWrite {
+    /// Writes `values` to the row; see [`PendingWrite::written`].
+    pub(crate) async fn write(self, values: WindowValues) -> Result<(), RowUnwritten> {
+        match &self.table {
+            Some(table) => PendingWrite::sent(table, &self.window_id, values),
+            None => PendingWrite::NoRow,
+        }
+        .written()
+        .await
     }
 }
 
@@ -773,6 +862,15 @@ impl OpeningRow {
     /// See [`WindowRow::lost_notice`].
     pub(crate) fn lost_notice(&self) -> crate::pty::LostNotice {
         self.row.lost_notice()
+    }
+
+    /// What writes the values the start settles, for `start` of
+    /// [`Self::open`] to await before it starts the holder.
+    pub(crate) fn writer(&self) -> OpeningWrite {
+        OpeningWrite {
+            table: self.row.table.clone(),
+            window_id: self.row.window_id.clone(),
+        }
     }
 
     /// The scope names the row was written with, for the window's holder to

@@ -58,11 +58,14 @@ pub enum FaultPoint {
     /// answer is not handed to the session yet. Every such take stops there
     /// until the fault is released. Released only in-process.
     ReportTakenUnanswered,
+    /// A window's holder has started its child and let the daemon in, and the
+    /// window is not registered yet. The daemon ends there.
+    WindowHolderStarted,
 }
 
 impl FaultPoint {
     /// Every point, in the order of [`FaultPoint::name`]'s table.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::HandoffDeposited,
         Self::WriteFails,
         Self::ParcelEndHalfSettled,
@@ -73,6 +76,7 @@ impl FaultPoint {
         Self::AfterSendKey,
         Self::DoorBeforeSettle,
         Self::ReportTakenUnanswered,
+        Self::WindowHolderStarted,
     ];
 
     /// The point's name, as [`POINT_ENV`] carries it.
@@ -89,6 +93,7 @@ impl FaultPoint {
             Self::AfterSendKey => "after_send_key",
             Self::DoorBeforeSettle => "door_before_settle",
             Self::ReportTakenUnanswered => "report_taken_unanswered",
+            Self::WindowHolderStarted => "window_holder_started",
         }
     }
 

@@ -57,8 +57,9 @@ use crate::token::StatusToken;
 use crate::waiter::StatusAt;
 pub use crate::window_table::HooksRoute;
 use crate::window_table::{
-    OpeningRow, Reservation, RowScopes, WindowRow, WindowTable, WindowValues, credentials_kind,
-    credentials_mode, launch_record, recorded_launch, route_taken_back,
+    OpeningRow, OpeningWrite, PendingWrite, Reservation, RowScopes, WindowRow, WindowTable,
+    WindowValues, credentials_kind, credentials_mode, launch_record, recorded_launch,
+    route_taken_back,
 };
 use crate::workspace::{self, WorkspaceKey, resolve_key_blocking};
 
@@ -1968,7 +1969,16 @@ impl WindowEntry {
 
     /// Writes the window's values as they are now to its row.
     fn update_row(&self) {
-        self.row.update(|| WindowValues {
+        self.row.update(|| self.values_now());
+    }
+
+    /// [`Self::update_row`], returning what tells once the row took them.
+    fn update_row_waited(&self) -> PendingWrite {
+        self.row.update_waited(|| self.values_now())
+    }
+
+    fn values_now(&self) -> WindowValues {
+        WindowValues {
             layout_json: self.layout_json(),
             session_id: self.session_id(),
             ..window_values(
@@ -1979,7 +1989,7 @@ impl WindowEntry {
                 &self.command,
                 self.detection.as_ref(),
             )
-        });
+        }
     }
 
     /// The PTY session backing this window (input / resize / screen /
@@ -5128,17 +5138,17 @@ impl WindowEntry {
         lock_recover(&self.name).clone()
     }
 
-    /// Stores `name` and returns the value as stored. Reached only through
-    /// [`WindowRegistry::rename_window`], which has already judged the name.
-    fn store_name(&self, name: &str) -> String {
+    /// Stores `name` and returns the value as stored, with the write of it to
+    /// the row. Reached only through [`WindowRegistry::rename_window`], which
+    /// has already judged the name.
+    fn store_name(&self, name: &str) -> (String, PendingWrite) {
         let stored = {
             let mut stored = lock_recover(&self.name);
             name.clone_into(&mut stored);
             stored.clone()
         };
         self.participation.raise();
-        self.update_row();
-        stored
+        (stored, self.update_row_waited())
     }
 
     /// Replaces the presentation layout this window carries. The value is
@@ -5615,16 +5625,11 @@ impl WindowRegistry {
         drop(open_guard);
 
         let palette = self.default_palette_for(vendor.as_deref());
-        let record = |hooks: HooksRoute| {
-            launch_record(
-                &window_id,
-                status_token.as_hex(),
-                &WindowValues {
-                    hooks: Some(hooks),
-                    ..values.clone()
-                },
-            )
+        let settled = |hooks: HooksRoute| WindowValues {
+            hooks: Some(hooks),
+            ..values.clone()
         };
+        let writer = row.writer();
         let lost = row.lost_notice();
         let scopes = row.scopes();
         let ((session, hooks), row) = row
@@ -5633,7 +5638,7 @@ impl WindowRegistry {
                 &resolved_cwd,
                 &status_token,
                 &window_id,
-                (record, lost, scopes),
+                (settled, writer, lost, scopes),
                 &resolution,
                 extra_profile_env,
                 &prepared,
@@ -5642,6 +5647,10 @@ impl WindowRegistry {
                 credentials_folder.as_ref(),
             ))
             .await?;
+        #[cfg(feature = "fault-injection")]
+        self.config
+            .faults
+            .reach(crate::fault_point::FaultPoint::WindowHolderStarted);
         let session = Arc::new(session);
         if let Some(folder) = credentials_folder {
             remove_credentials_when_exited(&session, folder);
@@ -5698,8 +5707,6 @@ impl WindowRegistry {
             detected_rx,
             Some(&opening),
         );
-        // The row takes the route the spawn settled.
-        entry.update_row();
         // Registered above, so a hook that spawns a watcher observes an entry
         // the registry can already look up by id.
         if let Some(hook) = lock_recover(&self.window_opened_hook).as_ref() {
@@ -5825,15 +5832,22 @@ impl WindowRegistry {
         name: &str,
     ) -> Result<String, WindowRenameError> {
         validate_window_name(name)?;
-        let _open_guard = self.open_lock.lock().await;
-        let refusal = {
-            let entries = lock_recover(&self.entries);
-            name_refusal(&entries, &lock_recover(&self.opening), name, Some(entry))
+        let (stored, write) = {
+            let _open_guard = self.open_lock.lock().await;
+            let refusal = {
+                let entries = lock_recover(&self.entries);
+                name_refusal(&entries, &lock_recover(&self.opening), name, Some(entry))
+            };
+            if let Some(refusal) = refusal {
+                return Err(refusal.into());
+            }
+            entry.store_name(name)
         };
-        if let Some(refusal) = refusal {
-            return Err(refusal.into());
-        }
-        Ok(entry.store_name(name))
+        // Answered once the row has the name: no launch record carries it, so
+        // a name only the daemon held would be gone after a crash. A row that
+        // cannot take it keeps the rename, as a window without a row does.
+        let _ = write.written().await;
+        Ok(stored)
     }
 
     /// Makes a [`CliInjection`] ready to spawn with: writes its settings
@@ -5966,8 +5980,9 @@ impl WindowRegistry {
         resolved_cwd: &std::path::Path,
         status_token: &StatusToken,
         window_id: &str,
-        (record, lost, scopes): (
-            impl FnOnce(HooksRoute) -> String,
+        (settled, writer, lost, scopes): (
+            impl FnOnce(HooksRoute) -> WindowValues,
+            OpeningWrite,
             LostNotice,
             Option<RowScopes>,
         ),
@@ -6040,6 +6055,13 @@ impl WindowRegistry {
         let spawn_argv = program::into_spawn_argv(resolution, &full_argv, platform);
         let spawn_argv: Vec<&str> = spawn_argv.iter().map(String::as_str).collect();
         let hooks = hooks.settle(hooks_injected);
+        let settled = settled(hooks);
+        // Written before the holder starts: a daemon that ends once the holder
+        // runs leaves a row the next daemon takes the window back from, route
+        // and all. A row that cannot take it refuses the open, as no id could.
+        writer.write(settled.clone()).await.map_err(|_| {
+            WindowOpenError::SpawnFailed("the window's row could not be written".to_owned())
+        })?;
 
         let removed_env: &[&str] = if launched {
             &[WINDOW_ID_ENV, STATUS_TOKEN_ENV]
@@ -6054,7 +6076,7 @@ impl WindowRegistry {
                 extra_env: &extra_env,
                 removed_env,
                 palette: Some(palette),
-                record: record(hooks),
+                record: launch_record(window_id, status_token.as_hex(), &settled),
                 lost,
                 scopes,
             },

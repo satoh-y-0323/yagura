@@ -1105,6 +1105,15 @@ fn write_registered_hooks(sandbox: &Sandbox) {
 /// definitions in `detections`, gives the windows it opens [`TOKEN`] and lets a handoff
 /// through without a human.
 async fn start_hooked(sandbox: &Sandbox, detections: &Path) -> RunningDaemon {
+    start_hooked_with(sandbox, detections, &[]).await
+}
+
+/// [`start_hooked`] with `extra` added to the daemon's environment.
+async fn start_hooked_with(
+    sandbox: &Sandbox,
+    detections: &Path,
+    extra: &[(&str, &str)],
+) -> RunningDaemon {
     let playbook = sandbox
         .tree
         .make_dir("hooked-playbook")
@@ -1115,17 +1124,17 @@ async fn start_hooked(sandbox: &Sandbox, detections: &Path) -> RunningDaemon {
     )
     .unwrap();
     let home = daemon_home(sandbox);
-    sandbox
-        .start_from(&[
-            ("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN),
-            ("YAGURA_PLAYBOOK", utf8(&playbook)),
-            ("YAGURA_DETECTION_DIR", utf8(detections)),
-            (
-                if cfg!(windows) { "USERPROFILE" } else { "HOME" },
-                utf8(&home),
-            ),
-        ])
-        .await
+    let mut env = vec![
+        ("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN),
+        ("YAGURA_PLAYBOOK", utf8(&playbook)),
+        ("YAGURA_DETECTION_DIR", utf8(detections)),
+        (
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+            utf8(&home),
+        ),
+    ];
+    env.extend_from_slice(extra);
+    sandbox.start_from(&env).await
 }
 
 /// The answer to a handoff sent to `window_id`.
@@ -1226,6 +1235,37 @@ async fn until_named(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
         info = listed(daemon, sandbox, window_id).await;
+    }
+}
+
+/// Opens a window of `profile`; returns its id and the name the answer gives it.
+async fn open_answered(
+    daemon: &mut RunningDaemon,
+    sandbox: &Sandbox,
+    profile: &str,
+) -> (String, String) {
+    send(
+        &mut daemon.client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: profile.to_owned(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowOpened {
+            window_id,
+            name: Some(name),
+            ..
+        } => (window_id, name),
+        other => panic!(
+            "expected window_opened with its name, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
     }
 }
 
@@ -1377,13 +1417,12 @@ async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
     );
 
     let mut first = start_hooked(&sandbox, &detections).await;
-    let left_out = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
+    let (left_out, left_out_name) = open_answered(&mut first, &sandbox, HOOKED_PROFILE).await;
     write_registered_hooks(&sandbox);
-    let registered = first.open_profile_window(&sandbox, HOOKED_PROFILE).await;
-    let unarranged = first
-        .open_profile_window(&sandbox, UNARRANGED_PROFILE)
-        .await;
-    let injected = first.open_profile_window(&sandbox, INJECTED_PROFILE).await;
+    let (registered, registered_name) = open_answered(&mut first, &sandbox, HOOKED_PROFILE).await;
+    let (unarranged, unarranged_name) =
+        open_answered(&mut first, &sandbox, UNARRANGED_PROFILE).await;
+    let (injected, injected_name) = open_answered(&mut first, &sandbox, INJECTED_PROFILE).await;
     let reach = [registered.as_str(), unarranged.as_str(), injected.as_str()];
     assert_undeliverable(&mut first, &sandbox, &left_out, "the fixture, as opened").await;
     assert_roster(
@@ -1397,8 +1436,15 @@ async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
     first.kill_keeping_windows();
 
     let mut next = start_hooked(&sandbox, &detections).await;
-    for window_id in [&left_out, &registered, &unarranged, &injected] {
-        listed(&mut next, &sandbox, window_id).await;
+    // A window whose row the killed daemon left without its route is listed under its
+    // id until its launch record rebuilds it; the name its open gave marks the rebuilt one.
+    for (window_id, name) in [
+        (&left_out, &left_out_name),
+        (&registered, &registered_name),
+        (&unarranged, &unarranged_name),
+        (&injected, &injected_name),
+    ] {
+        until_named(&mut next, &sandbox, window_id, name).await;
     }
     assert_undeliverable(&mut next, &sandbox, &left_out, "taken back with its row").await;
     assert_roster(
@@ -1409,6 +1455,96 @@ async fn a_window_taken_back_keeps_the_hook_route_its_open_settled() {
         "taken back with their rows",
     )
     .await;
+}
+
+/// The window's row holds the hook route its open settled from the moment its holder
+/// runs: a daemon that ends once the holder has started the child, before the window is
+/// registered, leaves a row the next daemon builds the whole window from. So the window
+/// is listed from the first time under the name its open asked for, and takes part in
+/// chat as one whose launch injects its hooks does.
+#[tokio::test]
+async fn a_window_whose_daemon_ended_once_its_holder_started_is_taken_back_from_its_row() {
+    const INJECTED_PROFILE: &str = "injected";
+    const NAME: &str = "opened-row";
+    let sandbox = Sandbox::new("recover-openrow");
+    let log = sandbox.tree.path().join("input.log");
+    let detections = write_hooked_profile(&sandbox, &log);
+    // As in `a_window_taken_back_keeps_the_hook_route_its_open_settled`.
+    let never = sandbox.tree.path().join("never-gate");
+    write_delivery_profile(
+        &sandbox,
+        INJECTED_PROFILE,
+        &log,
+        &format!("\n[hooks]\nargs = ['{}', '00']\n", utf8(&never)),
+    );
+
+    let point = yagura_daemon::fault_point::FaultPoint::WindowHolderStarted;
+    let mut first = start_hooked_with(
+        &sandbox,
+        &detections,
+        &[(yagura_daemon::fault_point::POINT_ENV, point.name())],
+    )
+    .await;
+    send(
+        &mut first.client,
+        &ClientMessage::OpenWindowFromProfile {
+            profile: INJECTED_PROFILE.to_owned(),
+            cwd: None,
+            name: Some(NAME.to_owned()),
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    first.wait_for_fault_end().await;
+
+    let (window_id, stored_hooks): (String, Option<String>) = {
+        let conn = store::open_readonly(&store_db(&sandbox)).unwrap();
+        conn.query_row(
+            "SELECT window_id, hooks FROM windows WHERE name = ?1",
+            [NAME],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "the open reserves the window's row before its holder starts: {error}; \
+                 daemon log:\n{}",
+                sandbox.daemon_log()
+            )
+        })
+    };
+    let record = record_of(&sandbox, &window_id);
+    let holder = handle_of(record.holder_pid, record.holder_start.as_deref());
+    assert_ne!(
+        holder.liveness(),
+        Liveness::Dead,
+        "the window's holder outlives the daemon that ended at {}",
+        point.name()
+    );
+
+    let mut next = start_hooked(&sandbox, &detections).await;
+    let info = listed(&mut next, &sandbox, &window_id).await;
+    assert_eq!(
+        info.name,
+        NAME,
+        "the next daemon lists the window from the first time under the name its open \
+         asked for, built from its row; daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    assert_roster(
+        &mut next,
+        &sandbox,
+        &[&window_id],
+        &[],
+        "listed first, built from its row",
+    )
+    .await;
+    assert_eq!(
+        stored_hooks.as_deref(),
+        Some("injection"),
+        "the window's row holds the hook route its open settled once its holder runs"
+    );
 }
 
 /// Has `child` report `summary` to the window that opened it; returns the window the
