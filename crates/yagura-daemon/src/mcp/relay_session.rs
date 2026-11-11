@@ -15,12 +15,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use accounted::Accounted;
 use rmcp::model::{
     CallToolResult, ClientJsonRpcMessage, ClientNotification, ClientRequest, ContentBlock,
     JsonRpcMessage, RequestId, ServerConfig, ServerResult,
 };
 use rmcp::service::{NotificationContext, RequestContext};
-use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
 use rmcp::{ErrorData, RoleServer, Service};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -517,8 +517,8 @@ impl Rmcp {
 
     /// Feeds one line to rmcp; `false` once it stopped reading.
     async fn feed(&mut self, line: &Accounted) -> bool {
-        let mut bytes = Vec::with_capacity(line.0.len() + 1);
-        bytes.extend_from_slice(line.0.as_bytes());
+        let mut bytes = Vec::with_capacity(line.as_bytes().len() + 1);
+        bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
         self.lines_in.write_all(&bytes).await.is_ok()
     }
@@ -534,20 +534,47 @@ impl Rmcp {
     }
 }
 
-/// A CLI line as the session read it: the JSON value it accounted for,
-/// written again. rmcp reads only these, so it never reads a line the session
-/// read otherwise, and each is one line of compact JSON.
-struct Accounted(String);
+/// Its own module, so [`Accounted::of`] is the only way to make one.
+mod accounted {
+    use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
+    use serde_json::Value;
 
-impl Accounted {
-    fn of(value: &Value) -> Self {
-        Self(value.to_string())
-    }
+    /// A CLI line as the session read it: the JSON value it accounted for,
+    /// written again. rmcp reads only these, so it never reads a line the
+    /// session read otherwise, each is one line of compact JSON, and each is
+    /// within the length rmcp reads.
+    pub(super) struct Accounted(String);
 
-    /// Whether rmcp reads it: rmcp drops a line past its limit, newline
-    /// included, unread and unanswered.
-    fn fits(&self) -> bool {
-        self.0.len() < DEFAULT_MAX_LINE_LENGTH
+    /// A value whose line, written again, passes the length rmcp reads: rmcp
+    /// would drop it, newline included, unread and unanswered.
+    pub(super) struct PastTheLine;
+
+    impl Accounted {
+        pub(super) fn of(value: &Value) -> Result<Self, PastTheLine> {
+            let line = value.to_string();
+            if line.len() < DEFAULT_MAX_LINE_LENGTH {
+                Ok(Self(line))
+            } else {
+                Err(PastTheLine)
+            }
+        }
+
+        /// The line for a value no one answers, `None` once it is past the
+        /// line.
+        pub(super) fn unanswered(value: &Value) -> Option<Self> {
+            let line = Self::of(value).ok();
+            if line.is_none() {
+                tracing::debug!(
+                    kind = "oversized",
+                    "a relay session dropped a line past the length rmcp reads"
+                );
+            }
+            line
+        }
+
+        pub(super) fn as_bytes(&self) -> &[u8] {
+            self.0.as_bytes()
+        }
     }
 }
 
@@ -703,10 +730,11 @@ impl Opening {
                 Ok(_) | Err(_) => {}
             }
         }
+        // An opening with a line rmcp would not read cannot be replayed whole.
         Some(Self {
-            request: request?,
+            request: request?.ok()?,
             answer: answer?,
-            initialized,
+            initialized: initialized.transpose().ok()?,
         })
     }
 }
@@ -976,14 +1004,13 @@ impl Carried {
                 let ours = self.next;
                 self.next += 1;
                 value["id"] = Value::from(ours);
-                let line = Accounted::of(&value);
                 let call = matches!(request.request, ClientRequest::CallToolRequest(_));
                 let id = request.id;
-                if !line.fits() {
-                    // Written again, a line the CLI sent within the limit may
-                    // pass it, and rmcp would leave the request unanswered.
+                // Written again, a line the CLI sent within the limit may pass
+                // it, and rmcp would leave the request unanswered.
+                let Ok(line) = Accounted::of(&value) else {
                     return Carry::Answer(too_long_answer(&id.into_json_value(), call));
-                }
+                };
                 self.requests.insert(ours, Request { id, seq, call });
                 (vec![line], false)
             }
@@ -991,24 +1018,16 @@ impl Carried {
                 ClientNotification::CancelledNotification(cancelled) => {
                     match cancelled.params.request_id {
                         Some(cancelled) => (self.cancel(&value, &cancelled), true),
-                        None => (vec![Accounted::of(&value)], true),
+                        None => (Accounted::unanswered(&value).into_iter().collect(), true),
                     }
                 }
-                _ => (vec![Accounted::of(&value)], true),
+                _ => (Accounted::unanswered(&value).into_iter().collect(), true),
             },
             // Neither is a request rmcp runs: it answers or drops them.
             Ok(JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_)) | Err(_) => {
-                (vec![Accounted::of(&value)], false)
+                (Accounted::unanswered(&value).into_iter().collect(), false)
             }
         };
-        let count = lines.len();
-        let lines: Vec<Accounted> = lines.into_iter().filter(Accounted::fits).collect();
-        if lines.len() < count {
-            tracing::debug!(
-                kind = "oversized",
-                "a relay session dropped a line past the length rmcp reads"
-            );
-        }
         match (lines.is_empty(), notification && !chosen) {
             (true, _) => Carry::Drop,
             (false, false) => Carry::Feed(lines),
@@ -1029,12 +1048,10 @@ impl Carried {
         for ours in ours {
             let mut value = value.clone();
             value["params"]["requestId"] = Value::from(ours);
-            let line = Accounted::of(&value);
-            // rmcp drops it unread, and so cancels nothing.
-            if !line.fits() {
-                lines.push(line);
+            // Past the line, it cancels nothing: the request keeps running.
+            let Some(line) = Accounted::unanswered(&value) else {
                 continue;
-            }
+            };
             if let Some(request) = self.requests.remove(&ours)
                 && request.call
             {

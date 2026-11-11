@@ -33,11 +33,12 @@ use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
 use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
-    RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS, request_id,
+    INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
+    SUPPORTED_CONTRACTS, request_id,
 };
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::process;
-use yagura_test_support::relay_stdio::tool_call_error;
+use yagura_test_support::relay_stdio::{rpc_error_word, tool_call_error};
 
 /// Well-formed, but not the token the harness gives its windows.
 const WRONG_TOKEN: &str = "fedcba9876543210fedcba9876543210";
@@ -359,9 +360,12 @@ async fn a_resumed_session_whose_tool_summary_differs_is_told_the_tool_list_chan
     );
 }
 
+/// The session does not resume an opening it cannot open the same way: one
+/// whose recorded protocol version or capabilities differ, or whose
+/// `initialize` the session writes again past the line rmcp reads, which rmcp
+/// would drop unanswered.
 #[tokio::test]
-async fn a_resumed_opening_whose_protocol_version_or_capabilities_differ_is_refused_as_session_mismatch()
- {
+async fn a_resumed_opening_the_session_cannot_open_the_same_way_is_refused_as_session_mismatch() {
     let h = Harness::start("relay-resume-mismatch", config()).await;
     let (tools, answer) = first_session(&h).await;
 
@@ -377,26 +381,49 @@ async fn a_resumed_opening_whose_protocol_version_or_capabilities_differ_is_refu
     let mut other_capabilities = answer.clone();
     other_capabilities["result"]["capabilities"] = json!({});
 
-    for (what, recorded) in [
-        ("protocolVersion", other_version),
-        ("capabilities", other_capabilities),
+    let mut long_initialize = initialize_line(0);
+    long_initialize["params"]["_meta"] = json!({"numbers": "NUMBERS"});
+    let long_initialize = written_again_past_the_line(&long_initialize);
+    let read = serde_json::from_str::<Value>(&long_initialize).unwrap();
+    assert!(
+        matches!(
+            rmcp::model::ClientJsonRpcMessage::deserialize(&read),
+            Ok(rmcp::model::JsonRpcMessage::Request(sent))
+                if matches!(sent.request, rmcp::model::ClientRequest::InitializeRequest(_))
+        ),
+        "the fixture: rmcp reads the long line as an initialize request"
+    );
+    let mut long_opening = opening(&answer);
+    long_opening[0] = long_initialize;
+
+    for (what, lines) in [
+        (
+            "a recorded protocolVersion that differs",
+            opening(&other_version),
+        ),
+        (
+            "recorded capabilities that differ",
+            opening(&other_capabilities),
+        ),
+        (
+            "an initialize written again past the line rmcp reads",
+            long_opening,
+        ),
     ] {
-        let (mut client, first) = RelayClient::open(
-            &h.endpoint,
-            hello(
-                None,
-                Some(RelayResume {
-                    opening: Some(opening(&recorded)),
-                    tools: tools.clone(),
-                }),
-            ),
-        )
-        .await;
+        let resume = hello(
+            None,
+            Some(RelayResume {
+                opening: Some(lines),
+                tools: tools.clone(),
+            }),
+        );
+        assert_fits_a_frame(&resume);
+        let (mut client, first) = RelayClient::open(&h.endpoint, resume).await;
         let refused = expect_refused_then_closed(&mut client, first).await;
         assert_eq!(
             refused_kind(&refused),
             RelayRefusedKind::SessionMismatch,
-            "a recorded {what} that differs must be refused as session_mismatch"
+            "{what} must be refused as session_mismatch"
         );
     }
 }
@@ -732,39 +759,58 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
     expect_the_session_serves(&mut client, 6, false).await;
 }
 
-/// A tools/call the relay carries in one frame, and rmcp would read as the
-/// CLI wrote it, but that the session writes again past the line rmcp reads
-/// (numbers in exponent form, written out in full), is answered under the
-/// CLI's id as an error, and the session goes on serving.
+/// `template` with its `"NUMBERS"` string replaced by numbers in exponent
+/// form: a line within the line rmcp reads, that the session writes again
+/// (the numbers written out in full) past it.
+fn written_again_past_the_line(template: &Value) -> String {
+    let numbers = vec!["1e15"; 1_000_000].join(",");
+    let line = template
+        .to_string()
+        .replacen("\"NUMBERS\"", &format!("[{numbers}]"), 1);
+    let rewritten = serde_json::from_str::<Value>(&line).unwrap().to_string();
+    assert!(
+        line.len() < DEFAULT_MAX_LINE_LENGTH && rewritten.len() >= DEFAULT_MAX_LINE_LENGTH,
+        "the fixture: a line of {} bytes, written again in {} bytes, against rmcp's line limit \
+         of {DEFAULT_MAX_LINE_LENGTH}",
+        line.len(),
+        rewritten.len()
+    );
+    line
+}
+
+fn assert_fits_a_frame(frame: &RelayFrame) {
+    let framed = serde_json::to_vec(frame).unwrap().len();
+    assert!(
+        framed <= MAX_FRAME_BODY_LEN,
+        "the fixture: a frame of {framed} bytes against a frame limit of {MAX_FRAME_BODY_LEN}"
+    );
+}
+
+/// A request the relay carries in one frame, and rmcp would read as the CLI
+/// wrote it, but that the session writes again past the line rmcp reads, is
+/// answered under the CLI's id as the relay answers a request it cannot
+/// carry: a tools/call with an `isError` result, any other request with a
+/// JSON-RPC error. The session goes on serving.
 #[tokio::test]
 async fn a_tool_call_written_again_past_the_line_rmcp_reads_is_answered_as_an_error() {
     const CLI_ID: u64 = 7;
     let h = Harness::start("relay-rewritten-long", config()).await;
     let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
     initialize(&mut client).await;
+    let carried = |line: &str| {
+        assert_fits_a_frame(&RelayFrame::In {
+            line: line.to_string(),
+            seq: Some(1),
+        });
+    };
 
-    let numbers = vec!["1e15"; 1_000_000].join(",");
-    let line = tool_call_line(CLI_ID, "list_windows", json!({"numbers": "NUMBERS"}), false)
-        .to_string()
-        .replacen("\"NUMBERS\"", &format!("[{numbers}]"), 1);
-    let rewritten = serde_json::from_str::<Value>(&line).unwrap().to_string();
-    let framed = serde_json::to_vec(&RelayFrame::In {
-        line: line.clone(),
-        seq: Some(1),
-    })
-    .unwrap()
-    .len();
-    assert!(
-        framed <= MAX_FRAME_BODY_LEN
-            && line.len() < DEFAULT_MAX_LINE_LENGTH
-            && rewritten.len() >= DEFAULT_MAX_LINE_LENGTH,
-        "the fixture: a frame of {framed} bytes holding a line of {} bytes, written again in {} \
-         bytes, against a frame limit of {MAX_FRAME_BODY_LEN} and rmcp's line limit of \
-         {DEFAULT_MAX_LINE_LENGTH}",
-        line.len(),
-        rewritten.len()
-    );
-
+    let line = written_again_past_the_line(&tool_call_line(
+        CLI_ID,
+        "list_windows",
+        json!({"numbers": "NUMBERS"}),
+        false,
+    ));
+    carried(&line);
     let seq = client.request_raw(&line).await;
     let answer = client.answer(seq).await;
     assert_eq!(
@@ -772,11 +818,43 @@ async fn a_tool_call_written_again_past_the_line_rmcp_reads_is_answered_as_an_er
         json!(CLI_ID),
         "the answer goes back under the CLI's id, got {answer}"
     );
-    assert!(
-        answer["error"].is_object() || answer["result"]["isError"] == true,
-        "a request rmcp cannot read as written again is answered as an error, got {answer}"
+    let (word, text) = tool_call_error(&answer);
+    assert_eq!(
+        word, INVALID_REQUEST,
+        "a tools/call rmcp cannot read as written again is refused as an invalid request, got \
+         {text}"
     );
-    expect_the_session_serves(&mut client, CLI_ID + 1, false).await;
+
+    let list = |id: u64, numbers: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list",
+            "params": {"_meta": {"numbers": numbers}},
+        })
+    };
+    let seq = client.request(&list(CLI_ID + 1, json!([1e15]))).await;
+    let listed = client.answer(seq).await;
+    assert!(
+        listed["result"]["tools"].is_array(),
+        "the fixture: rmcp answers the short tools/list as a request, got {listed}"
+    );
+    let line = written_again_past_the_line(&list(CLI_ID + 2, json!("NUMBERS")));
+    carried(&line);
+    let seq = client.request_raw(&line).await;
+    let answer = client.answer(seq).await;
+    assert_eq!(
+        answer["id"],
+        json!(CLI_ID + 2),
+        "the answer goes back under the CLI's id, got {answer}"
+    );
+    assert_eq!(
+        rpc_error_word(&answer),
+        INVALID_REQUEST,
+        "a request other than tools/call rmcp cannot read as written again is refused as an \
+         invalid request, got {answer}"
+    );
+    expect_the_session_serves(&mut client, CLI_ID + 3, false).await;
 }
 
 /// The relay reads a JSON-RPC id (`request_id`) as the session's rmcp reads
