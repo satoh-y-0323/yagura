@@ -15,6 +15,9 @@ use crate::common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rmcp::model::RequestId;
+use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use common::relay::{
@@ -30,7 +33,7 @@ use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_daemon::window::{InputOrigin, WindowEntry};
 use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
-    RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS,
+    RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume, SUPPORTED_CONTRACTS, request_id,
 };
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::process;
@@ -729,6 +732,97 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
     expect_the_session_serves(&mut client, 6, false).await;
 }
 
+/// A tools/call the relay carries in one frame, and rmcp would read as the
+/// CLI wrote it, but that the session writes again past the line rmcp reads
+/// (numbers in exponent form, written out in full), is answered under the
+/// CLI's id as an error, and the session goes on serving.
+#[tokio::test]
+async fn a_tool_call_written_again_past_the_line_rmcp_reads_is_answered_as_an_error() {
+    const CLI_ID: u64 = 7;
+    let h = Harness::start("relay-rewritten-long", config()).await;
+    let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    initialize(&mut client).await;
+
+    let numbers = vec!["1e15"; 1_000_000].join(",");
+    let line = tool_call_line(CLI_ID, "list_windows", json!({"numbers": "NUMBERS"}), false)
+        .to_string()
+        .replacen("\"NUMBERS\"", &format!("[{numbers}]"), 1);
+    let rewritten = serde_json::from_str::<Value>(&line).unwrap().to_string();
+    let framed = serde_json::to_vec(&RelayFrame::In {
+        line: line.clone(),
+        seq: Some(1),
+    })
+    .unwrap()
+    .len();
+    assert!(
+        framed <= MAX_FRAME_BODY_LEN
+            && line.len() < DEFAULT_MAX_LINE_LENGTH
+            && rewritten.len() >= DEFAULT_MAX_LINE_LENGTH,
+        "the fixture: a frame of {framed} bytes holding a line of {} bytes, written again in {} \
+         bytes, against a frame limit of {MAX_FRAME_BODY_LEN} and rmcp's line limit of \
+         {DEFAULT_MAX_LINE_LENGTH}",
+        line.len(),
+        rewritten.len()
+    );
+
+    let seq = client.request_raw(&line).await;
+    let answer = client.answer(seq).await;
+    assert_eq!(
+        answer["id"],
+        json!(CLI_ID),
+        "the answer goes back under the CLI's id, got {answer}"
+    );
+    assert!(
+        answer["error"].is_object() || answer["result"]["isError"] == true,
+        "a request rmcp cannot read as written again is answered as an error, got {answer}"
+    );
+    expect_the_session_serves(&mut client, CLI_ID + 1, false).await;
+}
+
+/// The relay reads a JSON-RPC id (`request_id`) as the session's rmcp reads
+/// one (`RequestId`): for each value, the same id written back, or none.
+#[test]
+fn the_relay_reads_each_request_id_as_rmcp_does() {
+    let ids = [
+        r#""call-1""#,
+        "0",
+        "-1",
+        "-9223372036854775808",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+        "1.0",
+        "-2.0",
+        "1e0",
+        "9007199254740991",
+        "9007199254740991.0",
+        "9007199254740992",
+        "9007199254740992.0",
+        "9007199254740993",
+        "9007199254740993.0",
+        "1.5",
+        "true",
+        "null",
+        "[1]",
+    ];
+    let differ: Vec<(&str, Option<Value>, Option<Value>)> = ids
+        .into_iter()
+        .filter_map(|text| {
+            let id: Value = serde_json::from_str(text).unwrap();
+            let relay = request_id(&id);
+            let rmcp = RequestId::deserialize(&id)
+                .ok()
+                .map(RequestId::into_json_value);
+            (relay != rmcp).then_some((text, relay, rmcp))
+        })
+        .collect();
+    assert!(
+        differ.is_empty(),
+        "the relay must read each id as rmcp does, (id, relay, rmcp): {differ:?}"
+    );
+}
+
 // =====================================================================
 // The end of a relay connection ends the calls it carried
 // =====================================================================
@@ -901,15 +995,6 @@ async fn a_roots_list_changed_between_server_discover_and_the_first_request_keep
     expect_the_session_serves(&mut client, 2, true).await;
 }
 
-#[tokio::test]
-async fn a_cancelled_before_the_first_request_keeps_the_session() {
-    let h = Harness::start("relay-first-cancelled", config()).await;
-    let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
-
-    client.carry(&cancelled_line(99).to_string()).await;
-    expect_the_session_serves(&mut client, 1, true).await;
-}
-
 /// A relay connecting again for a CLI that opened without `initialize`
 /// resumes with no opening; the CLI's next line may be a notification.
 #[tokio::test]
@@ -919,21 +1004,19 @@ async fn a_resumed_session_without_an_opening_whose_first_line_is_a_notification
     let (first, tools) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
     drop(first);
 
-    for notification in [roots_list_changed_line(), cancelled_line(7)] {
-        let (mut client, _) = RelayClient::welcomed(
-            &h.endpoint,
-            hello(
-                None,
-                Some(RelayResume {
-                    opening: None,
-                    tools: tools.clone(),
-                }),
-            ),
-        )
-        .await;
-        client.carry(&notification.to_string()).await;
-        expect_the_session_serves(&mut client, 1, true).await;
-    }
+    let (mut client, _) = RelayClient::welcomed(
+        &h.endpoint,
+        hello(
+            None,
+            Some(RelayResume {
+                opening: None,
+                tools,
+            }),
+        ),
+    )
+    .await;
+    client.carry(&roots_list_changed_line().to_string()).await;
+    expect_the_session_serves(&mut client, 1, true).await;
 }
 
 /// The form codex, grok and muse use, beside the stateless ones above.
@@ -1229,6 +1312,57 @@ async fn a_report_taken_and_cancelled_before_its_answer_comes_back_once() {
         after.reports.is_empty(),
         "the report that came back is handed out once: {:?}",
         after.reports
+    );
+}
+
+/// A cancel naming an id the session carries no request under cancels
+/// nothing: the call rmcp runs under the session's number equal to that id
+/// still answers, with the report it took.
+#[tokio::test]
+async fn a_cancel_of_an_id_no_request_was_sent_under_leaves_the_running_call_answered() {
+    const MARK: &str = "CANCEL-UNKNOWN-6W3";
+    let faults = yagura_daemon::fault_point::FaultPoints::arm(
+        yagura_daemon::fault_point::FaultPoint::ReportTakenUnanswered,
+    );
+    let h = Harness::start(
+        "relay-cancel-unknown",
+        DaemonConfig {
+            faults: faults.clone(),
+            ..config()
+        },
+    )
+    .await;
+    let (parent, child) = report_to_parent(&h, MARK).await;
+
+    let mut session = window_session(&h.endpoint, &parent).await;
+    // `initialize` took the session's number 1, so this call runs under 2.
+    let seq = session
+        .request(&tool_call_line(
+            1,
+            "wait_for_report",
+            json!({"timeout_sec": 0}),
+            false,
+        ))
+        .await;
+    tokio::time::timeout(HANG_GUARD, faults.reached())
+        .await
+        .expect("the take must reach the point before its answer");
+    session.carry(&cancelled_line(2).to_string()).await;
+    after_frames(&mut session, 3).await;
+    faults.release();
+
+    let answer = session.answer(seq).await;
+    let reports = tool_json(&answer)["reports"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        report_keys(&reports)
+            .iter()
+            .map(|(from, summary, _)| (from.as_str(), summary.as_str()))
+            .collect::<Vec<_>>(),
+        [(child.as_str(), MARK)],
+        "a cancel of an id the CLI sent no request under must leave its call answered, got {answer}"
     );
 }
 

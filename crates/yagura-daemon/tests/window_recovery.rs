@@ -1547,6 +1547,74 @@ async fn a_window_whose_daemon_ended_once_its_holder_started_is_taken_back_from_
     );
 }
 
+/// How many launch records the holders folder keeps.
+fn launch_records(sandbox: &Sandbox) -> usize {
+    std::fs::read_dir(sandbox.holders_dir())
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        })
+        .count()
+}
+
+/// A window whose row cannot take its values is refused before its holder starts: the
+/// open leaves no holder's launch record behind. Once the row takes values again, the
+/// same open starts a holder whose record is kept there.
+#[tokio::test]
+async fn a_window_whose_row_cannot_be_written_is_refused_before_its_holder_starts() {
+    let sandbox = Sandbox::new("recover-row-unwritable");
+    let signal = sandbox.tree.path().join("row-update-fails");
+    std::fs::write(&signal, b"").unwrap();
+    let mut daemon = sandbox
+        .start_at_fault(
+            yagura_daemon::fault_point::FaultPoint::WindowRowUpdateFails,
+            Some(&signal),
+        )
+        .await;
+    let open = ClientMessage::OpenWindow {
+        command: yagura_test_support::process::echo_child_command(),
+        cwd: None,
+        name: None,
+        vendor: None,
+        detection: None,
+        on_name_taken: Default::default(),
+    };
+
+    send(&mut daemon.client, &open).await;
+    match read_response(&mut daemon.client).await {
+        DaemonMessage::Error { code, .. } if code == "spawn_failed" => {}
+        other => panic!(
+            "a window whose row cannot be written must be refused as spawn_failed, got \
+             {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    }
+    assert_eq!(
+        launch_records(&sandbox),
+        0,
+        "the refused open must start no holder, yet the holders folder keeps a launch record"
+    );
+
+    std::fs::remove_file(&signal).unwrap();
+    send(&mut daemon.client, &open).await;
+    let window_id = match read_response(&mut daemon.client).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!(
+            "once its row takes values the window must open, got {other:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        ),
+    };
+    record_of(&sandbox, &window_id);
+    assert_eq!(
+        launch_records(&sandbox),
+        1,
+        "the holders folder keeps the record of the one holder started"
+    );
+}
+
 /// Has `child` report `summary` to the window that opened it; returns the window the
 /// report was delivered to.
 async fn report_from(sandbox: &Sandbox, child: &str, summary: &str) -> Option<String> {

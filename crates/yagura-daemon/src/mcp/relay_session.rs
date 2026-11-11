@@ -31,8 +31,8 @@ use tokio::io::{
 };
 use tokio::sync::{Semaphore, watch};
 use yagura_protocol::relay::{
-    HELD_LINES_MAX, Line, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
-    SUPPORTED_CONTRACTS, is_one_line, parse_line,
+    HELD_LINES_MAX, INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
+    SUPPORTED_CONTRACTS, is_one_line, parse_line, rpc_error_line, tool_call_error_line,
 };
 use yagura_protocol::{
     ClientMessage, DaemonMessage, FrameError, decode_daemon_message, encode_client_message,
@@ -619,10 +619,12 @@ impl<S: Service<RoleServer>> Service<RoleServer> for LifecycleWatch<S> {
         if !matches!(request, ClientRequest::CallToolRequest(_)) {
             return self.inner.handle_request(request, context).await;
         }
+        let call = call_key(&context.id);
         let Ok(_place) = self.calls.try_acquire() else {
+            // Clears the mark of a cancel the session read before the refusal.
+            self.receipts.returned(&call, false);
             return Ok(ServerResult::CallToolResult(refused_call()));
         };
-        let call = call_key(&context.id);
         let cancelled = context.ct.clone();
         let result = CALL
             .scope(call.clone(), self.inner.handle_request(request, context))
@@ -669,7 +671,9 @@ struct Opening {
 }
 
 impl Opening {
-    /// Picks the lines as a session reads them ([`parse_line`], [`Line::of`]).
+    /// Picks the lines as the session's rmcp reads them. The answer is the
+    /// server's line, so it is not read as a client message: it is the line
+    /// with a `result`, the only answer a relay records.
     fn read(lines: &[String]) -> Option<Self> {
         let mut request = None;
         let mut answer = None;
@@ -678,15 +682,25 @@ impl Opening {
             let Some(value) = parse_line(line) else {
                 continue;
             };
-            match Line::of(&value) {
-                Line::Request { method, .. } if method == "initialize" => {
+            if value.get("result").is_some() {
+                answer = Some(value);
+                continue;
+            }
+            match ClientJsonRpcMessage::deserialize(&value) {
+                Ok(JsonRpcMessage::Request(sent))
+                    if matches!(sent.request, ClientRequest::InitializeRequest(_)) =>
+                {
                     request = Some(Accounted::of(&value));
                 }
-                Line::Notification { method, .. } if method == "notifications/initialized" => {
+                Ok(JsonRpcMessage::Notification(sent))
+                    if matches!(
+                        sent.notification,
+                        ClientNotification::InitializedNotification(_)
+                    ) =>
+                {
                     initialized = Some(Accounted::of(&value));
                 }
-                Line::Answer { .. } => answer = Some(value),
-                Line::Request { .. } | Line::Notification { .. } | Line::Other => {}
+                Ok(_) | Err(_) => {}
             }
         }
         Some(Self {
@@ -810,6 +824,12 @@ async fn run_session<S: AsyncRead + AsyncWrite>(
                     }
                     Carry::Hold(lines) => lines.into_iter().for_each(|line| held.hold(line)),
                     Carry::Drop => {}
+                    Carry::Answer(line) => {
+                        let out = RelayFrame::Out { line, seq, receipt: None };
+                        if !send(writer, &out).await {
+                            return;
+                        }
+                    }
                 }
             }
             line = rmcp.lines_out.next_line() => {
@@ -909,6 +929,20 @@ enum Carry {
     Hold(Vec<Accounted>),
     /// A line rmcp would not answer either.
     Drop,
+    /// A request rmcp cannot read, answered by the session: the line it hands
+    /// on in rmcp's place.
+    Answer(String),
+}
+
+/// The answer to a request whose line, as the session writes it again for
+/// rmcp, passes the length rmcp reads, worded as a relay words its own errors.
+fn too_long_answer(id: &Value, call: bool) -> String {
+    let sentence = "the request is longer than the daemon's MCP server reads";
+    if call {
+        tool_call_error_line(id, INVALID_REQUEST, sentence)
+    } else {
+        rpc_error_line(id, INVALID_REQUEST, sentence)
+    }
 }
 
 /// An answer rmcp wrote, as the relay gets it.
@@ -943,11 +977,14 @@ impl Carried {
                 self.next += 1;
                 value["id"] = Value::from(ours);
                 let line = Accounted::of(&value);
-                if line.fits() {
-                    let call = matches!(request.request, ClientRequest::CallToolRequest(_));
-                    let id = request.id;
-                    self.requests.insert(ours, Request { id, seq, call });
+                let call = matches!(request.request, ClientRequest::CallToolRequest(_));
+                let id = request.id;
+                if !line.fits() {
+                    // Written again, a line the CLI sent within the limit may
+                    // pass it, and rmcp would leave the request unanswered.
+                    return Carry::Answer(too_long_answer(&id.into_json_value(), call));
                 }
+                self.requests.insert(ours, Request { id, seq, call });
                 (vec![line], false)
             }
             Ok(JsonRpcMessage::Notification(notification)) => match notification.notification {
@@ -1051,11 +1088,14 @@ impl Carried {
 }
 
 tokio::task_local! {
-    /// The JSON-RPC id key of the tool call a task runs.
+    /// The key ([`call_key`]) of the session's number the tool call a task
+    /// runs is under.
     static CALL: String;
 }
 
-/// How many cancels of calls still running a session remembers at once.
+/// How many cancels of calls still running a session remembers at once: one
+/// for each place a call holds, as a refused call lets go of its mark when it
+/// is refused.
 const CANCELS_REMEMBERED: usize = REQUESTS_AT_ONCE + REQUESTS_WAITING;
 
 /// The reports a session's `wait_for_report` calls took, from the take until
@@ -1071,7 +1111,8 @@ pub(crate) struct Receipts {
 
 #[derive(Default)]
 struct ReceiptState {
-    /// Taken by a call whose answer is not handed on yet, by JSON-RPC id key.
+    /// Taken by a call whose answer is not handed on yet, by the key of the
+    /// session's number it runs under.
     answering: HashMap<String, TakenReports>,
     /// Calls the CLI cancelled while they still ran.
     cancelled: HashSet<String>,
