@@ -6506,7 +6506,20 @@ impl WindowRegistry {
     /// Installs the window table every window opened from now on writes its
     /// row in (`store::wire_into` is its only caller).
     pub(crate) fn set_window_table(&self, table: WindowTable) {
+        #[cfg(feature = "fault-injection")]
+        self.config.faults.attach_window_table(&table);
         *lock_recover(&self.window_table) = Some(table);
+    }
+
+    /// Has the writer of the window table installed now act out `faults`
+    /// from its next command on, so a test arms it once its windows are
+    /// open. Nothing without a table. Behind the `fault-injection` feature
+    /// only.
+    #[cfg(feature = "fault-injection")]
+    pub fn arm_window_table(&self, faults: &crate::fault_point::FaultPoints) {
+        if let Some(table) = self.window_table() {
+            faults.attach_window_table(&table);
+        }
     }
 
     /// Installs where every window opened or taken back from now on keeps its

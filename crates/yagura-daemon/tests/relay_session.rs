@@ -424,7 +424,8 @@ async fn a_session_without_an_opening_enters_statelessly_through_server_discover
 /// A session runs four requests at once and holds sixteen more waiting; the
 /// next is answered `resource_exhausted` while all of those still wait. A
 /// line led by a UTF-8 byte order mark, which rmcp reads as the request after
-/// it, counts the same.
+/// it, counts the same. A request whose id is an integer written as a float,
+/// which rmcp answers under the integer, leaves the count once answered.
 #[tokio::test]
 async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resource_exhausted() {
     let h = Harness::start("relay-request-limit", config()).await;
@@ -491,6 +492,53 @@ async fn a_request_past_the_four_running_and_sixteen_waiting_is_answered_resourc
             "{what}: the {held} held requests must still wait, got {answered_early:?}"
         );
     }
+
+    let (mut client, _) = RelayClient::welcomed(&h.endpoint, hello(None, None)).await;
+    initialize(&mut client).await;
+    let past_the_limit = REQUESTS_AT_ONCE + REQUESTS_WAITING + 1;
+    let mut unanswered = Vec::new();
+    for id in 1..=past_the_limit {
+        let mut line = tool_call_line(id, "list_windows", json!({}), false);
+        let written = if id % 2 == 0 {
+            format!("{id}.0")
+        } else {
+            format!("{id}e0")
+        };
+        line["id"] = json!("ID");
+        let line = line.to_string().replacen("\"ID\"", &written, 1);
+        let seq = client.request_raw(&line).await;
+        let (answer, answered) = loop {
+            match client.next_frame().await {
+                RelayFrame::Out {
+                    line,
+                    seq: answered,
+                    ..
+                } => {
+                    let value: Value = serde_json::from_str(&line)
+                        .unwrap_or_else(|err| panic!("relay_out must carry JSON ({err}): {line}"));
+                    if value["id"].as_f64() == written.parse::<f64>().ok() {
+                        break (value, answered);
+                    }
+                }
+                other => panic!("expected relay_out while waiting for id {written}, got {other:?}"),
+            }
+        };
+        let refused = if answer["result"]["isError"] == true {
+            Some(tool_call_error(&answer).0)
+        } else if answer["result"].is_object() {
+            None
+        } else {
+            Some(answer.to_string())
+        };
+        if answered != Some(seq) || refused.is_some() {
+            unanswered.push((written, answered, refused));
+        }
+    }
+    assert!(
+        unanswered.is_empty(),
+        "each of {past_the_limit} calls sent one after another under an integral float id must \
+         be answered as its own sequence number and served; got {unanswered:?}"
+    );
 }
 
 // =====================================================================
@@ -553,9 +601,10 @@ async fn only_a_frame_breaking_the_contract_closes_the_relay_connection() {
 }
 
 /// A line the CLI wrote that is not one JSON-RPC message does not end the
-/// session, and is answered as it is today: nothing for a line that is not
-/// JSON or that answers no request, an `Invalid Request` error for JSON that
-/// is no JSON-RPC message.
+/// session, and is answered as rmcp answers it: nothing for a line that is
+/// not JSON or that answers no request, an `Invalid Request` error without an
+/// id for JSON that is no JSON-RPC message, an error-like line without
+/// `jsonrpc` among them, and one whose `error` is malformed.
 #[tokio::test]
 async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
     const INVALID_REQUEST_CODE: i64 = -32600;
@@ -566,7 +615,9 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
     let null_id_error =
         json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "x"}})
             .to_string();
-    let cases: [(&str, &str, Option<i64>); 3] = [
+    let error_without_jsonrpc = json!({"error": {"code": 1, "message": "x"}}).to_string();
+    let malformed_error = json!({"jsonrpc": "2.0", "error": "x"}).to_string();
+    let cases: [(&str, &str, Option<i64>); 5] = [
         ("a line that is not JSON", "{not json", None),
         (
             "JSON that is no JSON-RPC message",
@@ -574,6 +625,16 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
             Some(INVALID_REQUEST_CODE),
         ),
         ("an error answer whose id is null", &null_id_error, None),
+        (
+            "an error-like line without jsonrpc",
+            &error_without_jsonrpc,
+            Some(INVALID_REQUEST_CODE),
+        ),
+        (
+            "an error line whose error is malformed",
+            &malformed_error,
+            Some(INVALID_REQUEST_CODE),
+        ),
     ];
     for (id, (what, line, expected)) in (1u64..).zip(cases) {
         client.carry(line).await;
@@ -589,10 +650,15 @@ async fn a_relay_in_line_that_is_not_json_does_not_end_the_session() {
         assert_eq!(
             codes,
             expected.map(Some).into_iter().collect::<Vec<_>>(),
-            "{what} must be answered as before (an error of the code, or nothing), got {before:?}"
+            "{what} must be answered as rmcp answers it (an error of the code, or nothing), \
+             got {before:?}"
+        );
+        assert!(
+            before.iter().all(|answer| answer.get("id").is_none()),
+            "{what}: an answer to a line whose id cannot be read carries no id, got {before:?}"
         );
     }
-    expect_the_session_serves(&mut client, 4, false).await;
+    expect_the_session_serves(&mut client, 6, false).await;
 }
 
 // =====================================================================

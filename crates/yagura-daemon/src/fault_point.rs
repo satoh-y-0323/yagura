@@ -1,7 +1,7 @@
 //! The points a test of the daemon arms to stand the daemon at one moment of
-//! its work: the daemon ends itself there, or its parcel writer, or a
-//! relay session's take of reports, fails or stops there until the test
-//! releases it. Each point is named by the
+//! its work: the daemon ends itself there, or its parcel writer, its window
+//! table's writer, or a relay session's take of reports, fails or stops there
+//! until the test releases it. Each point is named by the
 //! property it stands for, not by the code it sits in, so a change that moves
 //! the property moves the point with it.
 //!
@@ -61,11 +61,17 @@ pub enum FaultPoint {
     /// A window's holder has started its child and let the daemon in, and the
     /// window is not registered yet. The daemon ends there.
     WindowHolderStarted,
+    /// The window table's writer stops before it writes a window's values to
+    /// its row until the fault is released. Released only in-process.
+    WindowRowUpdatePaused,
+    /// Every write of a window's values to its row fails until the fault is
+    /// released; the rows themselves are still reserved, marked and removed.
+    WindowRowUpdateFails,
 }
 
 impl FaultPoint {
     /// Every point, in the order of [`FaultPoint::name`]'s table.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::HandoffDeposited,
         Self::WriteFails,
         Self::ParcelEndHalfSettled,
@@ -77,6 +83,8 @@ impl FaultPoint {
         Self::DoorBeforeSettle,
         Self::ReportTakenUnanswered,
         Self::WindowHolderStarted,
+        Self::WindowRowUpdatePaused,
+        Self::WindowRowUpdateFails,
     ];
 
     /// The point's name, as [`POINT_ENV`] carries it.
@@ -94,6 +102,8 @@ impl FaultPoint {
             Self::DoorBeforeSettle => "door_before_settle",
             Self::ReportTakenUnanswered => "report_taken_unanswered",
             Self::WindowHolderStarted => "window_holder_started",
+            Self::WindowRowUpdatePaused => "window_row_update_paused",
+            Self::WindowRowUpdateFails => "window_row_update_fails",
         }
     }
 
@@ -109,13 +119,20 @@ impl FaultPoint {
     pub const fn ends_daemon(self) -> bool {
         !matches!(
             self,
-            Self::WriteFails | Self::WriterPaused | Self::ReportTakenUnanswered
+            Self::WriteFails
+                | Self::WriterPaused
+                | Self::ReportTakenUnanswered
+                | Self::WindowRowUpdatePaused
+                | Self::WindowRowUpdateFails
         )
     }
 
     /// Whether only the test's own process can release this point.
     const fn in_process_only(self) -> bool {
-        matches!(self, Self::WriterPaused | Self::ReportTakenUnanswered)
+        matches!(
+            self,
+            Self::WriterPaused | Self::ReportTakenUnanswered | Self::WindowRowUpdatePaused
+        )
     }
 }
 
@@ -180,8 +197,9 @@ impl FaultPoints {
     /// # Errors
     ///
     /// [`FaultArmError::Unknown`] when [`POINT_ENV`] names no point, and
-    /// [`FaultArmError::InProcessOnly`] for [`FaultPoint::WriterPaused`] and
-    /// [`FaultPoint::ReportTakenUnanswered`], which nothing outside the
+    /// [`FaultArmError::InProcessOnly`] for [`FaultPoint::WriterPaused`],
+    /// [`FaultPoint::ReportTakenUnanswered`] and
+    /// [`FaultPoint::WindowRowUpdatePaused`], which nothing outside the
     /// process can release.
     pub fn from_env() -> Result<Self, FaultArmError> {
         let Some(name) = std::env::var_os(POINT_ENV) else {
@@ -237,6 +255,13 @@ impl FaultPoints {
         store.arm_writer(self.clone());
     }
 
+    /// Hands the writer of `table` what it acts on from its next command on.
+    pub(crate) fn attach_window_table(&self, table: &crate::window_table::WindowTable) {
+        if self.armed.is_some() {
+            table.arm_writer(self.clone());
+        }
+    }
+
     /// Ends the daemon when `point` is the armed one that ends it, once its
     /// parcel writer has written what was handed to it before.
     pub(crate) fn reach(&self, point: FaultPoint) {
@@ -274,11 +299,29 @@ impl FaultPoints {
 
     /// Whether the parcel writer's next write fails.
     pub(crate) fn write_fails(&self) -> bool {
-        let Some(armed) = self
-            .armed
-            .as_ref()
-            .filter(|armed| armed.point == FaultPoint::WriteFails)
-        else {
+        self.fails_at(FaultPoint::WriteFails)
+    }
+
+    /// Stops the parcel writer, on its own thread, until the fault is
+    /// released.
+    pub(crate) fn pause_writer(&self) {
+        self.pause_at(FaultPoint::WriterPaused);
+    }
+
+    /// Whether the window table writer's next write of a window's values
+    /// fails.
+    pub(crate) fn row_update_fails(&self) -> bool {
+        self.fails_at(FaultPoint::WindowRowUpdateFails)
+    }
+
+    /// Stops the window table's writer, on its own thread, before it writes
+    /// a window's values, until the fault is released.
+    pub(crate) fn pause_row_update(&self) {
+        self.pause_at(FaultPoint::WindowRowUpdatePaused);
+    }
+
+    fn fails_at(&self, point: FaultPoint) -> bool {
+        let Some(armed) = self.armed.as_ref().filter(|armed| armed.point == point) else {
             return false;
         };
         if armed.is_released() {
@@ -288,14 +331,8 @@ impl FaultPoints {
         true
     }
 
-    /// Stops the parcel writer, on its own thread, until the fault is
-    /// released.
-    pub(crate) fn pause_writer(&self) {
-        let Some(armed) = self
-            .armed
-            .as_ref()
-            .filter(|armed| armed.point == FaultPoint::WriterPaused)
-        else {
+    fn pause_at(&self, point: FaultPoint) {
+        let Some(armed) = self.armed.as_ref().filter(|armed| armed.point == point) else {
             return;
         };
         let mut released = armed.lock_released();

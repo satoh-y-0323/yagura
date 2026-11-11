@@ -213,11 +213,14 @@ fn error_text(word: &str, sentence: &str) -> String {
 /// What a relay or a daemon reads of one JSON-RPC line: only its `method`,
 /// its `id` and, for a notification, `params.requestId` (the request a
 /// `notifications/cancelled` cancels). See [`read_line`].
+///
+/// Each id is read as the MCP server reads one ([`request_id`]), so it is the
+/// id the server's answer carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
     /// A request: a `method` and an `id` that is not null.
     Request {
-        /// The request's id.
+        /// The request's id, as [`request_id`] reads it.
         id: Value,
         /// The request's method.
         method: String,
@@ -234,7 +237,8 @@ pub enum Line {
         /// The id of the request it answers.
         id: Value,
     },
-    /// Neither: not a JSON object, or an object with no `method` and no `id`.
+    /// Neither: not a JSON object, an object with no `method` and no `id`, or
+    /// one whose `id` is not null and is no id [`request_id`] reads.
     Other,
 }
 
@@ -271,18 +275,50 @@ impl Line {
             .get("method")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let id = object.get("id").filter(|id| !id.is_null()).cloned();
+        let id = match object.get("id").filter(|id| !id.is_null()) {
+            None => None,
+            Some(id) => match request_id(id) {
+                Some(id) => Some(id),
+                // The server reads no message out of it.
+                None => return Self::Other,
+            },
+        };
         match (method, id) {
             (Some(method), Some(id)) => Self::Request { id, method },
             (Some(method), None) => {
                 let cancels = object
                     .get("params")
                     .and_then(|params| params.get("requestId"))
-                    .cloned();
+                    .and_then(request_id);
                 Self::Notification { method, cancels }
             }
             (None, Some(id)) => Self::Answer { id },
             (None, None) => Self::Other,
         }
+    }
+}
+
+/// The largest magnitude below which every integer is exact in an `f64`.
+const EXACT_FLOAT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
+/// The JSON-RPC id `id` as the MCP server (rmcp's `NumberOrString`) reads it
+/// and writes it back in its answer: a string as it is, an integer that fits
+/// an `i64`, and a float with an integer value (`1.0`, `1e0`) below 2^53 as
+/// that integer. `None` for any other value, which the server reads as no id.
+#[must_use]
+pub fn request_id(id: &Value) -> Option<Value> {
+    match id {
+        Value::String(_) => Some(id.clone()),
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|float| float.fract() == 0.0 && float.abs() < EXACT_FLOAT_INTEGER)
+                    // An exact integer below 2^53: the cast neither rounds nor saturates.
+                    .map(|float| float as i64)
+            })
+            .map(Value::from),
+        _ => None,
     }
 }

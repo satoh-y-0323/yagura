@@ -28,9 +28,11 @@ use yagura_test_support::process::echo_child_path;
 
 use common::{Harness, policy, read_response, send};
 use yagura_daemon::DaemonConfig;
+use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
 use yagura_daemon::store;
 use yagura_daemon::window::{
-    LaunchIdentity, OpenWindowRequest, RequestedCwd, TaskOrigin, WindowProvenance, WindowRegistry,
+    HooksRoute, LaunchIdentity, OpenWindowRequest, RequestedCwd, TaskOrigin, WindowOpenError,
+    WindowProvenance, WindowRegistry,
 };
 
 const STATES: [&str; 3] = ["opening", "live", "lost"];
@@ -287,10 +289,31 @@ async fn a_windows_row_comes_before_its_child_follows_its_values_and_goes_with_i
         );
     }
 
-    h.registry
-        .rename_window(&entry, "wt-alpha-renamed")
-        .await
-        .expect("the rename must succeed");
+    // The rename is answered only once its row has the name: while the row
+    // writer stands before the write, the rename is still waiting.
+    let paused = FaultPoints::arm(FaultPoint::WindowRowUpdatePaused);
+    h.registry.arm_window_table(&paused);
+    let mut rename = std::pin::pin!(h.registry.rename_window(&entry, "wt-alpha-renamed"));
+    let first_poll =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(rename.as_mut().poll(cx))).await;
+    let answered_early = first_poll.is_ready();
+    paused.release();
+    assert!(
+        !answered_early,
+        "a rename must not be answered before its row has the name"
+    );
+    let renamed = match first_poll {
+        std::task::Poll::Ready(renamed) => renamed,
+        std::task::Poll::Pending => tokio::time::timeout(HANG_GUARD, rename)
+            .await
+            .expect("the rename must be answered once the row writer goes on"),
+    };
+    renamed.expect("the rename must succeed");
+    let row = row_of(&state_rows(&db), &alpha_id).expect("the window's row");
+    assert!(
+        has_text(&row, "wt-alpha-renamed"),
+        "the row must have the new name once the rename is answered: {row:?}"
+    );
     h.registry.set_window_layout(&entry, LAYOUT.to_owned());
     assert!(entry.record_session_id(SESSION_ID));
     wait_for_row(
@@ -349,6 +372,25 @@ async fn a_windows_row_comes_before_its_child_follows_its_values_and_goes_with_i
         refused.is_err(),
         "a window whose holder cannot start must not open"
     );
+    // A row that takes no values refuses the open before any holder starts.
+    let unwritable = Harness::start(
+        "window-table-row-unwritable",
+        DaemonConfig {
+            faults: FaultPoints::arm(FaultPoint::WindowRowUpdateFails),
+            ..DaemonConfig::default()
+        },
+    )
+    .await;
+    store::wire_into(&unwritable.registry, Some(db.clone()));
+    let refused = unwritable
+        .registry
+        .open(request(echo_command(), "wt-row-unwritable"))
+        .await;
+    assert!(
+        matches!(refused, Err(WindowOpenError::SpawnFailed(_))),
+        "a window whose row cannot take its values must be refused as spawn_failed, got {:?}",
+        refused.as_ref().map(|opened| &opened.window_id)
+    );
     wait_for_rows_of(
         &db,
         &[&alpha_id, &beta_id],
@@ -371,8 +413,41 @@ async fn a_windows_row_comes_before_its_child_follows_its_values_and_goes_with_i
     }
     wait_for_rows_of(&db, &[&beta_id], "after the first window closed").await;
 
+    unwritable.registry.terminate_all().await;
     holderless.terminate_all().await;
     h.registry.terminate_all().await;
+}
+
+/// The spelling of each hook route in the table and the launch record: a
+/// contract with the rows and records earlier daemons and holders wrote.
+fn persisted_spelling(route: HooksRoute) -> &'static str {
+    match route {
+        HooksRoute::Unarranged => "unarranged",
+        HooksRoute::Injection => "injection",
+        HooksRoute::RegisteredEntries => "registered_entries",
+        HooksRoute::LeftOut => "left_out",
+    }
+}
+
+#[test]
+fn every_hook_route_keeps_its_persisted_spelling_both_ways() {
+    for route in [
+        HooksRoute::Unarranged,
+        HooksRoute::Injection,
+        HooksRoute::RegisteredEntries,
+        HooksRoute::LeftOut,
+    ] {
+        let spelling = persisted_spelling(route);
+        assert_eq!(
+            serde_json::to_value(route).unwrap(),
+            serde_json::Value::String(spelling.to_owned()),
+            "{route:?} must be written as {spelling:?}"
+        );
+        let read: HooksRoute =
+            serde_json::from_value(serde_json::Value::String(spelling.to_owned()))
+                .unwrap_or_else(|err| panic!("{spelling:?} must read back ({err})"));
+        assert_eq!(read, route, "{spelling:?} must read back as {route:?}");
+    }
 }
 
 /// The holders folder of this process's registry that keeps `window_id`'s record.

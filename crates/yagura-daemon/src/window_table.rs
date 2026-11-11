@@ -288,12 +288,15 @@ enum Command {
         window_id: String,
         values: WindowValues,
         /// Told whether the row took `values`.
-        reply: Option<oneshot::Sender<bool>>,
+        reply: oneshot::Sender<bool>,
     },
     Remove {
         window_id: String,
         reply: Option<oneshot::Sender<()>>,
     },
+    /// The fault the writer acts out from now on.
+    #[cfg(feature = "fault-injection")]
+    ArmWriter(crate::fault_point::FaultPoints),
 }
 
 /// What writing a window's `opening` row came to.
@@ -322,6 +325,12 @@ impl WindowTable {
 
     fn send(&self, command: Command) -> bool {
         self.commands.send(command).is_ok()
+    }
+
+    /// Has the writer act out `faults` from its next command on.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn arm_writer(&self, faults: crate::fault_point::FaultPoints) {
+        self.send(Command::ArmWriter(faults));
     }
 
     /// Every row, in the order the windows were opened; none when the rows
@@ -477,6 +486,8 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
             tracing::warn!(%error, "failed to write the window table; windows open without rows");
         }
     };
+    #[cfg(feature = "fault-injection")]
+    let mut faults = crate::fault_point::FaultPoints::default();
     while let Ok(command) = received.recv() {
         match command {
             Command::Rows { reply } => {
@@ -540,16 +551,25 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
                 values,
                 reply,
             } => {
-                let written = match update_values(conn, &window_id, &values) {
+                #[cfg(feature = "fault-injection")]
+                let updated = {
+                    faults.pause_row_update();
+                    if faults.row_update_fails() {
+                        Err(crate::fault_point::simulated_write_failure())
+                    } else {
+                        update_values(conn, &window_id, &values)
+                    }
+                };
+                #[cfg(not(feature = "fault-injection"))]
+                let updated = update_values(conn, &window_id, &values);
+                let written = match updated {
                     Ok(changed) => changed > 0,
                     Err(error) => {
                         warn(error);
                         false
                     }
                 };
-                if let Some(reply) = reply {
-                    let _ = reply.send(written);
-                }
+                let _ = reply.send(written);
             }
             Command::Remove { window_id, reply } => {
                 if let Err(error) = conn.execute_fixed(
@@ -562,6 +582,8 @@ fn write_rows(conn: &Connection, received: &mpsc::Receiver<Command>) {
                     let _ = reply.send(());
                 }
             }
+            #[cfg(feature = "fault-injection")]
+            Command::ArmWriter(armed) => faults = armed,
         }
     }
 }
@@ -676,18 +698,8 @@ impl WindowRow {
     /// Writes the window's values as they are now; `values` is read under the
     /// row's own lock, so the last write carries every change made before it.
     pub(crate) fn update(&self, values: impl FnOnce() -> WindowValues) {
-        let Some(table) = &self.table else {
-            return;
-        };
-        let _ordered = lock_recover(&self.updates);
-        if self.removed.load(Ordering::SeqCst) {
-            return;
-        }
-        table.send(Command::Update {
-            window_id: self.window_id.clone(),
-            values: values(),
-            reply: None,
-        });
+        // Unawaited, the write still takes its place in the writer's order.
+        let _unawaited = self.update_waited(values);
     }
 
     /// [`Self::update`], returning what tells once the row took the values.
@@ -762,7 +774,7 @@ impl PendingWrite {
         if table.send(Command::Update {
             window_id: window_id.to_owned(),
             values,
-            reply: Some(reply),
+            reply,
         }) {
             Self::Sent(written)
         } else {

@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rmcp::model::{ClientNotification, ClientRequest, ErrorCode, ServerConfig, ServerResult};
+use rmcp::model::{ClientNotification, ClientRequest, ServerConfig, ServerResult};
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData, RoleServer, Service};
 use serde_json::{Value, json};
@@ -55,10 +55,6 @@ const RMCP_PIPE_BUFFER: usize = 64 * 1024;
 
 /// Read size of the relay connection.
 const READ_CHUNK_LEN: usize = 8192;
-
-/// The `error.message` of the `Invalid Request` error a session answers a
-/// CLI line with that holds JSON but no JSON-RPC message, as rmcp words it.
-const INVALID_REQUEST_MESSAGE: &str = "Invalid request";
 
 /// Whether `body`, the first frame of a connection, opens a relay session.
 pub(crate) fn is_relay_hello(body: &[u8]) -> bool {
@@ -861,7 +857,7 @@ enum Carry {
     Hold(Accounted),
     /// The session answers it itself.
     Answer(RelayFrame),
-    /// A line that is no JSON-RPC message, and has no answer.
+    /// A line that holds no JSON, which rmcp would not answer either.
     Drop,
 }
 
@@ -922,8 +918,9 @@ impl Carried {
                     Carry::Hold(Accounted::of(&value))
                 }
             }
-            Line::Answer { .. } => Carry::Feed(Accounted::of(&value)),
-            Line::Other => unclassified(&value, seq),
+            // rmcp reads a request only out of a `method` and an `id` it
+            // takes, so neither is one it runs: rmcp answers or drops it.
+            Line::Answer { .. } | Line::Other => Carry::Feed(Accounted::of(&value)),
         }
     }
 
@@ -941,33 +938,6 @@ impl Carried {
             .flatten();
         (self.seqs.remove(&key), taken)
     }
-}
-
-/// What a session does with `value`, a CLI line's JSON that is no request,
-/// notification or answer: an error answer that names no request has no
-/// answer, and anything else is an `Invalid Request` with no `id`, as
-/// JSON-RPC 2.0 answers a message whose id cannot be read.
-fn unclassified(value: &Value, seq: Option<u64>) -> Carry {
-    if value.get("error").is_some() {
-        tracing::debug!(
-            kind = "answer_without_id",
-            "a relay session dropped a line that is no JSON-RPC message"
-        );
-        return Carry::Drop;
-    }
-    tracing::debug!(
-        kind = "not_a_message",
-        "a relay session answered a line that is no JSON-RPC message"
-    );
-    let invalid = json!({
-        "jsonrpc": "2.0",
-        "error": {"code": ErrorCode::INVALID_REQUEST.0, "message": INVALID_REQUEST_MESSAGE},
-    });
-    Carry::Answer(RelayFrame::Out {
-        line: invalid.to_string(),
-        seq,
-        receipt: None,
-    })
 }
 
 tokio::task_local! {
