@@ -362,8 +362,9 @@ async fn a_resumed_session_whose_tool_summary_differs_is_told_the_tool_list_chan
 
 /// The session does not resume an opening it cannot open the same way: one
 /// whose recorded protocol version or capabilities differ, or whose
-/// `initialize` the session writes again past the line rmcp reads, which rmcp
-/// would drop unanswered.
+/// `initialize` or `notifications/initialized` the session writes again past
+/// the line rmcp reads, which rmcp would drop. It is refused before any
+/// `relay_welcome`.
 #[tokio::test]
 async fn a_resumed_opening_the_session_cannot_open_the_same_way_is_refused_as_session_mismatch() {
     let h = Harness::start("relay-resume-mismatch", config()).await;
@@ -396,6 +397,24 @@ async fn a_resumed_opening_the_session_cannot_open_the_same_way_is_refused_as_se
     let mut long_opening = opening(&answer);
     long_opening[0] = long_initialize;
 
+    let mut long_initialized = initialized_line();
+    long_initialized["params"] = json!({"_meta": {"numbers": "NUMBERS"}});
+    let long_initialized = written_again_past_the_line(&long_initialized);
+    let read = serde_json::from_str::<Value>(&long_initialized).unwrap();
+    assert!(
+        matches!(
+            rmcp::model::ClientJsonRpcMessage::deserialize(&read),
+            Ok(rmcp::model::JsonRpcMessage::Notification(sent))
+                if matches!(
+                    sent.notification,
+                    rmcp::model::ClientNotification::InitializedNotification(_)
+                )
+        ),
+        "the fixture: rmcp reads the long line as notifications/initialized"
+    );
+    let mut long_initialized_opening = opening(&answer);
+    long_initialized_opening[2] = long_initialized;
+
     for (what, lines) in [
         (
             "a recorded protocolVersion that differs",
@@ -409,6 +428,10 @@ async fn a_resumed_opening_the_session_cannot_open_the_same_way_is_refused_as_se
             "an initialize written again past the line rmcp reads",
             long_opening,
         ),
+        (
+            "a notifications/initialized written again past the line rmcp reads",
+            long_initialized_opening,
+        ),
     ] {
         let resume = hello(
             None,
@@ -419,6 +442,10 @@ async fn a_resumed_opening_the_session_cannot_open_the_same_way_is_refused_as_se
         );
         assert_fits_a_frame(&resume);
         let (mut client, first) = RelayClient::open(&h.endpoint, resume).await;
+        assert!(
+            matches!(first, RelayFrame::Refused { .. }),
+            "{what} must be refused before any relay_welcome, got {first:?}"
+        );
         let refused = expect_refused_then_closed(&mut client, first).await;
         assert_eq!(
             refused_kind(&refused),
