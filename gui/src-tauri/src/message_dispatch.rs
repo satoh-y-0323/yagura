@@ -721,7 +721,7 @@ mod host_tests;
 #[cfg(test)]
 mod tests {
     use yagura_protocol::{
-        ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, HandoffDelivery,
+        ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalTarget, DeliveryState,
         WindowStatus, WithdrawReason,
     };
 
@@ -779,7 +779,9 @@ mod tests {
             reply_for(DaemonMessage::HandoffSent {
                 window_id: "window-a".to_owned(),
                 opened: true,
-                delivery: HandoffDelivery::Taken,
+                id: "envelope-1".to_owned(),
+                state: DeliveryState::Delivered,
+                note: None,
                 name: None,
             })
             .is_none()

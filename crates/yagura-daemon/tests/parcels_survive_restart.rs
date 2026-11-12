@@ -183,17 +183,17 @@ async fn chat_seq_of(client: &mut Connection, sandbox: &Sandbox, mark: &str) -> 
         .seq
 }
 
-/// Waits until the room records message `seq` as taken by `window_id`.
+/// Waits until the room records message `seq` as delivered to `window_id`.
 async fn until_chat_taken(client: &mut Connection, sandbox: &Sandbox, seq: u64, window_id: &str) {
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let state = chat_delivery_state(client, seq, window_id).await;
-        if state.as_deref() == Some("taken") {
+        if state.as_deref() == Some("delivered") {
             return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the post taken after the restart must be recorded as taken, not {state:?}; daemon              log:
+            "the post taken after the restart must be recorded as delivered, not {state:?}; daemon              log:
 {}",
             sandbox.daemon_log()
         );
@@ -317,6 +317,27 @@ async fn wait_for_report(client: &mut Connection) -> Vec<yagura_protocol::Receiv
 
 fn count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
+}
+
+const CHAT_ENVELOPE_MARKER: &str = "[yagura chat] ";
+
+/// The `id` the chat envelope carrying `mark` in `printed` names.
+fn chat_envelope_id(printed: &str, mark: &str) -> String {
+    let line = printed
+        .lines()
+        .find(|line| line.contains(mark))
+        .unwrap_or_else(|| panic!("no envelope carrying {mark} in {printed:?}"));
+    let start = line
+        .find(CHAT_ENVELOPE_MARKER)
+        .unwrap_or_else(|| panic!("the post must arrive as a chat envelope: {line:?}"))
+        + CHAT_ENVELOPE_MARKER.len();
+    let envelope: serde_json::Value = serde_json::from_str(&line[start..])
+        .unwrap_or_else(|err| panic!("the envelope must be JSON ({err}): {line:?}"));
+    envelope["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| panic!("the chat envelope must name its id: {line:?}"))
+        .to_string()
 }
 
 fn store_db(sandbox: &Sandbox) -> PathBuf {
@@ -723,7 +744,7 @@ async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row
     assert!(
         matches!(
             (state.as_deref(), kept),
-            (Some("pending"), true) | (Some("taken"), false)
+            (Some("queued"), true) | (Some("delivered"), false)
         ),
         "the delivery is {state:?} while the post is {} for the window; daemon log:\n{}",
         if kept { "kept" } else { "not kept" },
@@ -970,11 +991,16 @@ async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemo
         String::from_utf8_lossy(&again.stderr),
         sandbox.daemon_log()
     );
+    assert_eq!(
+        chat_envelope_id(&printed, CHAT_MARK),
+        chat_envelope_id(&printed_again, CHAT_MARK),
+        "the kept post is handed out again under the same id, so its reader can tell it is          the one it already has"
+    );
     let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
     assert_eq!(
         state.as_deref(),
-        Some("taken"),
-        "a post a door has written must already be recorded as taken"
+        Some("delivered"),
+        "a post a door has written must already be recorded as delivered"
     );
     next.kill_keeping_windows();
 
@@ -1113,8 +1139,8 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
     let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
     assert_eq!(
         state.as_deref(),
-        Some("taken"),
-        "a post a hook has written must already be recorded as taken"
+        Some("delivered"),
+        "a post a hook has written must already be recorded as delivered"
     );
     next.kill_keeping_windows();
 

@@ -40,7 +40,9 @@ const PARENT_MARKER: &str = "nt-parent-ready";
 /// The notice text, built from the fixed wording rather than taken from the
 /// product, so the product cannot move the expectation along with itself.
 fn expected_notice(pending: usize) -> String {
-    format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
+    format!(
+        "[yagura report] {pending} pending report(s). Call wait_for_report with timeout_sec: 0 to read them."
+    )
 }
 
 fn notice_config(dir: &Path) -> DaemonConfig {

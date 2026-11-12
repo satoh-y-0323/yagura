@@ -20,7 +20,7 @@ use common::{
 };
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
-    ApprovalRequest, ApprovalRequesterKind, ClientMessage, DaemonMessage, HandoffDelivery,
+    ApprovalRequest, ApprovalRequesterKind, ClientMessage, DaemonMessage, DeliveryState,
     PlanTaskSpec, WithdrawReason,
 };
 use yagura_test_support::ipc::Connection;
@@ -384,10 +384,12 @@ async fn a_profile_handoff_asks_once_before_the_window_exists_and_starts_it_once
 
     match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
-            opened, delivery, ..
+            opened,
+            state: delivery,
+            ..
         } => {
             assert!(opened);
-            assert_eq!(delivery, HandoffDelivery::Taken);
+            assert_eq!(delivery, DeliveryState::Delivered);
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }

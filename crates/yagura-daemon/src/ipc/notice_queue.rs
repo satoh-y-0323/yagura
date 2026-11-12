@@ -34,7 +34,7 @@ use yagura_protocol::WindowStatus;
 
 use crate::config::DaemonConfig;
 use crate::handoff::{DELIVERY_REACTION_STATUSES, READY_STATUSES, is_ready};
-use crate::inbox::{Deposited, Parcel, ParcelEnd, Push, PushBudget, PushEnd};
+use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, Push, PushBudget, PushEnd};
 use crate::profile_delivery::WakeMode;
 use crate::pty;
 use crate::waiter::{ReactionOutcome, StatusAt, WaitOutcome, wait_for_any_held, wait_for_reaction};
@@ -53,7 +53,7 @@ const NOTICE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long a wake command may run before it is given up on; only a hang
 /// reaches it.
-const WAKE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const WAKE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most output a wake command's run is read for.
 const WAKE_COMMAND_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -116,6 +116,16 @@ pub(super) enum Refused {
     Full,
 }
 
+/// What [`deposit`] tells its depositor about the parcel it put in.
+pub(super) struct Tracked {
+    /// Yields how the parcel left the inbox.
+    pub(super) end: oneshot::Receiver<ParcelEnd>,
+    /// Whether the deposit itself answered the CLI's registered wait with it.
+    pub(super) handed_to_wait: bool,
+    /// Where the parcel is until it ends.
+    pub(super) place: watch::Receiver<Place>,
+}
+
 /// Puts `parcel` in `entry`'s inbox and wakes the window's agent. `budget` is
 /// what typing it draws on; `waiting_limit` turns it away when that many
 /// already wait to be typed. A full inbox turns the new parcel away and never
@@ -130,15 +140,39 @@ pub(super) fn deposit(
     parcel: Parcel,
     budget: Option<PushBudget>,
     waiting_limit: Option<usize>,
-) -> Result<oneshot::Receiver<ParcelEnd>, Refused> {
+) -> Result<Tracked, Refused> {
     let typed = matches!(
         entry.delivery().map(|delivery| &delivery.wake),
         Some(WakeMode::None)
     );
-    let deposited = entry
-        .inbox()
-        .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
-    after_deposit(registry, entry, deposited)
+    let mut deposited =
+        entry
+            .inbox()
+            .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
+    let handed_to_wait = deposited.handed_to_wait;
+    let place = deposited.place.take();
+    let end = after_deposit(registry, entry, deposited)?;
+    // A parcel taken in always comes with its place.
+    let Some(place) = place else {
+        return Err(Refused::Ended);
+    };
+    Ok(Tracked {
+        end,
+        handed_to_wait,
+        place,
+    })
+}
+
+/// Whether the window's agent pushes what waits to `entry` by running its
+/// CLI's wake command, as soon as it can: the window wakes by command, can be
+/// pushed to now, has a program to run and a session to name.
+pub(super) fn wakes_by_command_now(entry: &WindowEntry) -> bool {
+    matches!(
+        entry.delivery().map(|delivery| &delivery.wake),
+        Some(WakeMode::Command(_))
+    ) && pushable(entry)
+        && entry.session_id().is_some()
+        && entry.wake_command().is_some()
 }
 
 /// What [`deposit`] does once the inbox has answered, for a caller that
@@ -153,7 +187,9 @@ pub(super) fn after_deposit(
     entry: &Arc<WindowEntry>,
     deposited: Deposited,
 ) -> Result<oneshot::Receiver<ParcelEnd>, Refused> {
-    let Deposited { turned_away, end } = deposited;
+    let Deposited {
+        turned_away, end, ..
+    } = deposited;
     if !turned_away.is_empty() {
         let keys: Vec<&str> = turned_away
             .iter()

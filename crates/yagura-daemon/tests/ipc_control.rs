@@ -54,8 +54,8 @@ use yagura_daemon::waiter::StatusAt;
 use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{
-    ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, HANDOFF_NOTE_MAX_BYTES,
-    HANDOFF_REFERENCE_MAX_BYTES, HandoffDelivery, WindowStatus, WithdrawReason,
+    ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage, DeliveryState,
+    HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, WindowStatus, WithdrawReason,
 };
 
 /// Same shape as [`VALID_TOKEN`] but a different value, so that a rejection
@@ -74,7 +74,7 @@ fn detection_config(dir: &Path) -> DaemonConfig {
 }
 
 /// A handoff's answer as its wire string.
-fn wire(delivery: HandoffDelivery) -> String {
+fn wire(delivery: DeliveryState) -> String {
     serde_json::to_value(delivery)
         .expect("a delivery encodes")
         .as_str()
@@ -1259,7 +1259,9 @@ async fn send_text_to_another_window_succeeds_when_the_playbook_lists_send_messa
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
 }
@@ -3540,7 +3542,7 @@ async fn send_text_from_an_identified_window_to_another_window_is_pending_with_f
 
     decide(&mut approver, &request.request_id, true).await;
     match read_response(&mut source).await {
-        DaemonMessage::TextSent { window_id } => assert_eq!(window_id, window_b),
+        DaemonMessage::TextSent { window_id, .. } => assert_eq!(window_id, window_b),
         other => panic!("expected text_sent, got {other:?}"),
     }
 }
@@ -3840,14 +3842,14 @@ async fn send_handoff_to_ones_own_window_needs_no_playbook_and_delivers_the_enve
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened, "a window_id target must never report opened: true");
             // common::control_definition sets delivery_confirm_ms = 0: no reaction is
             // ever looked for.
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -3924,12 +3926,12 @@ async fn send_handoff_between_two_windows_succeeds_when_the_playbook_lists_send_
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4244,12 +4246,12 @@ async fn send_handoff_between_two_windows_approved_by_a_registered_approver_deli
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(acked, window_b);
             assert!(!opened, "a window_id target must never report opened: true");
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4337,12 +4339,12 @@ async fn send_handoff_to_a_window_id_confirms_delivery_when_the_submit_key_lands
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4407,10 +4409,12 @@ async fn send_handoff_to_a_window_id_with_delivery_confirmation_disabled_is_take
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
             assert_eq!(
                 wire(delivery),
-                "taken",
+                "delivered",
                 "delivery_confirm_ms = 0 skips the confirmation wait: the typed envelope is taken"
             );
         }
@@ -4469,12 +4473,12 @@ async fn send_handoff_to_a_window_id_that_never_reacts_is_taken_and_the_window_s
         DaemonMessage::HandoffSent {
             window_id: acked,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(acked, window_id);
             assert!(!opened);
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent (a submitted envelope is taken), got {other:?}"),
     }
@@ -4573,10 +4577,12 @@ async fn send_handoff_to_a_window_id_delivers_through_the_same_submit_sequence_a
 
     match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
-            delivery, opened, ..
+            state: delivery,
+            opened,
+            ..
         } => {
             assert!(!opened);
-            assert_eq!(wire(delivery), "taken");
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4717,10 +4723,12 @@ async fn send_handoff_to_a_window_id_reacting_to_the_body_alone_is_written_once(
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
             assert_eq!(
                 wire(delivery),
-                "taken",
+                "delivered",
                 "a submitted envelope is taken however its submission was judged"
             );
         }
@@ -4802,8 +4810,10 @@ async fn send_handoff_to_a_window_id_does_not_resend_once_the_window_leaves_the_
     h.write_input(&window_id, &[0x03]).await;
 
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
-            assert_eq!(wire(delivery), "taken");
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4878,8 +4888,10 @@ async fn send_handoff_to_a_window_id_confirms_delivery_after_waiting_for_readine
     report_status(&mut reporter, &window_id, WindowStatus::WaitingInput).await;
 
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
-            assert_eq!(wire(delivery), "taken");
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -4952,8 +4964,10 @@ async fn send_handoff_to_a_working_window_waits_in_its_inbox_and_is_typed_once_i
 
     report_status(&mut reporter, &window_id, WindowStatus::WaitingInput).await;
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
-            assert_eq!(wire(delivery), "taken");
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
+            assert_eq!(wire(delivery), "delivered");
         }
         other => panic!("expected handoff_sent, got {other:?}"),
     }
@@ -5034,7 +5048,9 @@ async fn send_message_to_a_window_id_submits_a_single_line_regardless_of_which_b
         )
         .await;
         match read_response(&mut client).await {
-            DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+            DaemonMessage::TextSent {
+                window_id: acked, ..
+            } => assert_eq!(acked, window_id),
             other => panic!("expected text_sent for terminator {case}, got {other:?}"),
         }
 
@@ -5085,7 +5101,9 @@ async fn send_message_with_a_trailing_newline_and_no_forbidden_character_still_s
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
 
@@ -5194,7 +5212,9 @@ async fn send_message_without_a_usable_terminator_still_writes_the_raw_bytes_unc
         )
         .await;
         match read_response(&mut client).await {
-            DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+            DaemonMessage::TextSent {
+                window_id: acked, ..
+            } => assert_eq!(acked, window_id),
             other => panic!("expected text_sent for case {case}, got {other:?}"),
         }
 
@@ -5280,7 +5300,9 @@ async fn send_message_does_not_wait_for_a_reaction_or_resend() {
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("send_message must never wait on delivery_confirm_ms, got {other:?}"),
     }
     // The confirming probe and its erase, the body, the probe behind it and
@@ -5376,10 +5398,12 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
     .await;
 
     match read_response(&mut client_a).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
             assert_eq!(
                 wire(delivery),
-                "taken",
+                "delivered",
                 "handoff a is typed while the window is still ready (nothing else has written \
                  to it yet), so its envelope is taken"
             );
@@ -5387,7 +5411,9 @@ async fn send_text_never_lands_inside_a_handoffs_write_sequence_into_the_same_wi
         other => panic!("expected handoff_sent for a, got {other:?}"),
     }
     match read_response(&mut client_b).await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent for the send_text, got {other:?}"),
     }
 
@@ -5507,7 +5533,9 @@ async fn send_handoff_delivery_lock_serializes_a_resending_delivery_against_a_la
 
     for mut client in [client_a, client_b] {
         match read_response(&mut client).await {
-            DaemonMessage::HandoffSent { delivery, .. } => {
+            DaemonMessage::HandoffSent {
+                state: delivery, ..
+            } => {
                 assert_eq!(
                     wire(delivery),
                     "undelivered_timeout",
@@ -5612,7 +5640,9 @@ async fn send_handoff_keeps_declining_when_the_composer_holds_a_foreign_body_the
     .await;
 
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
             assert_eq!(
                 wire(delivery),
                 "undelivered_timeout",
@@ -5761,7 +5791,9 @@ async fn send_message_with_a_leading_key_character_elsewhere_is_still_written() 
         .await;
 
     match send_text(&mut client, &window_id, "send-message-inner-key-mark!\n").await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
     h.wait_for_scrollback_occurrences(&window_id, "send-message-inner-key-mark!", 1)

@@ -7,11 +7,11 @@
 //! are bounded by.
 
 use yagura_protocol::{
-    APPROVAL_TEXT_MAX_BYTES, ClientMessage, DaemonMessage, HANDOFF_ENVELOPE_MAX_BYTES,
-    HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, HandoffArgError, HandoffDelivery,
-    HandoffTextError, SendTextError, WindowNameError, decode_client_message, decode_daemon_message,
-    encode_client_message, encode_daemon_message, is_valid_token, validate_handoff_target,
-    validate_handoff_text, validate_send_text_body,
+    APPROVAL_TEXT_MAX_BYTES, ClientMessage, DaemonMessage, DeliveryState,
+    HANDOFF_ENVELOPE_MAX_BYTES, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
+    HandoffArgError, HandoffTextError, SendTextError, WindowNameError, decode_client_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message, is_valid_token,
+    validate_handoff_target, validate_handoff_text, validate_send_text_body,
 };
 
 // =====================================================================
@@ -95,18 +95,19 @@ fn send_handoff_round_trips_through_encode_and_decode() {
 
 #[test]
 fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
-    let body = br#"{"type":"handoff_sent","window_id":"w2","opened":true,"delivery":"taken"}"#;
+    let body =
+        br#"{"type":"handoff_sent","window_id":"w2","opened":true,"id":"e1","state":"delivered"}"#;
     let decoded = decode_daemon_message(body).expect("handoff_sent must decode");
     match decoded {
         DaemonMessage::HandoffSent {
             window_id,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => {
             assert_eq!(window_id, "w2");
             assert!(opened);
-            assert_eq!(wire_of(delivery), "\"taken\"");
+            assert_eq!(wire_of(delivery), "\"delivered\"");
         }
         other => panic!("expected DaemonMessage::HandoffSent, got {other:?}"),
     }
@@ -115,14 +116,14 @@ fn handoff_sent_decodes_with_window_id_opened_and_delivery() {
 #[test]
 fn handoff_sent_round_trips_through_encode_and_decode() {
     let body =
-        br#"{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"undelivered_timeout"}"#;
+        br#"{"type":"handoff_sent","window_id":"w2","opened":false,"id":"e1","state":"queued"}"#;
     let decoded = decode_daemon_message(body).expect("must decode");
     let encoded = encode_daemon_message(&decoded);
     let decoded2 = decode_daemon_message(&encoded).expect("must decode a second time");
     assert_eq!(decoded, decoded2);
 }
 
-/// The wire round trip for every [`HandoffDelivery`] value carried inside a
+/// The wire round trip for every [`DeliveryState`] value carried inside a
 /// real `handoff_sent` message, not just the bare enum (`handoff_delivery_*`
 /// below covers that): the field's presence must not change how the other
 /// two fields decode, in either direction.
@@ -132,7 +133,9 @@ fn handoff_sent_round_trips_every_delivery_value_through_the_message() {
         let message = DaemonMessage::HandoffSent {
             window_id: "w2".to_string(),
             opened: false,
-            delivery,
+            id: "e1".to_string(),
+            state: delivery,
+            note: None,
             name: None,
         };
         let encoded = encode_daemon_message(&message);
@@ -145,9 +148,9 @@ fn handoff_sent_round_trips_every_delivery_value_through_the_message() {
 /// long it may wait ran out, or the window declares no way to deliver it.
 #[test]
 fn handoff_sent_decodes_with_each_undelivered_delivery() {
-    for wire in ["undelivered_timeout", "undelivered_no_delivery"] {
+    for wire in ["queued", "undelivered_no_delivery"] {
         let body = format!(
-            r#"{{"type":"handoff_sent","window_id":"w2","opened":false,"delivery":"{wire}"}}"#
+            r#"{{"type":"handoff_sent","window_id":"w2","opened":false,"id":"e1","state":"{wire}"}}"#
         );
         match decode_daemon_message(body.as_bytes())
             .unwrap_or_else(|err| panic!("handoff_sent with {wire} must decode: {err}"))
@@ -155,7 +158,7 @@ fn handoff_sent_decodes_with_each_undelivered_delivery() {
             DaemonMessage::HandoffSent {
                 window_id,
                 opened,
-                delivery,
+                state: delivery,
                 ..
             } => {
                 assert_eq!(window_id, "w2");
@@ -173,7 +176,7 @@ fn handoff_sent_decodes_with_each_undelivered_delivery() {
 /// an unobserved delivery as whatever the default happens to be.
 #[test]
 fn handoff_sent_missing_delivery_is_a_decode_error() {
-    let body = br#"{"type":"handoff_sent","window_id":"w2","opened":true}"#;
+    let body = br#"{"type":"handoff_sent","window_id":"w2","opened":true,"id":"e1"}"#;
     let result = decode_daemon_message(body);
     assert!(
         result.is_err(),
@@ -607,7 +610,7 @@ fn the_four_handoff_byte_limits_have_the_documented_values() {
 }
 
 // =====================================================================
-// HandoffDelivery: the delivery-confirmation enum's own wire contract,
+// DeliveryState: the delivery-confirmation enum's own wire contract,
 // checked directly through `serde_json` rather than through a message
 // envelope (the "wire round trip" section above covers the enum riding
 // inside `DaemonMessage::HandoffSent`).
@@ -632,30 +635,26 @@ fn handoff_delivery_no_longer_spells_what_a_composer_did() {
         "\"not_observed\"",
         "\"not_written\"",
     ] {
-        let result: Result<HandoffDelivery, _> = serde_json::from_str(wire);
+        let result: Result<DeliveryState, _> = serde_json::from_str(wire);
         assert!(result.is_err(), "{wire} must not decode, got {result:?}");
     }
 }
 
 /// Every answer a handoff can carry, as its literal wire text: a change to the rename
 /// mapping itself shows up here, not just a change to the variant list.
-const DELIVERY_WIRES: [&str; 3] = [
-    "\"taken\"",
-    "\"undelivered_timeout\"",
-    "\"undelivered_no_delivery\"",
-];
+const DELIVERY_WIRES: [&str; 3] = ["\"delivered\"", "\"queued\"", "\"undelivered_no_delivery\""];
 
-fn delivery_of(wire: &str) -> HandoffDelivery {
+fn delivery_of(wire: &str) -> DeliveryState {
     serde_json::from_str(wire).unwrap_or_else(|err| panic!("{wire} must decode: {err}"))
 }
 
-fn wire_of(delivery: HandoffDelivery) -> String {
-    serde_json::to_string(&delivery).expect("HandoffDelivery must encode")
+fn wire_of(delivery: DeliveryState) -> String {
+    serde_json::to_string(&delivery).expect("DeliveryState must encode")
 }
 
 #[test]
 fn handoff_delivery_rejects_an_unrecognized_string() {
-    let result: Result<HandoffDelivery, _> = serde_json::from_str("\"bogus\"");
+    let result: Result<DeliveryState, _> = serde_json::from_str("\"bogus\"");
     assert!(
         result.is_err(),
         "an unrecognized delivery string must fail to decode, got {result:?}"

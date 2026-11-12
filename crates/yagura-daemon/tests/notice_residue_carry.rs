@@ -35,7 +35,8 @@ const APPROVAL_HEADING: &str = "NOTICE-APPROVAL";
 /// character (`.`) and not the first probe character.
 const SECOND_PROBE_CHAR: char = 'z';
 
-const NOTICE: &str = "[yagura report] 1 pending report(s). Call wait_for_report to read them.";
+const NOTICE: &str =
+    "[yagura report] 1 pending report(s). Call wait_for_report with timeout_sec: 0 to read them.";
 
 /// Opens `command` as a window whose profile declares delivery with no way to wake its
 /// CLI: a notice reaches it typed while it waits. A window opened from a raw argv takes

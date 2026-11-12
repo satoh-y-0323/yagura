@@ -30,7 +30,7 @@ use yagura_os::{Liveness, PeerAuth, PlatformIpc, ProcessHandle, ProcessStart};
 use yagura_protocol::holder::{
     HOLDER_PROTOCOL, HolderRecord, encode_holder_record, holder_record_path, read_holder_record,
 };
-use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, WindowInfo, WindowStatus};
+use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryState, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
 use yagura_test_support::process::{holder_path, relay_path, term_script_path};
@@ -1165,7 +1165,7 @@ async fn assert_undeliverable(
 ) {
     match handoff_answer(daemon, window_id).await {
         DaemonMessage::HandoffSent {
-            delivery: HandoffDelivery::UndeliveredNoDelivery,
+            state: DeliveryState::UndeliveredNoDelivery,
             opened: false,
             ..
         } => {}

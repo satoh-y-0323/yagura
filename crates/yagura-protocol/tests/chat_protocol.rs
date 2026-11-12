@@ -186,7 +186,8 @@ fn sample_chat_message() -> ChatMessage {
         broadcast: false,
         deliveries: vec![ChatDeliveryInfo {
             window_id: "w2-abc".to_string(),
-            state: "taken".to_string(),
+            state: "delivered".to_string(),
+            note: None,
             unknown_reason: None,
         }],
     }

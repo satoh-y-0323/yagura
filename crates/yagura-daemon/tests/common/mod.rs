@@ -24,8 +24,8 @@ use yagura_daemon::{
 };
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
-    ApprovalRequest, ApprovalSettingsInfo, ClientMessage, DaemonMessage, DetectedStatus,
-    HandoffDelivery, ToolAutoApprove, WindowInfo, WindowStatus,
+    ApprovalRequest, ApprovalSettingsInfo, ClientMessage, DaemonMessage, DeliveryState,
+    DetectedStatus, ToolAutoApprove, WindowInfo, WindowStatus,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
@@ -3107,12 +3107,12 @@ pub async fn call_send_handoff_from_profile_with_options(
 }
 
 /// Asserts `msg` is `handoff_sent` and returns `(window_id, opened, delivery)`.
-pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, HandoffDelivery) {
+pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, DeliveryState) {
     match msg {
         DaemonMessage::HandoffSent {
             window_id,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => (window_id, opened, delivery),
         other => panic!("expected handoff_sent, got {other:?}"),

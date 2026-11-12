@@ -477,7 +477,7 @@ pub enum ChatDeliveryState {
 }
 
 impl ChatDeliveryState {
-    /// The wire string this state is persisted and reported as.
+    /// The string the store keeps this state as.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -487,6 +487,19 @@ impl ChatDeliveryState {
             Self::UndeliveredHalted => "undelivered_halted",
             Self::UndeliveredExhausted => "undelivered_exhausted",
             Self::UndeliveredRestart => "undelivered_restart",
+        }
+    }
+
+    /// The string `read_chat` reports this state as: the senders' vocabulary
+    /// (`queued` / `delivered`) for the two states every sender shares, and
+    /// [`Self::as_str`] for the rest. The store keeps [`Self::as_str`], so
+    /// rows older daemons wrote read the same.
+    #[must_use]
+    pub fn wire_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "queued",
+            Self::Taken => "delivered",
+            other => other.as_str(),
         }
     }
 

@@ -761,7 +761,9 @@ async fn send_text_does_not_require_attach() {
         .await
         .expect_message("send_text response");
     match response {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected TextSent, got {other:?}"),
     }
 

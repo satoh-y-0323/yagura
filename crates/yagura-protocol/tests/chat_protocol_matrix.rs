@@ -23,8 +23,8 @@ const FROM_KINDS: [&str; 4] = ["window", "user", "external", "system"];
 
 /// Every delivery state a chat message can carry on the wire.
 const DELIVERY_STATES: [&str; 6] = [
-    "pending",
-    "taken",
+    "queued",
+    "delivered",
     "undelivered_unknown",
     "undelivered_halted",
     "undelivered_exhausted",
@@ -52,6 +52,7 @@ fn message_for(from_kind: &str, state: &str, mentions: Vec<String>) -> ChatMessa
         deliveries: vec![ChatDeliveryInfo {
             window_id: "w2-abc".to_string(),
             state: state.to_string(),
+            note: None,
             unknown_reason: None,
         }],
     }
@@ -96,7 +97,7 @@ fn every_from_kind_and_every_delivery_state_round_trips_exactly() {
 #[test]
 fn from_window_id_is_some_only_for_the_window_kind_after_a_round_trip() {
     for &from_kind in &FROM_KINDS {
-        let original = message_for(from_kind, "taken", vec![]);
+        let original = message_for(from_kind, "delivered", vec![]);
         let round_tripped = round_trip_via_chat_messages(original);
         if from_kind == "window" {
             assert!(
@@ -130,7 +131,7 @@ fn mentions_of_every_multiplicity_round_trip_verbatim_including_a_duplicate() {
         ],
     ];
     for mentions in cases {
-        let original = message_for("window", "taken", mentions.clone());
+        let original = message_for("window", "delivered", mentions.clone());
         let round_tripped = round_trip_via_chat_messages(original);
         assert_eq!(
             round_tripped.mentions, mentions,

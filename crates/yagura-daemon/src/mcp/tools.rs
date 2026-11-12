@@ -668,8 +668,13 @@ pub async fn send_message<T: DaemonTransport>(
     match response {
         // Success is observed solely via `TextSent`: any other non-error reply
         // is a daemon contract violation, not a silent success.
-        DaemonMessage::TextSent { .. } => Ok(with_requester(
-            json!({ "ok": true }),
+        DaemonMessage::TextSent {
+            window_id,
+            id,
+            state,
+            note,
+        } => Ok(with_requester(
+            json!({ "window_id": window_id, "id": id, "state": state, "note": note }),
             transport.requester_identity(),
         )),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
@@ -1129,11 +1134,18 @@ pub async fn send_handoff<T: DaemonTransport>(
         DaemonMessage::HandoffSent {
             window_id,
             opened,
-            delivery,
+            id,
+            state,
+            note,
             name,
         } => {
-            let mut result =
-                json!({ "window_id": window_id, "opened": opened, "delivery": delivery });
+            let mut result = json!({
+                "window_id": window_id,
+                "opened": opened,
+                "id": id,
+                "state": state,
+                "note": note,
+            });
             if let (Some(name), Some(object)) = (name, result.as_object_mut()) {
                 object.insert("name".to_string(), Value::String(name));
             }

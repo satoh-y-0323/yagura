@@ -165,16 +165,16 @@ async fn assert_waits_for_its_cli(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let read = expect_chat_messages(read_chat_msg(client, None, Some(0), None).await);
-    assert_eq!(
-        delivery_state_for(&read.messages, seq, window_id),
-        "pending"
-    );
+    assert_eq!(delivery_state_for(&read.messages, seq, window_id), "queued");
+    let note = delivery_note_for(&read.messages, seq, window_id)
+        .unwrap_or_else(|| panic!("a waiting post's delivery says when it is handed over"));
+    assert!(!note.is_empty());
 
     let mut door = h.connect().await;
     let taken = call_door(&mut door, "take", window_id).await;
     assert!(taken.contains(needle), "{taken:?}");
     let state = wait_for_settled_delivery(client, seq, window_id).await;
-    assert_eq!(state, "taken");
+    assert_eq!(state, "delivered");
     // The fixture echoes what it reads in order, so once this write is echoed
     // anything typed into the window before it has been echoed too.
     let sentinel = format!("SENTINEL-AFTER-TAKE-{window_id}.");
@@ -433,6 +433,20 @@ fn expect_chat_posted(msg: DaemonMessage) -> ChatPostedResult {
     }
 }
 
+/// The `note` of `window_id`'s delivery of message `seq`, read off the wire form.
+fn delivery_note_for(messages: &[ChatMessage], seq: u64, window_id: &str) -> Option<String> {
+    let messages = serde_json::to_value(messages).expect("chat messages always encode");
+    let message = messages
+        .as_array()
+        .and_then(|messages| messages.iter().find(|m| m["seq"] == seq))
+        .unwrap_or_else(|| panic!("no message with seq {seq} in {messages}"));
+    let delivery = message["deliveries"]
+        .as_array()
+        .and_then(|deliveries| deliveries.iter().find(|d| d["window_id"] == window_id))
+        .unwrap_or_else(|| panic!("no delivery to {window_id} in {message}"));
+    delivery["note"].as_str().map(str::to_string)
+}
+
 fn delivery_state_for<'a>(messages: &'a [ChatMessage], seq: u64, window_id: &str) -> &'a str {
     let message = messages
         .iter()
@@ -473,7 +487,7 @@ async fn wait_for_settled_delivery(
                     .find(|entry: &&ChatDeliveryInfo| entry.window_id == window_id)
             })
             .map(|entry| entry.state.clone())
-            .filter(|state| state != "pending");
+            .filter(|state| state != "queued");
         if let Some(state) = settled {
             return state;
         }
@@ -567,8 +581,8 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
 
     let state = wait_for_settled_delivery(&mut poster_conn, posted.seq, &target_id).await;
     assert_eq!(
-        state, "taken",
-        "an envelope typed up to its submit key is taken, whatever the composer showed after"
+        state, "delivered",
+        "an envelope typed up to its submit key is delivered, whatever the composer showed after"
     );
 }
 
@@ -1112,10 +1126,20 @@ async fn window_origin_send_chat_awaits_a_targetless_approval_and_delivers_once_
             .expect("already asserted the marker prefix is present"),
     )
     .expect("the approval body must be the JSON the daemon composed");
-    let delivered = wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
+    let mut delivered = wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
+    // The post's id is made from its seq, which exists only once the approved post is
+    // recorded: it is the one field the approved text cannot carry.
+    let id = delivered
+        .as_object_mut()
+        .and_then(|fields| fields.remove("id"))
+        .unwrap_or_else(|| panic!("the written envelope must name its id"));
+    assert!(
+        id.as_str().is_some_and(|id| !id.is_empty()),
+        "the written envelope's id must be a non-empty string, got {id}"
+    );
     assert_eq!(
         approved_json, delivered,
-        "the text a human approved and the envelope actually written must carry identical fields"
+        "the text a human approved and the envelope actually written must carry identical          fields, the daemon's id aside"
     );
 }
 
@@ -1689,7 +1713,7 @@ async fn a_full_delivery_budget_leaves_exactly_one_destination_undelivered_exhau
             .map(|id| delivery_state_for(&read.messages, posted.seq, id).to_string())
             .collect();
         let settled = states.iter().any(|s| s == "undelivered_exhausted")
-            || states.iter().all(|s| s != "pending");
+            || states.iter().all(|s| s != "queued");
         if settled {
             break states;
         }
@@ -1710,7 +1734,7 @@ async fn a_full_delivery_budget_leaves_exactly_one_destination_undelivered_exhau
     assert!(
         states
             .iter()
-            .any(|s| matches!(s.as_str(), "taken" | "pending")),
+            .any(|s| matches!(s.as_str(), "delivered" | "queued")),
         "the other destination must have been attempted, got {states:?}"
     );
 }
@@ -2021,13 +2045,13 @@ async fn every_destination_of_a_fresh_post_is_pending_until_its_delivery_settles
     let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
     assert_eq!(
         delivery_state_for(&read.messages, posted.seq, &first_id),
-        "pending",
-        "a destination whose delivery has not settled must be readable as pending right \
+        "queued",
+        "a destination whose delivery has not settled must be readable as queued right \
          after the post"
     );
     assert_eq!(
         delivery_state_for(&read.messages, posted.seq, &second_id),
-        "pending"
+        "queued"
     );
 }
 
@@ -2071,7 +2095,7 @@ async fn a_settled_delivery_pushes_chat_changed_carrying_the_posts_seq() {
         );
         let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
         let state = delivery_state_for(&read.messages, posted.seq, &recipient_id).to_string();
-        if state != "pending" {
+        if state != "queued" {
             break state;
         }
         assert!(
@@ -2080,7 +2104,7 @@ async fn a_settled_delivery_pushes_chat_changed_carrying_the_posts_seq() {
         );
     };
     assert_ne!(
-        settled_state, "pending",
+        settled_state, "queued",
         "the state one of the pushes announced must be readable back as settled"
     );
 }
@@ -2166,15 +2190,15 @@ async fn a_destination_whose_cli_takes_the_post_pushes_chat_changed_when_it_is_r
         assert!(!needs_user);
         let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
         let state = delivery_state_for(&read.messages, posted.seq, &unknown_id).to_string();
-        if state != "pending" {
+        if state != "queued" {
             break state;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "timed out waiting for a chat_changed push announcing the taken post"
+            "timed out waiting for a chat_changed push announcing the delivered post"
         );
     };
-    assert_eq!(settled_state, "taken");
+    assert_eq!(settled_state, "delivered");
 }
 
 #[tokio::test]
@@ -3226,8 +3250,8 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
 
     let state = wait_for_settled_delivery(&mut b_client, posted.seq, &target_id).await;
     assert_eq!(
-        state, "taken",
-        "an addressed, non-Unknown target in a second workspace is typed into and taken"
+        state, "delivered",
+        "an addressed, non-Unknown target in a second workspace is typed into and delivered"
     );
 }
 

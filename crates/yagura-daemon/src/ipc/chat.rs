@@ -35,6 +35,7 @@ use crate::approval::{ApprovalBroker, ApprovalDraft, ApprovalRoomRef, SubmitErro
 use crate::chat_store::{self, ChatStore, NewChatMessage, ParcelEndRecord, PostEffects, Share};
 use crate::config::DaemonConfig;
 use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
+use crate::handoff::with_envelope_id;
 use crate::inbox::{Deposited, Parcel, ParcelEnd, PushBudget, SaveOutcome, Unwritten};
 use crate::live_policy::{self, PolicyCell};
 use crate::parcel_store::ChatDelivery;
@@ -1350,7 +1351,10 @@ fn post_in_one_transaction(
                 settled.push(target_id.clone());
                 continue;
             };
-            let parcel = Parcel::new(chat_parcel_key(&room_id, seq), envelope.clone());
+            // The post's id is its parcel's key, which its seq decides: the
+            // kept parcel carries it, so a next daemon hands it out the same.
+            let key = chat_parcel_key(&room_id, seq);
+            let parcel = Parcel::new(key.clone(), with_envelope_id(&envelope, &key));
             let delivery = ChatDelivery {
                 room_id: room_id.clone(),
                 seq,
@@ -1646,7 +1650,13 @@ pub(super) async fn handle_read_chat(
                         .iter()
                         .map(|(window_id, outcome)| ChatDeliveryInfo {
                             window_id: window_id.clone(),
-                            state: outcome.state().as_str().to_string(),
+                            state: outcome.state().wire_str().to_string(),
+                            note: match outcome {
+                                DeliveryOutcome::Pending => registry
+                                    .get(window_id)
+                                    .and_then(|entry| super::waiting_note_for(&entry, false, true)),
+                                _ => None,
+                            },
                             unknown_reason: outcome.unknown_reason(),
                         })
                         .collect()

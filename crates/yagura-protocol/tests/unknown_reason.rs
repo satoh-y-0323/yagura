@@ -314,6 +314,7 @@ fn sample_chat_delivery(unknown_reason: Option<UnknownReason>) -> ChatDeliveryIn
     ChatDeliveryInfo {
         window_id: "w2".to_string(),
         state: "undelivered_unknown".to_string(),
+        note: None,
         unknown_reason,
     }
 }

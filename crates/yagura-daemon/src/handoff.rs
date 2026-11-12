@@ -1,11 +1,12 @@
-//! The pure functions behind `send_handoff`: composing the envelope written
-//! into the receiving window's PTY, measuring it against the shared byte cap,
-//! and deciding which statuses a handoff may land on.
+//! The pure functions behind `send_handoff` and `send_message`: composing the
+//! envelopes put in a window's inbox, measuring them against the shared byte
+//! cap, saying when a waiting one is handed over, and deciding which statuses
+//! a handoff may land on.
 //!
 //! No I/O and no policy live here, so the envelope's exact bytes can be
 //! checked without a window, a connection or a clock.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -242,6 +243,239 @@ pub fn check_envelope_len(envelope: &Envelope) -> Result<(), EnvelopeTooLong> {
         len,
         max: HANDOFF_ENVELOPE_MAX_BYTES,
         parts: envelope.parts,
+    })
+}
+
+/// How many random bytes name one envelope.
+const ENVELOPE_ID_RANDOM_BYTES: usize = 12;
+
+/// Names an envelope when the OS RNG cannot.
+static ENVELOPE_ID_FALLBACK: AtomicU64 = AtomicU64::new(0);
+
+/// A new id for one envelope a sender sends (`send_message`, `send_handoff`):
+/// a receiver that is handed the same id twice knows it is one request.
+///
+/// A failure to obtain randomness falls back to a counter rather than failing
+/// the send: the counter still keeps every id this process draws distinct.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::handoff::new_envelope_id;
+///
+/// assert_ne!(new_envelope_id(), new_envelope_id());
+/// ```
+#[must_use]
+pub fn new_envelope_id() -> String {
+    let mut bytes = [0u8; ENVELOPE_ID_RANDOM_BYTES];
+    match yagura_os::fill_random(&mut bytes) {
+        Ok(()) => bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        Err(err) => {
+            tracing::warn!("failed to obtain randomness for an envelope id ({err})");
+            format!(
+                "fallback-{}",
+                ENVELOPE_ID_FALLBACK.fetch_add(1, Ordering::Relaxed)
+            )
+        }
+    }
+}
+
+/// `text`, an envelope (a fixed prefix followed by one JSON object), with
+/// `"id"` as its object's first key. A text with no object is returned as
+/// it is.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::handoff::with_envelope_id;
+///
+/// assert_eq!(
+///     with_envelope_id("[yagura chat] {\"body\":\"hi\"}", "chat:main:3"),
+///     "[yagura chat] {\"id\":\"chat:main:3\",\"body\":\"hi\"}"
+/// );
+/// ```
+#[must_use]
+pub fn with_envelope_id(text: &str, id: &str) -> String {
+    match text.split_once('{') {
+        Some((prefix, rest)) => format!("{prefix}{{\"id\":{},{rest}", json_string(id)),
+        None => text.to_string(),
+    }
+}
+
+/// The id an envelope this module composed carries (its object's `"id"`);
+/// `None` for a text that carries none.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::handoff::{EnvelopeFrom, compose_message_envelope, envelope_id};
+///
+/// let envelope = compose_message_envelope(&EnvelopeFrom::External, "m1", "hi");
+/// assert_eq!(envelope_id(&envelope).as_deref(), Some("m1"));
+/// assert_eq!(envelope_id("no object"), None);
+/// ```
+#[must_use]
+pub fn envelope_id(text: &str) -> Option<String> {
+    let (_, object) = text.split_once('{')?;
+    let object: Value = serde_json::from_str(&format!("{{{object}")).ok()?;
+    object.get("id")?.as_str().map(str::to_string)
+}
+
+/// [`compose_envelope`] with `id` as the object's first key, counted in
+/// [`EnvelopeParts::overhead`]: the envelope a `send_handoff` puts in a
+/// window's inbox or starts a window with.
+#[must_use]
+pub fn compose_identified_envelope(
+    from: &EnvelopeFrom,
+    id: &str,
+    reference: &str,
+    note: &str,
+) -> Envelope {
+    let envelope = compose_envelope(from, reference, note);
+    let text = with_envelope_id(&envelope.text, id);
+    let parts = EnvelopeParts {
+        overhead: envelope.parts.overhead + text.len() - envelope.text.len(),
+        ..envelope.parts
+    };
+    Envelope { text, parts }
+}
+
+/// The fixed marker every message envelope opens with.
+const MESSAGE_ENVELOPE_PREFIX: &str = "[yagura message] ";
+
+/// Composes the envelope `send_message` puts in a window's inbox: one line,
+/// the fixed prefix followed by a JSON object with the keys `id`, `from`,
+/// `text` and, when `from` can be answered, `reply`. `text` goes in as a JSON
+/// string, so nothing inside it can become structure.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::handoff::{EnvelopeFrom, compose_message_envelope};
+///
+/// assert_eq!(
+///     compose_message_envelope(&EnvelopeFrom::External, "m1", "two\nlines"),
+///     "[yagura message] {\"id\":\"m1\",\"from\":\"external\",\"text\":\"two\\nlines\"}"
+/// );
+/// ```
+#[must_use]
+pub fn compose_message_envelope(from: &EnvelopeFrom, id: &str, text: &str) -> String {
+    let (from_json, reply_json) = match from {
+        EnvelopeFrom::Window { id, name, cwd } => {
+            let encoded_id = json_string(id);
+            (
+                format!(
+                    "{{\"window_id\":{encoded_id},\"name\":{},\"cwd\":{}}}",
+                    json_string(name),
+                    json_string(cwd)
+                ),
+                format!(",\"reply\":{{\"tool\":\"send_message\",\"window_id\":{encoded_id}}}"),
+            )
+        }
+        EnvelopeFrom::External => ("\"external\"".to_string(), String::new()),
+    };
+    format!(
+        "{MESSAGE_ENVELOPE_PREFIX}{{\"id\":{},\"from\":{from_json},\"text\":{}{reply_json}}}",
+        json_string(id),
+        json_string(text)
+    )
+}
+
+/// How a window's profile lets the daemon hand its CLI what waits for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitingWake {
+    /// The CLI leaves a wait registered that the daemon answers.
+    Wait,
+    /// The daemon runs the CLI's own command.
+    Command,
+    /// The daemon types it into the composer.
+    Typed,
+    /// Nothing wakes the CLI: it reads at its own doors only.
+    Doors,
+    /// The window declares no delivery at all.
+    Undeclared,
+}
+
+/// The facts [`waiting_note`] says when a waiting envelope is handed over
+/// from: the window's profile and its state now, never the name of its CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitingFacts {
+    /// How the window's CLI is handed what waits.
+    pub wake: WaitingWake,
+    /// The window's status now.
+    pub status: WindowStatus,
+    /// Whether the CLI has a wait registered now.
+    pub has_waiter: bool,
+    /// Whether the CLI has reported a session the wake command can name.
+    pub session_known: bool,
+    /// Whether a door is carrying the envelope and has not said it printed it.
+    pub carried: bool,
+    /// Whether the envelope outlives a daemon restart.
+    pub saved: bool,
+}
+
+/// Says when an envelope that is not delivered yet is handed over, and what
+/// could lose it on the way. `None` when there is nothing to say: the CLI has
+/// a wait registered that the daemon answers. Never says the CLI can or
+/// cannot be woken: whether it was is what the answer's state says.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_daemon::handoff::{WaitingFacts, WaitingWake, waiting_note};
+/// use yagura_protocol::WindowStatus;
+///
+/// let facts = WaitingFacts {
+///     wake: WaitingWake::Wait,
+///     status: WindowStatus::Running,
+///     has_waiter: false,
+///     session_known: true,
+///     carried: false,
+///     saved: false,
+/// };
+/// assert!(waiting_note(facts).is_some());
+/// assert_eq!(waiting_note(WaitingFacts { has_waiter: true, ..facts }), None);
+/// ```
+#[must_use]
+pub fn waiting_note(facts: WaitingFacts) -> Option<String> {
+    let when = if facts.carried {
+        "A door of the window's CLI is carrying it and has not said it printed it yet."
+    } else if facts.status == WindowStatus::Unknown {
+        "The window's status is unknown, so the daemon pushes nothing to it; it is handed \
+         over at the CLI's next door, or pushed once the status is known again."
+    } else if facts.status == WindowStatus::WaitingApproval {
+        "The window waits for an approval; it is handed over at the CLI's next door after \
+         that."
+    } else {
+        match facts.wake {
+            WaitingWake::Wait if facts.has_waiter => return None,
+            WaitingWake::Wait => {
+                "No wait of the window's CLI is registered right now; it arrives at the CLI's \
+                 next turn."
+            }
+            WaitingWake::Command if !facts.session_known => {
+                "The window's CLI has not reported a session yet; it arrives at the CLI's \
+                 first turn."
+            }
+            WaitingWake::Command => "It arrives at the CLI's next turn.",
+            WaitingWake::Typed => {
+                "The daemon types it into the window's composer once the window waits for \
+                 input."
+            }
+            WaitingWake::Doors => {
+                "Nothing wakes the window's CLI; it arrives at the CLI's next turn, such as \
+                 when the user next sends a prompt in this window."
+            }
+            WaitingWake::Undeclared => {
+                "The window declares no delivery; its CLI sees it only when it reads it \
+                 itself."
+            }
+        }
+    };
+    Some(if facts.saved {
+        when.to_string()
+    } else {
+        format!("{when} It is lost if the daemon restarts before then.")
     })
 }
 

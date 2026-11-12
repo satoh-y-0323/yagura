@@ -122,7 +122,9 @@ async fn send_message(client: &mut Connection, window_id: &str, text: &str) {
     )
     .await;
     match read_response(client).await {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
 }

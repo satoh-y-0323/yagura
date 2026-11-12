@@ -33,14 +33,14 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use yagura_protocol::{
-    AwaitingWindow, DaemonMessage, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES, ReceivedReport,
-    ReportOutcome, ReportTaskRef, WindowStatus, validate_handoff_text,
+    AwaitingWindow, DaemonMessage, DeliveryState, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES,
+    ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus, validate_handoff_text,
 };
 
 use crate::approval::ApprovalBroker;
 use crate::config::DaemonConfig;
 use crate::control::RequestOrigin;
-use crate::inbox::{SaveOutcome, Saving};
+use crate::inbox::SaveOutcome;
 use crate::parcel_store::{KeptReports, Written};
 use crate::plan_permit::{self, PermitError, TaskBinding};
 use crate::plan_store::ParentReportRow;
@@ -263,14 +263,15 @@ impl ReportInboxes {
     /// Hands `reports` to `window_id`'s oldest waiter, or queues them, at
     /// once: they were accepted before (a waiter that could not take them
     /// after all hands them back), or the inbox keeps nothing. `older` puts
-    /// them ahead of what is already queued.
+    /// them ahead of what is already queued. Returns whether a waiter took
+    /// them.
     fn put(
         self: &Arc<Self>,
         window_id: &str,
         reports: Vec<ReceivedReport>,
         from_slot: bool,
         older: bool,
-    ) {
+    ) -> Landed {
         // Looked up before the inboxes' lock, which the registry's is never
         // taken under.
         let entry = self.registry.get(window_id);
@@ -293,11 +294,12 @@ impl ReportInboxes {
             }
             let placed = places.into_iter().zip(reports).collect();
             let Some(reports) = self.hand_to_waiter(inbox, window_id, placed) else {
-                return;
+                return Landed::Waiter;
             };
             self.queue(inbox, entry.as_ref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
+        Landed::Inbox
     }
 
     /// Gives back the slot reserved for `report`, gives it the next place and
@@ -332,12 +334,13 @@ impl ReportInboxes {
     /// Puts `report`, the one a slot was reserved for, in `window_id`'s
     /// inbox behind the others. With a store it shows only once its row is
     /// written, and only after every report sent before it is settled; the
-    /// returned [`Saving`] tells its sender how the write came out.
-    fn put_saved(self: &Arc<Self>, window_id: &str, report: ReceivedReport) -> Saving {
+    /// returned [`ReportSaving`] tells its sender how the write came out and
+    /// where the report landed.
+    fn put_saved(self: &Arc<Self>, window_id: &str, report: ReceivedReport) -> ReportSaving {
         let entry = self.registry.get(window_id);
         let Some(store) = self.registry.parcel_store().filter(|_| entry.is_some()) else {
-            self.put(window_id, vec![report], true, false);
-            return Saving::ready();
+            let landed = self.put(window_id, vec![report], true, false);
+            return ReportSaving::Ready(landed);
         };
         let (seq, written) = self.hold_place(window_id, entry.as_ref(), report, |seq, report| {
             store.keep_reports(window_id, &[(seq, report)])
@@ -349,10 +352,10 @@ impl ReportInboxes {
         // leave the reports behind this one held back.
         tokio::spawn(async move {
             let outcome = SaveOutcome::of(written.await.unwrap_or(Written::Failed));
-            inboxes.settle_write(&window_id, seq, outcome);
-            let _ = told.send(outcome);
+            let landed = inboxes.settle_write(&window_id, seq, outcome);
+            let _ = told.send((outcome, landed));
         });
-        Saving::of(outcome)
+        ReportSaving::Written(outcome)
     }
 
     /// [`Self::put_saved`] for a caller that writes the row itself: decides
@@ -384,13 +387,14 @@ impl ReportInboxes {
 
     /// Records how the write of the report at `seq` came out, and shows every
     /// report whose turn that settles: a report whose row was not written
-    /// leaves, and holds nothing back.
-    fn settle_write(self: &Arc<Self>, window_id: &str, seq: i64, outcome: SaveOutcome) {
+    /// leaves, and holds nothing back. Returns where the report at `seq`
+    /// landed: still held back behind an older write counts as the inbox.
+    fn settle_write(self: &Arc<Self>, window_id: &str, seq: i64, outcome: SaveOutcome) -> Landed {
         let entry = self.registry.get(window_id);
         let deposited = {
             let mut inboxes = lock_recover(&self.inboxes);
             let Some(inbox) = inboxes.get_mut(window_id) else {
-                return;
+                return Landed::Inbox;
             };
             if let Some(writing) = inbox.writing.get_mut(&seq) {
                 writing.outcome = Some(outcome);
@@ -409,14 +413,16 @@ impl ReportInboxes {
                 if inbox.is_idle() {
                     inboxes.remove(window_id);
                 }
-                return;
+                return Landed::Inbox;
             }
+            let shows = settled.iter().any(|(settled, _)| *settled == seq);
             let Some(reports) = self.hand_to_waiter(inbox, window_id, settled) else {
-                return;
+                return if shows { Landed::Waiter } else { Landed::Inbox };
             };
             self.queue(inbox, entry.as_ref(), reports)
         };
         self.after_queue(window_id, entry, deposited);
+        Landed::Inbox
     }
 
     /// Queues `reports` in `inbox`, each in the order of its place, and makes
@@ -757,7 +763,59 @@ fn deposit_notice(entry: &WindowEntry, pending: usize) -> crate::inbox::Deposite
 /// The one line handed to a parent with `pending` reports waiting. Only the
 /// count varies, so nothing a child wrote ever reaches the parent's CLI.
 fn notice_text(pending: usize) -> String {
-    format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
+    format!(
+        "[yagura report] {pending} pending report(s). Call wait_for_report with timeout_sec: 0 \
+         to read them."
+    )
+}
+
+/// Where a sent report landed once it showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Landed {
+    /// A waiting `wait_for_report` of the parent took it.
+    Waiter,
+    /// It waits in the parent's report inbox, or no parent holds it.
+    Inbox,
+}
+
+/// How a report's place in its parent's inbox came out, once its row is
+/// written.
+enum ReportSaving {
+    /// It needed no write.
+    Ready(Landed),
+    /// Its write tells, with where it landed; one never told failed.
+    Written(oneshot::Receiver<(SaveOutcome, Landed)>),
+}
+
+impl ReportSaving {
+    async fn outcome(self) -> (SaveOutcome, Landed) {
+        match self {
+            Self::Ready(landed) => (SaveOutcome::Saved, landed),
+            Self::Written(told) => told.await.unwrap_or((SaveOutcome::Failed, Landed::Inbox)),
+        }
+    }
+}
+
+/// The `state` and `note` a report is answered with: `delivered` once a
+/// waiting `wait_for_report` of `parent` took it, `queued` with what the
+/// parent's window says about when it hears of it otherwise. A report is
+/// kept, so it outlives a daemon restart.
+fn report_state(
+    registry: &WindowRegistry,
+    parent: Option<&str>,
+    landed: Landed,
+) -> (DeliveryState, Option<String>) {
+    if landed == Landed::Waiter {
+        return (DeliveryState::Delivered, None);
+    }
+    let note = match parent.and_then(|parent| registry.get(parent)) {
+        Some(parent) => super::waiting_note_for(&parent, false, true),
+        None => Some(
+            "No window receives the report now; it stays recorded against its plan task."
+                .to_string(),
+        ),
+    };
+    (DeliveryState::Queued, note)
 }
 
 /// One reserved place in a parent's inbox. Dropped unused, it gives the
@@ -770,8 +828,8 @@ struct InboxSlot {
 
 impl InboxSlot {
     /// Puts `report` in the reserved place; it shows once its row is
-    /// written, which the returned [`Saving`] tells.
-    fn deliver(mut self, report: ReceivedReport) -> Saving {
+    /// written, which the returned [`ReportSaving`] tells.
+    fn deliver(mut self, report: ReceivedReport) -> ReportSaving {
         self.held = false;
         self.inboxes.put_saved(&self.window_id, report)
     }
@@ -834,8 +892,9 @@ impl Placing {
     }
 
     /// Tells how many rows the report's row came to once written: the report
-    /// shows, or, its parent having no row to keep it with, leaves.
-    fn finish(mut self, rows: usize) -> SaveOutcome {
+    /// shows, or, its parent having no row to keep it with, leaves. Returns
+    /// that outcome with where the report landed.
+    fn finish(mut self, rows: usize) -> (SaveOutcome, Landed) {
         match &mut self {
             Self::Kept {
                 inboxes,
@@ -846,18 +905,19 @@ impl Placing {
             } => {
                 *settled = true;
                 let outcome = SaveOutcome::of(Written::Rows(rows));
-                inboxes.settle_write(window_id, *seq, outcome);
-                outcome
+                let landed = inboxes.settle_write(window_id, *seq, outcome);
+                (outcome, landed)
             }
             Self::Memory {
                 inboxes,
                 window_id,
                 report,
             } => {
-                if let Some(report) = report.take() {
-                    inboxes.put(window_id, vec![report], true, false);
-                }
-                SaveOutcome::Saved
+                let landed = match report.take() {
+                    Some(report) => inboxes.put(window_id, vec![report], true, false),
+                    None => Landed::Inbox,
+                };
+                (SaveOutcome::Saved, landed)
             }
         }
     }
@@ -872,7 +932,9 @@ impl Drop for Placing {
                 seq,
                 settled: false,
                 ..
-            } => inboxes.settle_write(window_id, *seq, SaveOutcome::Failed),
+            } => {
+                inboxes.settle_write(window_id, *seq, SaveOutcome::Failed);
+            }
             Self::Memory {
                 inboxes,
                 window_id,
@@ -1095,13 +1157,18 @@ async fn send_opener_report(
     };
     let saving = slot.deliver(received_report(entry, body, None));
     match saving.outcome().await {
-        SaveOutcome::Saved => DaemonMessage::ReportSent {
-            delivered_to: Some(parent),
-            task: None,
-        },
+        (SaveOutcome::Saved, landed) => {
+            let (state, note) = report_state(registry, Some(&parent), landed);
+            DaemonMessage::ReportSent {
+                delivered_to: Some(parent),
+                task: None,
+                state,
+                note,
+            }
+        }
         // The parent's row is gone: it is closing.
-        SaveOutcome::NoRow => no_parent_msg(),
-        SaveOutcome::Failed => {
+        (SaveOutcome::NoRow, _) => no_parent_msg(),
+        (SaveOutcome::Failed, _) => {
             tracing::warn!("a report's row could not be written; it is refused");
             plan::internal_msg()
         }
@@ -1180,23 +1247,26 @@ async fn send_task_report(
                     },
                 )
                 .map_err(TaskReportRefusal::Write)?;
-            let parent = match placing.map(|placing| placing.finish(rows)) {
+            let (parent, landed) = match placing.map(|placing| placing.finish(rows)) {
                 // The parent's row is gone: the ledger alone holds it.
-                Some(SaveOutcome::NoRow) | None => None,
-                Some(_) => parent,
+                Some((SaveOutcome::NoRow, _)) | None => (None, Landed::Inbox),
+                Some((_, landed)) => (parent, landed),
             };
-            Ok(parent)
+            Ok((parent, landed))
         })
         .await;
 
     match decided {
-        Ok(Ok(parent)) => {
+        Ok(Ok((parent, landed))) => {
             broker.notify_approvers(&DaemonMessage::PlanChanged {
                 plan_id: plan_id.clone(),
             });
+            let (state, note) = report_state(registry, parent.as_deref(), landed);
             DaemonMessage::ReportSent {
                 delivered_to: parent,
                 task: Some(task),
+                state,
+                note,
             }
         }
         Ok(Err(TaskReportRefusal::Permit(PermitError::PlanNotFound))) => {

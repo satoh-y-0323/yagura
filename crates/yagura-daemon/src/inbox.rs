@@ -434,6 +434,16 @@ pub enum ParcelEnd {
     Stopped,
 }
 
+/// Where a deposited parcel is, as its depositor watches it until it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// Waiting in the inbox.
+    Waiting,
+    /// A door or a push is carrying it: it ends with them, or comes back to
+    /// waiting when they fail.
+    Carried,
+}
+
 /// A daemon-wide budget a push draws one unit from while it runs.
 #[derive(Debug, Clone)]
 pub struct PushBudget {
@@ -551,9 +561,15 @@ struct Held {
     settled: bool,
     end: Option<oneshot::Sender<ParcelEnd>>,
     budget: Option<PushBudget>,
+    /// Where it is, for its depositor to watch.
+    place: watch::Sender<Place>,
 }
 
 impl Held {
+    fn move_to(&self, place: Place) {
+        self.place.send_replace(place);
+    }
+
     fn kept(&self) -> KeptParcel {
         KeptParcel {
             seq: self.seq,
@@ -891,6 +907,9 @@ impl Shared {
         if taken.is_empty() {
             return DoorHold::empty();
         }
+        for held in &taken {
+            held.move_to(Place::Carried);
+        }
         state.next_push += 1;
         let id = state.next_push;
         state.doors.push(DoorHeld {
@@ -914,6 +933,7 @@ impl Shared {
             return;
         }
         for held in held {
+            held.move_to(Place::Waiting);
             let position = state
                 .parcels
                 .iter()
@@ -1126,6 +1146,12 @@ pub struct Deposited {
     /// Yields how the new parcel left the inbox; `None` when it was turned
     /// away at once.
     pub end: Option<oneshot::Receiver<ParcelEnd>>,
+    /// Whether the deposit itself answered the registered wait with the new
+    /// parcel, under the same lock it was put in under.
+    pub handed_to_wait: bool,
+    /// Where the new parcel is until it ends (the sender closes then);
+    /// `None` when it was turned away at once.
+    pub place: Option<watch::Receiver<Place>>,
 }
 
 /// A push under way: what it carries and what it draws on.
@@ -1232,6 +1258,7 @@ impl Inbox {
                 settled: false,
                 end: None,
                 budget: None,
+                place: watch::channel(Place::Waiting).0,
             });
         }
         if let Some(keeper) = keeper.as_ref().filter(|_| !too_long.is_empty()) {
@@ -1338,6 +1365,8 @@ impl Inbox {
                 Deposited {
                     turned_away: vec![parcel],
                     end: None,
+                    handed_to_wait: false,
+                    place: None,
                 },
                 Saving::ready(),
                 None,
@@ -1368,7 +1397,9 @@ impl Inbox {
             settled: false,
             end: Some(tx),
             budget,
+            place: watch::channel(Place::Waiting).0,
         };
+        let place = held.place.subscribe();
         let mut row = None;
         // A notice is one per key: the newer word takes the older one's place
         // in the queue, and the older depositor's end is dropped unsettled.
@@ -1394,10 +1425,16 @@ impl Inbox {
             }
         };
         self.shared.wake(&mut state);
+        let handed_to_wait = state
+            .doors
+            .iter()
+            .any(|door| door.held.iter().any(|held| held.id == id));
         (
             Deposited {
                 turned_away: Vec::new(),
                 end: Some(rx),
+                handed_to_wait,
+                place: Some(place),
             },
             saving,
             row,
@@ -1477,6 +1514,13 @@ impl Inbox {
                 Some((delivery, rx))
             })
             .collect()
+    }
+
+    /// The most characters one answer carries: a parcel longer than this is
+    /// never taken in.
+    #[must_use]
+    pub fn answer_limit(&self) -> usize {
+        self.shared.spec.max_chars
     }
 
     /// Whether a wait is registered.
@@ -1575,6 +1619,9 @@ impl Inbox {
             Vec::new()
         };
         let first = held.first()?;
+        for carried in &held {
+            carried.move_to(Place::Carried);
+        }
         let text = held
             .iter()
             .map(|held| held.parcel.text.as_str())
@@ -1727,6 +1774,7 @@ impl Inbox {
                 }
                 None => {
                     for held in carried.held.into_iter().rev() {
+                        held.move_to(Place::Waiting);
                         state.parcels.push_front(held);
                     }
                     self.shared.wake(&mut state);

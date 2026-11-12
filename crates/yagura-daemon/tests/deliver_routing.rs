@@ -63,7 +63,9 @@ fn expected_plan_notice(plan_id: &str) -> String {
 }
 
 fn expected_report_notice(pending: usize) -> String {
-    format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
+    format!(
+        "[yagura report] {pending} pending report(s). Call wait_for_report with timeout_sec: 0 to read them."
+    )
 }
 
 /// Every chat delivery state a profile that declares `[delivery]` never shows: they
@@ -656,7 +658,7 @@ fn expect_handoff_sent(message: DaemonMessage) -> (String, bool, String) {
         DaemonMessage::HandoffSent {
             window_id,
             opened,
-            delivery,
+            state: delivery,
             ..
         } => (
             window_id,
@@ -687,7 +689,7 @@ async fn a_post_to_a_waiting_window_that_waits_for_the_daemon_arrives_through_th
     assert_eq!(targets, vec![id.clone()]);
 
     logs.until_received("R1WAITIDLE").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     let wait = logs
         .events()
         .into_iter()
@@ -719,7 +721,7 @@ async fn a_post_to_a_working_window_that_waits_for_the_daemon_arrives_through_th
     let (seq, _) = post(&mut user, &format!("@{id} R1WAITWORKING")).await;
 
     logs.until_received("R1WAITWORKING").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(logs.door("wait").contains("R1WAITWORKING"));
     assert_eq!(logs.received("R1WAITWORKING"), 1);
     logs.assert_never_typed("R1WAITWORKING");
@@ -739,7 +741,7 @@ async fn a_post_to_a_waiting_window_woken_by_command_runs_the_command_with_its_s
     let (seq, _) = post(&mut user, &format!("@{id} R1COMMANDIDLE")).await;
 
     logs.until_received("R1COMMANDIDLE").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     let woken = logs.woken();
     let run = woken
         .iter()
@@ -761,7 +763,7 @@ async fn a_post_to_a_working_window_woken_by_command_runs_the_command_at_once() 
     let (seq, _) = post(&mut user, &format!("@{id} R1COMMANDWORKING")).await;
 
     logs.until_received("R1COMMANDWORKING").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(logs.woken_texts().contains("R1COMMANDWORKING"));
     assert_eq!(logs.received("R1COMMANDWORKING"), 1);
     logs.assert_never_typed("R1COMMANDWORKING");
@@ -776,11 +778,11 @@ async fn a_post_to_a_working_window_with_no_wake_door_arrives_with_the_next_turn
     scene.start_turn(&mut user, &logs, &id).await;
 
     let (seq, _) = post(&mut user, &format!("@{id} R1NONEWORKING")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     scene.start_turn(&mut user, &logs, &id).await;
 
     logs.until_received("R1NONEWORKING").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(logs.door("take").contains("R1NONEWORKING"));
     assert_eq!(logs.received("R1NONEWORKING"), 1);
     logs.assert_never_typed("R1NONEWORKING");
@@ -799,12 +801,12 @@ async fn a_post_waiting_for_a_session_is_pushed_by_command_once_the_session_is_f
     let mut user = scene.user().await;
     let id = scene.open_profile(&mut user, "hc-command-session").await;
     let (seq, _) = post(&mut user, &format!("@{id} R1SESSIONKNOWN")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
 
     scene.type_line(&id, "TURN").await;
 
     logs.until_received("R1SESSIONKNOWN").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(logs.woken_texts().contains("R1SESSIONKNOWN"));
     assert_eq!(logs.received("R1SESSIONKNOWN"), 1);
     logs.assert_never_typed("R1SESSIONKNOWN");
@@ -834,7 +836,7 @@ async fn opening_a_window_types_nothing_and_its_start_up_door_carries_the_intro(
     scene.until_waiting(&id).await;
     let (seq, _) = post(&mut user, &format!("@{id} R2AFTERINTRO")).await;
     logs.until_received("R2AFTERINTRO").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
 
     logs.assert_never_typed(INTRO);
     assert_eq!(logs.received(INTRO), 1, "the intro reaches the CLI once");
@@ -856,7 +858,10 @@ async fn a_handoff_to_an_existing_window_arrives_through_its_wait_and_answers_ta
         expect_handoff_sent(request(&mut user, handoff_to(&id, "R3HANDOFF")).await);
 
     assert_eq!((window_id.as_str(), opened), (id.as_str(), false));
-    assert_eq!(delivery, "taken", "answered once the CLI took the envelope");
+    assert_eq!(
+        delivery, "delivered",
+        "answered once the CLI took the envelope"
+    );
     // The answer comes once the door is handed the envelope; the CLI logs it after.
     logs.until_received("R3HANDOFF").await;
     assert!(logs.door("wait").contains("R3HANDOFF"));
@@ -1224,11 +1229,11 @@ async fn a_post_before_the_first_turn_waits_for_it_and_never_runs_the_wake_comma
     assert_eq!(scene.entry(&id).session_id(), None, "no turn has run yet");
 
     let (seq, _) = post(&mut user, &format!("@{id} R5BEFOREFIRSTTURN")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     scene.start_turn(&mut user, &logs, &id).await;
 
     logs.until_received("R5BEFOREFIRSTTURN").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(
         logs.door("context").contains("R5BEFOREFIRSTTURN")
             || logs.door("take").contains("R5BEFOREFIRSTTURN"),
@@ -1256,7 +1261,7 @@ async fn a_post_to_a_waiting_window_with_no_wake_door_is_typed_once_and_taken() 
 
     let (seq, _) = post(&mut user, &format!("@{id} R6NONEIDLE")).await;
 
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert_eq!(logs.typed().matches("R6NONEIDLE").count(), 1);
     assert_eq!(logs.received("R6NONEIDLE"), 0);
 }
@@ -1270,7 +1275,7 @@ async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again()
     scene.start_turn(&mut user, &logs, &id).await;
     let writes = scene.entry(&id).write_seq();
     let (seq, _) = post(&mut user, &format!("@{id} R6AFTERTURN")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     // The screen still shows the busy line, so no clock bound can make the
     // window wait for input again: whatever the agent would type while the
     // window works has been typed once they have all run out.
@@ -1285,7 +1290,7 @@ async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again()
 
     scene.end_turn(&mut user, &logs, &id).await;
 
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert_eq!(logs.typed().matches("R6AFTERTURN").count(), 1);
     assert_eq!(logs.received("R6AFTERTURN"), 0);
 }
@@ -1303,7 +1308,7 @@ async fn read_chat_reports_pending_until_the_cli_takes_the_post_and_taken_after(
     scene.start_turn(&mut user, &logs, &id).await;
     let (seq, _) = post(&mut user, &format!("@{id} R7STATES")).await;
 
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     assert_eq!(
         scene.entry(&id).inbox().pending_count(),
         1,
@@ -1311,7 +1316,7 @@ async fn read_chat_reports_pending_until_the_cli_takes_the_post_and_taken_after(
     );
     scene.start_turn(&mut user, &logs, &id).await;
 
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert_eq!(scene.entry(&id).inbox().pending_count(), 0);
 }
 
@@ -1370,7 +1375,7 @@ async fn a_wait_in_an_unknown_window_is_not_answered_but_the_take_door_returns_t
     lose(&scene, &mut user, &id).await;
 
     let (seq, _) = post(&mut user, &format!("@{id} R9WAIT")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     let mut door = scene.connect().await;
     let taken = call_take(&mut door, &id).await;
 
@@ -1395,12 +1400,12 @@ async fn a_post_held_while_unknown_is_pushed_once_the_status_is_known_again() {
     scene.until_waiting(&id).await;
     lose(&scene, &mut user, &id).await;
     let (seq, _) = post(&mut user, &format!("@{id} R9RECOVERS")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
 
     scene.type_line(&id, "FIND").await;
 
     logs.until_received("R9RECOVERS").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert!(logs.door("wait").contains("R9RECOVERS"));
     assert_eq!(logs.received("R9RECOVERS"), 1);
 }
@@ -1428,7 +1433,7 @@ async fn the_wake_command_never_runs_for_a_window_in_unknown() {
     lose(&scene, &mut user, &id).await;
 
     let (seq, _) = post(&mut user, &format!("@{id} R9COMMAND")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     let mut door = scene.connect().await;
     let taken = call_take(&mut door, &id).await;
 
@@ -1446,7 +1451,7 @@ async fn a_window_with_no_wake_door_is_never_typed_into_while_unknown() {
     lose(&scene, &mut user, &id).await;
 
     let (seq, _) = post(&mut user, &format!("@{id} R9NONE")).await;
-    until_state(&mut user, seq, &id, "pending").await;
+    until_state(&mut user, seq, &id, "queued").await;
     let mut door = scene.connect().await;
     let taken = call_take(&mut door, &id).await;
 
@@ -1609,7 +1614,7 @@ async fn a_handoff_not_taken_within_the_limit_is_undelivered_and_leaves_the_inbo
     let mut watcher = scene.user().await;
     scene.start_turn(&mut watcher, &logs, &id).await;
     let (_, _, delivery) = expect_handoff_sent(read_reply(&mut user).await);
-    assert_eq!(delivery, "taken");
+    assert_eq!(delivery, "delivered");
 }
 
 #[tokio::test]
@@ -1631,7 +1636,7 @@ async fn a_handoff_to_a_working_window_answers_taken_once_its_next_turn_starts()
     scene.start_turn(&mut watcher, &logs, &id).await;
 
     let (_, _, delivery) = expect_handoff_sent(read_reply(&mut user).await);
-    assert_eq!(delivery, "taken");
+    assert_eq!(delivery, "delivered");
     assert!(logs.door("take").contains("R11LATER"));
     assert_eq!(logs.received("R11LATER"), 1);
     logs.assert_never_typed("R11LATER");
@@ -1661,7 +1666,10 @@ async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_pro
     );
 
     assert!(opened);
-    assert_eq!(delivery, "taken", "taken once the window started with it");
+    assert_eq!(
+        delivery, "delivered",
+        "taken once the window started with it"
+    );
     logs.until("the window to log its argv", |logs| !logs.argv().is_empty())
         .await;
     assert!(
@@ -1720,7 +1728,7 @@ async fn a_post_being_pushed_by_command_is_not_returned_by_a_turn_start_door() {
         "a post being pushed is not handed out again"
     );
     logs.until_received("R13HELD").await;
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert_eq!(logs.received("R13HELD"), 1);
 }
 
@@ -1757,7 +1765,7 @@ async fn a_failed_command_push_puts_the_post_back_for_the_next_turn() {
     let taken = call_take(&mut door, &id).await;
 
     assert!(taken.contains("R13FAILED"), "{taken:?}");
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
 }
 
 #[tokio::test]
@@ -1789,7 +1797,7 @@ async fn a_post_being_typed_is_not_returned_by_a_turn_start_door() {
         !taken.contains("R13TYPING"),
         "a post being typed is not handed out again"
     );
-    until_state(&mut user, seq, &id, "taken").await;
+    until_state(&mut user, seq, &id, "delivered").await;
     assert_eq!(logs.typed().matches("R13TYPING").count(), 1);
     assert_eq!(logs.received("R13TYPING"), 0);
 }

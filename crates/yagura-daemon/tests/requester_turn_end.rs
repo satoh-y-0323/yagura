@@ -8,12 +8,12 @@
 //! the call is dropped. A definition says so with `[requests]
 //! abandoned_at_turn_end`; only then does that transition end a request that
 //! is still waiting on its answer. Every case drives a real `IpcServer`:
-//! the receiver is a `submit_child` that stops reading once the body arrives,
 //! the requester is an `echo_child` whose status is set by what the test
 //! prints into it (a status report cannot make a window `Interrupted`,
-//! `Idle` or `Unknown`, a screen rule can). "Does not end" is shown with the
-//! test's clock paused and an hour of it let pass, then by another writer's
-//! byte ending the same wait; the hang guards only bound a failure.
+//! `Idle` or `Unknown`, a screen rule can), and the call it leaves out is a
+//! `wait_for_report` no clock of the test ends. "Does not end" is shown with
+//! the test's clock paused and an hour of it let pass, then by a report ending
+//! the same wait; the hang guards only bound a failure.
 
 use crate::common;
 
@@ -26,12 +26,10 @@ use common::{
     Harness, SubmitDefinitionInput, approver_base_config, call_list_windows, decide,
     expect_approval_requested, expect_error, identify, let_every_clock_bound_run_out, policy,
     read_approver_reply, read_response, register_approver, send, unique_temp_dir,
-    wait_until_composer_is, wait_until_input_log_contains, wait_until_status,
-    write_submit_definition,
+    wait_until_input_log_contains, wait_until_status, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::reading::ComposerReadout;
-use yagura_daemon::window::{InputOrigin, WindowEntry};
+use yagura_daemon::window::WindowEntry;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
@@ -47,8 +45,9 @@ const IDLE: &str = "REQ-IDLE";
 /// Matches no rule of the requester's definition.
 const NO_RULE_MATCHES: &str = "REQ-NOTHING-KNOWN";
 
-/// Typed into a window by another writer: it ends a delivery that waits.
-const OTHER_WRITER: &[u8] = b"Q";
+/// The `wait_for_report` a requester leaves out: longer than the hour of the
+/// clock a "does not end" case lets pass, so only an event can end it.
+const LONG_WAIT_SEC: u64 = 7200;
 
 /// One change of the requester window's state.
 #[derive(Clone, Copy, Debug)]
@@ -99,6 +98,7 @@ fn config(dir: &Path) -> DaemonConfig {
             "close_window",
         ])),
         max_waiters_per_conn: 16,
+        wait_timeout_max_secs: LONG_WAIT_SEC,
         ..approver_base_config()
     }
 }
@@ -275,21 +275,75 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
     )
 }
 
-/// The requester asks for `BODY` to be sent to the receiver and the receiver
-/// has stopped reading in the middle of it: the call is out, unanswered.
-async fn start_send_message(stage: &Stage, requester: &mut Connection) {
+/// The requester opens a child (an approver lets it) and leaves a
+/// `wait_for_report` for its reports out, unanswered. Returns the child.
+async fn start_wait_for_report(stage: &Stage, requester: &mut Connection) -> String {
+    let mut approver = stage.h.connect().await;
+    register_approver(&mut approver).await;
     send(
         requester,
-        &ClientMessage::SendText {
-            window_id: stage.receiver.clone(),
-            text: "BODY\r".to_string(),
+        &ClientMessage::OpenWindow {
+            command: process::echo_child_command(),
+            cwd: None,
+            name: None,
+            vendor: None,
+            detection: None,
+            on_name_taken: Default::default(),
         },
     )
     .await;
-    stage
-        .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
-        .await;
+    let request = expect_approval_requested(&mut approver).await;
+    decide(&mut approver, &request.request_id, true).await;
+    let child = match read_response(requester).await {
+        DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened, got {other:?}"),
+    };
+    // Frames on one connection are handled in order: the pong proves the wait
+    // is registered.
+    send(
+        requester,
+        &ClientMessage::WaitForReport {
+            timeout_sec: LONG_WAIT_SEC,
+        },
+    )
+    .await;
+    expect_pong(requester).await;
+    child
+}
+
+/// `child` reports `summary` to its opener.
+async fn report(stage: &Stage, child: &str, summary: &str) {
+    let mut reporter = stage.h.connect().await;
+    identify(&mut reporter, child).await;
+    send(
+        &mut reporter,
+        &ClientMessage::SendReport {
+            outcome: ReportOutcome::Succeeded,
+            summary: summary.to_string(),
+            path: None,
+        },
+    )
+    .await;
+    match read_response(&mut reporter).await {
+        DaemonMessage::ReportSent { delivered_to, .. } => {
+            assert_eq!(
+                delivered_to.as_deref(),
+                Some(stage.requester_window.as_str())
+            );
+        }
+        other => panic!("expected report_sent, got {other:?}"),
+    }
+}
+
+/// The requester's wait ended at its turn's end with nothing taken, and the
+/// next request on the same connection is the next frame it gets (no second
+/// answer to the first).
+async fn expect_ended_empty_and_no_second_answer(requester: &mut Connection) {
+    match read_response(requester).await {
+        DaemonMessage::Reports { reports, .. } => assert!(reports.is_empty(), "{reports:?}"),
+        other => panic!("expected an empty reports answer, got {other:?}"),
+    }
+    expect_pong(requester).await;
 }
 
 /// The same, as a window-addressed handoff.
@@ -323,44 +377,6 @@ async fn expect_pong(requester: &mut Connection) {
     );
 }
 
-/// What follows once the daemon has answered a request whose requester left:
-/// the receiver reads on, the body it was sent is taken back, no submit key
-/// is ever written, and the next request on the same connection is the next
-/// frame that connection gets (no second answer to the first).
-async fn expect_withdrawn_without_a_submit_key_and_no_second_answer(
-    stage: &Stage,
-    requester: &mut Connection,
-) {
-    std::fs::write(&stage.resume, b"").expect("let the receiver read on");
-    wait_until_input_log_contains(&stage.input_log, b"\x15").await;
-    wait_until_composer_is(&stage.h, &stage.receiver, &ComposerReadout::Empty).await;
-
-    // Granted only once the first request's delivery has let go of the window.
-    send(
-        requester,
-        &ClientMessage::SendText {
-            window_id: stage.receiver.clone(),
-            text: "MARK".to_string(),
-        },
-    )
-    .await;
-    match read_response(requester).await {
-        DaemonMessage::TextSent { window_id } => assert_eq!(window_id, stage.receiver),
-        other => panic!("the next frame must answer the next request, got {other:?}"),
-    }
-    let read = wait_until_input_log_contains(&stage.input_log, b"MARK").await;
-    assert!(
-        !read.contains(&b'\r'),
-        "no submit key may be written for a request whose requester left: {read:?}"
-    );
-    wait_until_composer_is(
-        &stage.h,
-        &stage.receiver,
-        &ComposerReadout::Body("MARK".to_string()),
-    )
-    .await;
-}
-
 /// Reads the next response without any clock, so that it can wait while the
 /// test's clock is let run out.
 async fn read_response_untimed(client: &mut Connection) -> DaemonMessage {
@@ -385,9 +401,14 @@ async fn read_response_untimed(client: &mut Connection) -> DaemonMessage {
 }
 
 /// The requester's call is not ended by its window's `steps`: an hour of the
-/// clock passes with it unanswered, and then another writer's byte ends it
+/// clock passes with it unanswered, and then a report from `child` ends it
 /// (so nothing earlier did).
-async fn expect_the_call_outlives(mut stage: Stage, requester: Connection, steps: &[Step]) {
+async fn expect_the_call_outlives(
+    mut stage: Stage,
+    requester: Connection,
+    child: &str,
+    steps: &[Step],
+) {
     let answer = tokio::spawn(async move {
         let mut requester = requester;
         let answer = read_response_untimed(&mut requester).await;
@@ -400,80 +421,67 @@ async fn expect_the_call_outlives(mut stage: Stage, requester: Connection, steps
         "the request must still be waiting after {steps:?}"
     );
 
-    stage
-        .receiver_entry()
-        .write_pty_input(OTHER_WRITER, InputOrigin::Interactive)
-        .await
-        .expect("another writer's byte must not fail");
+    report(&stage, child, "OUTLIVED").await;
     let (_requester, answer) = tokio::time::timeout(HANG_GUARD, answer)
         .await
-        .expect("another writer's byte must end the wait")
+        .expect("the report must end the wait")
         .expect("the reader must not panic");
-    let message = expect_error(answer, "not_written");
-    assert!(
-        message.contains("another write reached the window"),
-        "the wait must have ended on the other writer, not on the requester's states: {message}"
-    );
+    match answer {
+        DaemonMessage::Reports { reports, .. } => {
+            assert_eq!(
+                reports
+                    .iter()
+                    .map(|r| r.summary.as_str())
+                    .collect::<Vec<_>>(),
+                ["OUTLIVED"],
+                "the wait must have ended on the report, not on the requester's states"
+            );
+        }
+        other => panic!("expected the report on the wait still out, got {other:?}"),
+    }
 }
 
 // =====================================================================
 // A requester that abandons its calls at the end of a turn
 // =====================================================================
 
-/// A requester (definition true) that was `Running` and is back to
-/// `WaitingInput` is answered at once with `not_written`, on the connection
-/// that is still open; its body is taken back and its submit key never typed.
+/// A requester (definition true) that was `Running` and is interrupted, goes
+/// idle or is closed has dropped its call: the call is answered at once with
+/// nothing taken, on the connection that is still open. (`Running` then
+/// `WaitingInput` is the `wait_for_report` case below.)
 #[tokio::test]
-async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_running_to_waiting_input()
- {
-    let (mut stage, mut requester) = stage("turn-end-send", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
-
-    stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    expect_error(read_response(&mut requester).await, "not_written");
-    expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
-}
-
-#[tokio::test]
-async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_running_to_interrupted()
- {
+async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_interrupted() {
     let (mut stage, mut requester) =
         stage("turn-end-interrupted", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    start_wait_for_report(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Interrupted]).await;
-    expect_error(read_response(&mut requester).await, "not_written");
-    expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
+    expect_ended_empty_and_no_second_answer(&mut requester).await;
 }
 
 #[tokio::test]
-async fn a_send_message_is_answered_not_written_when_its_requester_goes_from_running_to_idle() {
+async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_idle() {
     let (mut stage, mut requester) = stage("turn-end-idle", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    start_wait_for_report(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Idle]).await;
-    expect_error(read_response(&mut requester).await, "not_written");
-    expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
+    expect_ended_empty_and_no_second_answer(&mut requester).await;
 }
 
 #[tokio::test]
-async fn a_send_message_is_answered_not_written_when_its_requester_window_is_closed_after_running()
-{
+async fn a_wait_for_report_ends_empty_when_its_requester_window_is_closed_after_running() {
     let (mut stage, mut requester) = stage("turn-end-closed", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    start_wait_for_report(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::Close]).await;
-    expect_error(read_response(&mut requester).await, "not_written");
-    expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
+    expect_ended_empty_and_no_second_answer(&mut requester).await;
 }
 
 /// A handoff the receiver's CLI is already carrying is not taken back when its
 /// requester's turn ends: the typing finishes, so the body is submitted and
-/// never cleared from the composer, and the handoff is still answered once.
+/// never cleared from the composer, and the handoff is answered once. The call
+/// started no attempt of its own (the receiver wakes by none), so the answer
+/// says the envelope waits: never that it was not delivered.
 #[tokio::test]
 async fn a_carried_handoff_is_not_taken_back_when_its_requester_goes_from_running_to_waiting_input()
 {
@@ -482,15 +490,21 @@ async fn a_carried_handoff_is_not_taken_back_when_its_requester_goes_from_runnin
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
     std::fs::write(&stage.resume, b"").expect("let the receiver read on");
-    match read_response(&mut requester).await {
+    let answer = read_response(&mut requester).await;
+    match &answer {
         DaemonMessage::HandoffSent {
             window_id, opened, ..
         } => {
-            assert_eq!(window_id, stage.receiver);
+            assert_eq!(*window_id, stage.receiver);
             assert!(!opened, "the handoff was addressed to an open window");
         }
         other => panic!("expected handoff_sent with the carrier's result, got {other:?}"),
     }
+    assert_eq!(
+        crate::send_message_lifecycle::state_of(&answer).as_deref(),
+        Some("queued"),
+        "a carried handoff is never answered undelivered: {answer:?}"
+    );
     let read = wait_until_input_log_contains(&stage.input_log, b"\r").await;
     assert!(
         !read.contains(&0x15),
@@ -537,59 +551,12 @@ async fn a_wait_for_status_ends_as_timed_out_when_its_requester_goes_from_runnin
 async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_waiting_input() {
     let (mut stage, mut requester) =
         stage("turn-end-wait-report", Some(&abandoned_table(true))).await;
-    let mut approver = stage.h.connect().await;
-    register_approver(&mut approver).await;
-    send(
-        &mut requester,
-        &ClientMessage::OpenWindow {
-            command: process::echo_child_command(),
-            cwd: None,
-            name: None,
-            vendor: None,
-            detection: None,
-            on_name_taken: Default::default(),
-        },
-    )
-    .await;
-    let request = expect_approval_requested(&mut approver).await;
-    decide(&mut approver, &request.request_id, true).await;
-    let child = match read_response(&mut requester).await {
-        DaemonMessage::WindowOpened { window_id, .. } => window_id,
-        other => panic!("expected window_opened, got {other:?}"),
-    };
-    send(
-        &mut requester,
-        &ClientMessage::WaitForReport { timeout_sec: 300 },
-    )
-    .await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    match read_response(&mut requester).await {
-        DaemonMessage::Reports { reports, .. } => assert!(reports.is_empty(), "{reports:?}"),
-        other => panic!("expected an empty reports answer, got {other:?}"),
-    }
-    expect_pong(&mut requester).await;
+    expect_ended_empty_and_no_second_answer(&mut requester).await;
 
-    let mut reporter = stage.h.connect().await;
-    identify(&mut reporter, &child).await;
-    send(
-        &mut reporter,
-        &ClientMessage::SendReport {
-            outcome: ReportOutcome::Succeeded,
-            summary: "after the turn".to_string(),
-            path: None,
-        },
-    )
-    .await;
-    match read_response(&mut reporter).await {
-        DaemonMessage::ReportSent { delivered_to, .. } => {
-            assert_eq!(
-                delivered_to.as_deref(),
-                Some(stage.requester_window.as_str())
-            );
-        }
-        other => panic!("expected report_sent, got {other:?}"),
-    }
+    report(&stage, &child, "after the turn").await;
     send(
         &mut requester,
         &ClientMessage::WaitForReport { timeout_sec: 0 },
@@ -607,17 +574,19 @@ async fn a_wait_for_report_ends_empty_when_its_requester_goes_from_running_to_wa
 /// After the answer, the requester's window may do anything: nothing is
 /// answered again, and the connection carries on.
 #[tokio::test]
-async fn a_requester_changing_state_after_its_send_message_was_answered_is_answered_only_once() {
+async fn a_requester_changing_state_after_its_wait_for_report_was_answered_is_answered_only_once() {
     let (mut stage, mut requester) = stage("turn-end-once", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    start_wait_for_report(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    expect_error(read_response(&mut requester).await, "not_written");
+    match read_response(&mut requester).await {
+        DaemonMessage::Reports { reports, .. } => assert!(reports.is_empty(), "{reports:?}"),
+        other => panic!("expected an empty reports answer, got {other:?}"),
+    }
     stage
         .drive_all(&[Step::Running, Step::Interrupted, Step::Running, Step::Idle])
         .await;
     expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
 
 // =====================================================================
@@ -628,36 +597,49 @@ async fn a_requester_changing_state_after_its_send_message_was_answered_is_answe
 /// through the same states: Claude Code returns to `WaitingInput` while its
 /// call lives on, so the state alone must never end it.
 #[tokio::test]
-async fn a_requester_whose_definition_says_false_keeps_its_send_message_through_running_and_waiting_input()
+async fn a_requester_whose_definition_says_false_keeps_its_wait_for_report_through_running_and_waiting_input()
  {
     let (stage, mut requester) = stage("turn-end-false", Some(&abandoned_table(false))).await;
-    start_send_message(&stage, &mut requester).await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
-    expect_the_call_outlives(stage, requester, &[Step::Running, Step::WaitingInput]).await;
+    expect_the_call_outlives(
+        stage,
+        requester,
+        &child,
+        &[Step::Running, Step::WaitingInput],
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn a_requester_whose_definition_has_no_requests_table_keeps_its_send_message_through_running_and_waiting_input()
+async fn a_requester_whose_definition_has_no_requests_table_keeps_its_wait_for_report_through_running_and_waiting_input()
  {
     let (stage, mut requester) = stage("turn-end-omitted", None).await;
-    start_send_message(&stage, &mut requester).await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
-    expect_the_call_outlives(stage, requester, &[Step::Running, Step::WaitingInput]).await;
+    expect_the_call_outlives(
+        stage,
+        requester,
+        &child,
+        &[Step::Running, Step::WaitingInput],
+    )
+    .await;
 }
 
 /// The approval dialog before a call is `WaitingApproval`, and the state after
 /// it is `WaitingInput` once the call is back: without a `Running` in between
 /// there was no turn to end.
 #[tokio::test]
-async fn a_send_message_is_kept_when_its_requester_goes_from_waiting_approval_to_waiting_input_without_running()
+async fn a_wait_for_report_is_kept_when_its_requester_goes_from_waiting_approval_to_waiting_input_without_running()
  {
     let (stage, mut requester) =
         stage("turn-end-approval-first", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
     expect_the_call_outlives(
         stage,
         requester,
+        &child,
         &[Step::WaitingApproval, Step::WaitingInput],
     )
     .await;
@@ -666,20 +648,26 @@ async fn a_send_message_is_kept_when_its_requester_goes_from_waiting_approval_to
 /// A window that cannot be read (`Unknown`) says nothing about its turn: the
 /// fail-safe state never ends a request.
 #[tokio::test]
-async fn a_send_message_is_kept_when_its_requester_goes_from_running_to_unknown() {
+async fn a_wait_for_report_is_kept_when_its_requester_goes_from_running_to_unknown() {
     let (stage, mut requester) = stage("turn-end-unknown", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
-    expect_the_call_outlives(stage, requester, &[Step::Running, Step::Unknown]).await;
+    expect_the_call_outlives(stage, requester, &child, &[Step::Running, Step::Unknown]).await;
 }
 
 #[tokio::test]
-async fn a_send_message_is_kept_when_its_requester_goes_from_running_to_waiting_approval() {
+async fn a_wait_for_report_is_kept_when_its_requester_goes_from_running_to_waiting_approval() {
     let (stage, mut requester) =
         stage("turn-end-approval-after", Some(&abandoned_table(true))).await;
-    start_send_message(&stage, &mut requester).await;
+    let child = start_wait_for_report(&stage, &mut requester).await;
 
-    expect_the_call_outlives(stage, requester, &[Step::Running, Step::WaitingApproval]).await;
+    expect_the_call_outlives(
+        stage,
+        requester,
+        &child,
+        &[Step::Running, Step::WaitingApproval],
+    )
+    .await;
 }
 
 /// A request to open a window is still waiting for an approver when its

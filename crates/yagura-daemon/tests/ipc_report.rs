@@ -11,11 +11,14 @@ use crate::common;
 
 use std::path::{Path, PathBuf};
 
+use crate::send_message_lifecycle::{
+    entry, note_of, open_wait_window, state_of, take_and_print, until,
+};
 use common::{
-    Harness, approver_base_config, call_open_window, call_send_handoff_from_profile, empty_lookup,
-    expect_error, expect_handoff_sent, handoff_profile_config, identify,
-    launch_prompt_profile_source, policy, read_response, register_approver, send, unique_temp_dir,
-    write_profile,
+    CONTROL_DETECTION_NAME, Harness, approver_base_config, call_open_window,
+    call_send_handoff_from_profile, detection_config, empty_lookup, expect_error,
+    expect_handoff_sent, handoff_profile_config, identify, launch_prompt_profile_source, policy,
+    read_response, register_approver, send, unique_temp_dir, write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -306,7 +309,9 @@ async fn park_wait_for_report(client: &mut Connection, timeout_sec: u64) {
 
 fn expect_report_sent(msg: DaemonMessage) -> (Option<String>, Option<ReportTaskRef>) {
     match msg {
-        DaemonMessage::ReportSent { delivered_to, task } => (delivered_to, task),
+        DaemonMessage::ReportSent {
+            delivered_to, task, ..
+        } => (delivered_to, task),
         other => panic!("expected report_sent, got {other:?}"),
     }
 }
@@ -366,6 +371,46 @@ async fn a_window_opened_by_an_identified_connection_becomes_its_opener_and_rece
         (sent_after..=answered_before).contains(&report.at_ms),
         "at_ms {} must be the wall-clock time the report was received",
         report.at_ms
+    );
+}
+
+/// A report no `wait_for_report` takes waits in its parent's inbox: the answer says
+/// so and when the parent hears of it, and the notice the parent's door hands over
+/// tells it to read the reports without waiting (a notice can arrive after they were
+/// read, and a waiting call would then block on nothing).
+#[tokio::test]
+async fn a_report_no_wait_takes_is_answered_queued_and_its_notice_says_to_read_with_timeout_sec_0()
+{
+    let dir = unique_temp_dir("report-queued-notice");
+    let h = Harness::start(
+        "report-queued-notice",
+        detection_config(&dir, base_config()),
+    )
+    .await;
+    let mut a = h.connect().await;
+    let window_a = open_wait_window(&h, &mut a, CONTROL_DETECTION_NAME).await;
+    identify(&mut a, &window_a).await;
+    let window_b = call_open_window(&mut a, echo_child_command()).await;
+    let mut b = h.connect().await;
+    identify(&mut b, &window_b).await;
+
+    let reply = call_send_report(&mut b, ReportOutcome::Succeeded, "queued report", None).await;
+    assert_eq!(state_of(&reply).as_deref(), Some("queued"), "{reply:?}");
+    let note = note_of(&reply)
+        .unwrap_or_else(|| panic!("a waiting report's answer says when it is handed over"));
+    assert!(!note.is_empty());
+    let (delivered_to, _) = expect_report_sent(reply);
+    assert_eq!(delivered_to.as_deref(), Some(window_a.as_str()));
+
+    until("the report notice to reach the parent's inbox", || {
+        entry(&h, &window_a).inbox().pending_count() > 0
+    })
+    .await;
+    let notice = take_and_print(&h, &window_a).await;
+    assert!(notice.contains("[yagura report]"), "{notice:?}");
+    assert!(
+        notice.contains("timeout_sec: 0"),
+        "the notice must say to call wait_for_report with timeout_sec: 0: {notice:?}"
     );
 }
 

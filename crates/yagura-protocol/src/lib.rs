@@ -1868,6 +1868,39 @@ pub fn validate_send_text_body(value: &str) -> Result<(), SendTextError> {
     Ok(())
 }
 
+/// Validates the text of a `send_message` envelope against the same
+/// forbidden-character rule as [`validate_handoff_text`], except that `\n` and
+/// `\r` are allowed anywhere (see [`is_forbidden_send_text_char`]): the text
+/// is put in an envelope rather than typed, so it may run over several lines,
+/// while its other control characters (in particular `ESC`) could still
+/// redraw a human approver's view of it.
+///
+/// # Errors
+///
+/// Returns [`SendTextError::ForbiddenChar`] for the first character outside
+/// the allowed set.
+///
+/// # Examples
+///
+/// ```
+/// use yagura_protocol::{SendTextError, validate_message_text};
+///
+/// assert_eq!(validate_message_text("first line\nsecond line\n"), Ok(()));
+/// assert!(matches!(
+///     validate_message_text("first line\n\x1b[2Jerased"),
+///     Err(SendTextError::ForbiddenChar { at: 11, .. })
+/// ));
+/// ```
+pub fn validate_message_text(value: &str) -> Result<(), SendTextError> {
+    match value
+        .char_indices()
+        .find(|&(_, ch)| is_forbidden_send_text_char(ch))
+    {
+        Some((at, ch)) => Err(SendTextError::ForbiddenChar { at, ch }),
+        None => Ok(()),
+    }
+}
+
 /// Maximum allowed length (in bytes) of a single frame body.
 ///
 /// A declared length prefix exactly equal to this value is accepted (the body
@@ -2337,38 +2370,37 @@ pub enum WithdrawReason {
     Unknown,
 }
 
-/// What became of a handoff envelope: the receiving CLI took it, or it never
-/// will.
+/// What became of an envelope a sender put in a window's inbox
+/// (`send_message`, `send_handoff`, `send_report`).
 ///
-/// The daemon does not type an envelope into a window's composer to watch what
-/// the composer does with it: a window whose profile declares how text reaches
-/// its CLI is handed the envelope through that CLI's own doors, or as the
-/// launch prompt of a window the handoff opens.
+/// `delivered` is an input handoff: the envelope reached an input the CLI
+/// itself offers. It is not proof that the model read it or acted on it, and
+/// the daemon cannot tell whether the CLI dropped it afterwards.
 ///
 /// # Examples
 ///
 /// ```
-/// use yagura_protocol::HandoffDelivery;
+/// use yagura_protocol::DeliveryState;
 ///
-/// let encoded = serde_json::to_string(&HandoffDelivery::Taken)
+/// let encoded = serde_json::to_string(&DeliveryState::Queued)
 ///     .expect("a plain enum always encodes");
-/// assert_eq!(encoded, "\"taken\"");
-/// assert!(serde_json::from_str::<HandoffDelivery>("\"bogus\"").is_err());
+/// assert_eq!(encoded, "\"queued\"");
+/// assert!(serde_json::from_str::<DeliveryState>("\"bogus\"").is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HandoffDelivery {
-    /// The receiving CLI took the envelope: one of its doors returned it, the
-    /// daemon handed it over through the CLI's own command or typed it and
-    /// pressed the submit key, or the window this handoff opened was started
-    /// with it as its launch prompt.
-    Taken,
-    /// Nothing took the envelope within the daemon's limit, or the request
-    /// was withdrawn first; it was taken out of the window's inbox before
-    /// this answer, so it never arrives later.
-    UndeliveredTimeout,
+pub enum DeliveryState {
+    /// The CLI was handed the envelope: one of its doors printed it, its own
+    /// wake command took it, the daemon typed it and pressed the submit key,
+    /// or the window a handoff opened was started with it as its launch
+    /// prompt.
+    Delivered,
+    /// The envelope waits in the window's inbox, or a door is still carrying
+    /// it; the answer's note says when it is handed over.
+    Queued,
     /// The window declares no way to deliver it: it was not opened from a
     /// profile that declares delivery, or its hooks were left out at launch.
+    /// Nothing was put in its inbox.
     UndeliveredNoDelivery,
 }
 
@@ -3732,13 +3764,21 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcp_connected: Option<bool>,
     },
-    /// Response to [`ClientMessage::SendText`]: the text was written to the
-    /// target window's PTY. Distinct from a generic empty success so that
-    /// callers waiting on a single round-trip response (e.g. the MCP bridge)
-    /// can observe success.
+    /// Response to [`ClientMessage::SendText`]: what became of the envelope
+    /// the text was put in. Nothing is written to the window's PTY: the
+    /// envelope waits in the window's inbox for its CLI's own doors.
     TextSent {
         /// The window ID the text was sent to.
         window_id: String,
+        /// The envelope's id, which the envelope itself carries.
+        id: String,
+        /// What became of the envelope.
+        state: DeliveryState,
+        /// When a waiting envelope is handed over, and what could lose it.
+        /// `None` when there is nothing to say. Omitted from the wire when
+        /// `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Response to [`ClientMessage::SendKeys`]: all named keys were written
     /// to the target window's PTY in one operation.
@@ -3877,16 +3917,24 @@ pub enum DaemonMessage {
         /// The request that was settled.
         request_id: String,
     },
-    /// Response to [`ClientMessage::SendHandoff`]: the receiving CLI took the
-    /// envelope, or it never will.
+    /// Response to [`ClientMessage::SendHandoff`]: what became of the
+    /// envelope. The answer waits only for an attempt to hand it over that
+    /// the request itself started.
     HandoffSent {
         /// The window that received the envelope (the newly opened one when
         /// `opened` is `true`).
         window_id: String,
         /// Whether this handoff opened the target window from a profile.
         opened: bool,
+        /// The envelope's id, which the envelope itself carries.
+        id: String,
         /// What became of the envelope.
-        delivery: HandoffDelivery,
+        state: DeliveryState,
+        /// When a waiting envelope is handed over, and what could lose it.
+        /// `None` when there is nothing to say. Omitted from the wire when
+        /// `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         /// The name of the window that received the envelope. `None` when
         /// the daemon predates this field. Omitted from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4064,6 +4112,13 @@ pub enum DaemonMessage {
         /// The plan task the report was recorded against. Always present on
         /// the wire, as `null` when the reporting window runs no plan task.
         task: Option<ReportTaskRef>,
+        /// `delivered` when a waiting `wait_for_report` of the parent took
+        /// the report; `queued` otherwise.
+        state: DeliveryState,
+        /// When a waiting report reaches its parent. `None` when there is
+        /// nothing to say. Omitted from the wire when `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Response to [`ClientMessage::WaitForReport`]: every report taken, in
     /// arrival order; empty when none arrived in time.
@@ -4990,10 +5045,14 @@ pub struct ChatMessage {
 pub struct ChatDeliveryInfo {
     /// The addressed window.
     pub window_id: String,
-    /// The delivery state: `"pending"`, `"taken"`, `"undelivered_unknown"`,
+    /// The delivery state: `"queued"`, `"delivered"`, `"undelivered_unknown"`,
     /// `"undelivered_halted"`, `"undelivered_exhausted"` or
     /// `"undelivered_restart"`.
     pub state: String,
+    /// When a `"queued"` post is handed over, read off the window as it is
+    /// now. `None` for every other state. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Why the addressed window's status was `Unknown` at the moment this
     /// delivery was recorded, when that is why delivery did not happen.
     /// `None` when `state` carries no such reason, or when the value

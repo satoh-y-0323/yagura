@@ -7,9 +7,9 @@
 //! `TaskReport`), and `PlanTaskInfo.report`.
 
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES, ReceivedReport,
-    ReportOutcome, ReportTaskRef, TaskReport, decode_client_message, decode_daemon_message,
-    encode_client_message, encode_daemon_message,
+    ClientMessage, DaemonMessage, DeliveryState, REPORT_PATH_MAX_BYTES, REPORT_SUMMARY_MAX_BYTES,
+    ReceivedReport, ReportOutcome, ReportTaskRef, TaskReport, decode_client_message,
+    decode_daemon_message, encode_client_message, encode_daemon_message,
 };
 
 fn as_json(value: &impl serde::Serialize) -> serde_json::Value {
@@ -78,6 +78,8 @@ fn report_sent_carries_both_keys_present_when_absent() {
     let decoded = DaemonMessage::ReportSent {
         delivered_to: None,
         task: None,
+        state: DeliveryState::Queued,
+        note: None,
     };
     let value = as_json(&decoded);
     let object = value
@@ -108,6 +110,8 @@ fn report_sent_task_nests_plan_id_and_task_id() {
             plan_id: "p-sample".to_string(),
             task_id: "t1".to_string(),
         }),
+        state: DeliveryState::Delivered,
+        note: None,
     };
     let value = as_json(&decoded);
     assert_eq!(

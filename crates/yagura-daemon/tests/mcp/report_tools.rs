@@ -18,8 +18,8 @@ use yagura_daemon::mcp::report_tools::{
 use yagura_daemon::mcp::tools::ToolError;
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
-    AwaitingWindow, ClientMessage, DaemonMessage, REPORT_SUMMARY_MAX_BYTES, ReceivedReport,
-    ReportOutcome, ReportTaskRef, WindowStatus,
+    AwaitingWindow, ClientMessage, DaemonMessage, DeliveryState, REPORT_SUMMARY_MAX_BYTES,
+    ReceivedReport, ReportOutcome, ReportTaskRef, WindowStatus,
 };
 
 /// Replays queued responses in order and records every request, so a test
@@ -108,6 +108,8 @@ fn report_sent_to_parent() -> DaemonMessage {
             plan_id: "plan-7".to_string(),
             task_id: "build-parser".to_string(),
         }),
+        state: DeliveryState::Queued,
+        note: None,
     }
 }
 
@@ -201,6 +203,8 @@ async fn send_report_reports_the_delivered_window_and_the_recorded_task() {
         json!({
             "delivered_to": "w-parent",
             "task": { "plan_id": "plan-7", "task_id": "build-parser" },
+            "state": "queued",
+            "note": null,
         })
     );
 }
@@ -210,6 +214,8 @@ async fn send_report_keeps_an_absent_recipient_and_task_as_null_keys() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::ReportSent {
         delivered_to: None,
         task: None,
+        state: DeliveryState::Queued,
+        note: None,
     }));
 
     let result = send_report(
@@ -219,7 +225,10 @@ async fn send_report_keeps_an_absent_recipient_and_task_as_null_keys() {
     .await
     .expect("send_report must succeed");
 
-    assert_eq!(result, json!({ "delivered_to": null, "task": null }));
+    assert_eq!(
+        result,
+        json!({ "delivered_to": null, "task": null, "state": "queued", "note": null })
+    );
     let object = result.as_object().expect("the reply must be a JSON object");
     assert!(
         object.contains_key("delivered_to") && object.contains_key("task"),

@@ -73,9 +73,16 @@ pub async fn send_report<T: DaemonTransport>(
         .await
         .map_err(map_transport_error)?;
     match response {
-        DaemonMessage::ReportSent { delivered_to, task } => Ok(json!({
+        DaemonMessage::ReportSent {
+            delivered_to,
+            task,
+            state,
+            note,
+        } => Ok(json!({
             "delivered_to": delivered_to,
             "task": to_json(task)?,
+            "state": state,
+            "note": note,
         })),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
         other => Err(unexpected_response(&other)),

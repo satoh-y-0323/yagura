@@ -31,7 +31,9 @@ use yagura_test_support::process::{self, echo_child_command};
 const APPROVAL_HEADING: &str = "NOTICE-APPROVAL";
 
 fn notice_for(pending: usize) -> String {
-    format!("[yagura report] {pending} pending report(s). Call wait_for_report to read them.")
+    format!(
+        "[yagura report] {pending} pending report(s). Call wait_for_report with timeout_sec: 0 to read them."
+    )
 }
 
 /// Opens `command` as a window whose profile declares delivery with no way to wake its

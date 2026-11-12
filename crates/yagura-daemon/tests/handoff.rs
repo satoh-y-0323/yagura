@@ -10,18 +10,35 @@
 //! byte-accounting fields cannot simply mirror whatever the implementation
 //! computes), and through `serde_json` round trips (so escaping and structure
 //! are checked by an independent parser rather than by substring matching).
+//!
+//! The last section drives a real `IpcServer`: what `send_handoff` to an open
+//! window answers, and when.
+
+use crate::common;
 
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::Instant;
 
+use crate::send_message_lifecycle::{
+    First, entry, first_of, id_of, note_of, open_wait_window, register_wait, sending_config,
+    state_of, take_and_print, until,
+};
+use common::{
+    CONTROL_DETECTION_NAME, Harness, expect_delivery, read_response, send, unique_temp_dir,
+};
+use yagura_test_support::ipc::Connection;
+
 use yagura_daemon::handoff::{
     Envelope, EnvelopeFrom, EnvelopeParts, EnvelopeTooLong, ReadyHoldLatch, StartupEvidence,
     check_envelope_len, compose_envelope, hold_is_reachable_within, is_ready, reacts_to_delivery,
 };
 use yagura_daemon::waiter::StatusAt;
-use yagura_protocol::{DetectedStatus, HANDOFF_ENVELOPE_MAX_BYTES, UnknownReason, WindowStatus};
+use yagura_protocol::{
+    ClientMessage, DaemonMessage, DetectedStatus, HANDOFF_ENVELOPE_MAX_BYTES, UnknownReason,
+    WindowStatus,
+};
 
 const PREFIX: &str = "[yagura handoff] ";
 
@@ -561,5 +578,158 @@ fn hold_is_reachable_within_is_true_only_when_hold_is_strictly_less_than_timeout
     assert!(
         !hold_is_reachable_within(Duration::from_millis(3000), Duration::from_millis(2000)),
         "a hold larger than the timeout must not be reachable"
+    );
+}
+
+// =====================================================================
+// send_handoff to an open window: the answer waits only for an attempt
+// the call itself started
+// =====================================================================
+
+async fn ask_handoff(client: &mut Connection, window_id: &str, note: &str) {
+    send(
+        client,
+        &ClientMessage::SendHandoff {
+            window_id: Some(window_id.to_string()),
+            profile: None,
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            reference: "src/lib.rs".to_string(),
+            note: note.to_string(),
+        },
+    )
+    .await;
+}
+
+/// No wait is registered and the window wakes by none other: nothing is tried, so
+/// the answer comes at once and the envelope waits for the window's next door.
+#[tokio::test]
+async fn a_handoff_with_no_wait_registered_is_answered_queued_at_once_and_waits_for_the_next_door()
+{
+    let dir = unique_temp_dir("handoff-queued");
+    let h = Harness::start("handoff-queued", sending_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+
+    ask_handoff(&mut client, &window_id, "HANDOFF-QUEUED-2M").await;
+    let answer = read_response(&mut client).await;
+    assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
+    let note = note_of(&answer)
+        .unwrap_or_else(|| panic!("a waiting envelope's answer says when it is handed over"));
+    assert!(!note.is_empty());
+    let id = id_of(&answer);
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 1);
+
+    let taken = take_and_print(&h, &window_id).await;
+    assert!(
+        taken.contains("HANDOFF-QUEUED-2M") && taken.contains(&id),
+        "the next door hands over the envelope with the id the answer named: {taken:?}"
+    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
+}
+
+#[tokio::test]
+async fn a_handoff_a_registered_wait_is_handed_is_answered_delivered_once_the_door_printed_it() {
+    let dir = unique_temp_dir("handoff-waited");
+    let h = Harness::start("handoff-waited", sending_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+    let mut door = register_wait(&h, &window_id).await;
+
+    ask_handoff(&mut client, &window_id, "HANDOFF-WAITED-5T").await;
+    let output = match first_of(&mut door, &mut client).await {
+        First::Door(delivery) => expect_delivery(delivery).0,
+        First::Requester(answer) => {
+            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
+        }
+    };
+    assert!(output.contains("HANDOFF-WAITED-5T"), "{output:?}");
+    send(&mut door, &ClientMessage::DeliverPrinted).await;
+
+    let answer = read_response(&mut client).await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("delivered"),
+        "{answer:?}"
+    );
+    assert_eq!(
+        note_of(&answer),
+        None,
+        "a wait was registered, so there is nothing to say about when it arrives"
+    );
+    assert!(output.contains(&id_of(&answer)), "{output:?}");
+}
+
+/// The door the envelope was handed to ends before it printed: the envelope goes
+/// back to the inbox and the answer says it waits.
+#[tokio::test]
+async fn a_handoff_whose_door_ends_before_printing_is_answered_queued_and_waits_in_the_inbox() {
+    let dir = unique_temp_dir("handoff-door-gone");
+    let h = Harness::start("handoff-door-gone", sending_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+    let mut door = register_wait(&h, &window_id).await;
+
+    ask_handoff(&mut client, &window_id, "HANDOFF-DOOR-GONE-8P").await;
+    match first_of(&mut door, &mut client).await {
+        First::Door(delivery) => {
+            expect_delivery(delivery);
+        }
+        First::Requester(answer) => {
+            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
+        }
+    }
+    drop(door);
+
+    let answer = read_response(&mut client).await;
+    assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
+    let id = id_of(&answer);
+    until("the envelope to be back in the inbox", || {
+        entry(&h, &window_id).inbox().pending_count() == 1
+    })
+    .await;
+    let again = take_and_print(&h, &window_id).await;
+    assert!(
+        again.contains("HANDOFF-DOOR-GONE-8P") && again.contains(&id),
+        "{again:?}"
+    );
+}
+
+/// The door the envelope was handed to neither prints nor ends: the answer comes
+/// at the daemon's bound on a door's answer and says the envelope waits, and the
+/// envelope stays with the door rather than going back to the inbox.
+#[tokio::test]
+async fn a_handoff_whose_door_holds_it_past_the_door_bound_is_answered_queued_and_left_to_the_door()
+{
+    let dir = unique_temp_dir("handoff-door-bound");
+    let h = Harness::start("handoff-door-bound", sending_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+    let mut door = register_wait(&h, &window_id).await;
+
+    ask_handoff(&mut client, &window_id, "HANDOFF-DOOR-BOUND-4W").await;
+    match first_of(&mut door, &mut client).await {
+        First::Door(delivery) => {
+            expect_delivery(delivery);
+        }
+        First::Requester(answer) => {
+            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
+        }
+    }
+
+    let answer = read_response(&mut client).await;
+    assert_eq!(state_of(&answer).as_deref(), Some("queued"), "{answer:?}");
+    assert_eq!(
+        entry(&h, &window_id).inbox().pending_count(),
+        0,
+        "the envelope is still the door's: it is not put back"
+    );
+    send(&mut door, &ClientMessage::DeliverPrinted).await;
+    send(&mut client, &ClientMessage::Ping).await;
+    assert!(
+        matches!(read_response(&mut client).await, DaemonMessage::Pong),
+        "the handoff is answered once"
     );
 }

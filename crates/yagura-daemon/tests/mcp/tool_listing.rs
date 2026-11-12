@@ -244,8 +244,8 @@ fn send_handoff_explains_every_argument_in_its_schema() {
 const REQUIRED_DELIVERED_GUIDANCE: &[&str] = &[
     "reply.window_id",
     "512 and 1024 bytes",
-    "taken",
-    "undelivered_timeout",
+    "delivered",
+    "queued",
     "undelivered_no_delivery",
 ];
 
@@ -381,8 +381,8 @@ const READ_CHAT_REQUIRED_GUIDANCE: &[&str] = &[
     "@user",
     "asks a human to decide",
     "roster",
-    "pending",
-    "taken",
+    "queued",
+    "delivered",
     "undelivered_unknown",
     "undelivered_halted",
     "undelivered_exhausted",

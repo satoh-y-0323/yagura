@@ -1774,8 +1774,8 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
         "a window_id target must not report opening a new window"
     );
     assert_eq!(
-        result.get("delivery").and_then(|value| value.as_str()),
-        Some("taken"),
+        result.get("state").and_then(|value| value.as_str()),
+        Some("delivered"),
         "the reply must carry the delivery the daemon reported, got {result}"
     );
 
@@ -1897,8 +1897,8 @@ async fn send_handoff_opens_a_new_window_from_a_profile_with_the_envelope_as_its
     );
 
     assert_eq!(
-        result.get("delivery").and_then(|value| value.as_str()),
-        Some("taken"),
+        result.get("state").and_then(|value| value.as_str()),
+        Some("delivered"),
         "the reply must report the envelope taken once the window started, got {result}"
     );
 

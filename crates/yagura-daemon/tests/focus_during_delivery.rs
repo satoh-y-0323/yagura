@@ -125,7 +125,9 @@ async fn a_delivery_to_a_window_whose_view_lost_focus_is_typed_with_focus_and_su
         );
     };
     match answer {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::TextSent {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected text_sent, got {other:?}"),
     }
     h.wait_for_scrollback(&window_id, format!("SUBMITTED {BODY}").as_bytes())

@@ -28,9 +28,8 @@ use yagura_daemon::mcp::tools::{
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ClientMessage, ControlKey,
-    DaemonMessage, HandoffDelivery, LaunchOptionAlias, LaunchOptionInfo,
-    OpenWindowExclusivityError, ProfileInfo, ProfileUnavailableKind, RoomRef, UnknownReason,
-    WindowInfo, WindowStatus,
+    DaemonMessage, LaunchOptionAlias, LaunchOptionInfo, OpenWindowExclusivityError, ProfileInfo,
+    ProfileUnavailableKind, RoomRef, UnknownReason, WindowInfo, WindowStatus,
 };
 
 /// A scripted [`DaemonTransport`] double: replays queued responses in order
@@ -877,11 +876,29 @@ async fn send_message_rejects_a_missing_text_without_calling_the_transport() {
     assert_eq!(transport.call_count(), 0);
 }
 
+/// The daemon's answer to `send_message`, in its wire form: the envelope's id
+/// `MESSAGE_ID`, waiting, with the note `MESSAGE_NOTE`.
+fn text_sent(window_id: &str) -> DaemonMessage {
+    wire(serde_json::json!({
+        "type": "text_sent",
+        "window_id": window_id,
+        "id": MESSAGE_ID,
+        "state": "queued",
+        "note": MESSAGE_NOTE,
+    }))
+}
+
+const MESSAGE_ID: &str = "envelope-m-1";
+const MESSAGE_NOTE: &str = "NOTE-OF-THE-MESSAGE";
+
+fn wire(value: serde_json::Value) -> DaemonMessage {
+    serde_json::from_value(value.clone())
+        .unwrap_or_else(|err| panic!("the wire must know {value}: {err}"))
+}
+
 #[tokio::test]
 async fn send_message_defaults_an_omitted_mode_to_immediate_and_calls_the_transport() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::TextSent {
-        window_id: "w1".to_string(),
-    }));
+    let transport = MockTransport::with_response(Ok(text_sent("w1")));
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
@@ -898,14 +915,20 @@ async fn send_message_defaults_an_omitted_mode_to_immediate_and_calls_the_transp
             text: "hello".to_string(),
         }
     );
-    assert_eq!(result["ok"].as_bool(), Some(true));
+    assert_eq!(
+        (&result["state"], &result["id"], &result["note"]),
+        (
+            &serde_json::json!("queued"),
+            &serde_json::json!(MESSAGE_ID),
+            &serde_json::json!(MESSAGE_NOTE)
+        ),
+        "the reply must carry what the daemon answered, got {result}"
+    );
 }
 
 #[tokio::test]
 async fn send_message_accepts_an_explicit_immediate_mode() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::TextSent {
-        window_id: "w1".to_string(),
-    }));
+    let transport = MockTransport::with_response(Ok(text_sent("w1")));
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
@@ -915,7 +938,7 @@ async fn send_message_accepts_an_explicit_immediate_mode() {
     let result = send_message(&transport, args).await.expect("must succeed");
 
     assert_eq!(transport.call_count(), 1);
-    assert_eq!(result["ok"].as_bool(), Some(true));
+    assert_eq!(result["state"], "queued", "{result}");
 }
 
 #[tokio::test]
@@ -1062,9 +1085,7 @@ async fn send_message_maps_transport_protocol_error_to_internal() {
 /// Sends `text` through a transport double that accepts the round trip, and
 /// returns the `text` the daemon would have received.
 async fn sent_text_for(text: &str) -> String {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::TextSent {
-        window_id: "w1".to_string(),
-    }));
+    let transport = MockTransport::with_response(Ok(text_sent("w1")));
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some(text.to_string()),
@@ -3287,12 +3308,7 @@ async fn close_window_relays_every_held_request_error_code_unchanged() {
 async fn gated_tool_results(
     identity: &RequesterIdentity,
 ) -> Vec<(&'static str, serde_json::Value)> {
-    let send = MockTransport::with_identity(
-        Ok(DaemonMessage::TextSent {
-            window_id: "w1".to_string(),
-        }),
-        identity.clone(),
-    );
+    let send = MockTransport::with_identity(Ok(text_sent("w1")), identity.clone());
     let sent = send_message(
         &send,
         SendMessageArgs {
@@ -3348,9 +3364,9 @@ async fn gated_tool_results(
 fn assert_tool_keeps_its_own_result(tool: &str, result: &serde_json::Value) {
     if tool == "send_message" {
         assert_eq!(
-            result.get("ok").and_then(serde_json::Value::as_bool),
-            Some(true),
-            "send_message must still report ok:true"
+            result.get("state").and_then(serde_json::Value::as_str),
+            Some("queued"),
+            "send_message must still report the state the daemon answered"
         );
     } else {
         assert_eq!(
@@ -3702,12 +3718,7 @@ async fn send_handoff_rejects_a_reference_exceeding_the_512_byte_limit_without_c
 
 #[tokio::test]
 async fn send_handoff_accepts_a_reference_exactly_at_the_512_byte_limit() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-        window_id: "w1".to_string(),
-        opened: false,
-        delivery: delivery("taken"),
-        name: None,
-    }));
+    let transport = MockTransport::with_response(Ok(handoff_sent("w1", false, "delivered")));
     let mut args = valid_window_handoff_args();
     args.reference = Some("a".repeat(512));
 
@@ -3730,12 +3741,7 @@ async fn send_handoff_rejects_a_note_exceeding_the_1024_byte_limit_without_calli
 
 #[tokio::test]
 async fn send_handoff_accepts_a_note_exactly_at_the_1024_byte_limit() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-        window_id: "w1".to_string(),
-        opened: false,
-        delivery: delivery("taken"),
-        name: None,
-    }));
+    let transport = MockTransport::with_response(Ok(handoff_sent("w1", false, "delivered")));
     let mut args = valid_window_handoff_args();
     args.note = Some("a".repeat(1024));
 
@@ -3746,12 +3752,7 @@ async fn send_handoff_accepts_a_note_exactly_at_the_1024_byte_limit() {
 
 #[tokio::test]
 async fn send_handoff_sends_a_send_handoff_message_and_maps_a_window_target_response() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-        window_id: "w1".to_string(),
-        opened: false,
-        delivery: delivery("taken"),
-        name: None,
-    }));
+    let transport = MockTransport::with_response(Ok(handoff_sent("w1", false, "delivered")));
     let args = valid_window_handoff_args();
 
     let result = send_handoff(&transport, args).await.expect("must succeed");
@@ -3772,17 +3773,12 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_window_target_resp
     );
     assert_eq!(result["window_id"], "w1");
     assert_eq!(result["opened"], serde_json::Value::Bool(false));
-    assert_eq!(result["delivery"], "taken");
+    assert_eq!(result["state"], "delivered");
 }
 
 #[tokio::test]
 async fn send_handoff_sends_a_send_handoff_message_and_maps_a_profile_target_response() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-        window_id: "w9".to_string(),
-        opened: true,
-        delivery: delivery("taken"),
-        name: None,
-    }));
+    let transport = MockTransport::with_response(Ok(handoff_sent("w9", true, "delivered")));
     let args = valid_profile_handoff_args();
 
     let result = send_handoff(&transport, args).await.expect("must succeed");
@@ -3803,17 +3799,12 @@ async fn send_handoff_sends_a_send_handoff_message_and_maps_a_profile_target_res
     );
     assert_eq!(result["window_id"], "w9");
     assert_eq!(result["opened"], serde_json::Value::Bool(true));
-    assert_eq!(result["delivery"], "taken");
+    assert_eq!(result["state"], "delivered");
 }
 
 #[tokio::test]
 async fn send_handoff_forwards_the_model_launch_option_of_a_profile_target() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-        window_id: "w9".to_string(),
-        opened: true,
-        delivery: delivery("taken"),
-        name: None,
-    }));
+    let transport = MockTransport::with_response(Ok(handoff_sent("w9", true, "delivered")));
     let mut args = valid_profile_handoff_args();
     args.model = Some("strong".to_string());
 
@@ -3828,37 +3819,45 @@ async fn send_handoff_forwards_the_model_launch_option_of_a_profile_target() {
     }
 }
 
-/// Every `HandoffDelivery` the daemon can answer with, by its wire spelling. The
-/// three are listed together because the bridge's job here is to relay, not to
-/// judge: a reply that dropped the outcome, or that reported the same outcome
-/// whatever the daemon answered, would tell the caller a handoff landed that
-/// nobody took.
-const HANDOFF_DELIVERY_WIRE_SPELLINGS: [&str; 3] =
-    ["taken", "undelivered_timeout", "undelivered_no_delivery"];
+/// Every `state` the daemon can answer a handoff with. Listed together because the
+/// bridge's job here is to relay, not to judge: a reply that dropped the state, or
+/// that reported the same one whatever the daemon answered, would tell the caller a
+/// handoff landed that nobody took.
+const HANDOFF_STATES: [&str; 3] = ["delivered", "queued", "undelivered_no_delivery"];
 
-/// The `HandoffDelivery` whose wire spelling is `wire`.
-fn delivery(wire: &str) -> HandoffDelivery {
-    serde_json::from_value(serde_json::Value::String(wire.to_string()))
-        .unwrap_or_else(|err| panic!("{wire:?} must be a handoff delivery ({err})"))
+/// The daemon's answer to `send_handoff`, in its wire form: the envelope's id
+/// `HANDOFF_ID` and the note `HANDOFF_NOTE`.
+fn handoff_sent(window_id: &str, opened: bool, state: &str) -> DaemonMessage {
+    wire(serde_json::json!({
+        "type": "handoff_sent",
+        "window_id": window_id,
+        "opened": opened,
+        "id": HANDOFF_ID,
+        "state": state,
+        "note": HANDOFF_NOTE,
+    }))
 }
 
+const HANDOFF_ID: &str = "envelope-h-1";
+const HANDOFF_NOTE: &str = "NOTE-OF-THE-HANDOFF";
+
 #[tokio::test]
-async fn send_handoff_relays_every_delivery_outcome_the_daemon_can_report() {
-    for spelling in HANDOFF_DELIVERY_WIRE_SPELLINGS {
-        let transport = MockTransport::with_response(Ok(DaemonMessage::HandoffSent {
-            window_id: "w1".to_string(),
-            opened: false,
-            delivery: delivery(spelling),
-            name: None,
-        }));
+async fn send_handoff_relays_the_state_id_and_note_the_daemon_answered() {
+    for state in HANDOFF_STATES {
+        let transport = MockTransport::with_response(Ok(handoff_sent("w1", false, state)));
 
         let result = send_handoff(&transport, valid_window_handoff_args())
             .await
             .expect("must succeed");
 
         assert_eq!(
-            result["delivery"], spelling,
-            "the reply must carry the delivery outcome the daemon reported ({spelling}), got {result}"
+            (&result["state"], &result["id"], &result["note"]),
+            (
+                &serde_json::json!(state),
+                &serde_json::json!(HANDOFF_ID),
+                &serde_json::json!(HANDOFF_NOTE)
+            ),
+            "the reply must carry what the daemon answered ({state}), got {result}"
         );
     }
 }
@@ -3866,12 +3865,7 @@ async fn send_handoff_relays_every_delivery_outcome_the_daemon_can_report() {
 #[tokio::test]
 async fn send_handoff_reports_a_window_requester_once_the_daemon_accepted_the_identity() {
     let transport = MockTransport::with_identity(
-        Ok(DaemonMessage::HandoffSent {
-            window_id: "w1".to_string(),
-            opened: false,
-            delivery: delivery("taken"),
-            name: None,
-        }),
+        Ok(handoff_sent("w1", false, "delivered")),
         RequesterIdentity::Window(IDENTIFIED_WINDOW_ID.to_string()),
     );
     let args = valid_window_handoff_args();
@@ -4241,6 +4235,14 @@ async fn broadcast_chat_maps_an_unexpected_daemon_message_variant_to_internal() 
 // read_chat
 // =====================================================================
 
+const CHAT_DELIVERY_NOTE: &str = "NOTE-OF-THE-POST";
+
+/// One delivery of a chat message, in its wire form.
+fn chat_delivery(value: serde_json::Value) -> ChatDeliveryInfo {
+    serde_json::from_value(value.clone())
+        .unwrap_or_else(|err| panic!("the wire must know the delivery {value}: {err}"))
+}
+
 fn sample_chat_message(seq: u64) -> ChatMessage {
     ChatMessage {
         seq,
@@ -4251,11 +4253,11 @@ fn sample_chat_message(seq: u64) -> ChatMessage {
         body: "hi there".to_string(),
         mentions: Vec::new(),
         broadcast: false,
-        deliveries: vec![ChatDeliveryInfo {
-            window_id: "w1".to_string(),
-            state: "taken".to_string(),
-            unknown_reason: None,
-        }],
+        deliveries: vec![chat_delivery(serde_json::json!({
+            "window_id": "w1",
+            "state": "queued",
+            "note": CHAT_DELIVERY_NOTE,
+        }))],
     }
 }
 
@@ -4319,6 +4321,17 @@ async fn read_chat_sends_a_read_chat_message_and_maps_a_chat_messages_response()
     assert_eq!(
         result["messages"],
         serde_json::Value::Array(expected_messages)
+    );
+    assert_eq!(
+        (
+            &result["messages"][0]["deliveries"][0]["state"],
+            &result["messages"][0]["deliveries"][0]["note"]
+        ),
+        (
+            &serde_json::json!("queued"),
+            &serde_json::json!(CHAT_DELIVERY_NOTE)
+        ),
+        "a delivery's state and note reach the caller, got {result}"
     );
     assert_eq!(result["next_after_seq"], 2);
     assert_eq!(result["needs_user"], serde_json::Value::Bool(true));
@@ -4428,11 +4441,11 @@ async fn read_chat_maps_an_unexpected_daemon_message_variant_to_internal() {
 #[tokio::test]
 async fn read_chat_passes_the_delivery_unknown_reason_through() {
     let mut message = sample_chat_message(1);
-    message.deliveries = vec![ChatDeliveryInfo {
-        window_id: "w1".to_string(),
-        state: "undelivered_unknown".to_string(),
-        unknown_reason: Some(UnknownReason::ScreenLost),
-    }];
+    message.deliveries = vec![chat_delivery(serde_json::json!({
+        "window_id": "w1",
+        "state": "undelivered_unknown",
+        "unknown_reason": UnknownReason::ScreenLost,
+    }))];
     let transport = MockTransport::with_response(Ok(DaemonMessage::ChatMessages {
         room_id: "main".to_string(),
         messages: vec![message],

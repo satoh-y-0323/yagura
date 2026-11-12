@@ -899,7 +899,9 @@ async fn request_handoff(client: &mut Connection, window_id: &str, note: &str) {
 /// The handoff's answer as its wire string.
 async fn handoff_reply(client: &mut Connection) -> String {
     match read_response(client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => serde_json::to_value(delivery)
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => serde_json::to_value(delivery)
             .expect("a delivery encodes")
             .as_str()
             .expect("a delivery is a string on the wire")
@@ -1001,7 +1003,7 @@ async fn a_body_taller_than_the_screen_is_taken_once_its_composer_empties_after_
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        "taken",
+        "delivered",
         "the composer emptied after the submit key, whatever the status before it was"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
@@ -1030,7 +1032,7 @@ async fn a_receiver_that_keeps_the_envelope_gets_only_the_submit_key_again() {
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        "taken",
+        "delivered",
         "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
@@ -1076,7 +1078,7 @@ async fn a_receiver_that_empties_its_composer_without_reacting_is_not_written_to
         "the body must reach the receiver once; it read {read:?}"
     );
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "the composer emptied after the submit key"
     );
 }
@@ -1113,7 +1115,7 @@ async fn another_writers_write_before_the_composer_empties_is_not_a_confirmation
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        "taken",
+        "delivered",
         "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
@@ -1157,7 +1159,7 @@ async fn a_composer_that_empties_only_after_the_confirmation_window_is_taken_wit
         "the body must not be written again over an envelope the receiver took; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "the composer the submit key was pressed in read empty on a finished screen"
     );
 }
@@ -1189,7 +1191,7 @@ async fn a_handoff_whose_key_was_pressed_is_answered_taken_when_its_bound_runs_o
 
     // The receiver has not been let take the line: only the bound can answer.
     let delivery = handoff_reply(&mut client).await;
-    assert_eq!(delivery, "taken", "the submit key reached the receiver");
+    assert_eq!(delivery, "delivered", "the submit key reached the receiver");
     // Let the push finish, so nothing is left running.
     create_signal_file(&take_now);
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
@@ -1227,7 +1229,7 @@ async fn another_writer_between_the_submit_key_and_the_empty_composer_does_not_g
 
     assert_eq!(
         handoff_reply(&mut client).await,
-        "taken",
+        "delivered",
         "a submitted envelope is taken however its submission was judged"
     );
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
@@ -1308,7 +1310,7 @@ async fn a_declined_resend_attempt_does_not_let_a_later_empty_composer_get_the_b
         "the body must not be written again; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "a submitted envelope is taken however its submission was judged"
     );
 }
@@ -1358,7 +1360,7 @@ async fn another_writers_input_after_the_submit_key_gets_nothing_written_behind_
         "after the submit key, only the other writer's byte reaches the receiver; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "a submitted envelope is taken however its submission was judged"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
@@ -1398,7 +1400,7 @@ async fn a_resend_attempt_that_reads_the_composer_empty_after_the_submit_key_wri
         "after the submit key nothing more is written, a probe included; the delivery was {delivery:?}, the receiver read {read:?}"
     );
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "the composer the submit key was pressed in read empty on a finished screen"
     );
     assert_eq!(count_of(&read, PASTE_START), 1, "the body is written once");
@@ -1423,7 +1425,7 @@ async fn a_folded_envelope_the_receiver_takes_before_the_resend_probe_is_taken_a
         ClockBounds::RunOnTheirOwn,
     )
     .await;
-    assert_eq!(delivery, "taken");
+    assert_eq!(delivery, "delivered");
 }
 
 /// The same folded envelope, with the handoff's own delivery bound running out while the
@@ -1440,7 +1442,7 @@ async fn a_handoff_that_times_out_while_its_resend_probe_is_on_its_way_leaves_no
     )
     .await;
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "the push that began the probe settled the handoff when it finished"
     );
 }
@@ -1499,7 +1501,7 @@ async fn folded_envelope_taken_by_the_resend_probe(
     wait_until_composer_is(&h, &window_id, &ComposerReadout::Empty).await;
     let read = input_log_read_so_far(&entry(&h, &window_id), &log).await;
     assert_eq!(
-        delivery, "taken",
+        delivery, "delivered",
         "the probe the receiver read after the submit key showed alone: the envelope was taken; the receiver read {read:?}"
     );
     let after_the_key = read_after_the_submit_key(&read);

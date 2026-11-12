@@ -67,19 +67,17 @@ const INITIALIZED: &str = "notifications/initialized";
 const CANCELLED: &str = "notifications/cancelled";
 const PING: &str = "ping";
 
-const RESTARTED_TEXT: &str = "the connection to the yagura daemon was lost before this call \
-    finished (the daemon stopped or restarted), so it may or may not have taken effect. Check \
-    before calling again: for windows, send_message and handoffs read list_windows and \
-    read_output; for interrupt_window read get_window_status or wait_for_status; for chat read \
-    read_chat with after_seq; for plans and a task window's report read list_plans, then \
+const RESTARTED_TEXT: &str = "the connection to the yagura daemon was lost after this call \
+    was sent and before it was answered (the daemon stopped or restarted), so it may or may not \
+    have taken effect. Check before calling again: for windows read list_windows and \
+    get_window_status; for interrupt_window read get_window_status or wait_for_status; for chat \
+    read read_chat with after_seq; for plans and a task window's report read list_plans, then \
     get_plan; for tickets read list_tickets and get_ticket. Do not send send_keys again: read \
-    the screen as it is now with read_output and decide the next step from it. After \
-    send_message, read the screen with read_output and call it again only if the text did not \
-    arrive. A call that only waited (wait_for_status, wait_for_report) or was waiting for \
-    approval did nothing, so call it again. A handoff its receiver had not taken yet was \
-    withdrawn; send it again if it is not in the receiver's read_output. Some effects cannot be \
-    checked this way: a report sent to your opener, and a handoff delivered through a hook door \
-    or a wake command. If you send one of those again, say in it that it is a resend.";
+    the screen as it is now with read_output and decide the next step from it. A call that only \
+    waited (wait_for_status, wait_for_report) or was waiting for approval did nothing, so call \
+    it again. A send_message or send_handoff may already have reached its receiver, and nothing \
+    takes it back: if you send it again, it may arrive twice, under a new id, so say in it that \
+    it is a resend. The same holds for a report sent to your opener.";
 
 const BACK_TEXT: &str = "the yagura daemon could not be reached when this call was made, so the \
     relay did not send it and it did nothing. The daemon is reachable again now: call it again.";

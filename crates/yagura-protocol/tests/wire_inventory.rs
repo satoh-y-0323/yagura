@@ -79,20 +79,20 @@ use yagura_protocol::{
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
-    DaemonProblemKind, DefaultPalettes, DeliveryStream, Frame, FrameLine, FrameRun,
-    HandoffDelivery, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
-    InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
-    McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
-    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
-    McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
-    OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
-    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
-    ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
-    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
-    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
-    TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
-    TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState, WheelInput,
-    WindowInfo, WindowStatus as WireWindowStatus, WithdrawReason,
+    DaemonProblemKind, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
+    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key,
+    KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
+    McpRegistrationEntry, McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo,
+    McpRegistrationStep, McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo,
+    ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot,
+    PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState, PointerButton,
+    PointerInput, PointerKind, ProfileCapability, ProfileCommandDetail, ProfileDetailEntry,
+    ProfileGuidance, ProfileInfo, ProfileLimit, ProfileUnavailableKind, ReceivedReport,
+    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
+    RoomRef, TaskAssignment, TaskReport, TerminalSize, TicketConfigInfo, TicketFieldInfo,
+    TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
+    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
+    WindowStatus as WireWindowStatus, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -236,7 +236,7 @@ wire_sample!(enum WireWindowStatus => Running);
 wire_sample!(enum UnknownReason => NoDefinition);
 wire_sample!(enum ApprovalRequesterKind => External);
 wire_sample!(enum WithdrawReason => Resolved);
-wire_sample!(enum HandoffDelivery => Taken);
+wire_sample!(enum DeliveryState => Delivered);
 wire_sample!(enum AssignmentSource => User);
 wire_sample!(enum ReportOutcome => Succeeded);
 wire_sample!(enum InstructionNoticeState => Pending);
@@ -378,6 +378,7 @@ wire_sample!(struct ChatMessage {
 wire_sample!(struct ChatDeliveryInfo {
     window_id,
     state,
+    note,
     unknown_reason,
 });
 wire_sample!(struct ChatRoomInfo {
@@ -890,7 +891,12 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             detection_warning,
             mcp_connected,
         }),
-        wire_sample!(DaemonMessage::TextSent { window_id }),
+        wire_sample!(DaemonMessage::TextSent {
+            window_id,
+            id,
+            state,
+            note
+        }),
         wire_sample!(DaemonMessage::KeysSent { window_id }),
         wire_sample!(DaemonMessage::WindowInterrupted { window_id }),
         wire_sample!(DaemonMessage::WindowClosed { window_id }),
@@ -925,7 +931,9 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::HandoffSent {
             window_id,
             opened,
-            delivery,
+            id,
+            state,
+            note,
             name,
         }),
         wire_sample!(DaemonMessage::ChatPosted {
@@ -982,7 +990,12 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             assignment,
         }),
         wire_sample!(DaemonMessage::PlanChanged { plan_id }),
-        wire_sample!(DaemonMessage::ReportSent { delivered_to, task }),
+        wire_sample!(DaemonMessage::ReportSent {
+            delivered_to,
+            task,
+            state,
+            note
+        }),
         wire_sample!(DaemonMessage::Reports { reports, awaiting }),
         wire_sample!(DaemonMessage::ModelChoicesRequested {
             request_id,
@@ -1167,16 +1180,16 @@ fn withdraw_reason_wire_variants() -> BTreeSet<String> {
 
 fn handoff_delivery_wire_variants() -> BTreeSet<String> {
     [
-        HandoffDelivery::Taken,
-        HandoffDelivery::UndeliveredTimeout,
-        HandoffDelivery::UndeliveredNoDelivery,
+        DeliveryState::Delivered,
+        DeliveryState::Queued,
+        DeliveryState::UndeliveredNoDelivery,
     ]
     .into_iter()
     .map(|delivery| {
         let hand = match &delivery {
-            HandoffDelivery::Taken => "taken",
-            HandoffDelivery::UndeliveredTimeout => "undelivered_timeout",
-            HandoffDelivery::UndeliveredNoDelivery => "undelivered_no_delivery",
+            DeliveryState::Delivered => "delivered",
+            DeliveryState::Queued => "queued",
+            DeliveryState::UndeliveredNoDelivery => "undelivered_no_delivery",
         };
         serde_spelling(&delivery, hand)
     })
@@ -1660,7 +1673,7 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
             withdraw_reason_wire_variants(),
         ),
         (
-            "HandoffDelivery".to_string(),
+            "DeliveryState".to_string(),
             handoff_delivery_wire_variants(),
         ),
         (

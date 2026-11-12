@@ -398,7 +398,9 @@ async fn a_delivery_cut_by_a_killed_daemon_is_taken_back_before_the_next_one_is_
     )
     .await;
     match read_response(&mut next.client).await {
-        DaemonMessage::TextSent { window_id: sent } => assert_eq!(sent, window_id),
+        DaemonMessage::TextSent {
+            window_id: sent, ..
+        } => assert_eq!(sent, window_id),
         other => panic!(
             "the delivery after the restart must be typed, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()
@@ -732,7 +734,7 @@ async fn until_chat_taken(client: &mut Connection, sandbox: &Sandbox, seq: u64, 
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
     loop {
         let state = chat_delivery_state(client, seq, window_id).await;
-        if state.as_deref() == Some("taken") {
+        if state.as_deref() == Some("delivered") {
             return;
         }
         assert!(

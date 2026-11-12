@@ -1,101 +1,175 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Integration test: a `send_message` whose receiver shows nothing waits for
-//! an event, and what can happen on the wire while it waits.
+//! Integration test: `send_message` puts an envelope in the window's inbox and
+//! never writes to its PTY. The window's CLI takes it through its own doors.
 //!
-//! The wait is no longer bounded by a clock, so the connection that asked
-//! must keep being served meanwhile, its departure must reach the delivery,
-//! and the keys that could unstick the receiver must not queue behind it.
-//! Every case drives a real `IpcServer` against `submit_child` in
-//! composer-draw mode. The hang guards only bound a failure.
+//! The answer says what became of the envelope (`state`), names it (`id`) and,
+//! while it waits, says when it is handed over (`note`). A window whose CLI has a
+//! wait registered is handed the envelope at once and the answer waits for the
+//! door to say it printed it. A window with no doors is refused. Every case
+//! drives a real `IpcServer`; the hang guards only bound a failure.
 
 use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::Value;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, expect_error, identify, policy,
-    read_response, send, unique_temp_dir, wait_until_input_log_contains,
-    wait_until_no_connection_claims, wait_until_status, write_submit_definition,
+    CONTROL_DETECTION_NAME, Harness, LEADING_KEYS_DETECTION_NAME, READY_MARKER, VALID_TOKEN,
+    approver_base_config, detection_config, expect_delivery, policy, read_response, send,
+    unique_temp_dir, wait_until_status, write_leading_keys_definition,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::window::{InputOrigin, WindowEntry};
-use yagura_protocol::{ClientMessage, ControlKey, DaemonMessage, WindowStatus};
+use yagura_daemon::window::WindowEntry;
+use yagura_protocol::{ClientMessage, DaemonMessage, Door, WindowStatus};
 use yagura_test_support::ipc::Connection;
-use yagura_test_support::process;
 
-/// Typed into a window last; read back, it proves the child has read
-/// everything written before it.
-const SENTINEL: &[u8] = b"SENTINEL-AFTER";
-
-/// `send_message` and `send_keys` are approved by the playbook, so no
-/// approver connection is needed; `max_waiters_per_conn` is the case's own.
-fn lifecycle_config(dir: &Path, max_waiters_per_conn: usize) -> DaemonConfig {
+/// `send_message` and `send_handoff` are approved by the playbook; the control and
+/// leading-keys definitions are under `dir`.
+pub(crate) fn sending_config(dir: &Path) -> DaemonConfig {
+    write_leading_keys_definition(dir);
     DaemonConfig {
-        detection_dir: Some(dir.to_path_buf()),
-        approval_policy: Some(policy(&["send_message", "send_keys"])),
-        max_waiters_per_conn,
-        ..approver_base_config()
+        approval_policy: Some(policy(&["send_message", "send_handoff"])),
+        ..detection_config(dir, approver_base_config())
     }
 }
 
-fn entry(h: &Harness, window_id: &str) -> Arc<WindowEntry> {
+pub(crate) fn entry(h: &Harness, window_id: &str) -> Arc<WindowEntry> {
     h.registry
         .get(window_id)
         .expect("window must exist in registry")
 }
 
-/// A `submit_child` window in composer-draw mode. `clear` is the definition's
-/// clear sequence (`""` for none), `clear_scope` the fixture's mode, and
-/// `input_log` a file the fixture appends everything it reads to.
-async fn open_window(
+/// An `echo_child` window under `detection` whose profile declares delivery and
+/// wakes its CLI by answering the wait the CLI registers; driven to `idle`.
+pub(crate) async fn open_wait_window(
     h: &Harness,
     client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    clear: &'static str,
-    clear_scope: &str,
-    input_log: &Path,
+    detection: &str,
 ) -> String {
-    let marker = format!("{name}-marker");
-    write_submit_definition(
-        dir,
-        name,
-        &marker,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 120,
-            clear,
-            delivery_confirm_ms: 2000,
-            resend_max: 0,
-        },
-    );
-    let mut command = process::submit_child_command_with_composer(&marker, 0, 0, 0, 0);
-    command.push(String::new()); // fold_placeholder: none
-    command.push(clear_scope.to_string());
-    command.push(String::new()); // overlay: none
-    command.push(String::new()); // overlay_heading
-    command.push(
-        input_log
-            .to_str()
-            .expect("the input log path must be valid UTF-8")
-            .to_string(),
-    );
-    let window_id = h.open(command, Some(name)).await;
-    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
+    let window_id = h
+        .registry
+        .open_with_extra_env(
+            yagura_daemon::OpenWindowRequest {
+                command: yagura_test_support::process::echo_child_command(),
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(detection.to_string()),
+                on_name_taken: Default::default(),
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                delivery: Some(yagura_daemon::profile_delivery::ProfileDelivery {
+                    wake: yagura_daemon::profile_delivery::WakeMode::Wait,
+                    ..common::wake_none_delivery()
+                }),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("registry.open_with_extra_env should spawn the child")
+        .window_id;
+    h.write_input(&window_id, READY_MARKER).await;
+    wait_until_status(client, &window_id, WindowStatus::Idle).await;
     window_id
 }
 
-/// A window whose only use is to be identified as by a requester connection,
-/// so that connection's end shows in the listing.
-async fn open_requester_window(h: &Harness, client: &mut Connection, dir: &Path) -> String {
-    let log = dir.join("requester-input.log");
-    open_window(h, client, dir, "requester", "", "", &log).await
+/// Sends a door's read of `door` for `window_id` on `conn`.
+pub(crate) async fn send_door_read(conn: &mut Connection, window_id: &str, door: Door) {
+    send(
+        conn,
+        &ClientMessage::DoorRead {
+            window_id: window_id.to_string(),
+            token: VALID_TOKEN.to_string(),
+            door,
+        },
+    )
+    .await;
 }
 
-async fn send_text(client: &mut Connection, window_id: &str, text: &str) {
+/// Registers a wait for `window_id` on a connection of its own, as a CLI's wait
+/// hook does, and returns once the daemon holds it.
+pub(crate) async fn register_wait(h: &Harness, window_id: &str) -> Connection {
+    let mut door = h.connect().await;
+    send_door_read(&mut door, window_id, Door::Wait).await;
+    until("the wait to be registered", || {
+        entry(h, window_id).inbox().has_waiter()
+    })
+    .await;
+    door
+}
+
+/// Takes through the window's take door on a connection of its own, prints it and
+/// says so; returns what was printed.
+pub(crate) async fn take_and_print(h: &Harness, window_id: &str) -> String {
+    let mut door = h.connect().await;
+    send_door_read(&mut door, window_id, Door::Take).await;
+    let (output, _, _) = expect_delivery(read_response(&mut door).await);
+    send(&mut door, &ClientMessage::DeliverPrinted).await;
+    output
+}
+
+/// Polls an observable daemon-side state; the deadline only detects a hang.
+pub(crate) async fn until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while !condition() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// What a send's answer says became of its envelope: the refusal's code for an
+/// error, the answer's `state` otherwise (`None` when it carries none).
+pub(crate) fn state_of(answer: &DaemonMessage) -> Option<String> {
+    if let DaemonMessage::Error { code, .. } = answer {
+        return Some(code.clone());
+    }
+    answer_json(answer)["state"].as_str().map(str::to_string)
+}
+
+/// The answer's `note`; `None` when it has none.
+pub(crate) fn note_of(answer: &DaemonMessage) -> Option<String> {
+    answer_json(answer)["note"].as_str().map(str::to_string)
+}
+
+/// The answer's envelope `id`, which must be a non-empty string.
+pub(crate) fn id_of(answer: &DaemonMessage) -> String {
+    let id = answer_json(answer)["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the answer must name its envelope with an id: {answer:?}"))
+        .to_string();
+    assert!(!id.is_empty(), "the envelope's id must not be empty");
+    id
+}
+
+fn answer_json(answer: &DaemonMessage) -> Value {
+    serde_json::to_value(answer).expect("a daemon message always encodes")
+}
+
+/// Which of two connections spoke first.
+pub(crate) enum First {
+    Door(DaemonMessage),
+    Requester(DaemonMessage),
+}
+
+/// The first frame either `door` or `requester` receives.
+pub(crate) async fn first_of(door: &mut Connection, requester: &mut Connection) -> First {
+    tokio::select! {
+        biased;
+        answer = read_response(requester) => First::Requester(answer),
+        delivery = read_response(door) => First::Door(delivery),
+    }
+}
+
+async fn send_text(client: &mut Connection, window_id: &str, text: &str) -> DaemonMessage {
     send(
         client,
         &ClientMessage::SendText {
@@ -104,241 +178,131 @@ async fn send_text(client: &mut Connection, window_id: &str, text: &str) {
         },
     )
     .await;
-}
-
-fn expect_text_sent(msg: DaemonMessage, window_id: &str) {
-    match msg {
-        DaemonMessage::TextSent { window_id: acked } => assert_eq!(acked, window_id),
-        other => panic!("expected text_sent, got {other:?}"),
-    }
-}
-
-fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack
-        .windows(needle.len())
-        .filter(|window| *window == needle)
-        .count()
+    read_response(client).await
 }
 
 // =====================================================================
-// The asking connection keeps being served
+// The envelope waits in the inbox
 // =====================================================================
 
+/// The body starts with a key the window's CLI would read as a mode key and holds
+/// a line break mid-text: nothing is typed, so neither is refused.
 #[tokio::test]
-async fn a_ping_is_answered_on_the_connection_whose_send_message_waits_on_a_window_showing_nothing()
-{
-    let dir = unique_temp_dir("lifecycle-ping");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("lifecycle-ping", lifecycle_config(&dir, 16)).await;
+async fn send_message_puts_its_envelope_in_the_inbox_and_writes_nothing_to_the_window() {
+    let dir = unique_temp_dir("send-message-inbox");
+    let h = Harness::start("send-message-inbox", sending_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_window(&h, &mut client, &dir, "ping", "\\u0015", "frozen:", &log).await;
+    let window_id = open_wait_window(&h, &mut client, LEADING_KEYS_DETECTION_NAME).await;
+    let writes_before = entry(&h, &window_id).write_seq();
 
-    send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
-    send(&mut client, &ClientMessage::Ping).await;
-    let pong = read_response(&mut client).await;
-    assert!(
-        matches!(pong, DaemonMessage::Pong),
-        "a ping must be answered while the same connection's send_message waits, got {pong:?}"
-    );
-
-    entry(&h, &window_id)
-        .write_pty_input(b"Q", InputOrigin::Interactive)
-        .await
-        .expect("another writer's byte must not fail");
-    expect_error(read_response(&mut client).await, "not_written");
-}
-
-// =====================================================================
-// The requester leaves mid-delivery
-// =====================================================================
-
-/// The receiver stops reading once the body's paste begins and goes on only
-/// when the test says so, after the daemon has seen the requester go.
-#[tokio::test]
-async fn a_requester_leaving_mid_send_message_gets_no_submit_key_and_its_body_taken_back_so_the_next_send_delivers_once()
- {
-    let dir = unique_temp_dir("lifecycle-requester-leaves");
-    let log = dir.join("child-input.log");
-    let resume = dir.join("resume");
-    let h = Harness::start("lifecycle-requester-leaves", lifecycle_config(&dir, 16)).await;
-    let mut observer = h.connect().await;
-    let requester_window = open_requester_window(&h, &mut observer, &dir).await;
-    let stall = format!(
-        "stall-until|{}|",
-        resume
-            .to_str()
-            .expect("the resume path must be valid UTF-8")
-    );
-    let window_id = open_window(&h, &mut observer, &dir, "leaves", "\\u0015", &stall, &log).await;
-
-    let mut requester = h.connect().await;
-    identify(&mut requester, &requester_window).await;
-    send_text(&mut requester, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"STALL-BEGAN").await;
-    drop(requester);
-    wait_until_no_connection_claims(&h.registry, &requester_window).await;
-    std::fs::write(&resume, b"").expect("let the receiver read on");
-
-    let mut next = h.connect().await;
-    send_text(&mut next, &window_id, "BODY\r").await;
-    expect_text_sent(read_response(&mut next).await, &window_id);
-
-    entry(&h, &window_id)
-        .write_pty_input(SENTINEL, InputOrigin::Interactive)
-        .await
-        .expect("the sentinel must not fail");
-    let read = wait_until_input_log_contains(&log, SENTINEL).await;
-    let first_paste = read
-        .windows(b"\x1b[200~BODY".len())
-        .position(|window| window == b"\x1b[200~BODY")
-        .expect("the first body must have reached the receiver");
-    let second_paste = first_paste
-        + 1
-        + read[first_paste + 1..]
-            .windows(b"\x1b[200~BODY".len())
-            .position(|window| window == b"\x1b[200~BODY")
-            .expect("the next send_message must have written its body");
-    let between = &read[first_paste..second_paste];
-    assert!(
-        !between.contains(&b'\r'),
-        "no submit key may follow the departed requester's body: {read:?}"
-    );
-    assert!(
-        between.contains(&0x15),
-        "the departed requester's body must have been taken back: {read:?}"
-    );
+    let first = send_text(&mut client, &window_id, "!FIRST-LINE-7K\nSECOND-LINE-7K").await;
     assert_eq!(
-        count(&read, b"\r"),
-        1,
-        "only the next send_message presses the submit key: {read:?}"
+        state_of(&first).as_deref(),
+        Some("queued"),
+        "with no wait registered nothing is handed over, so the envelope waits: {first:?}"
     );
-    // The answer can come before the receiver draws the line it printed on
-    // taking the body; that line is what is waited for, then counted.
-    h.wait_for_scrollback(&window_id, b"SUBMITTED BODY").await;
+    let note = note_of(&first)
+        .unwrap_or_else(|| panic!("a waiting envelope's answer says when it is handed over"));
+    assert!(!note.is_empty());
+    let first_id = id_of(&first);
+
+    let second = send_text(&mut client, &window_id, "NEXT-MESSAGE-7K").await;
+    assert_eq!(state_of(&second).as_deref(), Some("queued"), "{second:?}");
+    let second_id = id_of(&second);
+    assert_ne!(first_id, second_id, "every send names its envelope anew");
+
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 2);
     assert_eq!(
-        count(&h.scrollback(&window_id), b"SUBMITTED BODY"),
-        1,
-        "the body reaches the receiver exactly once"
+        entry(&h, &window_id).write_seq(),
+        writes_before,
+        "send_message must write nothing to the window's PTY"
     );
-}
 
-/// The send queued behind a stuck one: its requester leaves before its turn,
-/// so once the turn comes it writes nothing. The raw send after it takes the
-/// next turn, so nothing of the departed send can land between the two.
-#[tokio::test]
-async fn a_send_message_waiting_for_its_turn_writes_nothing_once_its_requester_leaves() {
-    let dir = unique_temp_dir("lifecycle-queued-leaves");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("lifecycle-queued-leaves", lifecycle_config(&dir, 16)).await;
-    let mut first = h.connect().await;
-    let requester_window = open_requester_window(&h, &mut first, &dir).await;
-    let window_id = open_window(&h, &mut first, &dir, "queued", "\\u0015", "frozen:", &log).await;
-
-    send_text(&mut first, &window_id, "FIRST\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
-    let mut queued = h.connect().await;
-    identify(&mut queued, &requester_window).await;
-    send_text(&mut queued, &window_id, "SECOND\r").await;
-    drop(queued);
-    wait_until_no_connection_claims(&h.registry, &requester_window).await;
-
-    entry(&h, &window_id)
-        .write_pty_input(b"Q", InputOrigin::Interactive)
-        .await
-        .expect("another writer's byte must not fail");
-    expect_error(read_response(&mut first).await, "not_written");
-
-    let mut last = h.connect().await;
-    send_text(&mut last, &window_id, "MARK").await;
-    expect_text_sent(read_response(&mut last).await, &window_id);
-    let read = wait_until_input_log_contains(&log, b"MARK").await;
-    assert!(
-        read.windows(b"QMARK".len())
-            .any(|window| window == b"QMARK"),
-        "nothing may be written between the stuck send's end and the next turn's write: {read:?}"
-    );
-    assert_eq!(count(&read, b"SECOND"), 0, "{read:?}");
-}
-
-// =====================================================================
-// send_keys does not queue behind a stuck delivery
-// =====================================================================
-
-#[tokio::test]
-async fn send_keys_from_another_connection_is_written_while_a_send_message_waits_and_ends_that_wait()
- {
-    let dir = unique_temp_dir("lifecycle-send-keys");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("lifecycle-send-keys", lifecycle_config(&dir, 16)).await;
-    let mut client = h.connect().await;
-    let window_id = open_window(&h, &mut client, &dir, "keys", "\\u0015", "frozen:", &log).await;
-
-    send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
-    let mut keys = h.connect().await;
-    send(
-        &mut keys,
-        &ClientMessage::SendKeys {
-            window_id: window_id.clone(),
-            keys: vec![ControlKey::Backspace],
-        },
-    )
-    .await;
-    match read_response(&mut keys).await {
-        DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
-        other => panic!("send_keys must be written while a send_message waits, got {other:?}"),
+    let taken = take_and_print(&h, &window_id).await;
+    for needle in [
+        "FIRST-LINE-7K",
+        "SECOND-LINE-7K",
+        "NEXT-MESSAGE-7K",
+        first_id.as_str(),
+        second_id.as_str(),
+    ] {
+        assert!(
+            taken.contains(needle),
+            "the take door hands over both envelopes, each with its id ({needle}): {taken:?}"
+        );
     }
-
-    let message = expect_error(read_response(&mut client).await, "not_written");
-    assert!(
-        message.contains("another write reached the window"),
-        "the keys are another writer, so the waiting send_message ends interrupted: {message}"
-    );
-    // Read up to a sentinel written after the answer, so a submit key that
-    // followed the paste is in what is read.
-    let read = common::input_log_read_so_far(&entry(&h, &window_id), &log).await;
-    assert!(
-        read.windows(b"\x1b[201~".len())
-            .any(|window| window == b"\x1b[201~"),
-        "the body's paste must have ended: {read:?}"
-    );
-    assert!(
-        !read.contains(&b'\r'),
-        "the interrupted send_message must not press the submit key: {read:?}"
-    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
+    assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
 }
 
-// =====================================================================
-// A waiting send_message counts against the connection's waits
-// =====================================================================
-
+/// A CLI that left a wait registered is handed the envelope at once; the answer
+/// waits for the door to say it printed it and then needs no note.
 #[tokio::test]
-async fn a_waiting_send_message_counts_against_the_connections_pending_waits() {
-    let dir = unique_temp_dir("lifecycle-waiter-limit");
-    let log = dir.join("child-input.log");
-    let h = Harness::start("lifecycle-waiter-limit", lifecycle_config(&dir, 1)).await;
+async fn send_message_to_a_window_whose_cli_waits_is_delivered_once_the_door_printed_it() {
+    let dir = unique_temp_dir("send-message-waited");
+    let h = Harness::start("send-message-waited", sending_config(&dir)).await;
     let mut client = h.connect().await;
-    let window_id = open_window(&h, &mut client, &dir, "limit", "\\u0015", "frozen:", &log).await;
-
-    send_text(&mut client, &window_id, "BODY\r").await;
-    h.wait_for_scrollback(&window_id, b"PASTE 1").await;
+    let window_id = open_wait_window(&h, &mut client, CONTROL_DETECTION_NAME).await;
+    let writes_before = entry(&h, &window_id).write_seq();
+    let mut door = register_wait(&h, &window_id).await;
 
     send(
         &mut client,
-        &ClientMessage::WaitForStatus {
+        &ClientMessage::SendText {
             window_id: window_id.clone(),
-            target_status: WindowStatus::Running,
-            timeout_sec: 1,
+            text: "WAITED-BODY-3R".to_string(),
         },
     )
     .await;
-    expect_error(read_response(&mut client).await, "resource_exhausted");
-    send_text(&mut client, &window_id, "MORE\r").await;
-    expect_error(read_response(&mut client).await, "resource_exhausted");
-    send(&mut client, &ClientMessage::Ping).await;
-    assert!(matches!(
-        read_response(&mut client).await,
-        DaemonMessage::Pong
-    ));
+    let output = match first_of(&mut door, &mut client).await {
+        First::Door(delivery) => expect_delivery(delivery).0,
+        First::Requester(answer) => {
+            panic!("the answer must wait for the door the envelope was handed to: {answer:?}")
+        }
+    };
+    assert!(output.contains("WAITED-BODY-3R"), "{output:?}");
+    send(&mut door, &ClientMessage::DeliverPrinted).await;
+
+    let answer = read_response(&mut client).await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("delivered"),
+        "{answer:?}"
+    );
+    assert_eq!(
+        note_of(&answer),
+        None,
+        "a wait was registered, so there is nothing to say about when it arrives"
+    );
+    assert!(output.contains(&id_of(&answer)), "{output:?}");
+    assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
+}
+
+// =====================================================================
+// What is refused
+// =====================================================================
+
+#[tokio::test]
+async fn send_message_to_a_window_without_doors_is_undelivered_no_delivery_and_writes_nothing() {
+    let dir = unique_temp_dir("send-message-no-doors");
+    let h = Harness::start("send-message-no-doors", sending_config(&dir)).await;
+    let mut client = h.connect().await;
+    let window_id = h
+        .open(
+            yagura_test_support::process::echo_child_command(),
+            Some(CONTROL_DETECTION_NAME),
+        )
+        .await;
+    h.write_input(&window_id, READY_MARKER).await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
+    let writes_before = entry(&h, &window_id).write_seq();
+
+    let answer = send_text(&mut client, &window_id, "NO-DOORS-BODY").await;
+    assert_eq!(
+        state_of(&answer).as_deref(),
+        Some("undelivered_no_delivery"),
+        "{answer:?}"
+    );
+    assert_eq!(entry(&h, &window_id).inbox().pending_count(), 0);
+    assert_eq!(entry(&h, &window_id).write_seq(), writes_before);
 }

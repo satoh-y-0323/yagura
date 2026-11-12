@@ -1734,10 +1734,12 @@ async fn send_handoff_resend_succeeds_on_the_write_seq_submit_message_itself_ret
     .await;
 
     match read_response(&mut client).await {
-        DaemonMessage::HandoffSent { delivery, .. } => {
+        DaemonMessage::HandoffSent {
+            state: delivery, ..
+        } => {
             assert_eq!(
                 serde_json::to_value(delivery).expect("a delivery encodes"),
-                "taken",
+                "delivered",
                 "the resend must land through the carried-forward write-seq baseline once \
                  the paste guard has taken the first submit key"
             );

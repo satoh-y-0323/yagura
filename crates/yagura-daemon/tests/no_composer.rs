@@ -719,7 +719,7 @@ async fn send_handoff_to_a_profile_whose_definition_declares_no_composer_starts_
     );
     assert_eq!(
         serde_json::to_value(delivery).expect("a delivery encodes"),
-        "taken",
+        "delivered",
         "handed over as the launch prompt, the envelope is taken once the window started"
     );
     assert_eq!(
@@ -1376,7 +1376,9 @@ async fn a_send_message_with_no_line_to_judge_is_written_into_a_composer_without
         ("a bare terminator", "\r"),
     ] {
         match send_text(&mut owner, &window_id, text).await {
-            DaemonMessage::TextSent { window_id: sent_to } => assert_eq!(sent_to, window_id),
+            DaemonMessage::TextSent {
+                window_id: sent_to, ..
+            } => assert_eq!(sent_to, window_id),
             other => panic!(
                 "a send_message with {form} judges nothing on screen and must be written into \
                  a composer without a probe, got {other:?}"

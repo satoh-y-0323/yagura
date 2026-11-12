@@ -31,7 +31,7 @@ use yagura_test_support::HANG_GUARD;
 const EXHAUSTED: &str = "undelivered_exhausted";
 
 /// The state a chat delivery ends in once its envelope was written and submitted.
-const DELIVERED: [&str; 1] = ["taken"];
+const DELIVERED: [&str; 1] = ["delivered"];
 
 fn window_input() -> String {
     SubmitDefinitionInput {
@@ -167,7 +167,7 @@ async fn wait_until_settled(client: &mut Connection, seqs: &[u64], window_id: &s
             .iter()
             .map(|seq| state_of(&messages, *seq, window_id))
             .collect();
-        if states.iter().all(|state| state != "pending") {
+        if states.iter().all(|state| state != "queued") {
             return states;
         }
         assert!(

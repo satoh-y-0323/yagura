@@ -28,7 +28,7 @@ use common::{
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
-use yagura_protocol::{ClientMessage, DaemonMessage, HandoffDelivery, PlanInfo, PlanTaskSpec};
+use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryState, PlanInfo, PlanTaskSpec};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::paths::TempDir;
 use yagura_test_support::process::{argv_probe_path, argv_probe_profile_source, env_probe_path};
@@ -613,7 +613,7 @@ async fn send_handoff_from_a_profile_carries_the_same_mcp_injection_into_the_chi
     // launch; `argv_probe` then writes its argv and exits.
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert!(opened);
-    assert_eq!(delivery, HandoffDelivery::Taken);
+    assert_eq!(delivery, DeliveryState::Delivered);
 
     h.wait_for_scrollback(&window_id, b"<<argv[2]=").await;
     let text = String::from_utf8_lossy(&h.scrollback(&window_id)).into_owned();

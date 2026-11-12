@@ -41,8 +41,8 @@ use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, OpenWindowRequest, RequestedCwd};
 use yagura_os::program::ProgramLookup;
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    HandoffDelivery, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, WindowInfo,
+    ClientMessage, DaemonMessage, DeliveryState, HANDOFF_NOTE_MAX_BYTES,
+    HANDOFF_REFERENCE_MAX_BYTES, ProfileGuidance, ProfileInfo, ProfileUnavailableKind, WindowInfo,
     WithdrawReason,
 };
 use yagura_test_support::HANG_GUARD;
@@ -182,7 +182,7 @@ fn envelope_json(prompt: &str) -> serde_json::Value {
 }
 
 /// A handoff's answer as its wire string.
-fn wire(delivery: HandoffDelivery) -> String {
+fn wire(delivery: DeliveryState) -> String {
     serde_json::to_value(delivery)
         .expect("a delivery encodes")
         .as_str()
@@ -1347,7 +1347,7 @@ async fn send_handoff_from_a_profile_opens_a_new_window_with_the_envelope_as_its
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert_eq!(
         wire(delivery),
-        "taken",
+        "delivered",
         "handed over as the launch prompt, the envelope is taken once the window started"
     );
     assert!(opened, "a profile target must always report opened: true");
@@ -1430,7 +1430,7 @@ async fn send_handoff_from_a_profile_uses_the_explicit_cwd_argument_over_everyth
     )
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
     assert!(opened);
 
     let windows = call_list_windows(&mut requester).await;
@@ -1499,7 +1499,7 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_uses_the_requesters_ow
         call_send_handoff_from_profile(&mut requester, "ready", None, None, "src/foo.rs", "look")
             .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
     assert!(opened);
 
     let windows = call_list_windows(&mut requester).await;
@@ -1565,7 +1565,7 @@ async fn send_handoff_from_a_profile_with_no_cwd_argument_and_an_external_reques
         call_send_handoff_from_profile(&mut client, "ready", None, None, "src/foo.rs", "look")
             .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
     assert!(opened);
 
     let windows = call_list_windows(&mut client).await;
@@ -1744,7 +1744,7 @@ async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_still_tak
     .await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert!(opened);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
     assert_eq!(
         envelope_json(&launch_prompt_logged_in(&logs).await)["note"],
         "look"
@@ -2325,7 +2325,7 @@ async fn send_handoff_from_a_profile_approved_by_a_registered_approver_starts_th
 
     let msg = read_response(&mut requester).await;
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
     assert!(opened, "a profile target must always report opened: true");
 
     let json = envelope_json(&launch_prompt_logged_in(&logs).await);
@@ -2826,7 +2826,7 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
     // with is taken all the same, since it was handed over at launch.
     let (window_id, opened, delivery) = expect_handoff_sent(msg);
     assert!(opened);
-    assert_eq!(wire(delivery), "taken");
+    assert_eq!(wire(delivery), "delivered");
 
     h.wait_for_scrollback(&window_id, b"<<argv[6]=[yagura handoff] ")
         .await;

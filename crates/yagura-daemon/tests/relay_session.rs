@@ -26,11 +26,10 @@ use common::relay::{
 };
 use common::{
     Harness, SubmitDefinitionInput, VALID_TOKEN, approver_base_config, policy, unique_temp_dir,
-    wait_until_composer_is, wait_until_input_log_contains, write_submit_definition,
+    wait_until_input_log_contains, write_submit_definition,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::reading::ComposerReadout;
-use yagura_daemon::window::{InputOrigin, WindowEntry};
+use yagura_daemon::window::WindowEntry;
 use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
     INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
@@ -49,10 +48,6 @@ const SESSIONS_PER_WINDOW: usize = 4;
 /// How many requests one session runs at once, and how many more may wait.
 const REQUESTS_AT_ONCE: u64 = 4;
 const REQUESTS_WAITING: u64 = 16;
-
-/// Typed into a receiver last: read back, it proves the child read
-/// everything written before it.
-const SENTINEL: &[u8] = b"SENTINEL-AFTER";
 
 fn config() -> DaemonConfig {
     DaemonConfig {
@@ -1011,61 +1006,24 @@ impl Stage {
         initialize(&mut client).await;
         client
     }
-
-    /// Lets the receiver read on, and asserts that what it was sent is taken
-    /// back and no submit key is ever written.
-    async fn expect_taken_back_without_a_submit_key(&self) {
-        std::fs::write(&self.resume, b"").expect("let the receiver read on");
-        wait_until_input_log_contains(&self.input_log, b"\x15").await;
-        wait_until_composer_is(&self.h, &self.receiver, &ComposerReadout::Empty).await;
-        self.receiver_entry()
-            .write_pty_input(SENTINEL, InputOrigin::Interactive)
-            .await
-            .expect("the sentinel must not fail");
-        let read = wait_until_input_log_contains(&self.input_log, SENTINEL).await;
-        assert!(
-            !read.contains(&b'\r'),
-            "no submit key may follow a call whose relay connection closed: {read:?}"
-        );
-    }
 }
 
 fn path_str(path: &Path) -> &str {
     path.to_str().expect("the fixture path must be valid UTF-8")
 }
 
-#[tokio::test]
-async fn closing_the_relay_connection_during_a_send_message_presses_no_submit_key_and_takes_the_body_back()
- {
-    let stage = Stage::start("relay-end-send").await;
-    let mut client = stage.requester_session().await;
-
-    client
-        .request(&tool_call_line(
-            1,
-            "send_message",
-            json!({"window_id": stage.receiver, "text": "BODY\n"}),
-            false,
-        ))
-        .await;
-    stage
-        .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
-        .await;
-    drop(client);
-
-    stage.expect_taken_back_without_a_submit_key().await;
-}
-
 /// A handoff the CLI is already carrying is not the requester's to take back:
 /// its relay connection closing leaves the typing to finish with the
-/// carrier's own result, so the body is submitted and never cleared.
+/// carrier's own result, so the body is submitted and never cleared. The call
+/// started no attempt of its own (the receiver wakes by none), so it was
+/// answered that the envelope waits while it was still being carried: never
+/// that it was not delivered.
 #[tokio::test]
 async fn closing_the_relay_connection_during_a_handoff_leaves_the_carried_envelope_to_finish() {
     let stage = Stage::start("relay-end-handoff").await;
     let mut client = stage.requester_session().await;
 
-    client
+    let seq = client
         .request(&tool_call_line(
             1,
             "send_handoff",
@@ -1077,6 +1035,11 @@ async fn closing_the_relay_connection_during_a_handoff_leaves_the_carried_envelo
         .h
         .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
         .await;
+    let answered = tool_json(&client.answer(seq).await);
+    assert_eq!(
+        answered["state"], "queued",
+        "a carried handoff is never answered undelivered: {answered}"
+    );
     drop(client);
 
     std::fs::write(&stage.resume, b"").expect("let the receiver read on");
