@@ -3271,7 +3271,7 @@ impl IpcServer {
         }
         let requester = requester_window(&self.registry, &state.origin);
         let envelope = compose_message_envelope(&envelope_from(requester.as_ref()), &id, text);
-        if envelope.chars().count() > entry.inbox().answer_limit() {
+        if !entry.inbox().fits(&envelope) {
             outbound.reply(&error_msg(
                 "invalid_argument",
                 "text is longer than one answer of the window's doors carries",

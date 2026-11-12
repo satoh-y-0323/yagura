@@ -25,7 +25,7 @@ use tokio::sync::{oneshot, watch};
 use yagura_protocol::WindowStatus;
 
 use crate::config::DaemonConfig;
-use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, PushEnd};
+use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, PushEnd, fill_wake_argument};
 use crate::profile_delivery::WakeMode;
 use crate::pty;
 use crate::waiter::StatusAt;
@@ -39,11 +39,6 @@ pub(super) const WAKE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The most output a wake command's run is read for.
 const WAKE_COMMAND_MAX_OUTPUT_BYTES: usize = 64 * 1024;
-
-/// Where a wake argument takes the CLI's session identifier.
-const SESSION_PLACEHOLDER: &str = "{session}";
-/// Where a wake argument takes the text.
-const TEXT_PLACEHOLDER: &str = "{text}";
 
 /// What every window's delivery agent works with. Held strongly by the IPC
 /// server and by each running agent; the registry's launcher holds it
@@ -270,30 +265,6 @@ async fn push_by_command(agents: &NoticeAgents, entry: &WindowEntry, args: &[Str
         .inbox()
         .finish_push(push.id, if ran { PushEnd::Taken } else { PushEnd::Failed });
     ran
-}
-
-/// `template` with `{session}` and `{text}` filled in, in one pass: what was
-/// filled in is never read again, so a `{text}` inside the text stays as
-/// written.
-fn fill_wake_argument(template: &str, session: &str, text: &str) -> String {
-    let mut filled = String::with_capacity(template.len() + text.len());
-    let mut rest = template;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix(SESSION_PLACEHOLDER) {
-            filled.push_str(session);
-            rest = after;
-        } else if let Some(after) = rest.strip_prefix(TEXT_PLACEHOLDER) {
-            filled.push_str(text);
-            rest = after;
-        } else {
-            let mut chars = rest.chars();
-            if let Some(c) = chars.next() {
-                filled.push(c);
-            }
-            rest = chars.as_str();
-        }
-    }
-    filled
 }
 
 /// Runs `argv` once, with no shell, and returns whether it exited with 0.

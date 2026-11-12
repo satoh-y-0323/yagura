@@ -941,7 +941,7 @@ fn enumeration_states_a_fixed_reason_for_each_parse_failure_variant_without_the_
     copy_fixtures(&dir, &file_names);
     // A `[delivery]` table whose value is outside its domain is the one kind no shared
     // fixture file carries.
-    let delivery_source = "schema = 1\ndisplay_name = \"Delivery\"\n\n[delivery]\nmax_chars = 0\n";
+    let delivery_source = "schema = 1\ndisplay_name = \"Delivery\"\n\n[delivery]\nmax_bytes = 0\n";
     write_profile(&dir, "invalid-delivery", delivery_source);
 
     let config = config_with(Some(dir), empty_lookup(), ProfileOs::host(), None);

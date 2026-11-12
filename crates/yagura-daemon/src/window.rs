@@ -2463,6 +2463,9 @@ impl WindowRegistry {
         let inbox = Inbox::kept(
             self.config().inbox_capacity,
             delivery_spec,
+            // The registry does not know whether the room introduces this
+            // window, so the limit counts the configured intro.
+            &self.config().chat_intro,
             status_gate.watch(),
             keeper,
             kept,

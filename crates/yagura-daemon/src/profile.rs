@@ -1156,15 +1156,15 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     let mcp_registration =
         crate::mcp_registration::parse_mcp_registration(raw.mcp_registration, host_paths.as_ref())
             .map_err(ProfileParseError::InvalidMcpRegistration)?;
-    let delivery = parse_delivery(raw.delivery).map_err(ProfileParseError::InvalidDelivery)?;
+    let mut warnings = Vec::new();
+    let delivery =
+        parse_delivery(raw.delivery, &mut warnings).map_err(ProfileParseError::InvalidDelivery)?;
     let hook_events =
         parse_hook_events(raw.hook_events).map_err(ProfileParseError::InvalidHookEvents)?;
     let shim_guidance = raw
         .shim_guidance
         .map(|raw| parse_guidance(raw).ok_or(ProfileParseError::InvalidShimGuidance))
         .transpose()?;
-
-    let mut warnings = Vec::new();
 
     let cwd = raw.cwd.as_deref().and_then(|raw_cwd| {
         if Path::new(raw_cwd).is_absolute() {

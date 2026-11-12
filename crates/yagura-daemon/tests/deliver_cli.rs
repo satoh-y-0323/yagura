@@ -656,7 +656,10 @@ async fn a_json_template_in_the_profile_shapes_what_context_prints() {
 
 #[tokio::test]
 async fn the_profiles_limit_caps_one_answer_and_the_rest_comes_with_the_next() {
-    let setup = Setup::start_with_profile("max_chars = 20", |_| {}).await;
+    let setup = Setup::start_with_profile("max_bytes = 20", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
     let id = setup.profile_window().await;
     setup.deposit(&id, "a", "AAAAAAAAAAAAAAA");
     setup.deposit(&id, "b", "BBBBBBBBBBBBBBB");
@@ -666,7 +669,7 @@ async fn the_profiles_limit_caps_one_answer_and_the_rest_comes_with_the_next() {
     assert!(out(&first).contains("AAAAAAAAAAAAAAA"), "{}", out(&first));
     assert!(
         !out(&first).contains('B'),
-        "the second parcel does not fit within the profile's 20 characters: {}",
+        "the second parcel does not fit within the profile's 20 bytes: {}",
         out(&first)
     );
 
@@ -677,7 +680,10 @@ async fn the_profiles_limit_caps_one_answer_and_the_rest_comes_with_the_next() {
 
 #[tokio::test]
 async fn a_parcel_longer_than_the_profiles_limit_is_turned_away_at_the_inbox() {
-    let setup = Setup::start_with_profile("max_chars = 20", |_| {}).await;
+    let setup = Setup::start_with_profile("max_bytes = 20", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
     let id = setup.profile_window().await;
 
     let turned_away = setup
@@ -722,7 +728,7 @@ async fn the_profiles_wake_stream_and_exit_code_end_a_wait() {
 
 #[tokio::test]
 async fn a_window_the_profile_did_not_open_keeps_the_daemons_defaults() {
-    let setup = Setup::start_with_profile("max_chars = 20\nwake_exit = 3\n", |_| {}).await;
+    let setup = Setup::start_with_profile("max_bytes = 20\nwake_exit = 3\n", |_| {}).await;
     // Opened by argv, not from the profile: the profile's table does not apply to it.
     let id = setup.window().await;
     setup.deposit(&id, "a", "AAAAAAAAAAAAAAA");

@@ -62,7 +62,7 @@ args = [
 # daemon injects these only while that registration holds. Checked with
 # codex 0.159.2 on Windows.
 # Each hook calls `--hook codex-cli <Event>`; `additionalContextLimit` is the
-# delivery table's `max_chars`.
+# delivery table's `max_bytes`.
 [hooks]
 args = [
   "-c", "hooks.SessionStart=[{hooks=[{type='command',command='yagura-daemon --hook codex-cli SessionStart',additionalContextLimit=10000}]}]",
@@ -79,7 +79,7 @@ args = [
 # `--report-session` hook above tells the daemon.
 [delivery]
 output = "plain"
-max_chars = 10000
+max_bytes = 10000
 wake = "command"
 wake_args = ["queue", "--thread", "{session}", "--message", "{text}"]
 launch_prompt = ["{prompt}"]

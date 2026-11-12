@@ -7,7 +7,7 @@
 use thiserror::Error;
 use yagura_protocol::{DeliveryStream, ProfileGuidance};
 
-use crate::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DeliverySpec, DoorOutputs, OutputForm};
+use crate::inbox::{DEFAULT_MAX_BYTES, DEFAULT_WAKE_EXIT, DeliverySpec, DoorOutputs, OutputForm};
 use crate::profile::contains_placeholder_outside;
 use crate::window::{CliInjection, InjectionKind};
 
@@ -38,8 +38,9 @@ pub enum WakeMode {
 pub struct ProfileDelivery {
     /// How the doors print the text they carry.
     pub output: DoorOutputs,
-    /// The most characters one answer carries, the intro included.
-    pub max_chars: usize,
+    /// The most bytes one answer carries as it is printed, the intro
+    /// included (see [`DeliverySpec::max_bytes`]).
+    pub max_bytes: usize,
     /// How a waiting CLI is woken.
     pub wake: WakeMode,
     /// The stream a wait that was answered prints on.
@@ -59,8 +60,12 @@ impl ProfileDelivery {
     #[must_use]
     pub fn spec(&self) -> DeliverySpec {
         DeliverySpec {
-            max_chars: self.max_chars,
+            max_bytes: self.max_bytes,
             output: self.output.clone(),
+            wake_args: match &self.wake {
+                WakeMode::Command(args) => args.clone(),
+                WakeMode::None | WakeMode::Wait => Vec::new(),
+            },
             wake_stream: self.wake_stream,
             wake_exit: self.wake_exit,
         }
@@ -84,8 +89,10 @@ pub enum DeliveryError {
 }
 
 /// Reads and validates a profile's `delivery` value. `None` in, `None` out.
+/// An older key read in place of its successor is reported in `warnings`.
 pub(crate) fn parse_delivery(
     raw: Option<toml::Value>,
+    warnings: &mut Vec<String>,
 ) -> Result<Option<ProfileDelivery>, DeliveryError> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -95,13 +102,7 @@ pub(crate) fn parse_delivery(
     };
 
     let output = parse_door_outputs(table.remove("output"))?;
-    let max_chars = match take_integer(&mut table, "max_chars")? {
-        None => DEFAULT_MAX_CHARS,
-        Some(value) => usize::try_from(value)
-            .ok()
-            .filter(|chars| *chars >= 1)
-            .ok_or(DeliveryError::Invalid("max_chars"))?,
-    };
+    let max_bytes = parse_max_bytes(&mut table, warnings)?;
     let wake = parse_wake(
         take_string(&mut table, "wake")?,
         take_strings(&mut table, "wake_args")?,
@@ -134,13 +135,50 @@ pub(crate) fn parse_delivery(
     }
     Ok(Some(ProfileDelivery {
         output,
-        max_chars,
+        max_bytes,
         wake,
         wake_stream,
         wake_exit,
         launch_prompt,
         launch_context,
     }))
+}
+
+/// `max_bytes`, or the older `max_chars` read as that many bytes: a CLI
+/// limits what a hook prints in bytes or characters, and a byte count is never
+/// below the character count, so the older limit is kept on the safe side.
+fn parse_max_bytes(
+    table: &mut toml::Table,
+    warnings: &mut Vec<String>,
+) -> Result<usize, DeliveryError> {
+    let count = |key: &'static str, value: i64| {
+        usize::try_from(value)
+            .ok()
+            .filter(|count| *count >= 1)
+            .ok_or(DeliveryError::Invalid(key))
+    };
+    let older = take_integer(table, "max_chars")?
+        .map(|value| count("max_chars", value))
+        .transpose()?;
+    let newer = take_integer(table, "max_bytes")?
+        .map(|value| count("max_bytes", value))
+        .transpose()?;
+    match (older, newer) {
+        (Some(older), None) => {
+            warnings.push(format!(
+                "[delivery] max_chars is read as max_bytes = {older}; write max_bytes instead"
+            ));
+            Ok(older)
+        }
+        (Some(_), Some(newer)) => {
+            warnings.push(
+                "[delivery] max_chars was ignored, as max_bytes is given; remove max_chars"
+                    .to_string(),
+            );
+            Ok(newer)
+        }
+        (None, newer) => Ok(newer.unwrap_or(DEFAULT_MAX_BYTES)),
+    }
 }
 
 /// `{ text, command, url }`: `text` is required, the others optional. Each is

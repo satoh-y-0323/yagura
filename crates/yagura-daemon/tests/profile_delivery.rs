@@ -24,7 +24,7 @@ use common::docs::read_doc_verbatim;
 use common::{Harness, approver_base_config, write_profile};
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::OpenWindowRequest;
-use yagura_daemon::inbox::{DEFAULT_MAX_CHARS, DEFAULT_WAKE_EXIT, DoorOutputs, OutputForm};
+use yagura_daemon::inbox::{DEFAULT_WAKE_EXIT, DoorOutputs, OutputForm};
 use yagura_daemon::profile::{
     LaunchOptionValues, Profile, ProfileOs, list_profiles, parse_profile, resolve_launch,
     unavailability, unavailable_reason,
@@ -92,16 +92,34 @@ fn a_profile_without_a_delivery_table_declares_no_delivery() {
     assert!(parse_with("").unwrap().delivery.is_none());
 }
 
-#[test]
-fn an_empty_delivery_table_takes_the_documented_defaults() {
+#[tokio::test]
+async fn an_empty_delivery_table_takes_the_documented_defaults() {
     let delivery = delivery_of("[delivery]\n");
 
     assert_eq!(delivery.output, every_door(OutputForm::Plain));
-    assert_eq!(delivery.max_chars, DEFAULT_MAX_CHARS);
     assert_eq!(delivery.wake, WakeMode::None);
     assert_eq!(delivery.wake_stream, DeliveryStream::Stderr);
     assert_eq!(delivery.wake_exit, DEFAULT_WAKE_EXIT);
     assert_eq!(delivery.launch_prompt, None);
+
+    // One answer carries 10000 bytes, from the profile's table and from the daemon's own
+    // configuration alike.
+    let (h, mut client) = crate::inbox::start("delivery-default-limit", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
+    let from_profile = crate::inbox::delivering_window(&h, &mut client, delivery).await;
+    let daemons_own = h.open_idle_window(&mut client).await;
+    for id in [&from_profile, &daemons_own] {
+        crate::inbox::assert_takes_in_up_to(&h, id, 10_000, 0);
+        let wide = h
+            .registry
+            .get(id)
+            .expect("window exists")
+            .inbox()
+            .deposit(yagura_daemon::inbox::Parcel::new("wide", "あ".repeat(3334)));
+        assert_eq!(wide.len(), 1, "3334 characters are 10002 bytes");
+    }
 }
 
 #[test]
@@ -109,7 +127,7 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
     let delivery = delivery_of(
         "[delivery]\n\
          output = '{\"v\":{text}}'\n\
-         max_chars = 777\n\
+         max_bytes = 777\n\
          wake = \"command\"\n\
          wake_args = [\"queue\", \"--thread\", \"{session}\", \"--message\", \"{text}\"]\n\
          wake_stream = \"stdout\"\n\
@@ -121,7 +139,6 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
         delivery.output,
         every_door(OutputForm::Template("{\"v\":{text}}".into()))
     );
-    assert_eq!(delivery.max_chars, 777);
     assert_eq!(
         delivery.wake,
         WakeMode::Command(strings(&[
@@ -135,6 +152,39 @@ fn every_key_of_the_table_is_read_with_the_value_it_was_given() {
     assert_eq!(delivery.wake_stream, DeliveryStream::Stdout);
     assert_eq!(delivery.wake_exit, 3);
     assert_eq!(delivery.launch_prompt, Some(strings(&["-i", "{prompt}"])));
+}
+
+#[tokio::test]
+async fn the_limit_is_max_bytes_and_an_older_max_chars_is_read_as_it_with_a_warning() {
+    let (h, mut client) = crate::inbox::start("delivery-max-bytes", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
+    // (what, the table, the limit one answer has)
+    for (what, table, limit) in [
+        ("max_bytes", "[delivery]\nmax_bytes = 777\n", 777),
+        ("max_chars alone", "[delivery]\nmax_chars = 50\n", 50),
+        (
+            "max_chars beside max_bytes",
+            "[delivery]\nmax_chars = 50\nmax_bytes = 70\n",
+            70,
+        ),
+    ] {
+        let profile =
+            parse_with(table).unwrap_or_else(|err| panic!("{what}: accepted, got {err:?}"));
+        if table.contains("max_chars") && !table.contains("max_bytes") {
+            assert!(
+                profile.warnings.iter().any(|w| w.contains("max_bytes")),
+                "{what}: the older key is reported, naming the one to write: {:?}",
+                profile.warnings
+            );
+        }
+        let delivery = profile
+            .delivery
+            .unwrap_or_else(|| panic!("{what}: declares a [delivery] table"));
+        let id = crate::inbox::delivering_window(&h, &mut client, delivery).await;
+        crate::inbox::assert_takes_in_up_to(&h, &id, limit, 0);
+    }
 }
 
 #[test]
@@ -188,7 +238,7 @@ fn the_three_ways_to_wake_a_waiting_cli_are_all_readable() {
 #[test]
 fn the_edges_of_each_value_domain_are_accepted() {
     for (what, fragment) in [
-        ("max_chars of one", "[delivery]\nmax_chars = 1\n"),
+        ("max_bytes of one", "[delivery]\nmax_bytes = 1\n"),
         ("wake_exit of zero", "[delivery]\nwake_exit = 0\n"),
         ("wake_exit of 255", "[delivery]\nwake_exit = 255\n"),
         ("the plain output form", "[delivery]\noutput = \"plain\"\n"),
@@ -215,9 +265,9 @@ fn a_table_that_breaks_a_rule_takes_its_profile_out_of_the_reading() {
     let cases: [(&str, &str); 37] = [
         ("an unknown key", "[delivery]\nbogus = 1\n"),
         ("a delivery that is not a table", "delivery = 1\n"),
-        ("max_chars as a string", "[delivery]\nmax_chars = \"10\"\n"),
-        ("max_chars of zero", "[delivery]\nmax_chars = 0\n"),
-        ("a negative max_chars", "[delivery]\nmax_chars = -5\n"),
+        ("max_bytes as a string", "[delivery]\nmax_bytes = \"10\"\n"),
+        ("max_bytes of zero", "[delivery]\nmax_bytes = 0\n"),
+        ("a negative max_bytes", "[delivery]\nmax_bytes = -5\n"),
         (
             "an output that is neither plain nor a template",
             "[delivery]\noutput = \"xml\"\n",
@@ -408,11 +458,11 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
     write_profile(
         &profiles_dir,
         "delivery-ok",
-        &source_with("[delivery]\nmax_chars = 100\n"),
+        &source_with("[delivery]\nmax_bytes = 100\n"),
     );
     let invalid = [
         ("delivery-unknown-key", "[delivery]\nbogus = 1\n"),
-        ("delivery-bad-range", "[delivery]\nmax_chars = 0\n"),
+        ("delivery-bad-range", "[delivery]\nmax_bytes = 0\n"),
         (
             "delivery-unknown-slot",
             "[delivery]\nlaunch_prompt = [\"{nope}\"]\n",
@@ -471,7 +521,6 @@ fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_
     for id in ["claude-code", "wsl-claude-code"] {
         let delivery = shipped_delivery(id);
         assert_eq!(delivery.output, every_door(OutputForm::Plain), "{id}");
-        assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(delivery.wake, WakeMode::Wait, "{id}");
         assert_eq!(delivery.wake_stream, DeliveryStream::Stderr, "{id}");
         assert_eq!(delivery.wake_exit, 2, "{id}");
@@ -488,7 +537,6 @@ fn the_codex_profiles_wake_a_waiting_cli_by_queueing_a_message_on_its_session() 
     for id in ["codex-cli", "wsl-codex-cli"] {
         let delivery = shipped_delivery(id);
         assert_eq!(delivery.output, every_door(OutputForm::Plain), "{id}");
-        assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(
             delivery.wake,
             WakeMode::Command(strings(&[
@@ -535,7 +583,6 @@ fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way
             every_door(OutputForm::Template(AGY_OUTPUT.into())),
             "{id}"
         );
-        assert_eq!(delivery.max_chars, 10_000, "{id}");
         assert_eq!(delivery.wake, WakeMode::None, "{id}");
         assert_eq!(
             delivery.launch_prompt,
@@ -550,18 +597,75 @@ fn the_shell_profile_declares_no_delivery() {
     assert!(shipped("shell").delivery.is_none());
 }
 
-#[test]
-fn the_limits_the_hooks_carry_are_the_profiles_own_values() {
-    // The hook files are measured on their own (`profile_hooks.rs`,
-    // `profile_hooks_codex.rs`) with these literals; here they are tied to the table.
-    for id in [
-        "codex-cli",
-        "wsl-codex-cli",
-        "claude-code",
-        "wsl-claude-code",
-    ] {
-        assert_eq!(shipped_delivery(id).max_chars, 10_000, "{id}");
+/// Every number a `[hooks]` argument gives as `additionalContextLimit=`.
+fn context_limits_in(hooks: Option<&toml::Value>) -> Vec<usize> {
+    const KEY: &str = "additionalContextLimit=";
+    let args = hooks
+        .and_then(|hooks| hooks.get("args"))
+        .and_then(toml::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    args.iter()
+        .filter_map(toml::Value::as_str)
+        .flat_map(|arg| {
+            arg.match_indices(KEY)
+                .map(move |(at, _)| &arg[at + KEY.len()..])
+        })
+        .map(|rest| {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits
+                .parse()
+                .unwrap_or_else(|err| panic!("{rest:?} is not a limit: {err}"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn each_shipped_window_carries_the_bytes_its_own_profile_declares() {
+    // The widest form a shipped profile prints in adds this much around the text.
+    const SLACK: usize = 256;
+    let (h, mut client) = crate::inbox::start("delivery-shipped-limits", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles");
+    let mut checked = 0;
+    for file in std::fs::read_dir(&dir).expect("the shipped profiles directory reads") {
+        let path = file.expect("a directory entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let id = path.file_stem().and_then(|s| s.to_str()).expect("UTF-8");
+        let profile = shipped(id);
+        let Some(delivery) = profile.delivery.clone() else {
+            continue;
+        };
+        let document: toml::Table = read_doc_verbatim(&format!("../../profiles/{id}.toml"))
+            .parse()
+            .unwrap_or_else(|err| panic!("{id}: {err}"));
+        let table = document["delivery"].as_table().expect("a table");
+        assert!(
+            !table.contains_key("max_chars") && profile.warnings.is_empty(),
+            "{id}: a shipped profile is read with no warning: {:?}",
+            profile.warnings
+        );
+        let limit = table.get("max_bytes").map_or(10_000, |value| {
+            value
+                .as_integer()
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or_else(|| panic!("{id}: max_bytes is a count"))
+        });
+        for hook_limit in context_limits_in(document.get("hooks")) {
+            assert_eq!(
+                hook_limit, limit,
+                "{id}: what a hook may carry is the table's own limit"
+            );
+        }
+        let window = crate::inbox::delivering_window(&h, &mut client, delivery).await;
+        crate::inbox::assert_takes_in_up_to(&h, &window, limit, SLACK);
+        checked += 1;
     }
+    assert!(checked > 0, "no shipped profile declares delivery");
 }
 
 // =============================================================================

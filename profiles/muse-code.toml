@@ -38,7 +38,7 @@ url = "https://github.com/satoh-y-0323/yagura/blob/main/docs/mcp-setup.md#config
 # SessionStart runs on the first prompt, not at start-up. Muse takes plain
 # text from a hook too; the JSON form names the event the text arrives for.
 [delivery]
-max_chars = 10000
+max_bytes = 10000
 wake = "none"
 launch_prompt = ["--", "{prompt}"]
 

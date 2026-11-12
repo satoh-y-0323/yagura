@@ -1552,7 +1552,7 @@ mod tests {
         let registry = Arc::new(WindowRegistry::new(DaemonConfig::default()));
         let delivery = crate::profile_delivery::ProfileDelivery {
             output: crate::inbox::DoorOutputs::all(&crate::inbox::OutputForm::Plain),
-            max_chars: crate::inbox::DEFAULT_MAX_CHARS,
+            max_bytes: crate::inbox::DEFAULT_MAX_BYTES,
             wake: crate::profile_delivery::WakeMode::Wait,
             wake_stream: yagura_protocol::DeliveryStream::Stderr,
             wake_exit: crate::inbox::DEFAULT_WAKE_EXIT,

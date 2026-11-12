@@ -32,11 +32,14 @@ use crate::waiter::StatusAt;
 /// Between two parcels, and between the intro and the first parcel.
 const SEPARATOR: &str = "\n\n";
 
-/// Where a template takes the text.
+/// Where a template, and a wake argument, take the text.
 const TEXT_PLACEHOLDER: &str = "{text}";
 
-/// Default value of [`DeliverySpec::max_chars`].
-pub const DEFAULT_MAX_CHARS: usize = 10_000;
+/// Where a wake argument takes the CLI's session identifier.
+const SESSION_PLACEHOLDER: &str = "{session}";
+
+/// Default value of [`DeliverySpec::max_bytes`].
+pub const DEFAULT_MAX_BYTES: usize = 10_000;
 
 /// Default value of [`DeliverySpec::wake_exit`].
 pub const DEFAULT_WAKE_EXIT: u8 = 2;
@@ -365,6 +368,78 @@ impl OutputForm {
             }
         }
     }
+
+    /// The UTF-8 bytes [`Self::render`] prints for `text`.
+    fn printed_len(&self, text: &str) -> usize {
+        self.render(text).len()
+    }
+}
+
+/// One stretch of a wake argument's template.
+enum WakePiece<'a> {
+    Literal(&'a str),
+    Session,
+    Text,
+}
+
+/// `template` split at its `{session}` and `{text}`, read in a single pass.
+fn wake_pieces(template: &str) -> Vec<WakePiece<'_>> {
+    let mut pieces = Vec::new();
+    let (mut literal, mut at) = (0, 0);
+    while let Some(rest) = template.get(at..).filter(|rest| !rest.is_empty()) {
+        let slot = if rest.starts_with(SESSION_PLACEHOLDER) {
+            Some((WakePiece::Session, SESSION_PLACEHOLDER.len()))
+        } else if rest.starts_with(TEXT_PLACEHOLDER) {
+            Some((WakePiece::Text, TEXT_PLACEHOLDER.len()))
+        } else {
+            None
+        };
+        match slot {
+            Some((piece, len)) => {
+                if literal < at {
+                    pieces.push(WakePiece::Literal(&template[literal..at]));
+                }
+                pieces.push(piece);
+                at += len;
+                literal = at;
+            }
+            None => at += rest.chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    if literal < template.len() {
+        pieces.push(WakePiece::Literal(&template[literal..]));
+    }
+    pieces
+}
+
+/// `template` with `{session}` and `{text}` filled in, in one pass: what was
+/// filled in is never read again, so a `{text}` inside the text stays as
+/// written.
+pub(crate) fn fill_wake_argument(template: &str, session: &str, text: &str) -> String {
+    let mut filled = String::with_capacity(template.len() + text.len());
+    for piece in wake_pieces(template) {
+        filled.push_str(match piece {
+            WakePiece::Literal(literal) => literal,
+            WakePiece::Session => session,
+            WakePiece::Text => text,
+        });
+    }
+    filled
+}
+
+/// The UTF-8 bytes [`fill_wake_argument`] makes of `template` for `text`,
+/// with the longest session identifier the daemon keeps in each `{session}`:
+/// a deposit is measured before the CLI may have reported its session.
+fn wake_argument_len(template: &str, text: &str) -> usize {
+    wake_pieces(template)
+        .iter()
+        .map(|piece| match piece {
+            WakePiece::Literal(literal) => literal.len(),
+            // A session identifier is ASCII, one byte to a character.
+            WakePiece::Session => SESSION_ID_MAX_CHARS,
+            WakePiece::Text => text.len(),
+        })
+        .sum()
 }
 
 /// How each door prints the text it carries: the form follows the event the
@@ -394,11 +469,16 @@ impl DoorOutputs {
 /// How a window's doors answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliverySpec {
-    /// The most characters (`chars()`, the intro included) one answer
-    /// carries.
-    pub max_chars: usize,
+    /// The most bytes one answer carries: the UTF-8 of the output as it is
+    /// printed (in its form, escaping and the intro included), and of the
+    /// one wake argument that carries the text.
+    pub max_bytes: usize,
     /// How the text is printed.
     pub output: DoorOutputs,
+    /// The wake command's arguments, where `{text}` takes the text and
+    /// `{session}` the CLI's session; empty when the CLI is not woken by
+    /// command.
+    pub wake_args: Vec<String>,
     /// The stream a wait that was answered by a parcel prints on.
     pub wake_stream: DeliveryStream,
     /// The exit code that wait ends with.
@@ -408,11 +488,47 @@ pub struct DeliverySpec {
 impl Default for DeliverySpec {
     fn default() -> Self {
         Self {
-            max_chars: DEFAULT_MAX_CHARS,
+            max_bytes: DEFAULT_MAX_BYTES,
             output: DoorOutputs::all(&OutputForm::Plain),
+            wake_args: Vec::new(),
             wake_stream: DeliveryStream::Stderr,
             wake_exit: DEFAULT_WAKE_EXIT,
         }
+    }
+}
+
+impl DeliverySpec {
+    /// The bytes of the widest output `text` alone is handed over in: each
+    /// door's form (the context's behind `intro`) and each wake argument that
+    /// carries it.
+    fn widest(&self, intro: &str, text: &str) -> usize {
+        let context = if intro.is_empty() {
+            self.output.context.printed_len(text)
+        } else {
+            self.output
+                .context
+                .printed_len(&format!("{intro}{SEPARATOR}{text}"))
+        };
+        [
+            context,
+            self.output.take.printed_len(text),
+            self.output.wait.printed_len(text),
+            self.push_len(text),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+
+    /// The bytes of the widest wake argument that carries `text`; 0 when the
+    /// CLI is not woken by command.
+    fn push_len(&self, text: &str) -> usize {
+        self.wake_args
+            .iter()
+            .filter(|arg| arg.contains(TEXT_PLACEHOLDER))
+            .map(|arg| wake_argument_len(arg, text))
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -681,6 +797,8 @@ struct Shared {
     state: Mutex<State>,
     capacity: usize,
     spec: DeliverySpec,
+    /// The most the window's context prints ahead of the parcels.
+    intro: String,
     status: watch::Receiver<StatusAt>,
     keeper: Option<InboxKeeper>,
     #[cfg(test)]
@@ -808,36 +926,44 @@ impl Shared {
         )
     }
 
-    /// Takes the parcels that fit in one answer, oldest first, behind `intro`
-    /// when there is one. A parcel is never cut: the first one that does not
-    /// fit stays for the next answer.
-    fn take_within(&self, state: &mut State, intro: &str) -> (Vec<Held>, String) {
-        self.take_within_limit(state, intro, self.spec.max_chars)
+    /// Whether `text` alone is handed over whole in every output the window
+    /// prints it in.
+    fn fits(&self, text: &str) -> bool {
+        self.spec.widest(&self.intro, text) <= self.spec.max_bytes
     }
 
-    /// [`Shared::take_within`] with the answer's limit given by the caller.
-    fn take_within_limit(
+    /// The parcels one answer to a wait carries, as [`Self::take_within`]
+    /// takes them.
+    fn take_for_wait(&self, state: &mut State) -> (Vec<Held>, String) {
+        let form = &self.spec.output.wait;
+        self.take_within(state, "", self.spec.max_bytes, |text| {
+            form.printed_len(text)
+        })
+    }
+
+    /// Takes the parcels that fit within `limit` bytes once `printed_len`
+    /// measures their text, oldest first, behind `intro` when there is one. A
+    /// parcel is never cut: the first one that does not fit stays for the
+    /// next answer.
+    fn take_within(
         &self,
         state: &mut State,
         intro: &str,
         limit: usize,
+        printed_len: impl Fn(&str) -> usize,
     ) -> (Vec<Held>, String) {
-        // An intro longer than the limit cannot be carried whole by any answer.
-        let mut text: String = intro.chars().take(limit).collect();
-        let mut used = text.chars().count();
+        let mut text = longest_prefix_within(intro, limit, &printed_len).to_string();
         let mut taken = Vec::new();
         while let Some(front) = state.parcels.front().filter(|held| held.written) {
             let separator = if text.is_empty() { "" } else { SEPARATOR };
-            let needed = separator.chars().count() + front.parcel.text.chars().count();
-            if used + needed > limit {
+            let candidate = format!("{text}{separator}{}", front.parcel.text);
+            if printed_len(&candidate) > limit {
                 break;
             }
             let Some(held) = state.parcels.pop_front() else {
                 break;
             };
-            text.push_str(separator);
-            text.push_str(&held.parcel.text);
-            used += needed;
+            text = candidate;
             taken.push(held);
         }
         (taken, text)
@@ -870,7 +996,7 @@ impl Shared {
         let Some(waiter) = state.waiter.take() else {
             return;
         };
-        let (taken, text) = self.take_within(state, "");
+        let (taken, text) = self.take_for_wait(state);
         let read = DoorRead {
             message: self.wake_message(&text),
             hold: self.hold(state, taken),
@@ -1190,16 +1316,18 @@ impl Inbox {
     /// and pushing only while `status` allows it.
     #[must_use]
     pub fn new(capacity: usize, spec: DeliverySpec, status: watch::Receiver<StatusAt>) -> Self {
-        Self::kept(capacity, spec, status, None, Vec::new())
+        Self::kept(capacity, spec, "", status, None, Vec::new())
     }
 
-    /// [`Self::new`], keeping every change through `keeper` and holding
+    /// [`Self::new`] for a window whose context prints at most `intro` ahead
+    /// of the parcels, keeping every change through `keeper` and holding
     /// `kept` first: the parcels the store kept for the window, oldest first,
-    /// whose depositors are gone. A kept parcel longer than one answer
-    /// carries is dropped, as a deposit of it would have been turned away.
+    /// whose depositors are gone. A kept parcel no answer carries whole is
+    /// dropped, as a deposit of it would have been turned away.
     pub(crate) fn kept(
         capacity: usize,
         spec: DeliverySpec,
+        intro: &str,
         status: watch::Receiver<StatusAt>,
         keeper: Option<InboxKeeper>,
         kept: Vec<KeptParcel>,
@@ -1208,7 +1336,7 @@ impl Inbox {
         let mut too_long = Vec::new();
         for parcel in kept {
             state.next_seq = state.next_seq.max(parcel.seq.saturating_add(1));
-            if parcel.text.chars().count() > spec.max_chars {
+            if spec.widest(intro, &parcel.text) > spec.max_bytes {
                 too_long.push(parcel.seq);
                 continue;
             }
@@ -1244,6 +1372,7 @@ impl Inbox {
                 state: Mutex::new(state),
                 capacity,
                 spec,
+                intro: intro.to_string(),
                 status,
                 keeper,
                 #[cfg(test)]
@@ -1254,7 +1383,8 @@ impl Inbox {
 
     /// Adds `parcel` and returns the parcels the inbox turned away: `parcel`
     /// itself when the inbox is full of other parcels, has ended, or `parcel`
-    /// alone is longer than one answer can carry. Nothing already inside is
+    /// alone is not carried whole by some output the window prints it in
+    /// (each door's, and the wake command's). Nothing already inside is
     /// pushed out, except that a notice replaces the notice waiting under its
     /// key, which is not returned (see [`Parcel::notice`]). A registered wait
     /// is answered when the window can be pushed to.
@@ -1319,7 +1449,7 @@ impl Inbox {
                 None,
             )
         };
-        if parcel.text.chars().count() > self.shared.spec.max_chars {
+        if !self.shared.fits(&parcel.text) {
             return refused(parcel);
         }
         let mut state = self.shared.lock();
@@ -1460,11 +1590,11 @@ impl Inbox {
             .collect()
     }
 
-    /// The most characters one answer carries: a parcel longer than this is
-    /// never taken in.
+    /// Whether a parcel of `text` is carried whole by every output the window
+    /// prints it in: one that is not is never taken in.
     #[must_use]
-    pub fn answer_limit(&self) -> usize {
-        self.shared.spec.max_chars
+    pub fn fits(&self, text: &str) -> bool {
+        self.shared.fits(text)
     }
 
     /// Whether a wait is registered.
@@ -1478,19 +1608,21 @@ impl Inbox {
     /// carries are held for its door.
     pub fn read_context(&self, intro: &str, spec: Option<&DeliverySpec>) -> DoorRead {
         let spec = spec.unwrap_or(&self.shared.spec);
-        self.read(intro, &spec.output.context, spec.max_chars)
+        self.read(intro, &spec.output.context, spec.max_bytes)
     }
 
     /// The answer for the start of a turn: the parcels that fit in one
     /// answer, held for its door, as [`Self::read_context`] answers.
     pub fn read_take(&self, spec: Option<&DeliverySpec>) -> DoorRead {
         let spec = spec.unwrap_or(&self.shared.spec);
-        self.read("", &spec.output.take, spec.max_chars)
+        self.read("", &spec.output.take, spec.max_bytes)
     }
 
     fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DoorRead {
         let mut state = self.shared.lock();
-        let (taken, text) = self.shared.take_within_limit(&mut state, intro, limit);
+        let (taken, text) = self
+            .shared
+            .take_within(&mut state, intro, limit, |text| form.printed_len(text));
         DoorRead {
             message: self.shared.read_message(form, &text),
             hold: self.shared.hold(&mut state, taken),
@@ -1510,7 +1642,7 @@ impl Inbox {
             let _ = replaced.answer.send(DoorRead::silent());
         }
         if state.shown() > 0 && self.shared.pushable() {
-            let (taken, text) = self.shared.take_within(&mut state, "");
+            let (taken, text) = self.shared.take_for_wait(&mut state);
             return Wait::Answered(Box::new(DoorRead {
                 message: self.shared.wake_message(&text),
                 hold: self.shared.hold(&mut state, taken),
@@ -1540,11 +1672,15 @@ impl Inbox {
     }
 
     /// Takes what one push hands over out of the inbox: everything that fits
-    /// in one answer. `None` when nothing is waiting. The doors do not return
-    /// what a push carries.
+    /// in one wake argument. `None` when nothing is waiting. The doors do not
+    /// return what a push carries.
     pub fn begin_push(&self) -> Option<Push> {
         let mut state = self.shared.lock();
-        let held = self.shared.take_within(&mut state, "").0;
+        let spec = &self.shared.spec;
+        let held = self
+            .shared
+            .take_within(&mut state, "", spec.max_bytes, |text| spec.push_len(text))
+            .0;
         let first = held.first()?;
         for carried in &held {
             carried.move_to(Place::Carried);
@@ -1642,9 +1778,10 @@ impl Inbox {
     }
 
     /// Replaces the text of the waiting parcel named `key`. `false` when no
-    /// such parcel waits, or the new text is longer than one answer carries.
+    /// such parcel waits, or the new text would be turned away by
+    /// [`Self::deposit`].
     pub fn revise(&self, key: &str, text: String) -> bool {
-        if text.chars().count() > self.shared.spec.max_chars {
+        if !self.shared.fits(&text) {
             return false;
         }
         let mut state = self.shared.lock();
@@ -1680,4 +1817,16 @@ impl Inbox {
             let _ = waiter.answer.send(DoorRead::silent());
         }
     }
+}
+
+/// The longest start of `text`, cut between characters, that `printed_len`
+/// measures within `limit`: an intro is never more than one answer carries.
+fn longest_prefix_within(text: &str, limit: usize, printed_len: impl Fn(&str) -> usize) -> &str {
+    if printed_len(text) <= limit {
+        return text;
+    }
+    let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    // `ends[0]` is 0, and the empty text prints nothing, so it always fits.
+    let fitting = ends.partition_point(|&end| printed_len(&text[..end]) <= limit);
+    &text[..ends[fitting.saturating_sub(1)]]
 }

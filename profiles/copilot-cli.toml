@@ -49,7 +49,7 @@ args = ["--plugin-dir", "{hooks_config_dir}"]
 # Copilot has no hook that fires on an idle session, so `wake` stays `none`.
 [delivery]
 output = '{"additionalContext":{text}}'
-max_chars = 10000
+max_bytes = 10000
 wake = "none"
 launch_prompt = ["-i", "{prompt}"]
 

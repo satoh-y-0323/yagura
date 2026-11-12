@@ -46,7 +46,7 @@ args = ["--reasoning-effort", "{value}"]
 # session, so `wake` stays `none`.
 [delivery]
 output = '{"hookSpecificOutput":{"additionalContext":{text}}}'
-max_chars = 10000
+max_bytes = 10000
 wake = "none"
 launch_context = ["--rules", "{context}"]
 launch_prompt = ["--", "{prompt}"]

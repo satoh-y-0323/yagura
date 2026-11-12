@@ -57,7 +57,7 @@ doors = { wait = 86400 }
 # and would otherwise swallow it.
 [delivery]
 output = "plain"
-max_chars = 10000
+max_bytes = 10000
 wake = "wait"
 wake_stream = "stderr"
 wake_exit = 2

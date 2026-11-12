@@ -13,10 +13,13 @@ use crate::common;
 use std::time::Duration;
 
 use tracing_test::traced_test;
-use yagura_daemon::DaemonConfig;
 use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
 use yagura_daemon::inbox::{DeliverySpec, DoorOutputs, OutputForm, Parcel};
+use yagura_daemon::profile::parse_profile;
+use yagura_daemon::profile_delivery::ProfileDelivery;
 use yagura_daemon::store;
+use yagura_daemon::window::WindowProvenance;
+use yagura_daemon::{DaemonConfig, OpenWindowRequest};
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryStream, WindowStatus};
 use yagura_test_support::ipc::Connection;
 
@@ -33,10 +36,75 @@ fn config(tag: &str, tweak: impl FnOnce(&mut DaemonConfig)) -> DaemonConfig {
     config
 }
 
-async fn start(tag: &str, tweak: impl FnOnce(&mut DaemonConfig)) -> (Harness, Connection) {
+pub(crate) async fn start(
+    tag: &str,
+    tweak: impl FnOnce(&mut DaemonConfig),
+) -> (Harness, Connection) {
     let h = Harness::start(tag, config(tag, tweak)).await;
     let client = h.connect().await;
     (h, client)
+}
+
+/// The `[delivery]` table `lines` declare, read as a profile file of its own is read.
+pub(crate) fn profile_delivery(lines: &str) -> ProfileDelivery {
+    let source = format!(
+        "schema = 1\ndisplay_name = \"Bytes\"\n\n[command]\ndefault = [\"some-program\"]\n\n\
+         [delivery]\n{lines}\n"
+    );
+    parse_profile("bytes", &source)
+        .unwrap_or_else(|err| panic!("{lines:?} should be accepted, got {err:?}"))
+        .delivery
+        .unwrap_or_else(|| panic!("{lines:?} declares a [delivery] table"))
+}
+
+/// An idle window whose profile declares `delivery`: its doors answer, and its inbox
+/// takes parcels in, as that table says.
+pub(crate) async fn delivering_window(
+    h: &Harness,
+    client: &mut Connection,
+    delivery: ProfileDelivery,
+) -> String {
+    let id = h
+        .registry
+        .open_with_extra_env(
+            OpenWindowRequest {
+                command: yagura_test_support::process::echo_child_command(),
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(CONTROL_DETECTION_NAME.to_string()),
+                on_name_taken: Default::default(),
+            },
+            Vec::new(),
+            Vec::new(),
+            WindowProvenance {
+                delivery: Some(delivery),
+                ..WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("the window opens")
+        .window_id;
+    h.write_input(&id, READY_MARKER).await;
+    wait_until_status(client, &id, WindowStatus::Idle).await;
+    id
+}
+
+/// Asserts the window's inbox takes in an ASCII text `slack` bytes short of `limit` and
+/// turns away one of `limit + 1` bytes. `slack` is what the widest form the window prints
+/// in adds around the text; zero when every form prints it plain and nothing precedes it.
+pub(crate) fn assert_takes_in_up_to(h: &Harness, window_id: &str, limit: usize, slack: usize) {
+    assert!(
+        deposit(h, window_id, "within", &"a".repeat(limit - slack)).is_empty(),
+        "a text of {} bytes fits within {limit}",
+        limit - slack
+    );
+    assert_eq!(
+        deposit(h, window_id, "over", &"a".repeat(limit + 1)).len(),
+        1,
+        "a text of {} bytes is over {limit}",
+        limit + 1
+    );
 }
 
 /// A window whose status stays `Unknown`: its definition is loaded but nothing has
@@ -170,24 +238,21 @@ async fn a_take_returns_the_windows_parcels_in_order_and_takes_them_out() {
 #[tokio::test]
 async fn a_take_stays_within_the_limit_and_never_cuts_a_parcel() {
     let (h, mut client) = start("inbox-i2-ascii", |config| {
-        config.delivery = DeliverySpec {
-            max_chars: 100,
-            ..DeliverySpec::default()
-        };
+        config.chat_intro = String::new();
     })
     .await;
-    let id = h.open_idle_window(&mut client).await;
+    let id = delivering_window(&h, &mut client, profile_delivery("max_bytes = 100")).await;
     let (a, b, c) = ("A".repeat(40), "B".repeat(40), "C".repeat(40));
     deposit(&h, &id, "a", &a);
     deposit(&h, &id, "b", &b);
     deposit(&h, &id, "c", &c);
 
     let first = take(&h, &id).await;
-    assert!(first.chars().count() <= 100, "{}", first.chars().count());
+    assert!(first.len() <= 100, "{}", first.len());
     assert!(first.contains(&a), "the oldest parcel comes first, whole");
     assert!(!first.contains(&c), "three parcels of 40 do not fit in 100");
     let second = take(&h, &id).await;
-    assert!(second.chars().count() <= 100);
+    assert!(second.len() <= 100);
     let all = format!("{first}{second}");
     for parcel in [&a, &b, &c] {
         assert_eq!(all.matches(parcel.as_str()).count(), 1, "exactly once");
@@ -196,47 +261,234 @@ async fn a_take_stays_within_the_limit_and_never_cuts_a_parcel() {
     assert_eq!(pending(&h, &id), 0);
 }
 
+/// The text a JSON answer carries under `t`.
+fn text_under_t(output: &str) -> String {
+    let value: serde_json::Value =
+        serde_json::from_str(output).unwrap_or_else(|err| panic!("not JSON ({err}): {output:?}"));
+    value["t"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the text is a JSON string: {output:?}"))
+        .to_string()
+}
+
 #[tokio::test]
-async fn the_limit_counts_characters_not_bytes() {
-    let (h, mut client) = start("inbox-i2-chars", |config| {
-        config.delivery = DeliverySpec {
-            max_chars: 100,
-            ..DeliverySpec::default()
-        };
+async fn the_limit_counts_the_bytes_of_the_output_as_printed() {
+    let (h, mut client) = start("inbox-i2-bytes", |config| {
+        config.chat_intro = String::new();
     })
     .await;
-    let id = h.open_idle_window(&mut client).await;
-    // 40 characters are 120 bytes: two of them fit in 100 characters, not in 100 bytes.
-    let (a, b) = ("あ".repeat(40), "い".repeat(40));
-    deposit(&h, &id, "a", &a);
-    deposit(&h, &id, "b", &b);
-    let got = take(&h, &id).await;
-    assert!(got.contains(&a) && got.contains(&b), "{got:?}");
-    assert!(got.chars().count() <= 100);
+
+    // 20 characters of 3 bytes each: two fit in 100 characters, not in 100 bytes.
+    let plain = delivering_window(&h, &mut client, profile_delivery("max_bytes = 100")).await;
+    let (a, b) = ("あ".repeat(20), "い".repeat(20));
+    deposit(&h, &plain, "a", &a);
+    deposit(&h, &plain, "b", &b);
+    let first = take(&h, &plain).await;
+    assert!(first.contains(&a) && !first.contains(&b), "{first:?}");
+    assert!(first.len() <= 100, "{}", first.len());
+    assert!(take(&h, &plain).await.contains(&b), "the rest follows");
+    deposit(&h, &plain, "a2", &a);
+    deposit(&h, &plain, "b2", &b);
+    let (woken, _, _) = expect_delivery(read(&h, &wait_msg(&plain)).await);
+    assert!(woken.contains(&a) && !woken.contains(&b), "{woken:?}");
+    assert!(
+        take(&h, &plain).await.contains(&b),
+        "a wait's answer leaves the rest too"
+    );
+
+    // A quote is escaped to two bytes in a JSON string: two parcels of 30 quotes are 62
+    // characters, but print as 8 + 60 + 4 + 60 bytes.
+    let json = delivering_window(
+        &h,
+        &mut client,
+        profile_delivery("max_bytes = 100\noutput = '{\"t\":{text}}'"),
+    )
+    .await;
+    let quotes = "\"".repeat(30);
+    deposit(&h, &json, "a", &quotes);
+    deposit(&h, &json, "b", &quotes);
+    let first = take(&h, &json).await;
+    assert!(first.len() <= 100, "{}: {first:?}", first.len());
+    assert_eq!(text_under_t(&first), quotes, "one parcel, whole");
+    assert_eq!(
+        text_under_t(&take(&h, &json).await),
+        quotes,
+        "the rest follows"
+    );
 }
 
 #[tokio::test]
 async fn the_limit_includes_the_intro_in_the_context() {
-    let intro = "I".repeat(30);
+    // 10 characters of 3 bytes each: 30 + 2 + 40 + 2 + 40 bytes do not fit in 100, though
+    // 94 characters would.
+    let intro = "い".repeat(10);
     let intro_for_config = intro.clone();
     let (h, mut client) = start("inbox-i2-intro", move |config| {
         config.chat_intro = intro_for_config;
-        config.delivery = DeliverySpec {
-            max_chars: 100,
-            ..DeliverySpec::default()
-        };
     })
     .await;
-    let id = h.open_idle_window(&mut client).await;
+    let id = delivering_window(&h, &mut client, profile_delivery("max_bytes = 100")).await;
     let (a, b) = ("A".repeat(40), "B".repeat(40));
     deposit(&h, &id, "a", &a);
     deposit(&h, &id, "b", &b);
 
     let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(context.contains(&intro) && context.contains(&a));
-    assert!(!context.contains(&b), "30 + 40 + 40 does not fit in 100");
-    assert!(context.chars().count() <= 100);
+    assert!(
+        !context.contains(&b),
+        "30 + 2 + 40 + 2 + 40 bytes do not fit in 100"
+    );
+    assert!(context.len() <= 100, "{}", context.len());
     assert!(take(&h, &id).await.contains(&b), "the rest follows");
+}
+
+#[tokio::test]
+async fn a_push_by_command_carries_what_fits_once_put_into_its_argument() {
+    let (h, mut client) = start("inbox-i2-push", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
+    // The argument adds 14 bytes to the text: 14 + 45 + 2 + 45 is over 100, though the
+    // texts alone, as the doors print them, fit.
+    let id = delivering_window(
+        &h,
+        &mut client,
+        profile_delivery(
+            "max_bytes = 100\nwake = \"command\"\n\
+             wake_args = [\"queue\", \"--thread\", \"{session}\", \"PREFIX-PREFIX-{text}\"]",
+        ),
+    )
+    .await;
+    let (a, b) = ("A".repeat(45), "B".repeat(45));
+    assert!(deposit(&h, &id, "a", &a).is_empty());
+    assert!(deposit(&h, &id, "b", &b).is_empty());
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+
+    let push = inbox.begin_push().expect("something waits");
+    assert_eq!(push.text, a, "the first parcel alone, whole");
+    inbox.finish_push(push.id, yagura_daemon::inbox::PushEnd::Taken);
+    let next = inbox.begin_push().expect("the rest waits");
+    assert_eq!(next.text, b, "the rest follows");
+}
+
+#[tokio::test]
+async fn a_parcel_over_the_limit_in_any_form_the_window_prints_is_turned_away_when_deposited() {
+    let (h, mut client) = start("inbox-i2-widest", |config| {
+        config.chat_intro = String::new();
+    })
+    .await;
+    const JSON: &str = "'{\"t\":{text}}'";
+    let wake = "wake = \"command\"\n\
+                wake_args = [\"queue\", \"--thread\", \"{session}\", \"PREFIX-{text}\"]";
+    // (what, the rest of the table, a text that fits, a text that does not)
+    let cases: [(&str, String, String, String); 7] = [
+        (
+            "plain, counted in bytes",
+            String::new(),
+            "a".repeat(100),
+            "あ".repeat(34),
+        ),
+        (
+            "the take door's form",
+            format!("output = {{ take = {JSON} }}"),
+            "a".repeat(92),
+            "a".repeat(93),
+        ),
+        (
+            "the context door's form",
+            format!("output = {{ context = {JSON} }}"),
+            "a".repeat(92),
+            "a".repeat(93),
+        ),
+        (
+            "the wait door's form",
+            format!("output = {{ wait = {JSON} }}"),
+            "a".repeat(92),
+            "a".repeat(93),
+        ),
+        (
+            "escaping in a form",
+            format!("output = {JSON}"),
+            "\"".repeat(46),
+            "\"".repeat(47),
+        ),
+        (
+            "the wake command's argument",
+            wake.to_string(),
+            "a".repeat(50),
+            "a".repeat(94),
+        ),
+        (
+            "escaping in one form of several",
+            format!("output = {{ take = \"plain\", wait = {JSON} }}"),
+            "\n".repeat(46),
+            "\n".repeat(47),
+        ),
+    ];
+    for (what, rest, fits, over) in cases {
+        let id = delivering_window(
+            &h,
+            &mut client,
+            profile_delivery(&format!("max_bytes = 100\n{rest}")),
+        )
+        .await;
+        assert!(
+            deposit(&h, &id, "fits", &fits).is_empty(),
+            "{what}: a parcel every form prints within 100 bytes is taken in"
+        );
+        assert_eq!(
+            deposit(&h, &id, "over", &over).len(),
+            1,
+            "{what}: a parcel no door could carry whole is turned away"
+        );
+        assert_eq!(pending(&h, &id), 1, "{what}");
+    }
+
+    // The intro goes ahead of the parcels in the context: 30 + 2 + 69 is over 100.
+    let (h, mut client) = start("inbox-i2-widest-intro", |config| {
+        config.chat_intro = "I".repeat(30);
+    })
+    .await;
+    let id = delivering_window(&h, &mut client, profile_delivery("max_bytes = 100")).await;
+    assert!(deposit(&h, &id, "fits", &"a".repeat(68)).is_empty());
+    assert_eq!(
+        deposit(&h, &id, "over", &"a".repeat(69)).len(),
+        1,
+        "the context with its intro could not carry it whole"
+    );
+}
+
+#[tokio::test]
+async fn a_message_over_the_windows_limit_is_refused_as_an_invalid_argument() {
+    let (h, mut client) = start("inbox-i2-send-message", |config| {
+        config.chat_intro = String::new();
+        config.approval_policy = Some(common::policy(&["send_message"]));
+    })
+    .await;
+    let id = delivering_window(&h, &mut client, profile_delivery("max_bytes = 1000")).await;
+    let send = |text: String| ClientMessage::SendText {
+        window_id: id.clone(),
+        text,
+    };
+
+    // 320 characters of 3 bytes each: the envelope is far below 1000 characters, but over
+    // 1000 bytes.
+    common::send(&mut client, &send("あ".repeat(320))).await;
+    let refused = common::read_response(&mut client).await;
+    assert_eq!(
+        crate::send_message_lifecycle::state_of(&refused).as_deref(),
+        Some("invalid_argument"),
+        "{refused:?}"
+    );
+    assert_eq!(pending(&h, &id), 0, "nothing was deposited");
+
+    common::send(&mut client, &send("a".repeat(320))).await;
+    let queued = common::read_response(&mut client).await;
+    assert_eq!(
+        crate::send_message_lifecycle::state_of(&queued).as_deref(),
+        Some("queued"),
+        "{queued:?}"
+    );
 }
 
 // --- context ----------------------------------------------------------------

@@ -131,7 +131,7 @@ const WSL_HASHES: [(&str, &str); 7] = [
 /// registration takes them away; they are not part of the trust a window needs.
 const RETIRED_SUFFIXES: [&str; 2] = ["user_prompt_submit:0:1", "user_prompt_submit:0:2"];
 
-/// What a hook's `additionalContextLimit` must be: the profile's `max_chars`.
+/// What a hook's `additionalContextLimit` must be: the profile's `max_bytes`.
 const CONTEXT_LIMIT: i64 = 10_000;
 
 fn program_of(profile: &str) -> &'static str {

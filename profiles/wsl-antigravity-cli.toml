@@ -37,7 +37,7 @@ separator = "\t"
 # agy has no way to wake an idle session, so `wake` stays `none`.
 [delivery]
 output = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}'
-max_chars = 10000
+max_bytes = 10000
 wake = "none"
 launch_prompt = ["-i", "{prompt}"]
 

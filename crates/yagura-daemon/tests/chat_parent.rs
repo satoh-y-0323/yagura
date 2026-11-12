@@ -104,7 +104,7 @@ fn expect_chat_posted(msg: DaemonMessage) -> ChatPostedResult {
 fn wake_none_delivery() -> yagura_daemon::profile_delivery::ProfileDelivery {
     yagura_daemon::profile_delivery::ProfileDelivery {
         output: yagura_daemon::inbox::DoorOutputs::all(&yagura_daemon::inbox::OutputForm::Plain),
-        max_chars: yagura_daemon::inbox::DEFAULT_MAX_CHARS,
+        max_bytes: yagura_daemon::inbox::DEFAULT_MAX_BYTES,
         wake: yagura_daemon::profile_delivery::WakeMode::None,
         wake_stream: yagura_protocol::DeliveryStream::Stderr,
         wake_exit: yagura_daemon::inbox::DEFAULT_WAKE_EXIT,
