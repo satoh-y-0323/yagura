@@ -21,7 +21,6 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "list_windows",
     "get_window_status",
     "send_message",
-    "send_keys",
     "open_window",
     "interrupt_window",
     "close_window",
@@ -1184,11 +1183,6 @@ fn router_cases() -> Vec<(&'static str, Value, &'static str)> {
             "send_text",
         ),
         (
-            "send_keys",
-            json!({ "window_id": "w-1", "keys": ["enter"] }),
-            "send_keys",
-        ),
-        (
             "open_window",
             json!({ "command": ["probe"] }),
             "open_window",
@@ -1358,4 +1352,29 @@ async fn every_listed_tool_name_is_routed_to_its_own_request_and_returns_the_dae
             daemon.seen.lock().unwrap()
         );
     }
+
+    // A tool taken off the list must not stay callable by name: the daemon types
+    // nothing into a window's composer, so a call of the old key-writing tool
+    // reaches no request at all.
+    daemon.seen.lock().unwrap().clear();
+    let id = 1000;
+    send_line(
+        &mut write,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "send_keys",
+                "arguments": { "window_id": "w-1", "keys": ["enter"] },
+            },
+        }),
+    )
+    .await;
+    let response = recv_response(&mut lines, id).await;
+    assert!(
+        daemon.seen.lock().unwrap().is_empty(),
+        "a call of send_keys must send the daemon nothing, sent {:?}; answered {response}",
+        daemon.seen.lock().unwrap()
+    );
 }

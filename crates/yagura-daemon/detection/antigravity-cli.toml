@@ -69,22 +69,5 @@ continuation_prefix = "  "
 # than the composer folds under a `> ↑ N more lines` row.
 blank_lines_in_body = true
 
-[input]
-bracketed_paste = true
-submit = "\r"
-# No startup oscillation observed over 5 Windows + 3 WSL runs (max 732ms
-# held before WaitingInput); load was not measured, so this stays a
-# conservative headroom value pending real-machine confirmation.
-ready_hold_ms = 1500
-submit_delay_ms = 800       # a 1,200-char paste submitted cleanly at 0/100/300ms gaps
-delivery_confirm_ms = 8000  # reaction latency not separately measured; kept at the default
-# Ctrl+U erases one display line per press and does nothing on an empty
-# composer, so a take-back repeats it once per line the body may occupy.
-clear = "\u0015"
-probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.4.12 and 1.5.0, Windows, Linux and macOS)
-# First character taken as a key: `!` runs a shell command, `?` opens the help
-# (docs: antigravity.google/docs/cli/using; checked on this CLI).
-leading_keys = ["!", "?"]
-
 [requests]
 abandoned_at_turn_end = false  # cancels the call when the user presses Esc and when its own call timeout ends it

@@ -79,18 +79,3 @@ marker = '^(?:╻▄+$|❯ ?)'
 separator = ""
 continuation_prefix = "┃ "
 left_panel = '^[^│]*│'
-
-# A body and its submit key written back to back left the body unsent, so the
-# submit waits for the default delay. Ctrl+U empties the whole composer,
-# wrapped rows included, and does nothing in an empty one.
-[input]
-bracketed_paste = true
-submit = "\r"
-clear = "\u0015"
-ready_hold_ms = 1500
-submit_delay_ms = 800
-delivery_confirm_ms = 8000
-probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.0.105, Windows, Linux and macOS)
-# First character taken as a key: `!` runs a shell command, `?` on an empty
-# composer shows the help (docs: cli-command-reference; checked). `$` stays as text.
-leading_keys = ["!", "?"]

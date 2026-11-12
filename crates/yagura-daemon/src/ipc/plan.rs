@@ -1112,8 +1112,7 @@ pub(super) async fn handle_approve_plan(
                 // One notice per approved plan, however often it is approved.
                 if !entry.inbox().holds(&key) {
                     let notice = Parcel::notice(key, compose_plan_approved_notice(&info.plan_id));
-                    let (deposited, saving) =
-                        entry.inbox().deposit_saved(notice.clone(), None, None);
+                    let (deposited, saving) = entry.inbox().deposit_saved(notice.clone());
                     // Refused only once the owner's window has ended; the owner
                     // still reads the plan through get_plan.
                     let _ = super::notice_queue::after_deposit(registry, &entry, deposited);
@@ -1125,13 +1124,8 @@ pub(super) async fn handle_approve_plan(
                             tracing::warn!(
                                 "a plan approval notice could not be kept; telling the owner from memory"
                             );
-                            let _ = super::notice_queue::deposit(
-                                &registry,
-                                &entry,
-                                notice.unsaved(),
-                                None,
-                                None,
-                            );
+                            let _ =
+                                super::notice_queue::deposit(&registry, &entry, notice.unsaved());
                         }
                     });
                 }

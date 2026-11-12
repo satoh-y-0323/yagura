@@ -6,15 +6,15 @@
 //! defaults applied, with the resource limits enforced on the parsed content itself.
 //! `load_definition` surfaces IO failures as errors and never degrades to `Unknown`.
 //! Rejections are asserted only as `Result::Err`, never matched variant by variant, so
-//! the error shape stays free to change. The `[input]` range and consistency rules are
-//! the one exception: naming the offending key in the message is part of their contract,
-//! so those cases assert on the rendered message rather than on the error's variant.
+//! the error shape stays free to change. An unknown key is the one exception: naming it
+//! in the message is part of the contract, so those cases assert on the rendered message.
+//! The keys the daemon typed with load with a warning and are not used.
 
 use crate::common;
 
 use common::detection_rules::rule_for_status;
 use yagura_daemon::detector::definition::{
-    ComposerSection, InputSection, Region, is_valid_detection_name, parse_definition,
+    ComposerSection, Region, is_valid_detection_name, parse_definition,
 };
 use yagura_protocol::WindowStatus;
 
@@ -536,51 +536,20 @@ fn codex_cli_detection_file_loads() {
 }
 
 // =====================================================================
-// The `[input]` table: how a definition says its CLI is written to
+// The `[input]` table and the `[composer]` placeholder: how a definition said its CLI
+// was typed into, which the daemon no longer does
 // =====================================================================
-
-/// Every `[input]` key at once. Control bytes are written as basic-string unicode
-/// escapes, so no raw control character is embedded in this source where it would be
-/// invisible to a reader diffing it.
-const FULL_INPUT_TABLE: &str = r#"[input]
-bracketed_paste = true
-submit = "\r"
-submit_delay_ms = 800
-clear = "\u0015"
-delivery_confirm_ms = 9000
-resend_max = 4"#;
-
-/// The `[input]` table shared by the two tests that pin the scope of the
-/// "submit delay must outlast the debounce" rule: identical values, judged against a
-/// definition that declares `[debounce]` and one that does not.
-const DEBOUNCE_BOUNDARY_INPUT_TABLE: &str = r#"[input]
-submit_delay_ms = 300
-delivery_confirm_ms = 8000"#;
-
-/// An `[input]` table that omits `submit_delay_ms` entirely, used by the two tests that
-/// pin the rule to the *default* it falls back to (800 ms) rather than to a value the
-/// definition wrote down: that default must still outlast the debounce it is judged
-/// against.
-const OMITTED_SUBMIT_DELAY_INPUT_TABLE: &str = r#"[input]
-delivery_confirm_ms = 8000"#;
 
 /// A valid definition carrying `[debounce] confirm_ms = 300`, with `input` appended
 /// verbatim so each case differs only in the table under test.
 fn definition_with_input(name: &str, input: &str) -> String {
-    definition_with_debounce_and_input(name, 300, input)
-}
-
-/// [`definition_with_input`] with the `[debounce].confirm_ms` value under the caller's
-/// control, so the boundary against a *default* `submit_delay_ms` can be pinned on both
-/// sides (300 ms lets the 800 ms default clear it; 900 ms does not).
-fn definition_with_debounce_and_input(name: &str, confirm_ms: u64, input: &str) -> String {
     format!(
         r#"
 schema_version = 1
 name = "{name}"
 
 [debounce]
-confirm_ms = {confirm_ms}
+confirm_ms = 300
 
 [[rules]]
 status = "idle"
@@ -591,34 +560,6 @@ region = "bottom"
 {input}
 "#
     )
-}
-
-/// [`definition_with_input`] without the `[debounce]` table: the loader cannot know the
-/// effective `confirm_ms` such a definition runs under, since that comes from the
-/// daemon's own configuration.
-fn definition_without_debounce_with_input(name: &str, input: &str) -> String {
-    format!(
-        r#"
-schema_version = 1
-name = "{name}"
-
-[[rules]]
-status = "idle"
-pattern = 'x'
-priority = 1
-region = "bottom"
-
-{input}
-"#
-    )
-}
-
-/// The `[input]` table of a definition that must load.
-fn input_section_of(source: &str) -> InputSection {
-    parse_definition(source)
-        .expect("a definition carrying a valid [input] table must load")
-        .input
-        .expect("a definition that declares [input] must keep it on the loaded definition")
 }
 
 /// The rendered message of a rejection, for the cases whose contract includes naming the
@@ -633,368 +574,70 @@ fn rejection_message(source: &str) -> String {
     }
 }
 
-#[test]
-fn input_table_is_kept_verbatim_with_no_defaults_applied() {
-    let input = input_section_of(&definition_with_input("input-full", FULL_INPUT_TABLE));
+/// The keys the daemon used to type into a window with: every `[input]` key, and the
+/// `[composer]` placeholder that only told an empty composer from a typed one. Each
+/// comes with two values, the second one the old loader refused.
+const DEPRECATED_TYPING_KEYS: [(&str, &str, &str, &str); 12] = [
+    ("input", "bracketed_paste", "true", "false"),
+    ("input", "submit", r#""\r""#, r#""""#),
+    ("input", "submit_delay_ms", "800", "5001"),
+    ("input", "clear", r#""\u0015""#, r#""123456789""#),
+    ("input", "delivery_confirm_ms", "8000", "30001"),
+    ("input", "resend_max", "1", "5"),
+    ("input", "ready_hold_ms", "0", "10001"),
+    ("input", "reflect_wait_ms", "500", "10001"),
+    ("input", "probe", r#""x""#, r#""xzx""#),
+    ("input", "erase", r#""\u0008""#, r#""""#),
+    ("input", "leading_keys", r#"["!"]"#, r#"["!", "ab"]"#),
+    ("composer", "placeholder", "'hint'", "'('"),
+];
 
-    assert_eq!(input.bracketed_paste, Some(true));
-    assert_eq!(input.submit.as_deref(), Some("\r"));
-    assert_eq!(input.submit_delay_ms, Some(800));
-    assert_eq!(input.clear.as_deref(), Some("\u{15}"));
-    assert_eq!(
-        input.clear.as_deref().map(str::len),
-        Some(1),
-        "the escape must decode to the single byte the definition means to send, not to \
-         its six-character source spelling"
-    );
-    assert_eq!(input.delivery_confirm_ms, Some(9000));
-    assert_eq!(input.resend_max, Some(4));
+/// A definition reading its composer, with `key = value` written into `table`.
+fn definition_with_typing_key(table: &str, key: &str, value: &str) -> String {
+    let composer = "[composer]\nmarker = 'MARK'\nseparator = \" \"\ncontinuation_prefix = \"\"";
+    let tables = if table == "composer" {
+        format!("{composer}\n{key} = {value}")
+    } else {
+        format!("{composer}\n\n[{table}]\n{key} = {value}")
+    };
+    definition_with_input("typing-key", &tables)
 }
 
+/// A definition that still writes a typing key loads whatever its value, warns naming
+/// the key, and loads the same whichever value it writes: nothing reads the value.
+/// The composer table itself stays, since its marker keeps the composer's text out of
+/// the status rules.
 #[test]
-fn input_keys_the_definition_omits_stay_none() {
-    let input = input_section_of(&definition_with_input(
-        "input-partial",
-        "[input]\nbracketed_paste = true",
-    ));
-
-    assert_eq!(input.bracketed_paste, Some(true));
-    assert_eq!(
-        input.submit, None,
-        "the loader applies no defaults: an omitted key stays absent so the layer that owns \
-         the defaults can tell 'not written' from 'written as the default value'"
-    );
-    assert_eq!(input.submit_delay_ms, None);
-    assert_eq!(input.clear, None);
-    assert_eq!(input.delivery_confirm_ms, None);
-    assert_eq!(input.resend_max, None);
-}
-
-#[test]
-fn input_is_none_when_the_table_is_omitted() {
-    let definition = parse_definition(&minimal_valid_toml()).unwrap();
-
-    assert!(
-        definition.input.is_none(),
-        "a definition without an [input] table must not gain a synthesised one"
-    );
-}
-
-#[test]
-fn rejects_submit_delay_ms_over_its_range() {
-    let message = rejection_message(&definition_with_input(
-        "input-submit-delay-over",
-        "[input]\nsubmit_delay_ms = 5001",
-    ));
-
-    assert!(
-        message.contains("input.submit_delay_ms"),
-        "an out-of-range value must fail the whole definition and name the offending key, \
-         got: {message}"
-    );
-}
-
-#[test]
-fn rejects_delivery_confirm_ms_over_its_range() {
-    let message = rejection_message(&definition_with_input(
-        "input-delivery-confirm-over",
-        "[input]\ndelivery_confirm_ms = 30001",
-    ));
-
-    assert!(
-        message.contains("input.delivery_confirm_ms"),
-        "an out-of-range value must fail the whole definition and name the offending key, \
-         got: {message}"
-    );
-}
-
-#[test]
-fn rejects_resend_max_over_its_range() {
-    let message = rejection_message(&definition_with_input(
-        "input-resend-max-over",
-        "[input]\nsubmit_delay_ms = 800\nclear = \"\\u0015\"\ndelivery_confirm_ms = 8000\n\
-         resend_max = 5",
-    ));
-
-    assert!(
-        message.contains("input.resend_max"),
-        "an out-of-range value must fail the whole definition and name the offending key, \
-         got: {message}"
-    );
-    assert!(
-        !message.contains("input.delivery_confirm_ms") && !message.contains("input.clear"),
-        "the other two keys are written so that neither consistency rule can fire, and both \
-         of those rules name a second key: this case must be rejected by the range check \
-         itself, got: {message}"
-    );
-}
-
-/// The probe and erase keys are written into the child as they are, so only
-/// distinct visible characters may serve as probes and an erase key must stay
-/// within the input sequence bound. Each probe character may be typed into an
-/// empty composer on its own, so none may be one of the leading keys.
-#[test]
-fn probe_and_erase_keys_outside_their_shapes_fail_the_definition() {
-    let input = |extra: &str| format!("[input]\nclear = \"\\u0015\"\n{extra}");
-    for (extra, key) in [
-        (r#"probe = """#, "input.probe"),
-        (r#"probe = "xzx""#, "input.probe"),
-        (r#"probe = "abcdefghi""#, "input.probe"),
-        (r#"probe = "x z""#, "input.probe"),
-        ("leading_keys = [\"!\"]\nprobe = \"x!\"", "input.probe"),
-        (r#"probe = " ""#, "input.probe"),
-        (r#"probe = "\u0003""#, "input.probe"),
-        (r#"probe = "\u001b""#, "input.probe"),
-        (r#"erase = """#, "input.erase"),
-        (r#"erase = "123456789""#, "input.erase"),
-    ] {
-        let message = rejection_message(&definition_with_input("input-probe", &input(extra)));
-        assert!(
-            message.contains(key),
-            "{extra} must fail the definition and name {key}, got: {message}"
+fn a_typing_key_loads_with_a_warning_and_its_value_changes_nothing() {
+    for (table, key, one, other) in DEPRECATED_TYPING_KEYS {
+        let named = regex::Regex::new(&format!(r"\b{key}\b")).unwrap();
+        let mut loaded = Vec::new();
+        for value in [one, other] {
+            let source = definition_with_typing_key(table, key, value);
+            let (warns, parsed) =
+                common::store_fixtures::capture_warn_events(|| parse_definition(&source));
+            let definition = parsed.unwrap_or_else(|err| {
+                panic!("{table}.{key} = {value} is deprecated and must not fail the load: {err}")
+            });
+            assert!(
+                warns.iter().any(|event| {
+                    named.is_match(&event.message)
+                        || event.fields.values().any(|field| named.is_match(field))
+                }),
+                "loading {table}.{key} = {value} must warn naming {key}; warned: {:?}",
+                warns.iter().map(|event| &event.message).collect::<Vec<_>>()
+            );
+            assert!(
+                definition.composer.is_some(),
+                "{table}.{key} = {value} must leave the [composer] table loaded"
+            );
+            loaded.push(format!("{definition:?}"));
+        }
+        assert_eq!(
+            loaded[0], loaded[1],
+            "{table}.{key} = {one} and {table}.{key} = {other} must load the same definition"
         );
     }
-
-    for (extra, probe, erase) in [
-        (r#"probe = "x""#, Some("x"), None),
-        (r#"probe = "xy""#, Some("xy"), None),
-        (r#"probe = "xzv""#, Some("xzv"), None),
-        ("leading_keys = [\"!\"]\nprobe = \"xzv\"", Some("xzv"), None),
-        (r#"probe = "é""#, Some("é"), None),
-        (
-            "probe = \"x\"\nerase = \"\\u0008\"",
-            Some("x"),
-            Some("\u{8}"),
-        ),
-    ] {
-        let section = input_section_of(&definition_with_input("input-probe", &input(extra)));
-        assert_eq!(section.probe.as_deref(), probe, "{extra}");
-        assert_eq!(section.erase.as_deref(), erase, "{extra}");
-    }
-}
-
-/// Every line the daemon writes on its own begins with `[yagura `: a probe of
-/// `[` would read alone exactly as such a line begins to show, so the
-/// definition is refused and the message says why.
-#[test]
-fn a_probe_that_is_the_first_character_of_the_daemons_own_lines_fails_the_definition() {
-    let message = rejection_message(&definition_with_input(
-        "input-probe-bracket",
-        "[input]\nclear = \"\\u0015\"\nprobe = \"[\"",
-    ));
-
-    assert!(
-        message.contains("input.probe") && message.contains("daemon"),
-        "a probe of `[` must fail the definition, naming the key and the daemon's own lines, \
-         got: {message}"
-    );
-}
-
-#[test]
-fn rejects_an_empty_submit_sequence() {
-    let message = rejection_message(&definition_with_input(
-        "input-submit-empty",
-        "[input]\nsubmit = \"\"",
-    ));
-
-    assert!(
-        message.contains("input.submit"),
-        "a submit sequence that sends nothing is not a submit, so it must fail the whole \
-         definition and name the offending key, got: {message}"
-    );
-}
-
-#[test]
-fn rejects_a_submit_sequence_over_eight_bytes() {
-    let message = rejection_message(&definition_with_input(
-        "input-submit-too-long",
-        "[input]\nsubmit = \"123456789\"",
-    ));
-
-    assert!(
-        message.contains("input.submit"),
-        "a nine-byte submit sequence is out of range and must fail the whole definition, \
-         naming the offending key, got: {message}"
-    );
-}
-
-#[test]
-fn rejects_a_clear_sequence_over_eight_bytes() {
-    let message = rejection_message(&definition_with_input(
-        "input-clear-too-long",
-        "[input]\nclear = \"123456789\"",
-    ));
-
-    assert!(
-        message.contains("input.clear"),
-        "a nine-byte clear sequence is out of range and must fail the whole definition, \
-         naming the offending key, got: {message}"
-    );
-}
-
-#[test]
-fn accepts_the_upper_bound_of_every_input_range() {
-    let input = input_section_of(&definition_with_input(
-        "input-upper-bounds",
-        "[input]\nsubmit = \"12345678\"\nsubmit_delay_ms = 5000\nclear = \"12345678\"\n\
-         delivery_confirm_ms = 30000\nresend_max = 4",
-    ));
-
-    assert_eq!(input.submit.as_deref(), Some("12345678"));
-    assert_eq!(input.submit_delay_ms, Some(5000));
-    assert_eq!(input.clear.as_deref(), Some("12345678"));
-    assert_eq!(input.delivery_confirm_ms, Some(30000));
-    assert_eq!(
-        input.resend_max,
-        Some(4),
-        "the bounds themselves are inside the range: rejecting them would put the values \
-         the bundled definitions are allowed to carry out of reach"
-    );
-}
-
-#[test]
-fn rejects_resending_when_delivery_is_never_confirmed() {
-    let message = rejection_message(&definition_with_input(
-        "input-resend-without-confirm",
-        "[input]\ndelivery_confirm_ms = 0\nresend_max = 1\nclear = \"\\u0015\"",
-    ));
-
-    assert!(
-        message.contains("input.resend_max requires input.delivery_confirm_ms to be non-zero"),
-        "a resend only ever happens as the result of a confirmation, so asking for one \
-         without confirming delivery is a contradiction the loader must refuse, got: \
-         {message}"
-    );
-}
-
-#[test]
-fn accepts_resending_without_a_clear_sequence() {
-    // The resend action only writes the submit key again, so a clear
-    // sequence is not a precondition for resending.
-    let input = input_section_of(&definition_with_input(
-        "input-resend-without-clear",
-        "[input]\nsubmit_delay_ms = 800\ndelivery_confirm_ms = 8000\nresend_max = 1",
-    ));
-
-    assert_eq!(input.resend_max, Some(1));
-    assert_eq!(
-        input.clear, None,
-        "a resend-requesting definition must load even when it declares no clear sequence \
-         at all"
-    );
-}
-
-#[test]
-fn accepts_a_clear_sequence_alongside_a_disabled_delivery_confirmation() {
-    // The load-time check this loader keeps only rejects
-    // `resend_max > 0` combined with `delivery_confirm_ms == 0` (no resend
-    // trigger can ever fire), not the presence of a clear sequence by itself.
-    let input = input_section_of(&definition_with_input(
-        "input-clear-with-confirm-off",
-        "[input]\nclear = \"\\u0015\"\ndelivery_confirm_ms = 0",
-    ));
-
-    assert_eq!(input.clear.as_deref(), Some("\u{15}"));
-    assert_eq!(input.delivery_confirm_ms, Some(0));
-}
-
-#[test]
-fn rejects_an_input_table_that_still_writes_clear_per_char() {
-    let message: String = rejection_message(&definition_with_input(
-        "input-clear-per-char-withdrawn",
-        "[input]\nclear_per_char = \"\\u007f\"",
-    ));
-
-    assert!(
-        message.contains("clear_per_char"),
-        "clear_per_char was withdrawn: the loader must reject it as an unknown key and name \
-         it, got: {message}"
-    );
-}
-
-#[test]
-fn the_same_definition_loads_once_clear_per_char_is_removed() {
-    let input: InputSection = input_section_of(&definition_with_input(
-        "input-clear-per-char-removed",
-        "[input]\nbracketed_paste = true",
-    ));
-
-    assert_eq!(
-        input.bracketed_paste,
-        Some(true),
-        "removing the withdrawn key from the same table must let the definition load"
-    );
-}
-
-#[test]
-fn rejects_a_submit_delay_that_does_not_outlast_the_debounce() {
-    let message = rejection_message(&definition_with_input(
-        "input-submit-delay-under-debounce",
-        DEBOUNCE_BOUNDARY_INPUT_TABLE,
-    ));
-
-    assert!(
-        message.contains("input.submit_delay_ms"),
-        "the rejection must name the input key it judged, got: {message}"
-    );
-    assert!(
-        message.contains("debounce.confirm_ms"),
-        "the rejection must name the other side of the comparison too, since the fix may \
-         belong to either key, got: {message}"
-    );
-}
-
-#[test]
-fn accepts_the_same_submit_delay_when_the_definition_declares_no_debounce() {
-    let input = input_section_of(&definition_without_debounce_with_input(
-        "input-submit-delay-no-debounce",
-        DEBOUNCE_BOUNDARY_INPUT_TABLE,
-    ));
-
-    assert_eq!(
-        input.submit_delay_ms,
-        Some(300),
-        "a definition without [debounce] runs under the daemon's own confirm window, which \
-         the loader cannot read, so it must not judge the comparison at all"
-    );
-    assert_eq!(input.delivery_confirm_ms, Some(8000));
-}
-
-#[test]
-fn rejects_an_omitted_submit_delay_ms_when_its_default_does_not_outlast_the_debounce() {
-    let message = rejection_message(&definition_with_debounce_and_input(
-        "input-omitted-submit-delay-under-debounce",
-        900,
-        OMITTED_SUBMIT_DELAY_INPUT_TABLE,
-    ));
-
-    assert!(
-        message.contains("input.submit_delay_ms"),
-        "the rejection must name the input key it judged even though the definition omitted \
-         it: the value under judgment is the default (800 ms) that would apply, and that \
-         default does not outlast a 900 ms debounce, got: {message}"
-    );
-    assert!(
-        message.contains("debounce.confirm_ms"),
-        "the rejection must name the other side of the comparison too, got: {message}"
-    );
-}
-
-#[test]
-fn accepts_an_omitted_submit_delay_ms_when_its_default_outlasts_the_debounce() {
-    let input = input_section_of(&definition_with_debounce_and_input(
-        "input-omitted-submit-delay-over-debounce",
-        300,
-        OMITTED_SUBMIT_DELAY_INPUT_TABLE,
-    ));
-
-    assert_eq!(
-        input.submit_delay_ms, None,
-        "the loader judges the omitted key against its default without writing that \
-         default onto the loaded definition -- InputProfile::from_section, not the loader, \
-         owns applying defaults"
-    );
-    assert_eq!(input.delivery_confirm_ms, Some(8000));
 }
 
 #[test]
@@ -1138,151 +781,13 @@ fn rejects_an_unknown_input_key() {
 }
 
 #[test]
-fn ready_hold_ms_is_none_when_omitted_and_kept_verbatim_at_its_bounds() {
-    let omitted = input_section_of(&definition_with_input(
-        "input-ready-hold-omitted",
-        "[input]\nbracketed_paste = true",
-    ));
-    assert_eq!(omitted.ready_hold_ms, None);
-
-    let zero = input_section_of(&definition_with_input(
-        "input-ready-hold-zero",
-        "[input]\nready_hold_ms = 0",
-    ));
-    assert_eq!(zero.ready_hold_ms, Some(0));
-
-    let upper = input_section_of(&definition_with_input(
-        "input-ready-hold-upper",
-        "[input]\nready_hold_ms = 10000",
-    ));
-    assert_eq!(upper.ready_hold_ms, Some(10000));
-}
-
-#[test]
-fn rejects_ready_hold_ms_over_its_range() {
-    let message = rejection_message(&definition_with_input(
-        "input-ready-hold-over",
-        "[input]\nready_hold_ms = 10001",
-    ));
-
-    assert!(
-        message.contains("input.ready_hold_ms"),
-        "an out-of-range value must fail the whole definition and name the offending key, \
-         got: {message}"
-    );
-}
-
-#[test]
-fn reflect_wait_ms_is_kept_verbatim_at_its_upper_bound() {
-    let upper: InputSection = input_section_of(&definition_with_input(
-        "input-reflect-wait-upper",
-        "[input]\nreflect_wait_ms = 10000",
-    ));
-    assert_eq!(upper.reflect_wait_ms, Some(10000));
-}
-
-#[test]
-fn accepts_reflect_wait_ms_over_its_old_range_because_the_key_no_longer_bounds_anything() {
-    // Delivery no longer waits a duration for a write to show, so a value that
-    // used to stall the window cannot, and rejecting the whole definition for it
-    // would only turn a harmless old definition into a window stuck at `Unknown`.
-    let over: InputSection = input_section_of(&definition_with_input(
-        "input-reflect-wait-over",
-        "[input]\nreflect_wait_ms = 10001",
-    ));
-
-    assert_eq!(over.reflect_wait_ms, Some(10001));
-}
-
-#[test]
-fn accepts_a_nonzero_ready_hold_ms_alongside_a_disabled_delivery_confirmation() {
-    let input = input_section_of(&definition_with_input(
-        "input-ready-hold-with-confirm-off",
-        "[input]\nready_hold_ms = 1000\ndelivery_confirm_ms = 0",
-    ));
-
-    assert_eq!(input.ready_hold_ms, Some(1000));
-    assert_eq!(input.delivery_confirm_ms, Some(0));
-}
-
-#[test]
-fn accepts_a_ready_hold_ms_at_or_above_the_quiescence_after_ms() {
-    let toml = r#"
-schema_version = 1
-name = "input-ready-hold-above-quiescence"
-
-[debounce]
-confirm_ms = 300
-
-[[rules]]
-status = "idle"
-pattern = 'x'
-priority = 1
-region = "bottom"
-
-[quiescence]
-status = "idle"
-after_ms = 2000
-
-[input]
-ready_hold_ms = 2000
-"#;
-
-    let input = input_section_of(toml);
-
-    assert_eq!(input.ready_hold_ms, Some(2000));
-}
-
-#[test]
-fn codex_cli_detection_file_carries_its_input_section() {
-    let input = common::repo_definition("codex-cli.toml")
-        .input
-        .expect("the bundled codex-cli definition must declare how its CLI is written to");
-
-    assert_eq!(input.bracketed_paste, Some(true));
-    assert_eq!(input.submit.as_deref(), Some("\r"));
-    assert_eq!(input.ready_hold_ms, Some(3000));
-    assert_eq!(input.submit_delay_ms, Some(800));
-    assert_eq!(input.clear.as_deref(), Some("\u{15}"));
-    assert_eq!(input.clear.as_deref().map(str::len), Some(1));
-    assert_eq!(input.delivery_confirm_ms, Some(9000));
-    assert_eq!(
-        input.resend_max,
-        Some(4),
-        "the resend budget is what carries the last write past the receiver's startup \
-         discard boundary, so its value is part of the bundled definition's contract"
-    );
-}
-
-#[test]
-fn claude_code_detection_file_carries_its_input_section() {
-    let input = common::repo_definition("claude-code.toml")
-        .input
-        .expect("the bundled claude-code definition must declare how its CLI is written to");
-
-    assert_eq!(input.bracketed_paste, Some(true));
-    assert_eq!(input.submit.as_deref(), Some("\r"));
-    assert_eq!(input.ready_hold_ms, None);
-    assert_eq!(input.submit_delay_ms, Some(800));
-    assert_eq!(input.clear.as_deref(), Some("\u{15}"));
-    assert_eq!(input.clear.as_deref().map(str::len), Some(1));
-    assert_eq!(input.delivery_confirm_ms, Some(8000));
-    assert_eq!(input.resend_max, Some(1));
-}
-
-#[test]
-fn generic_shell_detection_file_declares_no_composer_and_no_input() {
+fn generic_shell_detection_file_declares_no_composer() {
     let definition = common::repo_definition("generic-shell.toml");
 
     assert!(
         definition.composer.is_none(),
         "a plain shell's screen carries no way to tell its own prompt apart from a \
          program's own output, so the bundled definition must not claim it can read one"
-    );
-    assert!(
-        definition.input.is_none(),
-        "with no composer to read back, the daemon never writes into this window, so the \
-         bundled definition carries no [input] table either"
     );
     assert!(
         !definition.rules.is_empty(),
@@ -1464,49 +969,6 @@ fn codex_cli_detection_file_carries_a_composer_section() {
 }
 
 // =====================================================================
-// `[input].reflect_wait_ms`: the upper bound the daemon waits for a write
-// to reflect on screen, shared by the delivery-confirmation wait and the
-// composer read-back query. Same loader contract as every other `[input]`
-// key: kept verbatim, no default applied here.
-// =====================================================================
-
-#[test]
-fn reflect_wait_ms_is_none_when_omitted_and_kept_verbatim_when_present() {
-    let omitted = input_section_of(&definition_with_input(
-        "input-reflect-wait-omitted",
-        "[input]\nbracketed_paste = true",
-    ));
-    assert_eq!(omitted.reflect_wait_ms, None);
-
-    let present = input_section_of(&definition_with_input(
-        "input-reflect-wait-present",
-        "[input]\nreflect_wait_ms = 500",
-    ));
-    assert_eq!(present.reflect_wait_ms, Some(500));
-}
-
-#[test]
-fn accepts_an_erase_sequence_of_eight_bytes() {
-    let input = input_section_of(&definition_with_input(
-        "input-erase-upper-bound",
-        "[input]\nclear = \"\\u0015\"\nprobe = \"x\"\nerase = \"12345678\"",
-    ));
-
-    assert_eq!(input.erase.as_deref(), Some("12345678"));
-}
-
-#[test]
-fn accepts_no_resend_alongside_a_disabled_delivery_confirmation() {
-    let input = input_section_of(&definition_with_input(
-        "input-no-resend-with-confirm-off",
-        "[input]\nclear = \"\\u0015\"\ndelivery_confirm_ms = 0\nresend_max = 0",
-    ));
-
-    assert_eq!(input.resend_max, Some(0));
-    assert_eq!(input.delivery_confirm_ms, Some(0));
-}
-
-// =====================================================================
 // The `[requests]` table: how a CLI treats a tool call still out at the end of its turn
 // =====================================================================
 
@@ -1571,38 +1033,5 @@ fn rejects_an_abandoned_at_turn_end_that_is_not_a_boolean() {
             parse_definition(&source).is_err(),
             "abandoned_at_turn_end = {value} must be rejected"
         );
-    }
-}
-
-#[test]
-fn leading_keys_of_single_visible_characters_load() {
-    let source = definition_with_input(
-        "input-leading-keys",
-        "[input]\nleading_keys = [\"!\", \"?\"]",
-    );
-
-    if let Err(err) = parse_definition(&source) {
-        panic!("leading_keys of single visible characters must load, got: {err}");
-    }
-}
-
-/// Each leading key is compared with one character of a body, so anything but a
-/// single visible character could never match or would match a blank.
-#[test]
-fn leading_keys_outside_a_single_visible_character_fail_the_definition() {
-    for entry in [r#""!!""#, r#""""#, r#"" ""#, r#""\u0007""#] {
-        let source = definition_with_input(
-            "input-leading-keys-bad",
-            &format!("[input]\nleading_keys = [\"!\", {entry}]"),
-        );
-        match parse_definition(&source) {
-            Err(yagura_daemon::detector::definition::DefinitionError::InvalidInput {
-                key, ..
-            }) => assert_eq!(key, "leading_keys", "leading_keys entry {entry}"),
-            other => panic!(
-                "leading_keys entry {entry} must be rejected as InvalidInput, got: {:?}",
-                other.map(|definition| definition.name)
-            ),
-        }
     }
 }

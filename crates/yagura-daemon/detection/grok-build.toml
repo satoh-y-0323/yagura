@@ -56,22 +56,9 @@ priority = 5
 region = "screen"
 
 # The composer is a `│ > ` row (`│ ❯ ` under WSL; what picks the mark is not
-# known) inside a box whose right border is drawn like text, so it is removed
-# before reading. A wrapped draft continues on rows indented by three columns.
-# The hint shown after a cancelled turn reads as empty (1.0.70).
+# known) inside a box. A wrapped draft continues on rows indented by three
+# columns (1.0.70).
 [composer]
 marker = '^\s*│ [>❯]'
 separator = " "
 continuation_prefix = "  │   "
-right_border = '│\s*$'
-placeholder = '^Build anything$'
-
-[input]
-bracketed_paste = true      # a long write left unwrapped stops the CLI under WSL (1.0.70)
-submit = "\r"
-submit_delay_ms = 800       # the text and the Enter written together were sent (1.0.70); kept above confirm_ms
-clear = "\u0015\u007f"      # Ctrl+U empties one row, DEL joins the row above; repeated it empties a multi-row draft and does nothing when empty (1.0.70)
-probe = "xzv"               # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (1.0.70, Windows, Linux and macOS)
-# On an empty composer `!` enters Bash mode and `#` may enter Remember mode
-# (remember_mode setting, so kept on the safe side) (source: prompt.rs). `?` stays as text (1.0.70).
-leading_keys = ["!", "#"]

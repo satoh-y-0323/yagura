@@ -9,9 +9,7 @@
 //! `generic-shell.toml` declares neither `[composer]` nor `[input]`: a plain
 //! shell's screen carries no way to tell its own prompt apart from a
 //! program's own output, so the daemon reads none of it back and writes
-//! nothing into it (`detector_definition.rs`). What `[composer]` reading
-//! looks like in general, on synthetic definitions, lives in
-//! `composer_readout.rs`.
+//! nothing into it (`detector_definition.rs`).
 
 use crate::common;
 

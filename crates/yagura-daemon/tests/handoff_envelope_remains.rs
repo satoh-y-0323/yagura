@@ -92,7 +92,7 @@ async fn a_window_that_took_its_envelope_at_launch_stays_open_after_the_requeste
     assert!(opened);
     assert_eq!(
         serde_json::to_value(delivery).expect("a delivery encodes"),
-        "taken"
+        "delivered"
     );
     drop(requester);
     common::wait_until_no_connection_claims(&h.registry, &requester_window).await;

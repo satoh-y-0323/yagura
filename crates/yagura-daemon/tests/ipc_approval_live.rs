@@ -502,7 +502,7 @@ async fn a_profile_handoff_pre_launch_judgement_still_refuses_when_only_another_
 {
     let (h, _tree) =
         start_profile_daemon("live-handoff-pre-control", NO_AUTO_APPROVE_PLAYBOOK).await;
-    switch_on_and_leave_no_approver(&h, "send_keys").await;
+    switch_on_and_leave_no_approver(&h, "interrupt_window").await;
 
     let mut requester = h.connect().await;
     let before: usize = h.registry.list().len();

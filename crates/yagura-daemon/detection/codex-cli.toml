@@ -62,18 +62,5 @@ marker = '›'
 separator = " "
 continuation_prefix = "  "
 
-[input]
-bracketed_paste = true      # paste_burst.rs treats input closer than 8ms as one burst
-submit = "\r"
-ready_hold_ms = 3000        # startup phase: prompt and work line alternate; measured up to 1.8s under load
-submit_delay_ms = 800       # PASTE_ENTER_SUPPRESS_WINDOW=120ms; 800ms verified for long bodies
-clear = "\u0015"            # erases one display line per press, harmless on an empty composer (repeated by the daemon)
-probe = "xzv"              # each shows as typed, alone, after text and after another, triggers nothing and is erased by one DEL (0.166.0, Windows, Linux and macOS)
-# First non-blank character taken as a key: `!` starts a shell command, `?` on
-# an empty composer opens the shortcuts (chat_composer.rs; checked on this CLI).
-leading_keys = ["!", "?"]
-delivery_confirm_ms = 9000
-resend_max = 4              # re-sends after codex drains input while starting up (discard_pending_input_before_interactive_screen)
-
 [requests]
 abandoned_at_turn_end = true  # ends its turn with a tool call still out, sends no cancellation, and stays running while it waits

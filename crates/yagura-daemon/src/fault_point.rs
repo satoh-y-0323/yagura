@@ -45,12 +45,6 @@ pub enum FaultPoint {
     /// A chat post is committed, and no destination's inbox shows it yet. The
     /// daemon ends there.
     ChatPostCommitted,
-    /// A typed push has written its text and confirmed it in the composer, and
-    /// its first submit key is not pressed yet. The daemon ends there.
-    BeforeSendCommit,
-    /// A typed push has pressed the submit key, and the push has not ended
-    /// yet. The daemon ends there.
-    AfterSendKey,
     /// A door has said it printed a read that took kept parcels, and the end
     /// of what it took is not committed yet. The daemon ends there.
     DoorBeforeSettle,
@@ -71,15 +65,13 @@ pub enum FaultPoint {
 
 impl FaultPoint {
     /// Every point, in the order of [`FaultPoint::name`]'s table.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 11] = [
         Self::HandoffDeposited,
         Self::WriteFails,
         Self::ParcelEndHalfSettled,
         Self::TaskReportHalfWritten,
         Self::WriterPaused,
         Self::ChatPostCommitted,
-        Self::BeforeSendCommit,
-        Self::AfterSendKey,
         Self::DoorBeforeSettle,
         Self::ReportTakenUnanswered,
         Self::WindowHolderStarted,
@@ -97,8 +89,6 @@ impl FaultPoint {
             Self::TaskReportHalfWritten => "task_report_half_written",
             Self::WriterPaused => "writer_paused",
             Self::ChatPostCommitted => "chat_post_committed",
-            Self::BeforeSendCommit => "before_send_commit",
-            Self::AfterSendKey => "after_send_key",
             Self::DoorBeforeSettle => "door_before_settle",
             Self::ReportTakenUnanswered => "report_taken_unanswered",
             Self::WindowHolderStarted => "window_holder_started",

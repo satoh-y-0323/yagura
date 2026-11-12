@@ -17,15 +17,13 @@
 
 use crate::common;
 
-use common::{CopiedEngine, ScreenFeed, SharedLocalScreen, feed_handle};
+use common::{CopiedEngine, ScreenFeed, feed_handle};
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::detector::engine::{ConfirmedStatus, DetectorHandle};
-use yagura_daemon::detector::reading::ComposerReadout;
+use yagura_daemon::detector::engine::DetectorHandle;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 /// Small debounce so a judgement shows up as a confirmed status within a few
@@ -251,40 +249,6 @@ async fn output_that_never_settles_is_judged_at_the_ceiling() {
 }
 
 // =====================================================================
-// The composer is read off a finished screen
-// =====================================================================
-
-/// A query that arrives while the screen is being drawn waits for the screen
-/// to finish, and reads the finished one.
-#[tokio::test(start_paused = true)]
-async fn a_composer_query_during_a_repaint_reads_the_finished_screen() {
-    let config = DaemonConfig::default();
-    let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);
-    let screen = engine.screen().clone();
-    let (handle, _statuses) = DetectorHandle::spawn(engine.into_engine());
-    feed_handle(&screen, &handle, IDLE_SCREEN);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    feed_handle(
-        &screen,
-        &handle,
-        "\x1b[?25l\x1b[2J\x1b[H› old draft".as_bytes(),
-    );
-    let (observation, ()) = tokio::join!(handle.query_composer(), async {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        feed_handle(
-            &screen,
-            &handle,
-            "\x1b[2J\x1b[H› new draft\x1b[?25h".as_bytes(),
-        );
-    });
-    assert_eq!(
-        observation.readout,
-        ComposerReadout::Body("new draft".to_string())
-    );
-}
-
-// =====================================================================
 // Lost or ended evidence is not judged later
 // =====================================================================
 
@@ -315,73 +279,6 @@ async fn a_postponed_judgement_is_dropped_when_the_child_exits() {
     driver.advance_to(1000).await;
     assert_eq!(driver.engine.detected(), DetectedStatus::Exited);
     assert!(!ever_confirmed(&driver, WindowStatus::Running));
-}
-
-// =====================================================================
-// Held composer queries are always answered
-// =====================================================================
-
-/// A spawned detector that has confirmed `WaitingInput` on the idle screen,
-/// with the status receiver kept alive so the driver task keeps running.
-async fn idle_handle() -> (
-    DetectorHandle,
-    UnboundedReceiver<ConfirmedStatus>,
-    SharedLocalScreen,
-) {
-    let config = DaemonConfig::default();
-    let engine = common::new_engine_sized(QUICK_DEF, &config, COLS, ROWS);
-    let screen = engine.screen().clone();
-    let (handle, statuses) = DetectorHandle::spawn(engine.into_engine());
-    feed_handle(&screen, &handle, IDLE_SCREEN);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    (handle, statuses, screen)
-}
-
-/// A screen that keeps the cursor hidden once output stops (a dialog) is
-/// read as soon as output has been quiet long enough.
-#[tokio::test(start_paused = true)]
-async fn a_query_held_on_a_hidden_cursor_is_answered_once_output_is_quiet() {
-    let (handle, _statuses, screen) = idle_handle().await;
-    feed_handle(&screen, &handle, "[?25l[2J[H› held draft".as_bytes());
-    let observation = tokio::time::timeout(Duration::from_millis(100), handle.query_composer())
-        .await
-        .expect("the held query is answered once output has been quiet");
-    assert_eq!(
-        observation.readout,
-        ComposerReadout::Body("held draft".to_string())
-    );
-}
-
-/// A held query is answered at once when the screen is lost.
-#[tokio::test(start_paused = true)]
-async fn a_query_held_when_the_screen_is_lost_is_answered_at_once() {
-    let (handle, _statuses, screen) = idle_handle().await;
-    feed_handle(&screen, &handle, HALF_DRAWN);
-    let (observation, ()) = tokio::join!(
-        tokio::time::timeout(Duration::from_millis(20), handle.query_composer()),
-        async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            screen.lock().poison_after_calls(0);
-            feed_handle(&screen, &handle, b"");
-        }
-    );
-    let observation = observation.expect("the held query is answered when the screen is lost");
-    assert_eq!(observation.readout, ComposerReadout::NotObserved);
-}
-
-/// A held query is answered at once when the child exits.
-#[tokio::test(start_paused = true)]
-async fn a_query_held_when_the_child_exits_is_answered_at_once() {
-    let (handle, _statuses, screen) = idle_handle().await;
-    feed_handle(&screen, &handle, HALF_DRAWN);
-    let (observation, ()) = tokio::join!(
-        tokio::time::timeout(Duration::from_millis(20), handle.query_composer()),
-        async {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            handle.notify_exited();
-        }
-    );
-    observation.expect("the held query is answered when the child exits");
 }
 
 // =====================================================================

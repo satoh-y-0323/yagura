@@ -228,26 +228,6 @@ impl McpSession {
         response
     }
 
-    /// Reads one answer per id in `ids`, in whatever order they arrive, and
-    /// returns them in the order of `ids`.
-    pub async fn responses_to(&mut self, ids: &[i64]) -> Vec<Value> {
-        let mut answers: Vec<Option<Value>> = vec![None; ids.len()];
-        for _ in ids {
-            let response = self.next_line().await;
-            let id = response.get("id").and_then(Value::as_i64);
-            let slot = ids
-                .iter()
-                .position(|expected| Some(*expected) == id)
-                .unwrap_or_else(|| panic!("expected an answer to one of {ids:?}, got {response}"));
-            assert!(
-                answers[slot].is_none(),
-                "request {id:?} was answered twice: {response}"
-            );
-            answers[slot] = Some(response);
-        }
-        answers.into_iter().map(Option::unwrap).collect()
-    }
-
     async fn start(&mut self, method: &str, params: Value) -> i64 {
         let id = self.next_id;
         self.next_id += 1;

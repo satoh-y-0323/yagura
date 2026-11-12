@@ -12,9 +12,9 @@
 //! while the child asks for it (see `encode_key`).
 
 use yagura_protocol::{
-    CellPosition, ClientMessage, ControlKey, InputModes, KITTY_REPORT_ALL_KEYS,
-    KITTY_SUPPORTED_FLAGS, Key, KeyInput, Modifiers, MouseTracking, NamedKey, PointerButton,
-    PointerInput, PointerKind, WheelInput,
+    CellPosition, ClientMessage, InputModes, KITTY_REPORT_ALL_KEYS, KITTY_SUPPORTED_FLAGS, Key,
+    KeyInput, Modifiers, MouseTracking, NamedKey, PointerButton, PointerInput, PointerKind,
+    WheelInput,
 };
 
 use crate::pty::InputState;
@@ -91,49 +91,34 @@ fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     }
 }
 
-/// One write of GUI or MCP input to a window: the bytes, and whether they are
-/// the window's interrupt keys. Built only from key presses or a client
-/// message, so client input never reaches a window as bare bytes.
+/// One write of GUI input to a window. Built only from key presses or a
+/// client message, so client input never reaches a window as bare bytes.
 #[derive(Debug)]
 pub struct ClientWrite {
     bytes: Vec<u8>,
-    is_interrupt_key: bool,
 }
 
 impl ClientWrite {
     /// Key presses written together, each as [`encode_key`] encodes it.
-    /// They are the interrupt keys when their legacy bytes, joined, are
-    /// exactly `interrupt_bytes`: judged on the presses, since the written
-    /// bytes (key records, the Kitty form) differ from the configured ones.
     #[must_use]
-    pub fn from_presses(presses: &[KeyInput], modes: InputModes, interrupt_bytes: &[u8]) -> Self {
+    pub fn from_presses(presses: &[KeyInput], modes: InputModes) -> Self {
         let bytes = presses
             .iter()
             .flat_map(|press| encode_key(press, modes))
             .collect();
-        Self {
-            bytes,
-            is_interrupt_key: presses_match_interrupt(presses, interrupt_bytes),
-        }
+        Self { bytes }
     }
 
     /// What a client message writes to a window in `input`; `None` when it
-    /// writes nothing. A key press is judged as in [`ClientWrite::from_presses`];
-    /// text, a paste, a pointer or wheel report is never the interrupt keys. A
-    /// pointer or wheel event off the screen is dropped, since no report could
-    /// name its cell. Selection and moving the view are not the child's to
-    /// see, so they write nothing.
+    /// writes nothing. A pointer or wheel event off the screen is dropped,
+    /// since no report could name its cell. Selection and moving the view are
+    /// not the child's to see, so they write nothing.
     #[must_use]
-    pub fn from_message(
-        msg: &ClientMessage,
-        input: InputState,
-        interrupt_bytes: &[u8],
-    ) -> Option<Self> {
+    pub fn from_message(msg: &ClientMessage, input: InputState) -> Option<Self> {
         let modes = input.modes;
         let bytes = match msg {
             ClientMessage::Key(key) => {
-                return Self::from_presses(std::slice::from_ref(key), modes, interrupt_bytes)
-                    .non_empty();
+                return Self::from_presses(std::slice::from_ref(key), modes).non_empty();
             }
             ClientMessage::Text { text } => encode_text(text),
             ClientMessage::Paste { text } => encode_paste(text, modes),
@@ -153,11 +138,7 @@ impl ClientWrite {
             }
             _ => Vec::new(),
         };
-        Self {
-            bytes,
-            is_interrupt_key: false,
-        }
-        .non_empty()
+        Self { bytes }.non_empty()
     }
 
     /// The bytes to write.
@@ -166,25 +147,9 @@ impl ClientWrite {
         &self.bytes
     }
 
-    /// Whether the write is the window's interrupt keys, so no take-back of a
-    /// delivery's unsent text goes in front of it.
-    #[must_use]
-    pub fn is_interrupt_key(&self) -> bool {
-        self.is_interrupt_key
-    }
-
     fn non_empty(self) -> Option<Self> {
         (!self.bytes.is_empty()).then_some(self)
     }
-}
-
-fn presses_match_interrupt(presses: &[KeyInput], interrupt_bytes: &[u8]) -> bool {
-    let modes = InputModes::default();
-    let legacy: Vec<u8> = presses
-        .iter()
-        .flat_map(|press| encode_legacy(press, modes))
-        .collect();
-    !legacy.is_empty() && legacy == interrupt_bytes
 }
 
 /// Whether some bytes a press is written as identify an Enter: a CR or LF,
@@ -516,34 +481,6 @@ pub fn encode_focus(focused: bool, modes: InputModes) -> Vec<u8> {
         (false, _) => Vec::new(),
         (true, true) => b"\x1b[I".to_vec(),
         (true, false) => b"\x1b[O".to_vec(),
-    }
-}
-
-/// The key press a `send_keys` key stands for; `None` for
-/// [`ControlKey::Unknown`].
-#[must_use]
-pub fn control_key_press(key: ControlKey) -> Option<KeyInput> {
-    let plain = Modifiers::default();
-    let named = |key| {
-        Some(KeyInput {
-            key: Key::Named(key),
-            mods: plain,
-        })
-    };
-    match key {
-        ControlKey::Escape => named(NamedKey::Escape),
-        ControlKey::Backspace => named(NamedKey::Backspace),
-        ControlKey::Enter => named(NamedKey::Enter),
-        ControlKey::Up => named(NamedKey::ArrowUp),
-        ControlKey::Down => named(NamedKey::ArrowDown),
-        ControlKey::CtrlU => Some(KeyInput {
-            key: Key::Char('u'),
-            mods: Modifiers {
-                ctrl: true,
-                ..plain
-            },
-        }),
-        ControlKey::Unknown => None,
     }
 }
 

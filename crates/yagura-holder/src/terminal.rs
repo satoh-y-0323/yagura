@@ -530,11 +530,6 @@ enum WriteJob {
     /// counted, not answered.
     Unanswered(Vec<u8>),
     ViewFocus(bool),
-    Interval {
-        open: bool,
-    },
-    /// The connection that opened this many intervals was lost.
-    IntervalsLost(usize),
     /// Output arrived while a focus-out waited for it.
     CheckFocus,
 }
@@ -622,19 +617,6 @@ impl InputWriter {
     pub(crate) fn set_view_focus(&self, focused: bool) {
         let mut state = self.state();
         self.queue(&mut state, WriteJob::ViewFocus(focused));
-    }
-
-    pub(crate) fn focus_interval(&self, open: bool) {
-        let mut state = self.state();
-        self.queue(&mut state, WriteJob::Interval { open });
-    }
-
-    /// Closes the `count` intervals a lost connection left open.
-    pub(crate) fn close_intervals(&self, count: usize) {
-        if count > 0 {
-            let mut state = self.state();
-            self.queue(&mut state, WriteJob::IntervalsLost(count));
-        }
     }
 
     /// Output arrived: a focus-out waiting for it may go now.
@@ -801,40 +783,6 @@ impl InputWriter {
                         state
                             .focus
                             .reconcile(published.modes(), published.outputs_fed())
-                    };
-                    write_whole(writer, &report);
-                }
-                WriteJob::Interval { open } => {
-                    let report = {
-                        let mut state = self.state();
-                        let outputs = published.outputs_fed();
-                        let due = if open {
-                            state.focus.open_interval();
-                            true
-                        } else {
-                            state.focus.close_interval()
-                        };
-                        if due {
-                            state.focus.reconcile(published.modes(), outputs)
-                        } else {
-                            Vec::new()
-                        }
-                    };
-                    write_whole(writer, &report);
-                }
-                WriteJob::IntervalsLost(count) => {
-                    let report = {
-                        let mut state = self.state();
-                        let outputs = published.outputs_fed();
-                        let mut due = false;
-                        for _ in 0..count {
-                            due = state.focus.close_interval();
-                        }
-                        if due {
-                            state.focus.reconcile(published.modes(), outputs)
-                        } else {
-                            Vec::new()
-                        }
                     };
                     write_whole(writer, &report);
                 }

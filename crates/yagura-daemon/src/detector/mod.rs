@@ -9,4 +9,4 @@ pub mod reading;
 pub mod source;
 
 pub use engine::{ConfirmedStatus, DetectionEngine, DetectorHandle, InputEcho};
-pub use reading::{ComposerReadout, CopyCounts, CopyRead, CopyRefused, HeldCopy, SharedCopy};
+pub use reading::{CopyCounts, CopyRead, CopyRefused, HeldCopy, SharedCopy};

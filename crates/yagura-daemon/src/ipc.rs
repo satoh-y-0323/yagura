@@ -18,21 +18,19 @@ use std::time::Duration;
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, WriteHalf};
-use tokio::sync::{
-    MutexGuard as AsyncMutexGuard, Notify, Semaphore, broadcast, mpsc, oneshot, watch,
-};
+use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
-    ApprovalRequester, ApprovalRequesterKind, ClientMessage, ControlKey, DaemonMessage,
-    DeliveryState, Frame, FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    InstructionNoticeState, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton,
-    PointerInput, PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo,
-    WindowStatus, check_input_bounds, decode_client_message, encode_daemon_message, frame_decode,
-    frame_encode, is_valid_source, validate_control_keys, validate_handoff_target,
-    validate_handoff_text, validate_launch_option_value, validate_message_text,
+    ApprovalRequester, ApprovalRequesterKind, ClientMessage, DaemonMessage, DeliveryState, Frame,
+    FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, InstructionNoticeState,
+    MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
+    ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
+    decode_client_message, encode_daemon_message, frame_decode, frame_encode, is_valid_source,
+    validate_handoff_target, validate_handoff_text, validate_launch_option_value,
+    validate_message_text,
 };
 
 mod approval_settings;
@@ -61,13 +59,11 @@ use crate::control::{
 use crate::detector::layers::DetectionLayers;
 use crate::detector::reading;
 use crate::handoff::{
-    self, DELIVERY_REACTION_STATUSES, EnvelopeFrom, READY_STATUSES, StartupEvidence, WaitingFacts,
-    WaitingWake, check_envelope_len, compose_identified_envelope, compose_message_envelope,
-    compose_task_notice, is_ready,
+    self, EnvelopeFrom, WaitingFacts, WaitingWake, check_envelope_len, compose_identified_envelope,
+    compose_message_envelope, compose_task_notice,
 };
 use crate::health;
-use crate::inbox::{Parcel, ParcelEnd, Push, PushBudget};
-use crate::input::SubmitOutcome;
+use crate::inbox::{Parcel, ParcelEnd};
 use crate::input_encode::{self, ClientWrite, PointerOutcome, ViewPage, WheelOutcome};
 use crate::live_policy::{self, PolicyCell};
 use crate::palette_store::{self, PaletteStore};
@@ -75,16 +71,15 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
-use crate::pty::{AttachGeneration, FrameSend, FrameSink, InputState, PtyError, SendKey, ViewNote};
+use crate::pty::{AttachGeneration, FrameSend, FrameSink, InputState, SendKey, ViewNote};
 use crate::store::{self, LostWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
-use crate::waiter::{self, ReactionOutcome, StatusAt, WaitOutcome};
+use crate::waiter::{self, StatusAt, WaitOutcome};
 use crate::window::{
-    CliInjection, ComposerResidue, EnvelopeWait, HooksRoute, InputOrigin, LaunchIdentity,
-    McpConnectionClaim, NameRefusal, NotPlaced, NotPlacedReason, OpenWindowRequest, OpenedWindow,
-    RejectedArgument, RequestedCwd, SendStage, SubmitJudgment, SubmitPlacement, TaskOrigin,
-    WakeCommand, WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
+    CliInjection, HooksRoute, InputOrigin, LaunchIdentity, McpConnectionClaim, NameRefusal,
+    OpenWindowRequest, OpenedWindow, RejectedArgument, RequestedCwd, TaskOrigin, WakeCommand,
+    WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
     WindowRenameError, resolve_existing_dir,
 };
 use yagura_protocol::holder::HolderViewOp;
@@ -334,7 +329,6 @@ enum StreamSend {
 /// arguments its handler already validated.
 enum PendingAction {
     SendText(String),
-    SendKeys(Vec<ControlKey>),
     Interrupt,
     Close(bool),
     /// A handoff envelope, plus the requesting window's id for the audit
@@ -352,7 +346,6 @@ impl PendingAction {
     fn tool(&self) -> DestructiveTool {
         match self {
             Self::SendText(_) => DestructiveTool::SendMessage,
-            Self::SendKeys(_) => DestructiveTool::SendKeys,
             Self::Interrupt => DestructiveTool::InterruptWindow,
             Self::Close(_) => DestructiveTool::CloseWindow,
             Self::SendHandoff { .. } => DestructiveTool::SendHandoff,
@@ -559,7 +552,6 @@ impl ProfileHandoffOpen {
 struct DeliveryJob {
     outbound: Arc<Outbound>,
     registry: Arc<WindowRegistry>,
-    config: DaemonConfig,
     entry: Arc<WindowEntry>,
     envelope: String,
     requester: Option<String>,
@@ -573,108 +565,19 @@ struct DeliveryJob {
     permit: Permit<permit::SendHandoff>,
 }
 
-/// What a typed delivery's submit loop could observe of its envelope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TypedOutcome {
-    /// After the submit key, the composer emptied or the window started
-    /// working.
-    Confirmed,
-    /// The submit key was pressed, but no such evidence followed.
-    Unconfirmed,
-    /// The submit key was pressed, and no reaction was looked for or could be.
-    NotObserved,
-    /// The submit key was never pressed for it.
-    NotWritten,
-}
-
-/// What one typed delivery's submit loop ended with.
-///
-/// Assembled once, where the loop leaves, so every reader reads the same
-/// values rather than each recomputing part of them.
-struct DeliveryVerdict {
-    delivery: TypedOutcome,
-    attempts: u8,
-    /// The clock the submit sequence itself stamped, so an elapsed time
-    /// computed from it measures the same span the writer measured.
-    submitted_at: Instant,
-    status_before_submit: WindowStatus,
-    ready_hold_wait_ms: u128,
-}
-
-/// What [`run_delivery`] ended with.
-enum DeliveryEnd<'a> {
-    /// The submit-and-confirm loop reached a verdict.
-    Finished {
-        verdict: DeliveryVerdict,
-        /// What the last attempt left in the composer, for a caller that
-        /// retries the same delivery later.
-        residue: Option<CarriedResidue>,
-        /// Whether it ended because someone else's text is in the composer.
-        foreign_draft: bool,
-    },
-    /// The watched connection closed before the first byte was written.
-    /// Never produced when [`run_delivery`] is called with `closed: None`.
-    Aborted,
-    /// Writing the envelope itself failed (e.g. the child exited mid-write).
-    ///
-    /// Carries the delivery lock onward rather than releasing it here: the
-    /// caller may still have to tear this window down, and no other delivery
-    /// may write into a window while that teardown runs.
-    WriteFailed(PtyError, AsyncMutexGuard<'a, ()>),
-    /// The text declined under the delivery lock, so nothing was written.
-    Skipped,
-    /// Nothing was written: the delivery was turned away before its first
-    /// byte, either because too many deliveries already wait for this
-    /// window's turn or because the shared budget it needs is spent.
-    Exhausted(Scarce),
-}
-
-/// Which bounded resource turned a delivery away.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Scarce {
-    /// The window's queue for its delivery turn is full.
-    TurnWaiters,
-    /// The daemon-wide budget the delivery draws on is spent.
-    SharedBudget,
-}
-
-/// The daemon-wide budget a delivery draws one unit from once it holds its
-/// window's turn -- never while it only waits for it, so a window that never
-/// frees its turn holds at most one unit of it.
-enum SharedBudget {
-    /// The delivery already holds what it needs (or needs nothing).
-    NotNeeded,
-    Counter {
-        counter: Arc<AtomicUsize>,
-        max: usize,
-    },
-}
-
-/// An envelope one [`run_delivery`] call left in a composer, owned so a later
-/// call can pick it up as its own residue.
-#[derive(Clone)]
-struct CarriedResidue {
-    body: String,
-    write_seq: u64,
-}
-
 /// One outstanding-handoff slot: a handoff this connection has accepted and
-/// not yet answered -- the approval wait, the readiness wait, the write and
-/// the delivery observation included. A window opened from a profile always
-/// belongs to such a handoff, so the older invariant (at most N
-/// profile-opened windows awaiting delivery) still holds.
+/// not yet answered -- the approval wait and the wait for an attempt to hand
+/// the envelope over included. A window opened from a profile always belongs
+/// to such a handoff, so at most N profile-opened windows await their start.
 ///
 /// Held from acquisition until the answer is sent -- the approval wait
-/// included, so a handoff awaiting a decision still counts against both
-/// budgets. Both budgets are given back when this is dropped.
+/// included, so a handoff awaiting a decision still counts against its
+/// budgets. They are given back when this is dropped.
 struct HandoffSlot {
     _per_conn: CounterGuard,
     /// Held from acceptance for a handoff that opens a window: the budget
-    /// also bounds the windows (child processes) waiting for a delivery.
+    /// also bounds the windows (child processes) waiting to start.
     _daemon: Option<CounterGuard>,
-    /// For a handoff to an existing window: the daemon-wide budget and its
-    /// limit, drawn on only once the delivery holds that window's turn.
-    daemon_when_turn_held: Option<(Arc<AtomicUsize>, usize)>,
 }
 
 /// Which of the two budgets refused a slot.
@@ -712,12 +615,11 @@ impl HandoffSlot {
         Ok(Self {
             _per_conn: per_conn,
             _daemon: Some(daemon),
-            daemon_when_turn_held: None,
         })
     }
 
-    /// Takes the per-connection slot only; the daemon-wide budget is left to
-    /// [`Self::shared_budget`], drawn once the delivery holds its turn.
+    /// Takes the per-connection slot only: a handoff to an existing window
+    /// starts no process.
     ///
     /// # Errors
     ///
@@ -725,27 +627,13 @@ impl HandoffSlot {
     fn try_acquire_per_conn(
         per_conn: &Arc<AtomicUsize>,
         per_conn_max: usize,
-        daemon: &Arc<AtomicUsize>,
-        daemon_max: usize,
     ) -> Result<Self, SlotExhausted> {
         let per_conn =
             CounterGuard::try_take(per_conn, per_conn_max).ok_or(SlotExhausted::PerConn)?;
         Ok(Self {
             _per_conn: per_conn,
             _daemon: None,
-            daemon_when_turn_held: Some((Arc::clone(daemon), daemon_max)),
         })
-    }
-
-    /// What the delivery still has to draw from the daemon-wide budget.
-    fn shared_budget(&self) -> SharedBudget {
-        match &self.daemon_when_turn_held {
-            Some((counter, max)) => SharedBudget::Counter {
-                counter: Arc::clone(counter),
-                max: *max,
-            },
-            None => SharedBudget::NotNeeded,
-        }
     }
 }
 
@@ -780,15 +668,12 @@ impl Drop for CounterGuard {
     }
 }
 
-/// The refusal for a delivery turned away before its first byte.
-fn delivery_exhausted_msg(scarce: Scarce) -> DaemonMessage {
-    match scarce {
-        Scarce::TurnWaiters => error_msg(
-            "resource_exhausted",
-            "too many deliveries are already waiting on this window",
-        ),
-        Scarce::SharedBudget => SlotExhausted::Daemon.to_message(),
-    }
+/// The refusal for an envelope the window's inbox has no room for.
+fn inbox_full_msg() -> DaemonMessage {
+    error_msg(
+        "resource_exhausted",
+        "the window's inbox already holds as many messages as it takes",
+    )
 }
 
 /// The refusal for a request past this connection's `max_waiters_per_conn`.
@@ -1694,11 +1579,6 @@ impl IpcServer {
             }
             Ok(ClientMessage::SendText { window_id, text }) => {
                 self.handle_send_text(outbound, state, &window_id, &text);
-                FrameOutcome::Continue
-            }
-            Ok(ClientMessage::SendKeys { window_id, keys }) => {
-                self.handle_send_keys(outbound, state, &window_id, &keys)
-                    .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::InterruptWindow { window_id }) => {
@@ -3340,8 +3220,8 @@ impl IpcServer {
     /// then the payload size, then its characters) -> a window whose status is
     /// `Unknown` (refused `status_unknown`) -> a window that declares no
     /// delivery (answered `undelivered_no_delivery` before any approval) ->
-    /// the envelope's length against one answer of the window -> the status,
-    /// composer and approval gates -> the deposit. Pre-validation comes first
+    /// the envelope's length against one answer of the window -> the status
+    /// and approval gates -> the deposit. Pre-validation comes first
     /// so that its refusals do not depend on who is asking.
     ///
     /// The deposit runs on its own task: an attempt to hand the envelope over
@@ -3421,63 +3301,9 @@ impl IpcServer {
 
         let RequestWatch { outbound, .. } = RequestWatch::quiet(&self.registry, outbound, state);
         let registry = Arc::clone(&self.registry);
-        let config = self.config.clone();
         tokio::spawn(async move {
-            execute_send_text(&outbound, &registry, &config, &entry, envelope, permit).await;
+            execute_send_text(&outbound, &registry, &entry, envelope, permit).await;
         });
-    }
-
-    /// Writes a validated named-key sequence to a window's PTY in one raw
-    /// operation. Unlike `send_message`, this deliberately bypasses composer
-    /// inspection because control keys are the requested keys themselves.
-    /// The keys travel through an approval wait as keys: what bytes they
-    /// become depends on the window's modes when they are written.
-    async fn handle_send_keys(
-        &self,
-        outbound: &Arc<Outbound>,
-        state: &ConnectionState,
-        window_id: &str,
-        keys: &[ControlKey],
-    ) {
-        let Some(entry) = self.registry.get(window_id) else {
-            outbound.reply(&window_not_found_msg());
-            return;
-        };
-        if is_confirmed_exited(&entry) {
-            outbound.reply(&child_exited_msg());
-            return;
-        }
-        if let Err(err) = validate_control_keys(keys) {
-            outbound.reply(&error_msg("invalid_argument", &err.to_string()));
-            return;
-        }
-        let approval_text = keys
-            .iter()
-            .map(|key| key.wire_name())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let permit = match gate_destructive(
-            &self.gate_context(state),
-            &entry,
-            permit::SendKeys,
-            Some(&approval_text),
-        ) {
-            GateOutcome::Proceed(permit) => permit,
-            GateOutcome::Pending(ticket) => {
-                spawn_pending(
-                    RequestWatch::connection_only(outbound, state),
-                    Arc::clone(&self.registry),
-                    self.config.clone(),
-                    entry,
-                    PendingAction::SendKeys(keys.to_vec()),
-                    ticket,
-                );
-                return;
-            }
-            GateOutcome::Refused(message) => return reply_refused(outbound, &message),
-        };
-
-        execute_send_keys(outbound, &entry, keys, permit).await;
     }
 
     /// Interrupts a window the way the configured interrupt method prescribes.
@@ -3635,13 +3461,9 @@ impl IpcServer {
             (Some(window_id), None) => {
                 // The slot is taken for a window_id-addressed handoff too: it
                 // is a detached task that stays outstanding until answered.
-                // The daemon-wide budget is drawn only while the envelope is
-                // being typed, not while it waits.
                 let slot = match HandoffSlot::try_acquire_per_conn(
                     &state.open_handoffs,
                     self.config.max_open_handoffs_per_conn,
-                    &self.open_handoffs,
-                    self.config.max_open_handoffs,
                 ) {
                     Ok(slot) => slot,
                     Err(exhausted) => {
@@ -3675,29 +3497,33 @@ impl IpcServer {
                     );
                     return;
                 }
-                let permit =
-                    match permit::gate_handoff(&self.gate_context(state), &entry, &envelope.text) {
-                        GateOutcome::Proceed(permit) => permit,
-                        GateOutcome::Pending(ticket) => {
-                            spawn_pending(
-                                RequestWatch::quiet(&self.registry, outbound, state),
-                                Arc::clone(&self.registry),
-                                self.config.clone(),
-                                entry,
-                                PendingAction::SendHandoff {
-                                    text: envelope.text,
-                                    requester: requester_id,
-                                    slot: Some(slot),
-                                },
-                                ticket,
-                            );
-                            return;
-                        }
-                        GateOutcome::Refused(message) => {
-                            abandon_handoff(outbound, slot, &message);
-                            return;
-                        }
-                    };
+                let permit = match gate_destructive(
+                    &self.gate_context(state),
+                    &entry,
+                    permit::SendHandoff,
+                    Some(&envelope.text),
+                ) {
+                    GateOutcome::Proceed(permit) => permit,
+                    GateOutcome::Pending(ticket) => {
+                        spawn_pending(
+                            RequestWatch::quiet(&self.registry, outbound, state),
+                            Arc::clone(&self.registry),
+                            self.config.clone(),
+                            entry,
+                            PendingAction::SendHandoff {
+                                text: envelope.text,
+                                requester: requester_id,
+                                slot: Some(slot),
+                            },
+                            ticket,
+                        );
+                        return;
+                    }
+                    GateOutcome::Refused(message) => {
+                        abandon_handoff(outbound, slot, &message);
+                        return;
+                    }
+                };
 
                 let RequestWatch { outbound, left } =
                     RequestWatch::quiet(&self.registry, outbound, state);
@@ -3706,7 +3532,6 @@ impl IpcServer {
                 tokio::spawn(deliver_handoff(DeliveryJob {
                     outbound,
                     registry: Arc::clone(&self.registry),
-                    config: self.config.clone(),
                     entry,
                     envelope: envelope.text,
                     requester: requester_id,
@@ -4243,12 +4068,11 @@ impl IpcServer {
             entry.session().set_view_focus(*focused);
             return;
         }
-        let Some(write) = ClientWrite::from_message(msg, input, entry.interrupt_bytes()) else {
+        let Some(write) = ClientWrite::from_message(msg, input) else {
             return;
         };
-        // A move with no button held carries no key or button, so it cannot
-        // change the composer and does not count as another writer to a
-        // delivery waiting on the window.
+        // A move with no button held carries no key or button: it goes out
+        // as a report, ordered with the writes.
         if is_report_without_input(msg) {
             entry.session().send_report(write.bytes().to_vec());
             return;
@@ -4628,27 +4452,11 @@ fn child_exited_msg() -> DaemonMessage {
     error_msg("child_exited", "child process has exited")
 }
 
-/// The one wording of "this window takes no daemon-composed text", shared by
-/// every layer that refuses for that reason so the guidance cannot drift.
-/// It names only the alternatives that fit such a window, so it cannot be
-/// read as an invitation to reopen the window under another definition.
-const NO_COMPOSER_MESSAGE: &str = "this window declares no composer, or declares one without \
-     an input probe, so the daemon writes no line into it (naming a probe in the definition's \
-     [input] table lets it): to run a command, open a window with it (open_window's command); \
-     to press keys in it, use send_keys";
-
 /// Why a window that would be handed a request at launch is refused when its
-/// profile declares no way to hand one over. It keeps the alternatives
-/// [`NO_COMPOSER_MESSAGE`] names.
+/// profile declares no way to hand one over.
 const NO_LAUNCH_PROMPT_MESSAGE: &str = "this profile declares no launch_prompt in its [delivery] \
      table, so a request cannot be handed to its CLI at launch: to run a command, open a window \
-     with it (open_window's command); to press keys in a window, use send_keys";
-
-/// The `no_composer` refusal, answered wherever a request would type
-/// daemon-composed text into a window that declares no composer.
-fn no_composer_msg() -> DaemonMessage {
-    error_msg("no_composer", NO_COMPOSER_MESSAGE)
-}
+     with it (open_window's command)";
 
 /// Translates a control primitive's failure into its client-facing answer.
 ///
@@ -4705,39 +4513,6 @@ fn reject_identify(outbound: &Outbound, state: &mut ConnectionState) -> FrameOut
     }
 }
 
-/// The body of a payload that is exactly one line: `Some(body)` when `text`
-/// ends in a single `\r`, `\n` or `\r\n` terminator, holds no other CR or LF,
-/// and leaves a non-empty body once that terminator is removed.
-///
-/// The subject of the judgment is the payload the daemon received. A bridge
-/// may normalize line endings before sending, but a client speaking the wire
-/// protocol directly does not, so all three terminators are read alike and
-/// both kinds of caller reach the same outcome.
-///
-/// # Examples
-///
-/// ```
-/// use yagura_daemon::ipc::single_line_body;
-///
-/// assert_eq!(single_line_body("run the tests\r"), Some("run the tests"));
-/// assert_eq!(single_line_body("run the tests\n"), Some("run the tests"));
-/// assert_eq!(single_line_body("run the tests\r\n"), Some("run the tests"));
-/// assert_eq!(single_line_body("first\rsecond\r"), None, "two lines, not one");
-/// assert_eq!(single_line_body("no terminator"), None);
-/// assert_eq!(single_line_body("\r"), None, "the body would be empty");
-/// ```
-#[must_use]
-pub fn single_line_body(text: &str) -> Option<&str> {
-    let body = text
-        .strip_suffix("\r\n")
-        .or_else(|| text.strip_suffix('\n'))
-        .or_else(|| text.strip_suffix('\r'))?;
-    if body.is_empty() || body.contains(['\r', '\n']) {
-        return None;
-    }
-    Some(body)
-}
-
 /// Names each message's parcel in its window's inbox.
 static NEXT_MESSAGE_PARCEL: AtomicU64 = AtomicU64::new(1);
 
@@ -4749,7 +4524,6 @@ static NEXT_MESSAGE_PARCEL: AtomicU64 = AtomicU64::new(1);
 async fn execute_send_text(
     outbound: &Outbound,
     registry: &WindowRegistry,
-    config: &DaemonConfig,
     entry: &Arc<WindowEntry>,
     envelope: String,
     _permit: Permit<permit::SendMessage>,
@@ -4773,13 +4547,7 @@ async fn execute_send_text(
     // Unsaved, as a handoff is: a next daemon never hands out an envelope
     // whose sender it cannot answer.
     let parcel = Parcel::new(key, envelope).unsaved();
-    let answered = match deposit_envelope(
-        registry,
-        entry,
-        parcel,
-        None,
-        Some(config.max_turn_waiters_per_window),
-    ) {
+    let answered = match deposit_envelope(registry, entry, parcel) {
         Ok(tracked) => answer_deposit(entry, tracked, false).await,
         Err(refused) => Err(refused),
     };
@@ -4792,57 +4560,6 @@ async fn execute_send_text(
         },
         Err(refusal) => refusal,
     });
-}
-
-/// Writes an approved control-key sequence without composer inspection,
-/// encoded with the window's modes at this moment.
-///
-/// The input lock is not taken: these keys are often what dismisses a dialog
-/// that keeps a delivery holding that lock. The keys are written at once,
-/// behind the take-back of such a delivery's unsent text (none in front of
-/// the window's own interrupt keys), and the write moves
-/// the ledger, so the delivery writes nothing more of its own plan; it answers
-/// once it has checked the composer on a screen that accepts a write (see
-/// [`WindowEntry::submit_message`]).
-async fn execute_send_keys(
-    outbound: &Outbound,
-    entry: &WindowEntry,
-    keys: &[ControlKey],
-    _permit: Permit<permit::SendKeys>,
-) {
-    let modes = entry.session().input_state().modes;
-    // Validated before the gate, so no key is unknown here.
-    let presses: Vec<_> = keys
-        .iter()
-        .filter_map(|key| input_encode::control_key_press(*key))
-        .collect();
-    let write = ClientWrite::from_presses(&presses, modes, entry.interrupt_bytes());
-    tracing::info!(
-        window_id = %entry.window_id(),
-        key_bytes = write.bytes().len(),
-        "accepted send_keys"
-    );
-    match entry.write_client_input(&write, InputOrigin::Message).await {
-        Ok(()) => outbound.reply(&DaemonMessage::KeysSent {
-            window_id: entry.window_id().to_string(),
-        }),
-        Err(PtyError::ChildExited) => outbound.reply(&child_exited_msg()),
-        Err(_) => outbound.reply(&error_msg("internal", "failed to write keys to the PTY")),
-    }
-}
-
-/// What one call to [`submit_line_to_pty`] asks to have written: a single
-/// line whose placement [`WindowEntry::submit_message`] judges against the
-/// window's composer.
-enum SubmitRequest<'a> {
-    /// A single line, judged before being written. `residue` is this send's
-    /// own envelope from a previous attempt, if it has one; `stage` is whether
-    /// a previous attempt pressed the submit key.
-    Judged {
-        body: &'a str,
-        residue: Option<ComposerResidue<'a>>,
-        stage: SendStage,
-    },
 }
 
 /// Delivers an approved interrupt the way the configured method prescribes
@@ -4926,497 +4643,6 @@ async fn close_for_cleanup(
     Ok(closed)
 }
 
-/// Executes one submit request on an agent's behalf: the only point that
-/// writes into a window's PTY for `send_text` and `send_handoff` alike.
-/// `requester` is handed to [`WindowEntry::submit_raw_gated`] and
-/// [`WindowEntry::submit_message`] as is; `push_id` names the push of the
-/// window's inbox a judged line types, settled before its submit key.
-///
-/// # Errors
-///
-/// Returns the [`PtyError`] a write failed with; the caller decides how a
-/// failure is reported. A placement [`WindowEntry::submit_message`] declined
-/// is never an error (see [`SubmitPlacement::NotPlaced`]).
-async fn submit_line_to_pty(
-    entry: &WindowEntry,
-    request: SubmitRequest<'_>,
-    requester: Option<watch::Receiver<bool>>,
-    push_id: Option<u64>,
-) -> Result<SubmitJudgment, PtyError> {
-    match request {
-        SubmitRequest::Judged {
-            body,
-            residue,
-            stage,
-        } => {
-            entry
-                .submit_message_for(body, residue, stage, requester, push_id)
-                .await
-        }
-    }
-}
-
-/// Submits a composed handoff envelope into `entry`'s input, confirms
-/// delivery, resends it while the target stays ready and the definition
-/// allows it, and answers the requester.
-///
-/// The one place a handoff is delivered from, so the audit line, the failure
-/// mapping and the order in which teardown, release and answer happen exist
-/// once. Whether the write failed or a `delivery` verdict was reached, the
-/// slot is released strictly before the answer goes out, so a caller holding
-/// its answer also has its budget back. A write failure closes the window
-/// this handoff opened (`job.opened`). Every other ending's teardown turns on
-/// whether the envelope remains in the receiver's composer, never on the
-/// `delivery` value or on whether any byte was written: a
-/// window this handoff opened is closed only when nothing of its own is left
-/// there, since a window with nothing left in front of the receiver is one
-/// the requester has no way to make use of.
-///
-/// The algorithm below is `entry`'s window: never a wall-clock deadline. Its
-/// upper bound is the resend count, `InputProfile::resend_max`, because a
-/// deadline computed before the input lock is acquired would be spent by
-/// another writer's queued sequence before this one's first byte is written.
-///
-/// Two waits happen before the first byte. This window's delivery lock comes
-/// first and is held until this delivery's own verdict is final, re-sends
-/// included, so no other delivery writes into the window in between;
-/// turns come in the order deliveries reached that lock,
-/// which is not the order their requests arrived. Only so many deliveries
-/// may queue for it (`max_turn_waiters_per_window`); the one past that, and
-/// one that finds `budget` spent right after winning the turn, ends in
-/// [`DeliveryEnd::Exhausted`] before its first byte. Under that lock, a window
-/// still in its startup phase is then given `handoff_ready_timeout_secs` to
-/// hold a status that accepts input -- the only one of the two bounded by the
-/// clock. Reaching that bound is not a failure of its own -- the envelope is
-/// written either way.
-/// Waits for `closed` to signal a disconnect. Never resolves when `closed` is
-/// `None`: chat delivery (`run_delivery(.., None, ..)`) has no single
-/// requester connection to watch, so its call to [`run_delivery`] can never
-/// end in [`DeliveryEnd::Aborted`].
-async fn wait_for_disconnect(closed: &mut Option<watch::Receiver<bool>>) {
-    match closed {
-        Some(rx) => {
-            let _ = rx.changed().await;
-        }
-        None => std::future::pending::<()>().await,
-    }
-}
-
-/// Whether the requester `closed` watches has gone; never for `None`.
-fn requester_left(closed: &Option<watch::Receiver<bool>>) -> bool {
-    closed
-        .as_ref()
-        .is_some_and(|rx| *rx.borrow() || rx.has_changed().is_err())
-}
-
-/// The core of typing a parcel into a window: takes `entry`'s delivery lock,
-/// waits out its startup phase if it is still building one, subscribes to its
-/// status, then composes the text (`compose`, under the lock, so what it
-/// checks cannot change while the delivery waits its turn; `None` ends in
-/// [`DeliveryEnd::Skipped`]), writes it and confirms/resends it under
-/// `entry`'s own input profile.
-///
-/// `closed` is raised when whoever the text is for no longer wants it. Raised
-/// before the submit key, it ends the delivery and takes the body back; once
-/// the key is pressed it is no longer watched, so the delivery runs to its
-/// real outcome and cleans up after itself.
-/// `ready_hold_wait_ms` is the caller's own prior readiness wait, carried
-/// onward into the verdict. `carried` is what an earlier call for the
-/// same delivery left in the composer (`None` for a first call); the residue
-/// this call leaves is returned in [`DeliveryEnd::Finished`]. `push` is the
-/// push of `entry`'s inbox the text is, settled right before its first submit
-/// key; its `submitted` is raised when that key is pressed, for a caller that
-/// answers its requester before the delivery's cleanup is done.
-#[allow(clippy::too_many_arguments)] // each is a distinct input of the one delivery
-async fn run_delivery<'a>(
-    entry: &'a WindowEntry,
-    compose: &(dyn Fn() -> Option<String> + Sync),
-    config: &DaemonConfig,
-    mut closed: Option<watch::Receiver<bool>>,
-    mut ready_hold_wait_ms: u128,
-    carried: Option<CarriedResidue>,
-    budget: SharedBudget,
-    push: Option<&Push>,
-) -> DeliveryEnd<'a> {
-    // Open for the whole delivery, its waits included, so the child holds the
-    // focus from the first wait on a screen it may draw only when focused.
-    let _focus = entry.session().open_focus_interval();
-    let profile = entry.input_profile();
-    let mut resent = 0u8;
-    // Times the submit key was actually pressed (`attempts`
-    // means submit-key presses, never attempts at the write itself; a run
-    // that never places the envelope reports 0).
-    let mut placements = 0u8;
-    // This delivery's own belief about what its envelope currently looks
-    // like in the composer, carried into the next attempt's `residue`:
-    // `None` until an attempt leaves something of this delivery's own
-    // behind, and this envelope's text paired with the window's write count
-    // at that instant once one does. The count is what tells this delivery's
-    // own residue from anyone else's identical bytes, and
-    // only the attempt that wrote can say what it was.
-    let mut residue: Option<ComposerResidue<'_>> =
-        carried.as_ref().map(|carried| ComposerResidue {
-            body: &carried.body,
-            write_seq: carried.write_seq,
-        });
-    let ready_timeout = Duration::from_secs(config.handoff_ready_timeout_secs);
-
-    // Both waits before the first byte -- this window's turn, then its startup
-    // phase -- sit under one disconnect watch, checked first so a requester
-    // that left during either is never written on behalf of. The turn is taken
-    // before the gate is judged, so no other delivery can land between that
-    // judgment and this envelope's first byte.
-    let acquired = tokio::select! {
-        biased;
-        () = wait_for_disconnect(&mut closed) => {
-            return DeliveryEnd::Aborted;
-        }
-        acquired = async {
-            let Some(guard) = entry
-                .lock_delivery_bounded(config.max_turn_waiters_per_window)
-                .await
-            else {
-                return Err(Scarce::TurnWaiters);
-            };
-            // Drawn right after the turn is won, so a window that never
-            // frees its turn holds one unit of the shared budget, not one per
-            // delivery queued behind it.
-            let shared = match &budget {
-                SharedBudget::NotNeeded => None,
-                SharedBudget::Counter { counter, max } => {
-                    let Some(unit) = CounterGuard::try_take(counter, *max) else {
-                        return Err(Scarce::SharedBudget);
-                    };
-                    Some(unit)
-                }
-            };
-            let mut waited = 0u128;
-            // The startup phase is the one thing worth waiting out before the
-            // first byte: a prompt painted while a CLI is still starting up
-            // takes writes that never reach the agent behind it.
-            match entry.startup_evidence() {
-                // Nothing pending: this window has already held a status that
-                // accepts input for the whole hold, once, and that never comes back.
-                StartupEvidence::Left => {}
-                // Nothing to accumulate from either, so waiting could only delay an
-                // envelope the target can still queue for itself.
-                StartupEvidence::Absent => {}
-                StartupEvidence::Building => {
-                    // Stamped after the turn is won, so time spent queued behind
-                    // another delivery is not reported as this one's readiness wait.
-                    let started = Instant::now();
-                    let outcome = waiter::wait_for_any_held(
-                        entry.watch_status(),
-                        READY_STATUSES,
-                        profile.ready_hold,
-                        ready_timeout,
-                    )
-                    .await;
-                    waited = started.elapsed().as_millis();
-                    if outcome == WaitOutcome::Reached {
-                        entry.note_left_startup_phase();
-                    }
-                    // A hold that never completed is not an answer: the envelope is
-                    // still written, and the delivery verdict reports what came of it.
-                }
-            }
-            Ok((guard, shared, waited))
-        } => acquired,
-    };
-    let (guard, _shared, gate_wait_ms) = match acquired {
-        Ok(acquired) => acquired,
-        Err(scarce) => return DeliveryEnd::Exhausted(scarce),
-    };
-    ready_hold_wait_ms += gate_wait_ms;
-
-    // Subscribed after the gate and before the first byte, so a status change
-    // published while the gate was waiting cannot be read as a reaction to
-    // this envelope.
-    let mut rx = entry.subscribe_status();
-
-    let Some(composed) = compose() else {
-        return DeliveryEnd::Skipped;
-    };
-    let envelope = composed.as_str();
-    // Whether this envelope remains in the receiver's composer once the loop
-    // stops; the only fact the teardown decision reads. `None` once the
-    // submit key has been pressed: the envelope may already be in front of
-    // the receiver, so no later attempt's report can make the window safe to
-    // close. Before that, it remains if any declined attempt left it behind:
-    // a later attempt that finds nothing of its own cannot vouch for an
-    // earlier write that has yet to be painted.
-    let mut envelope_remains: Option<bool> = Some(false);
-    let mut foreign_draft: bool;
-    // The last attempt that pressed the submit key, for a verdict a later
-    // attempt reaches without pressing it again.
-    let mut last_submit: Option<SubmitOutcome> = None;
-
-    let verdict = loop {
-        // Decided here rather than from `residue`: a declined attempt can
-        // drop the residue while the key it pressed earlier still counts.
-        let stage = if placements > 0 {
-            SendStage::AfterSubmitKey
-        } else {
-            SendStage::BeforeSubmitKey
-        };
-        let request = SubmitRequest::Judged {
-            body: envelope,
-            residue,
-            stage,
-        };
-        let push_id = push.map(|push| push.id);
-        let judgment = match submit_line_to_pty(entry, request, closed.clone(), push_id).await {
-            Ok(judgment) => judgment,
-            Err(err) => {
-                return DeliveryEnd::WriteFailed(err, guard);
-            }
-        };
-        residue = judgment.residue_write_seq.map(|write_seq| ComposerResidue {
-            body: envelope,
-            write_seq,
-        });
-        let (outcome, after_key) = match judgment.placement {
-            SubmitPlacement::Placed(outcome) => {
-                placements += 1;
-                envelope_remains = None;
-                // Submitted: nothing of the envelope can be taken back now, so
-                // what follows (a resend's probe included) runs to its end
-                // instead of stopping with a probe left in the composer.
-                closed = None;
-                if let Some(push) = push {
-                    push.submitted.send_replace(true);
-                }
-                foreign_draft = false;
-                last_submit = Some(outcome);
-                (outcome, judgment.residue_write_seq)
-            }
-            SubmitPlacement::NotPlaced(NotPlaced {
-                reason: reason @ (NotPlacedReason::Taken | NotPlacedReason::Vanished),
-                ..
-            }) => {
-                foreign_draft = false;
-                let delivery = if reason == NotPlacedReason::Taken {
-                    TypedOutcome::Confirmed
-                } else {
-                    TypedOutcome::Unconfirmed
-                };
-                break DeliveryVerdict {
-                    delivery,
-                    attempts: placements,
-                    submitted_at: last_submit.map_or_else(Instant::now, |last| last.submitted_at),
-                    status_before_submit: last_submit
-                        .map_or_else(|| entry.current_status(), |last| last.status_before_submit),
-                    ready_hold_wait_ms,
-                };
-            }
-            SubmitPlacement::NotPlaced(NotPlaced {
-                envelope_remains: remains,
-                reason,
-            }) => {
-                foreign_draft = judgment.foreign_draft;
-                // A declined write still spends this delivery's resend
-                // budget: re-observing and retrying is what lets a
-                // momentarily unwritable composer (a startup discard window,
-                // a screen not yet caught up) resolve on its own, without
-                // this loop ever writing on top of something it should not
-                // touch. `attempts` (`placements`) is unaffected: the submit
-                // key was not pressed.
-                resent += 1;
-                envelope_remains = envelope_remains.map(|earlier| earlier || remains);
-                let out_of_resends = !profile.may_resend() || resent > profile.resend_max;
-                if out_of_resends || requester_left(&closed) {
-                    // `not_written` means the submit key was never
-                    // written for this envelope, which is
-                    // what a run that never placed anything is. A decline
-                    // that follows an earlier placement is not: that
-                    // envelope was submitted and simply went unconfirmed.
-                    let delivery = if placements == 0 {
-                        // The reason a `send_text` caller reads in its error
-                        // message is logged here instead, so an operator has
-                        // the same distinction available for a typed delivery.
-                        tracing::info!(
-                            window_id = %entry.window_id(),
-                            reason = ?reason,
-                            envelope_remains = ?envelope_remains,
-                            "typed delivery was not written"
-                        );
-                        TypedOutcome::NotWritten
-                    } else {
-                        TypedOutcome::Unconfirmed
-                    };
-                    break DeliveryVerdict {
-                        delivery,
-                        attempts: placements,
-                        submitted_at: last_submit
-                            .map_or_else(Instant::now, |last| last.submitted_at),
-                        status_before_submit: last_submit.map_or_else(
-                            || entry.current_status(),
-                            |last| last.status_before_submit,
-                        ),
-                        ready_hold_wait_ms,
-                    };
-                }
-                continue;
-            }
-        };
-
-        if profile.delivery_confirm.is_zero() {
-            break DeliveryVerdict {
-                delivery: TypedOutcome::NotObserved,
-                attempts: placements,
-                submitted_at: outcome.submitted_at,
-                status_before_submit: outcome.status_before_submit,
-                ready_hold_wait_ms,
-            };
-        }
-        let unanswered = DeliveryVerdict {
-            delivery: TypedOutcome::Unconfirmed,
-            attempts: placements,
-            submitted_at: outcome.submitted_at,
-            status_before_submit: outcome.status_before_submit,
-            ready_hold_wait_ms,
-        };
-        let evidence =
-            wait_for_submit_evidence(entry, &mut rx, outcome, after_key, profile.delivery_confirm)
-                .await;
-        match evidence {
-            SubmitEvidence::Taken => {
-                break DeliveryVerdict {
-                    delivery: TypedOutcome::Confirmed,
-                    attempts: placements,
-                    submitted_at: outcome.submitted_at,
-                    status_before_submit: outcome.status_before_submit,
-                    ready_hold_wait_ms,
-                };
-            }
-            SubmitEvidence::Unanswered => break unanswered,
-            SubmitEvidence::Unobservable => {
-                break DeliveryVerdict {
-                    delivery: TypedOutcome::NotObserved,
-                    attempts: placements,
-                    submitted_at: outcome.submitted_at,
-                    status_before_submit: outcome.status_before_submit,
-                    ready_hold_wait_ms,
-                };
-            }
-            SubmitEvidence::Quiet => {
-                resent += 1;
-                let out_of_resends = !profile.may_resend() || resent > profile.resend_max;
-                // The target left the ready statuses on its own while this
-                // task was waiting: it may already have taken the envelope,
-                // so it is never written to again on the daemon's own
-                // judgement.
-                let left_ready = !is_ready(entry.current_status());
-                if out_of_resends || left_ready {
-                    break unanswered;
-                }
-                // Otherwise loop again with this placement's own envelope
-                // still carried as `residue`: the composer still holds it
-                // unconfirmed, so the next attempt resends the submit key
-                // alone if the screen or the write record still vouches for
-                // it.
-            }
-        }
-    };
-
-    drop(guard);
-    let residue = residue.map(|residue| CarriedResidue {
-        body: residue.body.to_string(),
-        write_seq: residue.write_seq,
-    });
-    DeliveryEnd::Finished {
-        verdict,
-        residue,
-        foreign_draft,
-    }
-}
-
-/// What [`wait_for_submit_evidence`] settled on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubmitEvidence {
-    /// The envelope was taken as one message: the composer read empty with
-    /// nothing written since the submit key, or a window that accepted input
-    /// right before the key moved to working after it.
-    Taken,
-    /// Neither showed within the bound.
-    Quiet,
-    /// Status changes were lost, so a reaction may have been missed.
-    Unobservable,
-    /// Nothing more can show: the child exited, or status changes were lost
-    /// after another writer had already written.
-    Unanswered,
-}
-
-/// Waits, for at most `bound` after the submit key `outcome` describes, for
-/// evidence the receiver took the envelope: the composer reading empty with
-/// the ledger still at `after_key` (`None` waits for no such reading), or,
-/// when the window accepted input right before the key, its status moving to
-/// working. Whichever shows first settles it.
-async fn wait_for_submit_evidence(
-    entry: &WindowEntry,
-    rx: &mut broadcast::Receiver<StatusAt>,
-    outcome: SubmitOutcome,
-    after_key: Option<u64>,
-    bound: Duration,
-) -> SubmitEvidence {
-    // A status that did not accept input right before the key gives no
-    // starting point that a reaction could be told apart from.
-    let reacts = is_ready(outcome.status_before_submit);
-    let composer = async {
-        match after_key {
-            Some(after_key) => entry.wait_for_envelope_taken(after_key).await,
-            None => std::future::pending().await,
-        }
-    };
-    let reaction = async {
-        if reacts {
-            waiter::wait_for_reaction(rx, DELIVERY_REACTION_STATUSES, outcome.submitted_at, bound)
-                .await
-        } else {
-            std::future::pending().await
-        }
-    };
-    tokio::pin!(composer, reaction);
-    let deadline = tokio::time::sleep(bound);
-    tokio::pin!(deadline);
-    let mut composer_open = after_key.is_some();
-    let mut status_open = reacts;
-    let mut lost_status = false;
-    let mut other_writer = false;
-    loop {
-        if !composer_open && !status_open {
-            break;
-        }
-        tokio::select! {
-            biased;
-            taken = &mut composer, if composer_open => match taken {
-                EnvelopeWait::Taken => return SubmitEvidence::Taken,
-                EnvelopeWait::Exited => return SubmitEvidence::Unanswered,
-                EnvelopeWait::OtherWriter => {
-                    composer_open = false;
-                    other_writer = true;
-                }
-            },
-            reacted = &mut reaction, if status_open => match reacted {
-                ReactionOutcome::Reacted(_) => return SubmitEvidence::Taken,
-                ReactionOutcome::Exited => return SubmitEvidence::Unanswered,
-                ReactionOutcome::Quiet => break,
-                // The composer can still show the envelope taken.
-                ReactionOutcome::Unobservable => {
-                    status_open = false;
-                    lost_status = true;
-                }
-            },
-            () = &mut deadline => break,
-        }
-    }
-    match (lost_status, other_writer) {
-        (false, _) => SubmitEvidence::Quiet,
-        (true, false) => SubmitEvidence::Unobservable,
-        (true, true) => SubmitEvidence::Unanswered,
-    }
-}
-
 /// Names each handoff's parcel, so the one this handoff put in a window's
 /// inbox can be withdrawn and no other.
 static NEXT_HANDOFF_PARCEL: AtomicU64 = AtomicU64::new(1);
@@ -5429,7 +4655,6 @@ async fn deliver_handoff(job: DeliveryJob) {
     let DeliveryJob {
         outbound,
         registry,
-        config,
         entry,
         envelope,
         requester,
@@ -5465,27 +4690,15 @@ async fn deliver_handoff(job: DeliveryJob) {
         registry.boot_nonce(),
         NEXT_HANDOFF_PARCEL.fetch_add(1, Ordering::Relaxed)
     );
-    // The daemon-wide budget is drawn only while the envelope is being typed,
-    // so a window that never takes it holds none of it.
-    let budget = slot.as_ref().and_then(|slot| match slot.shared_budget() {
-        SharedBudget::Counter { counter, max } => Some(PushBudget { counter, max }),
-        SharedBudget::NotNeeded => None,
-    });
     // A next daemon never hands out an envelope whose sender it cannot
     // answer: the daemon's end withdraws it.
     let parcel = Parcel::new(key.clone(), envelope).unsaved();
-    let answered = match deposit_envelope(
-        &registry,
-        &entry,
-        parcel,
-        budget,
-        Some(config.max_turn_waiters_per_window),
-    ) {
+    let answered = match deposit_envelope(&registry, &entry, parcel) {
         Ok(tracked) => {
             #[cfg(feature = "fault-injection")]
             if entry.inbox().holds(&key) {
-                config
-                    .faults
+                entry
+                    .faults()
                     .reach(crate::fault_point::FaultPoint::HandoffDeposited);
             }
             answer_deposit(&entry, tracked, false).await
@@ -5530,14 +4743,10 @@ fn deposit_envelope(
     registry: &WindowRegistry,
     entry: &Arc<WindowEntry>,
     parcel: Parcel,
-    budget: Option<PushBudget>,
-    waiting_limit: Option<usize>,
 ) -> Result<notice_queue::Tracked, DaemonMessage> {
-    notice_queue::deposit(registry, entry, parcel, budget, waiting_limit).map_err(|refused| {
-        match refused {
-            notice_queue::Refused::Full => delivery_exhausted_msg(Scarce::TurnWaiters),
-            notice_queue::Refused::Ended => child_exited_msg(),
-        }
+    notice_queue::deposit(registry, entry, parcel).map_err(|refused| match refused {
+        notice_queue::Refused::Full => inbox_full_msg(),
+        notice_queue::Refused::Ended => child_exited_msg(),
     })
 }
 
@@ -5646,7 +4855,6 @@ fn ended_answer(
             state: DeliveryState::Delivered,
             note: None,
         }),
-        Ok(ParcelEnd::TurnedAway) => Err(SlotExhausted::Daemon.to_message()),
         Ok(ParcelEnd::Closed | ParcelEnd::Stopped) => Err(child_exited_msg()),
         Err(_) => Err(error_msg(
             "internal",
@@ -5665,7 +4873,6 @@ pub(crate) fn waiting_note_for(entry: &WindowEntry, carried: bool, saved: bool) 
         None => WaitingWake::Undeclared,
         Some(WakeMode::Wait) => WaitingWake::Wait,
         Some(WakeMode::Command(_)) => WaitingWake::Command,
-        Some(WakeMode::None) if entry.composer_access().is_judged() => WaitingWake::Typed,
         Some(WakeMode::None) => WaitingWake::Doors,
     };
     handoff::waiting_note(WaitingFacts {
@@ -6334,10 +5541,7 @@ fn spawn_pending(
 
         match permitted {
             PermittedAction::SendText(envelope, permit) => {
-                execute_send_text(&outbound, &registry, &config, &entry, envelope, permit).await;
-            }
-            PermittedAction::SendKeys(keys, permit) => {
-                execute_send_keys(&outbound, &entry, &keys, permit).await;
+                execute_send_text(&outbound, &registry, &entry, envelope, permit).await;
             }
             PermittedAction::Interrupt(permit) => {
                 execute_interrupt(&outbound, &entry, &config, permit).await;
@@ -6354,7 +5558,6 @@ fn spawn_pending(
                 deliver_handoff(DeliveryJob {
                     outbound,
                     registry,
-                    config,
                     entry,
                     envelope: text,
                     requester,
@@ -6703,7 +5906,6 @@ fn deny_msg(tool: DestructiveTool, reason: DenyReason) -> DaemonMessage {
         DenyReason::PlaybookBroken => {
             error_msg("approval_required", &approval_required_message(tool, true))
         }
-        DenyReason::NoComposer => no_composer_msg(),
     }
 }
 

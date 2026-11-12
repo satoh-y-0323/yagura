@@ -12,19 +12,17 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use yagura_protocol::{
-    APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, ControlKey, DaemonMessage, DetectedStatus,
-};
+use yagura_protocol::{APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, DaemonMessage, DetectedStatus};
 
 use crate::approval::{ApprovalDraft, SubmitError, Ticket};
 use crate::config::DaemonConfig;
-use crate::control::{self, ComposerWrite, DenyReason, DestructiveTool, GateVerdict};
+use crate::control::{self, DenyReason, DestructiveTool, GateVerdict};
 use crate::live_policy;
 use crate::window::WindowEntry;
 
 use super::{
     ApprovalEnd, GateContext, HandoffSlot, PendingAction, approval_limits, await_approval,
-    deny_msg, deny_no_approver, error_msg, requester_for, single_line_body, window_info,
+    deny_msg, deny_no_approver, error_msg, requester_for, window_info,
 };
 
 /// One gated tool, named as a type so that a permit can be tied to it.
@@ -33,11 +31,8 @@ pub(super) trait GatedTool {
     const TOOL: DestructiveTool;
 }
 
-/// Writing text into a window's PTY on a caller's behalf.
+/// Putting a message envelope in a window's inbox on a caller's behalf.
 pub(super) struct SendMessage;
-
-/// Writing named control keys into a window's PTY on a caller's behalf.
-pub(super) struct SendKeys;
 
 /// Injecting the interrupt sequence into a window's PTY.
 pub(super) struct InterruptWindow;
@@ -57,10 +52,6 @@ pub(super) struct LaunchHandoff;
 
 impl GatedTool for SendMessage {
     const TOOL: DestructiveTool = DestructiveTool::SendMessage;
-}
-
-impl GatedTool for SendKeys {
-    const TOOL: DestructiveTool = DestructiveTool::SendKeys;
 }
 
 impl GatedTool for InterruptWindow {
@@ -110,8 +101,8 @@ impl Permit<LaunchHandoff> {
     }
 }
 
-/// Outcome of running one destructive request past the status, composer and
-/// approval gates.
+/// Outcome of running one destructive request past the status and approval
+/// gates.
 // Built once per request and consumed at once; boxing the answer would put an
 // indirection in every caller's pattern and buy nothing.
 #[allow(clippy::large_enum_variant)]
@@ -151,35 +142,10 @@ pub(super) fn gate_destructive<T: GatedTool>(
         live_policy::policy_source(&policy_snapshot),
         tool,
         detected,
-        entry.composer_access(),
-        send_message_write(tool, text),
         context.origin,
         entry.window_id(),
     );
     gate_window(context, entry, detected, verdict, text)
-}
-
-/// Runs a handoff to an existing window past the status and approval gates.
-///
-/// The composer gate does not apply: the envelope goes into the window's
-/// inbox, and is typed only into a window whose composer the daemon can judge.
-pub(super) fn gate_handoff(
-    context: &GateContext<'_>,
-    entry: &WindowEntry,
-    text: &str,
-) -> GateOutcome<SendHandoff> {
-    let tool = SendHandoff::TOOL;
-    let detected = entry.current_detected();
-    let policy_snapshot = context.policy.snapshot();
-    let verdict = control::status_gate(tool, detected).and_then(|()| {
-        control::policy_gate(
-            live_policy::policy_source(&policy_snapshot),
-            tool,
-            context.origin,
-            Some(entry.window_id()),
-        )
-    });
-    gate_window(context, entry, detected, verdict, Some(text))
 }
 
 /// Turns a gate's verdict on a request aimed at `entry`, judged against
@@ -461,25 +427,11 @@ pub(super) async fn await_verdict<T: GatedTool>(
     }
 }
 
-/// The shape of the text `tool` will type, decided before approval: a
-/// `send_message` body that is not exactly one line is written as it is, and
-/// every other tool's text is judged against the composer.
-fn send_message_write(tool: DestructiveTool, text: Option<&str>) -> ComposerWrite {
-    let is_raw_message = tool == DestructiveTool::SendMessage
-        && text.is_some_and(|text| single_line_body(text).is_none());
-    if is_raw_message {
-        ComposerWrite::Raw
-    } else {
-        ComposerWrite::Judged
-    }
-}
-
 /// An approved request paired with the permit its execution runs under: the
 /// arguments its handler already validated, plus the licence the recheck
 /// issued.
 pub(super) enum PermittedAction {
     SendText(String, Permit<SendMessage>),
-    SendKeys(Vec<ControlKey>, Permit<SendKeys>),
     Interrupt(Permit<InterruptWindow>),
     Close(bool, Permit<CloseWindow>),
     SendHandoff {
@@ -506,14 +458,11 @@ pub(super) enum ApprovedOutcome {
 /// new one, so the permit is issued by this recheck rather
 /// than by the approval that preceded it.
 pub(super) fn gate_approved(action: PendingAction, detected: DetectedStatus) -> ApprovedOutcome {
-    // Only the status is rechecked: a window's composer access is fixed for
-    // its lifetime, so the composer gate's pre-approval answer holds.
     if let Err(reason) = control::status_gate(action.tool(), detected) {
         return ApprovedOutcome::Denied(action, reason);
     }
     ApprovedOutcome::Permitted(match action {
         PendingAction::SendText(text) => PermittedAction::SendText(text, Permit::issue()),
-        PendingAction::SendKeys(keys) => PermittedAction::SendKeys(keys, Permit::issue()),
         PendingAction::Interrupt => PermittedAction::Interrupt(Permit::issue()),
         PendingAction::Close(force) => PermittedAction::Close(force, Permit::issue()),
         PendingAction::SendHandoff {

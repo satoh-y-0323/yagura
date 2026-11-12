@@ -28,7 +28,6 @@ const GATED_TOOLS = [
   'interrupt_window',
   'close_window',
   'send_message',
-  'send_keys',
   'send_handoff',
   'send_chat',
   'broadcast_chat',
@@ -59,7 +58,6 @@ describe('approvalToolRows', () => {
       'send_chat',
       'broadcast_chat',
       'interrupt_window',
-      'send_keys',
       'close_window',
       'send_message',
       'send_handoff',
@@ -73,10 +71,10 @@ describe('approvalToolRows', () => {
 
   it('builds one row per tool the daemon sent and no more', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'send_keys', autoApprove: true }] })
+      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
     );
 
-    expect(rows.map((row) => row.id)).toEqual(['send_keys']);
+    expect(rows.map((row) => row.id)).toEqual(['interrupt_window']);
   });
 
   it('is empty when the daemon sent no tools', () => {
@@ -131,20 +129,20 @@ describe('approvalToolRows', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
       info({
         tools: [
-          { tool: 'send_keys', autoApprove: false },
+          { tool: 'interrupt_window', autoApprove: false },
           { tool: 'a_newer_tool', autoApprove: false },
           { tool: 'send_chat', autoApprove: false },
         ],
       })
     );
 
-    expect(rows.map((row) => row.id)).toEqual(['send_keys', 'a_newer_tool', 'send_chat']);
+    expect(rows.map((row) => row.id)).toEqual(['interrupt_window', 'a_newer_tool', 'send_chat']);
     expect(rows[1]?.name).toBe('a_newer_tool');
   });
 
   it('labels a tool that runs automatically and emphasizes its risk', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'send_keys', autoApprove: true }] })
+      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
     );
 
     expect(rows[0]).toMatchObject({
@@ -156,7 +154,7 @@ describe('approvalToolRows', () => {
 
   it('labels a tool that waits for approval and does not emphasize its risk', () => {
     const rows: ApprovalToolRow[] = approvalToolRows(
-      info({ tools: [{ tool: 'send_keys', autoApprove: false }] })
+      info({ tools: [{ tool: 'interrupt_window', autoApprove: false }] })
     );
 
     expect(rows[0]).toMatchObject({
@@ -184,8 +182,12 @@ describe('approvalToolRows', () => {
   });
 
   it('keeps the same name, description and risk whether the tool is on or off', () => {
-    const [on] = approvalToolRows(info({ tools: [{ tool: 'send_keys', autoApprove: true }] }));
-    const [off] = approvalToolRows(info({ tools: [{ tool: 'send_keys', autoApprove: false }] }));
+    const [on] = approvalToolRows(
+      info({ tools: [{ tool: 'interrupt_window', autoApprove: true }] })
+    );
+    const [off] = approvalToolRows(
+      info({ tools: [{ tool: 'interrupt_window', autoApprove: false }] })
+    );
 
     expect([on?.name, on?.description, on?.risk]).toEqual([off?.name, off?.description, off?.risk]);
   });
@@ -306,8 +308,8 @@ describe('isApprovalSettingsReadOnly', () => {
 
 describe('approvalUpdateFailure', () => {
   it.each<[string, boolean, 'tool' | 'plan']>([
-    ['send_keys', true, 'tool'],
-    ['send_keys', false, 'tool'],
+    ['interrupt_window', true, 'tool'],
+    ['interrupt_window', false, 'tool'],
     ['require_approval', true, 'plan'],
     ['require_approval', false, 'plan'],
   ])('names %s and the reason (was on: %s, %s)', (id, wasOn, kind) => {
@@ -321,10 +323,10 @@ describe('approvalUpdateFailure', () => {
   it('gives each of the four cases its own line', () => {
     const reason = 'refused';
     const lines = [
-      approvalUpdateFailure('send_keys', reason, true, 'tool'),
-      approvalUpdateFailure('send_keys', reason, false, 'tool'),
-      approvalUpdateFailure('send_keys', reason, true, 'plan'),
-      approvalUpdateFailure('send_keys', reason, false, 'plan'),
+      approvalUpdateFailure('interrupt_window', reason, true, 'tool'),
+      approvalUpdateFailure('interrupt_window', reason, false, 'tool'),
+      approvalUpdateFailure('interrupt_window', reason, true, 'plan'),
+      approvalUpdateFailure('interrupt_window', reason, false, 'plan'),
     ];
 
     expect(new Set(lines).size).toBe(lines.length);

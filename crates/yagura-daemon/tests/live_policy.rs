@@ -123,8 +123,8 @@ async fn set_auto_approve_toggles_only_the_named_tool_and_purges_duplicate_entri
         Some(PathBuf::from("unused.toml")),
         Some(policy_approving(&[
             "send_chat",
-            "send_keys",
-            "send_keys",
+            "interrupt_window",
+            "interrupt_window",
             "typo_tool",
         ])),
         true,
@@ -193,7 +193,7 @@ async fn set_auto_approve_toggles_only_the_named_tool_and_purges_duplicate_entri
 
     {
         let mut guard: PolicyWriteGuard<'_> = cell.lock_writes().await;
-        let changed: bool = guard.set_auto_approve(DestructiveTool::SendKeys, false);
+        let changed: bool = guard.set_auto_approve(DestructiveTool::InterruptWindow, false);
         assert!(
             changed,
             "turning off a duplicated entry must still report a change"
@@ -201,7 +201,7 @@ async fn set_auto_approve_toggles_only_the_named_tool_and_purges_duplicate_entri
     }
     let after_off: Arc<LivePolicy> = cell.snapshot();
     assert_eq!(
-        gate(policy_source(&after_off), DestructiveTool::SendKeys),
+        gate(policy_source(&after_off), DestructiveTool::InterruptWindow),
         Ok(GateVerdict::NeedsApproval),
         "every duplicate entry for the same tool must be purged by one off toggle"
     );
@@ -214,8 +214,8 @@ async fn set_auto_approve_toggles_only_the_named_tool_and_purges_duplicate_entri
         .expect("the approval section must still be present")
         .auto_approve;
     assert!(
-        !names.iter().any(|name| name == "send_keys"),
-        "no send_keys entry, duplicated or not, may remain: {names:?}"
+        !names.iter().any(|name| name == "interrupt_window"),
+        "no interrupt_window entry, duplicated or not, may remain: {names:?}"
     );
     assert!(
         names.iter().any(|name| name == "typo_tool"),

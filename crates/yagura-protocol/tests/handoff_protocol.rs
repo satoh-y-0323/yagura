@@ -11,7 +11,7 @@ use yagura_protocol::{
     HANDOFF_ENVELOPE_MAX_BYTES, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
     HandoffArgError, HandoffTextError, SendTextError, WindowNameError, decode_client_message,
     decode_daemon_message, encode_client_message, encode_daemon_message, is_valid_token,
-    validate_handoff_target, validate_handoff_text, validate_send_text_body,
+    validate_handoff_target, validate_handoff_text, validate_message_text,
 };
 
 // =====================================================================
@@ -440,19 +440,18 @@ fn validate_handoff_text_accepts_ordinary_ascii_symbols_and_multibyte_text() {
 }
 
 // =====================================================================
-// validate_send_text_body: the same forbidden-character rule as
-// validate_handoff_text, except `\n` and `\r` -- a send_message body's own
-// submit marker and line boundaries -- are allowed.
+// validate_message_text: the same forbidden-character rule as
+// validate_handoff_text, except `\n` and `\r` are allowed.
 // =====================================================================
 
 #[test]
-fn validate_send_text_body_rejects_every_forbidden_character_except_newline_and_cr() {
+fn validate_message_text_rejects_every_forbidden_character_except_newline_and_cr() {
     for ch in forbidden_text_chars() {
         if matches!(ch, '\n' | '\r') {
             continue;
         }
         let value = format!("a{ch}b");
-        let result = validate_send_text_body(&value);
+        let result = validate_message_text(&value);
         match result {
             Err(SendTextError::ForbiddenChar { at, ch: reported }) => {
                 assert_eq!(
@@ -475,83 +474,11 @@ fn validate_send_text_body_rejects_every_forbidden_character_except_newline_and_
 }
 
 #[test]
-fn validate_send_text_body_accepts_a_trailing_newline_and_a_trailing_cr() {
-    for value in [
-        "submit this line\n",
-        "submit this line\r",
-        "submit this line\r\n",
-    ] {
-        assert_eq!(
-            validate_send_text_body(value),
-            Ok(()),
-            "expected {value:?} to be accepted"
-        );
-    }
-}
-
-// =====================================================================
-// A body with more than one terminator -- any CR/LF that is not
-// the single trailing one -- is not written through unchanged. The daemon
-// cannot confirm such a body reached the receiver as more than one message, so it is rejected
-// outright; a caller with several lines to deliver sends them one at a
-// time, or writes them into a plan task's `instruction`.
-// =====================================================================
-
-#[test]
-fn validate_send_text_body_rejects_a_middle_line_break() {
-    for value in ["a\rb\r", "a\nb", "a\r\nb\r\n"] {
-        let result = validate_send_text_body(value);
-        assert!(
-            matches!(result, Err(SendTextError::EmbeddedLineBreak { .. })),
-            "expected {value:?} to be rejected as an embedded line break, got {result:?}"
-        );
-    }
-}
-
-#[test]
-fn validate_send_text_body_rejects_a_middle_line_break_reporting_its_byte_offset() {
-    let result = validate_send_text_body("first line\rsecond line\r");
-    match result {
-        Err(SendTextError::EmbeddedLineBreak { at }) => {
-            assert_eq!(
-                at, 10,
-                "must report the byte offset of the first non-trailing terminator"
-            );
-        }
-        other => panic!("expected Err(SendTextError::EmbeddedLineBreak {{ .. }}), got {other:?}"),
-    }
-}
-
-#[test]
-fn validate_send_text_body_still_accepts_no_terminator_terminator_only_and_empty() {
-    for value in ["no terminator at all", "\r", "\n", "\r\n", ""] {
-        assert_eq!(
-            validate_send_text_body(value),
-            Ok(()),
-            "expected {value:?} to be accepted"
-        );
-    }
-}
-
-#[test]
-fn send_text_error_embedded_line_break_display_reports_the_offset_without_a_character() {
-    let result = validate_send_text_body("a\rb");
-    let Err(err) = result else {
-        panic!("expected a rejection for an embedded CR, got {result:?}");
-    };
-    let message = err.to_string();
-    assert!(
-        message.contains("byte offset 1"),
-        "the message must report the byte offset, got {message:?}"
-    );
-}
-
-#[test]
-fn validate_send_text_body_rejects_escape_regardless_of_position() {
+fn validate_message_text_rejects_escape_regardless_of_position() {
     for value in ["\x1b[2Jerased", "erased\x1b[2J", "era\x1bsed\n"] {
         assert!(
             matches!(
-                validate_send_text_body(value),
+                validate_message_text(value),
                 Err(SendTextError::ForbiddenChar { .. })
             ),
             "expected {value:?} to be rejected"
@@ -560,10 +487,9 @@ fn validate_send_text_body_rejects_escape_regardless_of_position() {
 }
 
 #[test]
-fn validate_send_text_body_display_reports_the_code_point_and_offset_without_echoing_the_character()
-{
+fn validate_message_text_display_reports_the_code_point_and_offset_without_echoing_the_character() {
     let value = "a\u{202E}b";
-    let result = validate_send_text_body(value);
+    let result = validate_message_text(value);
     let Err(err) = result else {
         panic!("expected a rejection for an embedded U+202E, got {result:?}");
     };
@@ -580,14 +506,14 @@ fn validate_send_text_body_display_reports_the_code_point_and_offset_without_ech
 }
 
 #[test]
-fn validate_send_text_body_accepts_ordinary_ascii_symbols_and_multibyte_text() {
+fn validate_message_text_accepts_ordinary_ascii_symbols_and_multibyte_text() {
     for value in [
         "run the tests\n",
         "レビューをお願いします\n",
         "emoji ZWJ sequence: a\u{200D}b\n",
     ] {
         assert_eq!(
-            validate_send_text_body(value),
+            validate_message_text(value),
             Ok(()),
             "expected {value:?} to be accepted"
         );

@@ -384,22 +384,6 @@ pub fn ready_child_path() -> PathBuf {
     fixture_bin_path("ready_child")
 }
 
-/// Path to the `submit_child` fixture binary that belongs to the test
-/// binary currently running.
-///
-/// Resolved the same way as [`echo_child_path`], including the existence
-/// check, and for the same reason.
-///
-/// # Panics
-///
-/// Panics if the running executable's own path cannot be resolved, or if the
-/// fixture binary is not present next to it -- build it with
-/// `cargo build -p yagura-daemon --bins` first.
-#[must_use]
-pub fn submit_child_path() -> PathBuf {
-    fixture_bin_path("submit_child")
-}
-
 /// Path to the `env_probe` fixture binary that belongs to the test binary
 /// currently running.
 ///
@@ -642,36 +626,6 @@ pub fn ready_child_command(marker: &str) -> Vec<String> {
     ]
 }
 
-/// The command array for a window running the `submit_child` fixture: the
-/// executable path followed by its five positional settings, with no shell
-/// wrapping and no parsing beyond writing each number in decimal.
-/// Slot 5 is the startup slot and holds `now`; a caller that must hold the
-/// marker until a file exists writes `until|<path>` over it.
-///
-/// # Panics
-///
-/// Panics under the same conditions as [`submit_child_path`], or if that
-/// path is not valid UTF-8.
-#[must_use]
-pub fn submit_child_command(
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-) -> Vec<String> {
-    vec![
-        submit_child_path()
-            .to_str()
-            .expect("submit_child path must be valid UTF-8")
-            .to_string(),
-        marker.to_string(),
-        discard_reads.to_string(),
-        paste_guard_keys.to_string(),
-        react_on_body.to_string(),
-        "now".to_string(),
-    ]
-}
-
 /// The TOML source of a profile with `display_name` whose `[command]`
 /// default is `command`, each element written as a TOML literal string.
 ///
@@ -776,59 +730,6 @@ pub fn ready_child_command_with_composer(marker: &str, reflect_delay_ms: u64) ->
     command
 }
 
-/// [`submit_child_command`] in composer-draw mode: the fixture keeps every
-/// behavior its five positional settings select and additionally paints its
-/// unsubmitted input as a composer region, reflecting each write
-/// `reflect_delay_ms` after it lands.
-///
-/// # Panics
-///
-/// Panics under the same conditions as [`submit_child_command`].
-#[must_use]
-pub fn submit_child_command_with_composer(
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    reflect_delay_ms: u64,
-) -> Vec<String> {
-    let mut command = submit_child_command(marker, discard_reads, paste_guard_keys, react_on_body);
-    command.extend(composer_arguments(reflect_delay_ms));
-    command
-}
-
-/// [`submit_child_command_with_composer`] with the composer folded: the
-/// fixture paints `placeholder` wherever a non-empty body would stand, so its
-/// region stays observable while what was written into it cannot be read back
-/// off the screen. An empty `placeholder` paints the body as written.
-///
-/// `placeholder` is the caller's own value rather than a shared constant:
-/// unlike the composer triple, no detection definition holds it, so nothing
-/// reading the screen may depend on what it says.
-///
-/// # Panics
-///
-/// Panics under the same conditions as [`submit_child_command`].
-#[must_use]
-pub fn submit_child_command_with_folded_composer(
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    reflect_delay_ms: u64,
-    placeholder: &str,
-) -> Vec<String> {
-    let mut command = submit_child_command_with_composer(
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        reflect_delay_ms,
-    );
-    command.push(placeholder.to_string());
-    command
-}
-
 /// [`ready_child_profile_source`] in composer-draw mode, with the same fixed
 /// marker ([`crate::detection::CONTROL_READY_MARKER`]).
 ///
@@ -847,63 +748,6 @@ pub fn ready_child_profile_source_with_composer(
             reflect_delay_ms,
         ),
     )
-}
-
-/// The TOML source of a profile whose `[command]` launches the `submit_child`
-/// fixture in composer-draw mode (see [`submit_child_command_with_composer`]).
-///
-/// # Panics
-///
-/// Panics under the same conditions as [`submit_child_command`].
-#[must_use]
-pub fn submit_child_profile_source_with_composer(
-    display_name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    reflect_delay_ms: u64,
-) -> String {
-    profile_source(
-        display_name,
-        &submit_child_command_with_composer(
-            marker,
-            discard_reads,
-            paste_guard_keys,
-            react_on_body,
-            reflect_delay_ms,
-        ),
-    )
-}
-
-/// [`submit_child_command_with_composer`] with `clear_scope` appended after
-/// the (always-empty, "no folding") `fold_placeholder` slot: selects what the
-/// fixture's `clear` byte (`0x15`) does, or leaves it at its ordinary
-/// behavior when `clear_scope` is empty. See the fixture's module doc for the
-/// named values (`"hold-until-clear"`, `"literal-clear"`, `"partial-clear"`).
-///
-/// # Panics
-///
-/// Panics under the same conditions as [`submit_child_command`].
-#[must_use]
-pub fn submit_child_command_with_clear_scope(
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    reflect_delay_ms: u64,
-    clear_scope: &str,
-) -> Vec<String> {
-    let mut command = submit_child_command_with_composer(
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        reflect_delay_ms,
-    );
-    command.push(String::new()); // fold_placeholder: none
-    command.push(clear_scope.to_string());
-    command
 }
 
 /// The TOML source of a profile whose `[command]` launches the `argv_probe`

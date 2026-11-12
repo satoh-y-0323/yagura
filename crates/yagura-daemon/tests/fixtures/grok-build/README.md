@@ -56,12 +56,6 @@ text, not the window's size: 88 x 23 is estimated from the capture (the
 rows `read_output` returned for the trust prompt). The tests judge them at that
 size.
 
-| composer fixture | cols x rows | expected | screen |
-|---|---|---|---|
-| composer/100x30-empty.bin | 100x30 | Empty | Windows, the empty composer after start (the `idle` capture) |
-| composer/100x30-draft.bin | 100x30 | Body (the typed prompt) | Windows, a draft of one wrapped line typed and not sent |
-| composer/100x30-wsl-empty.bin | 100x30 | Empty | WSL, the empty composer after start, mark `❯` |
-
 ## Capture conditions
 
 Captured 2026-10-28. Windows: `grok.exe` started directly (no shim), in a
@@ -71,10 +65,3 @@ scratch git repository, with `GROK_FOLDER_TRUST=0` for the turn captures. WSL:
 The first-run "Help improve Grok" consent notice was left unanswered on screen
 in every capture; it does not take input. What decides `>` versus `❯` is not
 known (the WSL captures show `❯`, the Windows ones `>`).
-
-## Redactions
-
-The working folder shown in the top bar of the byte streams under `composer/`
-(abbreviated to initials) is replaced with `~/work/project`, padded with spaces
-to the same byte length. No other byte was changed. The `.txt` files hold none
-of it.

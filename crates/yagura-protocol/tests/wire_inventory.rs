@@ -78,10 +78,10 @@ use yagura_protocol::{
     ApprovalRequest, ApprovalRequester, ApprovalRequesterKind, ApprovalSettingsInfo,
     ApprovalTarget, AssignmentSource, AwaitingWindow, CellAttr, CellColor, CellFlag, CellPosition,
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
-    ColorOverride, ControlKey, CursorShape, CursorState, DaemonMessage, DaemonProblem,
-    DaemonProblemKind, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
-    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key,
-    KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
+    ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
+    DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun, HookInputValue,
+    HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key, KeyInput,
+    LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
     McpRegistrationEntry, McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo,
     McpRegistrationStep, McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo,
     ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot,
@@ -654,10 +654,6 @@ fn client_message_corpus() -> Vec<ClientMessage> {
         wire_sample!(ClientMessage::ListWindows),
         wire_sample!(ClientMessage::GetWindowStatus { window_id }),
         wire_sample!(ClientMessage::SendText { window_id, text }),
-        ClientMessage::SendKeys {
-            window_id: "sample".to_string(),
-            keys: vec![ControlKey::Escape, ControlKey::Enter],
-        },
         wire_sample!(ClientMessage::InterruptWindow { window_id }),
         wire_sample!(ClientMessage::CloseWindow { window_id, force }),
         wire_sample!(ClientMessage::WaitForStatus {
@@ -897,7 +893,6 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             state,
             note
         }),
-        wire_sample!(DaemonMessage::KeysSent { window_id }),
         wire_sample!(DaemonMessage::WindowInterrupted { window_id }),
         wire_sample!(DaemonMessage::WindowClosed { window_id }),
         wire_sample!(DaemonMessage::WaitResult {

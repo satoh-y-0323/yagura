@@ -233,8 +233,8 @@ async fn at_parent_from_a_child_reaches_its_opener_in_their_shared_room() {
     .await;
 
     // The parent must actually be able to *receive* a delivery (not merely
-    // exist), so it is driven to `Idle` in composer-draw mode -- the same
-    // discipline `ipc_chat.rs` uses for every delivery target.
+    // exist): its profile declares delivery, so the post waits in its inbox
+    // for its take door.
     let mut setup = h.connect().await;
     let parent_window = h.open_idle_window_with_composer(&mut setup).await;
     let mut parent_conn = h.connect().await;
@@ -249,8 +249,20 @@ async fn at_parent_from_a_child_reaches_its_opener_in_their_shared_room() {
     assert_eq!(posted.targets, vec![parent_window.clone()]);
     assert!(posted.unresolved.is_empty());
 
-    h.wait_for_scrollback(&parent_window, b"are you there?")
-        .await;
+    let entry = h
+        .registry
+        .get(&parent_window)
+        .expect("the parent is registered");
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached the parent's inbox"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let taken = crate::send_message_lifecycle::take_and_print(&h, &parent_window).await;
+    assert!(taken.contains("are you there?"), "{taken:?}");
 }
 
 // --- Task-bound window follows the plan's live owner, not opener -----

@@ -9,9 +9,13 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::common;
+
+use common::store_fixtures::capture_warn_events;
+use yagura_daemon::DaemonConfig;
 use yagura_daemon::cli::resolve_playbook;
 use yagura_daemon::config::APPROVAL_TIMEOUT_DEFAULT_SECS;
-use yagura_daemon::control::{ApprovalPolicy, DestructiveTool, parse_policy};
+use yagura_daemon::control::{ApprovalPolicy, DestructiveTool, apply_limits, parse_policy};
 
 #[test]
 fn resolve_playbook_prefers_the_argument_over_the_environment_variable() {
@@ -123,14 +127,12 @@ fn the_bundled_repository_playbook_auto_approves_exactly_send_chat_and_open_wind
         policy.allows(DestructiveTool::OpenWindow),
         "the bundled playbook must let agents start windows without a human"
     );
-    for tool in [
-        DestructiveTool::CloseWindow,
-        DestructiveTool::InterruptWindow,
-        DestructiveTool::SendMessage,
-        DestructiveTool::SendKeys,
-        DestructiveTool::SendHandoff,
-        DestructiveTool::BroadcastChat,
-    ] {
+    for tool in DestructiveTool::ALL.into_iter().filter(|tool| {
+        !matches!(
+            tool,
+            DestructiveTool::SendChat | DestructiveTool::OpenWindow
+        )
+    }) {
         assert!(
             !policy.allows(tool),
             "the bundled playbook must not let {} run without a human, whatever shape \
@@ -162,64 +164,84 @@ fn the_bundled_repository_playbook_keeps_the_daemon_approval_deadline() {
 }
 
 // =============================================================================
-// [limits] handoff_ready_timeout_secs: read through the same parse_policy
-// path resolve_playbook feeds into, independent of the control_gate.rs
-// coverage of the same key (a second, playbook-shaped view of the contract).
+// Keys of the typing the daemon no longer does: an old playbook that still
+// writes them keeps loading, is told about them, and changes nothing with them.
 // =============================================================================
 
-#[test]
-fn handoff_ready_timeout_secs_is_read_from_a_parsed_playbook() {
-    let policy = parse_policy("[limits]\nhandoff_ready_timeout_secs = 90\n")
-        .expect("a [limits] handoff_ready_timeout_secs within range must parse");
-    assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .handoff_ready_timeout_secs,
-        Some(90)
-    );
+/// The `[limits]` keys that bounded typing into a window and waiting for it to
+/// be taken. With nothing typed, a value of theirs bounds nothing.
+const DEPRECATED_LIMITS_KEYS: [&str; 2] = [
+    "handoff_ready_timeout_secs",
+    "handoff_delivery_timeout_secs",
+];
+
+/// Whether one of `events` is a WARN naming `needle` in its message or a field.
+fn warned_about(events: &[common::store_fixtures::WarnEvent], needle: &str) -> bool {
+    events.iter().any(|event| {
+        event.message.contains(needle) || event.fields.values().any(|value| value.contains(needle))
+    })
 }
 
+/// A playbook still writing a deprecated `[limits]` key loads whatever the value, even
+/// one the old range refused, and the rest of the playbook takes effect; the load warns
+/// naming the key, and merging its limits leaves every setting at its default.
 #[test]
-fn handoff_ready_timeout_secs_out_of_range_fails_the_whole_playbook_load_naming_the_key() {
-    for seconds in [0u64, 601] {
-        let source = format!("[limits]\nhandoff_ready_timeout_secs = {seconds}\n");
-        let result = parse_policy(&source);
-        // `err.to_string()` also carries a TOML source-line snippet that
-        // echoes the raw key from the input, so matching on the key name
-        // alone is a vacuous check (it passes even if the custom message
-        // itself dropped the key). Match the custom message text that
-        // `check_timeout_range` (control.rs) builds instead, so this test
-        // fails if that message stops naming its key.
-        let expected =
-            format!("handoff_ready_timeout_secs must be between 1 and 600, got {seconds}");
-        match result {
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains(&expected),
-                    "{seconds} is outside 1..=600 and must fail the whole playbook load \
-                     with a message naming the offending key, expected to find {expected:?} \
-                     in {message:?}"
-                );
-            }
-            Ok(_) => panic!("{seconds} is outside 1..=600 and must fail the whole load"),
+fn a_deprecated_limits_key_is_warned_about_and_changes_no_setting_whatever_its_value() {
+    for key in DEPRECATED_LIMITS_KEYS {
+        for seconds in [0_u64, 90, 601] {
+            let source = format!(
+                "[approval]\nauto_approve = [\"send_chat\"]\n\n[limits]\n{key} = {seconds}\n"
+            );
+            let (warns, parsed) = capture_warn_events(|| parse_policy(&source));
+            let policy = parsed.unwrap_or_else(|err| {
+                panic!(
+                    "{key} = {seconds} is deprecated and must not fail the playbook load, \
+                     got: {err}"
+                )
+            });
+            assert!(
+                policy.allows(DestructiveTool::SendChat),
+                "the rest of a playbook carrying {key} = {seconds} must still take effect"
+            );
+            assert!(
+                warned_about(&warns, key),
+                "loading {key} = {seconds} must warn naming {key}; warned: {:?}",
+                warns.iter().map(|event| &event.message).collect::<Vec<_>>()
+            );
+            let mut config = DaemonConfig::default();
+            apply_limits(&mut config, policy.limits());
+            assert_eq!(
+                format!("{config:?}"),
+                format!("{:?}", DaemonConfig::default()),
+                "{key} = {seconds} must change no setting of the daemon"
+            );
         }
     }
 }
 
+/// `send_keys` in `auto_approve` names a tool that no longer exists: it is warned about
+/// and approves nothing, while the other names in the same list still approve.
 #[test]
-fn handoff_ready_timeout_secs_defaults_to_none_when_the_playbook_omits_it() {
-    let policy = parse_policy("[limits]\ninterrupt_bytes = [3]\n")
-        .expect("a [limits] section without handoff_ready_timeout_secs must parse");
+fn send_keys_in_auto_approve_is_warned_about_and_approves_nothing() {
+    let (warns, parsed) = capture_warn_events(|| {
+        parse_policy("[approval]\nauto_approve = [\"send_keys\", \"send_chat\"]\n")
+    });
+    let policy = parsed.expect("send_keys in auto_approve must not fail the playbook load");
+
+    assert!(
+        warned_about(&warns, "send_keys"),
+        "loading send_keys in auto_approve must warn naming it; warned: {:?}",
+        warns.iter().map(|event| &event.message).collect::<Vec<_>>()
+    );
+    let approved: Vec<&str> = DestructiveTool::ALL
+        .into_iter()
+        .filter(|tool| policy.allows(*tool))
+        .map(DestructiveTool::as_tool_name)
+        .collect();
     assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .handoff_ready_timeout_secs,
-        None,
-        "an omitted handoff_ready_timeout_secs must stay None so the daemon's built-in \
-         default applies"
+        approved,
+        ["send_chat"],
+        "send_keys must approve no tool; only send_chat of the list may"
     );
 }
 

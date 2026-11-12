@@ -9,9 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{DaemonTransport, RequesterIdentity, TransportError};
-use yagura_protocol::{
-    ClientMessage, ControlKey, DaemonMessage, OnNameTaken, WindowStatus, validate_control_keys,
-};
+use yagura_protocol::{ClientMessage, DaemonMessage, OnNameTaken, WindowStatus};
 
 /// The fixed MCP error-code vocabulary, exposed via
 /// [`ToolError::code`]. Mapping it onto the MCP `content` / `isError` JSON
@@ -49,13 +47,8 @@ pub enum ToolError {
     /// is `Unknown` (fail-safe; not relaxable by a playbook).
     #[error("the window's status is unknown: {0}")]
     StatusUnknown(String),
-    /// The daemon judged the target window's composer and never wrote the
-    /// text there, so the submit key was never pressed for it.
-    #[error("the text was not written into the window: {0}")]
-    NotWritten(String),
-    /// The daemon refused to write text into the target window because the
-    /// window's definition declares no composer, so the text could never be
-    /// typed there as input.
+    /// The daemon refused to open a window from a profile that cannot be
+    /// handed a request at launch.
     #[error("the window has no composer: {0}")]
     NoComposer(String),
     /// The daemon refused the request because a rate limit was exceeded.
@@ -129,7 +122,6 @@ impl ToolError {
             Self::SpawnFailed(_) => "spawn_failed",
             Self::ApprovalRequired(_) => "approval_required",
             Self::StatusUnknown(_) => "status_unknown",
-            Self::NotWritten(_) => "not_written",
             Self::NoComposer(_) => "no_composer",
             Self::RateLimited(_) => "rate_limited",
             Self::AuthFailed(_) => "auth_failed",
@@ -168,18 +160,6 @@ pub struct SendMessageArgs {
     pub window_id: Option<String>,
     /// The text to send.
     pub text: Option<String>,
-    /// Delivery mode. Only `"immediate"` (the default when omitted) is
-    /// implemented; any other value is `unsupported`.
-    pub mode: Option<String>,
-}
-
-/// Arguments for the `send_keys` tool.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SendKeysArgs {
-    /// The window ID to send keys to.
-    pub window_id: Option<String>,
-    /// Named control keys, in the order they should be written.
-    pub keys: Option<Vec<ControlKey>>,
 }
 
 /// Arguments for the `open_window` tool.
@@ -320,7 +300,6 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
         DaemonMessage::WindowList { .. } => "WindowList",
         DaemonMessage::WindowStatus { .. } => "WindowStatus",
         DaemonMessage::TextSent { .. } => "TextSent",
-        DaemonMessage::KeysSent { .. } => "KeysSent",
         DaemonMessage::WindowInterrupted { .. } => "WindowInterrupted",
         DaemonMessage::WindowClosed { .. } => "WindowClosed",
         DaemonMessage::WaitResult { .. } => "WaitResult",
@@ -379,10 +358,6 @@ pub(crate) fn message_kind(message: &DaemonMessage) -> &'static str {
     }
 }
 
-/// The only `mode` value `send_message` implements; anything else is
-/// `unsupported`.
-const SEND_MESSAGE_MODE_IMMEDIATE: &str = "immediate";
-
 pub(crate) fn map_transport_error(err: TransportError) -> ToolError {
     match err {
         TransportError::Unavailable(message) => ToolError::DaemonUnavailable(message),
@@ -403,7 +378,6 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "spawn_failed" => ToolError::SpawnFailed(message),
         "approval_required" => ToolError::ApprovalRequired(message),
         "status_unknown" => ToolError::StatusUnknown(message),
-        "not_written" => ToolError::NotWritten(message),
         "no_composer" => ToolError::NoComposer(message),
         "rate_limited" => ToolError::RateLimited(message),
         "auth_failed" => ToolError::AuthFailed(message),
@@ -523,18 +497,6 @@ fn require_positive_timeout(value: Option<u64>) -> Result<u64, ToolError> {
     }
 }
 
-/// Evaluates `mode` against the fixed `"immediate"` vocabulary locally,
-/// before any daemon round trip. A value check rather than a presence check,
-/// so it maps to `unsupported` rather than `invalid_argument`.
-fn validate_send_mode(mode: Option<&str>) -> Result<(), ToolError> {
-    match mode {
-        None | Some(SEND_MESSAGE_MODE_IMMEDIATE) => Ok(()),
-        Some(other) => Err(ToolError::Unsupported(format!(
-            "mode {other:?} is not supported; only \"immediate\" is implemented"
-        ))),
-    }
-}
-
 /// `list_windows`: no arguments. Maps `DaemonMessage::WindowList` to
 /// `{ "windows": [...] }`.
 pub async fn list_windows<T: DaemonTransport>(transport: &T) -> Result<Value, ToolError> {
@@ -609,57 +571,19 @@ pub async fn get_window_status<T: DaemonTransport>(
     }
 }
 
-/// Rewrites every line terminator -- both `\r\n` pairs and lone LFs -- as a
-/// lone CR, leaving existing lone CRs untouched and never appending a
-/// terminator the caller did not write, so text without a trailing newline
-/// stays unsubmitted.
+/// `send_message`: `window_id` and `text` are required and non-empty, both
+/// checked before any daemon round trip, whatever the target window's status.
 ///
-/// A console line editor (Windows PSReadLine in particular) submits on CR: a
-/// trailing LF only opens a continuation prompt, and CRLF is read as two
-/// keystrokes (submit, then an in-line newline). MCP clients cannot put a raw
-/// CR in a JSON string argument, so the normalization is an MCP-layer policy.
-///
-/// The daemon rejects a normalized body carrying a line break anywhere but a
-/// single trailing terminator (`SendTextError::EmbeddedLineBreak`): it writes
-/// a body straight through with no per-line confirmation, so it cannot tell
-/// whether an embedded line break reached the receiver as more than one
-/// message. A single-line payload with one trailing terminator goes through
-/// the target definition's input plan instead, which replaces that
-/// terminator with the definition's own submit key. Normalizing here
-/// therefore does not decide how the line is submitted, only that a caller
-/// who wrote LF still gets a terminated line; a caller with several lines to
-/// deliver sends them one at a time, or writes them into a plan task's
-/// `instruction` (see [`super::plan_tools::create_plan`]).
-fn normalize_line_endings(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    let mut previous_was_cr = false;
-    for character in text.chars() {
-        match character {
-            // The CR of this pair was already emitted; drop the LF.
-            '\n' if previous_was_cr => {}
-            '\n' => normalized.push('\r'),
-            _ => normalized.push(character),
-        }
-        previous_was_cr = character == '\r';
-    }
-    normalized
-}
-
-/// `send_message`: `window_id` and `text` are required and non-empty;
-/// `mode` (if present) must be `"immediate"`. All three are checked before
-/// any daemon round trip, whatever the target window's status.
-///
-/// `text` is forwarded with its line endings normalized by
-/// [`normalize_line_endings`] and is otherwise unmodified. The `text` size
-/// limit is enforced solely by the daemon's `send_text` handler; this
-/// function relays whatever error it sends back.
+/// `text` is forwarded as written: it reaches the window inside an envelope,
+/// so its line endings are data, not keystrokes. The `text` size limit is
+/// enforced solely by the daemon's `send_text` handler; this function relays
+/// whatever error it sends back.
 pub async fn send_message<T: DaemonTransport>(
     transport: &T,
     args: SendMessageArgs,
 ) -> Result<Value, ToolError> {
     let window_id = require_non_empty(args.window_id, "window_id")?;
-    let text = normalize_line_endings(&require_non_empty(args.text, "text")?);
-    validate_send_mode(args.mode.as_deref())?;
+    let text = require_non_empty(args.text, "text")?;
 
     let response = transport
         .round_trip(ClientMessage::SendText { window_id, text })
@@ -675,33 +599,6 @@ pub async fn send_message<T: DaemonTransport>(
             note,
         } => Ok(with_requester(
             json!({ "window_id": window_id, "id": id, "state": state, "note": note }),
-            transport.requester_identity(),
-        )),
-        DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),
-        other => Err(unexpected_response(&other)),
-    }
-}
-
-/// `send_keys`: validates a non-empty sequence of at most
-/// [`yagura_protocol::SEND_KEYS_MAX_KEYS`] named keys
-/// before crossing the daemon boundary.
-pub async fn send_keys<T: DaemonTransport>(
-    transport: &T,
-    args: SendKeysArgs,
-) -> Result<Value, ToolError> {
-    let window_id = require_non_empty(args.window_id, "window_id")?;
-    let keys = args
-        .keys
-        .ok_or_else(|| ToolError::InvalidArgument("keys is required".to_string()))?;
-    validate_control_keys(&keys).map_err(|err| ToolError::InvalidArgument(err.to_string()))?;
-
-    let response = transport
-        .round_trip(ClientMessage::SendKeys { window_id, keys })
-        .await
-        .map_err(map_transport_error)?;
-    match response {
-        DaemonMessage::KeysSent { .. } => Ok(with_requester(
-            json!({ "ok": true }),
             transport.requester_identity(),
         )),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),

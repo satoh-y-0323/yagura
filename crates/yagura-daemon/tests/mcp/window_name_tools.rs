@@ -181,7 +181,8 @@ fn handoff_sent(name: Option<&str>) -> Value {
         "type": "handoff_sent",
         "window_id": "w2-abc",
         "opened": true,
-        "delivery": "taken",
+        "id": "e-1",
+        "state": "delivered",
     });
     if let Some(name) = name {
         frame["name"] = json!(name);

@@ -862,34 +862,9 @@ async fn a_report_does_not_release_a_held_update_and_a_write_does() {
     link.view_with("HELD-TEXT").await;
 }
 
+/// The write itself tells the child it has the focus, in front of its body.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_focus_report_goes_right_before_the_writes_body() {
-    let rig = Rig::new("focus");
-    let _daemon = hold_daemon_endpoint(&rig).await;
-    let (_holder, log, mut link, _) = script_window(&rig, true).await;
-    link.script(b"\x1b[?1004hFOCUS-ON").await;
-    link.copy_with("FOCUS-ON").await;
-
-    link.peer
-        .send(HolderFrame::SetViewFocus { focused: false })
-        .await;
-    link.peer
-        .send(HolderFrame::FocusInterval { open: true })
-        .await;
-    link.write(b"BODY").await;
-
-    let log = log_with(&log, b"BODY").await;
-    assert!(
-        contains(&log, b"\x1b[IBODY"),
-        "the child did not read the focus report right before the body: {:?}",
-        String::from_utf8_lossy(&log)
-    );
-}
-
-/// With no interval open, the write itself tells the child it has the focus,
-/// in front of its body.
-#[tokio::test(flavor = "multi_thread")]
-async fn without_an_interval_the_writes_own_focus_report_goes_right_before_its_body() {
+async fn the_writes_own_focus_report_goes_right_before_its_body() {
     let rig = Rig::new("focusprefix");
     let _daemon = hold_daemon_endpoint(&rig).await;
     let (_holder, log, mut link, _) = script_window(&rig, true).await;
@@ -1082,8 +1057,8 @@ async fn the_last_screen_outlives_a_child_that_exited_while_disconnected() {
 /// A holder whose daemon may have a successor keeps the child through a lost
 /// connection and reads on: the child's query is answered once, with nobody
 /// connected, and the next daemon is shown the output of the absence. The
-/// lost connection closed the focus interval it left open and took the view
-/// with it.
+/// child is told the view's focus again after the write, and the lost
+/// connection took the view with it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_holder_awaiting_a_successor_keeps_the_child_and_reads_on_while_disconnected() {
     const ABSENT_MARK: &str = "ABSENT-MARK";
@@ -1105,9 +1080,6 @@ async fn a_holder_awaiting_a_successor_keeps_the_child_and_reads_on_while_discon
     link.attach(1).await;
     link.peer
         .send(HolderFrame::SetViewFocus { focused: false })
-        .await;
-    link.peer
-        .send(HolderFrame::FocusInterval { open: true })
         .await;
     link.write(b"FIRST-MARK").await;
     log_with(&log, b"FIRST-MARK").await;
@@ -1144,7 +1116,7 @@ async fn a_holder_awaiting_a_successor_keeps_the_child_and_reads_on_while_discon
     );
     assert!(
         contains(&before_input[first_end..], b"\x1b[O"),
-        "the focus interval the lost connection left open still holds the focus: {:?}",
+        "the child is still told it has the focus after the write: {:?}",
         String::from_utf8_lossy(&before_input[first_end..])
     );
     assert!(

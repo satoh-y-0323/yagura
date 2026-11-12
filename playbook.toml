@@ -10,8 +10,8 @@
 # outside its own CLI's permission prompts. send_chat is listed because its
 # reach is closed: it can only address a window that is already a chat
 # participant, never an arbitrary process or file. Remove it and every
-# window's chat post waits for a human, like the other six -- close_window,
-# interrupt_window, send_message, send_keys, send_handoff and broadcast_chat --
+# window's chat post waits for a human, like the other five -- close_window,
+# interrupt_window, send_message, send_handoff and broadcast_chat --
 # which reach the GUI's approval dialog when requested by another window or an
 # external MCP client. A request naming the requester's own window as its
 # target, or one from the GUI's own approver connection, is never gated and
@@ -37,19 +37,6 @@ require_approval = true
 #                                     # key. 60 is also the daemon's own
 #                                     # built-in default, so leaving this
 #                                     # commented out has the same effect.
-# handoff_ready_timeout_secs = 60    # How long a delivery typed into a
-#                                     # window waits for it to finish
-#                                     # starting up, in seconds. Same
-#                                     # 1..=600 range and 60s default as
-#                                     # approval_timeout_secs above.
-# handoff_delivery_timeout_secs = 120 # How long a send_handoff to an
-#                                     # existing window waits for its CLI
-#                                     # to take the envelope before it is
-#                                     # answered undelivered_timeout, in
-#                                     # seconds. Same 1..=600 range.
-# chat_delivery_max = 32             # Upper bound on how many chat posts
-#                                     # may be typed into windows at once.
-#                                     # Must be within 1..=256.
 
 # [chat]
 # Optional overrides for the chat rooms; every field defaults to a

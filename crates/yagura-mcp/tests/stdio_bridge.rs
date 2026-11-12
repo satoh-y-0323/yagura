@@ -81,15 +81,11 @@ fn request_ids(lines: &[Value]) -> BTreeSet<u64> {
 }
 
 /// What a `daemon_restarted` answer must point the model to: the read paths
-/// that tell whether a call took effect, and the
-/// two tools whose second effect is not harmless (`send_keys`: look at the
-/// screen instead of sending again; `send_message`: look, then call again if
-/// it did not arrive).
+/// that tell whether a call took effect, and the tool whose second effect is
+/// not harmless (`send_message`: look, then call again if it did not arrive).
 fn assert_restart_guidance(text: &str) {
     for tool in [
-        "send_keys",
         "send_message",
-        "read_output",
         "list_windows",
         "get_window_status",
         "read_chat",
@@ -256,8 +252,8 @@ async fn a_sent_tool_call_is_answered_daemon_restarted_once_the_connection_ends_
     relay
         .send(&tool_call_line(
             5,
-            "send_keys",
-            json!({"window_id": "w-1", "keys": ["enter"]}),
+            "interrupt_window",
+            json!({"window_id": "w-1"}),
         ))
         .await;
     conn.request().await;

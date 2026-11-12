@@ -75,7 +75,7 @@ const TYPE_SCREEN_RESYNC: u16 = 22;
 const TYPE_REPORT: u16 = 23;
 const TYPE_SET_PALETTE: u16 = 24;
 const TYPE_SET_VIEW_FOCUS: u16 = 25;
-const TYPE_FOCUS_INTERVAL: u16 = 26;
+// 26 was a focus interval for a daemon that typed into windows; it is not reused.
 const TYPE_ATTACH: u16 = 27;
 const TYPE_DETACH: u16 = 28;
 const TYPE_VIEW_NOTE: u16 = 29;
@@ -217,12 +217,6 @@ pub enum HolderFrame {
     SetViewFocus {
         /// The view's focus.
         focused: bool,
-    },
-    /// d -> h: a stretch in which the daemon decides on or makes writes opens
-    /// or closes; while one is open the child is told it has the focus.
-    FocusInterval {
-        /// Opens one (`true`) or closes one (`false`).
-        open: bool,
     },
     /// d -> h: a client is shown the window as attach `generation`, which
     /// supersedes the one before; every row goes in its first frame.
@@ -460,9 +454,6 @@ impl std::fmt::Debug for HolderFrame {
                 .debug_struct("SetViewFocus")
                 .field("focused", focused)
                 .finish(),
-            Self::FocusInterval { open } => {
-                f.debug_struct("FocusInterval").field("open", open).finish()
-            }
             Self::Attach { generation } => f
                 .debug_struct("Attach")
                 .field("generation", generation)
@@ -629,11 +620,6 @@ struct FocusedBody {
 }
 
 #[derive(Serialize, Deserialize)]
-struct OpenBody {
-    open: bool,
-}
-
-#[derive(Serialize, Deserialize)]
 struct GenerationBody {
     generation: u64,
 }
@@ -791,9 +777,6 @@ pub fn encode_holder_frame(frame: &HolderFrame) -> Vec<u8> {
         ),
         HolderFrame::SetViewFocus { focused } => {
             json_frame(TYPE_SET_VIEW_FOCUS, &FocusedBody { focused: *focused })
-        }
-        HolderFrame::FocusInterval { open } => {
-            json_frame(TYPE_FOCUS_INTERVAL, &OpenBody { open: *open })
         }
         HolderFrame::Attach { generation } => json_frame(
             TYPE_ATTACH,
@@ -1063,10 +1046,6 @@ fn decode_body(frame_type: u16, body: &[u8]) -> Result<HolderFrame, HolderCodecE
         TYPE_SET_VIEW_FOCUS => {
             let FocusedBody { focused } = json(frame_type, body)?;
             HolderFrame::SetViewFocus { focused }
-        }
-        TYPE_FOCUS_INTERVAL => {
-            let OpenBody { open } = json(frame_type, body)?;
-            HolderFrame::FocusInterval { open }
         }
         TYPE_ATTACH => {
             let GenerationBody { generation } = json(frame_type, body)?;

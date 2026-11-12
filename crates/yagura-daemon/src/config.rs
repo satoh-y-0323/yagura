@@ -134,18 +134,6 @@ pub struct DaemonConfig {
     /// `[limits] approval_timeout_secs`.
     pub approval_timeout_secs: u64,
 
-    /// How long a delivery the daemon types into a window waits for that
-    /// window to leave its startup phase, in seconds. Defaults to
-    /// [`HANDOFF_READY_TIMEOUT_DEFAULT_SECS`]. Overridable through a
-    /// playbook's `[limits] handoff_ready_timeout_secs`.
-    pub handoff_ready_timeout_secs: u64,
-
-    /// How long a handoff to an existing window waits for that window's CLI
-    /// to take its envelope before it is answered as undelivered, in seconds.
-    /// Defaults to [`HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS`]. Overridable
-    /// through a playbook's `[limits] handoff_delivery_timeout_secs`.
-    pub handoff_delivery_timeout_secs: u64,
-
     /// Daemon-wide cap on handoffs the daemon has accepted and not yet
     /// answered. Defaults to 32.
     pub max_open_handoffs: usize,
@@ -297,17 +285,6 @@ pub struct DaemonConfig {
     /// Detection definition names excluded from chat participation.
     /// Defaults to `["generic-shell"]`.
     pub chat_exclude_detections: Vec<String>,
-
-    /// Upper bound on how many chat posts may be typed into windows at once.
-    /// Defaults to 32.
-    pub chat_delivery_max: usize,
-
-    /// Upper bound on how many deliveries may wait for one window's turn at a
-    /// time: typed deliveries queued on its delivery lock, and handoffs
-    /// waiting in the inbox of a window that is typed into. The delivery
-    /// holding the turn is not counted; one past the bound is turned away for
-    /// that window alone. Defaults to 8.
-    pub max_turn_waiters_per_window: usize,
 
     /// The MCP bridge executable (`yagura-mcp`) a window's CLI is pointed at,
     /// resolved once by `main.rs` next to the daemon's own executable and
@@ -494,14 +471,6 @@ const CTRL_C: u8 = 0x03;
 /// [`DaemonConfig::default`]) and every range check derives from.
 pub const APPROVAL_TIMEOUT_DEFAULT_SECS: u64 = 60;
 
-/// Default value of [`DaemonConfig::handoff_ready_timeout_secs`] when nothing
-/// overrides it: the single definition point every default (this one and
-/// [`DaemonConfig::default`]) derives from.
-pub const HANDOFF_READY_TIMEOUT_DEFAULT_SECS: u64 = 60;
-
-/// Default value of [`DaemonConfig::handoff_delivery_timeout_secs`].
-pub const HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS: u64 = 120;
-
 /// Default value of [`DaemonConfig::max_open_handoffs`].
 const DEFAULT_MAX_OPEN_HANDOFFS: usize = 32;
 
@@ -524,12 +493,6 @@ const DEFAULT_CHAT_INTRO: &str = "A chat room for this workspace is available. U
 
 /// Default value of [`DaemonConfig::inbox_capacity`].
 pub const DEFAULT_INBOX_CAPACITY: usize = 64;
-
-/// Default value of [`DaemonConfig::chat_delivery_max`].
-const DEFAULT_CHAT_DELIVERY_MAX: usize = 32;
-
-/// Default value of [`DaemonConfig::max_turn_waiters_per_window`].
-const DEFAULT_MAX_TURN_WAITERS_PER_WINDOW: usize = 8;
 
 /// Default value of [`DaemonConfig::model_choices_max_concurrent`].
 const DEFAULT_MODEL_CHOICES_MAX_CONCURRENT: usize = 2;
@@ -677,8 +640,6 @@ impl Default for DaemonConfig {
             playbook: None,
             approval_policy: None,
             approval_timeout_secs: APPROVAL_TIMEOUT_DEFAULT_SECS,
-            handoff_ready_timeout_secs: HANDOFF_READY_TIMEOUT_DEFAULT_SECS,
-            handoff_delivery_timeout_secs: HANDOFF_DELIVERY_TIMEOUT_DEFAULT_SECS,
             max_open_handoffs: DEFAULT_MAX_OPEN_HANDOFFS,
             max_open_handoffs_per_conn: DEFAULT_MAX_OPEN_HANDOFFS_PER_CONN,
             max_pending_approvals: DEFAULT_MAX_PENDING_APPROVALS,
@@ -706,8 +667,6 @@ impl Default for DaemonConfig {
             delivery: DeliverySpec::default(),
             inbox_capacity: DEFAULT_INBOX_CAPACITY,
             chat_exclude_detections: vec![DEFAULT_DETECTION_NAME.to_string()],
-            chat_delivery_max: DEFAULT_CHAT_DELIVERY_MAX,
-            max_turn_waiters_per_window: DEFAULT_MAX_TURN_WAITERS_PER_WINDOW,
             mcp_bridge: None,
             mcp_config_dir: None,
             report_dir: None,

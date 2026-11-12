@@ -26,14 +26,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Instrument;
 use yagura_protocol::{DetectedStatus, UnknownReason, WindowStatus};
 
 use crate::DaemonConfig;
 use crate::detector::definition::{Definition, Region};
-use crate::detector::reading::{self, ComposerReadout, CopyCounts, SharedCopy};
+use crate::detector::reading::{self, CopyCounts, SharedCopy};
 use crate::detector::source::TurnReport;
 use crate::handoff;
 
@@ -142,55 +142,8 @@ fn close_in_time(at: Option<Instant>, window: Duration, now: Instant) -> bool {
     at.is_some_and(|at| now.saturating_duration_since(at) < window)
 }
 
-/// The composer's content, paired with what the detection definition's rules
-/// alone declare about the same screen -- the answer to
-/// [`DetectionEngine::query_composer`] / [`DetectorHandle::query_composer`].
-///
-/// The two halves are read from the same `self` in the same call, so they are
-/// guaranteed to describe the same instant: a caller deciding whether it may
-/// write must never pair a composer reading with a rule verdict taken a
-/// moment later, since a status change in between is exactly the gap that
-/// lets a submit key land on an approval prompt the confirmed status has not
-/// caught up with yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComposerObservation {
-    /// The composer's content as of this call.
-    pub readout: ComposerReadout,
-    /// What the definition's rules alone say about the screen right now,
-    /// ignoring the structured source and every time-based judgement. `None`
-    /// while no rule matches this screen.
-    pub screen_rule: Option<DetectedStatus>,
-    /// Whether the program had finished painting this screen: the cursor is
-    /// shown and no synchronized update is open. Always `false` for a screen
-    /// that is not trusted to reflect what the program drew.
-    pub painted: bool,
-    /// How many screens the detector has read, up to and including this one,
-    /// that a rule closes the write gate on (an approval prompt or a rule's
-    /// explicit `unknown` declaration). Only ever grows, so a larger count
-    /// than an earlier observation's says a dialog may have come and gone in
-    /// between, even one no composer query happened to see.
-    pub closed_screens: u64,
-}
-
-impl ComposerObservation {
-    /// The fail-safe answer for a query nobody could actually put to a live
-    /// screen (the driver task has ended): the
-    /// composer is unreadable, and the rule verdict closes the write gate
-    /// rather than leaving it open, since a caller that cannot ask must never
-    /// write on the strength of silence.
-    pub(crate) fn closed_unobserved() -> Self {
-        Self {
-            readout: ComposerReadout::NotObserved,
-            screen_rule: Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown)),
-            painted: false,
-            closed_screens: 0,
-        }
-    }
-}
-
 /// What one evaluation reads off the window's screen copy. Read from one copy,
-/// so the cursor, the rule verdict and the composer all describe the same
-/// screen.
+/// so the cursor and the rule verdict describe the same screen.
 #[derive(Debug)]
 struct ScreenReading {
     /// The model was replaced, a read of the copy was lost, or a copy was
@@ -199,13 +152,8 @@ struct ScreenReading {
     rebuilt: bool,
     counts: CopyCounts,
     cursor_hidden: bool,
-    /// The program has a synchronized update open.
-    sync_open: bool,
     /// What the definition's rules say about this screen.
     rule: Option<WindowStatus>,
-    /// The composer as this screen shows it; `None` when not asked for, or
-    /// when the definition declares no composer.
-    composer: Option<ComposerReadout>,
 }
 
 /// The rows a reading's rules are matched against, composer body taken out.
@@ -262,32 +210,25 @@ pub struct DetectionEngine {
     /// for as long as a screen loss stands, so screen-derived readings can
     /// tell "the screen is gone" apart from "the definition matched nothing".
     screen_trusted: bool,
-    /// When an evaluation or a composer query was first held back because
-    /// the screen was still being drawn; `None` while nothing is held back.
+    /// When an evaluation was first held back because the screen was still
+    /// being drawn; `None` while nothing is held back.
     held_since: Option<Instant>,
-    /// Composer queries held back until the screen is finished.
-    held_queries: Vec<oneshot::Sender<ComposerObservation>>,
     report_watch: Arc<ReportWatch>,
     /// Whether any status report has reached this engine.
     reports_seen: bool,
     /// When a rule of the screen first confirmed `Running`; a turn a report
     /// opened does not count.
     first_screen_running_at: Option<Instant>,
-    /// See [`ComposerObservation::closed_screens`].
-    closed_screens: u64,
 }
 
 /// How long output must pause, with the cursor still hidden, before the
 /// screen counts as finished: CLIs hide the cursor while they paint and show
 /// it again at the end, so a hidden cursor that stays put this long belongs
-/// to a screen the user is actually looking at. Whether the daemon may write
-/// never rests on this clock: that is [`ComposerObservation::painted`].
+/// to a screen the user is actually looking at.
 pub const SETTLE_QUIET: Duration = Duration::from_millis(50);
 
-/// The longest a judgement or a composer query is held back for a screen
-/// that never finishes, so output that keeps the cursor hidden is still
-/// judged. Whether the daemon may write never rests on this clock: that is
-/// [`ComposerObservation::painted`].
+/// The longest a judgement is held back for a screen that never finishes, so
+/// output that keeps the cursor hidden is still judged.
 pub const SETTLE_CEILING: Duration = Duration::from_millis(250);
 
 /// The countdown behind [`DetectionEngine::poison_reading_after_calls`]:
@@ -411,11 +352,9 @@ impl DetectionEngine {
             exited: false,
             screen_trusted: true,
             held_since: None,
-            held_queries: Vec::new(),
             report_watch: Arc::new(ReportWatch::default()),
             reports_seen: false,
             first_screen_running_at: None,
-            closed_screens: 0,
         }
     }
 
@@ -490,7 +429,7 @@ impl DetectionEngine {
         // Before this arrival refreshes the clock: a turn already silent for
         // the quiet time stays closed however soon output resumes.
         self.close_quiet_turn(now);
-        let reading = self.read_screen(self.wants_composer());
+        let reading = self.read_screen();
         if reading.rebuilt {
             return self.degrade_after_screen_loss(&reading);
         }
@@ -560,7 +499,7 @@ impl DetectionEngine {
     /// [`DetectionEngine::degrade_after_screen_loss`]). Returns `None` for
     /// every ordinary resize.
     pub fn on_resized(&mut self) -> Option<DetectedStatus> {
-        let reading = self.read_screen(self.wants_composer());
+        let reading = self.read_screen();
         if reading.rebuilt {
             return self.degrade_after_screen_loss(&reading);
         }
@@ -580,7 +519,7 @@ impl DetectionEngine {
     /// destroyed evidence, it did not produce any.
     fn degrade_after_screen_loss(&mut self, reading: &ScreenReading) -> Option<DetectedStatus> {
         self.screen_trusted = false;
-        self.release_held(reading);
+        self.held_since = None;
         if self.exited {
             return None;
         }
@@ -596,10 +535,6 @@ impl DetectionEngine {
     /// every later judgement for the rest of the engine's life.
     pub fn on_exit(&mut self) -> Option<DetectedStatus> {
         self.exited = true;
-        if !self.held_queries.is_empty() {
-            let reading = self.read_screen(true);
-            self.release_held(&reading);
-        }
         self.raw = DetectedStatus::Exited;
         self.raw_since = Instant::now();
         self.raw_evidence_at = self.raw_since;
@@ -650,54 +585,9 @@ impl DetectionEngine {
         self.confirmed
     }
 
-    /// Reads the composer's content off the screen as it stands at this call,
-    /// together with what the definition's rules alone say about the exact
-    /// same screen (see [`ComposerObservation`]).
-    ///
-    /// The reading never fails: everything that leaves the composer unreadable
-    /// resolves to [`ComposerReadout::NotObserved`] -- a definition without a
-    /// `[composer]` table (answered without looking at the screen at all), no
-    /// definition, a marker the screen does not show (unless the body's end
-    /// still fills the screen, which is [`ComposerReadout::Tail`]), and a
-    /// screen loss that still stands. An empty composer is
-    /// [`ComposerReadout::Empty`], which is a reading, not a failure.
-    ///
-    /// The rule verdict ignores the structured source and every time-based
-    /// judgement -- only [`DetectionEngine::match_rules`], applied to the
-    /// screen this same call reads the composer from -- so it never lags the
-    /// screen the way the confirmed status does (that one waits out
-    /// `confirm_ms`). `None` when no rule matches; a definition with no rules
-    /// at all, or no definition, answers `None` the same way.
-    ///
-    /// Synchronous and free of I/O; waits for the copy's lock for at most one
-    /// copy being applied, so it belongs on a blocking thread.
-    /// The daemon itself asks through [`DetectorHandle::query_composer`]: this
-    /// reading is not recorded, so a dialog it reads does not move
-    /// [`ComposerObservation::closed_screens`].
-    #[must_use]
-    pub fn query_composer(&self) -> ComposerObservation {
-        self.observe(&self.take_reading(true))
-    }
-
-    /// The answer to a composer query from one reading. A model rebuilt
-    /// since the engine last looked is as untrusted as a loss it has seen.
-    fn observe(&self, reading: &ScreenReading) -> ComposerObservation {
-        let trusted = self.screen_trusted && !reading.rebuilt;
-        let readout = match reading.composer.as_ref() {
-            Some(readout) if trusted => readout.clone(),
-            _ => ComposerReadout::NotObserved,
-        };
-        ComposerObservation {
-            readout,
-            screen_rule: reading.rule.map(declare_status),
-            painted: trusted && !reading.cursor_hidden && !reading.sync_open,
-            closed_screens: self.closed_screens,
-        }
-    }
-
     /// Reads the copy once (see [`ScreenReading`]), without recording what
     /// was read.
-    fn take_reading(&self, with_composer: bool) -> ScreenReading {
+    fn take_reading(&self) -> ScreenReading {
         let composer = self
             .definition
             .as_ref()
@@ -736,54 +626,36 @@ impl DetectionEngine {
                     }
                 }
             });
-            let readout = composer
-                .filter(|_| with_composer)
-                .map(|section| reading::read_composer(copy, section));
-            ((copy.cursor_hidden, copy.sync_open), lines, readout)
+            (copy.cursor_hidden, lines)
         });
         let counts = CopyCounts {
             generation: read.generation,
             read_losses: read.read_losses,
             refused: read.refused,
         };
-        let ((cursor_hidden, sync_open), lines, composer) = read.value.unwrap_or_default();
+        let (cursor_hidden, lines) = read.value.unwrap_or_default();
         ScreenReading {
             rebuilt: counts != self.counts,
             counts,
             cursor_hidden,
-            sync_open,
             // Matched after the copy is read, so the reader does not hold it
             // through the regular expressions.
             rule: lines.and_then(|lines| self.match_rules(&lines)),
-            composer,
         }
     }
 
     /// Reads the copy once and remembers its generation and lost reads, so
-    /// the next reading only reports a loss that happened after this one,
-    /// and counts it when a rule closes the write gate on it.
-    fn read_screen(&mut self, with_composer: bool) -> ScreenReading {
-        let reading = self.take_reading(with_composer);
+    /// the next reading only reports a loss that happened after this one.
+    fn read_screen(&mut self) -> ScreenReading {
+        let reading = self.take_reading();
         self.counts = reading.counts;
-        if matches!(
-            reading.rule.map(declare_status),
-            Some(DetectedStatus::WaitingApproval)
-                | Some(DetectedStatus::Unknown(UnknownReason::DeclaredUnknown))
-        ) {
-            self.closed_screens += 1;
-        }
         reading
-    }
-
-    /// Composer queries are held, so a reading must cover the composer too.
-    fn wants_composer(&self) -> bool {
-        !self.held_queries.is_empty()
     }
 
     /// Reads the model once and evaluates that screen, or degrades when the
     /// model was rebuilt since the last reading.
     fn read_and_evaluate(&mut self, now: Instant) -> Option<DetectedStatus> {
-        let reading = self.read_screen(self.wants_composer());
+        let reading = self.read_screen();
         if reading.rebuilt {
             return self.degrade_after_screen_loss(&reading);
         }
@@ -885,7 +757,7 @@ impl DetectionEngine {
         self.close_quiet_turn(now);
         let judged = if self.screen_finished(now, reading.cursor_hidden) {
             let evidence_at = self.held_since.unwrap_or(now);
-            self.release_held(reading);
+            self.held_since = None;
             self.settle_answered_approval(now, reading.rule);
             Some((self.judge(now, reading.rule), evidence_at))
         } else {
@@ -982,45 +854,6 @@ impl DetectionEngine {
             || self
                 .held_since
                 .is_some_and(|since| now.saturating_duration_since(since) >= SETTLE_CEILING)
-    }
-
-    /// Ends a hold: the held evaluation is dropped (the caller evaluates now,
-    /// or the event ending the hold made it moot), and held composer queries
-    /// are answered from `reading`, the screen as it stands.
-    fn release_held(&mut self, reading: &ScreenReading) {
-        self.held_since = None;
-        for respond in std::mem::take(&mut self.held_queries) {
-            let _ = respond.send(self.observe(reading));
-        }
-    }
-
-    /// Answers a composer query once the screen is finished, holding it back
-    /// until then (see [`DetectionEngine::screen_finished`]). A judgement
-    /// still held back is made first, so it is dated before anything the
-    /// caller writes on the strength of the answer.
-    fn answer_query(
-        &mut self,
-        respond: oneshot::Sender<ComposerObservation>,
-    ) -> Option<DetectedStatus> {
-        let now = Instant::now();
-        let reading = self.read_screen(true);
-        if reading.rebuilt {
-            let changed = self.degrade_after_screen_loss(&reading);
-            let _ = respond.send(self.observe(&reading));
-            return changed;
-        }
-        if !self.screen_finished(now, reading.cursor_hidden) {
-            self.held_since.get_or_insert(now);
-            self.held_queries.push(respond);
-            return None;
-        }
-        let changed = if self.held_since.is_some() {
-            self.evaluate(now, &reading)
-        } else {
-            None
-        };
-        let _ = respond.send(self.observe(&reading));
-        changed
     }
 
     /// The only place the confirmed status is assigned, so the screen-trust
@@ -1180,9 +1013,6 @@ impl DetectionEngine {
                 self.on_resize_started();
                 None
             }
-            // A caller that stopped waiting leaves a closed channel, which is
-            // not an error here.
-            DetectorCommand::QueryComposer(respond) => self.answer_query(respond),
             #[cfg(any(test, feature = "fault-injection"))]
             DetectorCommand::InjectPanic => fire_driver_panic_seam(),
         }
@@ -1231,7 +1061,6 @@ enum DetectorCommand {
     ExpectStatusReports(bool),
     Resized,
     ResizeStarted,
-    QueryComposer(oneshot::Sender<ComposerObservation>),
     /// Makes the step that takes it panic outside the screen's own guard,
     /// which ends the driver task; see [`DetectorHandle::inject_driver_panic`].
     #[cfg(any(test, feature = "fault-injection"))]
@@ -1254,8 +1083,7 @@ pub struct ConfirmedStatus {
 ///
 /// The notifiers are fire-and-forget and infallible: they are called from the
 /// PTY read path, which must never fail or block because the detector task has
-/// gone away. [`DetectorHandle::query_composer`] is the one round trip; it
-/// answers once the driver task takes it up, or at once when that task ends.
+/// gone away.
 #[derive(Debug)]
 pub struct DetectorHandle {
     commands: mpsc::UnboundedSender<DetectorCommand>,
@@ -1403,30 +1231,6 @@ impl DetectorHandle {
         self.send(DetectorCommand::InjectPanic);
     }
 
-    /// Asks the engine for the composer's content, and the rule verdict on
-    /// the same screen, as of the first finished screen once the driver task
-    /// picks the request up (see [`DetectionEngine::query_composer`]; a
-    /// screen mid-paint is waited out for at most [`SETTLE_CEILING`]).
-    ///
-    /// Never fails, and has no time limit of its own: it waits for as long as
-    /// the driver task takes to pick the request up (a held model holds it
-    /// up), so a caller that must not wait on it races it against what ends
-    /// that caller's wait. An engine whose task has ended resolves to
-    /// [`ComposerObservation::closed_unobserved`].
-    pub async fn query_composer(&self) -> ComposerObservation {
-        let (respond, reply) = oneshot::channel();
-        if self
-            .commands
-            .send(DetectorCommand::QueryComposer(respond))
-            .is_err()
-        {
-            return ComposerObservation::closed_unobserved();
-        }
-        reply
-            .await
-            .unwrap_or_else(|_| ComposerObservation::closed_unobserved())
-    }
-
     fn send(&self, command: DetectorCommand) {
         let _ = self.commands.send(command);
     }
@@ -1568,77 +1372,5 @@ region = "bottom"
              report that change to its caller"
         );
         assert_eq!(engine.status(), WindowStatus::Unknown);
-    }
-
-    const GATED_DEF: &str = r#"
-schema_version = 1
-name = "test-gated"
-
-[debounce]
-confirm_ms = 300
-
-[[rules]]
-status = "waiting_approval"
-pattern = 'ALLOW\?'
-priority = 20
-region = "bottom"
-
-[[rules]]
-status = "unknown"
-pattern = 'HALTED'
-priority = 15
-region = "bottom"
-
-[[rules]]
-status = "waiting_input"
-pattern = 'READY>'
-priority = 10
-region = "bottom"
-"#;
-
-    #[tokio::test]
-    async fn only_readings_a_rule_closes_the_gate_on_move_the_closed_screen_count() {
-        let config = DaemonConfig::default();
-        let definition = parse_definition(GATED_DEF).expect("the fixture definition parses");
-        let copy = SharedCopy::default();
-        show(&copy, 1, 0, (80, 24), "");
-        let mut engine = DetectionEngine::new(Some(definition), &config, copy.clone());
-        let mut number = 1;
-        let mut show_next = |line: &str| {
-            number += 1;
-            show(&copy, number, 0, (80, 24), line);
-        };
-        let mut closed_after = |engine: &mut DetectionEngine, line: &str| {
-            show_next(line);
-            engine.on_output();
-            engine.query_composer().closed_screens
-        };
-
-        assert_eq!(
-            closed_after(&mut engine, "READY>"),
-            0,
-            "an open screen is not counted"
-        );
-        assert_eq!(
-            closed_after(&mut engine, "ALLOW?"),
-            1,
-            "an approval prompt is counted"
-        );
-        assert_eq!(
-            closed_after(&mut engine, "HALTED"),
-            2,
-            "a declared unknown is counted"
-        );
-        assert_eq!(
-            closed_after(&mut engine, "READY>"),
-            2,
-            "the count never moves back"
-        );
-        show(&copy, 99, 0, (80, 24), "ALLOW?");
-        assert_eq!(
-            engine.query_composer().closed_screens,
-            2,
-            "a synchronous query does not record its reading"
-        );
     }
 }

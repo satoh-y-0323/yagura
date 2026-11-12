@@ -107,9 +107,9 @@ pub struct Activity {
 ///
 /// `marker`, `separator` and `continuation_prefix` are required: if the
 /// `[composer]` table is present, all three keys must be provided.
-/// `blank_lines_in_body` is optional and defaults to `false`; `left_panel`,
-/// `right_border` and `placeholder` are optional and have no default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// `blank_lines_in_body` is optional and defaults to `false`; `left_panel` is
+/// optional and has no default.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComposerRawSection {
     /// A regex pattern string to identify the composer's marker line
@@ -132,16 +132,19 @@ pub struct ComposerRawSection {
     /// A regex pattern string; see [`ComposerSection::left_panel`].
     #[serde(default)]
     pub left_panel: Option<String>,
-    /// A regex pattern string; see [`ComposerSection::right_border`].
+    /// Deprecated: told a box's edge from typed text for a daemon that read
+    /// the composer before typing into it. Read whatever it holds, warned
+    /// about and not used.
     #[serde(default)]
-    pub right_border: Option<String>,
-    /// A regex pattern string; see [`ComposerSection::placeholder`].
+    pub right_border: Option<serde::de::IgnoredAny>,
+    /// Deprecated: told an empty composer from a typed one for a daemon that
+    /// typed into it. Read whatever it holds, warned about and not used.
     #[serde(default)]
-    pub placeholder: Option<String>,
+    pub placeholder: Option<serde::de::IgnoredAny>,
 }
 
 /// The compiled section of a definition that identifies the composer (input area)
-/// on the screen, allowing the daemon to read what has been typed.
+/// on the screen, so the rules can be matched without the text typed into it.
 ///
 /// The marker pattern is already compiled to a [`Regex`], ready for use.
 #[derive(Debug, Clone)]
@@ -167,103 +170,48 @@ pub struct ComposerSection {
     /// holding a visible character and all its matches end at the same
     /// column is the composer read from that column; otherwise from column 0.
     pub left_panel: Option<Regex>,
-    /// A compiled regex matching an edge the CLI draws at the right end of
-    /// each composer row (a box's right border), so the edge can be told
-    /// from typed text. On the marker row and every continuation row, a
-    /// match ending at the row's last visible character is dropped before
-    /// the row is read, before anything right of the cursor is judged.
-    pub right_border: Option<Regex>,
-    /// A compiled regex matching a hint the CLI draws in an empty composer
-    /// without dimming it. The composer reads as empty only when nothing is
-    /// typed left of the cursor on the marker row and one match spans that
-    /// row's whole visible text right of the cursor; any other hint reads as
-    /// occupied.
-    pub placeholder: Option<Regex>,
 }
 
-/// Raw values from a definition's optional `[input]` table: how the CLI this
-/// definition describes expects a line of text to be written and submitted.
-///
-/// Every field mirrors a TOML key literally and stays `None` when the
-/// definition omits it, or when the whole `[input]` table is absent: this
-/// loader applies no default for any of them (see the module doc), so a
-/// caller that owns the defaults can tell "not written" from "written as the
-/// default value". The values that do load are range- and
-/// consistency-checked; see [`DefinitionError::InvalidInput`].
-///
-/// # Examples
-///
-/// ```
-/// use yagura_daemon::detector::definition::parse_definition;
-///
-/// let toml = r#"
-/// schema_version = 1
-/// name = "example"
-///
-/// [debounce]
-/// confirm_ms = 300
-///
-/// [[rules]]
-/// status = "idle"
-/// pattern = '\$\s*$'
-/// priority = 1
-/// region = "bottom"
-///
-/// [input]
-/// submit = "\r"
-/// "#;
-///
-/// let definition = parse_definition(toml).expect("a valid definition must load");
-/// let input = definition.input.expect("the definition declares [input]");
-/// assert_eq!(input.submit.as_deref(), Some("\r"));
-/// assert_eq!(input.bracketed_paste, None);
-/// ```
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+/// The keys of a definition's `[input]` table, which told how the daemon was
+/// to type into the CLI. Nothing is typed into a window any more: each key is
+/// read whatever it holds, warned about and not used. A key outside these is
+/// still a load error, so a mistyped key keeps failing loudly.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InputSection {
-    /// Whether the body should be wrapped in `ESC[200~` / `ESC[201~` before
-    /// being written.
-    pub bracketed_paste: Option<bool>,
-    /// The bytes that submit a line, written verbatim (1..=8 bytes).
-    pub submit: Option<String>,
-    /// How long the confirmed status must have stayed in a status that
-    /// accepts input, once, before this window counts as past its startup
-    /// phase (0..=10000; 0 = count it as past from the moment the window is
-    /// created). A prompt a CLI paints while it is still starting up is
-    /// indistinguishable from one it paints when it is ready, so the daemon
-    /// asks the prompt to *stay*.
-    pub ready_hold_ms: Option<u64>,
-    /// Milliseconds to wait after writing the body before writing `submit`
-    /// (0..=5000).
-    pub submit_delay_ms: Option<u64>,
-    /// One key that takes text back out of the receiver's editor and may be
-    /// repeated until it is empty: it is written once per display line the
-    /// text may occupy, and on an empty editor it does nothing (0..=8 bytes;
-    /// empty means "send nothing").
-    pub clear: Option<String>,
-    /// Milliseconds to wait for a delivery reaction after `submit` is
-    /// written before giving up (0..=30000; `0` disables the wait).
-    pub delivery_confirm_ms: Option<u64>,
-    /// How many times a submit may be retried after an unconfirmed delivery
-    /// (0..=4; `0` means never retry).
-    pub resend_max: Option<u8>,
-    /// Accepted so a definition written for an older daemon still loads, and
-    /// has no effect: whether a write showed is decided by events, never by a
-    /// bound on how long to wait for it.
-    pub reflect_wait_ms: Option<u64>,
-    /// Distinct printable, non-blank characters (1..=8) the receiver's editor
-    /// shows as typed and that trigger nothing else there. Each is one probe,
-    /// written behind the daemon's own writes to learn that everything before
-    /// it was handled; a later one stands in for an earlier one a dialog may
-    /// have taken. Omitted, a take-back is never confirmed, so the window
-    /// assumes something may remain.
-    pub probe: Option<String>,
-    /// The key that erases one character (1..=8 bytes; default DEL).
-    pub erase: Option<String>,
-    /// Characters the receiver's editor takes as a key rather than as text
-    /// when one is the first non-blank character of its input (a shell mode,
-    /// a help view). Each entry is exactly one printable, non-blank character.
-    pub leading_keys: Option<Vec<String>>,
+struct RawInputSection {
+    bracketed_paste: Option<serde::de::IgnoredAny>,
+    submit: Option<serde::de::IgnoredAny>,
+    ready_hold_ms: Option<serde::de::IgnoredAny>,
+    submit_delay_ms: Option<serde::de::IgnoredAny>,
+    clear: Option<serde::de::IgnoredAny>,
+    delivery_confirm_ms: Option<serde::de::IgnoredAny>,
+    resend_max: Option<serde::de::IgnoredAny>,
+    reflect_wait_ms: Option<serde::de::IgnoredAny>,
+    probe: Option<serde::de::IgnoredAny>,
+    erase: Option<serde::de::IgnoredAny>,
+    leading_keys: Option<serde::de::IgnoredAny>,
+}
+
+impl RawInputSection {
+    /// The keys the table writes.
+    fn written(&self) -> Vec<&'static str> {
+        [
+            ("bracketed_paste", self.bracketed_paste.is_some()),
+            ("submit", self.submit.is_some()),
+            ("ready_hold_ms", self.ready_hold_ms.is_some()),
+            ("submit_delay_ms", self.submit_delay_ms.is_some()),
+            ("clear", self.clear.is_some()),
+            ("delivery_confirm_ms", self.delivery_confirm_ms.is_some()),
+            ("resend_max", self.resend_max.is_some()),
+            ("reflect_wait_ms", self.reflect_wait_ms.is_some()),
+            ("probe", self.probe.is_some()),
+            ("erase", self.erase.is_some()),
+            ("leading_keys", self.leading_keys.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, written)| written.then_some(key))
+        .collect()
+    }
 }
 
 /// A single compiled pattern rule.
@@ -311,9 +259,6 @@ pub struct Definition {
     /// Composer identification section, if the definition's `[composer]`
     /// table is present. Used to read the input area on screen.
     pub composer: Option<ComposerSection>,
-    /// How this CLI's input is written to, if the definition's `[input]`
-    /// table is present. See [`InputSection`].
-    pub input: Option<InputSection>,
     /// How this CLI treats a tool call it made; every field at its default
     /// when the `[requests]` table is omitted. See [`RequestsSection`].
     pub requests: RequestsSection,
@@ -388,26 +333,6 @@ pub enum DefinitionError {
         #[source]
         source: regex::Error,
     },
-    /// An `[input]` value is out of range, or two `[input]` (or `[input]`
-    /// and `[debounce]`) values contradict each other. `key` is always the
-    /// offending `input.*` key (or `input.*` paired with `debounce.*`), so
-    /// the rendered message names which key to fix.
-    #[error("input.{key} {reason}")]
-    InvalidInput {
-        /// The `[input]` key this rejection is about (without the `input.`
-        /// prefix, which the message adds).
-        key: String,
-        /// Why `key` was rejected, completing the sentence after `input.{key} `.
-        reason: String,
-    },
-}
-
-/// Convenience constructor for [`DefinitionError::InvalidInput`].
-fn invalid_input(key: &str, reason: impl Into<String>) -> DefinitionError {
-    DefinitionError::InvalidInput {
-        key: key.to_string(),
-        reason: reason.into(),
-    }
 }
 
 /// Raw, pre-validation representation of `[[rules]]`. `pattern` is kept as a
@@ -446,271 +371,14 @@ struct RawDefinition {
     #[serde(default)]
     composer: Option<ComposerRawSection>,
     #[serde(default)]
-    input: Option<InputSection>,
+    input: Option<RawInputSection>,
     #[serde(default)]
     requests: RequestsSection,
-}
-
-/// Upper bound (inclusive) on `[input].ready_hold_ms`, in milliseconds.
-const MAX_READY_HOLD_MS: u64 = 10_000;
-
-/// Upper bound (inclusive) on `[input].submit_delay_ms`, in milliseconds.
-const MAX_SUBMIT_DELAY_MS: u64 = 5000;
-
-/// Upper bound (inclusive) on `[input].delivery_confirm_ms`, in
-/// milliseconds.
-const MAX_DELIVERY_CONFIRM_MS: u64 = 30_000;
-
-/// The first character of every line the daemon writes on its own (`[yagura `
-/// handoff, task, plan, chat and report lines), which `[input].probe` must
-/// not name.
-const DAEMON_LINE_LEAD: char = '[';
-
-/// Upper bound (inclusive) on how many characters `[input].probe` names.
-const MAX_PROBE_CHARS: usize = 8;
-
-/// Upper bound (inclusive) on `[input].resend_max`.
-const MAX_RESEND_MAX: u8 = 4;
-
-/// Upper bound (inclusive), in bytes, on `[input].submit` and
-/// `[input].clear`.
-const MAX_INPUT_SEQUENCE_BYTES: usize = 8;
-
-/// The `[input].submit_delay_ms` value a definition that omits the key runs
-/// under. `InputProfile::from_section` (a later layer, outside this module)
-/// applies this same default to the value it hands the daemon; this loader
-/// never writes it onto [`InputSection`] (see the module doc), but the
-/// "submit delay must outlast the debounce" consistency check below judges
-/// the value a definition will actually run under, so it reads this
-/// constant when the key is omitted.
-pub const INPUT_SUBMIT_DELAY_DEFAULT_MS: u64 = 800;
-
-/// Where the `confirm_ms` value [`check_submit_delay_outlasts`] judged
-/// `submit_delay_ms` against came from, so the rejection message can name
-/// the key a caller should change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmMsSource {
-    /// The definition's own `[debounce].confirm_ms`.
-    Debounce,
-    /// `DaemonConfig::confirm_ms`, used because the definition (or the
-    /// caller's window) has no `[debounce]` table to read instead.
-    DaemonDefault,
-}
-
-/// The single comparison the delivery-confirmation defense at submit time
-/// depends on: the body's own echo must settle into a confirmed status
-/// *before* the submit key is written, which requires `submit_delay_ms` to
-/// outlast the `confirm_ms` a window actually debounces under. Called both
-/// by [`validate_input_section`]
-/// (when the definition declares its own `[debounce]`) and by
-/// `WindowRegistry::initialize_detection_for_window` (when it does not, and
-/// the effective value is the daemon's own default instead) so the two call
-/// sites never drift apart.
-///
-/// # Errors
-///
-/// Returns [`DefinitionError::InvalidInput`] naming `submit_delay_ms` when
-/// `submit_delay_ms <= effective_confirm_ms`.
-pub fn check_submit_delay_outlasts(
-    submit_delay_ms: u64,
-    effective_confirm_ms: u64,
-    source: ConfirmMsSource,
-) -> Result<(), DefinitionError> {
-    if submit_delay_ms > effective_confirm_ms {
-        return Ok(());
-    }
-    let reason = match source {
-        ConfirmMsSource::Debounce => "must be greater than debounce.confirm_ms".to_string(),
-        ConfirmMsSource::DaemonDefault => format!(
-            "must be greater than the daemon's default confirm_ms ({effective_confirm_ms}ms, \
-             since this definition has no [debounce] table)"
-        ),
-    };
-    Err(invalid_input("submit_delay_ms", reason))
-}
-
-/// Range- and consistency-checks a definition's `[input]` table against the
-/// same definition's `[debounce]` table (`None` when the definition omits
-/// it).
-///
-/// Every field is optional and independently range-checked when present. An
-/// omitted `submit_delay_ms` is judged against [`INPUT_SUBMIT_DELAY_DEFAULT_MS`],
-/// the value such a definition actually runs under, rather than left
-/// unjudged.
-fn validate_input_section(
-    section: &InputSection,
-    debounce: Option<&Debounce>,
-) -> Result<(), DefinitionError> {
-    if let Some(value) = section.ready_hold_ms
-        && value > MAX_READY_HOLD_MS
-    {
-        return Err(invalid_input(
-            "ready_hold_ms",
-            format!("must be between 0 and {MAX_READY_HOLD_MS}, got {value}"),
-        ));
-    }
-    if let Some(value) = section.submit_delay_ms
-        && value > MAX_SUBMIT_DELAY_MS
-    {
-        return Err(invalid_input(
-            "submit_delay_ms",
-            format!("must be between 0 and {MAX_SUBMIT_DELAY_MS}, got {value}"),
-        ));
-    }
-    if let Some(value) = section.delivery_confirm_ms
-        && value > MAX_DELIVERY_CONFIRM_MS
-    {
-        return Err(invalid_input(
-            "delivery_confirm_ms",
-            format!("must be between 0 and {MAX_DELIVERY_CONFIRM_MS}, got {value}"),
-        ));
-    }
-    if let Some(value) = section.resend_max
-        && value > MAX_RESEND_MAX
-    {
-        return Err(invalid_input(
-            "resend_max",
-            format!("must be between 0 and {MAX_RESEND_MAX}, got {value}"),
-        ));
-    }
-    if let Some(keys) = section.leading_keys.as_deref()
-        && !keys.iter().all(|key| is_one_visible_char(key))
-    {
-        return Err(invalid_input(
-            "leading_keys",
-            "entries must each be exactly one printable, non-blank character",
-        ));
-    }
-    if let Some(probe) = section.probe.as_deref() {
-        validate_probe(probe, section.leading_keys.as_deref().unwrap_or_default())?;
-    }
-    if let Some(erase) = section.erase.as_deref()
-        && (erase.is_empty() || erase.len() > MAX_INPUT_SEQUENCE_BYTES)
-    {
-        return Err(invalid_input(
-            "erase",
-            format!("must be 1 to {MAX_INPUT_SEQUENCE_BYTES} bytes"),
-        ));
-    }
-    if let Some(submit) = section.submit.as_deref() {
-        if submit.is_empty() {
-            return Err(invalid_input("submit", "must not be empty"));
-        }
-        if submit.len() > MAX_INPUT_SEQUENCE_BYTES {
-            return Err(invalid_input(
-                "submit",
-                format!(
-                    "must be at most {MAX_INPUT_SEQUENCE_BYTES} bytes, got {}",
-                    submit.len()
-                ),
-            ));
-        }
-    }
-    if let Some(clear) = section.clear.as_deref()
-        && clear.len() > MAX_INPUT_SEQUENCE_BYTES
-    {
-        return Err(invalid_input(
-            "clear",
-            format!(
-                "must be at most {MAX_INPUT_SEQUENCE_BYTES} bytes, got {}",
-                clear.len()
-            ),
-        ));
-    }
-    let resend_requested = section.resend_max.is_some_and(|value| value > 0);
-    if section.delivery_confirm_ms == Some(0) && resend_requested {
-        return Err(invalid_input(
-            "resend_max",
-            "requires input.delivery_confirm_ms to be non-zero",
-        ));
-    }
-    // An omitted submit_delay_ms is judged against the default it actually
-    // runs under (INPUT_SUBMIT_DELAY_DEFAULT_MS), not left unjudged: a
-    // missing [debounce] is the one side this loader truly cannot know
-    // (DaemonConfig's confirm_ms, which this loader never reads -- see the
-    // module doc), so only that side skips the check.
-    if let Some(debounce) = debounce {
-        let submit_delay_ms = section
-            .submit_delay_ms
-            .unwrap_or(INPUT_SUBMIT_DELAY_DEFAULT_MS);
-        if section.delivery_confirm_ms != Some(0) {
-            check_submit_delay_outlasts(
-                submit_delay_ms,
-                debounce.confirm_ms,
-                ConfirmMsSource::Debounce,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Checks `[input].probe`: 1 to [`MAX_PROBE_CHARS`] distinct printable,
-/// non-blank characters, none of them [`DAEMON_LINE_LEAD`] or one of the same
-/// definition's `leading_keys`.
-fn validate_probe(probe: &str, leading_keys: &[String]) -> Result<(), DefinitionError> {
-    let chars: Vec<char> = probe.chars().collect();
-    if chars.is_empty()
-        || chars.len() > MAX_PROBE_CHARS
-        || chars.iter().any(|c| c.is_control() || c.is_whitespace())
-    {
-        return Err(invalid_input(
-            "probe",
-            format!("must be 1 to {MAX_PROBE_CHARS} printable, non-blank characters"),
-        ));
-    }
-    // A probe that is the first character of the daemon's own lines would
-    // read alone exactly as one of those lines begins to show.
-    if chars.contains(&DAEMON_LINE_LEAD) {
-        return Err(invalid_input(
-            "probe",
-            format!(
-                "must not contain {DAEMON_LINE_LEAD:?}, the first character of every line the \
-                 daemon writes"
-            ),
-        ));
-    }
-    // Each character is a probe of its own, told apart from the others by
-    // which one shows.
-    if chars
-        .iter()
-        .enumerate()
-        .any(|(index, c)| chars[..index].contains(c))
-    {
-        return Err(invalid_input(
-            "probe",
-            "must not name the same character twice",
-        ));
-    }
-    // A probe may be typed into an empty composer on its own, where a leading
-    // key is taken as a key rather than as text.
-    if let Some(key) = leading_keys
-        .iter()
-        .find(|key| key.chars().any(|c| chars.contains(&c)))
-    {
-        return Err(invalid_input(
-            "probe",
-            format!("must not contain {key:?}, one of input.leading_keys"),
-        ));
-    }
-    Ok(())
-}
-
-/// Whether `value` is exactly one character that is neither a control nor a
-/// blank character.
-fn is_one_visible_char(value: &str) -> bool {
-    let mut chars = value.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => !c.is_control() && !c.is_whitespace(),
-        _ => false,
-    }
 }
 
 fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, DefinitionError> {
     let marker = compile_composer_pattern(raw.marker)?;
     let left_panel = raw.left_panel.map(compile_composer_pattern).transpose()?;
-    let right_border = raw.right_border.map(compile_composer_pattern).transpose()?;
-    let placeholder = raw.placeholder.map(compile_composer_pattern).transpose()?;
 
     Ok(ComposerSection {
         marker,
@@ -718,8 +386,6 @@ fn compile_composer_section(raw: ComposerRawSection) -> Result<ComposerSection, 
         continuation_prefix: raw.continuation_prefix,
         blank_lines_in_body: raw.blank_lines_in_body,
         left_panel,
-        right_border,
-        placeholder,
     })
 }
 
@@ -761,9 +427,7 @@ fn compile_rule(raw: RawRule) -> Result<Rule, DefinitionError> {
 ///
 /// Returns [`DefinitionError`] for oversized input, malformed TOML, unknown
 /// enum values, missing required keys, an unsupported `schema_version`, more
-/// than [`MAX_RULES`] rules, a rule pattern that fails to compile, or an
-/// `[input]` table with an out-of-range or self-contradictory value (see
-/// [`DefinitionError::InvalidInput`]).
+/// than [`MAX_RULES`] rules, or a rule pattern that fails to compile.
 pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(DefinitionError::SourceTooLarge {
@@ -794,8 +458,37 @@ pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
         .map(compile_rule)
         .collect::<Result<Vec<_>, _>>()?;
 
-    if let Some(input) = &raw.input {
-        validate_input_section(input, raw.debounce.as_ref())?;
+    for key in raw
+        .input
+        .as_ref()
+        .map(RawInputSection::written)
+        .unwrap_or_default()
+    {
+        tracing::warn!(
+            definition = raw.name.as_str(),
+            key,
+            "detection definition [input] {key} is deprecated and has no effect: the daemon no \
+             longer types into windows; remove it"
+        );
+    }
+    let retired_composer_keys = raw.composer.as_ref().map_or([false; 2], |composer| {
+        [
+            composer.placeholder.is_some(),
+            composer.right_border.is_some(),
+        ]
+    });
+    for (key, written) in ["placeholder", "right_border"]
+        .into_iter()
+        .zip(retired_composer_keys)
+    {
+        if written {
+            tracing::warn!(
+                definition = raw.name.as_str(),
+                key,
+                "detection definition [composer] {key} is deprecated and has no effect: the \
+                 daemon no longer types into windows; remove it"
+            );
+        }
     }
 
     let composer = if let Some(raw_composer) = raw.composer {
@@ -813,7 +506,6 @@ pub fn parse_definition(source: &str) -> Result<Definition, DefinitionError> {
         quiescence: raw.quiescence,
         activity: raw.activity,
         composer,
-        input: raw.input,
         requests: raw.requests,
     })
 }

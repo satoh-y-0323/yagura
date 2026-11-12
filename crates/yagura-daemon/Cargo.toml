@@ -38,10 +38,6 @@ name = "ready_child"
 path = "src/bin/ready_child.rs"
 
 [[bin]]
-name = "submit_child"
-path = "src/bin/submit_child.rs"
-
-[[bin]]
 name = "capture_child"
 path = "src/bin/capture_child.rs"
 

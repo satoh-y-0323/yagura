@@ -389,7 +389,6 @@ fn the_frames_of_the_terminal_in_the_holder_round_trip() {
             palette: yagura_protocol::built_in_dark_palette(),
         },
         HolderFrame::SetViewFocus { focused: true },
-        HolderFrame::FocusInterval { open: false },
         HolderFrame::Attach { generation: 2 },
         HolderFrame::Detach { generation: 2 },
         HolderFrame::ViewNote {

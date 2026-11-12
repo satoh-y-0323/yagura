@@ -387,7 +387,6 @@ fn reply_for(message: DaemonMessage) -> Option<(PendingKind, Reply)> {
         | DaemonMessage::Pong
         | DaemonMessage::WindowStatus { .. }
         | DaemonMessage::TextSent { .. }
-        | DaemonMessage::KeysSent { .. }
         | DaemonMessage::WaitResult { .. }
         | DaemonMessage::WindowOutput { .. }
         | DaemonMessage::Identified { .. }

@@ -672,8 +672,6 @@ struct Core {
     /// `Exited` has been told; every later connection is told it after its
     /// whole copy of the last screen.
     exit_told: bool,
-    /// Focus intervals the current connection opened and has not closed.
-    focus_intervals: usize,
     /// A copy of the endpoint's lock, until it is handed to the watcher.
     #[cfg(unix)]
     endpoint_lock: Option<std::os::fd::OwnedFd>,
@@ -714,7 +712,6 @@ pub(crate) async fn serve(
         writer_done: false,
         input_drain: None,
         exit_told: false,
-        focus_intervals: 0,
         #[cfg(unix)]
         endpoint_lock,
     };
@@ -1011,15 +1008,11 @@ impl Core {
     }
 
     /// Lets go of a connection that is lost or displaced: what was opened on
-    /// it is closed (its focus intervals, its view, the copies it was sent),
-    /// so the next connection starts from a whole copy.
+    /// it is closed (its view, the copies it was sent), so the next
+    /// connection starts from a whole copy.
     fn lose(&mut self, conn: Conn) {
         self.close_outlet(&conn);
         self.to_terminal(Control::Disconnected);
-        let intervals = std::mem::take(&mut self.focus_intervals);
-        if let Some(terminal) = self.terminal() {
-            terminal.input.close_intervals(intervals);
-        }
         drop(conn.close());
     }
 
@@ -1057,16 +1050,6 @@ impl Core {
             HolderFrame::SetViewFocus { focused } => {
                 if let Some(terminal) = self.terminal() {
                     terminal.input.set_view_focus(focused);
-                }
-            }
-            HolderFrame::FocusInterval { open } => {
-                self.focus_intervals = if open {
-                    self.focus_intervals.saturating_add(1)
-                } else {
-                    self.focus_intervals.saturating_sub(1)
-                };
-                if let Some(terminal) = self.terminal() {
-                    terminal.input.focus_interval(open);
                 }
             }
             HolderFrame::Resize { cols, rows } => self.resize(cols, rows),

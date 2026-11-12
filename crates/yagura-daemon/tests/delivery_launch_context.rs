@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use common::{
-    CONTROL_INPUT_TABLE, approver_base_config, composer_section_toml, detection_config,
-    empty_lookup, read_response, register_approver, registration_cwd_in, send, unique_temp_dir,
-    wait_until_status, write_profile,
+    approver_base_config, composer_section_toml, detection_config, empty_lookup, read_response,
+    register_approver, registration_cwd_in, send, unique_temp_dir, wait_until_status,
+    write_profile,
 };
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, WindowRegistry};
@@ -268,7 +268,7 @@ fn write_hook_definition(dir: &Path) {
              [[rules]]\nstatus = \"waiting_input\"\npattern = 'HC-IDLE'\npriority = 10\n\
              region = \"bottom\"\n\n\
              [[rules]]\nstatus = \"running\"\npattern = 'HC-BUSY'\npriority = 10\n\
-             region = \"bottom\"\n{CONTROL_INPUT_TABLE}{}",
+             region = \"bottom\"\n{}",
             composer_section_toml()
         ),
     )

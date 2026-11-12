@@ -843,10 +843,10 @@ describe('approval settings', () => {
     },
     {
       label: 'invokeSetAutoApprove (on)',
-      call: () => invokeSetAutoApprove('send_keys', true),
+      call: () => invokeSetAutoApprove('interrupt_window', true),
       command: 'set_auto_approve',
       // The core's commands take snake_case argument names.
-      args: { tool: 'send_keys', auto_approve: true },
+      args: { tool: 'interrupt_window', auto_approve: true },
     },
     {
       label: 'invokeSetAutoApprove (off)',
@@ -898,14 +898,14 @@ describe('approval settings', () => {
   it('returns what the daemon answered rather than echoing the request', async () => {
     invokeMock.mockResolvedValueOnce(
       approvalReply({
-        tools: [{ tool: 'send_keys', auto_approve: false }],
+        tools: [{ tool: 'interrupt_window', auto_approve: false }],
         plans_require_approval: true,
       })
     );
 
-    const afterTool: ApprovalSettingsInfo = await invokeSetAutoApprove('send_keys', true);
+    const afterTool: ApprovalSettingsInfo = await invokeSetAutoApprove('interrupt_window', true);
 
-    expect(afterTool.tools).toEqual([{ tool: 'send_keys', autoApprove: false }]);
+    expect(afterTool.tools).toEqual([{ tool: 'interrupt_window', autoApprove: false }]);
 
     invokeMock.mockResolvedValueOnce(approvalReply({ plans_require_approval: true }));
 
@@ -983,7 +983,7 @@ describe('approval settings', () => {
       approvalReply({
         tools: [
           { tool: 'send_chat', auto_approve: true },
-          { tool: 'send_keys', auto_approve: 0 },
+          { tool: 'interrupt_window', auto_approve: 0 },
         ],
       }),
     ],

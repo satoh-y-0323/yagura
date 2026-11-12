@@ -25,8 +25,8 @@ use crate::window::{ExitConfirmed, ExitUnobserved, InputOrigin, WindowEntry};
 ///
 /// The variants map one-to-one onto the MCP tool names used in a playbook's
 /// `auto_approve` list, which is an external contract: `open_window`,
-/// `interrupt_window`, `close_window`, `send_message`, `send_keys`,
-/// `send_handoff`, `send_chat` and `broadcast_chat`.
+/// `interrupt_window`, `close_window`, `send_message`, `send_handoff`,
+/// `send_chat` and `broadcast_chat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestructiveTool {
     /// Starting a new process in a new window: `open_window` itself, and the
@@ -38,13 +38,11 @@ pub enum DestructiveTool {
     InterruptWindow,
     /// Terminating a window and its whole process tree.
     CloseWindow,
-    /// Writing text into a window's PTY on the caller's behalf
+    /// Putting a message envelope in a window's inbox on the caller's behalf
     /// (`ClientMessage::SendText` on the wire, `send_message` as an MCP
     /// tool).
     SendMessage,
-    /// Writing named control keys into a window's PTY on the caller's behalf.
-    SendKeys,
-    /// Writing a handoff envelope into a window's PTY on the requester's
+    /// Putting a handoff envelope in a window's inbox on the requester's
     /// behalf, opening that window from a launch profile first when asked to
     /// (`ClientMessage::SendHandoff` on the wire, `send_handoff` as an MCP
     /// tool).
@@ -62,12 +60,11 @@ pub enum DestructiveTool {
 impl DestructiveTool {
     /// Every tool the gate covers, so that a caller enumerating them cannot
     /// silently miss a variant added later.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::OpenWindow,
         Self::InterruptWindow,
         Self::CloseWindow,
         Self::SendMessage,
-        Self::SendKeys,
         Self::SendHandoff,
         Self::SendChat,
         Self::BroadcastChat,
@@ -82,7 +79,6 @@ impl DestructiveTool {
             Self::InterruptWindow => "interrupt_window",
             Self::CloseWindow => "close_window",
             Self::SendMessage => "send_message",
-            Self::SendKeys => "send_keys",
             Self::SendHandoff => "send_handoff",
             Self::SendChat => "send_chat",
             Self::BroadcastChat => "broadcast_chat",
@@ -123,12 +119,6 @@ pub enum DenyReason {
     /// approved this" apart from "the operator's policy file is broken".
     #[error("the configured playbook failed to load")]
     PlaybookBroken,
-    /// The window's detection definition declares no composer, or declares
-    /// one without a probe where the tool's text must be judged, so the tool
-    /// can never be carried out there. Refused before approval so no human is
-    /// asked to approve an operation that cannot succeed.
-    #[error("the window declares no composer")]
-    NoComposer,
 }
 
 /// Where a destructive request came from, as established by the connection's
@@ -216,25 +206,41 @@ pub struct PolicyLimits {
     /// instead of silently taking effect.
     #[serde(default, deserialize_with = "deserialize_approval_timeout_secs")]
     pub approval_timeout_secs: Option<u64>,
-    /// How long a delivery the daemon types into a window waits for that
-    /// window to leave its startup phase, in seconds. Validated the same way,
-    /// and against the same range, as [`PolicyLimits::approval_timeout_secs`].
-    #[serde(default, deserialize_with = "deserialize_handoff_ready_timeout_secs")]
-    pub handoff_ready_timeout_secs: Option<u64>,
-    /// How long a handoff to an existing window waits for that window's CLI
-    /// to take its envelope, in seconds. Validated the same way, and against
-    /// the same range, as [`PolicyLimits::approval_timeout_secs`].
-    #[serde(
-        default,
-        deserialize_with = "deserialize_handoff_delivery_timeout_secs"
-    )]
-    pub handoff_delivery_timeout_secs: Option<u64>,
-    /// Upper bound on how many chat posts may be typed into windows at once
-    /// (1..=256). Validated the same
-    /// way as the other `[limits]` deadlines.
-    #[serde(default, deserialize_with = "deserialize_chat_delivery_max")]
-    pub chat_delivery_max: Option<u64>,
+    /// Deprecated: bounded how long a delivery typed into a window waited for
+    /// it to start up. Nothing is typed into a window any more, so any value
+    /// is read, warned about and never used.
+    #[serde(default)]
+    pub handoff_ready_timeout_secs: Option<RetiredLimit>,
+    /// Deprecated: bounded how long a handoff waited for its envelope to be
+    /// taken. A handoff no longer waits for that, so any value is read,
+    /// warned about and never used.
+    #[serde(default)]
+    pub handoff_delivery_timeout_secs: Option<RetiredLimit>,
+    /// Deprecated: bounded how many chat posts were typed into windows at
+    /// once. Nothing is typed into a window any more, so any value is read,
+    /// warned about and never used.
+    #[serde(default)]
+    pub chat_delivery_max: Option<RetiredLimit>,
 }
+
+/// The value of a deprecated `[limits]` key: whatever it is, it is read so an
+/// older playbook keeps loading, and dropped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetiredLimit;
+
+impl<'de> Deserialize<'de> for RetiredLimit {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
+    }
+}
+
+/// Tool names an older playbook may still list in `auto_approve` for a tool
+/// this daemon no longer has.
+const RETIRED_TOOL_NAMES: [&str; 1] = ["send_keys"];
 
 /// The `[chat]` table of a playbook: the seven numeric knobs the bundled
 /// `playbook.toml` documents, plus `intro` and `exclude_detections`. Carried as
@@ -332,44 +338,6 @@ where
     deserialize_timeout_secs(deserializer, "approval_timeout_secs")
 }
 
-fn deserialize_handoff_ready_timeout_secs<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_timeout_secs(deserializer, "handoff_ready_timeout_secs")
-}
-
-fn deserialize_handoff_delivery_timeout_secs<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_timeout_secs(deserializer, "handoff_delivery_timeout_secs")
-}
-
-/// Lower and upper bound (inclusive) accepted for `[limits] chat_delivery_max`.
-const CHAT_DELIVERY_MAX_RANGE: std::ops::RangeInclusive<u64> = 1..=256;
-
-/// Deserializes `[limits] chat_delivery_max`, rejecting a value outside
-/// [`CHAT_DELIVERY_MAX_RANGE`] at load time rather than clamping it silently,
-/// the same discipline [`deserialize_timeout_secs`] applies to the two
-/// deadline fields.
-fn deserialize_chat_delivery_max<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = u64::deserialize(deserializer)?;
-    if !CHAT_DELIVERY_MAX_RANGE.contains(&value) {
-        return Err(serde::de::Error::custom(format!(
-            "chat_delivery_max must be between {} and {}, got {value}",
-            CHAT_DELIVERY_MAX_RANGE.start(),
-            CHAT_DELIVERY_MAX_RANGE.end()
-        )));
-    }
-    Ok(Some(value))
-}
-
 /// Why a playbook could not be turned into an [`ApprovalPolicy`].
 ///
 /// The two cases are kept apart so the daemon's warning says which one
@@ -417,6 +385,7 @@ impl ApprovalPolicy {
 pub fn parse_policy(source: &str) -> Result<ApprovalPolicy, PolicyError> {
     let policy: ApprovalPolicy = toml::from_str(source)?;
     warn_about_unknown_tool_names(&policy);
+    warn_about_retired_limits(policy.limits.as_ref());
     if let Err(err) = chat_limits_from_section(policy.chat.as_ref()) {
         return Err(PolicyError::Parse(toml::de::Error::custom(err.to_string())));
     }
@@ -507,9 +476,41 @@ fn warn_about_unknown_tool_names(policy: &ApprovalPolicy) {
         return;
     };
     for name in &section.auto_approve {
-        if !DestructiveTool::is_known_tool_name(name) {
+        if RETIRED_TOOL_NAMES.contains(&name.as_str()) {
+            tracing::warn!(
+                tool = name.as_str(),
+                "playbook auto_approve lists {name:?}, a tool this daemon no longer has; \
+                 ignoring it"
+            );
+        } else if !DestructiveTool::is_known_tool_name(name) {
             tracing::warn!(
                 "playbook auto_approve lists an unknown tool name {name:?}; ignoring it"
+            );
+        }
+    }
+}
+
+fn warn_about_retired_limits(limits: Option<&PolicyLimits>) {
+    let Some(limits) = limits else {
+        return;
+    };
+    let retired = [
+        (
+            "handoff_ready_timeout_secs",
+            limits.handoff_ready_timeout_secs,
+        ),
+        (
+            "handoff_delivery_timeout_secs",
+            limits.handoff_delivery_timeout_secs,
+        ),
+        ("chat_delivery_max", limits.chat_delivery_max),
+    ];
+    for (key, value) in retired {
+        if value.is_some() {
+            tracing::warn!(
+                key,
+                "playbook [limits] {key} is deprecated and has no effect: the daemon no longer \
+                 types into windows; remove it"
             );
         }
     }
@@ -519,11 +520,10 @@ fn warn_about_unknown_tool_names(policy: &ApprovalPolicy) {
 /// blind.
 ///
 /// Covers [`DestructiveTool::InterruptWindow`], [`DestructiveTool::SendMessage`],
-/// [`DestructiveTool::SendKeys`], [`DestructiveTool::SendHandoff`],
-/// [`DestructiveTool::SendChat`] and [`DestructiveTool::BroadcastChat`]: each
-/// of these writes into a window's PTY or posts a chat message, so
-/// firing them at a window whose state could not be detected risks hitting an
-/// unexpected prompt. [`DestructiveTool::CloseWindow`] is deliberately
+/// [`DestructiveTool::SendHandoff`], [`DestructiveTool::SendChat`] and
+/// [`DestructiveTool::BroadcastChat`]: each of these writes into a window's
+/// PTY or hands its CLI something to act on, so firing them at a window whose
+/// state could not be detected risks hitting an unexpected prompt. [`DestructiveTool::CloseWindow`] is deliberately
 /// exempt, so a hung or undetectable window can still be cleaned up, and
 /// [`DestructiveTool::OpenWindow`] has no window whose status could be read.
 /// `Exited` is not this gate's business either: the handler's
@@ -541,7 +541,6 @@ pub fn status_gate(tool: DestructiveTool, status: DetectedStatus) -> Result<(), 
         tool,
         DestructiveTool::InterruptWindow
             | DestructiveTool::SendMessage
-            | DestructiveTool::SendKeys
             | DestructiveTool::SendHandoff
             | DestructiveTool::SendChat
             | DestructiveTool::BroadcastChat
@@ -551,133 +550,28 @@ pub fn status_gate(tool: DestructiveTool, status: DetectedStatus) -> Result<(), 
     Ok(())
 }
 
-/// What the daemon may type into a window, as its detection definition
-/// declares it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerAccess {
-    /// The definition declares no `[composer]`: the daemon types nothing of
-    /// its own composition.
-    Absent,
-    /// A `[composer]` without an `[input].probe`: the daemon may write a body
-    /// it has no line to judge, but cannot tell whether a line showed.
-    RawOnly,
-    /// A `[composer]` and an `[input].probe`: the daemon may write and judge a
-    /// line. The probe characters themselves are the window's
-    /// [`crate::input::InputProfile::probe`].
-    Judged,
-}
-
-impl ComposerAccess {
-    /// Whether the daemon may write a line into the window and judge whether
-    /// it showed: the access every judged delivery needs.
-    #[must_use]
-    pub fn is_judged(self) -> bool {
-        matches!(self, Self::Judged)
-    }
-}
-
-/// The shape of the text a tool asks the daemon to type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerWrite {
-    /// One line the daemon judges against the composer before pressing the
-    /// submit key.
-    Judged,
-    /// Bytes written as they are, with nothing to judge.
-    Raw,
-}
-
-/// Decides whether `tool`, writing text shaped as `write`, can be carried out
-/// at all in a window with the given composer `access`.
+/// Decides whether `tool` may run against `target_window_id`, currently in
+/// `status`, on behalf of `origin`.
 ///
-/// Only [`DestructiveTool::SendMessage`] and [`DestructiveTool::SendHandoff`]
-/// type daemon-composed text into the window. A handoff and a one-line
-/// message are judged against the composer, which needs a probe
-/// ([`ComposerAccess::Judged`]); a message with no line to judge needs only a
-/// composer. [`DestructiveTool::SendKeys`] writes the caller's bytes
-/// verbatim, and the chat tools post to a room rather than to a window, so
-/// they are not this gate's business.
+/// Judgement order: 1. [`status_gate`] (origin-independent) -> 2. `origin` is
+/// the target window itself -> `Allow` -> 3. `origin` is a registered approver
+/// -> `Allow` -> 4. `policy` approves `tool` -> `Allow`; `policy` is
+/// [`PolicySource::Failed`] -> [`DenyReason::PlaybookBroken`] -> 5.
+/// [`GateVerdict::NeedsApproval`].
 ///
 /// # Errors
 ///
-/// Returns [`DenyReason::NoComposer`] when `tool` types text that `access`
-/// does not allow.
-///
-/// # Examples
-///
-/// ```
-/// use yagura_daemon::control::{
-///     ComposerAccess, ComposerWrite, DenyReason, DestructiveTool, composer_gate,
-/// };
-///
-/// assert_eq!(
-///     composer_gate(DestructiveTool::SendMessage, ComposerAccess::Absent, ComposerWrite::Raw),
-///     Err(DenyReason::NoComposer)
-/// );
-/// assert_eq!(
-///     composer_gate(DestructiveTool::SendMessage, ComposerAccess::RawOnly, ComposerWrite::Raw),
-///     Ok(())
-/// );
-/// assert_eq!(
-///     composer_gate(DestructiveTool::SendMessage, ComposerAccess::RawOnly, ComposerWrite::Judged),
-///     Err(DenyReason::NoComposer)
-/// );
-/// assert_eq!(
-///     composer_gate(DestructiveTool::SendKeys, ComposerAccess::Absent, ComposerWrite::Raw),
-///     Ok(())
-/// );
-/// ```
-pub fn composer_gate(
-    tool: DestructiveTool,
-    access: ComposerAccess,
-    write: ComposerWrite,
-) -> Result<(), DenyReason> {
-    let allowed = match tool {
-        DestructiveTool::SendHandoff => matches!(access, ComposerAccess::Judged),
-        DestructiveTool::SendMessage => match write {
-            ComposerWrite::Judged => matches!(access, ComposerAccess::Judged),
-            ComposerWrite::Raw => !matches!(access, ComposerAccess::Absent),
-        },
-        DestructiveTool::OpenWindow
-        | DestructiveTool::InterruptWindow
-        | DestructiveTool::CloseWindow
-        | DestructiveTool::SendKeys
-        | DestructiveTool::SendChat
-        | DestructiveTool::BroadcastChat => true,
-    };
-    if allowed {
-        Ok(())
-    } else {
-        Err(DenyReason::NoComposer)
-    }
-}
-
-/// Decides whether `tool`, writing text shaped as `write`, may run against
-/// `target_window_id`, currently in `status` and with the composer `access`
-/// its definition gives, on behalf of `origin`.
-///
-/// Judgement order: 1. [`status_gate`] (origin-independent) -> 2.
-/// [`composer_gate`] (origin-independent) -> 3. `origin` is the target window
-/// itself -> `Allow` -> 4. `origin` is a registered approver -> `Allow` -> 5.
-/// `policy` approves `tool` -> `Allow`; `policy` is [`PolicySource::Failed`]
-/// -> [`DenyReason::PlaybookBroken`] -> 6. [`GateVerdict::NeedsApproval`].
-///
-/// # Errors
-///
-/// Returns [`DenyReason::StatusUnknown`] when [`status_gate`] refuses,
-/// [`DenyReason::NoComposer`] when [`composer_gate`] refuses, and
+/// Returns [`DenyReason::StatusUnknown`] when [`status_gate`] refuses, and
 /// [`DenyReason::PlaybookBroken`] when no identity relieves the request and
 /// the configured playbook failed to load.
 pub fn check_destructive(
     policy: PolicySource<'_>,
     tool: DestructiveTool,
     status: DetectedStatus,
-    access: ComposerAccess,
-    write: ComposerWrite,
     origin: &RequestOrigin,
     target_window_id: &str,
 ) -> Result<GateVerdict, DenyReason> {
     status_gate(tool, status)?;
-    composer_gate(tool, access, write)?;
     policy_gate(policy, tool, origin, Some(target_window_id))
 }
 
@@ -687,8 +581,7 @@ pub fn check_destructive(
 ///
 /// `target_window_id` is `None` when the target is about to be opened, in
 /// which case the requester cannot be addressing its own window.
-/// [`check_destructive`] is exactly [`status_gate`] and [`composer_gate`]
-/// followed by this function, so a caller that has no window yet can ask the
+/// [`check_destructive`] is exactly [`status_gate`] followed by this function, so a caller that has no window yet can ask the
 /// same question and get the same answer.
 ///
 /// # Errors
@@ -762,15 +655,6 @@ pub fn apply_limits(config: &mut DaemonConfig, limits: Option<&PolicyLimits>) {
     }
     if let Some(seconds) = limits.approval_timeout_secs {
         config.approval_timeout_secs = seconds;
-    }
-    if let Some(seconds) = limits.handoff_ready_timeout_secs {
-        config.handoff_ready_timeout_secs = seconds;
-    }
-    if let Some(seconds) = limits.handoff_delivery_timeout_secs {
-        config.handoff_delivery_timeout_secs = seconds;
-    }
-    if let Some(max) = limits.chat_delivery_max {
-        config.chat_delivery_max = usize::try_from(max).unwrap_or(usize::MAX);
     }
 }
 

@@ -169,8 +169,6 @@ struct Pending {
     /// The size the holder last confirmed: its `Welcome`, then each
     /// `Resized`.
     confirmed: (u16, u16),
-    /// A size asked for that the holder has not answered yet.
-    asked: Option<(u16, u16)>,
 }
 
 impl Pending {
@@ -185,7 +183,6 @@ impl Pending {
             selections: HashMap::new(),
             settles: HashMap::new(),
             confirmed: (cols, rows),
-            asked: None,
         }
     }
 
@@ -193,14 +190,6 @@ impl Pending {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         id
-    }
-
-    /// The narrowest width the holder may have as it writes what is sent
-    /// now: frames reach it in order, so it has the size it last confirmed
-    /// or the one asked for since.
-    fn narrowest_cols(&self) -> u16 {
-        self.asked
-            .map_or(self.confirmed.0, |(cols, _)| cols.min(self.confirmed.0))
     }
 }
 
@@ -255,10 +244,6 @@ impl Link {
 
     pub(super) fn set_view_focus(&self, focused: bool) {
         self.send(&HolderFrame::SetViewFocus { focused });
-    }
-
-    pub(super) fn focus_interval(&self, open: bool) {
-        self.send(&HolderFrame::FocusInterval { open });
     }
 
     pub(super) fn attach(&self, generation: u64) {
@@ -357,7 +342,6 @@ impl Link {
             if pending.closed {
                 return false;
             }
-            pending.asked = Some((cols, rows));
             pending.resize = Some(answer);
             self.send(&HolderFrame::Resize { cols, rows });
         }
@@ -369,25 +353,24 @@ impl Link {
         lock_recover(&self.pending).confirmed
     }
 
-    /// Writes `lead` and then `data` to the child as one write, after every
-    /// earlier write, and returns once the holder answered. `lead` is made
-    /// from the narrowest width the holder may have as it writes, decided
-    /// under the same lock a resize is sent under.
-    fn write(&self, lead: impl FnOnce(u16) -> Vec<u8>, data: &[u8]) -> std::io::Result<()> {
+    /// Writes `data` to the child, after every earlier write, and returns
+    /// once the holder answered.
+    fn write(&self, data: &[u8]) -> std::io::Result<()> {
         let (answer, answered) = std::sync::mpsc::sync_channel(1);
         {
             let mut pending = lock_recover(&self.pending);
             if pending.closed {
                 return Err(std::io::ErrorKind::BrokenPipe.into());
             }
-            let mut bytes = lead(pending.narrowest_cols());
-            bytes.extend_from_slice(data);
-            if bytes.is_empty() {
+            if data.is_empty() {
                 return Ok(());
             }
             let id = pending.next_id();
             pending.writes.insert(id, answer);
-            self.send(&HolderFrame::Write { id, bytes });
+            self.send(&HolderFrame::Write {
+                id,
+                bytes: data.to_vec(),
+            });
         }
         match answered.recv() {
             Ok(true) => Ok(()),
@@ -415,7 +398,6 @@ impl Link {
         if let Some(size) = size {
             pending.confirmed = size;
         }
-        pending.asked = None;
         if let Some(answer) = pending.resize.take() {
             let _ = answer.send(size.is_some());
         }
@@ -462,12 +444,8 @@ pub(super) struct Writer(Link);
 
 impl Writer {
     /// See `Link::write`.
-    pub(super) fn write(
-        &mut self,
-        lead: impl FnOnce(u16) -> Vec<u8>,
-        data: &[u8],
-    ) -> std::io::Result<()> {
-        self.0.write(lead, data)
+    pub(super) fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.0.write(data)
     }
 }
 
@@ -1661,7 +1639,6 @@ impl Reader<'_> {
             | HolderFrame::Report { .. }
             | HolderFrame::SetPalette { .. }
             | HolderFrame::SetViewFocus { .. }
-            | HolderFrame::FocusInterval { .. }
             | HolderFrame::Attach { .. }
             | HolderFrame::Detach { .. }
             | HolderFrame::ViewNote { .. }
@@ -2022,7 +1999,7 @@ mod tests {
         use crate::detector::DetectionEngine;
         use crate::detector::definition::parse_definition;
         use crate::detector::reading;
-        use crate::pty::{GuardedWrite, PtySession, TakeBackRegistration};
+        use crate::pty::PtySession;
         use yagura_os::{IpcTransport, PlatformIpc};
 
         const COLS: u16 = 80;
@@ -2207,38 +2184,6 @@ region = "bottom"
                 .await;
             }
 
-            /// Answers the next `Write` as written and returns its bytes.
-            async fn answer_write(&mut self) -> Vec<u8> {
-                let asked = self
-                    .next_of(|frame| matches!(frame, HolderFrame::Write { .. }))
-                    .await;
-                let HolderFrame::Write { id, bytes } = asked else {
-                    unreachable!()
-                };
-                self.send(&HolderFrame::Written { id }).await;
-                bytes
-            }
-
-            /// Takes the next `Resize` without answering it yet.
-            async fn take_resize(&mut self) -> (u16, u16) {
-                let asked = self
-                    .next_of(|frame| matches!(frame, HolderFrame::Resize { .. }))
-                    .await;
-                let HolderFrame::Resize { cols, rows } = asked else {
-                    unreachable!()
-                };
-                (cols, rows)
-            }
-
-            /// Answers the `Resize` taken last the way a holder does: a copy
-            /// of the new size, then `Resized`.
-            async fn finish_resize(&mut self, cols: u16, rows: u16) {
-                self.size = (cols, rows);
-                let number = self.push(true, &[], 0).await;
-                self.send(&HolderFrame::Resized { cols, rows }).await;
-                self.expect_ack(number).await;
-            }
-
             /// Reads at least `count` bytes of whatever the daemon sends,
             /// without taking them as frames.
             async fn drain_at_least(&mut self, count: usize) {
@@ -2390,63 +2335,6 @@ region = "bottom"
                 Some(7),
                 "the exit the holder sent before it closed is read, not lost to the failed write"
             );
-        }
-
-        /// The take-back keys ahead of a write are counted at the narrowest
-        /// width the holder may have when it writes them: the size it last
-        /// confirmed or one asked for and not answered yet.
-        #[tokio::test]
-        async fn take_back_keys_are_counted_at_the_narrowest_width_the_holder_may_have() {
-            const CLEAR: u8 = 0x15;
-            let text = "x".repeat(150);
-            let (endpoint, listener) = bind_holder_endpoint("take-back-width").await;
-            let (session, mut holder) =
-                tokio::join!(played_session(&endpoint), Holder::accept(listener));
-            holder.expect_ack(1).await;
-
-            for (asked, narrowest) in [(120u16, COLS), (40, 40)] {
-                let call = session.begin_take_back_call();
-                let registration = TakeBackRegistration::Set {
-                    call,
-                    text: text.clone(),
-                    clear: vec![CLEAR],
-                };
-                let (registered, _) = tokio::join!(
-                    session.write_input_if_unmoved(
-                        text.as_bytes(),
-                        session.writes_recorded(),
-                        registration,
-                        || {}
-                    ),
-                    holder.answer_write()
-                );
-                assert_eq!(
-                    registered.expect("the registering write is made"),
-                    GuardedWrite::Written
-                );
-
-                let (resized, written) = tokio::join!(session.resize(asked, ROWS), async {
-                    let size = holder.take_resize().await;
-                    assert_eq!(size, (asked, ROWS));
-                    let (write, bytes) =
-                        tokio::join!(session.write_input(b"next"), holder.answer_write());
-                    write.expect("the write is made");
-                    holder.finish_resize(asked, ROWS).await;
-                    bytes
-                });
-                resized.expect("the resize is answered");
-
-                let keys = written.iter().take_while(|&&byte| byte == CLEAR).count();
-                assert_eq!(
-                    (keys, &written[keys..]),
-                    (
-                        crate::input::take_back_key_count(&text, narrowest),
-                        b"next".as_slice()
-                    ),
-                    "with {asked} columns asked for and not answered, the keys are counted at \
-                     {narrowest} columns"
-                );
-            }
         }
     }
 }

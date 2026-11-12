@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`send_message` keeps the line endings of its `text` as written.** It used to turn every LF and CRLF into a lone CR, so that a console line editor would submit the line it typed; the text now reaches the window inside an envelope, where a line ending is data.
+- **A detection definition's `[composer] right_border` is deprecated and has no effect.** The daemon no longer reads the composer's body back, which was all it was for; a definition that still sets it loads, with one warning that names the key.
 - **The minimum supported Rust version is now 1.89** (it was 1.88), which `rusqlite` 0.41 requires. See [`docs/building.md`](docs/building.md).
 - **`get_window_status`'s `last_output_summary` is now the last 500 characters the window's screen shows**, its wrapped rows joined as `read_output` joins them, rather than the last 500 characters of `read_output`'s text: rows that scrolled off the top are no longer part of it. The daemon answers it from what it holds, so a window whose terminal does not answer no longer holds up its status. See [`docs/mcp-setup.md`](docs/mcp-setup.md#get_window_status).
 - **Four default keys change on Windows and Linux, and two on macOS**, so that they no longer take keys the CLIs in your windows use. Windows and Linux: next window `Ctrl+Tab` is now `Ctrl+Shift+f`, previous window `Ctrl+Shift+Tab` is now `Ctrl+Shift+b`, settings `Ctrl+,` is now `Ctrl+Shift+s`, next window needing you `Ctrl+Shift+a` is now `Ctrl+Shift+j`. macOS: next window `Ctrl+Tab` is now `Shift+Meta+]`, previous window `Ctrl+Shift+Tab` is now `Shift+Meta+[`. To get the earlier keys back, set them in Settings > Keyboard or in `keymap.toml`. See [`docs/keymap.md`](docs/keymap.md#default-keys).
@@ -41,6 +43,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
+- **`send_message`'s `mode` argument.** It took only `"immediate"`, the way the daemon used to type a message into the window at once; a message now always waits in the window's inbox until the CLI takes it, so there is nothing left to choose. A call that still sends `mode` is not refused: the argument is ignored.
 - **The `YAGURA_CLOSE_SETTLE_MS` environment variable**, and `DaemonConfig::close_settle_ms` and `resolve_close_settle_ms` from the `yagura-daemon` library API. `close_window` no longer waits a fixed budget for the window's status (see Fixed).
 - **`yagura_os::locale`**, whose `preferred_locale`, `PreferredLocale` and `locale_exists` moved unchanged to the new `yagura-locale` crate.
 - **On macOS and Linux, `yagura_os::pty::spawn`**, with `PtySpawn`, `PtySpawnError`, `PtyChild` and `PtyKiller`. They remain on Windows; a Unix window starts through `pty::open` and `pty::start_leader`.

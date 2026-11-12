@@ -189,7 +189,7 @@ fn validate_task_instruction_accepts_lf_and_tab() {
 /// Every character `validate_task_instruction` must reject: the same set
 /// [`is_forbidden_label_char`] documents (in `src/lib.rs`), except LF and TAB
 /// -- the two control characters an instruction's own line structure needs.
-/// Unlike [`validate_send_text_body`]'s rule, CR stays forbidden here: a
+/// Unlike [`validate_message_text`]'s rule, CR stays forbidden here: a
 /// caller normalizes CR to LF before this validator ever sees the value.
 fn forbidden_instruction_chars() -> Vec<char> {
     let mut chars = Vec::new();

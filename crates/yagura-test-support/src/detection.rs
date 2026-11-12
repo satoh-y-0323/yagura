@@ -27,7 +27,7 @@ pub const CONTROL_READY_LINE: &str = concat!(control_ready_marker!(), "\r\n");
 ///
 /// `head` is placed before `schema_version` (top-level keys such as
 /// `bottom_line_count = N\n` must precede every table); `tail` is appended
-/// after the rule (`[input]`, `[composer]`, ...). Either may be empty.
+/// after the rule (`[composer]`, `[requests]`, ...). Either may be empty.
 #[must_use]
 pub fn idle_definition_toml(name: &str, head: &str, tail: &str) -> String {
     format!(
@@ -53,45 +53,5 @@ region = "bottom"
 pub fn composer_section_toml() -> String {
     format!(
         "\n[composer]\nmarker = '{COMPOSER_MARKER}'\nseparator = \"{COMPOSER_SEPARATOR}\"\ncontinuation_prefix = \"{COMPOSER_CONTINUATION_PREFIX}\"\n"
-    )
-}
-
-/// The definition shape for a `submit_child` window: `marker` (the fixture's
-/// startup line) is `waiting_input`, and its `SUBMITTED` / `REACT` output is
-/// `running`. `input_toml` is the body written under the `[input]` heading
-/// this function writes; no `[composer]` table is appended.
-///
-/// `marker` goes into a regex pattern verbatim, so it must carry no regex
-/// metacharacter.
-#[must_use]
-pub fn submit_definition_toml(
-    name: &str,
-    marker: &str,
-    bottom_line_count: u16,
-    input_toml: &str,
-) -> String {
-    format!(
-        r#"schema_version = 1
-name = "{name}"
-bottom_line_count = {bottom_line_count}
-
-[debounce]
-confirm_ms = 30
-
-[[rules]]
-status = "running"
-pattern = '(SUBMITTED)|(REACT)'
-priority = 20
-region = "bottom"
-
-[[rules]]
-status = "waiting_input"
-pattern = '{marker}'
-priority = 10
-region = "bottom"
-
-[input]
-{input_toml}
-"#
     )
 }

@@ -1,5 +1,5 @@
 //! The chat rooms' IPC surface: [`ChatRuntime`] (store lifecycle, limits,
-//! delivery budget, the intro a participant's start-up door carries), the
+//! the intro a participant's start-up door carries), the
 //! room a request belongs to ([`resolve_room`]), the window-opened hook
 //! ([`install_intro_hook`]) and the `send_chat` / `broadcast_chat` /
 //! `read_chat` / `list_chat_rooms` handlers.
@@ -22,7 +22,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -36,7 +35,7 @@ use crate::chat_store::{self, ChatStore, NewChatMessage, ParcelEndRecord, PostEf
 use crate::config::DaemonConfig;
 use crate::control::{self, DestructiveTool, GateVerdict, RequestOrigin};
 use crate::handoff::with_envelope_id;
-use crate::inbox::{Deposited, Parcel, ParcelEnd, PushBudget, SaveOutcome, Unwritten};
+use crate::inbox::{Deposited, Parcel, ParcelEnd, SaveOutcome, Unwritten};
 use crate::live_policy::{self, PolicyCell};
 use crate::parcel_store::ChatDelivery;
 use crate::room::{self, ChatLimits, DeliveryOutcome};
@@ -58,15 +57,12 @@ use super::{
 const MAIN_ROOM_ID: &str = "main";
 
 /// The chat room's runtime state: the store gate, the effective `[chat]`
-/// limits, the intro text, the participation exclusion list and the shared
-/// chat delivery budget.
+/// limits, the intro text and the participation exclusion list.
 pub struct ChatRuntime {
     store: StoreGate<ChatStore>,
     limits: ChatLimits,
     intro: String,
     exclude_detections: Vec<String>,
-    chat_delivery_max: usize,
-    open_deliveries: Arc<AtomicUsize>,
     /// Whether this daemon was built with no chat at all, rather than with
     /// a chat that failed to come up.
     unwired: bool,
@@ -85,8 +81,6 @@ impl ChatRuntime {
             limits: ChatLimits::default(),
             intro: String::new(),
             exclude_detections: Vec::new(),
-            chat_delivery_max: 32,
-            open_deliveries: Arc::new(AtomicUsize::new(0)),
             unwired: false,
             #[cfg(feature = "fault-injection")]
             faults: crate::fault_point::FaultPoints::default(),
@@ -114,8 +108,8 @@ impl ChatRuntime {
 
     /// Builds the chat runtime from `config`'s already-resolved fields
     /// (`chat_limits` / `chat_intro` / `chat_exclude_detections` /
-    /// `chat_delivery_max` / `store_db_path_resolved` / `playbook` /
-    /// `approval_policy`), opening the store synchronously.
+    /// `store_db_path_resolved` / `playbook` / `approval_policy`), opening the
+    /// store synchronously.
     ///
     /// A caller in an async context must run this on a blocking thread
     /// (`tokio::task::spawn_blocking`): opening a database is blocking I/O.
@@ -150,8 +144,6 @@ impl ChatRuntime {
                     limits: config.chat_limits,
                     intro: config.chat_intro.clone(),
                     exclude_detections: config.chat_exclude_detections.clone(),
-                    chat_delivery_max: config.chat_delivery_max,
-                    open_deliveries: Arc::new(AtomicUsize::new(0)),
                     unwired: false,
                     #[cfg(feature = "fault-injection")]
                     faults: config.faults.clone(),
@@ -189,14 +181,6 @@ impl ChatRuntime {
             || (self.store.is_enabled()
                 && is_participant(delivers, detection, &self.exclude_detections));
         if introduced { &self.intro } else { "" }
-    }
-
-    /// The chat delivery budget every post draws on while it is being typed.
-    fn delivery_budget(&self) -> PushBudget {
-        PushBudget {
-            counter: Arc::clone(&self.open_deliveries),
-            max: self.chat_delivery_max,
-        }
     }
 
     /// Records one destination's delivery outcome in the store, reason
@@ -1183,7 +1167,6 @@ async fn complete_post(
         room_id: room_id.clone(),
         envelope,
         targets: targets.clone(),
-        budget: chat.delivery_budget(),
         #[cfg(feature = "fault-injection")]
         faults: chat.faults.clone(),
     };
@@ -1286,7 +1269,6 @@ struct Landing {
     room_id: String,
     envelope: String,
     targets: Vec<String>,
-    budget: PushBudget,
     #[cfg(feature = "fault-injection")]
     faults: crate::fault_point::FaultPoints,
 }
@@ -1326,7 +1308,6 @@ fn post_in_one_transaction(
         room_id,
         envelope,
         targets,
-        budget,
         #[cfg(feature = "fault-injection")]
         faults,
     } = landing;
@@ -1359,10 +1340,7 @@ fn post_in_one_transaction(
                 room_id: room_id.clone(),
                 seq,
             };
-            let (deposited, row) =
-                entry
-                    .inbox()
-                    .deposit_with_row(parcel, Some(budget.clone()), delivery);
+            let (deposited, row) = entry.inbox().deposit_with_row(parcel, delivery);
             if deposited.end.is_none() {
                 let outcome = match notice_queue::after_deposit(&registry, &entry, deposited) {
                     Err(notice_queue::Refused::Full) => DeliveryOutcome::UndeliveredExhausted,
@@ -1442,23 +1420,19 @@ async fn record_when_left(
     end: oneshot::Receiver<ParcelEnd>,
 ) {
     let outcome = match end.await {
-        // The push's settling recorded it with the row's removal.
+        // The door's confirmation recorded it with the row's removal.
         Ok(ParcelEnd::TakenRecorded) => {
             chat.announce_change(broker, room_id, seq).await;
             return;
         }
         Ok(ParcelEnd::Taken) => DeliveryOutcome::Taken,
-        Ok(ParcelEnd::TurnedAway) => DeliveryOutcome::UndeliveredExhausted,
         // The next daemon settles it.
         Ok(ParcelEnd::Stopped) => return,
         Ok(ParcelEnd::Closed) | Err(_) => DeliveryOutcome::UndeliveredUnknown(None),
     };
-    // Taken and turned away are the ends that leave the parcel's kept row to
-    // the delivery's settlement; a closed window takes its rows with it.
-    if matches!(
-        outcome,
-        DeliveryOutcome::Taken | DeliveryOutcome::UndeliveredExhausted
-    ) {
+    // Taken is the end that leaves the parcel's kept row to the delivery's
+    // settlement; a closed window takes its rows with it.
+    if matches!(outcome, DeliveryOutcome::Taken) {
         chat.settle_parcel_end_and_notify(broker, room_id, seq, target_id, outcome)
             .await;
     } else {
@@ -1950,7 +1924,6 @@ async fn handle_room_removal(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
 
     use tokio::sync::watch;
     use tokio::time::Instant;
@@ -2016,13 +1989,6 @@ mod tests {
         Inbox::new(8, DeliverySpec::default(), rx)
     }
 
-    fn budget() -> PushBudget {
-        PushBudget {
-            counter: Arc::new(AtomicUsize::new(0)),
-            max: 8,
-        }
-    }
-
     fn parcel_key(seq: i64) -> String {
         chat_parcel_key(ROOM, seq)
     }
@@ -2034,11 +2000,7 @@ mod tests {
         let mut store = store_with_room("clear-after-deposit");
         let seq = post(&mut store, &["w-b"]);
         let inbox = inbox();
-        let (deposited, _saving) = inbox.deposit_saved(
-            Parcel::new(parcel_key(seq), "ENVELOPE"),
-            Some(budget()),
-            None,
-        );
+        let (deposited, _saving) = inbox.deposit_saved(Parcel::new(parcel_key(seq), "ENVELOPE"));
         assert!(deposited.end.is_some());
         assert!(inbox.holds(&parcel_key(seq)));
 

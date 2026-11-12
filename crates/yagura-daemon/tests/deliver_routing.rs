@@ -26,9 +26,9 @@ use std::time::Duration;
 #[cfg(windows)]
 use common::call_list_windows;
 use common::{
-    CONTROL_INPUT_TABLE, VALID_TOKEN, approver_base_config, composer_section_toml,
-    detection_config, empty_lookup, identify, read_response, register_approver, send,
-    unique_temp_dir, wait_until_status, write_profile,
+    VALID_TOKEN, approver_base_config, composer_section_toml, detection_config, empty_lookup,
+    identify, read_response, register_approver, send, unique_temp_dir, wait_until_status,
+    write_profile,
 };
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{IpcServer, OpenWindowRequest, WindowRegistry};
@@ -387,7 +387,7 @@ fn write_hook_definition(dir: &Path) {
              [[rules]]\nstatus = \"waiting_input\"\npattern = 'HC-IDLE'\npriority = 10\n\
              region = \"bottom\"\n\n\
              [[rules]]\nstatus = \"running\"\npattern = 'HC-BUSY'\npriority = 10\n\
-             region = \"bottom\"\n{CONTROL_INPUT_TABLE}{}",
+             region = \"bottom\"\n{}",
             composer_section_toml()
         ),
     )
@@ -1249,53 +1249,6 @@ async fn a_post_before_the_first_turn_waits_for_it_and_never_runs_the_wake_comma
 }
 
 // =========================================================================================
-// a profile with no wake door is typed into while it waits, and only then
-// =========================================================================================
-
-#[tokio::test]
-async fn a_post_to_a_waiting_window_with_no_wake_door_is_typed_once_and_taken() {
-    let scene = Scene::start("none-idle", Opts::default()).await;
-    let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
-    let mut user = scene.user().await;
-    let id = scene.open_profile(&mut user, "hc-none").await;
-
-    let (seq, _) = post(&mut user, &format!("@{id} R6NONEIDLE")).await;
-
-    until_state(&mut user, seq, &id, "delivered").await;
-    assert_eq!(logs.typed().matches("R6NONEIDLE").count(), 1);
-    assert_eq!(logs.received("R6NONEIDLE"), 0);
-}
-
-#[tokio::test]
-async fn a_post_after_the_last_turn_start_is_typed_once_the_window_waits_again() {
-    let scene = Scene::start("none-after-turn", Opts::default()).await;
-    let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
-    let mut user = scene.user().await;
-    let id = scene.open_profile(&mut user, "hc-none").await;
-    scene.start_turn(&mut user, &logs, &id).await;
-    let writes = scene.entry(&id).write_seq();
-    let (seq, _) = post(&mut user, &format!("@{id} R6AFTERTURN")).await;
-    until_state(&mut user, seq, &id, "queued").await;
-    // The screen still shows the busy line, so no clock bound can make the
-    // window wait for input again: whatever the agent would type while the
-    // window works has been typed once they have all run out.
-    common::let_every_clock_bound_run_out().await;
-    assert_eq!(
-        scene.entry(&id).write_seq(),
-        writes,
-        "nothing is typed into a working window: {:?}",
-        logs.typed()
-    );
-    logs.assert_never_typed("R6AFTERTURN");
-
-    scene.end_turn(&mut user, &logs, &id).await;
-
-    until_state(&mut user, seq, &id, "delivered").await;
-    assert_eq!(logs.typed().matches("R6AFTERTURN").count(), 1);
-    assert_eq!(logs.received("R6AFTERTURN"), 0);
-}
-
-// =========================================================================================
 // pending while in the inbox, taken once the CLI has it
 // =========================================================================================
 
@@ -1323,34 +1276,6 @@ async fn read_chat_reports_pending_until_the_cli_takes_the_post_and_taken_after(
 // =========================================================================================
 // send_message is still typed
 // =========================================================================================
-
-// `send_message` is the caller's own request to type, so it is still typed into a window
-// that declares `[delivery]`.
-#[tokio::test]
-async fn send_message_is_still_typed_into_a_window_that_declares_delivery() {
-    let scene = Scene::start("send-message", Opts::default()).await;
-    let logs = scene.profile("hc-wait", WAIT_FLAGS, Some(WAIT_DELIVERY));
-    let mut user = scene.user().await;
-    let id = scene.open_profile(&mut user, "hc-wait").await;
-
-    match request(
-        &mut user,
-        ClientMessage::SendText {
-            window_id: id.clone(),
-            text: "R8TYPED\r".to_string(),
-        },
-    )
-    .await
-    {
-        DaemonMessage::TextSent { .. } => {}
-        other => panic!("expected text_sent, got {other:?}"),
-    }
-    logs.until("the message to be typed", |logs| {
-        logs.typed().contains("R8TYPED")
-    })
-    .await;
-    assert_eq!(logs.received("R8TYPED"), 0);
-}
 
 // =========================================================================================
 // the daemon pushes nothing to a window in Unknown; the CLI's own doors still answer
@@ -1464,8 +1389,8 @@ async fn a_window_with_no_wake_door_is_never_typed_into_while_unknown() {
 // =========================================================================================
 
 /// Checks that `window_id` is no participant: a post naming it and a broadcast both leave
-/// it out, nothing the daemon sends of its own accord -- the intro included -- is typed
-/// into it, and a handoff to it is undelivered for want of a way to deliver it.
+/// it out, nothing the daemon sends of its own accord -- the intro included -- reaches it,
+/// and a handoff or a message to it is undelivered for want of a way to deliver it.
 async fn assert_takes_no_part(scene: &Scene, user: &mut Connection, logs: &Logs, window_id: &str) {
     let (_, targets) = post(user, &format!("@{window_id} R10MENTION")).await;
     assert!(
@@ -1492,25 +1417,28 @@ async fn assert_takes_no_part(scene: &Scene, user: &mut Connection, logs: &Logs,
         expect_handoff_sent(request(user, handoff_to(window_id, "R10HANDOFF")).await);
     assert_eq!(delivery, "undelivered_no_delivery");
 
-    // Writes into one window are made one at a time: whatever the daemon had queued for it
-    // is typed before this line is.
     match request(
         user,
         ClientMessage::SendText {
             window_id: window_id.to_string(),
-            text: "R10SENTINEL\r".to_string(),
+            text: "R10MESSAGE".to_string(),
         },
     )
     .await
     {
-        DaemonMessage::TextSent { .. } => {}
+        DaemonMessage::TextSent { state, .. } => assert_eq!(
+            serde_json::to_value(state).expect("a state encodes"),
+            "undelivered_no_delivery"
+        ),
         other => panic!("expected text_sent, got {other:?}"),
     }
-    logs.until("the sentinel to be typed", |logs| {
-        logs.typed().contains("R10SENTINEL")
-    })
-    .await;
-    for needle in [INTRO, "R10MENTION", "R10BROADCAST", "R10HANDOFF"] {
+    for needle in [
+        INTRO,
+        "R10MENTION",
+        "R10BROADCAST",
+        "R10HANDOFF",
+        "R10MESSAGE",
+    ] {
         logs.assert_never_typed(needle);
         assert_eq!(logs.received(needle), 0, "{needle}");
     }
@@ -1567,80 +1495,6 @@ async fn a_window_whose_hooks_were_left_out_takes_no_part_in_chat_or_notices() {
 // =========================================================================================
 // a handoff answers once the CLI took it, or once it is known it never will
 // =========================================================================================
-
-#[tokio::test]
-async fn a_handoff_not_taken_within_the_limit_is_undelivered_and_leaves_the_inbox() {
-    let scene = Scene::start(
-        "timeout",
-        Opts {
-            limits: "handoff_delivery_timeout_secs = 1",
-            handoffs_per_conn: Some(1),
-            ..Opts::default()
-        },
-    )
-    .await;
-    let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
-    let mut user = scene.user().await;
-    let id = scene.open_profile(&mut user, "hc-none").await;
-    // Working, with no wake door: nothing takes the envelope until the next turn starts.
-    scene.start_turn(&mut user, &logs, &id).await;
-
-    let (_, _, delivery) =
-        expect_handoff_sent(request(&mut user, handoff_to(&id, "R11TIMEOUT")).await);
-
-    assert_eq!(delivery, "undelivered_timeout");
-    assert_eq!(
-        scene.entry(&id).inbox().pending_count(),
-        0,
-        "an envelope answered as undelivered is no longer waiting"
-    );
-    scene.start_turn(&mut user, &logs, &id).await;
-    assert_eq!(
-        logs.received("R11TIMEOUT"),
-        0,
-        "it never arrives after the answer"
-    );
-    logs.assert_never_typed("R11TIMEOUT");
-
-    // The answer returned the handoff's slot, the connection's only one: the next handoff
-    // is accepted.
-    send(&mut user, &handoff_to(&id, "R11SECOND")).await;
-    scene
-        .until("the second envelope to wait in the inbox", || {
-            scene.entry(&id).inbox().pending_count() == 1
-        })
-        .await;
-    // `user` owes the handoff's reply, so the turn is watched on another connection.
-    let mut watcher = scene.user().await;
-    scene.start_turn(&mut watcher, &logs, &id).await;
-    let (_, _, delivery) = expect_handoff_sent(read_reply(&mut user).await);
-    assert_eq!(delivery, "delivered");
-}
-
-#[tokio::test]
-async fn a_handoff_to_a_working_window_answers_taken_once_its_next_turn_starts() {
-    let scene = Scene::start("taken-later", Opts::default()).await;
-    let logs = scene.profile("hc-none", NONE_FLAGS, Some(NONE_DELIVERY));
-    let mut user = scene.user().await;
-    let id = scene.open_profile(&mut user, "hc-none").await;
-    scene.start_turn(&mut user, &logs, &id).await;
-
-    send(&mut user, &handoff_to(&id, "R11LATER")).await;
-    scene
-        .until("the envelope to wait in the inbox", || {
-            scene.entry(&id).inbox().pending_count() == 1
-        })
-        .await;
-    // `user` owes the handoff's reply, so the turn is watched on another connection.
-    let mut watcher = scene.user().await;
-    scene.start_turn(&mut watcher, &logs, &id).await;
-
-    let (_, _, delivery) = expect_handoff_sent(read_reply(&mut user).await);
-    assert_eq!(delivery, "delivered");
-    assert!(logs.door("take").contains("R11LATER"));
-    assert_eq!(logs.received("R11LATER"), 1);
-    logs.assert_never_typed("R11LATER");
-}
 
 #[tokio::test]
 async fn a_handoff_that_opens_a_window_hands_the_envelope_over_as_its_launch_prompt() {
@@ -1766,38 +1620,4 @@ async fn a_failed_command_push_puts_the_post_back_for_the_next_turn() {
 
     assert!(taken.contains("R13FAILED"), "{taken:?}");
     until_state(&mut user, seq, &id, "delivered").await;
-}
-
-#[tokio::test]
-async fn a_post_being_typed_is_not_returned_by_a_turn_start_door() {
-    let scene = Scene::start("typing-held", Opts::default()).await;
-    let pause = scene.root.join("paint-pause");
-    std::fs::write(&pause, b"").expect("create the pause file");
-    let logs = scene.profile_with(
-        "hc-none",
-        &format!("pause|{}", pause.display()),
-        NONE_FLAGS,
-        Some(NONE_DELIVERY),
-        "",
-    );
-    let mut user = scene.user().await;
-    // The pause holds what is typed off the screen; the status line was painted at start.
-    let id = scene.open_profile(&mut user, "hc-none").await;
-
-    let (seq, _) = post(&mut user, &format!("@{id} R13TYPING")).await;
-    logs.until("the daemon to start typing", |logs| {
-        !logs.typed().is_empty()
-    })
-    .await;
-    let mut door = scene.connect().await;
-    let taken = call_take(&mut door, &id).await;
-    std::fs::remove_file(&pause).expect("let the composer paint");
-
-    assert!(
-        !taken.contains("R13TYPING"),
-        "a post being typed is not handed out again"
-    );
-    until_state(&mut user, seq, &id, "delivered").await;
-    assert_eq!(logs.typed().matches("R13TYPING").count(), 1);
-    assert_eq!(logs.received("R13TYPING"), 0);
 }

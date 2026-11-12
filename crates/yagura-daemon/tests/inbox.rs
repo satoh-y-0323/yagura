@@ -763,9 +763,9 @@ async fn a_notice_deposited_again_replaces_the_one_waiting_under_its_key() {
     let (h, mut client) = start("inbox-notice-replaced", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
-    let first = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-OLD"), None, None);
+    let first = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-OLD"));
     let mut first_end = first.end.expect("the first notice is taken in");
-    let second = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-NEW"), None, None);
+    let second = inbox.deposit_tracked(Parcel::notice("report", "NOTICE-NEW"));
     assert!(second.turned_away.is_empty());
     assert!(second.end.is_some());
 
@@ -793,9 +793,9 @@ async fn a_replacing_notice_is_the_one_whose_owner_learns_it_was_taken() {
     let (h, mut client) = start("inbox-notice-replaced-taken", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
-    let _ = inbox.deposit_tracked(Parcel::notice("plan:p1", "NOTICE-OLD"), None, None);
+    let _ = inbox.deposit_tracked(Parcel::notice("plan:p1", "NOTICE-OLD"));
     let end = inbox
-        .deposit_tracked(Parcel::notice("plan:p1", "NOTICE-NEW"), None, None)
+        .deposit_tracked(Parcel::notice("plan:p1", "NOTICE-NEW"))
         .end
         .expect("taken in");
     let _ = take(&h, &id).await;
@@ -852,7 +852,7 @@ async fn withdrawing_a_parcel_a_door_holds_leaves_it_to_the_door_that_prints_it(
     let (h, mut client) = start("inbox-withdraw-door-held", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
-    let deposited = inbox.deposit_tracked(Parcel::new("held", "PARCEL-HELD"), None, None);
+    let deposited = inbox.deposit_tracked(Parcel::new("held", "PARCEL-HELD"));
     let end = deposited.end.expect("the inbox must take the parcel in");
     let read = inbox.read_take(None);
     let (output, _, _) = expect_delivery(read.message.clone());
@@ -920,9 +920,9 @@ async fn withdrawing_a_parcel_a_wake_command_carries_leaves_it_to_the_command() 
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
 
-    let taken = inbox.deposit_tracked(Parcel::new("taken", "PARCEL-TAKEN"), None, None);
+    let taken = inbox.deposit_tracked(Parcel::new("taken", "PARCEL-TAKEN"));
     let taken_end = taken.end.expect("the inbox must take the parcel in");
-    let push = inbox.begin_push(false).expect("a push picks the parcel up");
+    let push = inbox.begin_push().expect("a push picks the parcel up");
     assert!(matches!(
         inbox.withdraw("taken"),
         Withdrawal::UnderWay { .. }
@@ -931,7 +931,7 @@ async fn withdrawing_a_parcel_a_wake_command_carries_leaves_it_to_the_command() 
     assert_eq!(taken_end.await, Ok(ParcelEnd::Taken));
 
     deposit(&h, &id, "failed", "PARCEL-FAILED");
-    let push = inbox.begin_push(false).expect("a push picks the parcel up");
+    let push = inbox.begin_push().expect("a push picks the parcel up");
     assert!(matches!(
         inbox.withdraw("failed"),
         Withdrawal::UnderWay { .. }
@@ -955,7 +955,7 @@ async fn withdrawing_a_waiting_parcel_does_not_disturb_another_that_a_push_carri
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
     deposit(&h, &id, "under-way", "PARCEL-UNDER-WAY");
     let push = inbox
-        .begin_push(false)
+        .begin_push()
         .expect("a push must pick the waiting parcel up");
     deposit(&h, &id, "waiting", "PARCEL-WAITING");
 

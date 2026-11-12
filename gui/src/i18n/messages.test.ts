@@ -360,11 +360,6 @@ export const dummyMessages: Messages = {
         description: 'DUMMY_settings_approvalToolInfo_send_handoff_description',
         risk: 'DUMMY_settings_approvalToolInfo_send_handoff_risk',
       },
-      send_keys: {
-        name: 'DUMMY_settings_approvalToolInfo_send_keys_name',
-        description: 'DUMMY_settings_approvalToolInfo_send_keys_description',
-        risk: 'DUMMY_settings_approvalToolInfo_send_keys_risk',
-      },
       interrupt_window: {
         name: 'DUMMY_settings_approvalToolInfo_interrupt_window_name',
         description: 'DUMMY_settings_approvalToolInfo_interrupt_window_description',

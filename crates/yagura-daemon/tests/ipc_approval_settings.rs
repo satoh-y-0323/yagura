@@ -31,8 +31,8 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::control::DestructiveTool;
 use yagura_daemon::plan_permit::LockTable;
 use yagura_protocol::{
-    ApprovalRequest, ApprovalSettingsInfo, ClientMessage, ControlKey, DaemonMessage, PlanInfo,
-    PlanTaskSpec, PlaybookState, ToolAutoApprove,
+    ApprovalRequest, ApprovalSettingsInfo, ClientMessage, DaemonMessage, PlanInfo, PlanTaskSpec,
+    PlaybookState, ToolAutoApprove,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::ready_child_profile_source;
@@ -320,13 +320,16 @@ async fn set_auto_approve_with_no_playbook_configured_is_unsupported_and_changes
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     expect_error(reply, "unsupported");
 
     let reply: DaemonMessage = call_get_approval_settings(&mut approver).await;
     let settings: ApprovalSettingsInfo = expect_approval_settings(reply);
     assert_eq!(settings.playbook, PlaybookState::NotConfigured);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(false));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(false)
+    );
 }
 
 #[tokio::test]
@@ -361,7 +364,7 @@ async fn set_auto_approve_when_the_playbook_failed_to_load_at_boot_is_invalid_st
     register_approver(&mut approver).await;
     let before: Vec<u8> = fs::read(&path).expect("read before");
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let message: String = expect_error(reply, "invalid_state");
     assert_eq!(message, "the playbook did not load when the daemon started");
 
@@ -371,7 +374,10 @@ async fn set_auto_approve_when_the_playbook_failed_to_load_at_boot_is_invalid_st
     let reply: DaemonMessage = call_get_approval_settings(&mut approver).await;
     let settings: ApprovalSettingsInfo = expect_approval_settings(reply);
     assert_eq!(settings.playbook, PlaybookState::Failed);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(false));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(false)
+    );
 }
 
 #[tokio::test]
@@ -413,7 +419,7 @@ async fn set_auto_approve_after_the_playbook_is_corrupted_post_boot_is_invalid_s
     fs::write(&path, BROKEN_PLAYBOOK_SOURCE).expect("corrupt the file after boot");
     let before: Vec<u8> = fs::read(&path).expect("read before");
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let message: String = expect_error(reply, "invalid_state");
     assert_eq!(message, "the playbook on disk could not be read");
 
@@ -431,7 +437,10 @@ async fn set_auto_approve_after_the_playbook_is_corrupted_post_boot_is_invalid_s
         "the daemon's own value must still reflect the boot-time load, unaffected by the later \
          corruption"
     );
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(false));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(false)
+    );
 }
 
 #[tokio::test]
@@ -451,7 +460,7 @@ async fn set_auto_approve_that_cannot_write_the_playbook_is_internal_and_changes
     block_rewrite(&path, true);
     let before: Vec<u8> = fs::read(&path).expect("read before");
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let message: String = expect_error(reply, "internal");
     assert_eq!(message, "the playbook could not be written");
 
@@ -464,7 +473,7 @@ async fn set_auto_approve_that_cannot_write_the_playbook_is_internal_and_changes
     let reply: DaemonMessage = call_get_approval_settings(&mut approver).await;
     let settings: ApprovalSettingsInfo = expect_approval_settings(reply);
     assert_eq!(
-        reported_auto_approve(&settings, "send_keys"),
+        reported_auto_approve(&settings, "interrupt_window"),
         Some(false),
         "the daemon's own value must be unaffected by a write failure"
     );
@@ -472,9 +481,12 @@ async fn set_auto_approve_that_cannot_write_the_playbook_is_internal_and_changes
     // Control: the same request, the same fixture, succeeds once the write is
     // able to go through again.
     block_rewrite(&path, false);
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(true));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(true)
+    );
     let after_control: Vec<u8> = fs::read(&path).expect("read after control");
     assert_ne!(
         before, after_control,
@@ -540,7 +552,10 @@ async fn get_approval_settings_reports_the_daemons_current_value_across_playbook
     assert_eq!(tool_names(&settings.tools), expected_tool_order());
     assert_eq!(reported_auto_approve(&settings, "send_message"), Some(true));
     assert_eq!(reported_auto_approve(&settings, "close_window"), Some(true));
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(false));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(false)
+    );
     assert!(!settings.plans_require_approval);
 
     // NotConfigured.
@@ -606,15 +621,15 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
     let mut approver = h.connect().await;
     register_approver(&mut approver).await;
 
-    // A human (or an agent) edits the file directly, adding send_keys.
-    fs::write(&path, "[approval]\nauto_approve = [\"send_keys\"]\n").expect("manual edit");
+    // A human (or an agent) edits the file directly, adding interrupt_window.
+    fs::write(&path, "[approval]\nauto_approve = [\"interrupt_window\"]\n").expect("manual edit");
 
     // The approver switches a different tool on through the daemon.
     let reply: DaemonMessage = call_set_auto_approve(&mut approver, "close_window", true).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
     assert_eq!(reported_auto_approve(&settings, "close_window"), Some(true));
     assert_eq!(
-        reported_auto_approve(&settings, "send_keys"),
+        reported_auto_approve(&settings, "interrupt_window"),
         Some(false),
         "the daemon's value for a tool it was never asked about must not silently follow a \
          manual file edit"
@@ -622,7 +637,7 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
 
     let contents: String = fs::read_to_string(&path).expect("read the rewritten file");
     assert!(
-        contents.contains("send_keys"),
+        contents.contains("interrupt_window"),
         "the file must still carry the manual entry"
     );
     assert!(
@@ -634,9 +649,8 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
     let window_id: String = h.open_idle_window(&mut requester).await;
     send(
         &mut requester,
-        &ClientMessage::SendKeys {
+        &ClientMessage::InterruptWindow {
             window_id: window_id.clone(),
-            keys: vec![ControlKey::Enter],
         },
     )
     .await;
@@ -644,7 +658,7 @@ async fn a_tool_added_to_the_file_by_hand_stays_pending_while_a_different_tool_i
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
-    assert_eq!(request.tool, "send_keys");
+    assert_eq!(request.tool, "interrupt_window");
     deny_and_confirm(&mut approver, &mut requester, &request).await;
 
     let second_window: String = h.open_idle_window(&mut requester).await;
@@ -679,7 +693,7 @@ async fn switching_a_tool_to_match_a_manually_cleared_files_off_value_changes_on
     let config: DaemonConfig = live_playbook_config(
         &dir,
         detection_config(&dir, approver_base_config()),
-        "[approval]\nauto_approve = [\"send_keys\"]\n",
+        "[approval]\nauto_approve = [\"interrupt_window\"]\n",
     );
     let path: PathBuf = config.playbook.clone().expect("playbook path must be set");
     let h = Harness::start("settings-mismatch-tool-off", config).await;
@@ -695,9 +709,13 @@ async fn switching_a_tool_to_match_a_manually_cleared_files_off_value_changes_on
         .modified()
         .expect("mtime before");
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", false).await;
+    let reply: DaemonMessage =
+        call_set_auto_approve(&mut approver, "interrupt_window", false).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(false));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(false)
+    );
 
     let after: Vec<u8> = fs::read(&path).expect("read after");
     let mtime_after: SystemTime = fs::metadata(&path)
@@ -714,29 +732,26 @@ async fn switching_a_tool_to_match_a_manually_cleared_files_off_value_changes_on
     let window_id: String = h.open_idle_window(&mut requester).await;
     send(
         &mut requester,
-        &ClientMessage::SendKeys {
-            window_id,
-            keys: vec![ControlKey::Enter],
-        },
+        &ClientMessage::InterruptWindow { window_id },
     )
     .await;
     let request: ApprovalRequest = match read_approver_reply(&mut approver).await {
         DaemonMessage::ApprovalRequested { request } => request,
         other => panic!("expected approval_requested, got {other:?}"),
     };
-    assert_eq!(request.tool, "send_keys");
+    assert_eq!(request.tool, "interrupt_window");
     deny_and_confirm(&mut approver, &mut requester, &request).await;
 
     logs_assert(|lines: &[&str]| {
         let hits = lines
             .iter()
-            .filter(|line| line.contains("send_keys") && line.contains("false"))
+            .filter(|line| line.contains("interrupt_window") && line.contains("false"))
             .count();
         if hits == 1 {
             Ok(())
         } else {
             Err(format!(
-                "expected exactly one info line naming send_keys and false, found {hits} in \
+                "expected exactly one info line naming interrupt_window and false, found {hits} in \
                  {lines:?}"
             ))
         }
@@ -762,16 +777,19 @@ async fn switching_a_tool_to_match_a_manually_added_files_on_value_changes_only_
 
     // Manual edit: the file's own value is already on, but the daemon still
     // knows the tool as off, from boot.
-    fs::write(&path, "[approval]\nauto_approve = [\"send_keys\"]\n").expect("manual edit");
+    fs::write(&path, "[approval]\nauto_approve = [\"interrupt_window\"]\n").expect("manual edit");
     let before: Vec<u8> = fs::read(&path).expect("read before");
     let mtime_before: SystemTime = fs::metadata(&path)
         .expect("stat before")
         .modified()
         .expect("mtime before");
 
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(true));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(true)
+    );
 
     let after: Vec<u8> = fs::read(&path).expect("read after");
     let mtime_after: SystemTime = fs::metadata(&path)
@@ -788,28 +806,27 @@ async fn switching_a_tool_to_match_a_manually_added_files_on_value_changes_only_
     let window_id: String = h.open_idle_window(&mut requester).await;
     send(
         &mut requester,
-        &ClientMessage::SendKeys {
+        &ClientMessage::InterruptWindow {
             window_id: window_id.clone(),
-            keys: vec![ControlKey::Enter],
         },
     )
     .await;
     let reply: DaemonMessage = read_response(&mut requester).await;
     match reply {
-        DaemonMessage::KeysSent { window_id: acked } => assert_eq!(acked, window_id),
-        other => panic!("expected keys_sent without approval, got {other:?}"),
+        DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
+        other => panic!("expected window_interrupted without approval, got {other:?}"),
     }
 
     logs_assert(|lines: &[&str]| {
         let hits = lines
             .iter()
-            .filter(|line| line.contains("send_keys") && line.contains("true"))
+            .filter(|line| line.contains("interrupt_window") && line.contains("true"))
             .count();
         if hits == 1 {
             Ok(())
         } else {
             Err(format!(
-                "expected exactly one info line naming send_keys and true, found {hits} in \
+                "expected exactly one info line naming interrupt_window and true, found {hits} in \
                  {lines:?}"
             ))
         }
@@ -1024,16 +1041,22 @@ async fn switching_a_tool_on_logs_once_and_a_repeat_of_the_same_value_logs_nothi
 
     // Positive control: the first switch actually changes both the file and
     // the daemon's value, and is logged.
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(true));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(true)
+    );
 
     let before: Vec<u8> = fs::read(&path).expect("read before the no-op");
 
     // A repeat of the same value changes neither the file nor the daemon.
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     let settings: ApprovalSettingsInfo = expect_auto_approve_set(reply);
-    assert_eq!(reported_auto_approve(&settings, "send_keys"), Some(true));
+    assert_eq!(
+        reported_auto_approve(&settings, "interrupt_window"),
+        Some(true)
+    );
 
     // The switch is answered only once its file write and its log line are
     // done, both on the request's own path.
@@ -1046,7 +1069,7 @@ async fn switching_a_tool_on_logs_once_and_a_repeat_of_the_same_value_logs_nothi
     logs_assert(|lines: &[&str]| {
         let hits = lines
             .iter()
-            .filter(|line| line.contains("send_keys") && line.contains("true"))
+            .filter(|line| line.contains("interrupt_window") && line.contains("true"))
             .count();
         if hits == 1 {
             Ok(())
@@ -1126,7 +1149,7 @@ async fn a_failed_write_is_logged_at_warn_not_info() {
     register_approver(&mut approver).await;
 
     block_rewrite(&path, true);
-    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "send_keys", true).await;
+    let reply: DaemonMessage = call_set_auto_approve(&mut approver, "interrupt_window", true).await;
     expect_error(reply, "internal");
 
     logs_assert(|lines: &[&str]| {

@@ -2,7 +2,6 @@
 //! the order of writes, with the PTY, the child and the terminal model kept
 //! by the window's holder (`yagura-holder`, reached through [`holder_link`]).
 
-use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -167,109 +166,11 @@ pub async fn spawn_one_shot(
     })
 }
 
-/// The count of a window's writes; see [`PtySession::write_input`].
-/// Published as a watch so a waiter woken by a change reads the very count
-/// that woke it.
-struct WriteLedger {
-    count: watch::Sender<u64>,
-    /// The count of the latest write made with [`TakeBackPrefix::Withhold`].
-    withheld: Mutex<Option<u64>>,
-}
-
-impl Default for WriteLedger {
-    fn default() -> Self {
-        Self {
-            count: watch::Sender::new(0),
-            withheld: Mutex::new(None),
-        }
-    }
-}
-
-impl WriteLedger {
-    fn count(&self) {
-        self.count
-            .send_modify(|count| *count = count.wrapping_add(1));
-    }
-
-    fn count_withheld(&self) {
-        self.count();
-        *lock_recover(&self.withheld) = Some(*self.count.borrow());
-    }
-}
-
-/// Whether a plain write puts the registered take-back in front of its own
-/// bytes; see [`PtySession::write_input_with`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TakeBackPrefix {
-    /// Write the registered take-back first.
-    Apply,
-    /// Write no take-back; the registration is dropped all the same.
-    Withhold,
-}
-
-/// What [`PtySession::write_input_if_unmoved`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardedWrite {
-    /// The ledger was where the caller expected, and the bytes were written.
-    Written,
-    /// Another write had been counted since; nothing was written or counted.
-    Moved,
-}
-
-/// One take-back call's generation, from [`PtySession::begin_take_back_call`].
-/// A registration made under a call that has ended is never placed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TakeBackCall(u64);
-
-/// How a ledger-checked write leaves the window's take-back registration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TakeBackRegistration {
-    /// Leave the registration as it is.
-    Keep,
-    /// Remove the registration.
-    Empty,
-    /// Register `text` as the daemon's part of the composer, taken back with
-    /// `clear` keys, unless `call` has already ended.
-    Set {
-        /// The call that owns the registration.
-        call: TakeBackCall,
-        /// The daemon's text in the composer.
-        text: String,
-        /// One take-back key.
-        clear: Vec<u8>,
-    },
-}
-
-/// The daemon's text in a composer, held as text and key rather than bytes so
-/// the key count follows the width at the moment it is written.
-struct Registered {
-    call: TakeBackCall,
-    text: String,
-    clear: Vec<u8>,
-}
-
-impl Registered {
-    fn keys(&self, cols: u16) -> Vec<u8> {
-        self.clear
-            .repeat(crate::input::take_back_key_count(&self.text, cols))
-    }
-}
-
-#[derive(Default)]
-struct TakeBackState {
-    next_call: u64,
-    live_calls: HashSet<u64>,
-    registered: Option<Registered>,
-}
-
 /// The write end of a window's child input, which teardown can hand back
 /// without waiting for a writer that is stuck inside a write.
 struct WriterSlot {
     writer: Mutex<Option<Writer>>,
     release_requested: AtomicBool,
-    /// Taken inside `writer`'s lock, never the other way round, and never held
-    /// across a write, so a stuck write never holds it.
-    take_back: Mutex<TakeBackState>,
 }
 
 impl WriterSlot {
@@ -277,40 +178,6 @@ impl WriterSlot {
         Self {
             writer: Mutex::new(Some(writer)),
             release_requested: AtomicBool::new(false),
-            take_back: Mutex::new(TakeBackState::default()),
-        }
-    }
-
-    fn begin_take_back_call(&self) -> TakeBackCall {
-        let mut state = lock_recover(&self.take_back);
-        state.next_call = state.next_call.wrapping_add(1);
-        let call = state.next_call;
-        state.live_calls.insert(call);
-        TakeBackCall(call)
-    }
-
-    fn end_take_back_call(&self, call: TakeBackCall) {
-        let mut state = lock_recover(&self.take_back);
-        state.live_calls.remove(&call.0);
-        if state.registered.as_ref().is_some_and(|r| r.call == call) {
-            state.registered = None;
-        }
-    }
-
-    fn take_registration(&self) -> Option<Registered> {
-        lock_recover(&self.take_back).registered.take()
-    }
-
-    fn update_registration(&self, update: TakeBackRegistration) {
-        let mut state = lock_recover(&self.take_back);
-        match update {
-            TakeBackRegistration::Keep => {}
-            TakeBackRegistration::Empty => state.registered = None,
-            TakeBackRegistration::Set { call, text, clear } => {
-                if state.live_calls.contains(&call.0) {
-                    state.registered = Some(Registered { call, text, clear });
-                }
-            }
         }
     }
 
@@ -392,19 +259,6 @@ impl PublishedInput {
             cols: field(16),
             rows: field(32),
         }
-    }
-}
-
-/// An open stretch in which the daemon is deciding on, or making, writes to a
-/// window; see [`PtySession::open_focus_interval`]. Ends when dropped.
-#[must_use = "the interval ends when this is dropped"]
-pub struct FocusInterval {
-    link: Link,
-}
-
-impl Drop for FocusInterval {
-    fn drop(&mut self) {
-        self.link.focus_interval(false);
     }
 }
 
@@ -525,9 +379,9 @@ pub struct PtySession {
     /// The child's input, written through the holder.
     writer: Arc<WriterSlot>,
 
-    /// Every write [`PtySession::write_input`] made, counted while holding
-    /// `writer`, so the count's order is the order the bytes reach the child.
-    write_ledger: Arc<WriteLedger>,
+    /// How many writes [`PtySession::write_input`] made, counted while holding
+    /// `writer`.
+    writes: Arc<AtomicU64>,
 
     /// OS process ID of the child, as the holder's welcome names it.
     child_process_id: u32,
@@ -788,7 +642,7 @@ impl PtySession {
             views,
             writer: Arc::new(WriterSlot::new(link.writer())),
             link,
-            write_ledger: Arc::new(WriteLedger::default()),
+            writes: Arc::new(AtomicU64::new(0)),
             child_process_id,
             exit_code,
             is_exited,
@@ -910,86 +764,41 @@ impl PtySession {
     }
 
     /// Sends the child a report it turned on that carries no key or button,
-    /// such as a pointer move: ordered with every other write but not counted
-    /// in the write ledger, since a report never reaches the composer. The
-    /// holder drops it once the child is gone. Focus is not sent this way;
-    /// see [`PtySession::set_view_focus`].
+    /// such as a pointer move, ordered with every other write. The holder
+    /// drops it once the child is gone. Focus is not sent this way; see
+    /// [`PtySession::set_view_focus`].
     pub fn send_report(&self, report: Vec<u8>) {
         self.link.report(report);
     }
 
     /// Records the focus the window's view reported. The holder tells the
-    /// child when it asked for focus reports and the daemon is not typing
-    /// into the window (see [`PtySession::open_focus_interval`]); only a
-    /// change is ever sent, and never counted in the write ledger.
+    /// child when it asked for focus reports; only a change is ever sent.
     pub fn set_view_focus(&self, focused: bool) {
         self.link.set_view_focus(focused);
     }
 
-    /// Opens a stretch in which the daemon decides on, or makes, writes to the
-    /// child, such as one delivery from its start to its end. While any is
-    /// open, and while a write is being made, the child is told it has the
-    /// focus, whatever the view reported: a daemon that types into a window
-    /// the user is not looking at would otherwise type into a child that
-    /// believes it has no focus, and some of those draw nothing until they
-    /// have it. Once the last one ends, the view's focus is told again, after
-    /// the child's next output. The stretch ends when the guard is dropped.
-    pub fn open_focus_interval(&self) -> FocusInterval {
-        self.link.focus_interval(true);
-        FocusInterval {
-            link: self.link.clone(),
-        }
-    }
-
-    /// [`PtySession::write_input_with`] with [`TakeBackPrefix::Apply`].
+    /// Writes `data` to the child's input, after every earlier write, and
+    /// counts it in [`PtySession::writes_recorded`]; a write that then fails
+    /// still counts. A write to a window being taken back waits for its
+    /// holder.
     ///
     /// # Errors
     ///
-    /// As [`PtySession::write_input_with`].
+    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted);
+    /// [`PtyError::WriteFailed`] when the write itself fails.
     pub async fn write_input(&self, data: &[u8]) -> PtyResult<()> {
-        self.write_input_with(data, TakeBackPrefix::Apply).await
-    }
-
-    /// Writes `data` to the child's input, counting it in this window's write
-    /// ledger under the same lock that orders the bytes, so
-    /// [`PtySession::writes_recorded`] never counts a write ahead of one whose
-    /// bytes reached the child first. A write that then fails still counts.
-    ///
-    /// Under the same lock, the take-back registered by
-    /// [`PtySession::write_input_if_unmoved`] is removed and, with
-    /// [`TakeBackPrefix::Apply`], written ahead of `data`, its keys counted
-    /// at the narrowest width the holder may have as it writes them (the
-    /// size it last confirmed or one asked for since), so a daemon's unsent
-    /// text never ends up in front of another writer's bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted
-    /// and the registration stays); [`PtyError::WriteFailed`] when the write
-    /// itself fails.
-    pub async fn write_input_with(&self, data: &[u8], prefix: TakeBackPrefix) -> PtyResult<()> {
         if self.is_exited.load(Ordering::SeqCst) {
             return Err(PtyError::ChildExited);
         }
 
         let data = data.to_vec();
         let writer = self.writer.clone();
-        let ledger = Arc::clone(&self.write_ledger);
+        let writes = Arc::clone(&self.writes);
         tokio::task::spawn_blocking(move || {
             let mut writer_guard = writer.lock();
-            let registered = writer.take_registration();
-            match prefix {
-                TakeBackPrefix::Apply => ledger.count(),
-                TakeBackPrefix::Withhold => ledger.count_withheld(),
-            }
+            writes.fetch_add(1, Ordering::SeqCst);
             let written = match writer_guard.as_mut() {
-                Some(w) => w.write(
-                    |cols| match (prefix, &registered) {
-                        (TakeBackPrefix::Apply, Some(registered)) => registered.keys(cols),
-                        _ => Vec::new(),
-                    },
-                    &data,
-                ),
+                Some(w) => w.write(&data),
                 None => Ok(()),
             };
             drop(writer_guard);
@@ -1001,89 +810,11 @@ impl PtySession {
         .map_err(|_| PtyError::WriteFailed)
     }
 
-    /// Writes `data` only if the write ledger still reads `expected_seq`,
-    /// checked under the lock that orders every write, so a decision made on
-    /// a composer nobody else has written to since is never acted on after
-    /// someone has. On a match, `before_write` runs, the write is counted and
-    /// made, and `registration` is applied; otherwise nothing runs, nothing is
-    /// counted, and [`GuardedWrite::Moved`] is returned.
-    ///
-    /// # Errors
-    ///
-    /// [`PtyError::ChildExited`] once the child is gone (nothing is counted);
-    /// [`PtyError::WriteFailed`] when the write itself fails or
-    /// `before_write` panics.
-    pub async fn write_input_if_unmoved(
-        &self,
-        data: &[u8],
-        expected_seq: u64,
-        registration: TakeBackRegistration,
-        before_write: impl FnOnce() + Send + 'static,
-    ) -> PtyResult<GuardedWrite> {
-        if self.is_exited.load(Ordering::SeqCst) {
-            return Err(PtyError::ChildExited);
-        }
-
-        let data = data.to_vec();
-        let writer = self.writer.clone();
-        let ledger = Arc::clone(&self.write_ledger);
-        tokio::task::spawn_blocking(move || {
-            let mut writer_guard = writer.lock();
-            let outcome = if *ledger.count.borrow() == expected_seq {
-                before_write();
-                ledger.count();
-                let written = match writer_guard.as_mut() {
-                    Some(w) => w.write(|_| Vec::new(), &data),
-                    None => Ok(()),
-                };
-                // Applied even when the write failed: part of `data` may have
-                // reached the composer, and extra take-back keys are harmless.
-                writer.update_registration(registration);
-                written.map(|()| GuardedWrite::Written)
-            } else {
-                Ok(GuardedWrite::Moved)
-            };
-            drop(writer_guard);
-            writer.release_if_requested();
-            outcome
-        })
-        .await
-        .map_err(|_| PtyError::WriteFailed)?
-        .map_err(|_| PtyError::WriteFailed)
-    }
-
-    /// Starts a take-back call: registrations made under the returned
-    /// generation are placed until [`PtySession::end_take_back_call`].
-    #[must_use]
-    pub fn begin_take_back_call(&self) -> TakeBackCall {
-        self.writer.begin_take_back_call()
-    }
-
-    /// Ends `call`: removes its registration, if it is the one in place, and
-    /// places none of its later ones.
-    pub fn end_take_back_call(&self, call: TakeBackCall) {
-        self.writer.end_take_back_call(call);
-    }
-
-    /// How many writes [`PtySession::write_input_with`] and
-    /// [`PtySession::write_input_if_unmoved`] have counted.
+    /// How many writes [`PtySession::write_input`] has counted: a report
+    /// ([`PtySession::send_report`]) and a focus change are not among them.
     #[must_use]
     pub fn writes_recorded(&self) -> u64 {
-        *self.write_ledger.count.borrow()
-    }
-
-    /// The [`PtySession::writes_recorded`] count of the latest write made
-    /// with [`TakeBackPrefix::Withhold`], if any.
-    #[must_use]
-    pub fn latest_withheld_write(&self) -> Option<u64> {
-        *lock_recover(&self.write_ledger.withheld)
-    }
-
-    /// A receiver of [`PtySession::writes_recorded`]'s value, changing as each
-    /// write is counted.
-    #[must_use]
-    pub fn subscribe_writes_recorded(&self) -> watch::Receiver<u64> {
-        self.write_ledger.count.subscribe()
+        self.writes.load(Ordering::SeqCst)
     }
 
     /// Resize the window to `cols` x `rows`: the holder resizes its terminal

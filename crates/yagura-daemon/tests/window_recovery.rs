@@ -33,7 +33,10 @@ use yagura_protocol::holder::{
 use yagura_protocol::{ClientMessage, DaemonMessage, DeliveryState, WindowInfo, WindowStatus};
 use yagura_test_support::HANG_GUARD;
 use yagura_test_support::ipc::{Connection, connect_with_retry};
-use yagura_test_support::process::{holder_path, relay_path, term_script_path};
+use yagura_test_support::process::{
+    COMPOSER_CONTINUATION_PREFIX, COMPOSER_MARKER, COMPOSER_SEPARATOR, echo_child_path,
+    holder_path, relay_path, term_script_path,
+};
 use yagura_test_support::relay_stdio::RelayProcess;
 
 /// The only token shape `StatusToken::from_override` accepts: the first daemon gives it
@@ -3314,4 +3317,177 @@ async fn a_windows_relay_names_its_window_to_the_next_daemon_without_any_call_an
 
     relay.kill().await;
     until_mcp_connected(&mut next, &sandbox, &window_id, false, "the relay's end").await;
+}
+
+/// A definition under which a daemon that typed into windows took a body it had marked
+/// back out of the composer: a composer with a marker it reads, and `[input]` keys
+/// naming a clear key and a probe.
+fn left_mark_definition() -> String {
+    format!(
+        r#"schema_version = 1
+name = "left-mark"
+bottom_line_count = 5
+
+[debounce]
+confirm_ms = 30
+
+[[rules]]
+status = "waiting_input"
+pattern = '{COMPOSER_MARKER}'
+priority = 10
+region = "bottom"
+
+[input]
+bracketed_paste = true
+submit_delay_ms = 120
+clear = "\u0015"
+delivery_confirm_ms = 2000
+resend_max = 0
+probe = "x"
+
+[composer]
+marker = '{COMPOSER_MARKER}'
+separator = "{COMPOSER_SEPARATOR}"
+continuation_prefix = "{COMPOSER_CONTINUATION_PREFIX}"
+"#
+    )
+}
+
+/// The text the composer `echo_child` paints on `screen` holds: what follows its marker
+/// and separator on the last row carrying the marker.
+fn painted_composer(screen: &str) -> Option<String> {
+    let row = screen
+        .lines()
+        .rfind(|line| line.trim_start().starts_with(COMPOSER_MARKER))?;
+    let rest = row.trim_start()[COMPOSER_MARKER.len()..].trim_end();
+    Some(
+        rest.strip_prefix(COMPOSER_SEPARATOR)
+            .unwrap_or(rest)
+            .to_owned(),
+    )
+}
+
+/// The WARN lines of `log`, without the timestamp each line begins with.
+fn warn_lines(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|line| line.contains(" WARN "))
+        .map(|line| {
+            line.split_once(' ')
+                .map_or(line, |(_, rest)| rest)
+                .trim_start()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Upgrading over a daemon that typed into windows, once: the mark such a daemon kept
+/// for a body it was typing (a `delivery_marks` row) is discarded by the next daemon with
+/// a warning, and nothing is taken back out of the composer for it. The composer here
+/// holds the very text the mark names, as the user typed it, and keeps it.
+#[tokio::test]
+async fn a_typing_mark_an_older_daemon_left_is_dropped_with_a_warning_and_nothing_is_taken_back() {
+    const BODY: &str = "LEFT-MARK-BODY-5Q8";
+    const AFTER: &str = "AFTER-MARK.";
+    let sandbox = Sandbox::new("left-mark");
+    let detections = sandbox.tree.make_dir("left-mark-detections");
+    std::fs::write(detections.join("left-mark.toml"), left_mark_definition()).unwrap();
+    let child = echo_child_path();
+    common::write_profile(
+        &sandbox.profiles_dir,
+        "left-mark",
+        &format!(
+            "schema = 1\ndisplay_name = \"left-mark\"\ndetection = \"left-mark\"\n\n[command]\n\
+             default = ['{}', '{COMPOSER_MARKER}', '{COMPOSER_SEPARATOR}', \
+             '{COMPOSER_CONTINUATION_PREFIX}', '0']\n",
+            utf8(&child)
+        ),
+    );
+    let env = [("YAGURA_DETECTION_DIR", utf8(&detections))];
+
+    let mut first = sandbox.start_from(&env).await;
+    let window_id = first.open_profile_window(&sandbox, "left-mark").await;
+    attach(&mut first, &window_id).await;
+    first
+        .output_until(&window_id, "the empty composer", |text| {
+            painted_composer(text).is_some()
+        })
+        .await;
+    send(
+        &mut first.client,
+        &ClientMessage::Text {
+            text: BODY.to_owned(),
+        },
+    )
+    .await;
+    first
+        .output_until(&window_id, "the typed text in the composer", |text| {
+            painted_composer(text).as_deref() == Some(BODY)
+        })
+        .await;
+    first.kill_keeping_windows();
+
+    let db = store_db(&sandbox);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO delivery_marks (window_id, body) VALUES (?1, ?2)",
+            rusqlite::params![window_id, BODY],
+        )
+        .unwrap();
+    }
+    assert!(
+        common::store_fixtures::store_holds(&db, BODY),
+        "the precondition: the store holds the mark the older daemon left"
+    );
+    let log_before = sandbox.daemon_log();
+
+    let mut next = sandbox.start_from(&env).await;
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while listed(&mut next, &sandbox, &window_id).await.status != WindowStatus::WaitingInput
+        || common::store_fixtures::store_holds(&db, BODY)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the next daemon must take the window back to waiting_input and drop the mark; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    attach(&mut next, &window_id).await;
+    send(
+        &mut next.client,
+        &ClientMessage::Text {
+            text: AFTER.to_owned(),
+        },
+    )
+    .await;
+    let screen = next
+        .output_until(&window_id, "the text typed after the restart", |text| {
+            painted_composer(text).is_some_and(|composer| composer.ends_with(AFTER))
+        })
+        .await;
+    assert_eq!(
+        painted_composer(&screen).as_deref(),
+        Some(format!("{BODY}{AFTER}").as_str()),
+        "nothing may be taken back out of the composer for a mark an older daemon left; \
+         screen:\n{screen}\ndaemon log:\n{}",
+        sandbox.daemon_log()
+    );
+
+    let log = sandbox.daemon_log();
+    let earlier = warn_lines(&log_before);
+    let new_warns: Vec<String> = warn_lines(log.get(log_before.len()..).unwrap_or_default())
+        .into_iter()
+        .filter(|line| !earlier.contains(line))
+        .collect();
+    assert!(
+        !new_warns.is_empty(),
+        "the next daemon must warn that it dropped the mark the older daemon left; \
+         daemon log:\n{log}"
+    );
+    assert!(
+        !log.contains(BODY),
+        "the daemon log must not carry the marked text {BODY:?}:\n{log}"
+    );
 }

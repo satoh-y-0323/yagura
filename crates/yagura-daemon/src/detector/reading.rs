@@ -20,24 +20,6 @@ use yagura_protocol::{
 
 use crate::detector::definition::ComposerSection;
 
-/// The result of reading a composer from the screen: body recovered, only the
-/// body's end in view, empty (marker present but no text), or not observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComposerReadout {
-    /// The composer contains a non-empty body of text.
-    Body(String),
-    /// The marker row has scrolled off the top, but every row from the top
-    /// down to the cursor is a continuation row: only the body's end is in
-    /// view, and this is that non-empty end. A frame whose composer rows were
-    /// just erased never takes this shape, since erased rows do not fill the
-    /// screen up to the top with continuation rows.
-    Tail(String),
-    /// The composer is present but empty.
-    Empty,
-    /// The composer could not be observed (marker not found or not defined).
-    NotObserved,
-}
-
 /// Where the upward walk from the cursor ended (see [`walk_to_marker`]).
 enum ComposerWalk {
     /// On the marker row.
@@ -86,8 +68,8 @@ pub fn bottom_lines(copy: &ScreenCopy, n: usize) -> Vec<String> {
 /// cannot be located: the screen then cannot be told apart from a dialog
 /// drawn over the composer's shape.
 ///
-/// The composer is located from the same column as in [`read_composer`],
-/// and a left panel's part of the marker row is kept for the rules.
+/// The composer is located from the column [`composer_origin`] finds, and
+/// a left panel's part of the marker row is kept for the rules.
 #[must_use]
 pub fn bottom_lines_without_composer(
     copy: &ScreenCopy,
@@ -218,179 +200,9 @@ fn screen_rows(copy: &ScreenCopy) -> Vec<String> {
         .collect()
 }
 
-/// Reads the composer region from the screen according to the given section.
-///
-/// The composer region is identified by:
-/// 1. Finding the cursor row
-/// 2. Scanning upward from the cursor row to find the first (closest) row
-///    that matches the section's marker pattern, following continuation lines
-///    (lines starting with the section's continuation prefix)
-/// 3. Extracting the region from the marker line up to the cursor
-///
-/// The cursor bounds the body in both directions: rows below it are
-/// outside the region, and on its own row the body ends at its column.
-/// Columns the cursor has moved past count as blanks there, written or
-/// not, so a marker's trailing space may be drawn by a cursor move alone.
-/// What stands to the right of it is the CLI's own drawing, told apart
-/// from typed text by dimming rather than by any text it contains (see
-/// [`visible_text`]).
-///
-/// Returns:
-/// - `NotObserved` if the marker is not found and the walk stopped below
-///   the top, if the section has no continuation prefix to walk by, or if
-///   anything not dimmed stands to the right of the cursor -- which is
-///   also how a cursor parked in the middle of a body avoids reporting a
-///   shortened one
-/// - `Empty` if the marker is found and nothing but dimmed drawing is in
-///   the composer, or nothing is typed and the rest of the marker row is
-///   the section's `placeholder`
-/// - `Body(text)` if body text is successfully extracted and normalized
-/// - `Tail(text)` if continuation rows reach the top row without the
-///   marker, and joining them (normalized as below) leaves text; with no
-///   text left it is `NotObserved`, since an empty tail ends every body
-///
-/// The normalization process:
-/// - Remove marker and separator from the first line
-/// - Remove continuation prefix from continuation lines (if not empty string)
-/// - Trim trailing whitespace from all lines
-/// - Join all lines into a single string
-///
-/// Every row is read from the composer's origin: the right edge of the
-/// section's `left_panel` when it matches every row holding a visible
-/// character and all its matches end at one column, else column 0. A
-/// cursor left of the origin is outside the composer: `NotObserved`.
-///
-/// Every row of the region, the cursor's included, ends where the
-/// section's `right_border` starts, so the edge is neither body text nor
-/// something standing right of the cursor.
-#[must_use]
-pub fn read_composer(copy: &ScreenCopy, section: &ComposerSection) -> ComposerReadout {
-    let origin = composer_origin(copy, section);
-    let (cursor, cursor_col) = cursor_position(copy);
-    let cursor_col = cursor_col.min(copy.cols);
-    let cursor_end = composer_row_end(copy, section, cursor, origin);
-    let cursor_line = text_left_of_cursor(copy, cursor, origin, cursor_col.min(cursor_end));
-
-    let marker_row = match walk_to_marker(copy, section, origin) {
-        ComposerWalk::Marker(row) => Some(row),
-        ComposerWalk::ReachedTop => None,
-        ComposerWalk::Absent => return ComposerReadout::NotObserved,
-    };
-
-    // Text the CLI left to the right of the insertion point is either its
-    // own drawing (dimmed, and already dropped) or something this section
-    // cannot name: refuse to judge rather than fold it into the body or
-    // call the composer empty.
-    let right_of_cursor = visible_text(copy, cursor, cursor_col, cursor_end);
-    if !right_of_cursor.trim().is_empty() {
-        let untyped_hint =
-            marker_row == Some(cursor) && is_untyped_hint(section, &cursor_line, &right_of_cursor);
-        return if untyped_hint {
-            ComposerReadout::Empty
-        } else {
-            ComposerReadout::NotObserved
-        };
-    }
-
-    // Lines from marker to cursor, each cut at the cursor's column on the
-    // cursor's own row.
-    let region_line = |row: u16| {
-        if row == cursor {
-            cursor_line.clone()
-        } else {
-            visible_text(
-                copy,
-                row,
-                origin,
-                composer_row_end(copy, section, row, origin),
-            )
-        }
-    };
-    let continuation_text = |row: u16| {
-        let line = region_line(row);
-        let continued = line
-            .strip_prefix(&section.continuation_prefix)
-            .unwrap_or(&line);
-        continued.trim_end().to_string()
-    };
-
-    let Some(marker_row) = marker_row else {
-        let tail: String = (0..=cursor).map(continuation_text).collect();
-        return if tail.is_empty() {
-            ComposerReadout::NotObserved
-        } else {
-            ComposerReadout::Tail(tail)
-        };
-    };
-
-    // Normalize:
-    // 1. First line: drop the marker match, then the separator's first
-    //    occurrence *after* it, not the separator's first
-    //    occurrence in the whole line -- a marker class like `[$#>]` can
-    //    coincidentally match earlier text (e.g. a path segment).
-    let first_line = region_line(marker_row);
-    let Some(marker_match) = section.marker.find(&first_line) else {
-        // The upward walk already matched this exact line, so this is
-        // unreachable in practice; treat it as "not observed" rather
-        // than panicking on an assumption about regex behavior.
-        return ComposerReadout::NotObserved;
-    };
-
-    let after_marker = marker_match.end();
-    let body_start = match first_line[after_marker..].find(&section.separator) {
-        Some(rel_pos) => after_marker + rel_pos + section.separator.len(),
-        // Without a separator the body has no start to bound it. Anything
-        // visible after the marker is text this section cannot place, so
-        // refuse to call the composer empty.
-        None if first_line[after_marker..].trim().is_empty() => {
-            return ComposerReadout::Empty;
-        }
-        None => return ComposerReadout::NotObserved,
-    };
-
-    let mut normalized = String::new();
-
-    // Add the text after separator from the first line (trimming trailing whitespace)
-    let first_text = first_line[body_start..].trim_end();
-    if !first_text.is_empty() {
-        normalized.push_str(first_text);
-    }
-
-    // 2. Continuation lines: remove prefix, trim trailing whitespace, concatenate
-    for row in marker_row.saturating_add(1)..=cursor {
-        normalized.push_str(&continuation_text(row));
-    }
-
-    if normalized.is_empty() {
-        ComposerReadout::Empty
-    } else {
-        ComposerReadout::Body(normalized)
-    }
-}
-
-/// Locates the composer by walking up from the cursor row: a row starting
-/// with the continuation prefix is skipped, and the first row that is not
-/// one must match the marker, else the structure is not there. With
-/// `blank_lines_in_body`, a blank row above a shown cursor is skipped too:
-/// a hidden cursor is how a dialog is told from a composer, and the cursor
-/// row itself never is, since typing puts the cursor past the prefix.
-///
-/// Returns `(marker_row, cursor_row)`, or `None` when the walk reaches a
-/// non-continuation row that is not the marker, or runs off the top of the
-/// screen (the marker row has scrolled out of view). A marker row must
-/// therefore not itself start with the continuation prefix.
-///
-/// Rows are read from the same origin as in [`read_composer`], and a cursor
-/// left of it locates nothing.
-#[must_use]
-pub fn locate_composer(copy: &ScreenCopy, section: &ComposerSection) -> Option<(u16, u16)> {
-    match walk_to_marker(copy, section, composer_origin(copy, section)) {
-        ComposerWalk::Marker(row) => Some((row, cursor_position(copy).0)),
-        ComposerWalk::ReachedTop | ComposerWalk::Absent => None,
-    }
-}
-
-/// The column the composer is read from (see [`read_composer`]). The panel
+/// The column the composer is read from: the right edge of the section's
+/// `left_panel` when it matches every row holding a visible character and
+/// all its matches end at one column, else column 0. The panel
 /// is matched against each row from column 0, dimmed cells included, and its
 /// end is counted in cells: a wide character takes two columns, and a match
 /// ending inside a cell (before its combining marks) has no column, so the
@@ -423,10 +235,17 @@ fn composer_origin(copy: &ScreenCopy, section: &ComposerSection) -> u16 {
     origin.unwrap_or(0)
 }
 
-/// The upward walk behind [`locate_composer`], telling a walk that ran off
-/// the top through continuation rows from one that stopped on a row that is
-/// neither a continuation nor the marker. Rows are read from column
-/// `origin`.
+/// Locates the composer by walking up from the cursor row: a row starting
+/// with the continuation prefix is skipped, and the first row that is not
+/// one must match the marker, else the structure is not there. With
+/// `blank_lines_in_body`, a blank row above a shown cursor is skipped too:
+/// a hidden cursor is how a dialog is told from a composer, and the cursor
+/// row itself never is, since typing puts the cursor past the prefix.
+///
+/// Tells a walk that ran off the top through continuation rows from one
+/// that stopped on a row that is neither a continuation nor the marker.
+/// Rows are read from column `origin`, and a cursor left of it locates
+/// nothing.
 fn walk_to_marker(copy: &ScreenCopy, section: &ComposerSection, origin: u16) -> ComposerWalk {
     let cols = copy.cols;
     let (cursor, cursor_col) = cursor_position(copy);
@@ -461,46 +280,6 @@ fn walk_to_marker(copy: &ScreenCopy, section: &ComposerSection, origin: u16) -> 
             None => return ComposerWalk::ReachedTop,
         }
     }
-}
-
-/// The text of `row` between columns `start` (inclusive) and `end`
-/// (exclusive) as a human reads it, minus every cell drawn dimmed.
-///
-/// Dimming is how a CLI separates what it drew itself -- the hint filling
-/// an otherwise empty input area -- from what the user typed, and unlike
-/// the hint's wording it carries no vendor's vocabulary. A terminal that
-/// renders no dim attribute therefore reads such a hint as a body, which
-/// is the safe direction: the composer is treated as occupied.
-fn visible_text(copy: &ScreenCopy, row: u16, start: u16, end: u16) -> String {
-    row_text(copy, row, start, end, true)
-        .map(|(text, _)| text)
-        .unwrap_or_default()
-}
-
-/// The column a composer row read from `start` ends at: where the section's
-/// `right_border` match ending at the row's last visible character begins,
-/// else the screen's width.
-fn composer_row_end(copy: &ScreenCopy, section: &ComposerSection, row: u16, start: u16) -> u16 {
-    let cols = copy.cols;
-    let Some(border) = &section.right_border else {
-        return cols;
-    };
-    let Some(line) = copy.lines.get(usize::from(row)) else {
-        return cols;
-    };
-    let mut columns = Vec::new();
-    let (text, _) = cells_text_mapped(
-        line,
-        usize::from(start),
-        usize::from(cols),
-        true,
-        |byte, col| columns.push((byte, col)),
-    );
-    border
-        .find_iter(&text)
-        .find(|found| found.end() == text.len())
-        .and_then(|found| column_at_byte(&columns, found.start()))
-        .unwrap_or(cols)
 }
 
 /// The cursor row from column `start` up to the cursor's column, with every
@@ -586,30 +365,6 @@ fn cells_text_mapped(
         next_col = col + if cell.wide { 2 } else { 1 };
     }
     (text, u16::try_from(next_col).unwrap_or(u16::MAX))
-}
-
-/// Whether the marker row holds only the section's `placeholder`: nothing but
-/// the marker and blanks left of the cursor, and one match spanning the whole
-/// visible text right of it, so a hint followed by anything else is not one.
-fn is_untyped_hint(section: &ComposerSection, cursor_line: &str, right_of_cursor: &str) -> bool {
-    let Some(placeholder) = &section.placeholder else {
-        return false;
-    };
-    let Some(marker_match) = section.marker.find(cursor_line) else {
-        return false;
-    };
-    let after_marker = &cursor_line[marker_match.end()..];
-    let typed = match after_marker.find(&section.separator) {
-        Some(pos) => &after_marker[pos + section.separator.len()..],
-        None => after_marker,
-    };
-    if !typed.trim().is_empty() {
-        return false;
-    }
-    let hint = right_of_cursor.trim();
-    placeholder
-        .find(hint)
-        .is_some_and(|found| found.start() == 0 && found.end() == hint.len())
 }
 
 /// The column whose text starts at `byte` in a [`row_text_columns`] map, or

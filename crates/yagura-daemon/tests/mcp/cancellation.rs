@@ -1,21 +1,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! A relay session, spoken the way a CLI's relay speaks it, while a
-//! `send_message` waits on a receiver that shows nothing.
+//! `wait_for_status` waits for a status its window never takes.
 //!
-//! Such a call no longer ends on a clock, so the client's own way out -- the
-//! `notifications/cancelled` an MCP client sends when it gives up -- has to
-//! reach the daemon as the requester leaving, and the call must not hold up
-//! the agent's other calls meanwhile. The cases run a real `IpcServer`
-//! against `submit_child` in composer-draw mode. Every daemon binds a named
-//! instance reserved for its case. The hang guards only bound a failure.
+//! Such a call must not hold up the agent's other calls meanwhile, and the
+//! client's own way out -- the `notifications/cancelled` an MCP client sends
+//! when it gives up -- frees its place among the calls a session runs at
+//! once. The cases run a real `IpcServer` against `echo_child`. Every
+//! daemon binds a named instance reserved for its case. The hang guards only
+//! bound a failure.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::task::JoinHandle;
 
 use yagura_daemon::control::{ApprovalPolicy, ApprovalSection};
@@ -23,9 +22,9 @@ use yagura_daemon::window::InputOrigin;
 use yagura_daemon::{DaemonConfig, IpcServer, OpenWindowRequest, WindowEntry, WindowRegistry};
 use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 use yagura_protocol::WindowStatus;
-use yagura_test_support::detection::{composer_section_toml, submit_definition_toml};
+use yagura_test_support::detection::{CONTROL_READY_LINE, idle_definition_toml};
 use yagura_test_support::paths::unique_temp_dir;
-use yagura_test_support::process::{own_canonical_exe, submit_child_command_with_composer};
+use yagura_test_support::process::{echo_child_command, own_canonical_exe};
 use yagura_test_support::scan::contains_subsequence;
 
 use super::{McpSession, tool_reply};
@@ -34,12 +33,7 @@ use yagura_test_support::HANG_GUARD;
 
 const FIXTURE_PREFIX: &str = "yagura-mcp-cancellation";
 
-const DEFINITION: &str = "cancel-submit";
-
-const MARKER: &str = "CANCEL-READY";
-
-/// A judged delivery: a probe, and a clear sequence that takes a body back.
-const INPUT_TOML: &str = "bracketed_paste = true\nready_hold_ms = 0\nsubmit_delay_ms = 120\nclear = \"\\u0015\"\ndelivery_confirm_ms = 2000\nresend_max = 0\nprobe = \"x\"";
+const DEFINITION: &str = "cancel-echo";
 
 /// How many calls one relay session runs at once.
 const CALLS_AT_ONCE: usize = 4;
@@ -51,14 +45,6 @@ const INTERRUPT_BYTES: &[u8] = b"INTR";
 /// The only token shape `status_token_override` accepts; every window adopts
 /// it, so the bridge can claim a window with it.
 const VALID_TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
-/// Typed into a window last; read back, it proves the child has read
-/// everything written before it.
-const SENTINEL: &[u8] = b"SENTINEL-AFTER";
-
-const PASTE_END: &[u8] = b"\x1b[201~";
-
-const CLEAR: u8 = 0x15;
 
 // =====================================================================
 // A real daemon at a reserved instance
@@ -75,20 +61,16 @@ fn policy(tools: &[&str]) -> ApprovalPolicy {
     }
 }
 
-fn daemon_config(dir: &Path) -> DaemonConfig {
+fn daemon_config(dir: &std::path::Path) -> DaemonConfig {
     std::fs::write(
         dir.join(format!("{DEFINITION}.toml")),
-        format!(
-            "{}{}",
-            submit_definition_toml(DEFINITION, MARKER, 5, INPUT_TOML),
-            composer_section_toml()
-        ),
+        idle_definition_toml(DEFINITION, "", ""),
     )
-    .expect("write the submit_child definition");
+    .expect("write the echo_child definition");
     DaemonConfig {
         detection_dir: Some(dir.to_path_buf()),
         detection_name: DEFINITION.to_string(),
-        approval_policy: Some(policy(&["send_message", "send_keys", "interrupt_window"])),
+        approval_policy: Some(policy(&["interrupt_window"])),
         status_token_override: Some(VALID_TOKEN.into()),
         approver_exe: Some(own_canonical_exe()),
         interrupt_bytes: INTERRUPT_BYTES.to_vec(),
@@ -124,7 +106,6 @@ async fn bind_instance(
 
 struct Daemon {
     endpoint: String,
-    dir: PathBuf,
     registry: Arc<WindowRegistry>,
     server_task: JoinHandle<Result<(), yagura_daemon::IpcError>>,
 }
@@ -145,7 +126,6 @@ impl Daemon {
         let server_task = tokio::spawn(server.run_with_listener(listener, user_id));
         Self {
             endpoint,
-            dir,
             registry,
             server_task,
         }
@@ -157,26 +137,12 @@ impl Daemon {
             .unwrap_or_else(|| panic!("window {window_id} must be present in the registry"))
     }
 
-    /// A `submit_child` window in composer-draw mode, ready for input.
-    /// `frozen_input_log` makes it paint nothing from the first paste on and
-    /// append everything it reads to that file.
-    async fn open_window(&self, name: &str, frozen_input_log: Option<&Path>) -> String {
-        let mut command = submit_child_command_with_composer(MARKER, 0, 0, 0, 0);
-        if let Some(log) = frozen_input_log {
-            command.push(String::new()); // fold_placeholder: none
-            command.push("frozen:".to_string());
-            command.push(String::new()); // overlay: none
-            command.push(String::new()); // overlay_heading
-            command.push(
-                log.to_str()
-                    .expect("the input log path must be valid UTF-8")
-                    .to_string(),
-            );
-        }
+    /// An `echo_child` window, driven to `idle`.
+    async fn open_window(&self, name: &str) -> String {
         let window_id = self
             .registry
             .open(OpenWindowRequest {
-                command,
+                command: echo_child_command(),
                 cwd: None,
                 name: Some(name.to_string()),
                 vendor: None,
@@ -187,11 +153,15 @@ impl Daemon {
             .expect("the window must open")
             .window_id;
         let entry = self.entry(&window_id);
+        entry
+            .write_pty_input(CONTROL_READY_LINE.as_bytes(), InputOrigin::Interactive)
+            .await
+            .expect("the ready line must be written");
         let deadline = tokio::time::Instant::now() + HANG_GUARD;
-        while entry.current_status() != WindowStatus::WaitingInput {
+        while entry.current_status() != WindowStatus::Idle {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "window {name} never became ready for input"
+                "window {name} never became idle"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -229,110 +199,35 @@ impl Daemon {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-
-    /// Writes [`SENTINEL`] as another writer and returns everything the child
-    /// read up to it.
-    async fn read_input_through_sentinel(&self, window_id: &str, log: &Path) -> Vec<u8> {
-        self.entry(window_id)
-            .write_pty_input(SENTINEL, InputOrigin::Interactive)
-            .await
-            .expect("the sentinel must not fail");
-        wait_until_input_log(log, "the sentinel", |read| {
-            contains_subsequence(read, SENTINEL)
-        })
-        .await
-    }
 }
 
-async fn wait_until_input_log(
-    log: &Path,
-    what: &str,
-    mut accept: impl FnMut(&[u8]) -> bool,
-) -> Vec<u8> {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let read = std::fs::read(log).unwrap_or_default();
-        if accept(&read) {
-            return read;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the receiver never read {what}; it read {read:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// Whether the child read a clear byte after the end of a bracketed paste.
-fn taken_back_after_paste(read: &[u8]) -> bool {
-    read.windows(PASTE_END.len())
-        .position(|window| window == PASTE_END)
-        .is_some_and(|end| read[end..].contains(&CLEAR))
-}
-
-fn assert_not_written(response: &Value) {
-    let (is_error, text) = tool_reply(response);
-    assert!(
-        is_error && text.starts_with("the text was not written into the window"),
-        "the waiting send_message must end not_written, got {response}"
-    );
-}
-
-/// Starts a judged `send_message` into `receiver` and returns once its body
-/// has reached the receiver, which then shows nothing.
-async fn start_stuck_send(daemon: &Daemon, bridge: &mut McpSession, receiver: &str) -> i64 {
+/// Starts a `wait_for_status` on `receiver` for a status it never takes, and
+/// returns once the session has taken the call up: the server dispatches each
+/// request as it reads it, so the call is under way before a later ping is
+/// answered.
+async fn start_waiting_call(bridge: &mut McpSession, receiver: &str) -> i64 {
     let call = bridge
         .start_tool_call(
-            "send_message",
-            json!({ "window_id": receiver, "text": "BODY\n" }),
+            "wait_for_status",
+            json!({ "window_id": receiver, "target_status": "exited", "timeout_sec": 600 }),
         )
         .await;
-    daemon.wait_for_output(receiver, b"PASTE 1").await;
+    bridge.ping().await;
     call
 }
 
 // =====================================================================
-// A cancelled call reaches the daemon as the requester leaving
+// A waiting call does not hold up the agent's other calls
 // =====================================================================
 
 #[tokio::test]
-async fn a_cancelled_send_message_presses_no_submit_key_and_its_body_is_taken_back() {
-    let daemon = Daemon::bind("mcp-cancel-send").await;
-    let requester = daemon.open_window("requester", None).await;
-    let log = daemon.dir.join("receiver-input.log");
-    let receiver = daemon.open_window("receiver", Some(&log)).await;
-    let mut bridge = daemon.open_session(Some(&requester)).await;
-    bridge.initialize().await;
-
-    let call = start_stuck_send(&daemon, &mut bridge, &receiver).await;
-    bridge.cancel(call).await;
-
-    wait_until_input_log(&log, "a take-back after the cancelled body", |read| {
-        taken_back_after_paste(read)
-    })
-    .await;
-    let read = daemon.read_input_through_sentinel(&receiver, &log).await;
-    assert!(
-        !read.contains(&b'\r'),
-        "no submit key may follow a cancelled send_message's body: {read:?}"
-    );
-
-    bridge.kill().await;
-}
-
-// =====================================================================
-// A waiting send_message does not hold up the agent's other calls
-// =====================================================================
-
-#[tokio::test]
-async fn get_window_status_answers_while_a_send_message_from_the_same_bridge_waits() {
+async fn get_window_status_answers_while_a_wait_from_the_same_bridge_waits() {
     let daemon = Daemon::bind("mcp-stuck-status").await;
-    let log = daemon.dir.join("receiver-input.log");
-    let receiver = daemon.open_window("receiver", Some(&log)).await;
+    let receiver = daemon.open_window("receiver").await;
     let mut bridge = daemon.open_session(None).await;
     bridge.initialize().await;
 
-    let stuck = start_stuck_send(&daemon, &mut bridge, &receiver).await;
+    start_waiting_call(&mut bridge, &receiver).await;
     let status = bridge
         .start_tool_call("get_window_status", json!({ "window_id": receiver }))
         .await;
@@ -340,72 +235,28 @@ async fn get_window_status_answers_while_a_send_message_from_the_same_bridge_wai
     let (is_error, _) = tool_reply(&response);
     assert!(!is_error, "get_window_status must succeed, got {response}");
 
-    daemon
-        .entry(&receiver)
-        .write_pty_input(b"Q", InputOrigin::Interactive)
-        .await
-        .expect("another writer's byte must not fail");
-    assert_not_written(&bridge.response_to(stuck).await);
-
     bridge.kill().await;
 }
 
 #[tokio::test]
-async fn send_keys_is_written_while_a_send_message_from_the_same_bridge_waits() {
-    let daemon = Daemon::bind("mcp-stuck-keys").await;
-    let log = daemon.dir.join("receiver-input.log");
-    let receiver = daemon.open_window("receiver", Some(&log)).await;
-    let mut bridge = daemon.open_session(None).await;
-    bridge.initialize().await;
-
-    let stuck = start_stuck_send(&daemon, &mut bridge, &receiver).await;
-    let keys = bridge
-        .start_tool_call(
-            "send_keys",
-            json!({ "window_id": receiver, "keys": ["backspace"] }),
-        )
-        .await;
-    // The keys end the waiting call, so the two answers may come either way.
-    let [keys_response, stuck_response] =
-        <[Value; 2]>::try_from(bridge.responses_to(&[keys, stuck]).await).expect("two answers");
-    let (is_error, _) = tool_reply(&keys_response);
-    assert!(!is_error, "send_keys must succeed, got {keys_response}");
-    assert_not_written(&stuck_response);
-    let read = daemon.read_input_through_sentinel(&receiver, &log).await;
-    assert!(
-        read.contains(&0x08) || read.contains(&0x7f),
-        "the keys must have reached the receiver: {read:?}"
-    );
-
-    bridge.kill().await;
-}
-
-#[tokio::test]
-async fn interrupt_window_is_written_while_a_send_message_from_the_same_bridge_waits() {
+async fn interrupt_window_is_written_while_a_wait_from_the_same_bridge_waits() {
     let daemon = Daemon::bind("mcp-stuck-intr").await;
-    let log = daemon.dir.join("receiver-input.log");
-    let receiver = daemon.open_window("receiver", Some(&log)).await;
+    let receiver = daemon.open_window("receiver").await;
     let mut bridge = daemon.open_session(None).await;
     bridge.initialize().await;
 
-    let stuck = start_stuck_send(&daemon, &mut bridge, &receiver).await;
+    start_waiting_call(&mut bridge, &receiver).await;
     let interrupt = bridge
         .start_tool_call("interrupt_window", json!({ "window_id": receiver }))
         .await;
-    let [interrupt_response, stuck_response] =
-        <[Value; 2]>::try_from(bridge.responses_to(&[interrupt, stuck]).await)
-            .expect("two answers");
+    let interrupt_response = bridge.response_to(interrupt).await;
     let (is_error, _) = tool_reply(&interrupt_response);
     assert!(
         !is_error,
         "interrupt_window must succeed, got {interrupt_response}"
     );
-    assert_not_written(&stuck_response);
-    let read = daemon.read_input_through_sentinel(&receiver, &log).await;
-    assert!(
-        contains_subsequence(&read, INTERRUPT_BYTES),
-        "the interrupt must have reached the receiver: {read:?}"
-    );
+    // echo_child prints what it reads, so the interrupt shows once it reached the child.
+    daemon.wait_for_output(&receiver, INTERRUPT_BYTES).await;
 
     bridge.kill().await;
 }
@@ -419,20 +270,14 @@ async fn a_session_runs_at_most_four_calls_at_once_and_the_next_proceeds_once_a_
     let daemon = Daemon::bind("mcp-call-limit").await;
     let mut receivers = Vec::new();
     for n in 0..=CALLS_AT_ONCE {
-        let log = daemon.dir.join(format!("receiver-{n}-input.log"));
-        receivers.push(
-            daemon
-                .open_window(&format!("receiver-{n}"), Some(&log))
-                .await,
-        );
+        receivers.push(daemon.open_window(&format!("receiver-{n}")).await);
     }
     let mut bridge = daemon.open_session(None).await;
     bridge.initialize().await;
 
-    // Each waiting send_message has reached its receiver, so each runs.
-    let mut stuck_calls = Vec::new();
+    let mut waiting_calls = Vec::new();
     for receiver in &receivers[..CALLS_AT_ONCE] {
-        stuck_calls.push(start_stuck_send(&daemon, &mut bridge, receiver).await);
+        waiting_calls.push(start_waiting_call(&mut bridge, receiver).await);
     }
 
     let status = bridge
@@ -446,7 +291,7 @@ async fn a_session_runs_at_most_four_calls_at_once_and_the_next_proceeds_once_a_
     // come first.
     bridge.ping().await;
 
-    bridge.cancel(stuck_calls[0]).await;
+    bridge.cancel(waiting_calls[0]).await;
     let response = tokio::time::timeout(HANG_GUARD, bridge.response_to(status))
         .await
         .expect("the waiting call must answer once a cancel freed a place");

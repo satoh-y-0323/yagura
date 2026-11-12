@@ -7,7 +7,6 @@ use yagura_protocol::{DetectedStatus, UnknownReason};
 
 use super::{STATUS_BROADCAST_CAPACITY, window_status_wire};
 use crate::detector::engine::ConfirmedStatus;
-use crate::handoff::{ReadyHoldLatch, StartupEvidence};
 use crate::pty::lock_recover;
 use crate::waiter::StatusAt;
 
@@ -23,8 +22,8 @@ pub(crate) enum Publication {
     Dropped,
 }
 
-/// A window's confirmed-status sinks (the current value, the fan-out to
-/// attach holders and the startup latch) behind one critical section.
+/// A window's confirmed-status sinks (the current value and the fan-out to
+/// attach holders) behind one critical section.
 ///
 /// Every write takes the section, so the fan-out order always matches the
 /// generation order, and `Exited` is terminal: once published, every later
@@ -32,18 +31,13 @@ pub(crate) enum Publication {
 pub(crate) struct StatusGate {
     current: watch::Sender<StatusAt>,
     changes: broadcast::Sender<StatusAt>,
-    ready_hold: ReadyHoldLatch,
     // A std mutex: no write awaits, and none of it takes another lock.
     section: Mutex<()>,
 }
 
 impl StatusGate {
     /// A gate whose current value is `initial` as of `at`, generation 0.
-    pub(crate) fn new(
-        initial: DetectedStatus,
-        at: tokio::time::Instant,
-        ready_hold: ReadyHoldLatch,
-    ) -> Self {
+    pub(crate) fn new(initial: DetectedStatus, at: tokio::time::Instant) -> Self {
         let (current, _) = watch::channel(StatusAt {
             status: initial,
             changed_at: at,
@@ -54,17 +48,14 @@ impl StatusGate {
         Self {
             current,
             changes,
-            ready_hold,
             section: Mutex::new(()),
         }
     }
 
     /// Publishes one confirmed status, unless the window has already exited.
     ///
-    /// The startup latch is offered the *outgoing* pair first, the only point
-    /// that sees how long a status actually lasted. The status and the
-    /// instant it changed then go out as one value on the current value and
-    /// then the fan-out, so an observer that has seen the new status can
+    /// The status and the instant it changed go out as one value on the
+    /// current value and then the fan-out, so an observer that has seen the new status can
     /// never read the previous change's age. Logs one `window status
     /// confirmed` event per published transition.
     pub(crate) fn publish(&self, window_id: &str, confirmed: ConfirmedStatus) -> Publication {
@@ -106,7 +97,6 @@ impl StatusGate {
         let status = confirmed.status;
         // Never later than `changed_at`.
         let evidence_since = confirmed.evidence_since.min(now);
-        self.ready_hold.observe(*self.current.borrow(), now);
         // `send_modify` (not `send`): no receiver is kept alive and `send`
         // no-ops when there are none, and the new generation is derived from
         // the value being replaced while that value's write lock is held.
@@ -161,18 +151,6 @@ impl StatusGate {
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<StatusAt> {
         self.changes.subscribe()
     }
-
-    /// What the current pair says about the startup phase, latching if it
-    /// already proves it.
-    pub(crate) fn startup_evidence(&self) -> StartupEvidence {
-        self.ready_hold
-            .observe(self.snapshot(), tokio::time::Instant::now())
-    }
-
-    /// Records that the window is past its startup phase.
-    pub(crate) fn note_left_startup_phase(&self) {
-        self.ready_hold.latch();
-    }
 }
 
 #[cfg(test)]
@@ -191,11 +169,11 @@ mod tests {
     }
 
     impl Probe {
-        fn new(status: DetectedStatus, hold: Duration) -> Self {
+        fn new(status: DetectedStatus) -> Self {
             let initial_changed_at = tokio::time::Instant::now()
                 .checked_sub(Duration::from_secs(60))
                 .expect("the test clock must support a 60s offset into the past");
-            let gate = StatusGate::new(status, initial_changed_at, ReadyHoldLatch::new(hold));
+            let gate = StatusGate::new(status, initial_changed_at);
             let fanout = gate.subscribe();
             Self {
                 gate,
@@ -225,7 +203,7 @@ mod tests {
 
     #[test]
     fn publish_loss_fails_a_live_window_back_to_unknown() {
-        let mut probe = Probe::new(DetectedStatus::Running, Duration::ZERO);
+        let mut probe = Probe::new(DetectedStatus::Running);
 
         assert_eq!(probe.gate.publish_loss("w-test"), Publication::Changed);
 
@@ -240,7 +218,7 @@ mod tests {
 
     #[test]
     fn publish_loss_never_overwrites_an_exited_window() {
-        let mut probe = Probe::new(DetectedStatus::Exited, Duration::ZERO);
+        let mut probe = Probe::new(DetectedStatus::Exited);
 
         assert_eq!(probe.gate.publish_loss("w-test"), Publication::Dropped);
 
@@ -251,7 +229,7 @@ mod tests {
 
     #[test]
     fn publish_loss_is_idempotent_once_the_window_is_already_unknown() {
-        let mut probe = Probe::new(DetectedStatus::Running, Duration::ZERO);
+        let mut probe = Probe::new(DetectedStatus::Running);
 
         probe.gate.publish_loss("w-test");
         let stopped = DetectedStatus::Unknown(UnknownReason::DetectorStopped);
@@ -267,42 +245,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn publish_passes_the_outgoing_pair_to_the_ready_hold_latch() {
-        let hold = Duration::from_millis(1000);
-        let past = tokio::time::Instant::now()
-            .checked_sub(Duration::from_millis(1500))
-            .expect("the test clock must support a 1500ms offset into the past");
-        let gate = StatusGate::new(
-            DetectedStatus::WaitingInput,
-            past,
-            ReadyHoldLatch::new(hold),
-        );
-
-        gate.publish(
-            "w-test",
-            ConfirmedStatus {
-                status: DetectedStatus::Running,
-                evidence_since: tokio::time::Instant::now(),
-            },
-        );
-
-        assert!(
-            gate.ready_hold.is_latched(),
-            "publish must observe the outgoing pair against the ready-hold latch before \
-             publishing the new status, so a window that held ready for the full duration \
-             latches even though the new status is not itself ready"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn publish_restarts_the_age_at_every_transition_on_the_paused_clock() {
         let opened_at = tokio::time::Instant::now();
-        let gate = StatusGate::new(
-            DetectedStatus::Running,
-            opened_at,
-            ReadyHoldLatch::new(Duration::ZERO),
-        );
+        let gate = StatusGate::new(DetectedStatus::Running, opened_at);
         let mut fanout = gate.subscribe();
         let publish = |status: DetectedStatus| {
             gate.publish(
@@ -342,7 +288,7 @@ mod tests {
 
     #[test]
     fn nothing_published_after_exited_reaches_any_sink() {
-        let mut probe = Probe::new(DetectedStatus::Exited, Duration::ZERO);
+        let mut probe = Probe::new(DetectedStatus::Exited);
         let before = probe.gate.snapshot();
 
         assert_eq!(probe.publish(DetectedStatus::Running), Publication::Dropped);
@@ -361,7 +307,7 @@ mod tests {
 
     #[test]
     fn exited_is_published_once_and_a_second_one_fans_out_nothing() {
-        let mut probe = Probe::new(DetectedStatus::Running, Duration::ZERO);
+        let mut probe = Probe::new(DetectedStatus::Running);
 
         assert_eq!(
             probe.publish(DetectedStatus::Exited),

@@ -367,13 +367,6 @@
         "type": "string",
         "window_id": "string"
       },
-      "send_keys": {
-        "keys": [
-          "string"
-        ],
-        "type": "string",
-        "window_id": "string"
-      },
       "send_report": {
         "outcome": "string",
         "path": "string",
@@ -671,6 +664,7 @@
             "broadcast": "boolean",
             "deliveries": [
               {
+                "note": "string",
                 "state": "string",
                 "unknown_reason": "string",
                 "window_id": "string"
@@ -845,9 +839,11 @@
         }
       },
       "handoff_sent": {
-        "delivery": "string",
+        "id": "string",
         "name": "string",
+        "note": "string",
         "opened": "boolean",
+        "state": "string",
         "type": "string",
         "window_id": "string"
       },
@@ -861,10 +857,6 @@
         "type": "string"
       },
       "identified": {
-        "type": "string",
-        "window_id": "string"
-      },
-      "keys_sent": {
         "type": "string",
         "window_id": "string"
       },
@@ -1225,6 +1217,8 @@
       },
       "report_sent": {
         "delivered_to": "string",
+        "note": "string",
+        "state": "string",
         "task": {
           "plan_id": "string",
           "task_id": "string"
@@ -1319,6 +1313,9 @@
         "window_id": "string"
       },
       "text_sent": {
+        "id": "string",
+        "note": "string",
+        "state": "string",
         "type": "string",
         "window_id": "string"
       },
@@ -1514,14 +1511,14 @@
     "DaemonProblemKind": [
       "windows_unavailable"
     ],
+    "DeliveryState": [
+      "delivered",
+      "queued",
+      "undelivered_no_delivery"
+    ],
     "DeliveryStream": [
       "stderr",
       "stdout"
-    ],
-    "HandoffDelivery": [
-      "taken",
-      "undelivered_no_delivery",
-      "undelivered_timeout"
     ],
     "HookInputValue": [
       "absent",

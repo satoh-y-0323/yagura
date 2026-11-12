@@ -463,40 +463,6 @@ fn command_default_argv(source: &str) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn submit_child_command_is_the_six_element_argv_of_submit_child_path_and_its_settings() {
-    // Same skip shape as ready_child_command_is_the_two_element_argv_of_ready_child_path_and_the_marker
-    // above: an absent fixture binary means submit_child_path's own existence check fires
-    // first, and no argv shape is left to observe.
-    let Ok(path) = std::panic::catch_unwind(process::submit_child_path) else {
-        eprintln!(
-            "skipping argv-shape assertion: the submit_child fixture binary is absent \
-             (run `cargo build -p yagura-daemon --bins` first)"
-        );
-        return;
-    };
-    let expected = path
-        .to_str()
-        .expect("submit_child path must be valid UTF-8")
-        .to_string();
-
-    assert_eq!(
-        process::submit_child_command("marker-value", 4500, 400, 1),
-        vec![
-            expected,
-            "marker-value".to_string(),
-            "4500".to_string(),
-            "400".to_string(),
-            "1".to_string(),
-            "now".to_string(),
-        ],
-        "the fixture takes five positional arguments and parses none of them, so the \
-         command must be the executable path followed by the marker, the discard window, \
-         the paste-guard window and the react flag, each written as it is read, and the \
-         startup slot holding `now`"
-    );
-}
-
 // =====================================================================
 // process: composer-draw-mode argv shapes. A new entry point per fixture,
 // appended after each existing argv rather than replacing it, so the 43 existing call sites of
@@ -598,167 +564,6 @@ fn ready_child_profile_source_with_composer_writes_the_fixture_argv_as_the_comma
     assert!(
         display_line.contains("Ready Composer"),
         "the caller-supplied display name must reach the profile, got: {display_line}"
-    );
-}
-
-#[test]
-fn submit_child_command_with_composer_appends_the_shared_composer_triple_and_the_reflect_delay() {
-    // Same skip shape as the ordinary submit_child_command test above.
-    let Ok(path) = std::panic::catch_unwind(process::submit_child_path) else {
-        eprintln!(
-            "skipping argv-shape assertion: the submit_child fixture binary is absent \
-             (run `cargo build -p yagura-daemon --bins` first)"
-        );
-        return;
-    };
-    let expected = path
-        .to_str()
-        .expect("submit_child path must be valid UTF-8")
-        .to_string();
-
-    assert_eq!(
-        process::submit_child_command_with_composer("marker-value", 4500, 400, 1, 1500),
-        vec![
-            expected,
-            "marker-value".to_string(),
-            "4500".to_string(),
-            "400".to_string(),
-            "1".to_string(),
-            "now".to_string(),
-            process::COMPOSER_MARKER.to_string(),
-            process::COMPOSER_SEPARATOR.to_string(),
-            process::COMPOSER_CONTINUATION_PREFIX.to_string(),
-            "1500".to_string(),
-        ],
-        "composer-draw mode is appended after the existing five positional settings, carrying \
-         the shared composer triple and the reflect delay; the six-element \
-         submit_child_command above must stay unchanged"
-    );
-}
-
-#[test]
-fn submit_child_profile_source_with_composer_writes_the_fixture_argv_as_the_command_default() {
-    // Same skip shape as the profile-source assertion above.
-    if std::panic::catch_unwind(process::submit_child_path).is_err() {
-        eprintln!(
-            "skipping profile-source assertion: the submit_child fixture binary is absent \
-             (run `cargo build -p yagura-daemon --bins` first)"
-        );
-        return;
-    }
-
-    let source: String = process::submit_child_profile_source_with_composer(
-        "Submit Composer",
-        "marker-value",
-        4500,
-        400,
-        0,
-        1500,
-    );
-
-    assert_eq!(
-        command_default_argv(&source),
-        process::submit_child_command_with_composer("marker-value", 4500, 400, 0, 1500),
-        "a window opened from this profile must run the very composer-draw-mode argv the \
-         direct-command helper builds, otherwise the two ways of launching a composer-drawing \
-         submit_child drift apart"
-    );
-
-    let display_line = source
-        .lines()
-        .find(|line: &&str| line.trim_start().starts_with("display_name"))
-        .expect("a profile source must carry a display_name");
-    assert!(
-        display_line.contains("Submit Composer"),
-        "the caller-supplied display name must reach the profile, got: {display_line}"
-    );
-}
-
-#[test]
-fn submit_child_command_with_folded_composer_appends_the_fold_placeholder_after_the_reflect_delay()
-{
-    // Same skip shape as the ordinary submit_child_command test above.
-    let Ok(path) = std::panic::catch_unwind(process::submit_child_path) else {
-        eprintln!(
-            "skipping argv-shape assertion: the submit_child fixture binary is absent \
-             (run `cargo build -p yagura-daemon --bins` first)"
-        );
-        return;
-    };
-    let expected = path
-        .to_str()
-        .expect("submit_child path must be valid UTF-8")
-        .to_string();
-
-    assert_eq!(
-        process::submit_child_command_with_folded_composer(
-            "marker-value",
-            4500,
-            400,
-            1,
-            1500,
-            "[Pasted text #1]",
-        ),
-        vec![
-            expected,
-            "marker-value".to_string(),
-            "4500".to_string(),
-            "400".to_string(),
-            "1".to_string(),
-            "now".to_string(),
-            process::COMPOSER_MARKER.to_string(),
-            process::COMPOSER_SEPARATOR.to_string(),
-            process::COMPOSER_CONTINUATION_PREFIX.to_string(),
-            "1500".to_string(),
-            "[Pasted text #1]".to_string(),
-        ],
-        "folding appends one element after the reflect delay; the ten-element \
-         submit_child_command_with_composer argv above (five positional settings plus the \
-         composer triple and the reflect delay) must stay unchanged ahead of it"
-    );
-}
-
-#[test]
-fn submit_child_command_with_clear_scope_appends_clear_scope_after_the_fold_placeholder_slot() {
-    // Same skip shape as the ordinary submit_child_command test above.
-    let Ok(path) = std::panic::catch_unwind(process::submit_child_path) else {
-        eprintln!(
-            "skipping argv-shape assertion: the submit_child fixture binary is absent \
-             (run `cargo build -p yagura-daemon --bins` first)"
-        );
-        return;
-    };
-    let expected = path
-        .to_str()
-        .expect("submit_child path must be valid UTF-8")
-        .to_string();
-
-    assert_eq!(
-        process::submit_child_command_with_clear_scope(
-            "marker-value",
-            4500,
-            400,
-            1,
-            1500,
-            "literal-clear",
-        ),
-        vec![
-            expected,
-            "marker-value".to_string(),
-            "4500".to_string(),
-            "400".to_string(),
-            "1".to_string(),
-            "now".to_string(),
-            process::COMPOSER_MARKER.to_string(),
-            process::COMPOSER_SEPARATOR.to_string(),
-            process::COMPOSER_CONTINUATION_PREFIX.to_string(),
-            "1500".to_string(),
-            String::new(),
-            "literal-clear".to_string(),
-        ],
-        "clear_scope is appended after an always-empty fold_placeholder slot; the ten-element \
-         submit_child_command_with_composer argv above (five positional settings plus the \
-         composer triple and the reflect delay) must stay unchanged ahead of it"
     );
 }
 
@@ -1103,10 +908,9 @@ separator = ">>"
 continuation_prefix = "::"
 "#;
 
-    const CONTROL_INPUT_TABLE: &str = r#"
-[input]
-submit_delay_ms = 40
-delivery_confirm_ms = 0
+    const REQUESTS_TABLE: &str = r#"
+[requests]
+abandoned_at_turn_end = true
 "#;
 
     #[test]
@@ -1131,7 +935,7 @@ delivery_confirm_ms = 0
 
     #[test]
     fn idle_definition_puts_head_before_schema_version_and_tail_at_the_end() {
-        let tail = format!("{CONTROL_INPUT_TABLE}{COMPOSER_TABLE}");
+        let tail = format!("{REQUESTS_TABLE}{COMPOSER_TABLE}");
         let text =
             detection::idle_definition_toml("control-test", "bottom_line_count = 7\n", &tail);
 
@@ -1153,16 +957,16 @@ delivery_confirm_ms = 0
     }
 
     #[test]
-    fn idle_definition_with_a_tail_keeps_the_input_table_out_of_the_rules() {
-        let text = detection::idle_definition_toml("control-test", "", CONTROL_INPUT_TABLE);
+    fn idle_definition_with_a_tail_keeps_the_tail_table_out_of_the_rules() {
+        let text = detection::idle_definition_toml("control-test", "", REQUESTS_TABLE);
         let parsed = parse(&text);
         assert_eq!(
-            parsed["input"]["submit_delay_ms"].as_integer(),
-            Some(40),
-            "the [input] table must be a top-level table: {text}"
+            parsed["requests"]["abandoned_at_turn_end"].as_bool(),
+            Some(true),
+            "the [requests] table must be a top-level table: {text}"
         );
         assert_eq!(parsed["rules"].as_array().map(Vec::len), Some(1));
-        assert!(parsed["rules"][0].get("submit_delay_ms").is_none());
+        assert!(parsed["rules"][0].get("abandoned_at_turn_end").is_none());
     }
 
     #[test]
@@ -1201,75 +1005,6 @@ delivery_confirm_ms = 0
         assert_eq!(
             table["continuation_prefix"].as_str(),
             Some(yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX)
-        );
-    }
-
-    fn submit_expected(name: &str, marker: &str, bottom_line_count: u16, input: &str) -> String {
-        format!(
-            r#"
-schema_version = 1
-name = "{name}"
-bottom_line_count = {bottom_line_count}
-
-[debounce]
-confirm_ms = 30
-
-[[rules]]
-status = "running"
-pattern = '(SUBMITTED)|(REACT)'
-priority = 20
-region = "bottom"
-
-[[rules]]
-status = "waiting_input"
-pattern = '{marker}'
-priority = 10
-region = "bottom"
-
-[input]
-{input}
-"#
-        )
-    }
-
-    #[test]
-    fn submit_definition_matches_the_daemon_shape() {
-        let input = "bracketed_paste = true\nready_hold_ms = 0\nsubmit_delay_ms = 900\nclear = \"\"\ndelivery_confirm_ms = 800\nresend_max = 0";
-        let text = detection::submit_definition_toml("submit-test", "SUBMIT-READY", 5, input);
-        assert_eq!(
-            parse(&text),
-            parse(&submit_expected("submit-test", "SUBMIT-READY", 5, input))
-        );
-    }
-
-    #[test]
-    fn submit_definition_takes_name_marker_and_bottom_line_count_from_arguments() {
-        let input = "submit_delay_ms = 50";
-        let text = detection::submit_definition_toml("another", "OTHER-READY", 12, input);
-        let parsed = parse(&text);
-        assert_eq!(parsed["name"].as_str(), Some("another"));
-        assert_eq!(parsed["bottom_line_count"].as_integer(), Some(12));
-        assert_eq!(parsed["rules"][1]["pattern"].as_str(), Some("OTHER-READY"));
-        assert_eq!(
-            parsed,
-            parse(&submit_expected("another", "OTHER-READY", 12, input))
-        );
-    }
-
-    #[test]
-    fn submit_definition_writes_the_input_heading_itself_and_adds_no_composer_table() {
-        let text =
-            detection::submit_definition_toml("submit-test", "SUBMIT-READY", 5, "resend_max = 3");
-        assert_eq!(
-            text.matches("[input]").count(),
-            1,
-            "the function owns the [input] heading: {text}"
-        );
-        let parsed = parse(&text);
-        assert_eq!(parsed["input"]["resend_max"].as_integer(), Some(3));
-        assert!(
-            parsed.get("composer").is_none(),
-            "a composer table is the caller's to append: {text}"
         );
     }
 }

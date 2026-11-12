@@ -14,7 +14,6 @@ pub mod health;
 pub mod holder_host;
 pub mod host_paths;
 pub mod inbox;
-pub mod input;
 pub mod input_encode;
 pub mod ipc;
 pub mod json_entry;

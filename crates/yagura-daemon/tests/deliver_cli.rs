@@ -184,11 +184,10 @@ async fn every_inbox_command_is_silent_and_succeeds_outside_a_window() {
 async fn take_prints_the_parcels_on_stdout_and_exits_zero() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
-    let deposited =
-        setup
-            .entry(&id)
-            .inbox()
-            .deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"), None, None);
+    let deposited = setup
+        .entry(&id)
+        .inbox()
+        .deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"));
     let end = deposited.end.expect("the inbox must take the parcel in");
     let output = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
     assert_eq!(output.status.code(), Some(0), "{}", err(&output));
@@ -340,7 +339,7 @@ async fn a_take_door_that_cannot_print_puts_the_parcel_back_untold() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
     let inbox = setup.entry(&id).inbox().clone();
-    let deposited = inbox.deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"), None, None);
+    let deposited = inbox.deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"));
     let mut end = deposited.end.expect("the inbox must take the parcel in");
 
     // A stdout whose reading end is already gone: the door's write fails.

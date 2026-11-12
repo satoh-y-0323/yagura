@@ -376,16 +376,20 @@ fn turning_on_a_tool_in_a_multi_line_array_adds_one_element_line() {
     let (_tree, path) = write_playbook("on-multi-line", MULTI_LINE_LF);
     let before = parsed(MULTI_LINE_LF);
 
-    let outcome: PlaybookWrite = written(set_auto_approve(&path, DestructiveTool::SendKeys, true));
+    let outcome: PlaybookWrite = written(set_auto_approve(
+        &path,
+        DestructiveTool::InterruptWindow,
+        true,
+    ));
 
     assert!(outcome.written);
     let after = read_text(&path);
     let (_, added) = added_line(MULTI_LINE_LF, &after)
         .unwrap_or_else(|| panic!("exactly one line must be added, got:\n{after}"));
-    assert_eq!(without_trailing_comma(&added), quoted("send_keys"));
+    assert_eq!(without_trailing_comma(&added), quoted("interrupt_window"));
     let after_policy: ApprovalPolicy = parsed(&after);
-    assert!(after_policy.allows(DestructiveTool::SendKeys));
-    assert_other_tools_unchanged(&before, &after_policy, DestructiveTool::SendKeys);
+    assert!(after_policy.allows(DestructiveTool::InterruptWindow));
+    assert_other_tools_unchanged(&before, &after_policy, DestructiveTool::InterruptWindow);
     assert_non_approval_sections_unchanged(&before, &after_policy);
 }
 
@@ -475,11 +479,15 @@ fn turning_on_a_tool_with_no_approval_table_creates_one() {
     let (_tree, path) = write_playbook("create-approval-table", NO_APPROVAL_LF);
     let before = parsed(NO_APPROVAL_LF);
 
-    let outcome: PlaybookWrite = written(set_auto_approve(&path, DestructiveTool::SendKeys, true));
+    let outcome: PlaybookWrite = written(set_auto_approve(
+        &path,
+        DestructiveTool::InterruptWindow,
+        true,
+    ));
 
     assert!(outcome.written);
     let after_policy: ApprovalPolicy = parsed(&read_text(&path));
-    assert!(after_policy.allows(DestructiveTool::SendKeys));
+    assert!(after_policy.allows(DestructiveTool::InterruptWindow));
     assert_non_approval_sections_unchanged(&before, &after_policy);
 }
 
@@ -580,12 +588,16 @@ fn a_toggle_leaves_every_other_tool_and_section_unchanged() {
     let (_tree, path) = write_playbook("other-tools-unchanged", REAL_PLAYBOOK);
     let before = parsed(REAL_PLAYBOOK);
 
-    let outcome: PlaybookWrite = written(set_auto_approve(&path, DestructiveTool::SendKeys, true));
+    let outcome: PlaybookWrite = written(set_auto_approve(
+        &path,
+        DestructiveTool::InterruptWindow,
+        true,
+    ));
 
     assert!(outcome.written);
     let after_policy: ApprovalPolicy = parsed(&read_text(&path));
-    assert!(after_policy.allows(DestructiveTool::SendKeys));
-    assert_other_tools_unchanged(&before, &after_policy, DestructiveTool::SendKeys);
+    assert!(after_policy.allows(DestructiveTool::InterruptWindow));
+    assert_other_tools_unchanged(&before, &after_policy, DestructiveTool::InterruptWindow);
     assert_non_approval_sections_unchanged(&before, &after_policy);
 }
 

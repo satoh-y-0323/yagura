@@ -20,15 +20,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use yagura_daemon::mcp::plan_tools::{OpenTaskWindowArgs, open_task_window};
 use yagura_daemon::mcp::tools::{
     CloseWindowArgs, GetWindowStatusArgs, InterruptWindowArgs, OpenWindowArgs, ReadChatArgs,
-    ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendKeysArgs, SendMessageArgs, ToolError,
-    WaitForStatusArgs, broadcast_chat, close_window, get_window_status, interrupt_window,
-    list_detections, list_profiles, list_windows, open_window, read_chat, read_output, send_chat,
-    send_handoff, send_keys, send_message, wait_for_status,
+    ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendMessageArgs, ToolError, WaitForStatusArgs,
+    broadcast_chat, close_window, get_window_status, interrupt_window, list_detections,
+    list_profiles, list_windows, open_window, read_chat, read_output, send_chat, send_handoff,
+    send_message, wait_for_status,
 };
 use yagura_daemon::mcp::{DaemonTransport, RequesterIdentity, TransportError};
 use yagura_protocol::{
-    ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ClientMessage, ControlKey,
-    DaemonMessage, LaunchOptionAlias, LaunchOptionInfo, OpenWindowExclusivityError, ProfileInfo,
+    ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ClientMessage, DaemonMessage,
+    LaunchOptionAlias, LaunchOptionInfo, OpenWindowExclusivityError, ProfileInfo,
     ProfileUnavailableKind, RoomRef, UnknownReason, WindowInfo, WindowStatus,
 };
 
@@ -747,102 +747,11 @@ async fn send_message_rejects_a_missing_window_id_without_calling_the_transport(
     let args = SendMessageArgs {
         window_id: None,
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
 
     assert_eq!(err.code(), "invalid_argument");
-    assert_eq!(transport.call_count(), 0);
-}
-
-// ---------------------------------------------------------------------
-// send_keys
-// ---------------------------------------------------------------------
-
-#[tokio::test]
-async fn send_keys_rejects_a_missing_window_id_without_calling_the_transport() {
-    let transport = MockTransport::never_called();
-    let args = SendKeysArgs {
-        window_id: None,
-        keys: Some(vec![ControlKey::Enter]),
-    };
-
-    let err = send_keys(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "invalid_argument");
-    assert_eq!(transport.call_count(), 0);
-}
-
-#[tokio::test]
-async fn send_keys_rejects_an_empty_window_id_without_calling_the_transport() {
-    let transport = MockTransport::never_called();
-    let args = SendKeysArgs {
-        window_id: Some(String::new()),
-        keys: Some(vec![ControlKey::Enter]),
-    };
-
-    let err = send_keys(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "invalid_argument");
-    assert_eq!(transport.call_count(), 0);
-}
-
-#[tokio::test]
-async fn send_keys_rejects_missing_empty_overlong_and_unknown_keys_without_calling_the_transport() {
-    let cases = [
-        (None, "keys is required"),
-        (Some(Vec::new()), "keys must contain at least one key"),
-        (
-            Some(vec![ControlKey::Enter; 17]),
-            "keys must contain at most 16 keys",
-        ),
-    ];
-    for (keys, expected_message) in cases {
-        let transport = MockTransport::never_called();
-        let args = SendKeysArgs {
-            window_id: Some("w1".to_string()),
-            keys,
-        };
-
-        let err = send_keys(&transport, args).await.expect_err("must fail");
-
-        assert_eq!(err.code(), "invalid_argument");
-        assert!(err.to_string().ends_with(expected_message));
-        assert_eq!(transport.call_count(), 0);
-    }
-}
-
-#[tokio::test]
-async fn send_keys_rejects_unknown_wire_names_without_calling_the_transport() {
-    for name in ["tab", "\u{0003}"] {
-        let transport = MockTransport::never_called();
-        let args: SendKeysArgs = serde_json::from_value(serde_json::json!({
-            "window_id": "w1",
-            "keys": [name],
-        }))
-        .expect("unknown wire names must deserialize to ControlKey::Unknown");
-
-        let err = send_keys(&transport, args).await.expect_err("must fail");
-
-        assert_eq!(err.code(), "invalid_argument");
-        assert!(err.to_string().ends_with("unknown control key"));
-        assert_eq!(transport.call_count(), 0);
-    }
-}
-
-#[tokio::test]
-async fn send_keys_rejects_escape_before_the_last_key_without_calling_the_transport() {
-    let transport = MockTransport::never_called();
-    let args = SendKeysArgs {
-        window_id: Some("w1".to_string()),
-        keys: Some(vec![ControlKey::Escape, ControlKey::Enter]),
-    };
-
-    let err = send_keys(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "invalid_argument");
-    assert!(err.to_string().ends_with("escape must be the last key"));
     assert_eq!(transport.call_count(), 0);
 }
 
@@ -852,7 +761,6 @@ async fn send_message_rejects_an_empty_window_id_without_calling_the_transport()
     let args = SendMessageArgs {
         window_id: Some(String::new()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -867,7 +775,6 @@ async fn send_message_rejects_a_missing_text_without_calling_the_transport() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: None,
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -897,12 +804,11 @@ fn wire(value: serde_json::Value) -> DaemonMessage {
 }
 
 #[tokio::test]
-async fn send_message_defaults_an_omitted_mode_to_immediate_and_calls_the_transport() {
+async fn send_message_calls_the_transport_with_the_text_and_relays_the_reply() {
     let transport = MockTransport::with_response(Ok(text_sent("w1")));
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let result = send_message(&transport, args).await.expect("must succeed");
@@ -927,68 +833,6 @@ async fn send_message_defaults_an_omitted_mode_to_immediate_and_calls_the_transp
 }
 
 #[tokio::test]
-async fn send_message_accepts_an_explicit_immediate_mode() {
-    let transport = MockTransport::with_response(Ok(text_sent("w1")));
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: Some("immediate".to_string()),
-    };
-
-    let result = send_message(&transport, args).await.expect("must succeed");
-
-    assert_eq!(transport.call_count(), 1);
-    assert_eq!(result["state"], "queued", "{result}");
-}
-
-#[tokio::test]
-async fn send_message_rejects_an_empty_mode_as_unsupported_without_calling_the_transport() {
-    // Mode evaluation happens before any daemon round trip, whatever the
-    // target window's state, so the daemon is never consulted.
-    let transport = MockTransport::never_called();
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: Some(String::new()),
-    };
-
-    let err = send_message(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "unsupported");
-    assert_eq!(transport.call_count(), 0);
-}
-
-#[tokio::test]
-async fn send_message_rejects_a_differently_cased_mode_as_unsupported() {
-    let transport = MockTransport::never_called();
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: Some("Immediate".to_string()),
-    };
-
-    let err = send_message(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "unsupported");
-    assert_eq!(transport.call_count(), 0);
-}
-
-#[tokio::test]
-async fn send_message_rejects_an_unknown_mode_value_as_unsupported() {
-    let transport = MockTransport::never_called();
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: Some("queue_until_input".to_string()),
-    };
-
-    let err = send_message(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "unsupported");
-    assert_eq!(transport.call_count(), 0);
-}
-
-#[tokio::test]
 async fn send_message_maps_daemon_child_exited_error() {
     let transport = MockTransport::with_response(Ok(DaemonMessage::Error {
         code: "child_exited".to_string(),
@@ -998,7 +842,6 @@ async fn send_message_maps_daemon_child_exited_error() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -1016,7 +859,6 @@ async fn send_message_maps_daemon_window_not_found_error() {
     let args = SendMessageArgs {
         window_id: Some("does-not-exist".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -1027,30 +869,6 @@ async fn send_message_maps_daemon_window_not_found_error() {
 /// The daemon refuses a send whose text it never wrote with its own code, so
 /// a caller can tell "nothing was written" from a daemon-side failure.
 #[tokio::test]
-async fn send_message_maps_daemon_not_written_error() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::Error {
-        code: "not_written".to_string(),
-        message: "the window's composer already held content this send could not account for"
-            .to_string(),
-        rejected_argument: None,
-    }));
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: None,
-    };
-
-    let err = send_message(&transport, args).await.expect_err("must fail");
-
-    assert_eq!(err.code(), "not_written");
-    assert!(
-        err.to_string()
-            .contains("the window's composer already held content this send could not account for"),
-        "the daemon's reason must survive the mapping, got {err}"
-    );
-}
-
-#[tokio::test]
 async fn send_message_maps_transport_unavailable_to_daemon_unavailable() {
     let transport = MockTransport::with_response(Err(TransportError::Unavailable(
         "pipe not connected".to_string(),
@@ -1058,7 +876,6 @@ async fn send_message_maps_transport_unavailable_to_daemon_unavailable() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -1074,7 +891,6 @@ async fn send_message_maps_transport_protocol_error_to_internal() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -1089,7 +905,6 @@ async fn sent_text_for(text: &str) -> String {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some(text.to_string()),
-        mode: None,
     };
 
     send_message(&transport, args).await.expect("must succeed");
@@ -1105,30 +920,11 @@ async fn sent_text_for(text: &str) -> String {
 }
 
 #[tokio::test]
-async fn send_message_normalizes_a_trailing_lone_lf_to_a_lone_cr() {
-    // An MCP client cannot express a raw CR in a JSON string argument, so a
-    // trailing LF is the only submit it can write -- and a bare LF does not
-    // submit the line on a Windows console.
-    assert_eq!(sent_text_for("cmd\n").await, "cmd\r");
-}
-
-#[tokio::test]
-async fn send_message_collapses_an_existing_crlf_to_a_lone_cr() {
-    // A CRLF reaching PSReadLine is read as Enter followed by a newline
-    // insertion, which leaves a `>>` continuation prompt behind.
-    assert_eq!(sent_text_for("a\r\nb\n").await, "a\rb\r");
-}
-
-#[tokio::test]
-async fn send_message_leaves_text_without_a_newline_unchanged() {
-    // "type this but do not submit it" must stay expressible: no terminator
-    // is ever appended.
+async fn send_message_forwards_the_text_with_its_line_endings_as_written() {
+    // The text travels inside an envelope, so no terminator is rewritten or
+    // appended.
     assert_eq!(sent_text_for("no newline").await, "no newline");
-}
-
-#[tokio::test]
-async fn send_message_normalizes_every_line_terminator_not_just_the_last() {
-    assert_eq!(sent_text_for("line1\nline2\n").await, "line1\rline2\r");
+    assert_eq!(sent_text_for("a\r\nb\nc\r").await, "a\r\nb\nc\r");
 }
 
 #[tokio::test]
@@ -1139,7 +935,6 @@ async fn send_message_maps_a_non_text_sent_non_error_response_to_internal() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some("hello".to_string()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -1161,7 +956,6 @@ async fn send_message_does_not_enforce_a_text_length_limit_itself() {
     let args = SendMessageArgs {
         window_id: Some("w1".to_string()),
         text: Some(oversized_text.clone()),
-        mode: None,
     };
 
     let err = send_message(&transport, args).await.expect_err("must fail");
@@ -3263,7 +3057,6 @@ async fn send_message_relays_every_held_request_error_code_unchanged() {
         let args = SendMessageArgs {
             window_id: Some("w1".to_string()),
             text: Some("hello".to_string()),
-            mode: None,
         };
 
         let err = send_message(&transport, args).await.expect_err("must fail");
@@ -3314,7 +3107,6 @@ async fn gated_tool_results(
         SendMessageArgs {
             window_id: Some("w1".to_string()),
             text: Some("hello".to_string()),
-            mode: None,
         },
     )
     .await
@@ -4696,7 +4488,7 @@ fn no_composer_error() -> DaemonMessage {
     }
 }
 
-/// A caller can only choose another route (a command window, `send_keys`)
+/// A caller can only choose another route (a command window)
 /// when the refusal keeps both its own code and the daemon's guidance.
 fn assert_no_composer_relayed(err: ToolError) {
     assert_eq!(err.code(), "no_composer");
@@ -4710,20 +4502,6 @@ fn assert_no_composer_relayed(err: ToolError) {
 fn tool_error_code_covers_no_composer() {
     let err: ToolError = ToolError::NoComposer("x".to_string());
     assert_eq!(err.code(), "no_composer");
-}
-
-#[tokio::test]
-async fn send_message_relays_a_no_composer_refusal_with_the_daemons_message() {
-    let transport = MockTransport::with_response(Ok(no_composer_error()));
-    let args = SendMessageArgs {
-        window_id: Some("w1".to_string()),
-        text: Some("hello".to_string()),
-        mode: None,
-    };
-
-    let err = send_message(&transport, args).await.expect_err("must fail");
-
-    assert_no_composer_relayed(err);
 }
 
 #[tokio::test]

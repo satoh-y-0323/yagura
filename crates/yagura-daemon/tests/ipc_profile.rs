@@ -1721,7 +1721,7 @@ async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_still_tak
         &launch_profile_source("Unresolvable", None, Some("does-not-exist-anywhere"), &logs),
     );
 
-    let mut config = handoff_profile_config(
+    let config = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
         &detection_dir,
@@ -1729,7 +1729,6 @@ async fn send_handoff_from_a_profile_whose_detection_never_resolves_is_still_tak
         Some(policy(&["send_handoff"])),
         30,
     );
-    config.handoff_ready_timeout_secs = 1;
     let h = Harness::start("handoff-profile-not-ready", config).await;
     let mut client = h.connect().await;
 
@@ -2799,7 +2798,7 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
         ),
     );
 
-    let mut config = handoff_profile_config(
+    let config = handoff_profile_config(
         Some(profiles_dir),
         empty_lookup(),
         &detection_dir,
@@ -2807,7 +2806,6 @@ async fn send_handoff_from_a_profile_carries_a_supplied_launch_option_into_the_c
         Some(policy(&["send_handoff"])),
         30,
     );
-    config.handoff_ready_timeout_secs = 1;
     let h = Harness::start("handoff-profile-launch-options", config).await;
     let mut client = h.connect().await;
 

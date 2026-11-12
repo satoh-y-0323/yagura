@@ -786,7 +786,7 @@ export const messagesEn = {
       },
       send_message: {
         name: 'Send a message to a window',
-        description: 'Types text into another window and submits it.',
+        description: 'Delivers a message to another window.',
         risk: 'An agent can give another agent new instructions.',
       },
       send_handoff: {
@@ -794,12 +794,6 @@ export const messagesEn = {
         description:
           'Sends a reference and a note to another window, or opens a new window for it.',
         risk: 'An agent can start work in another window or open new ones.',
-      },
-      send_keys: {
-        name: 'Send keys to a window',
-        description:
-          'Sends control keys such as Enter, Escape or the arrow keys to another window.',
-        risk: "An agent can answer another CLI's confirmation prompts.",
       },
       interrupt_window: {
         name: 'Interrupt a window',

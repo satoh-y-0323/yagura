@@ -2,8 +2,7 @@
 
 Seventeen real-session captures of Muse Code, kept to exercise
 `crates/yagura-daemon/detection/muse-code.toml` against real screen content
-instead of hand-written approximations. The raw byte streams the composer
-readout is checked against are in `composer/`.
+instead of hand-written approximations.
 
 Muse Code draws on the normal screen (no alternate screen) and puts its composer,
 a `❯ ` row, between two rules: on Windows the upper rule reads

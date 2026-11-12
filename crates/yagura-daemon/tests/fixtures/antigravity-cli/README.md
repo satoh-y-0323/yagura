@@ -86,24 +86,6 @@ approved is still executing in the background, and the CLI's own turn has
 not finished evaluating it, so the daemon reads that footer as `running` the
 same way `codex-cli.toml` reads its own background-terminal footer variant.
 
-## Composer cursor position
-
-`VtScreen::read_composer` scans upward from the terminal's own cursor row, so a caller
-judging a captured screen has to put the cursor back where it really sat, not wherever
-writing the fixture's text happens to leave it. That position is kept in
-`tests/detector_antigravity_cli.rs` as two constants
-(`IDLE_STARTUP_COMPOSER_CURSOR`, `WAITING_INPUT_DRAFT_COMPOSER_CURSOR`), not in the
-fixture files themselves, so the fixture format stays the plain `bottom_lines(16)` text
-described above.
-
-The two values are recorded data: the real vt100 cursor position (row, col; 0-indexed
-within the fixture's own 16-line window) the `redump` tool's own debug dump reported at
-the moment each fixture was captured -- `cursor=(8,2)` for `100x30-idle-startup` (session
-mark `dump:idle`) and `cursor=(8,14)` for `100x30-waiting-input-draft` (session mark
-`dump:typed`). An empty composer's cursor sits at column 2, right after the `> ` marker. Every other fixture here is judged only through
-`DetectionEngine`'s pattern rules, which never consult the cursor, so no other fixture
-needs a recorded position.
-
 ## Screen inventory
 
 Screens the probe sessions observed but that are not captured here as a

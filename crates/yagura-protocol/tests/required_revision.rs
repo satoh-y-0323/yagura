@@ -49,8 +49,8 @@ use serde_json::Value;
 
 use yagura_protocol::{
     APPROVAL_SETTINGS_MIN_REVISION, CHAT_ROOM_REMOVAL_MIN_REVISION, CellPosition, ClientMessage,
-    ControlKey, DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes,
-    FRAME_MIN_REVISION, HOOK_EVENTS_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION,
+    DAEMON_HEALTH_MIN_REVISION, DEFAULT_PALETTES_MIN_REVISION, DefaultPalettes, FRAME_MIN_REVISION,
+    HOOK_EVENTS_MIN_REVISION, Key, KeyInput, LAUNCH_OPTIONS_MIN_REVISION,
     MCP_REGISTRATION_MIN_REVISION, MODEL_ALIASES_MIN_REVISION, McpRegistrationAction, Modifiers,
     NamedKey, PLAN_REVIEW_MIN_REVISION, PROFILE_DETAIL_MIN_REVISION, PROFILE_ENABLED_MIN_REVISION,
     PROTOCOL_REVISION, PROTOCOL_REVISION_BASELINE, Palette, PlanTaskSpec, PointerButton,
@@ -136,10 +136,6 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
         ClientMessage::SendText {
             window_id: "w1".to_string(),
             text: "hi".to_string(),
-        },
-        ClientMessage::SendKeys {
-            window_id: "w1".to_string(),
-            keys: vec![ControlKey::Enter],
         },
         ClientMessage::InterruptWindow {
             window_id: "w1".to_string(),
@@ -527,7 +523,6 @@ fn every_other_variant_requires_no_more_than_baseline() {
                         | ClientMessage::Pointer(_)
                         | ClientMessage::Wheel(_)
                         | ClientMessage::Focus { .. }
-                        | ClientMessage::SendKeys { .. }
                         | ClientMessage::ApprovePlan { .. }
                         | ClientMessage::MarkPlanSeen { .. }
                         | ClientMessage::SetProfileEnabled { .. }
@@ -564,15 +559,6 @@ fn every_other_variant_requires_no_more_than_baseline() {
              revision"
         );
     }
-}
-
-#[test]
-fn send_keys_requires_revision_six() {
-    let message = ClientMessage::SendKeys {
-        window_id: "w1".to_string(),
-        keys: vec![ControlKey::Enter],
-    };
-    assert_eq!(required_protocol_revision(&message), 6);
 }
 
 // =============================================================================

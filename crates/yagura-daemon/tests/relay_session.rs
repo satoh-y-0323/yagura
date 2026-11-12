@@ -12,9 +12,6 @@
 
 use crate::common;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use rmcp::model::RequestId;
 use rmcp::transport::async_rw::DEFAULT_MAX_LINE_LENGTH;
 use serde::Deserialize;
@@ -24,12 +21,8 @@ use common::relay::{
     RelayClient, cancelled_line, discover_line, hello, initialize_line, initialized_line,
     roots_list_changed_line, stateless_meta, tool_call_line, tool_json,
 };
-use common::{
-    Harness, SubmitDefinitionInput, VALID_TOKEN, approver_base_config, policy, unique_temp_dir,
-    wait_until_input_log_contains, write_submit_definition,
-};
+use common::{Harness, VALID_TOKEN, approver_base_config, policy};
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::window::WindowEntry;
 use yagura_protocol::MAX_FRAME_BODY_LEN;
 use yagura_protocol::relay::{
     INVALID_REQUEST, RESOURCE_EXHAUSTED, RelayFrame, RelayRefusedKind, RelayResume,
@@ -921,134 +914,6 @@ fn the_relay_reads_each_request_id_as_rmcp_does() {
         differ.is_empty(),
         "the relay must read each id as rmcp does, (id, relay, rmcp): {differ:?}"
     );
-}
-
-// =====================================================================
-// The end of a relay connection ends the calls it carried
-// =====================================================================
-
-struct Stage {
-    h: Harness,
-    requester: String,
-    receiver: String,
-    input_log: PathBuf,
-    resume: PathBuf,
-}
-
-impl Stage {
-    /// A requester window, and a receiver that stops reading once a body
-    /// arrives and reads on when `resume` exists.
-    async fn start(tag: &str) -> Self {
-        let dir = unique_temp_dir(tag);
-        let h = Harness::start(
-            tag,
-            DaemonConfig {
-                detection_dir: Some(dir.clone()),
-                ..config()
-            },
-        )
-        .await;
-        let requester = h.open(process::echo_child_command(), None).await;
-
-        let input_log = dir.join("receiver-input.log");
-        let resume = dir.join("resume");
-        write_submit_definition(
-            &dir,
-            "receiver",
-            "receiver-marker",
-            SubmitDefinitionInput {
-                bracketed_paste: true,
-                ready_hold_ms: 0,
-                submit_delay_ms: 120,
-                clear: "\\u0015",
-                delivery_confirm_ms: 2000,
-                resend_max: 0,
-            },
-        );
-        let mut command =
-            process::submit_child_command_with_composer("receiver-marker", 0, 0, 0, 0);
-        command.push(String::new()); // fold_placeholder: none
-        command.push(format!("stall-until|{}|", path_str(&resume)));
-        command.push(String::new()); // overlay: none
-        command.push(String::new()); // overlay_heading
-        command.push(path_str(&input_log).to_string());
-        let receiver = h.open_delivering(command, Some("receiver")).await;
-        let mut observer = h.connect().await;
-        common::wait_until_status(
-            &mut observer,
-            &receiver,
-            yagura_protocol::WindowStatus::WaitingInput,
-        )
-        .await;
-        Self {
-            h,
-            requester,
-            receiver,
-            input_log,
-            resume,
-        }
-    }
-
-    fn receiver_entry(&self) -> Arc<WindowEntry> {
-        self.h
-            .registry
-            .get(&self.receiver)
-            .expect("the receiver must exist")
-    }
-
-    /// The requester's relay session, opened the way a window's CLI opens it.
-    async fn requester_session(&self) -> RelayClient {
-        let (mut client, _) = RelayClient::welcomed(
-            &self.h.endpoint,
-            hello(Some((&self.requester, VALID_TOKEN)), None),
-        )
-        .await;
-        initialize(&mut client).await;
-        client
-    }
-}
-
-fn path_str(path: &Path) -> &str {
-    path.to_str().expect("the fixture path must be valid UTF-8")
-}
-
-/// A handoff the CLI is already carrying is not the requester's to take back:
-/// its relay connection closing leaves the typing to finish with the
-/// carrier's own result, so the body is submitted and never cleared. The call
-/// started no attempt of its own (the receiver wakes by none), so it was
-/// answered that the envelope waits while it was still being carried: never
-/// that it was not delivered.
-#[tokio::test]
-async fn closing_the_relay_connection_during_a_handoff_leaves_the_carried_envelope_to_finish() {
-    let stage = Stage::start("relay-end-handoff").await;
-    let mut client = stage.requester_session().await;
-
-    let seq = client
-        .request(&tool_call_line(
-            1,
-            "send_handoff",
-            json!({"window_id": stage.receiver, "reference": "src/lib.rs", "note": "please look"}),
-            false,
-        ))
-        .await;
-    stage
-        .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
-        .await;
-    let answered = tool_json(&client.answer(seq).await);
-    assert_eq!(
-        answered["state"], "queued",
-        "a carried handoff is never answered undelivered: {answered}"
-    );
-    drop(client);
-
-    std::fs::write(&stage.resume, b"").expect("let the receiver read on");
-    let read = wait_until_input_log_contains(&stage.input_log, b"\r").await;
-    assert!(
-        !read.contains(&0x15),
-        "a carried handoff must not be cleared from the composer when its requester leaves: {read:?}"
-    );
-    assert_eq!(stage.receiver_entry().inbox().pending_count(), 0);
 }
 
 // =====================================================================

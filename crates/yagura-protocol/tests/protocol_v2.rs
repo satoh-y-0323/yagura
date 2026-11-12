@@ -260,7 +260,7 @@ fn daemon_message_status_changed_round_trip_with_window_id() {
 #[test]
 fn daemon_message_text_sent_round_trip() {
     // The success response to send_text.
-    let body = br#"{"type":"text_sent","window_id":"w1"}"#;
+    let body = br#"{"type":"text_sent","window_id":"w1","id":"e-1","state":"queued"}"#;
     let decoded = decode_daemon_message(body).expect("text_sent must decode");
     let encoded = encode_daemon_message(&decoded);
     let decoded2 = decode_daemon_message(&encoded).expect("round trip must succeed");

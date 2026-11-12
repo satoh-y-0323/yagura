@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use yagura_protocol::{
     HANDOFF_NOTE_MAX_BYTES, WINDOW_NAME_MAX_BYTES, WindowNameError, decode_client_message,
     decode_daemon_message, encode_client_message, encode_daemon_message, validate_chat_body,
-    validate_handoff_text, validate_send_text_body, validate_task_instruction,
-    validate_window_name, validate_window_vendor,
+    validate_handoff_text, validate_message_text, validate_task_instruction, validate_window_name,
+    validate_window_vendor,
 };
 
 /// Invisible characters that carry no glyph-shaping role and are therefore
@@ -288,7 +288,7 @@ fn a_double_quote_stays_accepted_everywhere_a_window_name_is_not_written() {
     assert_eq!(validate_window_vendor(quoted), Ok(()));
     assert!(validate_handoff_text(quoted, HANDOFF_NOTE_MAX_BYTES).is_ok());
     assert!(validate_task_instruction(quoted).is_ok());
-    assert!(validate_send_text_body(quoted).is_ok());
+    assert!(validate_message_text(quoted).is_ok());
     assert!(validate_chat_body(quoted).is_ok());
 }
 
@@ -377,7 +377,8 @@ fn opened_answers() -> [Value; 3] {
             "type": "handoff_sent",
             "window_id": "w2-abc",
             "opened": true,
-            "delivery": "taken",
+            "id": "e-1",
+            "state": "delivered",
         }),
     ]
 }

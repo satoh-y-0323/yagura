@@ -10,13 +10,12 @@
 //!   [`start_chat`] / [`common::chat_config`] / [`common::ChatPlaybook`]. `ChatPlaybook`'s
 //!   `intro` defaults to `Some("")` (no intro injection): only the
 //!   intro-observing cases (including the abandoned-on-close case) pass a non-empty value.
-//! - A **running / waiting_input / idle-capable participant** is a `submit_child` window
-//!   opened through [`common::open_submit_child_window_with_composer`] against a definition
-//!   [`common::write_submit_definition`] wrote: it starts at `waiting_input` and can be driven
-//!   to `running` by writing raw `REACT` bytes directly to its PTY (matching the definition's
-//!   own `running` rule), bypassing the chat delivery path entirely.
+//! - A **running / waiting_input / idle-capable participant** is an `echo_child` window
+//!   opened through [`common::open_marked_delivering_window`]: it starts at `waiting_input`
+//!   and can be driven to `running` by writing a `REACT` line to its PTY (matching the
+//!   definition's own `running` rule), bypassing the chat delivery path entirely.
 //! - Only a window that declares delivery takes part in chat: the openers above declare
-//!   one with no way to wake its CLI, so a post reaches them typed while they wait. A
+//!   one with no way to wake its CLI, so a post waits in their inbox for the take door. A
 //!   window opened from a raw argv (`Harness::open`) takes no part; [`open_delivering`]
 //!   opens any other command as a participant.
 //! - A **plain idle participant** (never a delivery target, only a roster entry) is opened
@@ -36,8 +35,8 @@
 //!   `detection` argument / `--detection` flag actually names), never by the file's own
 //!   `name` field.
 //! - The chat envelope marker is `"[yagura chat] "` (parallel to the handoff envelope's
-//!   `"[yagura handoff] "`); [`wait_for_accepted_chat_envelope_json`] is this file's own
-//!   marker-aware reader, mirroring `common::wait_for_accepted_handoff_envelope_json`.
+//!   `"[yagura handoff] "`); [`taken_chat_envelope_json`] reads it off what the take door
+//!   hands over.
 
 use crate::common;
 
@@ -45,11 +44,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{
-    CONTROL_DETECTION_NAME, ChatPlaybook, Harness, SubmitDefinitionInput, chat_config,
-    composer_section_toml, decide, expect_approval_requested, expect_error, identify,
-    open_submit_child_window_with_composer, open_submit_child_window_with_composer_in_cwd,
+    CONTROL_DETECTION_NAME, ChatPlaybook, Harness, chat_config, composer_section_toml, decide,
+    expect_approval_requested, expect_error, identify, open_marked_delivering_window,
     read_response, register_approver, second_workspace_dir, send, unique_temp_dir,
-    wait_until_status, write_submit_definition,
+    wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
 use yagura_daemon::fault_point::{FaultPoint, FaultPoints};
@@ -194,52 +192,38 @@ async fn assert_waits_for_its_cli(
 
 const CHAT_ENVELOPE_MARKER: &str = "[yagura chat] ";
 
-/// This file's own marker-aware scrollback reader, mirroring
-/// `common::wait_for_accepted_handoff_envelope_json` for the chat envelope
-/// marker instead of the handoff one (composer-draw mode paints an
-/// unsubmitted draft with the same marker text, so only an occurrence that is
-/// not immediately preceded by the composer's own marker+separator counts).
-async fn wait_for_accepted_chat_envelope_json(h: &Harness, window_id: &str) -> serde_json::Value {
+/// Waits until a post reached `window_id`'s inbox, then has its CLI take it through
+/// the take door the way its hook does, and returns what the door printed.
+async fn take_post(h: &Harness, window_id: &str) -> String {
+    let entry = h.registry.get(window_id).expect("the window is registered");
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    loop {
-        let text = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-        if let Some(json) = accepted_chat_envelope_json(&text) {
-            return json;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for an accepted chat envelope line in window {window_id} \
-                 scrollback: {text:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    while entry.inbox().pending_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the post never reached {window_id}'s inbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let mut door = h.connect().await;
+    call_door(&mut door, "take", window_id).await
 }
 
-/// Byte offsets of `needle` in `text` that are accepted lines rather than a
-/// composer draft: a draft copy follows the composer's marker and separator.
-fn accepted_offsets<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
-    let draft_prefix = format!(
-        "{}{}",
-        yagura_test_support::process::COMPOSER_MARKER,
-        yagura_test_support::process::COMPOSER_SEPARATOR,
-    );
-    text.match_indices(needle)
-        .map(|(index, _)| index)
-        .filter(move |index| !text[..*index].ends_with(&draft_prefix))
-}
-
-fn accepted_chat_envelope_json(text: &str) -> Option<serde_json::Value> {
-    let start = accepted_offsets(text, CHAT_ENVELOPE_MARKER).next()?;
-    let after = text.get(start + CHAT_ENVELOPE_MARKER.len()..)?;
-    let end = after.find('\r').unwrap_or(after.len());
-    let json_part = after.get(..end)?.trim_end_matches(|c: char| c != '}');
-    serde_json::from_str(json_part).ok()
+/// The chat envelope `window_id`'s CLI takes through [`take_post`], parsed as JSON.
+async fn taken_chat_envelope_json(h: &Harness, window_id: &str) -> serde_json::Value {
+    let taken = take_post(h, window_id).await;
+    let json = taken
+        .lines()
+        .find_map(|line| {
+            line.find(CHAT_ENVELOPE_MARKER)
+                .map(|at| &line[at + CHAT_ENVELOPE_MARKER.len()..])
+        })
+        .unwrap_or_else(|| panic!("the take door must hand over a chat envelope: {taken:?}"));
+    serde_json::from_str(json.trim_end())
+        .unwrap_or_else(|err| panic!("the envelope must be JSON ({err}): {json:?}"))
 }
 
 /// Writes a minimal detection definition (a single `idle` rule plus
-/// [`composer_section_toml`], so the participation this fixture exercises is
-/// never itself refused for the missing table) at `{dir}/{file_stem}.toml`,
+/// [`composer_section_toml`]) at `{dir}/{file_stem}.toml`,
 /// whose declared `name` is `declared_name`: a caller passing
 /// `file_stem != declared_name` builds the stem/name-mismatch fixture.
 fn write_stem_mismatch_definition(dir: &Path, file_stem: &str, declared_name: &str) {
@@ -254,14 +238,9 @@ fn write_stem_mismatch_definition(dir: &Path, file_stem: &str, declared_name: &s
     .expect("write stem/name-mismatch chat participant definition");
 }
 
-/// A chat participant is a window the daemon can deliver a judged line to,
-/// which takes a probe as well as a composer.
+/// The `[composer]` table a chat participant's definition carries.
 fn participant_composer_toml() -> String {
-    format!(
-        "{}\n[input]\nprobe = \"{}\"\n",
-        composer_section_toml(),
-        common::SUBMIT_CHILD_PROBE
-    )
+    composer_section_toml()
 }
 
 /// [`write_stem_mismatch_definition`] with `file_stem == declared_name` and,
@@ -509,37 +488,13 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
     let h = start_chat("chat-g1-basic", &dir, &ChatPlaybook::default()).await;
 
     let mut poster_conn = h.connect().await;
-    write_submit_definition(
-        &dir,
-        "chat-g1-target",
-        "chat-g1-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 2,
-        },
-    );
-    let target_id = open_submit_child_window_with_composer(
+    let target_id = open_marked_delivering_window(
         &h,
         &mut poster_conn,
         &dir,
         "chat-g1-target",
         "chat-g1-marker",
-        0,
-        0,
-        0,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 2,
-        },
-        0,
+        None,
     )
     .await;
     let poster_id = h.open_idle_window(&mut poster_conn).await;
@@ -553,7 +508,7 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
     assert!(posted.unresolved.is_empty());
     assert!(!posted.halted);
 
-    let json = wait_for_accepted_chat_envelope_json(&h, &target_id).await;
+    let json = taken_chat_envelope_json(&h, &target_id).await;
     assert_eq!(
         json.get("room_id").and_then(serde_json::Value::as_str),
         // An identified window's own default room is its own
@@ -580,10 +535,7 @@ async fn send_chat_delivers_the_envelope_to_the_named_target_and_reports_it_take
     );
 
     let state = wait_for_settled_delivery(&mut poster_conn, posted.seq, &target_id).await;
-    assert_eq!(
-        state, "delivered",
-        "an envelope typed up to its submit key is delivered, whatever the composer showed after"
-    );
+    assert_eq!(state, "delivered", "an envelope its CLI took is delivered");
 }
 
 #[tokio::test]
@@ -592,29 +544,16 @@ async fn send_chat_still_delivers_to_a_target_that_is_currently_running() {
     let h = start_chat("chat-g1-running", &dir, &ChatPlaybook::default()).await;
     let mut poster_conn = h.connect().await;
 
-    let target_id = open_submit_child_window_with_composer(
+    let target_id = open_marked_delivering_window(
         &h,
         &mut poster_conn,
         &dir,
         "chat-g1-running-target",
         "chat-g1-running-marker",
-        0,
-        1,
-        1,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 2000,
-            resend_max: 1,
-        },
-        0,
+        None,
     )
     .await;
-    // A reacting fixture prints `REACT` when a bracketed paste ends, matched byte by byte, so
-    // unlike a typed submit this never depends on how the fixture's reads split the input.
-    h.write_input(&target_id, b"\x1b[200~\x1b[201~").await;
+    h.write_input(&target_id, b"REACT\r").await;
     wait_until_status(&mut poster_conn, &target_id, WindowStatus::Running).await;
 
     let poster_id = h.open_idle_window(&mut poster_conn).await;
@@ -1126,7 +1065,7 @@ async fn window_origin_send_chat_awaits_a_targetless_approval_and_delivers_once_
             .expect("already asserted the marker prefix is present"),
     )
     .expect("the approval body must be the JSON the daemon composed");
-    let mut delivered = wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
+    let mut delivered = taken_chat_envelope_json(&h, &recipient_id).await;
     // The post's id is made from its seq, which exists only once the approved post is
     // recorded: it is the one field the approved text cannot carry.
     let id = delivered
@@ -1427,12 +1366,12 @@ async fn the_start_up_door_carries_the_intro_and_nothing_is_typed() {
     let context = call_door(&mut door, "context", &recipient_id).await;
     assert!(context.contains("welcome to the room"), "{context:?}");
 
-    // Whatever the daemon queued for the window on its own is written before a later
-    // post, which is typed into this window while it waits.
+    // Whatever the daemon queued for the window on its own goes out through the start-up
+    // door, ahead of a later post the window's CLI takes.
     let poster_id = h.open_idle_window(&mut client).await;
     identify(&mut client, &poster_id).await;
     expect_chat_posted(send_chat_msg(&mut client, None, &format!("hello @{recipient_id}")).await);
-    wait_for_accepted_chat_envelope_json(&h, &recipient_id).await;
+    taken_chat_envelope_json(&h, &recipient_id).await;
     assert!(
         !String::from_utf8_lossy(&h.scrollback(&recipient_id)).contains("welcome to the room"),
         "the intro is never typed into a window"
@@ -1634,6 +1573,7 @@ async fn silence_after_a_taken_post_marks_needs_user_and_notifies_the_approver()
     identify(&mut poster_conn, &poster_id).await;
 
     send_chat_msg(&mut poster_conn, None, &format!("hello @{recipient_id}")).await;
+    take_post(&h, &recipient_id).await;
 
     let _changed_seq = next_chat_changed_needing_user(&mut approver).await;
 
@@ -1667,6 +1607,7 @@ async fn a_follow_up_from_the_poster_itself_does_not_count_as_the_addressed_wind
     expect_chat_posted(
         send_chat_msg(&mut poster_conn, None, &format!("hello @{recipient_id}")).await,
     );
+    take_post(&h, &recipient_id).await;
     expect_chat_posted(send_chat_msg(&mut poster_conn, None, "anyone there?").await);
 
     let _changed_seq = next_chat_changed_needing_user(&mut approver).await;
@@ -1674,68 +1615,6 @@ async fn a_follow_up_from_the_poster_itself_does_not_count_as_the_addressed_wind
     assert!(
         read.messages.iter().any(|m| m.from_kind == "system"),
         "only the addressed window speaking again may cancel the silence notice"
-    );
-}
-
-// =============================================================================
-// Chat delivery budget
-// =============================================================================
-
-#[tokio::test]
-async fn a_full_delivery_budget_leaves_exactly_one_destination_undelivered_exhausted() {
-    let dir = unique_temp_dir("chat-g11-budget");
-    let h = start_chat(
-        "chat-g11-budget",
-        &dir,
-        &ChatPlaybook {
-            auto_approve: &["broadcast_chat"],
-            chat_delivery_max: Some(1),
-            ..ChatPlaybook::default()
-        },
-    )
-    .await;
-    let mut client = h.connect().await;
-    let first_id = h.open_idle_window_with_composer(&mut client).await;
-    let second_id = h.open_idle_window_with_composer(&mut client).await;
-    let poster_id = h.open_idle_window(&mut client).await;
-    identify(&mut client, &poster_id).await;
-
-    let posted = expect_chat_posted(broadcast_chat_msg(&mut client, None, "budget check").await);
-    assert_eq!(posted.targets.len(), 2);
-
-    // Both destinations start out pending; the read is repeated until the
-    // budget has turned one away or neither is pending any more.
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let states: Vec<String> = loop {
-        let read = expect_chat_messages(read_chat_msg(&mut client, None, Some(0), None).await);
-        let states: Vec<String> = [&first_id, &second_id]
-            .iter()
-            .map(|id| delivery_state_for(&read.messages, posted.seq, id).to_string())
-            .collect();
-        let settled = states.iter().any(|s| s == "undelivered_exhausted")
-            || states.iter().all(|s| s != "queued");
-        if settled {
-            break states;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the deliveries never settled, last read {states:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    assert_eq!(
-        states
-            .iter()
-            .filter(|s| *s == "undelivered_exhausted")
-            .count(),
-        1,
-        "exactly one destination must be exhausted, got {states:?}"
-    );
-    assert!(
-        states
-            .iter()
-            .any(|s| matches!(s.as_str(), "delivered" | "queued")),
-        "the other destination must have been attempted, got {states:?}"
     );
 }
 
@@ -1895,24 +1774,8 @@ async fn a_broken_playbook_disables_chat_entirely_including_the_intro() {
 // destination is pushed to the approvers
 // =============================================================================
 
-/// The `[input]` shape of a destination whose delivery cannot start while a
-/// case runs: `ready_hold_ms` sits at the definition loader's maximum, far
-/// longer than any case here takes, so a window that has only just reached
-/// `waiting_input` keeps the delivery waiting at the startup gate instead of
-/// writing.
-fn held_destination_input() -> SubmitDefinitionInput {
-    SubmitDefinitionInput {
-        bracketed_paste: true,
-        ready_hold_ms: 10_000,
-        submit_delay_ms: 50,
-        clear: "",
-        delivery_confirm_ms: 1000,
-        resend_max: 0,
-    }
-}
-
-/// Opens one destination whose delivery stays at the startup gate for the
-/// whole case (see [`held_destination_input`]).
+/// Opens one destination whose CLI takes nothing while a case runs: nothing
+/// wakes it, and nothing calls its take door.
 async fn open_held_destination(
     h: &Harness,
     client: &mut yagura_test_support::ipc::Connection,
@@ -1920,20 +1783,7 @@ async fn open_held_destination(
     name: &str,
     marker: &str,
 ) -> String {
-    write_submit_definition(dir, name, marker, held_destination_input());
-    open_submit_child_window_with_composer(
-        h,
-        client,
-        dir,
-        name,
-        marker,
-        0,
-        0,
-        0,
-        held_destination_input(),
-        0,
-    )
-    .await
+    open_marked_delivering_window(h, client, dir, name, marker, None).await
 }
 
 /// The next `chat_changed` push on `client`, skipping frames that are not
@@ -2070,6 +1920,7 @@ async fn a_settled_delivery_pushes_chat_changed_carrying_the_posts_seq() {
     let posted = expect_chat_posted(
         send_chat_msg(&mut poster_conn, None, &format!("hello @{recipient_id}")).await,
     );
+    take_post(&h, &recipient_id).await;
 
     // The post being recorded pushes once on its own, before the delivery
     // has had a chance to settle; the delivery settling pushes again once
@@ -2142,6 +1993,7 @@ async fn a_settled_deliverys_push_reports_the_rooms_stored_attention_flag() {
         )
         .await,
     );
+    take_post(&h, &recipient_id).await;
     let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
     assert_eq!(seq, posted.seq);
     assert!(
@@ -2199,87 +2051,6 @@ async fn a_destination_whose_cli_takes_the_post_pushes_chat_changed_when_it_is_r
         );
     };
     assert_eq!(settled_state, "delivered");
-}
-
-#[tokio::test]
-async fn a_destination_refused_by_the_delivery_budget_pushes_chat_changed_when_it_is_recorded() {
-    let dir = unique_temp_dir("chat-exhausted-push");
-    let h = start_chat(
-        "chat-exhausted-push",
-        &dir,
-        &ChatPlaybook {
-            chat_delivery_max: Some(1),
-            ..ChatPlaybook::default()
-        },
-    )
-    .await;
-    let mut poster_conn = h.connect().await;
-    let mut approver = h.connect().await;
-    register_approver(&mut approver).await;
-
-    // Both destinations hold their delivery at the startup gate, so whichever
-    // wins the single budget slot keeps it for the whole case and the other
-    // is refused: which one is refused is unspecified, that one of them is is
-    // not.
-    let first_id = open_held_destination(
-        &h,
-        &mut poster_conn,
-        &dir,
-        "chat-budget-alpha",
-        "chat-budget-alpha-marker",
-    )
-    .await;
-    let second_id = open_held_destination(
-        &h,
-        &mut poster_conn,
-        &dir,
-        "chat-budget-beta",
-        "chat-budget-beta-marker",
-    )
-    .await;
-    let poster_id = h.open_idle_window(&mut poster_conn).await;
-    identify(&mut poster_conn, &poster_id).await;
-
-    let posted = expect_chat_posted(
-        send_chat_msg(
-            &mut poster_conn,
-            None,
-            &format!("hello @{first_id} @{second_id}"),
-        )
-        .await,
-    );
-
-    // The post being recorded pushes once on its own, before either spawned
-    // delivery task has had a chance to record the budget's outcome; read
-    // after each push until one destination reads back refused rather than
-    // assuming the first push already announces it.
-    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
-    let exhausted_count = loop {
-        let (_, seq, needs_user) = next_chat_changed(&mut approver).await;
-        assert_eq!(seq, posted.seq);
-        assert!(!needs_user);
-        let read = expect_chat_messages(read_chat_msg(&mut poster_conn, None, Some(0), None).await);
-        let states: Vec<&str> = [&first_id, &second_id]
-            .iter()
-            .map(|id| delivery_state_for(&read.messages, posted.seq, id))
-            .collect();
-        let count = states
-            .iter()
-            .filter(|state| **state == "undelivered_exhausted")
-            .count();
-        if count > 0 {
-            break count;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for a chat_changed push announcing the budget-refused \
-             destination, got {states:?}"
-        );
-    };
-    assert_eq!(
-        exhausted_count, 1,
-        "exactly one destination must be refused by the budget"
-    );
 }
 
 #[tokio::test]
@@ -2739,9 +2510,6 @@ async fn a_room_row_appears_in_the_listing_before_any_post_or_read_and_before_th
     register_approver(&mut approver).await;
     let mut opener = h.connect().await;
 
-    // held_destination_input's ready_hold_ms (10s) outlives this test's own
-    // 5s poll budget, so the window is never considered "held ready" by the
-    // intro watcher's own wait_for_any_held within that budget.
     let _held_id = open_held_destination(
         &h,
         &mut opener,
@@ -2929,6 +2697,7 @@ async fn silence_after_a_taken_post_is_independent_per_room() {
     let a_posted = expect_chat_posted(
         send_chat_msg(&mut a_client, None, &format!("hello @{a_recipient_id}")).await,
     );
+    take_post(&h, &a_recipient_id).await;
     let changed_room = next_chat_changed_needing_user_room(&mut approver).await;
     assert_eq!(changed_room, a_posted.room_id);
 
@@ -3206,7 +2975,7 @@ async fn two_daemon_instances_sharing_a_store_resolve_the_same_cwd_to_the_same_r
 }
 
 // A real, delivery-capable participant opened in a second workspace
-// (open_submit_child_window_with_composer_in_cwd) still gets a full
+// (open_marked_delivering_window) still gets a full
 // delivery inside its own room.
 #[tokio::test]
 async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() {
@@ -3215,25 +2984,13 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
     let second_dir = second_workspace_dir("chat-room-f0-composer-b");
     let mut b_client = h.connect().await;
 
-    let target_id = open_submit_child_window_with_composer_in_cwd(
+    let target_id = open_marked_delivering_window(
         &h,
         &mut b_client,
         &dir,
-        &second_dir,
         "chat-room-f0-target",
         "chat-room-f0-marker",
-        0,
-        0,
-        0,
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 50,
-            clear: "",
-            delivery_confirm_ms: 3000,
-            resend_max: 2,
-        },
-        0,
+        Some(&second_dir),
     )
     .await;
     let _poster_id = open_identified_participant_in_cwd(&h, &mut b_client, &second_dir).await;
@@ -3248,10 +3005,11 @@ async fn send_chat_delivers_to_a_composer_target_opened_in_a_second_workspace() 
         posted.room_id
     );
 
+    take_post(&h, &target_id).await;
     let state = wait_for_settled_delivery(&mut b_client, posted.seq, &target_id).await;
     assert_eq!(
         state, "delivered",
-        "an addressed, non-Unknown target in a second workspace is typed into and delivered"
+        "an addressed target in a second workspace is delivered once its CLI took the post"
     );
 }
 

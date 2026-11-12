@@ -74,10 +74,6 @@ use yagura_protocol::{
 /// PTY output. Kept short so ConPTY's 80-column wrapping cannot split it.
 const SEND_MESSAGE_MARKER: &str = "mcp-e2e-send;";
 
-/// The `[input]` table of [`composer_detection_config`]'s definition: only the
-/// probe a judged delivery needs.
-const COMPOSER_INPUT_TABLE: &str = "\n[input]\nprobe = \"x\"\n";
-
 /// Replaces `DaemonConfig.interrupt_bytes` so that interrupt delivery is
 /// observable: the default `0x03` becomes an interrupt (`CTRL_C_EVENT` under
 /// ConPTY, `SIGINT` from a Unix pty) rather than text in the scrollback.
@@ -127,24 +123,11 @@ fn detection_config(dir: &Path) -> DaemonConfig {
 }
 
 /// [`detection_config`] plus [`composer_section_toml`], under the same
-/// [`CONTROL_DETECTION_NAME`] file: for every test below whose window must
-/// actually take text the daemon writes (a `send_message` body or a
-/// `send_handoff` envelope).
-///
-/// The daemon writes text of its own only once the definition carries a
-/// `[composer]` table, and a judged delivery (`send_handoff`, and a terminated
-/// `send_message`) additionally needs the definition's probe and the child
-/// launched in composer-draw mode.
-/// The `not_written` test deliberately relies on [`detection_config`], whose
-/// definition has no such table.
+/// [`CONTROL_DETECTION_NAME`] file, for the windows that draw a composer.
 fn composer_detection_config(dir: &Path) -> DaemonConfig {
     std::fs::write(
         dir.join(format!("{CONTROL_DETECTION_NAME}.toml")),
-        idle_definition_toml(
-            CONTROL_DETECTION_NAME,
-            "",
-            &format!("{COMPOSER_INPUT_TABLE}{}", composer_section_toml()),
-        ),
+        idle_definition_toml(CONTROL_DETECTION_NAME, "", &composer_section_toml()),
     )
     .expect("write the composer detection definition file");
     DaemonConfig {
@@ -153,46 +136,6 @@ fn composer_detection_config(dir: &Path) -> DaemonConfig {
         approver_exe: Some(own_canonical_exe()),
         ..DaemonConfig::default()
     }
-}
-
-/// The literal prefix every handoff envelope starts with on the wire.
-const HANDOFF_ENVELOPE_PREFIX: &str = "[yagura handoff] ";
-
-/// What a composer-draw-mode fixture paints immediately before any body: an
-/// envelope prefix glued straight onto this is still an unsubmitted draft of
-/// it, not the line an accepted delivery's `output.line()` call writes on its
-/// own (see [`find_accepted_handoff_envelope`]).
-fn composer_draft_prefix() -> String {
-    format!("{COMPOSER_MARKER}{COMPOSER_SEPARATOR}")
-}
-
-/// The byte offset, in `text`, of an *accepted* handoff envelope's own
-/// [`HANDOFF_ENVELOPE_PREFIX`] -- one that is not immediately glued to
-/// [`composer_draft_prefix`] -- or `None` if every occurrence found is such a
-/// draft (including none at all).
-///
-/// A composer-draw-mode fixture paints the identical prefix, unmodified,
-/// right after its own marker while an envelope is still sitting unsubmitted
-/// in the composer; an occurrence checked only for presence would therefore
-/// stay true whether or not the daemon ever wrote (and pressed the submit
-/// key for) the envelope. The distinguishing test is where the prefix
-/// starts, not merely that it occurs, so the accepted line's own occurrence
-/// -- which starts at the very beginning of what `output.line()` wrote,
-/// immediately after that call's own screen-erase sequence -- is never
-/// glued to the draft's marker+separator.
-fn find_accepted_handoff_envelope(text: &str) -> Option<usize> {
-    let draft_prefix = composer_draft_prefix();
-    yagura_test_support::scan::find_accepted_marker(text, HANDOFF_ENVELOPE_PREFIX, &draft_prefix)
-}
-
-/// The handoff envelope's JSON body from `scrollback`, taken from the
-/// *accepted* occurrence [`find_accepted_handoff_envelope`] locates rather
-/// than the first occurrence in the text (which, in composer-draw mode, may
-/// still be an unsubmitted draft whose escape-sequence-laden repaint would
-/// fail to parse, or simply be the wrong copy of the value).
-fn extract_accepted_handoff_envelope_json(scrollback: &[u8]) -> serde_json::Value {
-    let draft_prefix = composer_draft_prefix();
-    yagura_test_support::scan::extract_accepted_handoff_envelope_json(scrollback, &draft_prefix)
 }
 
 /// A playbook that auto-approves exactly `tools`, named by their external MCP
@@ -456,7 +399,7 @@ impl DaemonHarness {
 
     /// [`DaemonHarness::open_idle_window`] in composer-draw mode, opened the way a
     /// profile that declares delivery with no way to wake its CLI would open it: a
-    /// handoff reaches it typed while it waits. A raw argv window is handed nothing.
+    /// handoff waits in its inbox. A raw argv window is handed nothing.
     async fn open_idle_delivering_composer_window<T: DaemonTransport>(
         &self,
         transport: &T,
@@ -496,30 +439,6 @@ impl DaemonHarness {
             .await;
         self.await_status(transport, &window_id, "idle").await;
         window_id
-    }
-
-    /// Polls a window's PTY scrollback until an *accepted* handoff envelope
-    /// appears: see [`find_accepted_handoff_envelope`] for what
-    /// distinguishes that from a composer-draw-mode child's still-unsubmitted
-    /// draft of the same envelope, which paints the identical
-    /// `[yagura handoff] ` prefix and would otherwise make this wait
-    /// vacuously true whether or not the daemon ever wrote the envelope.
-    async fn await_accepted_handoff_envelope(&self, window_id: &str) {
-        let deadline = tokio::time::Instant::now() + HANG_GUARD;
-        loop {
-            let tail = self.window_text(window_id).await;
-            let text = String::from_utf8_lossy(&tail).into_owned();
-            if find_accepted_handoff_envelope(&text).is_some() {
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "timed out waiting for an accepted handoff envelope in window \
-                     {window_id}'s output; tail so far: {text:?}"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
     }
 
     /// Shuts the daemon down over IPC and asserts that every window's child
@@ -786,85 +705,6 @@ async fn get_window_status_answers_for_a_live_window_id_and_always_reports_since
         status.get("since_ms").and_then(|v| v.as_u64()).is_some(),
         "since_ms must always be present as a number, got {:?}",
         status.get("since_ms")
-    );
-
-    harness.shutdown_and_assert_children_exited().await;
-}
-
-#[tokio::test]
-async fn send_message_immediate_delivers_the_text_to_the_child_process() {
-    // send_message goes through the same status/approval gate as
-    // interrupt_window / close_window, so the target must be driven to
-    // `idle` and a policy must approve it first (neither of which the
-    // initial window, alone, provides).
-    let dir = unique_temp_dir(FIXTURE_PREFIX, "send-immediate");
-    // The daemon writes its own text only into a window whose definition
-    // declares a composer, so the target's definition carries one.
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["send_message"])),
-        ..composer_detection_config(&dir)
-    };
-    let harness = DaemonHarness::start_with_config("send-immediate", config).await;
-    let transport = harness.transport();
-    harness.wait_until_ready(&transport).await;
-    let window_id = harness.open_idle_window(&transport).await;
-
-    let sent = send_message(
-        &transport,
-        SendMessageArgs {
-            window_id: Some(window_id.clone()),
-            text: Some(SEND_MESSAGE_MARKER.to_string()),
-            mode: Some("immediate".to_string()),
-        },
-    )
-    .await
-    .expect("send_message must succeed for a live window");
-    assert_eq!(
-        sent.get("ok").and_then(|v| v.as_bool()),
-        Some(true),
-        "a successful send_message must report ok:true (a text_sent reply)"
-    );
-
-    // The success flag alone would pass against a daemon that swallowed the
-    // text, so require the bytes to actually surface in the child's output.
-    harness
-        .await_child_output(&window_id, SEND_MESSAGE_MARKER.as_bytes())
-        .await;
-
-    harness.shutdown_and_assert_children_exited().await;
-}
-
-/// The target window's definition resolves and reaches `idle`, but
-/// carries no `[composer]` section at all, so the daemon declines to write
-/// its own text into it. The only property under test is that the daemon
-/// must not report success for a line it never wrote; the specific error
-/// code this takes is `tools.rs`'s contract, not this file's.
-#[tokio::test]
-async fn send_message_with_a_terminated_line_to_an_unobservable_window_does_not_report_success() {
-    let dir = unique_temp_dir(FIXTURE_PREFIX, "send-not-written");
-    let config = DaemonConfig {
-        approval_policy: Some(policy(&["send_message"])),
-        ..detection_config(&dir)
-    };
-    let harness = DaemonHarness::start_with_config("send-not-written", config).await;
-    let transport = harness.transport();
-    harness.wait_until_ready(&transport).await;
-    let window_id = harness.open_idle_window(&transport).await;
-
-    let result = send_message(
-        &transport,
-        SendMessageArgs {
-            window_id: Some(window_id.clone()),
-            text: Some("mcp-e2e-not-written;\n".to_string()),
-            mode: Some("immediate".to_string()),
-        },
-    )
-    .await;
-    assert!(
-        result.is_err(),
-        "a send_message the daemon never wrote to (its target window's definition has no \
-         [composer] section, so it can never be observed) must not report success, got \
-         {result:?}"
     );
 
     harness.shutdown_and_assert_children_exited().await;
@@ -1673,8 +1513,6 @@ async fn a_transport_that_lost_its_connection_claims_its_window_again_on_the_nex
 #[tokio::test]
 async fn a_transport_whose_claim_the_daemon_refuses_keeps_working_as_an_external_client() {
     let dir = unique_temp_dir(FIXTURE_PREFIX, "refused-claim");
-    // `approval_config`'s settings over a definition that declares a
-    // composer: the daemon writes its own text into no other window.
     let config = DaemonConfig {
         approval_policy: Some(policy(&["send_message"])),
         approval_timeout_secs: 30,
@@ -1695,7 +1533,6 @@ async fn a_transport_whose_claim_the_daemon_refuses_keeps_working_as_an_external
             SendMessageArgs {
                 window_id: Some(window_id.clone()),
                 text: Some(SEND_MESSAGE_MARKER.to_string()),
-                mode: None,
             },
         )
         .await
@@ -1703,10 +1540,10 @@ async fn a_transport_whose_claim_the_daemon_refuses_keeps_working_as_an_external
             panic!("call {call}: a refused claim must not fail the call itself, got {err:?}")
         });
 
-        assert_eq!(
-            sent.get("ok").and_then(|value| value.as_bool()),
-            Some(true),
-            "call {call}: the policy approves this tool, so it must succeed"
+        assert!(
+            sent.get("state").and_then(|value| value.as_str()).is_some(),
+            "call {call}: the policy approves this tool, so it must be answered with what \
+             became of the envelope, got {sent}"
         );
         assert_eq!(
             sent.get("requester").and_then(|value| value.as_str()),
@@ -1723,10 +1560,6 @@ async fn a_transport_whose_claim_the_daemon_refuses_keeps_working_as_an_external
         );
     }
 
-    harness
-        .await_child_output(&window_id, SEND_MESSAGE_MARKER.as_bytes())
-        .await;
-
     harness.shutdown_and_assert_children_exited().await;
 }
 
@@ -1735,7 +1568,7 @@ async fn a_transport_whose_claim_the_daemon_refuses_keeps_working_as_an_external
 // =====================================================================
 
 #[tokio::test]
-async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved() {
+async fn send_handoff_puts_the_envelope_in_an_existing_windows_inbox_when_approved() {
     let dir = unique_temp_dir(FIXTURE_PREFIX, "handoff-window");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["send_handoff"])),
@@ -1775,15 +1608,19 @@ async fn send_handoff_writes_the_envelope_into_an_existing_window_when_approved(
     );
     assert_eq!(
         result.get("state").and_then(|value| value.as_str()),
-        Some("delivered"),
-        "the reply must carry the delivery the daemon reported, got {result}"
+        Some("queued"),
+        "with no wait registered the envelope waits, got {result}"
     );
-
-    harness.await_accepted_handoff_envelope(&window_id).await;
-    let scrollback = harness.window_text(&window_id).await;
-    let envelope = extract_accepted_handoff_envelope_json(&scrollback);
-    assert_eq!(envelope["reference"], "src/foo.rs");
-    assert_eq!(envelope["note"], "Please take a look.");
+    assert_eq!(
+        harness
+            .registry
+            .get(&window_id)
+            .expect("the window is registered")
+            .inbox()
+            .pending_count(),
+        1,
+        "the envelope waits in the window's inbox"
+    );
 
     harness.shutdown_and_assert_children_exited().await;
 }

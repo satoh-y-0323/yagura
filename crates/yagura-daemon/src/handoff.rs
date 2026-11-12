@@ -6,14 +6,10 @@
 //! No I/O and no policy live here, so the envelope's exact bytes can be
 //! checked without a window, a connection or a clock.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use tokio::time::Instant;
 use yagura_protocol::{HANDOFF_ENVELOPE_MAX_BYTES, WindowStatus};
-
-use crate::waiter::StatusAt;
 
 /// The fixed marker every envelope opens with, so a receiving CLI can tell a
 /// handoff apart from something a human typed.
@@ -388,8 +384,6 @@ pub enum WaitingWake {
     Wait,
     /// The daemon runs the CLI's own command.
     Command,
-    /// The daemon types it into the composer.
-    Typed,
     /// Nothing wakes the CLI: it reads at its own doors only.
     Doors,
     /// The window declares no delivery at all.
@@ -458,10 +452,6 @@ pub fn waiting_note(facts: WaitingFacts) -> Option<String> {
                  first turn."
             }
             WaitingWake::Command => "It arrives at the CLI's next turn.",
-            WaitingWake::Typed => {
-                "The daemon types it into the window's composer once the window waits for \
-                 input."
-            }
             WaitingWake::Doors => {
                 "Nothing wakes the window's CLI; it arrives at the CLI's next turn, such as \
                  when the user next sends a prompt in this window."
@@ -511,183 +501,6 @@ pub const READY_STATUSES: &[WindowStatus] = &[WindowStatus::WaitingInput, Window
 #[must_use]
 pub fn is_ready(status: WindowStatus) -> bool {
     READY_STATUSES.contains(&status)
-}
-
-/// The statuses that count as a reaction to a handoff that was written and
-/// submitted: the receiver stopped accepting input and started doing
-/// something with what it was given.
-///
-/// This is the complement of [`READY_STATUSES`] minus `Unknown` (a window
-/// nothing can be told about neither confirms nor refutes a delivery) and
-/// `Exited` (a different ending, not a reaction).
-///
-/// # Examples
-///
-/// ```
-/// use yagura_daemon::handoff::DELIVERY_REACTION_STATUSES;
-/// use yagura_protocol::WindowStatus;
-///
-/// assert!(DELIVERY_REACTION_STATUSES.contains(&WindowStatus::Running));
-/// assert!(!DELIVERY_REACTION_STATUSES.contains(&WindowStatus::Exited));
-/// ```
-pub const DELIVERY_REACTION_STATUSES: &[WindowStatus] = &[
-    WindowStatus::Running,
-    WindowStatus::WaitingApproval,
-    WindowStatus::Interrupted,
-];
-
-/// Whether `status` is one of [`DELIVERY_REACTION_STATUSES`].
-///
-/// Every status is named, with no `_` arm, so an eighth status added later
-/// has to be classified here rather than silently counting as no reaction.
-///
-/// # Examples
-///
-/// ```
-/// use yagura_daemon::handoff::{is_ready, reacts_to_delivery};
-/// use yagura_protocol::WindowStatus;
-///
-/// assert!(reacts_to_delivery(WindowStatus::Running));
-/// assert!(!reacts_to_delivery(WindowStatus::Unknown));
-/// // Ready and reacting are disjoint: a status is at most one of them.
-/// assert!(!(is_ready(WindowStatus::Idle) && reacts_to_delivery(WindowStatus::Idle)));
-/// ```
-#[must_use]
-pub fn reacts_to_delivery(status: WindowStatus) -> bool {
-    match status {
-        WindowStatus::Running | WindowStatus::WaitingApproval | WindowStatus::Interrupted => true,
-        WindowStatus::WaitingInput
-        | WindowStatus::Idle
-        | WindowStatus::Exited
-        | WindowStatus::Unknown => false,
-    }
-}
-
-/// What a window's published status pair says about its startup phase.
-///
-/// `Left` means the window has once held a status that accepts input for the
-/// whole hold, so nothing about its startup phase is pending any more.
-/// `Building` means the window is in such a status right now but has not held
-/// it long enough yet, so a caller may wait for the hold to complete.
-/// `Absent` means the window's confirmed status is known -- it simply is not
-/// the kind of status this evidence accumulates from, which is why a caller
-/// may not read `Absent` as "undetectable" (`Unknown` is refused by the
-/// status gate before it ever reaches here).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartupEvidence {
-    /// The window has left its startup phase.
-    Left,
-    /// The window is accumulating the hold right now.
-    Building,
-    /// The current status contributes nothing towards the hold.
-    Absent,
-}
-
-/// One window's record of whether it has left its startup phase: a prompt a
-/// CLI paints while it is still starting up is indistinguishable from one it
-/// paints when it is ready, so the daemon asks the prompt to *stay*.
-///
-/// Monotone: a window that has once held a status that accepts input for
-/// `hold` has left its startup phase, and nothing it does afterwards takes
-/// that back.
-///
-/// What the latch is read for is that a caller may skip the wait -- never
-/// that a caller must refuse to write.
-///
-/// A zero `hold` is latched from construction, which is what makes a
-/// definition without `ready_hold_ms` behave exactly as it did before this
-/// existed.
-///
-/// # Examples
-///
-/// ```
-/// use std::time::Duration;
-/// use tokio::time::Instant;
-/// use yagura_daemon::handoff::{ReadyHoldLatch, StartupEvidence};
-/// use yagura_daemon::waiter::StatusAt;
-/// use yagura_protocol::DetectedStatus;
-///
-/// let latch = ReadyHoldLatch::new(Duration::ZERO);
-/// let now = Instant::now();
-/// let observed = StatusAt {
-///     status: DetectedStatus::Running,
-///     changed_at: now,
-///     evidence_since: now,
-///     generation: 1,
-/// };
-/// assert_eq!(latch.observe(observed, now), StartupEvidence::Left);
-/// ```
-#[derive(Debug)]
-pub struct ReadyHoldLatch {
-    hold: Duration,
-    latched: AtomicBool,
-}
-
-impl ReadyHoldLatch {
-    /// A latch that asks a status accepting input to hold for `hold`.
-    #[must_use]
-    pub fn new(hold: Duration) -> Self {
-        Self {
-            hold,
-            latched: AtomicBool::new(hold == Duration::ZERO),
-        }
-    }
-
-    /// Whether this window has already been shown to be past its startup
-    /// phase.
-    #[must_use]
-    pub fn is_latched(&self) -> bool {
-        self.latched.load(Ordering::SeqCst)
-    }
-
-    /// Evaluates one observed pair, latching when it proves the hold was
-    /// held.
-    ///
-    /// The caller hands in the pair it observed and the instant it observed
-    /// it, so this holds no clock of its own.
-    pub fn observe(&self, observed: StatusAt, now: Instant) -> StartupEvidence {
-        if self.is_latched() {
-            return StartupEvidence::Left;
-        }
-        if !is_ready(observed.status.status()) {
-            return StartupEvidence::Absent;
-        }
-        if now.saturating_duration_since(observed.changed_at) >= self.hold {
-            self.latch();
-            return StartupEvidence::Left;
-        }
-        StartupEvidence::Building
-    }
-
-    /// Records that this window is past its startup phase, for a caller that
-    /// waited the hold out itself -- the wait is the proof.
-    pub fn latch(&self) {
-        self.latched.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Whether a `hold` can ever be satisfied inside a readiness wait bounded by
-/// `timeout`. Equality is *not* reachable: the wait ends at the deadline, so
-/// a hold that completes exactly then never settles it.
-///
-/// # Examples
-///
-/// ```
-/// use std::time::Duration;
-/// use yagura_daemon::handoff::hold_is_reachable_within;
-///
-/// assert!(hold_is_reachable_within(
-///     Duration::from_millis(1_000),
-///     Duration::from_millis(2_000)
-/// ));
-/// assert!(!hold_is_reachable_within(
-///     Duration::from_millis(2_000),
-///     Duration::from_millis(2_000)
-/// ));
-/// ```
-#[must_use]
-pub fn hold_is_reachable_within(hold: Duration, timeout: Duration) -> bool {
-    hold < timeout
 }
 
 /// The fixed marker every task notice starts with.

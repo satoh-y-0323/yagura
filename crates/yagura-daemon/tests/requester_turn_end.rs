@@ -17,19 +17,16 @@
 
 use crate::common;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
 use tokio::io::AsyncReadExt;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, call_list_windows, decide,
-    expect_approval_requested, expect_error, identify, let_every_clock_bound_run_out, policy,
-    read_approver_reply, read_response, register_approver, send, unique_temp_dir,
-    wait_until_input_log_contains, wait_until_status, write_submit_definition,
+    Harness, approver_base_config, call_list_windows, decide, expect_approval_requested,
+    expect_error, identify, let_every_clock_bound_run_out, policy, read_approver_reply,
+    read_response, register_approver, send, unique_temp_dir, wait_until_status,
 };
 use yagura_daemon::DaemonConfig;
-use yagura_daemon::window::WindowEntry;
 use yagura_protocol::{ClientMessage, DaemonMessage, ReportOutcome, WindowStatus, WithdrawReason};
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
@@ -91,12 +88,7 @@ impl Step {
 fn config(dir: &Path) -> DaemonConfig {
     DaemonConfig {
         detection_dir: Some(dir.to_path_buf()),
-        approval_policy: Some(policy(&[
-            "send_message",
-            "send_keys",
-            "send_handoff",
-            "close_window",
-        ])),
+        approval_policy: Some(policy(&["send_message", "send_handoff", "close_window"])),
         max_waiters_per_conn: 16,
         wait_timeout_max_secs: LONG_WAIT_SEC,
         ..approver_base_config()
@@ -164,18 +156,9 @@ struct Stage {
     observer: Connection,
     requester_window: String,
     receiver: String,
-    input_log: PathBuf,
-    resume: PathBuf,
 }
 
 impl Stage {
-    fn receiver_entry(&self) -> Arc<WindowEntry> {
-        self.h
-            .registry
-            .get(&self.receiver)
-            .expect("the receiver must exist")
-    }
-
     /// Takes the requester window to `step` and waits for the daemon to
     /// confirm it.
     async fn drive(&mut self, step: Step) {
@@ -211,8 +194,8 @@ impl Stage {
 }
 
 /// Builds the daemon, a requester window whose definition carries `requests`
-/// (in `WaitingInput`), a receiver that stops reading once a body arrives,
-/// and a connection identified as the requester.
+/// (in `WaitingInput`), a receiver window, and a connection identified as the
+/// requester.
 async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
     let dir = unique_temp_dir(tag);
     let h = Harness::start(tag, config(&dir)).await;
@@ -226,39 +209,8 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
         .await;
     wait_until_status(&mut observer, &requester_window, WindowStatus::WaitingInput).await;
 
-    let input_log = dir.join("receiver-input.log");
-    let resume = dir.join("resume");
-    write_submit_definition(
-        &dir,
-        "receiver",
-        "receiver-marker",
-        SubmitDefinitionInput {
-            bracketed_paste: true,
-            ready_hold_ms: 0,
-            submit_delay_ms: 120,
-            clear: "\\u0015",
-            delivery_confirm_ms: 2000,
-            resend_max: 0,
-        },
-    );
-    let mut command = process::submit_child_command_with_composer("receiver-marker", 0, 0, 0, 0);
-    command.push(String::new()); // fold_placeholder: none
-    command.push(format!(
-        "stall-until|{}|",
-        resume
-            .to_str()
-            .expect("the resume path must be valid UTF-8")
-    ));
-    command.push(String::new()); // overlay: none
-    command.push(String::new()); // overlay_heading
-    command.push(
-        input_log
-            .to_str()
-            .expect("the input log path must be valid UTF-8")
-            .to_string(),
-    );
-    let receiver = h.open_delivering(command, Some("receiver")).await;
-    wait_until_status(&mut observer, &receiver, WindowStatus::WaitingInput).await;
+    common::write_control_definition(&dir);
+    let receiver = h.open_idle_window(&mut observer).await;
 
     let mut requester = h.connect().await;
     identify(&mut requester, &requester_window).await;
@@ -268,8 +220,6 @@ async fn stage(tag: &str, requests: Option<&str>) -> (Stage, Connection) {
             observer,
             requester_window,
             receiver,
-            input_log,
-            resume,
         },
         requester,
     )
@@ -344,28 +294,6 @@ async fn expect_ended_empty_and_no_second_answer(requester: &mut Connection) {
         other => panic!("expected an empty reports answer, got {other:?}"),
     }
     expect_pong(requester).await;
-}
-
-/// The same, as a window-addressed handoff.
-async fn start_handoff(stage: &Stage, requester: &mut Connection) {
-    send(
-        requester,
-        &ClientMessage::SendHandoff {
-            window_id: Some(stage.receiver.clone()),
-            profile: None,
-            cwd: None,
-            name: None,
-            model: None,
-            effort: None,
-            reference: "src/lib.rs".to_string(),
-            note: "please look".to_string(),
-        },
-    )
-    .await;
-    stage
-        .h
-        .wait_for_scrollback(&stage.receiver, b"STALL-BEGAN")
-        .await;
 }
 
 async fn expect_pong(requester: &mut Connection) {
@@ -475,43 +403,6 @@ async fn a_wait_for_report_ends_empty_when_its_requester_window_is_closed_after_
 
     stage.drive_all(&[Step::Running, Step::Close]).await;
     expect_ended_empty_and_no_second_answer(&mut requester).await;
-}
-
-/// A handoff the receiver's CLI is already carrying is not taken back when its
-/// requester's turn ends: the typing finishes, so the body is submitted and
-/// never cleared from the composer, and the handoff is answered once. The call
-/// started no attempt of its own (the receiver wakes by none), so the answer
-/// says the envelope waits: never that it was not delivered.
-#[tokio::test]
-async fn a_carried_handoff_is_not_taken_back_when_its_requester_goes_from_running_to_waiting_input()
-{
-    let (mut stage, mut requester) = stage("turn-end-handoff", Some(&abandoned_table(true))).await;
-    start_handoff(&stage, &mut requester).await;
-
-    stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
-    std::fs::write(&stage.resume, b"").expect("let the receiver read on");
-    let answer = read_response(&mut requester).await;
-    match &answer {
-        DaemonMessage::HandoffSent {
-            window_id, opened, ..
-        } => {
-            assert_eq!(*window_id, stage.receiver);
-            assert!(!opened, "the handoff was addressed to an open window");
-        }
-        other => panic!("expected handoff_sent with the carrier's result, got {other:?}"),
-    }
-    assert_eq!(
-        crate::send_message_lifecycle::state_of(&answer).as_deref(),
-        Some("queued"),
-        "a carried handoff is never answered undelivered: {answer:?}"
-    );
-    let read = wait_until_input_log_contains(&stage.input_log, b"\r").await;
-    assert!(
-        !read.contains(&0x15),
-        "a carried handoff must not be cleared from the composer: {read:?}"
-    );
-    assert_eq!(stage.receiver_entry().inbox().pending_count(), 0);
-    expect_pong(&mut requester).await;
 }
 
 /// A `wait_for_status` the requester dropped at the end of its turn ends then,

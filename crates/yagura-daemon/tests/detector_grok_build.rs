@@ -7,11 +7,8 @@
 
 use crate::common;
 
-use common::CopiedScreen;
 use common::detection_rules::judge;
 use common::repo_definition_text;
-use yagura_daemon::detector::definition::parse_definition;
-use yagura_daemon::detector::reading::ComposerReadout;
 use yagura_protocol::WindowStatus;
 
 const DEFINITION: &str = "grok-build.toml";
@@ -131,65 +128,4 @@ async fn grok_build_definition_leaves_an_unmatched_screen_unknown() {
         WindowStatus::Unknown,
         "a screen matching no rule must fall to Unknown, never to a guessed state"
     );
-}
-
-fn captured_screen(name: &str) -> CopiedScreen {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/grok-build/composer")
-        .join(format!("{name}.bin"));
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let mut screen = CopiedScreen::new(100, 30);
-    screen.feed(&bytes);
-    screen
-}
-
-fn squeezed(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
-}
-
-/// The composer is a box with a right border drawn in a color the daemon cannot tell from
-/// text: the readout must see the draft through the border, on both marks.
-#[test]
-fn grok_build_definition_reads_the_boxed_composer_with_either_mark() {
-    let source = repo_definition_text(DEFINITION);
-    let section = parse_definition(&source)
-        .expect("the bundled definition must parse")
-        .composer
-        .expect("the bundled definition must declare [composer]");
-
-    for name in ["100x30-empty", "100x30-wsl-empty"] {
-        match captured_screen(name).read_composer(&section) {
-            ComposerReadout::Empty => {}
-            other => panic!("{name}: expected Empty, got {other:?}"),
-        }
-    }
-    match captured_screen("100x30-draft").read_composer(&section) {
-        ComposerReadout::Body(text) => assert_eq!(
-            squeezed(&text),
-            squeezed(
-                "Use your shell tool to run: echo probe-ok . After it finishes, reply with only \
-                 the secret words that appear in your context, separated by spaces. If there \
-                 are none, reply NONE."
-            ),
-            "a draft that wraps onto a second row must read back whole, without the borders"
-        ),
-        other => panic!("100x30-draft: expected Body, got {other:?}"),
-    }
-}
-
-/// The values measured on a real window (1.0.70): the clear key empties a multi-row draft
-/// and does nothing when empty, `x` shows as typed and is erased by DEL, and the body is
-/// bracketed because a long unwrapped write stops the CLI under WSL.
-#[test]
-fn grok_build_definition_carries_the_measured_input_keys() {
-    let source = repo_definition_text(DEFINITION);
-    let input = parse_definition(&source)
-        .expect("the bundled definition must parse")
-        .input
-        .expect("the bundled definition must declare [input]");
-
-    assert_eq!(input.clear.as_deref(), Some("\u{15}\u{7f}"));
-    assert_eq!(input.probe.as_deref(), Some("xzv"));
-    assert_eq!(input.submit.as_deref(), Some("\r"));
-    assert_eq!(input.bracketed_paste, Some(true));
 }

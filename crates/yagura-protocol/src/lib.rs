@@ -215,6 +215,8 @@
 //! revision 33 and `deliver_done` are answered with nothing to print, for a door
 //! built before this revision. A caller establishes [`DOOR_READ_MIN_REVISION`]
 //! before sending `door_read` or `deliver_printed`.
+//! The same revision drops `send_keys` and its answer `keys_sent`: the daemon
+//! no longer writes into a window's input on an agent's behalf.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -273,9 +275,6 @@ pub const fn window_size_within_limit(cols: u16, rows: u16) -> bool {
 /// An older daemon refuses both by name, so a caller establishes this
 /// revision before sending either.
 pub const CHAT_ROOM_REMOVAL_MIN_REVISION: u32 = 26;
-
-/// The first wire revision that carries [`ClientMessage::SendKeys`].
-pub const SEND_KEYS_MIN_REVISION: u32 = 6;
 
 /// The wire revision attributed to a peer that reports none.
 ///
@@ -1150,9 +1149,6 @@ pub const REPORT_SUMMARY_MAX_BYTES: usize = 1024;
 /// written.
 pub const REPORT_PATH_MAX_BYTES: usize = 512;
 
-/// Upper bound on the number of named keys in one `send_keys` request.
-pub const SEND_KEYS_MAX_KEYS: usize = 16;
-
 /// Why a handoff's target arguments were rejected.
 ///
 /// The daemon collapses every reason into a single `invalid_argument` code on
@@ -1374,7 +1370,7 @@ pub enum TaskInstructionError {
     /// The value contains a character an instruction may not carry: the same
     /// set [`WindowNameError::ForbiddenChar`]'s documentation lists, except
     /// `\n` and `\t` (see [`is_forbidden_instruction_char`]). Unlike
-    /// [`validate_send_text_body`], `\r` stays forbidden here: a caller
+    /// [`validate_message_text`], `\r` stays forbidden here: a caller
     /// normalizes `\r` to `\n` before this validator ever sees the value.
     ///
     /// The character itself is reported as a code point and never echoed
@@ -1511,22 +1507,19 @@ pub const TICKET_RESULT_MAX_BYTES: usize = 4 * 1024;
 pub const MILESTONE_DESCRIPTION_MAX_BYTES: usize = 2 * 1024;
 
 /// Same set as [`is_forbidden_label_char`], except `\n` and `\r`: a
-/// `send_message` body uses them as its own submit marker (a single
-/// trailing terminator), so they are not control characters this rule
-/// rejects outright -- whether one is *placed* legally is
-/// [`validate_send_text_body`]'s separate embedded-line-break check.
+/// `send_message` text goes into an envelope rather than being typed, so it
+/// may run over several lines.
 fn is_forbidden_send_text_char(ch: char) -> bool {
     !matches!(ch, '\n' | '\r') && is_forbidden_label_char(ch)
 }
 
-/// Why a `send_message` body was rejected.
+/// Why a `send_message` text was rejected.
 ///
 /// A distinct type from [`HandoffTextError`] because the two rules differ:
-/// a `send_message` body's size budget is the daemon's own `send_text` limit
+/// a `send_message` text's size budget is the daemon's own `send_text` limit
 /// rather than one of this crate's text-field byte budgets, and an empty
-/// body is a valid (no-op) send, so this type carries only the violations
-/// the two rules do share, plus the one below that is unique to a body
-/// written straight into a terminal.
+/// text is a valid send, so this type carries only the violation the two
+/// rules share.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SendTextError {
     /// The value contains a character forbidden in a `send_message` body:
@@ -1543,99 +1536,6 @@ pub enum SendTextError {
         /// The offending character.
         ch: char,
     },
-    /// The value carries a `\r` or `\n` that is not its single trailing
-    /// terminator: the daemon writes a `send_message` body straight through
-    /// with no per-line confirmation, so it cannot tell whether a body with
-    /// an embedded line break reached the receiver as more than one message.
-    /// Rather than report a false success, the body is rejected outright; a
-    /// caller with several lines to deliver sends them one at a time, or
-    /// writes them into a plan task's `instruction` (see
-    /// [`validate_task_instruction`]).
-    #[error(
-        "send_message text contains a line break at byte offset {at} that is not the body's single trailing terminator"
-    )]
-    EmbeddedLineBreak {
-        /// Byte offset of the first line break that is not the body's
-        /// single trailing terminator.
-        at: usize,
-    },
-}
-
-/// A named control key that may be injected into a window.
-///
-/// The set is deliberately closed: callers cannot use this operation to send
-/// arbitrary bytes or terminal escape sequences. `Unknown` is a serde
-/// catch-all so the daemon can return `invalid_argument` for a newer key name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ControlKey {
-    Escape,
-    Backspace,
-    CtrlU,
-    Enter,
-    Up,
-    Down,
-    #[serde(other)]
-    Unknown,
-}
-
-impl ControlKey {
-    /// The stable wire spelling used in approval text and validation errors.
-    #[must_use]
-    pub const fn wire_name(self) -> &'static str {
-        match self {
-            Self::Escape => "escape",
-            Self::Backspace => "backspace",
-            Self::CtrlU => "ctrl_u",
-            Self::Enter => "enter",
-            Self::Up => "up",
-            Self::Down => "down",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-/// Why a `send_keys` request was rejected before its approval gate.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SendKeysError {
-    #[error("keys must contain at least one key")]
-    Empty,
-    #[error("keys must contain at most {max} keys", max = SEND_KEYS_MAX_KEYS)]
-    TooMany,
-    #[error("escape must be the last key")]
-    EscapeMustBeLast,
-    #[error("unknown control key")]
-    Unknown,
-}
-
-/// Validates a named-key sequence for `send_keys`.
-///
-/// The bytes a key becomes depend on the window's terminal modes at the
-/// moment it is written, so they are the daemon's to produce, not this
-/// crate's.
-///
-/// # Errors
-///
-/// [`SendKeysError::Empty`] for no keys, [`SendKeysError::TooMany`] for more
-/// than [`SEND_KEYS_MAX_KEYS`], [`SendKeysError::EscapeMustBeLast`] for an
-/// `Escape` before the last key, and [`SendKeysError::Unknown`] for a key
-/// name this build does not know.
-pub fn validate_control_keys(keys: &[ControlKey]) -> Result<(), SendKeysError> {
-    if keys.is_empty() {
-        return Err(SendKeysError::Empty);
-    }
-    if keys.len() > SEND_KEYS_MAX_KEYS {
-        return Err(SendKeysError::TooMany);
-    }
-    for (index, key) in keys.iter().enumerate() {
-        if *key == ControlKey::Escape && index + 1 != keys.len() {
-            return Err(SendKeysError::EscapeMustBeLast);
-        }
-        if *key == ControlKey::Unknown {
-            return Err(SendKeysError::Unknown);
-        }
-    }
-    Ok(())
 }
 
 /// The most bytes one [`ClientMessage::Text`] may carry. Committed text is
@@ -1806,66 +1706,6 @@ pub struct WheelInput {
     /// The modifiers held.
     #[serde(default)]
     pub mods: Modifiers,
-}
-
-/// The byte length of `value`'s single trailing terminator, if it has one:
-/// `2` for a trailing `"\r\n"`, `1` for a trailing lone `"\n"` or `"\r"`, `0`
-/// otherwise. The single place [`validate_send_text_body`] decides which
-/// `\r` / `\n` in a body is "the" terminator rather than an embedded line
-/// break.
-fn trailing_terminator_len(value: &str) -> usize {
-    if value.ends_with("\r\n") {
-        2
-    } else if value.ends_with('\n') || value.ends_with('\r') {
-        1
-    } else {
-        0
-    }
-}
-
-/// Validates a `send_message` body against the same forbidden-character rule
-/// as [`validate_handoff_text`] (except that `\n` and `\r` are allowed, see
-/// [`is_forbidden_send_text_char`]), plus the rule that a `\r` or `\n` may
-/// appear only once, at the very end, as the body's own submit marker:
-/// a body's other control characters (in particular `ESC`) could
-/// redraw the receiving window's screen and spoof the daemon's own read of
-/// it, which is the vulnerability the forbidden-character rule closes.
-///
-/// # Errors
-///
-/// Returns [`SendTextError::ForbiddenChar`] for the first character outside
-/// the allowed set, or [`SendTextError::EmbeddedLineBreak`] for the first
-/// `\r` / `\n` that is not the body's single trailing terminator.
-///
-/// # Examples
-///
-/// ```
-/// use yagura_protocol::{SendTextError, validate_send_text_body};
-///
-/// assert_eq!(validate_send_text_body("run the tests\n"), Ok(()));
-/// assert!(matches!(
-///     validate_send_text_body("first\rsecond\r"),
-///     Err(SendTextError::EmbeddedLineBreak { at: 5 })
-/// ));
-/// assert!(matches!(
-///     validate_send_text_body("\x1b[2Jerased"),
-///     Err(SendTextError::ForbiddenChar { at: 0, .. })
-/// ));
-/// ```
-pub fn validate_send_text_body(value: &str) -> Result<(), SendTextError> {
-    let terminator_start = value.len() - trailing_terminator_len(value);
-    for (at, ch) in value.char_indices() {
-        if ch == '\n' || ch == '\r' {
-            if at < terminator_start {
-                return Err(SendTextError::EmbeddedLineBreak { at });
-            }
-            continue;
-        }
-        if is_forbidden_send_text_char(ch) {
-            return Err(SendTextError::ForbiddenChar { at, ch });
-        }
-    }
-    Ok(())
 }
 
 /// Validates the text of a `send_message` envelope against the same
@@ -2267,7 +2107,7 @@ pub struct ApprovalRequest {
     pub request_id: String,
     /// The gated operation's external name (`"open_window"`,
     /// `"close_window"`, `"interrupt_window"`, `"send_message"`,
-    /// `"send_keys"`, `"send_handoff"`, `"send_chat"` or `"broadcast_chat"`).
+    /// `"send_handoff"`, `"send_chat"` or `"broadcast_chat"`).
     pub tool: String,
     /// Who asked.
     pub requester: ApprovalRequester,
@@ -2284,8 +2124,7 @@ pub struct ApprovalRequest {
     /// when known, `for:`); a `send_handoff` that opens a window carries
     /// those lines followed by its envelope. Omitted from the wire (rather than
     /// sent as `null`) for `close_window` and `interrupt_window`, which carry
-    /// no body. The submit key and any paste framing the daemon adds when
-    /// writing it are not part of this text.
+    /// no body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// The chat room a post would go to. `Some` only for `send_chat` /
@@ -2391,9 +2230,8 @@ pub enum WithdrawReason {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
     /// The CLI was handed the envelope: one of its doors printed it, its own
-    /// wake command took it, the daemon typed it and pressed the submit key,
-    /// or the window a handoff opened was started with it as its launch
-    /// prompt.
+    /// wake command took it, or the window a handoff opened was started with
+    /// it as its launch prompt.
     Delivered,
     /// The envelope waits in the window's inbox, or a door is still carrying
     /// it; the answer's note says when it is handed over.
@@ -2851,24 +2689,9 @@ pub enum ClientMessage {
     SendText {
         /// The window ID to send text to.
         window_id: String,
-        /// The text to send (bytes are treated as UTF-8 or raw binary as
-        /// appropriate).
-        ///
-        /// A payload holding a single line -- one trailing `\r`, `\n` or
-        /// `\r\n` terminator, no other CR or LF, and a non-empty body before
-        /// it -- is written through the target window's detection definition
-        /// `[input]` plan: the body and the submit key are written as
-        /// separate steps, and the trailing terminator is replaced by that
-        /// definition's submit key. Every other payload, multi-line or
-        /// unterminated, is written through unchanged.
+        /// The text to put in the window's inbox as a `[yagura message]`
+        /// envelope; it is never typed into the window's input.
         text: String,
-    },
-    /// Send a closed set of named control keys to a specific window.
-    SendKeys {
-        /// The window ID to send keys to.
-        window_id: String,
-        /// Named keys; the daemon validates the sequence before approval.
-        keys: Vec<ControlKey>,
     },
     /// Request to interrupt the child process (write the configured interrupt
     /// byte sequence to the PTY).
@@ -3580,7 +3403,6 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         | ClientMessage::Pointer(_)
         | ClientMessage::Wheel(_)
         | ClientMessage::Focus { .. } => STRUCTURED_INPUT_MIN_REVISION,
-        ClientMessage::SendKeys { .. } => SEND_KEYS_MIN_REVISION,
         ClientMessage::ListTicketWorkspaces
         | ClientMessage::ListTickets { .. }
         | ClientMessage::GetTicket { .. }
@@ -3779,12 +3601,6 @@ pub enum DaemonMessage {
         /// `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
-    },
-    /// Response to [`ClientMessage::SendKeys`]: all named keys were written
-    /// to the target window's PTY in one operation.
-    KeysSent {
-        /// The window ID the keys were sent to.
-        window_id: String,
     },
     /// Response to [`ClientMessage::InterruptWindow`]: the interrupt byte
     /// sequence was written to the target window's PTY.
@@ -5157,7 +4973,7 @@ pub enum ChatBodyError {
 /// Validates a chat message body: at least one visible character, at most [`CHAT_BODY_MAX_BYTES`]
 /// UTF-8 bytes, and free of the characters [`ChatBodyError::ForbiddenChar`]
 /// documents. Shares its forbidden-character rule with
-/// [`validate_send_text_body`] ([`is_forbidden_send_text_char`]) rather than
+/// [`validate_message_text`] ([`is_forbidden_send_text_char`]) rather than
 /// restating it.
 ///
 /// # Errors
@@ -5298,7 +5114,6 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "list_windows",
     "get_window_status",
     "send_text",
-    "send_keys",
     "interrupt_window",
     "close_window",
     "wait_for_status",
@@ -5376,7 +5191,6 @@ const DAEMON_MESSAGE_TYPES: &[&str] = &[
     "window_list",
     "window_status",
     "text_sent",
-    "keys_sent",
     "window_interrupted",
     "window_closed",
     "wait_result",

@@ -13,9 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{
-    CONTROL_INPUT_TABLE, Harness, approver_base_config, call_list_windows, composer_section_toml,
-    detection_config, identify, policy, read_response, send, unique_temp_dir, wait_until_status,
-    write_profile,
+    Harness, approver_base_config, call_list_windows, composer_section_toml, detection_config,
+    identify, policy, read_response, send, unique_temp_dir, wait_until_status, write_profile,
 };
 
 use yagura_daemon::DaemonConfig;
@@ -52,7 +51,7 @@ fn ledger_config(dir: &Path, profiles_dir: PathBuf, detection_dir: &Path) -> Dae
 }
 
 fn write_definitions(detection_dir: &Path) {
-    let tail = format!("{CONTROL_INPUT_TABLE}{}", composer_section_toml());
+    let tail = composer_section_toml();
     std::fs::write(
         detection_dir.join(format!("{READY_DETECTION}.toml")),
         format!(

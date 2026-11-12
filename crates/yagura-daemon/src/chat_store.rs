@@ -311,31 +311,6 @@ pub(crate) fn settle_parcel_end_in(
     )
 }
 
-/// Records one destination's delivery of `(room_id, seq)` as pending again
-/// over `conn`, which the caller holds a transaction on: a push's settling
-/// recorded it taken, and its submit key did not go out. Returns whether a
-/// delivery was written: not when the message is gone.
-///
-/// # Errors
-///
-/// Any SQLite error of the write.
-pub(crate) fn reopen_delivery_in(
-    conn: &Connection,
-    room_id: &str,
-    seq: i64,
-    window_id: &str,
-    at_ms: i64,
-) -> rusqlite::Result<bool> {
-    write_delivery(
-        conn,
-        room_id,
-        seq,
-        window_id,
-        DeliveryOutcome::Pending,
-        at_ms,
-    )
-}
-
 /// Appends `msg` inside `tx` and applies the limits: the body of
 /// [`ChatStore::append_message`].
 fn append_in(

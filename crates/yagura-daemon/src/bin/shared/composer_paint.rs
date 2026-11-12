@@ -80,7 +80,7 @@ impl ComposerStyle {
 }
 
 /// What stands in the composer's place while an [`Overlay`] is drawn.
-// Only `submit_child` draws an overlay; the other fixtures sharing this file
+// Only `hook_child` draws an overlay; the other fixtures sharing this file
 // never construct one.
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -98,7 +98,7 @@ pub(crate) enum OverlayComposer {
 
 /// Lines a CLI draws on top of its prompt area (a dialog, a status line),
 /// painted where the composer region starts.
-// Only `submit_child` draws an overlay; see [`OverlayComposer`].
+// Only `hook_child` draws an overlay; see [`OverlayComposer`].
 #[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct Overlay {
@@ -112,7 +112,7 @@ pub(crate) struct Overlay {
 /// How a frame brackets what it draws, the way a real CLI marks a repaint in
 /// progress: a screen reader tells a finished paint from one still under way
 /// (or a dialog) by these brackets alone.
-// Only `submit_child` draws an overlay; see [`OverlayComposer`].
+// Only `hook_child` draws an overlay; see [`OverlayComposer`].
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) enum Paint {
@@ -152,9 +152,6 @@ struct Screen {
     /// How many leading bytes of `body` arrived in a paste: the part a
     /// folding composer paints as its placeholder.
     pasted_len: usize,
-    /// Set once the composer stops showing what it reads: `body` keeps what
-    /// it held at that moment.
-    frozen: bool,
     /// Drawn in the composer region's place while set.
     overlay: Option<Overlay>,
     /// Rows painted below the marker line, so the region is erased by walking
@@ -276,29 +273,6 @@ fn wrap_end(drawable: &[char], start: usize) -> usize {
     end
 }
 
-/// `buffer` (read as UTF-8 text) with the last display line it paints
-/// removed, the way a CLI whose clear key erases one visual line at a time
-/// leaves a body that wraps over several lines.
-// Only `submit_child` models that clear key; the other fixtures sharing this
-// file never call it.
-#[allow(dead_code)]
-pub(crate) fn without_last_painted_line(buffer: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(buffer);
-    let drawable: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
-    let mut start = 0;
-    let mut last_start = 0;
-    while start < drawable.len() {
-        last_start = start;
-        start = wrap_end(&drawable, start);
-    }
-    drawable
-        .get(..last_start)
-        .unwrap_or_default()
-        .iter()
-        .collect::<String>()
-        .into_bytes()
-}
-
 /// A [`Screen`] shared between the thread reading input and the thread that
 /// repaints the body after a delay. `Screen.body` is the one place a
 /// composer's contents live: the reading thread writes every update to it
@@ -318,7 +292,6 @@ impl Output {
                 style,
                 body: String::new(),
                 pasted_len: 0,
-                frozen: false,
                 overlay: None,
                 extra_rows: 0,
             }),
@@ -345,7 +318,7 @@ impl Output {
 
     /// Draws `overlay` in the composer region's place, or restores the
     /// composer when `None`. The body keeps updating underneath either way.
-    // Only `submit_child` draws an overlay; see [`OverlayComposer`].
+    // Only `hook_child` draws an overlay; see [`OverlayComposer`].
     #[allow(dead_code)]
     pub(crate) fn set_overlay(&self, overlay: Option<Overlay>) -> io::Result<()> {
         let mut screen = self.lock();
@@ -373,20 +346,9 @@ impl Output {
     /// after it as typed.
     pub(crate) fn set_body_pasted_through(&self, body: &str, pasted_len: usize) {
         let mut screen = self.lock();
-        if screen.frozen {
-            return;
-        }
         screen.body.clear();
         screen.body.push_str(body);
         screen.pasted_len = pasted_len;
-    }
-
-    /// Keeps the composer showing what it holds now, whatever is read later.
-    // Only `submit_child` freezes its composer; the other fixtures sharing
-    // this file never do.
-    #[allow(dead_code)]
-    pub(crate) fn freeze_body(&self) {
-        self.lock().frozen = true;
     }
 
     /// Repaints the region with whatever body currently stands.

@@ -30,7 +30,6 @@ mod report_gap;
 mod report_protocol;
 mod required_revision;
 mod restore_protocol;
-mod send_keys_protocol;
 mod status;
 mod status_rev;
 mod structured_input_protocol;

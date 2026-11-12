@@ -16,7 +16,7 @@ use yagura_daemon::detector::definition::{
     ComposerSection, Definition, load_definition, parse_definition,
 };
 use yagura_daemon::detector::engine::{DetectionEngine, DetectorHandle};
-use yagura_daemon::detector::reading::{self, ComposerReadout};
+use yagura_daemon::detector::reading;
 use yagura_daemon::detector::{HeldCopy, SharedCopy};
 use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::{
@@ -29,14 +29,6 @@ use yagura_protocol::{
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process;
-
-/// The literal behind [`SUBMIT_CHILD_PROBE`], so [`CONTROL_INPUT_TABLE`] can
-/// name the same probe through `concat!`.
-macro_rules! composer_probe {
-    () => {
-        "x"
-    };
-}
 
 // --- detection-engine test helpers ------------------------------------------
 //
@@ -294,10 +286,6 @@ impl CopiedScreen {
         section: &ComposerSection,
     ) -> Vec<String> {
         reading::bottom_lines_without_composer(&self.copy(), n, section)
-    }
-
-    pub fn read_composer(&self, section: &ComposerSection) -> ComposerReadout {
-        reading::read_composer(&self.copy(), section)
     }
 }
 
@@ -1008,8 +996,8 @@ impl Harness {
 
     /// [`Self::open`], for a window whose profile declares delivery with no way to
     /// wake its CLI ([`wake_none_delivery`]): it takes part in chat and notices
-    /// whatever its command line, and is typed into while it waits. Its doors answer
-    /// as the daemon's own `delivery` configuration says.
+    /// whatever its command line, and what it is sent waits in its inbox for its
+    /// doors. Its doors answer as the daemon's own `delivery` configuration says.
     pub async fn open_delivering(&self, command: Vec<String>, detection: Option<&str>) -> String {
         self.open_delivering_in(command, detection, None).await
     }
@@ -1075,21 +1063,7 @@ impl Harness {
     /// removed, so a line the terminal wrapped or redrew still reads as one
     /// run of text.
     pub fn flattened_scrollback(&self, window_id: &str) -> String {
-        flatten_terminal_text(&self.scrollback(window_id), OscPayload::Remove)
-    }
-
-    /// Like [`Harness::flattened_scrollback`], but an OSC sequence's payload
-    /// (a window title, for one) stays in the text; only its introducer goes.
-    pub fn flattened_scrollback_keeping_osc_payload(&self, window_id: &str) -> String {
-        flatten_terminal_text(&self.scrollback(window_id), OscPayload::Keep)
-    }
-
-    /// Times `window_id`'s `submit_child` echoed a submitted line starting
-    /// with `text`; an empty `text` counts every submitted line.
-    pub fn submitted_count(&self, window_id: &str, text: &str) -> usize {
-        self.flattened_scrollback(window_id)
-            .matches(&format!("SUBMITTED {text}"))
-            .count()
+        flatten_terminal_text(&self.scrollback(window_id))
     }
 
     /// Re-reads `window_id`'s scrollback every 50ms, handing each read and
@@ -1127,34 +1101,6 @@ impl Harness {
         }
     }
 
-    /// Waits until `needle` appears at least `min_count` times in `window_id`'s
-    /// scrollback. A handoff envelope's marker line is written once by the
-    /// daemon but rendered twice: once as the terminal's own local echo of the
-    /// input, once as the child's own echo of what it actually read from
-    /// stdin. Only the second copy proves the daemon's write was delivered as
-    /// a complete line.
-    pub async fn wait_for_scrollback_occurrences(
-        &self,
-        window_id: &str,
-        needle: &str,
-        min_count: usize,
-    ) {
-        let deadline = tokio::time::Instant::now() + HANG_GUARD;
-        let (found, reached) = self
-            .poll_scrollback(window_id, |scrollback, now| {
-                let found = count_in_scrollback(scrollback, needle);
-                let reached = found >= min_count;
-                (reached || now >= deadline).then_some((found, reached))
-            })
-            .await;
-        if !reached {
-            panic!(
-                "timed out waiting for {min_count} occurrences of {needle:?} in window \
-                 {window_id} scrollback (found {found})"
-            );
-        }
-    }
-
     /// Waits until `window_id`'s child has exited, the window's confirmed
     /// status says so, and everything the child wrote is in
     /// [`Self::scrollback`]: the exit is not ordered after the raw output, but
@@ -1185,22 +1131,13 @@ impl Harness {
 /// for [`Harness::open_idle_window`] to be able to leave `Unknown`.
 pub const CONTROL_DETECTION_NAME: &str = yagura_test_support::detection::CONTROL_DETECTION_NAME;
 
-/// The `[input]` table of the daemon's control definition: a short submit delay and no
-/// delivery confirmation, so a delivery test is not held up waiting for a reaction the
-/// `echo_child` window never gives, and the probe a judged delivery needs.
-pub const CONTROL_INPUT_TABLE: &str = concat!(
-    "\n[input]\nsubmit_delay_ms = 40\ndelivery_confirm_ms = 0\nprobe = \"",
-    composer_probe!(),
-    "\"\n"
-);
-
 /// The detection definition (rule `CTRL-READY` -> `idle`) shared by every daemon
 /// integration test that needs a window able to leave `Unknown` on demand, with an
 /// explicit `bottom_line_count` when given. `rules = []` is unusable for that purpose: it
 /// stays `Unknown` forever.
 ///
-/// It ends with [`composer_section_toml`]: a window whose definition names no composer
-/// region is unobservable to the delivery path.
+/// It ends with [`composer_section_toml`], so a composer-draw fixture's body is kept out
+/// of what the rules read.
 pub fn control_definition(bottom_line_count: Option<u16>) -> String {
     let head = match bottom_line_count {
         Some(n) => format!("bottom_line_count = {n}\n"),
@@ -1209,23 +1146,21 @@ pub fn control_definition(bottom_line_count: Option<u16>) -> String {
     yagura_test_support::detection::idle_definition_toml(
         CONTROL_DETECTION_NAME,
         &head,
-        &format!("{CONTROL_INPUT_TABLE}{}", composer_section_toml()),
+        &composer_section_toml(),
     )
 }
 
 /// File stem of [`leading_keys_definition`] under a detection directory.
 pub const LEADING_KEYS_DETECTION_NAME: &str = "leading-keys-control";
 
-/// [`control_definition`] whose CLI consumes a leading `!` or `?` in an empty
-/// composer as a key rather than typing it.
+/// [`control_definition`] under its own name, for a CLI that would consume a leading
+/// `!` or `?` in an empty composer as a key: nothing is typed into it, so the definition
+/// needs nothing of its own to say so.
 pub fn leading_keys_definition() -> String {
     yagura_test_support::detection::idle_definition_toml(
         LEADING_KEYS_DETECTION_NAME,
         "",
-        &format!(
-            "{CONTROL_INPUT_TABLE}leading_keys = [\"!\", \"?\"]\n{}",
-            composer_section_toml()
-        ),
+        &composer_section_toml(),
     )
 }
 
@@ -1241,11 +1176,8 @@ pub fn write_leading_keys_definition(dir: &Path) {
 /// Written into a window's PTY input to trigger the `idle` rule of [`control_definition`].
 pub const READY_MARKER: &[u8] = yagura_test_support::detection::CONTROL_READY_LINE.as_bytes();
 
-/// The `[composer]` table naming the region a fixture in composer-draw mode paints.
-///
-/// Appended to every synthetic definition here whose windows take a delivery: a
-/// definition without this table can never be observed, so the delivery path would
-/// refuse to write to such a window at all.
+/// The `[composer]` table naming the region a fixture in composer-draw mode paints, so
+/// the rules read the screen without the body typed into it.
 pub fn composer_section_toml() -> String {
     yagura_test_support::detection::composer_section_toml()
 }
@@ -1262,13 +1194,9 @@ pub fn write_control_definition(dir: &Path) {
 /// [`write_control_definition`]'s own behavior exactly (the key stays out of
 /// the file, so the engine falls back to [`DaemonConfig::bottom_line_count`]).
 ///
-/// [`control_definition`] is paired with composer-draw-mode fixtures through
-/// `handoff_profile_config` / `detection_config` (e.g.
-/// `ready_child_profile_source_with_composer`), so the same
-/// marker-scrolled-out-of-the-window risk
-/// [`write_submit_definition_with_bottom_line_count`]'s doc comment
-/// describes applies here too, once a caller's composer content grows past
-/// the fallback value.
+/// A composer-draw fixture repaints its composer below the ready line, so a body long
+/// enough to wrap pushes that line out of the last `bottom_line_count` rows: a caller
+/// whose composer grows needs a wider count.
 pub fn write_control_definition_with_bottom_line_count(dir: &Path, bottom_line_count: Option<u16>) {
     std::fs::write(
         dir.join(format!("{CONTROL_DETECTION_NAME}.toml")),
@@ -1412,21 +1340,6 @@ impl Harness {
         .await
     }
 
-    /// [`Harness::open_idle_window_with_composer`] bound to `detection`, which must
-    /// share [`control_definition`]'s ready rule (e.g. [`leading_keys_definition`]).
-    pub async fn open_idle_window_with_composer_detected_by(
-        &self,
-        client: &mut Connection,
-        detection: &str,
-    ) -> String {
-        self.open_idle_window_detected_by(
-            client,
-            yagura_test_support::process::echo_child_command_with_composer(0),
-            detection,
-        )
-        .await
-    }
-
     async fn open_idle_window_running(
         &self,
         client: &mut Connection,
@@ -1563,16 +1476,9 @@ pub async fn wait_for_scrollback_containing(session: &PtySession, needle: &str) 
     }
 }
 
-/// What [`flatten_terminal_text`] does with an OSC sequence's payload.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OscPayload {
-    Remove,
-    Keep,
-}
-
-/// `raw` decoded lossily, with CSI sequences, line breaks and (per `osc`)
-/// OSC payloads removed. Any other escape drops itself and the char after it.
-pub fn flatten_terminal_text(raw: &[u8], osc: OscPayload) -> String {
+/// `raw` decoded lossily, with CSI sequences, line breaks and OSC payloads
+/// removed. Any other escape drops itself and the char after it.
+pub fn flatten_terminal_text(raw: &[u8]) -> String {
     let raw = String::from_utf8_lossy(raw);
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
@@ -1586,7 +1492,7 @@ pub fn flatten_terminal_text(raw: &[u8], osc: OscPayload) -> String {
                         }
                     }
                 }
-                Some(']') if osc == OscPayload::Remove => {
+                Some(']') => {
                     while let Some(c) = chars.next() {
                         if c == '\u{7}' {
                             break;
@@ -1604,13 +1510,6 @@ pub fn flatten_terminal_text(raw: &[u8], osc: OscPayload) -> String {
         }
     }
     out
-}
-
-/// The last 600 characters of `text`, for a failure message.
-pub fn text_tail(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let start = chars.len().saturating_sub(600);
-    chars[start..].iter().collect()
 }
 
 pub fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
@@ -2224,7 +2123,6 @@ pub struct ChatPlaybook<'a> {
     /// Nothing in this suite needs that built-in-text case.
     pub intro: Option<&'a str>,
     pub exclude_detections: Option<&'a [&'a str]>,
-    pub chat_delivery_max: Option<u64>,
     pub approval_timeout_secs: Option<u64>,
 }
 
@@ -2241,7 +2139,6 @@ impl<'a> Default for ChatPlaybook<'a> {
             history_max: None,
             intro: None,
             exclude_detections: None,
-            chat_delivery_max: None,
             approval_timeout_secs: None,
         }
     }
@@ -2302,9 +2199,6 @@ fn chat_playbook_toml(spec: &ChatPlaybook<'_>) -> String {
         out.push_str("]\n");
     }
     out.push_str("\n[limits]\n");
-    if let Some(v) = spec.chat_delivery_max {
-        out.push_str(&format!("chat_delivery_max = {v}\n"));
-    }
     if let Some(v) = spec.approval_timeout_secs {
         out.push_str(&format!("approval_timeout_secs = {v}\n"));
     }
@@ -2401,197 +2295,40 @@ pub fn handoff_profile_config(
     }
 }
 
-// --- submit_child delivery-test detection definitions -----------
+// --- a delivering window with a ready marker of its own -----------
 
-/// The probe every test definition that takes a judged delivery declares:
-/// typed as-is into a composer-draw fixture's composer and erased by DEL.
-pub const SUBMIT_CHILD_PROBE: &str = composer_probe!();
-
-/// Values for the `[input]` table of the one detection-definition shape every
-/// `send_handoff` delivery test against the `submit_child` fixture uses (see
-/// [`write_submit_definition`]).
-///
-/// `submit` is left at the definition-loader default (`"\r"`, matching the
-/// carriage return `submit_child` itself treats as a submit key), so it is
-/// not a field here.
-pub struct SubmitDefinitionInput {
-    pub bracketed_paste: bool,
-    pub ready_hold_ms: u64,
-    pub submit_delay_ms: u64,
-    /// The `clear` value's TOML basic-string *body*, already escaped: `""`
-    /// for no clear sequence, or `"\\u0015"` for Ctrl-U. Kept as the escaped
-    /// source text (rather than a raw control byte) so the definition file
-    /// stays literally readable -- an embedded `0x15` byte would be
-    /// invisible in a diff or a failed test's file dump.
-    pub clear: &'static str,
-    pub delivery_confirm_ms: u64,
-    pub resend_max: u8,
-}
-
-impl SubmitDefinitionInput {
-    /// The body written under the definition's `[input]` heading, naming
-    /// [`SUBMIT_CHILD_PROBE`] whether or not a clear sequence is given: a
-    /// judged delivery needs a probe either way.
-    pub fn input_toml(&self) -> String {
-        let Self {
-            bracketed_paste,
-            ready_hold_ms,
-            submit_delay_ms,
-            clear,
-            delivery_confirm_ms,
-            resend_max,
-        } = self;
-        format!(
-            "bracketed_paste = {bracketed_paste}\nready_hold_ms = {ready_hold_ms}\nsubmit_delay_ms = {submit_delay_ms}\nclear = \"{clear}\"\ndelivery_confirm_ms = {delivery_confirm_ms}\nresend_max = {resend_max}\nprobe = \"{SUBMIT_CHILD_PROBE}\""
-        )
-    }
-}
-
-/// [`write_submit_definition`]'s own `bottom_line_count`: enough for a
-/// short, unwrapped composer, but not for the multi-line region a long
-/// composer-draw-mode body wraps into (see
-/// [`write_submit_definition_with_bottom_line_count`]).
-const SUBMIT_DEFINITION_BOTTOM_LINE_COUNT: u16 = 5;
-
-/// Writes the one `submit_child` delivery-test detection definition shape as
-/// `{dir}/{name}.toml`: a `waiting_input` rule
-/// on `marker` (`submit_child`'s startup line and its re-print on a
-/// discarded submit), a `running` rule on `submit_child`'s own `SUBMITTED` /
-/// `REACT` output, the `[input]` table from `input`, and
-/// [`composer_section_toml`].
-///
-/// `marker` is inserted into the definition's regex `pattern` verbatim, so a
-/// caller's marker must not contain regex metacharacters.
-pub fn write_submit_definition(dir: &Path, name: &str, marker: &str, input: SubmitDefinitionInput) {
-    write_submit_definition_with_bottom_line_count(
-        dir,
-        name,
-        marker,
-        input,
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-    );
-}
-
-/// The `waiting_input` pattern of a `submit_child` window that can be returned
-/// to the ready status after it has echoed a line: `marker` alone matches only
-/// the line printed at startup, which a typed line's `SUBMITTED` echo (a
-/// `running` rule of the same definition) pushes out of the detection window
-/// for good. The dots [`redraw_screen`] prints match the second alternative.
-///
-/// Pass the result wherever a marker is taken; the fixture prints it as text,
-/// and the pattern matches that text through its first alternative.
-pub fn ready_pattern_with_redraw(marker: &str) -> String {
-    format!(r"{marker}|^\.$")
-}
-
-/// Makes a `submit_child` window repaint its screen with filler dots (the byte
-/// `0x03`), the way a CLI redraws its prompt after a turn. The window is ready
-/// again only if its definition's ready pattern accepts the dots
-/// ([`ready_pattern_with_redraw`]); callers wait for the status they expect.
-///
-/// `marker` is the text the window's `submit_child` was given. The fixture
-/// prints it once it reads raw input, and a byte written before that is lost,
-/// so the byte waits for the marker to appear.
-pub async fn redraw_screen(h: &Harness, window_id: &str, marker: &str) {
-    h.wait_for_scrollback(window_id, marker.as_bytes()).await;
-    h.write_input(window_id, &[0x03]).await;
-}
-
-/// [`write_submit_definition`], with `bottom_line_count` taken from the
-/// caller instead of fixed at [`SUBMIT_DEFINITION_BOTTOM_LINE_COUNT`].
-///
-/// A window's own `waiting_input` marker line is printed once, at startup,
-/// and never repainted; a composer-draw-mode fixture repaints its region on
-/// every reflected write, below that line. A body long enough to wrap past
-/// several rows pushes the marker line up along with it, and once it falls
-/// outside the last `bottom_line_count` rows of the screen, the
-/// `waiting_input` rule can no longer match it -- the window's confirmed
-/// status regresses out from under a test that never touched it on purpose,
-/// so once the composer grows past the window's own `bottom_line_count` the
-/// caller needs a wider one (see [`write_control_definition_with_bottom_line_count`]).
-pub fn write_submit_definition_with_bottom_line_count(
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    input: SubmitDefinitionInput,
-    bottom_line_count: u16,
-) {
-    let toml = yagura_test_support::detection::submit_definition_toml(
-        name,
-        marker,
-        bottom_line_count,
-        &input.input_toml(),
-    );
-    std::fs::write(
-        dir.join(format!("{name}.toml")),
-        format!("{toml}{}", composer_section_toml()),
-    )
-    .expect("write submit_child delivery-test definition file");
-}
-
-/// The same `submit_child` delivery-test definition shape as
-/// [`write_submit_definition`], with its `[input]` table taken verbatim from
-/// `input_toml` instead of built from [`SubmitDefinitionInput`], for a case
-/// whose `[input]` table does not fit that struct's fixed field set.
-/// `input_toml` is the body the caller writes under `[input]` (e.g.
-/// `"submit_delay_ms = 120\ndelivery_confirm_ms = 0\n"`).
-pub fn write_submit_definition_with_input_toml(
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    input_toml: &str,
-) {
-    let toml = yagura_test_support::detection::submit_definition_toml(
-        name,
-        marker,
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        input_toml,
-    );
-    std::fs::write(
-        dir.join(format!("{name}.toml")),
-        format!("{toml}{}", composer_section_toml()),
-    )
-    .expect("write submit_child delivery-test definition file");
-}
-
-/// Opens a `submit_child` window whose detection definition's `[input]`
-/// table is `input_toml` (see [`write_submit_definition_with_input_toml`]),
-/// launched in composer-draw mode with `clear_scope` selecting the fixture's
-/// take-back behavior (see
-/// [`yagura_test_support::process::submit_child_command_with_clear_scope`]),
-/// with the child appending every byte it reads to `input_log` when given,
-/// and observes it reach `waiting_input` before returning.
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_clear_scope(
+/// Opens an `echo_child` window whose profile declares delivery (see
+/// [`Harness::open_delivering_in`]), under a definition written as `{dir}/{name}.toml`
+/// whose rules read `marker` as `waiting_input` and a `REACT` line as `running`, and
+/// observes `waiting_input` before returning. `marker` goes into a regex verbatim, so it
+/// must hold no metacharacters.
+pub async fn open_marked_delivering_window(
     h: &Harness,
     client: &mut Connection,
     dir: &Path,
     name: &str,
     marker: &str,
-    input_toml: &str,
-    reflect_delay_ms: u64,
-    clear_scope: &str,
-    input_log: Option<&Path>,
+    cwd: Option<&Path>,
 ) -> String {
-    write_submit_definition_with_input_toml(dir, name, marker, input_toml);
-    let mut command = yagura_test_support::process::submit_child_command_with_clear_scope(
-        marker,
-        0,
-        0,
-        0,
-        reflect_delay_ms,
-        clear_scope,
-    );
-    if let Some(log) = input_log {
-        // overlay and overlay_heading: none; then the input log.
-        command.resize(14, String::new());
-        command.push(
-            log.to_str()
-                .expect("the input log path must be valid UTF-8")
-                .to_string(),
-        );
-    }
-    let window_id = h.open_delivering(command, Some(name)).await;
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!(
+            "schema_version = 1\nname = \"{name}\"\nbottom_line_count = 5\n\n[debounce]\n\
+             confirm_ms = 30\n\n[[rules]]\nstatus = \"running\"\npattern = 'REACT'\n\
+             priority = 20\nregion = \"bottom\"\n\n[[rules]]\nstatus = \"waiting_input\"\n\
+             pattern = '{marker}'\npriority = 10\nregion = \"bottom\"\n"
+        ),
+    )
+    .expect("write the marked window's definition");
+    let window_id = h
+        .open_delivering_in(
+            yagura_test_support::process::echo_child_command(),
+            Some(name),
+            cwd,
+        )
+        .await;
+    h.write_input(&window_id, format!("{marker}\r").as_bytes())
+        .await;
     wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
     window_id
 }
@@ -2664,287 +2401,6 @@ pub async fn call_list_windows(client: &mut Connection) -> Vec<WindowInfo> {
     }
 }
 
-/// Counts non-overlapping occurrences of `needle` in `window_id`'s current
-/// scrollback, decoded lossily (the fixtures this suite uses only ever write
-/// plain ASCII, so lossy decoding never hides a real occurrence).
-///
-/// This is the vessel for "how many times did the receiver accept a
-/// send" -- pass a needle the fixture writes only on acceptance (its
-/// `SUBMITTED ` / `REACT` lines, never a composer-echo line). A caller
-/// counting a composer's own on-screen text instead would double-count once
-/// a fixture starts repainting an unsent draft on every write, because that
-/// text then appears both on each repaint and once more on acceptance; this
-/// helper's contract is to count acceptance only, matching
-/// [`Harness::wait_for_scrollback_occurrences`]'s note that a marker line is
-/// rendered by two independent writers (the terminal's local echo and the
-/// child's own echo of what it read).
-pub fn count_marker(h: &Harness, window_id: &str, needle: &str) -> usize {
-    count_in_scrollback(&h.scrollback(window_id), needle)
-}
-
-fn count_in_scrollback(scrollback: &[u8], needle: &str) -> usize {
-    yagura_test_support::scan::count_occurrences(&String::from_utf8_lossy(scrollback), needle)
-}
-
-/// Opens a `submit_child` window bound to a fresh detection definition built
-/// by [`write_submit_definition`], and observes it reach `waiting_input`
-/// (the fixture's startup marker line) before returning: never assert
-/// against a delivery outcome for a window whose readiness was not itself
-/// observed first.
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-) -> String {
-    open_submit_child_window_in_mode(
-        h,
-        client,
-        dir,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        None,
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-    )
-    .await
-}
-
-/// [`open_submit_child_window`] with the fixture in composer-draw mode: it
-/// paints what is written to it as a composer region and reflects each write
-/// `reflect_delay_ms` after it lands, so a caller can put a delivery's own
-/// steps on either side of that wait.
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_composer(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: u64,
-) -> String {
-    open_submit_child_window_in_mode(
-        h,
-        client,
-        dir,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        Some(reflect_delay_ms),
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-    )
-    .await
-}
-
-/// [`open_submit_child_window_with_composer`], with an explicit window
-/// `cwd`: a second entry point for a case that
-/// must open a participant in a second workspace.
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_composer_in_cwd(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    cwd: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: u64,
-) -> String {
-    open_submit_child_window_in_mode_with_cwd(
-        h,
-        client,
-        dir,
-        Some(cwd),
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        Some(reflect_delay_ms),
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        None,
-    )
-    .await
-}
-
-/// [`open_submit_child_window_with_composer`] whose fixture appends every
-/// byte it reads to `input_log`, so a case can wait on what the child has
-/// read (see [`wait_until_input_log_contains`]).
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_composer_logging_input(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: u64,
-    input_log: &Path,
-) -> String {
-    open_submit_child_window_in_mode_with_cwd(
-        h,
-        client,
-        dir,
-        None,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        Some(reflect_delay_ms),
-        SUBMIT_DEFINITION_BOTTOM_LINE_COUNT,
-        Some(input_log),
-    )
-    .await
-}
-
-/// [`open_submit_child_window_with_composer`] with an explicit
-/// `bottom_line_count`, for a body long enough that composer-draw mode wraps
-/// it past [`SUBMIT_DEFINITION_BOTTOM_LINE_COUNT`] and scrolls the fixture's
-/// once-only startup marker line out of the window (see
-/// [`write_submit_definition_with_bottom_line_count`]).
-#[allow(clippy::too_many_arguments)]
-pub async fn open_submit_child_window_with_composer_and_bottom_line_count(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: u64,
-    bottom_line_count: u16,
-) -> String {
-    open_submit_child_window_in_mode(
-        h,
-        client,
-        dir,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        Some(reflect_delay_ms),
-        bottom_line_count,
-    )
-    .await
-}
-
-/// The one implementation behind all `submit_child` window openers: they
-/// differ only in whether the fixture is launched in composer-draw mode and
-/// in `bottom_line_count`, and the
-/// definition, the readiness wait and the failure text must not drift
-/// between them.
-#[allow(clippy::too_many_arguments)]
-async fn open_submit_child_window_in_mode(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: Option<u64>,
-    bottom_line_count: u16,
-) -> String {
-    open_submit_child_window_in_mode_with_cwd(
-        h,
-        client,
-        dir,
-        None,
-        name,
-        marker,
-        discard_reads,
-        paste_guard_keys,
-        react_on_body,
-        input,
-        reflect_delay_ms,
-        bottom_line_count,
-        None,
-    )
-    .await
-}
-
-/// [`open_submit_child_window_in_mode`], with an explicit window `cwd`:
-/// `dir` is where the detection
-/// definition is written, `cwd` is where the opened window's own process
-/// runs, `None` reproducing the original's `h.open` (the daemon's own cwd).
-#[allow(clippy::too_many_arguments)]
-async fn open_submit_child_window_in_mode_with_cwd(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    cwd: Option<&Path>,
-    name: &str,
-    marker: &str,
-    discard_reads: u64,
-    paste_guard_keys: u64,
-    react_on_body: u8,
-    input: SubmitDefinitionInput,
-    reflect_delay_ms: Option<u64>,
-    bottom_line_count: u16,
-    input_log: Option<&Path>,
-) -> String {
-    write_submit_definition_with_bottom_line_count(dir, name, marker, input, bottom_line_count);
-    let mut command = match reflect_delay_ms {
-        Some(reflect_delay_ms) => yagura_test_support::process::submit_child_command_with_composer(
-            marker,
-            discard_reads,
-            paste_guard_keys,
-            react_on_body,
-            reflect_delay_ms,
-        ),
-        None => yagura_test_support::process::submit_child_command(
-            marker,
-            discard_reads,
-            paste_guard_keys,
-            react_on_body,
-        ),
-    };
-    if let Some(input_log) = input_log {
-        // The log is argv index 14; `-` leaves every slot before it at its default.
-        command.resize(14, "-".to_string());
-        command.push(
-            input_log
-                .to_str()
-                .expect("the input log path must be valid UTF-8")
-                .to_string(),
-        );
-    }
-    let window_id = h.open_delivering_in(command, Some(name), cwd).await;
-    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
-    window_id
-}
-
 /// Attaches `client` to `window_id` (the interactive PTY-streaming path:
 /// [`ClientMessage::AttachView`] with no size), and asserts the daemon acknowledged it.
 /// The frames that follow the answer are left unread (and unacknowledged);
@@ -2982,28 +2438,6 @@ pub async fn write_interactive_input(client: &mut Connection, text: &str) {
         },
     )
     .await;
-}
-
-/// Sends `first` on `client_a`, awaits `between`, then sends `second` on
-/// `client_b`. `send` only writes the request frame and does not wait for a
-/// response, so `between` alone separates the two requests' arrival at the
-/// daemon.
-///
-/// This is scenes (f) and (h) of this file's shared-helper contract: two
-/// connections addressing the same window. A case whose assertions depend on
-/// `first` arriving before `second` passes an observation of `first`'s effect
-/// (for instance its body reaching the child); a case that only tries for an
-/// overlap passes a short sleep.
-pub async fn send_from_two_connections(
-    client_a: &mut Connection,
-    first: &ClientMessage,
-    client_b: &mut Connection,
-    second: &ClientMessage,
-    between: impl std::future::Future<Output = ()>,
-) {
-    send(client_a, first).await;
-    between.await;
-    send(client_b, second).await;
 }
 
 // --- profile-addressed send_handoff helpers shared across ipc_profile.rs and
@@ -3117,88 +2551,6 @@ pub fn expect_handoff_sent(msg: DaemonMessage) -> (String, bool, DeliveryState) 
         } => (window_id, opened, delivery),
         other => panic!("expected handoff_sent, got {other:?}"),
     }
-}
-
-/// Every `PASTE ` line's `buffered=` value in `window_id`'s scrollback, in
-/// the order the `submit_child` fixture wrote them: how many bytes were
-/// already sitting in the receiver's buffer when each body landed, which is
-/// the only direct evidence of one send having been written on top of
-/// another's.
-pub fn paste_buffered_values(h: &Harness, window_id: &str) -> Vec<usize> {
-    let text = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-    text.lines()
-        .filter(|line| line.contains("PASTE "))
-        .map(|line| {
-            let (_, after) = line.split_once("buffered=").unwrap_or_else(|| {
-                panic!(
-                    "fixture must write PASTE <n> buffered=<bytes>, got a PASTE line \
-                     without buffered=: {line:?}"
-                )
-            });
-            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-            if digits.is_empty() {
-                panic!(
-                    "fixture must write PASTE <n> buffered=<bytes>, got a buffered= value \
-                     with no digits: {line:?}"
-                );
-            }
-            digits
-                .parse::<usize>()
-                .unwrap_or_else(|_| panic!("buffered= value is not a valid usize: {line:?}"))
-        })
-        .collect()
-}
-
-/// The marker every handoff envelope line starts with.
-const HANDOFF_ENVELOPE_MARKER: &str = "[yagura handoff] ";
-
-/// The JSON body of the handoff envelope `window_id`'s child accepted as a
-/// submitted line, waited for rather than read once.
-///
-/// A window in composer-draw mode paints the same envelope text as an
-/// unsubmitted draft -- wrapped mid-line, so it neither parses as JSON nor
-/// proves anything was delivered -- and repaints it any number of times
-/// before and after the accepted line lands. Occurrences of the marker are
-/// therefore not countable evidence; only one the fixture did not paint as a
-/// draft is.
-pub async fn wait_for_accepted_handoff_envelope_json(
-    h: &Harness,
-    window_id: &str,
-) -> serde_json::Value {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let text = String::from_utf8_lossy(&h.scrollback(window_id)).into_owned();
-        if let Some(json) = accepted_handoff_envelope_json(&text) {
-            return json;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for an accepted handoff envelope line in window \
-                 {window_id} scrollback: {text:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// The first envelope occurrence in `text` that composer-draw mode did not
-/// paint as a draft, parsed as JSON, or `None` while no such occurrence has
-/// landed yet. A draft always carries the marker glued directly onto
-/// `{COMPOSER_MARKER}{COMPOSER_SEPARATOR}`; an accepted line never does.
-fn accepted_handoff_envelope_json(text: &str) -> Option<serde_json::Value> {
-    let draft_prefix = format!(
-        "{}{}",
-        yagura_test_support::process::COMPOSER_MARKER,
-        yagura_test_support::process::COMPOSER_SEPARATOR,
-    );
-    let start = text
-        .match_indices(HANDOFF_ENVELOPE_MARKER)
-        .map(|(index, _)| index)
-        .find(|index| !text[..*index].ends_with(&draft_prefix))?;
-    let after = text.get(start + HANDOFF_ENVELOPE_MARKER.len()..)?;
-    let end = after.find('\r').unwrap_or(after.len());
-    let json_part = after.get(..end)?.trim_end_matches(|c: char| c != '}');
-    serde_json::from_str(json_part).ok()
 }
 
 // --- mcp_cli_stub fixture path and profile document --------------------------
@@ -3443,120 +2795,6 @@ pub mod relay;
 pub mod store_fixtures;
 pub mod views;
 
-// --- reading submit_child's composer ------------------------------
-
-/// The composer region `submit_child` paints in composer-draw mode.
-pub fn submit_child_composer_section() -> ComposerSection {
-    ComposerSection {
-        marker: regex::Regex::new(yagura_test_support::process::COMPOSER_MARKER)
-            .expect("the shared composer marker must compile as a regex"),
-        separator: yagura_test_support::process::COMPOSER_SEPARATOR.to_string(),
-        continuation_prefix: yagura_test_support::process::COMPOSER_CONTINUATION_PREFIX.to_string(),
-        blank_lines_in_body: false,
-        left_panel: None,
-        right_border: None,
-        placeholder: None,
-    }
-}
-
-/// The composer `submit_child` shows in `window_id` right now, read off the
-/// window's model: a direct read of what reached the child, independent of
-/// any judgment under test.
-pub async fn read_composer_now(h: &Harness, window_id: &str) -> ComposerReadout {
-    let session = h
-        .registry
-        .get(window_id)
-        .expect("window must exist in registry")
-        .session()
-        .clone();
-    session
-        .read_screen(|copy| reading::read_composer(copy, &submit_child_composer_section()))
-        .await
-        .unwrap()
-}
-
-/// Reads [`read_composer_now`] until it equals `expected`, failing once
-/// [`HANG_GUARD`] passes: a case waits for what the child shows, not for a delay.
-pub async fn wait_until_composer_is(h: &Harness, window_id: &str, expected: &ComposerReadout) {
-    wait_until_composer_satisfies(h, window_id, &format!("{expected:?}"), |readout| {
-        readout == expected
-    })
-    .await;
-}
-
-/// Reads [`read_composer_now`] until `accept` holds and returns that readout,
-/// failing with `what` once [`HANG_GUARD`] passes. For a case that knows only part
-/// of what the child will show: any other readout on the way is not the end.
-pub async fn wait_until_composer_satisfies(
-    h: &Harness,
-    window_id: &str,
-    what: &str,
-    accept: impl Fn(&ComposerReadout) -> bool,
-) -> ComposerReadout {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let readout = read_composer_now(h, window_id).await;
-        if accept(&readout) {
-            return readout;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("composer for {window_id} never reached {what}, last saw {readout:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// Waits until `window_id`'s model holds a frame `accept` takes, given the
-/// composer `submit_child` shows in it and whether the program is still
-/// painting it (the cursor hidden or a synchronized update open, which no
-/// write is decided on). Woken by the model's own output arrivals, never by a
-/// delay; [`HANG_GUARD`] only calls it hung.
-pub async fn wait_until_frame_satisfies(
-    h: &Harness,
-    window_id: &str,
-    what: &str,
-    accept: impl Fn(&ComposerReadout, bool) -> bool,
-) -> ComposerReadout {
-    let session = h
-        .registry
-        .get(window_id)
-        .expect("window must exist in registry")
-        .session()
-        .clone();
-    let mut arrivals = session.output_arrivals();
-    let mut last = None;
-    let found = tokio::time::timeout(HANG_GUARD, async {
-        loop {
-            // Marked seen before the read, so output fed after it wakes the
-            // wait below.
-            arrivals.borrow_and_update();
-            let (readout, unfinished) = session
-                .read_screen(|copy| {
-                    (
-                        reading::read_composer(copy, &submit_child_composer_section()),
-                        copy.cursor_hidden || copy.sync_open,
-                    )
-                })
-                .await
-                .unwrap();
-            if accept(&readout, unfinished) {
-                return readout;
-            }
-            last = Some((readout, unfinished));
-            arrivals
-                .changed()
-                .await
-                .expect("the window's output arrivals stay open");
-        }
-    })
-    .await;
-    found.unwrap_or_else(|_| {
-        panic!(
-            "the model of {window_id} never held {what}; last saw (composer, unfinished) {last:?}"
-        )
-    })
-}
-
 // --- what a hex_echo child received -------------------------------------------
 
 /// `bytes` as lowercase hex, the form `hex_echo` prints what it reads.
@@ -3638,318 +2876,7 @@ pub async fn let_every_clock_bound_run_out() {
     tokio::time::resume();
 }
 
-/// Waits until the child's input log holds `needle`, and returns the log.
-/// Written into the window after everything a case wants to inspect, a
-/// sentinel read back this way proves the child has read all of it.
-pub async fn wait_until_input_log_contains(log: &Path, needle: &[u8]) -> Vec<u8> {
-    let deadline = tokio::time::Instant::now() + HANG_GUARD;
-    loop {
-        let read = std::fs::read(log).unwrap_or_default();
-        if read.windows(needle.len()).any(|window| window == needle) {
-            return read;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the child never read {needle:?}; it read {read:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-/// Everything the child read up to now, from its input log. The log is filled
-/// as the child reads, behind the daemon's writes, so it is read only once a
-/// sentinel written after them has come back through it. Each call writes a
-/// sentinel of its own, so a log read again is read up to the later call's
-/// sentinel, never cut at an earlier one.
-pub async fn input_log_read_so_far(
-    entry: &yagura_daemon::window::WindowEntry,
-    log: &Path,
-) -> Vec<u8> {
-    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    // The trailing `.` keeps one sentinel from being the prefix of another.
-    let sentinel = format!(
-        "SENTINEL-AFTER-{}.",
-        CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-    let sentinel = sentinel.as_bytes();
-    entry
-        .write_pty_input(sentinel, yagura_daemon::window::InputOrigin::Interactive)
-        .await
-        .expect("the sentinel must not fail");
-    let mut read = wait_until_input_log_contains(log, sentinel).await;
-    let at = read
-        .windows(sentinel.len())
-        .position(|window| window == sentinel)
-        .expect("the log was returned holding the sentinel");
-    read.truncate(at);
-    read
-}
-
-/// The line ends (`\r`, `\n`) in `read` outside a bracketed paste: the only
-/// bytes on which `submit_child` takes a line, or its dialog takes a key.
-/// None of them read means nothing was submitted, however late the child's
-/// echo of it would have come.
-pub fn line_ends_outside_paste(read: &[u8]) -> usize {
-    const START: &[u8] = b"\x1b[200~";
-    const END: &[u8] = b"\x1b[201~";
-    let mut in_paste = false;
-    let mut found = 0;
-    let mut at = 0;
-    while at < read.len() {
-        let rest = &read[at..];
-        if rest.starts_with(START) {
-            in_paste = true;
-            at += START.len();
-        } else if rest.starts_with(END) {
-            in_paste = false;
-            at += END.len();
-        } else {
-            if !in_paste && matches!(rest[0], b'\r' | b'\n') {
-                found += 1;
-            }
-            at += 1;
-        }
-    }
-    found
-}
-
-/// Everything a window's child read, from its input log, up to a sentinel
-/// written behind everything before the call: what was written is counted on
-/// what the child received, not on what it echoed.
-pub struct ChildInput(Vec<u8>);
-
-impl ChildInput {
-    /// Writes the sentinel of [`input_log_read_so_far`] and reads the log up
-    /// to it, waiting at most [`HANG_GUARD`].
-    pub async fn read(entry: &yagura_daemon::window::WindowEntry, log: &Path) -> Self {
-        Self(input_log_read_so_far(entry, log).await)
-    }
-
-    /// The bytes read, in order.
-    pub fn bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Non-overlapping occurrences of `needle` in what was read.
-    pub fn count(&self, needle: &[u8]) -> usize {
-        assert!(!needle.is_empty(), "an empty needle counts nothing");
-        let mut found = 0;
-        let mut rest = self.0.as_slice();
-        while let Some(at) = rest
-            .windows(needle.len())
-            .position(|window| window == needle)
-        {
-            found += 1;
-            rest = &rest[at + needle.len()..];
-        }
-        found
-    }
-
-    /// Times the daemon wrote `body` as one message: the composer line
-    /// ([`yagura_daemon::input::ComposerLine`], its trailing space included),
-    /// framed as a paste or not.
-    pub fn line_writes(&self, body: &str) -> usize {
-        self.count(
-            yagura_daemon::input::ComposerLine::new(body)
-                .as_str()
-                .as_bytes(),
-        )
-    }
-
-    /// Times the default submit key ([`yagura_daemon::input::InputProfile`])
-    /// was read.
-    pub fn submit_keys(&self) -> usize {
-        self.count(&yagura_daemon::input::InputProfile::default().submit)
-    }
-}
-
-// --- a `submit_child` window whose screen can show an approval dialog ---------
-
-/// The first line of the fixture's approval dialog, matched by
-/// [`write_gate_definition`]'s approval rule.
-pub const APPROVAL_HEADING: &str = "GATE-APPROVAL";
-
-/// The status line of the fixture's `working` overlay, matched by
-/// [`write_gate_definition`]'s running rule.
-pub const WORKING_HEADING: &str = "GATE-WORKING";
-
-/// Ctrl-U, as a TOML basic-string body.
-pub const CLEAR_CTRL_U: &str = "\\u0015";
-
-/// A rules-only definition for `submit_child`: approval over working over
-/// input, so a drawn dialog wins even while the startup marker line is still
-/// on screen, plus the shared composer section.
-pub fn write_gate_definition(
-    dir: &Path,
-    name: &str,
-    marker: &str,
-    clear: &str,
-    submit_delay_ms: u64,
-) {
-    let toml = format!(
-        r#"schema_version = 1
-name = "{name}"
-bottom_line_count = 5
-
-[debounce]
-confirm_ms = 30
-
-[[rules]]
-status = "waiting_approval"
-pattern = '{APPROVAL_HEADING}'
-priority = 30
-region = "bottom"
-
-[[rules]]
-status = "running"
-pattern = '(SUBMITTED)|({WORKING_HEADING})'
-priority = 20
-region = "bottom"
-
-[[rules]]
-status = "waiting_input"
-pattern = '{marker}'
-priority = 10
-region = "bottom"
-
-[input]
-bracketed_paste = true
-ready_hold_ms = 0
-submit_delay_ms = {submit_delay_ms}
-clear = "{clear}"
-delivery_confirm_ms = 2000
-resend_max = 2
-probe = "{SUBMIT_CHILD_PROBE}"
-"#
-    );
-    std::fs::write(
-        dir.join(format!("{name}.toml")),
-        format!("{toml}{}", composer_section_toml()),
-    )
-    .expect("write detection definition file");
-}
-
-/// How one gate window is launched.
-pub struct GateWindow<'a> {
-    pub name: &'a str,
-    pub marker: &'a str,
-    /// `submit_child`'s overlay argument; empty for none.
-    pub overlay: &'a str,
-    pub heading: &'a str,
-    pub clear: &'a str,
-    /// `submit_child`'s `clear_scope` argument; empty for the ordinary one.
-    pub clear_scope: &'a str,
-    pub reflect_delay_ms: u64,
-    /// A file the child appends every byte it reads to; none when unset.
-    pub input_log: Option<&'a Path>,
-    /// The definition's `submit_delay_ms`: how long a delivery sleeps after
-    /// the body, before it goes on to the probe.
-    pub submit_delay_ms: u64,
-    /// `submit_child`'s `fold_placeholder` argument; empty for no folding.
-    pub fold_placeholder: &'a str,
-}
-
-impl<'a> GateWindow<'a> {
-    pub fn new(name: &'a str, marker: &'a str, overlay: &'a str, heading: &'a str) -> Self {
-        GateWindow {
-            name,
-            marker,
-            overlay,
-            heading,
-            clear: CLEAR_CTRL_U,
-            clear_scope: "",
-            reflect_delay_ms: 0,
-            input_log: None,
-            submit_delay_ms: 120,
-            fold_placeholder: "",
-        }
-    }
-}
-
-/// Opens `submit_child` in composer-draw mode with the overlay argument and
-/// observes the window reach `waiting_input` before returning.
-pub async fn open_gate_window(
-    h: &Harness,
-    client: &mut Connection,
-    dir: &Path,
-    window: GateWindow<'_>,
-) -> String {
-    write_gate_definition(
-        dir,
-        window.name,
-        window.marker,
-        window.clear,
-        window.submit_delay_ms,
-    );
-    let mut command = process::submit_child_command(window.marker, 0, 0, 0);
-    command.push(process::COMPOSER_MARKER.to_string());
-    command.push(process::COMPOSER_SEPARATOR.to_string());
-    command.push(process::COMPOSER_CONTINUATION_PREFIX.to_string());
-    command.push(window.reflect_delay_ms.to_string());
-    command.push(window.fold_placeholder.to_string());
-    command.push(window.clear_scope.to_string());
-    command.push(window.overlay.to_string());
-    command.push(window.heading.to_string());
-    if let Some(log) = window.input_log {
-        command.push(
-            log.to_str()
-                .expect("the input log path must be valid UTF-8")
-                .to_string(),
-        );
-    }
-    let window_id = h.open_delivering(command, Some(window.name)).await;
-    wait_until_status(client, &window_id, WindowStatus::WaitingInput).await;
-    window_id
-}
-
-// --- shared by the foreign-write gate suites ---------------------------------
-
 pub use yagura_test_support::HANG_GUARD;
-
-pub const BODY: &str = "BODY";
-pub const CLEAR: u8 = 0x15;
-pub const CTRL_C: u8 = 0x03;
-pub const ERASE: u8 = 0x7f;
-pub const PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Written last; read back, it proves the child has read everything before
-/// it. `M` then an erase leaves the composer as it stood.
-pub const MARKER: &[u8] = b"M\x7f";
-
-pub fn gate_config(dir: &Path) -> DaemonConfig {
-    DaemonConfig {
-        detection_dir: Some(dir.to_path_buf()),
-        ..approver_base_config()
-    }
-}
-
-pub fn window_entry(h: &Harness, window_id: &str) -> Arc<yagura_daemon::window::WindowEntry> {
-    h.registry
-        .get(window_id)
-        .expect("window must exist in registry")
-}
-
-/// What the child read after the body's paste, up to the marker.
-pub fn after_the_body(read: &[u8]) -> &[u8] {
-    let end = read
-        .windows(PASTE_END.len())
-        .position(|w| w == PASTE_END)
-        .unwrap_or_else(|| panic!("the body's paste must have reached the child: {read:?}"));
-    &read[end + PASTE_END.len()..]
-}
-
-/// Splits `after_body`, which must end with `foreign`, into what came before
-/// the run of clear bytes right in front of `foreign`, and that run's length.
-pub fn take_back_in_front_of<'a>(after_body: &'a [u8], foreign: &[u8]) -> (&'a [u8], usize) {
-    assert!(
-        after_body.ends_with(foreign),
-        "the other writer's bytes must be the last the child read before the marker -- the \
-         delivery writes nothing after them; after the body it read {after_body:?}"
-    );
-    let before = &after_body[..after_body.len() - foreign.len()];
-    let run = before.iter().rev().take_while(|&&b| b == CLEAR).count();
-    (&before[..before.len() - run], run)
-}
 
 // --- inbox / delivery-door fixtures -------------------------------------------
 

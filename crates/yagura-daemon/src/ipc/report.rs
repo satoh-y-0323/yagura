@@ -757,7 +757,7 @@ impl std::fmt::Debug for ReportInboxes {
 fn deposit_notice(entry: &WindowEntry, pending: usize) -> crate::inbox::Deposited {
     // Derived from the reports, which are kept, so the notice itself is not.
     let parcel = crate::inbox::Parcel::notice(REPORT_NOTICE_KEY, notice_text(pending)).unsaved();
-    entry.inbox().deposit_tracked(parcel, None, None)
+    entry.inbox().deposit_tracked(parcel)
 }
 
 /// The one line handed to a parent with `pending` reports waiting. Only the

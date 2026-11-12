@@ -72,8 +72,7 @@ const RESTARTED_TEXT: &str = "the connection to the yagura daemon was lost after
     have taken effect. Check before calling again: for windows read list_windows and \
     get_window_status; for interrupt_window read get_window_status or wait_for_status; for chat \
     read read_chat with after_seq; for plans and a task window's report read list_plans, then \
-    get_plan; for tickets read list_tickets and get_ticket. Do not send send_keys again: read \
-    the screen as it is now with read_output and decide the next step from it. A call that only \
+    get_plan; for tickets read list_tickets and get_ticket. A call that only \
     waited (wait_for_status, wait_for_report) or was waiting for approval did nothing, so call \
     it again. A send_message or send_handoff may already have reached its receiver, and nothing \
     takes it back: if you send it again, it may arrive twice, under a new id, so say in it that \

@@ -11,8 +11,9 @@ use crate::common;
 
 use common::CopiedScreen;
 use regex::Regex;
-use yagura_daemon::detector::definition::ComposerSection;
-use yagura_daemon::detector::reading::ComposerReadout;
+use yagura_daemon::detector::definition::{
+    ComposerSection, bundled_definition_source, parse_definition,
+};
 
 const COLS: u16 = 20;
 const ROWS: u16 = 4;
@@ -31,8 +32,6 @@ fn composer(marker: &str, separator: &str, continuation_prefix: &str) -> Compose
         continuation_prefix: continuation_prefix.to_string(),
         blank_lines_in_body: false,
         left_panel: None,
-        right_border: None,
-        placeholder: None,
     }
 }
 
@@ -403,10 +402,10 @@ fn cursor_row_moves_with_explicit_cursor_positioning() {
 }
 
 // =====================================================================
-// read_composer / ComposerReadout -- region determination. The
-// three cases below are the ones the rejected "continuation-prefix-until-it-
-// stops-matching" design gets wrong; each pins a property the cursor-bound
-// design must still satisfy.
+// Taking the composer's body out of what the rules read -- the region. The
+// three cases below are the ones a "continuation-prefix-until-it-stops-
+// matching" design gets wrong; each pins a property the cursor-bound walk
+// must satisfy.
 // =====================================================================
 
 #[test]
@@ -424,10 +423,11 @@ fn composer_region_does_not_extend_past_the_cursor_row_when_the_continuation_pre
     // -- not wherever the last byte fed happened to land it.
     screen.feed(b"\x1b[1;21H");
 
-    match screen.read_composer(&section) {
-        ComposerReadout::Body(text) => assert_eq!(text, "zzShortDraft"),
-        other => panic!("expected Body, got {other:?}"),
-    }
+    assert_eq!(
+        screen.bottom_lines_without_composer(5, &section),
+        vec!["prompt$ ", "unwanted trailing content below"],
+        "only the body on the cursor's own row is taken out"
+    );
 }
 
 #[test]
@@ -443,10 +443,11 @@ fn composer_region_terminates_at_the_cursor_row_with_no_border_line_below() {
     );
     screen.feed(b"\x1b[2;12H");
 
-    match screen.read_composer(&section) {
-        ComposerReadout::Body(text) => assert_eq!(text, "zzHEADrootBCDEFTAIL"),
-        other => panic!("expected Body, got {other:?}"),
-    }
+    assert_eq!(
+        screen.bottom_lines_without_composer(5, &section),
+        vec!["> ", "  indented decoy line"],
+        "the body ends at the cursor's row, and the decoy row below stays"
+    );
 }
 
 #[test]
@@ -466,10 +467,15 @@ fn composer_region_picks_the_marker_row_nearest_the_cursor_over_an_older_one_fur
     );
     screen.feed(b"\x1b[4;15H");
 
-    match screen.read_composer(&section) {
-        ComposerReadout::Body(text) => assert_eq!(text, "newDraftHEADnewDraftTAIL"),
-        other => panic!("expected Body, got {other:?}"),
-    }
+    assert_eq!(
+        screen.bottom_lines_without_composer(5, &section),
+        vec![
+            "> oldDraftFromEarlier",
+            "some unrelated command output",
+            "> "
+        ],
+        "only the composer nearest the cursor is taken out"
+    );
 }
 
 #[test]
@@ -478,4 +484,50 @@ fn note_output_counts_each_chunk_taken_in() {
 
     assert_eq!(screen.note_output(), 1);
     assert_eq!(screen.note_output(), 2);
+}
+
+fn shipped_composer(definition: &str) -> ComposerSection {
+    let source = bundled_definition_source(definition).expect("bundled definition must exist");
+    parse_definition(source)
+        .expect("bundled definition must parse")
+        .composer
+        .expect("bundled definition must declare a composer")
+}
+
+fn move_cursor(screen: &mut CopiedScreen, row: u16, col: u16) {
+    screen.feed(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+}
+
+fn sidebar_screen(fixture: &str, cursor_col: u16) -> CopiedScreen {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/copilot-cli")
+        .join(format!("{fixture}.txt"));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let lines: Vec<&str> = text.lines().collect();
+    let mut screen = feed_rows(100, &lines);
+    // The capture keeps text only; the cursor sits where the CLI leaves it
+    // (replayed from the raw recordings: just after `┃ ` / after `else.`).
+    move_cursor(&mut screen, 13, cursor_col);
+    screen
+}
+
+#[test]
+fn a_composer_beside_a_left_panel_has_its_body_taken_out_from_the_panels_edge() {
+    let section = shipped_composer("copilot-cli");
+    assert!(
+        section.left_panel.is_some(),
+        "the copilot-cli definition must declare the panel this case reads past"
+    );
+    let draft = sidebar_screen("100x30-sidebar-draft", 38);
+    let unmasked = draft.bottom_lines(30).join("\n");
+    assert!(
+        unmasked.contains("Start-Sleep"),
+        "the draft must be on the screen, or its absence below proves nothing"
+    );
+    let masked = draft.bottom_lines_without_composer(30, &section).join("\n");
+    assert!(
+        !masked.contains("Start-Sleep"),
+        "a body read from the panel's edge must be taken out: {masked:?}"
+    );
 }

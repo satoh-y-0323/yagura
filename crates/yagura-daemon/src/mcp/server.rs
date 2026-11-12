@@ -25,8 +25,7 @@ use super::ticket_tools::{
 };
 use super::tools::{
     self, CloseWindowArgs, GetWindowStatusArgs, InterruptWindowArgs, OpenWindowArgs, ReadChatArgs,
-    ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendKeysArgs, SendMessageArgs, ToolError,
-    WaitForStatusArgs,
+    ReadOutputArgs, SendChatArgs, SendHandoffArgs, SendMessageArgs, ToolError, WaitForStatusArgs,
 };
 
 /// Shared between `open_window` and `send_handoff`'s schemas: both accept the
@@ -239,8 +238,7 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             immediately when it targets this bridge's own window, and is otherwise held pending \
             a decision (by the active playbook or a human approver) unless the target window's \
             status is unknown, in which case it is refused outright (status_unknown) -- even \
-            for a caller sending to its own window. A window whose definition declares no \
-            composer is refused as no_composer. A held call blocks until it is decided or the \
+            for a caller sending to its own window. A held call blocks until it is decided or the \
             deadline passes; a denial or timeout is reported as approval_denied or \
             approval_timeout. The reply carries id, state and note. state is delivered once \
             the CLI was handed the envelope (an input handoff, not proof that the model read \
@@ -259,17 +257,11 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
                 "window_id": { "type": "string" },
                 "text": {
                     "type": "string",
-                    "description": "Line endings are normalized to a lone CR and kept: the \
-                        text may run over several lines. Any other control character (for \
-                        example ESC) is rejected as invalid_argument before any approval \
+                    "description": "The text may run over several lines; its line endings \
+                        are kept as written. Any other control character (for example ESC) is rejected as invalid_argument before any approval \
                         decision is made, and so is text longer than one answer of the \
                         window's doors carries. When the call needs a decision, a body over \
                         2048 bytes is also rejected as invalid_argument.",
-                },
-                "mode": {
-                    "type": "string",
-                    "description": "Only \"immediate\" is currently implemented; other values \
-                        are rejected as unsupported.",
                 },
             },
             "required": ["window_id", "text"],
@@ -288,35 +280,6 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
         .await
     }
 
-    #[tool(
-        description = "Send named control keys to a window. The closed set is escape, backspace, ctrl_u, enter, up and down; keys are written in order as one raw PTY operation. escape is allowed only as the last key; any other position is invalid_argument. This is a destructive, gated operation and refuses unknown, empty or overlong sequences before approval.",
-        input_schema = schema_object(json!({
-            "type": "object",
-            "properties": {
-                "window_id": { "type": "string" },
-                "keys": {
-                    "type": "array",
-                    "items": { "type": "string", "enum": ["escape", "backspace", "ctrl_u", "enter", "up", "down"] },
-                    "minItems": 1,
-                    "maxItems": yagura_protocol::SEND_KEYS_MAX_KEYS,
-                },
-            },
-            "required": ["window_id", "keys"],
-        }))
-    )]
-    async fn send_keys(
-        &self,
-        params: Parameters<SendKeysArgs>,
-        ctx: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        self.unless_cancelled(
-            "send_keys",
-            &ctx,
-            tools::send_keys(&self.transport, params.0),
-        )
-        .await
-    }
-
     // Some MCP clients silently truncate a long tool description, so the
     // description keeps only what every caller needs and the per-argument
     // rules live in the schema, where a client reads them per argument.
@@ -329,7 +292,7 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
             until decided or the deadline passes. A denial, a timeout or no connected \
             approver is reported as approval_denied, approval_timeout or \
             approval_required. An existing window's CLI takes the envelope through \
-            its own hooks (a CLI with no way to be woken is typed it while it waits); \
+            its own hooks or its wake command (a CLI with neither takes it at its next turn); \
             a window opened from a profile is started with it as its first request, \
             after its start and the envelope are both approved -- nothing starts \
             before that. A profile that cannot be handed a request at launch is \

@@ -21,7 +21,6 @@
 //! row could not be written never shows, and holds nothing back.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tokio::sync::{oneshot, watch};
@@ -422,12 +421,10 @@ impl Default for DeliverySpec {
 pub enum ParcelEnd {
     /// The window's CLI took it.
     Taken,
-    /// A push handed it to the window's CLI, and its row's removal recorded
+    /// A door handed it to the window's CLI, and its row's removal recorded
     /// the chat delivery it carried as taken: its depositor writes nothing
     /// more.
     TakenRecorded,
-    /// It was turned away: the budget a push of it draws on was spent.
-    TurnedAway,
     /// The window ended before its CLI took it.
     Closed,
     /// The daemon stopped with the parcel still waiting.
@@ -442,15 +439,6 @@ pub enum Place {
     /// A door or a push is carrying it: it ends with them, or comes back to
     /// waiting when they fail.
     Carried,
-}
-
-/// A daemon-wide budget a push draws one unit from while it runs.
-#[derive(Debug, Clone)]
-pub struct PushBudget {
-    /// The units in use.
-    pub counter: Arc<AtomicUsize>,
-    /// The most units there are.
-    pub max: usize,
 }
 
 /// Who writes a deposited parcel's row.
@@ -536,8 +524,7 @@ impl Drop for Unwritten {
     }
 }
 
-/// One parcel as the inbox holds it: who learns how it left, and what its
-/// push draws on.
+/// One parcel as the inbox holds it, and who learns how it left.
 struct Held {
     parcel: Parcel,
     /// Its place in the inbox as the store keeps it: lower is older.
@@ -550,17 +537,16 @@ struct Held {
     /// held back has to be woken for again once it shows.
     wakes: bool,
     /// Whether its depositor forgets its row itself, in the same transaction
-    /// that settles what the parcel was for, once it is taken or turned
-    /// away: the inbox then leaves that row alone.
+    /// that settles what the parcel was for, once it is taken: the inbox then
+    /// leaves that row alone.
     depositor_forgets: bool,
     /// The chat delivery its row's removal records, for a depositor that
     /// forgets the row itself.
     delivery: Option<ChatDelivery>,
-    /// Whether a push's settling has forgotten its row already (or owes
+    /// Whether a door's confirmation has forgotten its row already (or owes
     /// that): nothing forgets it a second time.
     settled: bool,
     end: Option<oneshot::Sender<ParcelEnd>>,
-    budget: Option<PushBudget>,
     /// Where it is, for its depositor to watch.
     place: watch::Sender<Place>,
 }
@@ -591,14 +577,12 @@ impl Held {
 struct Carried {
     id: u64,
     held: Vec<Held>,
-    /// Raised once the push has pressed the submit key: what it carries has
-    /// reached the CLI, whatever its cleanup still has to do.
-    submitted: Arc<watch::Sender<bool>>,
-    /// The settling before the submit key, once it was asked for.
-    settling: Option<Arc<Mutex<Recorded>>>,
+    /// Never raised: it is dropped when the push ends, which is what a
+    /// withdrawal that found the parcels here waits for.
+    ended: watch::Sender<bool>,
 }
 
-/// Whether a push's settling has committed: until it has, the ends of the
+/// Whether a door's confirmation has committed: until it has, the ends of the
 /// chat deliveries it records wait for it.
 enum Recorded {
     Waiting(Vec<oneshot::Sender<ParcelEnd>>),
@@ -806,8 +790,8 @@ impl Shared {
         }
     }
 
-    /// [`Self::forget`] for parcels that were taken or turned away: a parcel
-    /// whose depositor forgets its row itself keeps it until then.
+    /// [`Self::forget`] for parcels that were taken: a parcel whose depositor
+    /// forgets its row itself keeps it until then.
     fn forget_ended<'a>(&self, held: impl IntoIterator<Item = &'a Held>) {
         self.forget(
             held.into_iter()
@@ -971,12 +955,7 @@ impl Shared {
         };
         if let Some(keeper) = self.keeper.as_ref().filter(|_| !rows.is_empty()) {
             let committed = Arc::clone(&recorded);
-            let settled = keeper.settle_push(
-                id,
-                rows,
-                None,
-                Box::new(move || Recorded::commit(&committed)),
-            );
+            let settled = keeper.settle_push(rows, Box::new(move || Recorded::commit(&committed)));
             let _ = settled.await;
         }
         let mut state = self.lock();
@@ -1154,7 +1133,7 @@ pub struct Deposited {
     pub place: Option<watch::Receiver<Place>>,
 }
 
-/// A push under way: what it carries and what it draws on.
+/// A push under way: what it carries.
 pub struct Push {
     /// Names the push to [`Inbox::finish_push`].
     pub id: u64,
@@ -1162,10 +1141,6 @@ pub struct Push {
     pub key: String,
     /// The text the push hands over.
     pub text: String,
-    /// The budget the first parcel it carries draws on, if any.
-    pub budget: Option<PushBudget>,
-    /// To be raised by the push when it presses the submit key.
-    pub submitted: Arc<watch::Sender<bool>>,
 }
 
 /// How a push ended.
@@ -1175,8 +1150,6 @@ pub enum PushEnd {
     Taken,
     /// Nothing reached the CLI: the parcels go back in front of the inbox.
     Failed,
-    /// The budget the push draws on was spent: the parcels are turned away.
-    TurnedAway,
 }
 
 /// What withdrawing a parcel came to.
@@ -1185,13 +1158,11 @@ pub enum Withdrawal {
     /// It was waiting and is out of the inbox: it never reaches the CLI.
     Removed,
     /// A door or a push holds it: it ends with that door or push, and goes
-    /// back to waiting when they fail. `submitted` turns true once a push has
-    /// pressed the submit key: the parcel has then reached the CLI. A door's
-    /// is never raised. Either closes when the door or push ends, which is when
-    /// the parcel is waiting again or ended.
+    /// back to waiting when they fail.
     UnderWay {
-        /// Whether the push has pressed the submit key.
-        submitted: watch::Receiver<bool>,
+        /// Never turns true; closes when the door or push ends, which is when
+        /// the parcel is waiting again or ended.
+        ended: watch::Receiver<bool>,
     },
     /// It already left the inbox; its end says how.
     Gone,
@@ -1257,7 +1228,6 @@ impl Inbox {
                 delivery: None,
                 settled: false,
                 end: None,
-                budget: None,
                 place: watch::channel(Place::Waiting).0,
             });
         }
@@ -1289,36 +1259,24 @@ impl Inbox {
     /// key, which is not returned (see [`Parcel::notice`]). A registered wait
     /// is answered when the window can be pushed to.
     pub fn deposit(&self, parcel: Parcel) -> Vec<Parcel> {
-        self.deposit_as(parcel, None, None, false).0.turned_away
+        self.deposit_as(parcel, false).0.turned_away
     }
 
     /// [`Self::deposit`], telling the depositor how the parcel leaves the
-    /// inbox. `budget` is what a push of it draws on. With `waiting_limit`,
-    /// a parcel that would find that many already waiting is turned away
-    /// sooner than the capacity alone would. A notice that replaces another
-    /// leaves the replaced one's end dropped unsettled. A kept parcel shows
-    /// once its row is written, and one whose row cannot be written leaves
-    /// without ever showing. The depositor wakes the window's agent: one
-    /// held back is woken for again once it shows.
-    pub fn deposit_tracked(
-        &self,
-        parcel: Parcel,
-        budget: Option<PushBudget>,
-        waiting_limit: Option<usize>,
-    ) -> Deposited {
-        self.deposit_as(parcel, budget, waiting_limit, true).0
+    /// inbox. A notice that replaces another leaves the replaced one's end
+    /// dropped unsettled. A kept parcel shows once its row is written, and one
+    /// whose row cannot be written leaves without ever showing. The depositor
+    /// wakes the window's agent: one held back is woken for again once it
+    /// shows.
+    pub fn deposit_tracked(&self, parcel: Parcel) -> Deposited {
+        self.deposit_as(parcel, true).0
     }
 
     /// [`Self::deposit_tracked`], with [`Saving`] telling the depositor how
     /// the parcel's row came out, for a depositor that answers for it being
     /// kept.
-    pub(crate) fn deposit_saved(
-        &self,
-        parcel: Parcel,
-        budget: Option<PushBudget>,
-        waiting_limit: Option<usize>,
-    ) -> (Deposited, Saving) {
-        self.deposit_as(parcel, budget, waiting_limit, true)
+    pub(crate) fn deposit_saved(&self, parcel: Parcel) -> (Deposited, Saving) {
+        self.deposit_as(parcel, true)
     }
 
     /// [`Self::deposit_tracked`] for a depositor that writes the parcel's row
@@ -1326,37 +1284,26 @@ impl Inbox {
     /// parcel carries. The row to write comes back with the [`Unwritten`]
     /// that holds the parcel back until the depositor tells how the write
     /// came out; `None` when the inbox keeps nothing. The parcel's row is
-    /// forgotten by its depositor too, once it is taken or turned away, but
-    /// for a push's settling, which records `delivery` with it
+    /// forgotten by its depositor too, once it is taken, but for a door's
+    /// confirmation, which records `delivery` with it
     /// ([`ParcelEnd::TakenRecorded`]).
     pub(crate) fn deposit_with_row(
         &self,
         parcel: Parcel,
-        budget: Option<PushBudget>,
         delivery: ChatDelivery,
     ) -> (Deposited, Option<(KeptParcel, Unwritten)>) {
-        let (deposited, _, row) =
-            self.deposit_by(parcel, budget, None, true, Keeping::Depositor(delivery));
+        let (deposited, _, row) = self.deposit_by(parcel, true, Keeping::Depositor(delivery));
         (deposited, row)
     }
 
-    fn deposit_as(
-        &self,
-        parcel: Parcel,
-        budget: Option<PushBudget>,
-        waiting_limit: Option<usize>,
-        wakes: bool,
-    ) -> (Deposited, Saving) {
-        let (deposited, saving, _) =
-            self.deposit_by(parcel, budget, waiting_limit, wakes, Keeping::Keeper);
+    fn deposit_as(&self, parcel: Parcel, wakes: bool) -> (Deposited, Saving) {
+        let (deposited, saving, _) = self.deposit_by(parcel, wakes, Keeping::Keeper);
         (deposited, saving)
     }
 
     fn deposit_by(
         &self,
         parcel: Parcel,
-        budget: Option<PushBudget>,
-        waiting_limit: Option<usize>,
         wakes: bool,
         keeping: Keeping,
     ) -> (Deposited, Saving, Option<(KeptParcel, Unwritten)>) {
@@ -1378,9 +1325,7 @@ impl Inbox {
         let mut state = self.shared.lock();
         // A notice is one per key, so it bounds itself; it is never turned
         // away, and never counted, for the room other parcels take.
-        let full = !parcel.notice
-            && (state.waiting_others() >= self.shared.capacity
-                || waiting_limit.is_some_and(|limit| state.parcels.len() >= limit));
+        let full = !parcel.notice && state.waiting_others() >= self.shared.capacity;
         if state.closed.is_some() || full {
             return refused(parcel);
         }
@@ -1396,7 +1341,6 @@ impl Inbox {
             delivery: None,
             settled: false,
             end: Some(tx),
-            budget,
             place: watch::channel(Place::Waiting).0,
         };
         let place = held.place.subscribe();
@@ -1595,29 +1539,12 @@ impl Inbox {
         self.shared.wake(&mut state);
     }
 
-    /// The budget a push of the oldest waiting parcel would draw on.
-    #[must_use]
-    pub fn next_budget(&self) -> Option<PushBudget> {
-        self.shared
-            .lock()
-            .parcels
-            .front()
-            .filter(|held| held.written)
-            .and_then(|held| held.budget.clone())
-    }
-
     /// Takes what one push hands over out of the inbox: everything that fits
-    /// in one answer when `whole`, otherwise the oldest parcel alone. `None`
-    /// when nothing is waiting. The doors do not return what a push carries.
-    pub fn begin_push(&self, whole: bool) -> Option<Push> {
+    /// in one answer. `None` when nothing is waiting. The doors do not return
+    /// what a push carries.
+    pub fn begin_push(&self) -> Option<Push> {
         let mut state = self.shared.lock();
-        let held = if whole {
-            self.shared.take_within(&mut state, "").0
-        } else if state.shown() > 0 {
-            state.parcels.pop_front().into_iter().collect()
-        } else {
-            Vec::new()
-        };
+        let held = self.shared.take_within(&mut state, "").0;
         let first = held.first()?;
         for carried in &held {
             carried.move_to(Place::Carried);
@@ -1627,119 +1554,19 @@ impl Inbox {
             .map(|held| held.parcel.text.as_str())
             .collect::<Vec<_>>()
             .join(SEPARATOR);
-        let budget = first.budget.clone();
         let key = first.parcel.key.clone();
         state.next_push += 1;
         let id = state.next_push;
-        let submitted = Arc::new(watch::channel(false).0);
         state.carrying.push(Carried {
             id,
             held,
-            submitted: Arc::clone(&submitted),
-            settling: None,
+            ended: watch::channel(false).0,
         });
-        Some(Push {
-            id,
-            key,
-            text,
-            budget,
-            submitted,
-        })
+        Some(Push { id, key, text })
     }
 
-    /// Settles push `id` right before its first submit key, once: the rows
-    /// of the kept parcels it carries are forgotten, with the chat delivery
-    /// each carries recorded as taken, and the delivery mark of `mark` with
-    /// them, in one transaction. Returns once that has committed -- or has
-    /// failed, and is owed behind the next write that succeeds, since the key
-    /// goes out regardless -- whether it settled anything (and took the mark
-    /// along): not when the push carries nothing kept, or is settled already.
-    pub(crate) async fn settle_push(&self, id: u64, mark: Option<String>) -> bool {
-        let Some(keeper) = self.shared.keeper.as_ref() else {
-            return false;
-        };
-        let (rows, recorded) = {
-            let mut state = self.shared.lock();
-            let Some(carried) = state
-                .carrying
-                .iter_mut()
-                .find(|carried| carried.id == id && carried.settling.is_none())
-            else {
-                return false;
-            };
-            let mut rows = Vec::new();
-            for held in carried.held.iter_mut().filter(|held| held.parcel.saved) {
-                if held.delivery.is_none() && held.depositor_forgets {
-                    continue;
-                }
-                rows.push(RowEnd {
-                    parcel: held.kept(),
-                    delivery: held.delivery.clone(),
-                });
-                held.settled = true;
-            }
-            if rows.is_empty() {
-                return false;
-            }
-            let recorded = Arc::new(Mutex::new(Recorded::Waiting(Vec::new())));
-            carried.settling = Some(Arc::clone(&recorded));
-            (rows, recorded)
-        };
-        let settled = keeper.settle_push(
-            id,
-            rows,
-            mark,
-            Box::new(move || Recorded::commit(&recorded)),
-        );
-        let _ = settled.await;
-        true
-    }
-
-    /// Undoes push `id`'s settling once its submit key is known not to have
-    /// gone out: the rows are kept again with their chat deliveries pending,
-    /// and the delivery mark of `mark` with them, before the push puts its
-    /// parcels back. A write that fails is owed as the settling is. Nothing
-    /// when the push was not settled.
-    pub(crate) async fn unsettle_push(&self, id: u64, mark: Option<String>) {
-        let Some(keeper) = self.shared.keeper.as_ref() else {
-            return;
-        };
-        let rows = {
-            let mut state = self.shared.lock();
-            let Some(carried) = state
-                .carrying
-                .iter_mut()
-                .find(|carried| carried.id == id && carried.settling.is_some())
-            else {
-                return;
-            };
-            carried.settling = None;
-            carried
-                .held
-                .iter_mut()
-                .filter_map(|held| {
-                    std::mem::take(&mut held.settled).then(|| RowEnd {
-                        parcel: held.kept(),
-                        delivery: held.delivery.clone(),
-                    })
-                })
-                .collect()
-        };
-        let _ = keeper.unsettle_push(id, rows, mark).await;
-    }
-
-    /// Whether a push is under way that has not pressed its submit key.
-    #[cfg(feature = "fault-injection")]
-    pub(crate) fn push_before_submit_key(&self) -> bool {
-        self.shared
-            .lock()
-            .carrying
-            .iter()
-            .any(|carried| !*carried.submitted.borrow())
-    }
-
-    /// Ends push `id`: what it carried is taken, goes back in front of the
-    /// inbox, or is turned away.
+    /// Ends push `id`: what it carried is taken, or goes back in front of the
+    /// inbox.
     pub fn finish_push(&self, id: u64, end: PushEnd) {
         let mut state = self.shared.lock();
         let Some(position) = state.carrying.iter().position(|carried| carried.id == id) else {
@@ -1749,21 +1576,8 @@ impl Inbox {
         match end {
             PushEnd::Taken => {
                 self.shared.forget_ended(&carried.held);
-                for mut held in carried.held {
-                    match (&carried.settling, held.settled && held.delivery.is_some()) {
-                        (Some(recorded), true) => {
-                            if let Some(end) = held.end.take() {
-                                Recorded::tell(recorded, end);
-                            }
-                        }
-                        _ => held.settle(ParcelEnd::Taken),
-                    }
-                }
-            }
-            PushEnd::TurnedAway => {
-                self.shared.forget_ended(&carried.held);
                 for held in carried.held {
-                    held.settle(ParcelEnd::TurnedAway);
+                    held.settle(ParcelEnd::Taken);
                 }
             }
             PushEnd::Failed => match state.closed {
@@ -1812,7 +1626,7 @@ impl Inbox {
             .find(|carried| carried.held.iter().any(|held| held.parcel.key == key))
         {
             return Withdrawal::UnderWay {
-                submitted: carried.submitted.subscribe(),
+                ended: carried.ended.subscribe(),
             };
         }
         match state
@@ -1821,7 +1635,7 @@ impl Inbox {
             .find(|door| door.held.iter().any(|held| held.parcel.key == key))
         {
             Some(door) => Withdrawal::UnderWay {
-                submitted: door.ended.subscribe(),
+                ended: door.ended.subscribe(),
             },
             None => Withdrawal::Gone,
         }

@@ -10,46 +10,28 @@
 //! - `command`: runs the profile's own program with the wake arguments, once
 //!   the CLI has reported its session. A failed run puts the parcels back and
 //!   is not repeated until something changes.
-//! - `none`: types the oldest parcel into the composer while the window waits
-//!   for input, through the same judged send `send_message` uses. The next one
-//!   is typed only once the window has reacted to the last submit key, or the
-//!   delivery confirmation after that key has run out.
+//! - `none`: pushes nothing; what waits is read by the window's doors at the
+//!   CLI's next turn.
 //!
-//! None of them pushes to a window whose status is `Unknown`. A parcel a push
+//! Neither pushes to a window whose status is `Unknown`. A parcel a push
 //! carries is out of reach of the window's doors until the push ends, and goes
 //! back in front of the inbox if nothing reached the CLI.
-//!
-//! A typed parcel the window declined is tried again when the window's status
-//! moves on or, failing that, after [`NOTICE_RETRY_INTERVAL`]; one declined
-//! because someone else's text sits in the composer waits for the composer to
-//! read empty or the status to move on instead.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, oneshot, watch};
-use tokio::time::Instant;
+use tokio::sync::{oneshot, watch};
 use yagura_protocol::WindowStatus;
 
 use crate::config::DaemonConfig;
-use crate::handoff::{DELIVERY_REACTION_STATUSES, READY_STATUSES, is_ready};
-use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, Push, PushBudget, PushEnd};
+use crate::inbox::{Deposited, Parcel, ParcelEnd, Place, PushEnd};
 use crate::profile_delivery::WakeMode;
 use crate::pty;
-use crate::waiter::{ReactionOutcome, StatusAt, WaitOutcome, wait_for_any_held, wait_for_reaction};
+use crate::waiter::StatusAt;
 use crate::window::{WindowEntry, WindowLiveness, WindowRegistry};
 
 use super::report::ReportInboxes;
-use super::{CarriedResidue, CounterGuard, DeliveryEnd, Scarce, SharedBudget, TypedOutcome};
-
-/// How long one wait for the window to accept input runs before its liveness
-/// is looked at again; a parcel itself has no deadline.
-const NOTICE_WAIT_SLICE: Duration = Duration::from_secs(60);
-
-/// How long a declined parcel waits before it is typed again while the
-/// window's status stays where it was.
-const NOTICE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long a wake command may run before it is given up on; only a hang
 /// reaches it.
@@ -126,10 +108,9 @@ pub(super) struct Tracked {
     pub(super) place: watch::Receiver<Place>,
 }
 
-/// Puts `parcel` in `entry`'s inbox and wakes the window's agent. `budget` is
-/// what typing it draws on; `waiting_limit` turns it away when that many
-/// already wait to be typed. A full inbox turns the new parcel away and never
-/// pushes an older one out, except that a notice is always taken in.
+/// Puts `parcel` in `entry`'s inbox and wakes the window's agent. A full
+/// inbox turns the new parcel away and never pushes an older one out, except
+/// that a notice is always taken in.
 ///
 /// # Errors
 ///
@@ -138,17 +119,8 @@ pub(super) fn deposit(
     registry: &WindowRegistry,
     entry: &Arc<WindowEntry>,
     parcel: Parcel,
-    budget: Option<PushBudget>,
-    waiting_limit: Option<usize>,
 ) -> Result<Tracked, Refused> {
-    let typed = matches!(
-        entry.delivery().map(|delivery| &delivery.wake),
-        Some(WakeMode::None)
-    );
-    let mut deposited =
-        entry
-            .inbox()
-            .deposit_tracked(parcel, budget, waiting_limit.filter(|_| typed));
+    let mut deposited = entry.inbox().deposit_tracked(parcel);
     let handed_to_wait = deposited.handed_to_wait;
     let place = deposited.place.take();
     let end = after_deposit(registry, entry, deposited)?;
@@ -217,59 +189,9 @@ pub(super) fn after_deposit(
     Ok(end)
 }
 
-/// How one typing attempt ended, with the verdict or reason it is logged
-/// under.
-#[derive(Clone, Copy)]
-enum Attempt {
-    /// The submit key was pressed, at the instant carried.
-    Written(&'static str, Instant),
-    Declined(&'static str),
-    /// Declined because someone else's text is in the composer.
-    DeclinedForeign,
-    /// The budget it draws on was spent.
-    Exhausted(&'static str),
-}
-
-/// When the last attempt was declined, and on which status generation.
-struct Declined {
-    generation: u64,
-    at: Instant,
-}
-
-/// What a typing agent carries from one attempt to the next.
-#[derive(Default)]
-struct Typing {
-    declined: Option<Declined>,
-    /// Whether the last attempt was declined for someone else's text.
-    foreign_draft: bool,
-    retries: u32,
-    /// What a declined attempt left in the composer, with the parcel it
-    /// belongs to, handed to the next attempt at that same parcel so it
-    /// finishes its own text instead of declining it as someone else's.
-    residue: Option<(String, CarriedResidue)>,
-}
-
-impl Typing {
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-/// A submit key the window has not yet been seen to react to. Kept apart from
-/// [`Typing`] so that an inbox running empty does not forget it: a text
-/// arriving later must still wait for that reaction.
-struct Unanswered {
-    submitted_at: Instant,
-    /// Subscribed before the submit key was written, so a reaction that came
-    /// and went before the next text is still read.
-    changes: broadcast::Receiver<StatusAt>,
-}
-
 async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
     let window_id = entry.window_id().to_string();
     let mut status = entry.watch_status();
-    let mut typing = Typing::default();
-    let mut unanswered: Option<Unanswered> = None;
     // A failed wake command is not run again until something changes.
     let mut command_failed = false;
     while matches!(
@@ -290,23 +212,10 @@ async fn run_agent(agents: Arc<NoticeAgents>, entry: Arc<WindowEntry>) {
                     continue;
                 }
             }
-            Some(WakeMode::None) => {
-                // A window the daemon cannot judge a typed line in is never
-                // typed into: what waits for it stays for its doors.
-                if entry.composer_access().is_judged() && entry.inbox().pending_count() > 0 {
-                    match type_once(&agents, &entry, &mut status, &mut typing, &mut unanswered)
-                        .await
-                    {
-                        Some(()) => continue,
-                        None => break,
-                    }
-                }
-                typing.reset();
-            }
-            // Nothing is pushed to a window that declares no delivery; the
-            // agent still runs so that its report inbox is discarded once it
-            // ends.
-            None => {}
+            // Nothing is pushed to a window whose CLI has no way to be woken,
+            // or that declares no delivery; the agent still runs so that its
+            // report inbox is discarded once it ends.
+            Some(WakeMode::None) | None => {}
         }
         if !idle(&entry, &mut status).await {
             break;
@@ -324,145 +233,6 @@ fn pushable(entry: &WindowEntry) -> bool {
     )
 }
 
-/// One pass of the typing agent: waits out a declined attempt's pacing, the
-/// window's reaction to the last submit key and the window's readiness, then
-/// types the oldest parcel. `None` once the window's status stream is gone.
-async fn type_once(
-    agents: &NoticeAgents,
-    entry: &WindowEntry,
-    status: &mut watch::Receiver<StatusAt>,
-    typing: &mut Typing,
-    unanswered: &mut Option<Unanswered>,
-) -> Option<()> {
-    if let Some(last) = &typing.declined {
-        let released = if typing.foreign_draft {
-            wait_for_draft_change(entry, status, last).await
-        } else {
-            wait_to_retry(status, last).await
-        };
-        if !released {
-            return None;
-        }
-    }
-    // A budgeted parcel holds its unit from the moment it is next to be typed,
-    // its wait for the window to be ready included; with none left it goes
-    // straight to the push, which turns it away.
-    let reserved = entry.inbox().next_budget().map(|budget| {
-        CounterGuard::try_take(&budget.counter, budget.max).map(|unit| (budget, unit))
-    });
-    // Waited even with no unit reserved: one freed before the push would
-    // otherwise let it type into the turn the last text started.
-    if let Some(last) = unanswered.take() {
-        await_reaction(entry, last).await?;
-    }
-    if !matches!(reserved, Some(None)) {
-        let ready_hold = entry.input_profile().ready_hold;
-        match wait_for_any_held(
-            status.clone(),
-            READY_STATUSES,
-            ready_hold,
-            NOTICE_WAIT_SLICE,
-        )
-        .await
-        {
-            WaitOutcome::Reached => {}
-            WaitOutcome::Timeout { .. } => return Some(()),
-            WaitOutcome::ChildExited { .. } | WaitOutcome::Detached => return None,
-        }
-        entry.note_left_startup_phase();
-    }
-    // Taken out only now: until the window is ready, a turn's own door may
-    // still take it.
-    let Some(push) = entry.inbox().begin_push(false) else {
-        return Some(());
-    };
-    let carried = typing
-        .residue
-        .take()
-        .filter(|(key, _)| *key == push.key)
-        .map(|(_, residue)| residue);
-    let held = reserved.flatten().filter(|(budget, _)| {
-        push.budget
-            .as_ref()
-            .is_some_and(|drawn| Arc::ptr_eq(&drawn.counter, &budget.counter))
-    });
-    let changes = entry.subscribe_status();
-    let (attempt, left) = type_push(entry, &push, &agents.config, carried, held.is_some()).await;
-    #[cfg(feature = "fault-injection")]
-    if *push.submitted.borrow() {
-        agents
-            .config
-            .faults
-            .reach(crate::fault_point::FaultPoint::AfterSendKey);
-    }
-    drop(held);
-    entry.note_notice_attempt();
-    let outcome = match attempt {
-        Attempt::Written(outcome, _) | Attempt::Declined(outcome) | Attempt::Exhausted(outcome) => {
-            outcome
-        }
-        Attempt::DeclinedForeign => "foreign_draft",
-    };
-    tracing::info!(
-        window_id = entry.window_id(),
-        outcome,
-        retries = typing.retries,
-        "notice delivery attempt finished"
-    );
-    match attempt {
-        Attempt::Written(_, submitted_at) => {
-            entry.inbox().finish_push(push.id, PushEnd::Taken);
-            typing.reset();
-            *unanswered = Some(Unanswered {
-                submitted_at,
-                changes,
-            });
-        }
-        Attempt::Exhausted(_) => {
-            entry.inbox().finish_push(push.id, PushEnd::TurnedAway);
-            typing.reset();
-        }
-        Attempt::Declined(_) | Attempt::DeclinedForeign => {
-            entry.inbox().finish_push(push.id, PushEnd::Failed);
-            typing.declined = Some(Declined {
-                generation: status.borrow().generation,
-                at: Instant::now(),
-            });
-            typing.foreign_draft = matches!(attempt, Attempt::DeclinedForeign);
-            typing.retries = typing.retries.saturating_add(1);
-            typing.residue = left.map(|residue| (push.key.clone(), residue));
-        }
-    }
-    Some(())
-}
-
-/// Waits for the window to react to `last`'s submit key with a status it
-/// reached after that key, for no longer than the window's delivery
-/// confirmation counted from the key. A window that never reacts is typed into
-/// again once that runs out, as before. `None` once the window has exited.
-async fn await_reaction(entry: &WindowEntry, mut last: Unanswered) -> Option<()> {
-    let confirm = entry.input_profile().delivery_confirm;
-    if confirm.is_zero() {
-        return Some(());
-    }
-    let left = (last.submitted_at + confirm).saturating_duration_since(Instant::now());
-    match wait_for_reaction(
-        &mut last.changes,
-        DELIVERY_REACTION_STATUSES,
-        last.submitted_at,
-        left,
-    )
-    .await
-    {
-        ReactionOutcome::Exited => None,
-        // A lost change is settled by the readiness wait that follows, which
-        // reads the newer status's own `changed_at`.
-        ReactionOutcome::Reacted(_) | ReactionOutcome::Quiet | ReactionOutcome::Unobservable => {
-            Some(())
-        }
-    }
-}
-
 /// Waits for something that may give the agent work: a status change, or a
 /// wake (a new parcel, a session reported). `false` once the window's status
 /// stream is gone.
@@ -470,138 +240,6 @@ async fn idle(entry: &WindowEntry, status: &mut watch::Receiver<StatusAt>) -> bo
     tokio::select! {
         changed = status.changed() => changed.is_ok(),
         () = entry.notice_woken() => true,
-    }
-}
-
-/// Holds a retry back until the status generation moves past the declined
-/// attempt's or the retry interval has passed. `false` once the window's
-/// status stream is gone.
-async fn wait_to_retry(status: &mut watch::Receiver<StatusAt>, last: &Declined) -> bool {
-    let deadline = last.at + NOTICE_RETRY_INTERVAL;
-    loop {
-        if status.borrow_and_update().generation > last.generation {
-            return true;
-        }
-        tokio::select! {
-            () = tokio::time::sleep_until(deadline) => return true,
-            changed = status.changed() => {
-                if changed.is_err() {
-                    return false;
-                }
-            }
-        }
-    }
-}
-
-/// Holds a retry back after a decline for someone else's text, which stays
-/// until somebody empties the composer: released once a screen that accepts a
-/// write shows the composer empty, or the status generation moves past the
-/// declined attempt's. Writes by others do not release it, since a draft being
-/// typed moves the ledger on every key. `false` once the status stream is gone.
-async fn wait_for_draft_change(
-    entry: &WindowEntry,
-    status: &mut watch::Receiver<StatusAt>,
-    last: &Declined,
-) -> bool {
-    loop {
-        if status.borrow_and_update().generation > last.generation {
-            return true;
-        }
-        tokio::select! {
-            changed = status.changed() => {
-                if changed.is_err() {
-                    return false;
-                }
-            }
-            () = entry.wait_for_composer_empty() => return true,
-        }
-    }
-}
-
-/// Composed under the delivery lock: nothing is written to a window whose
-/// status is `Unknown` or no longer accepts input.
-fn accepts_input(entry: &WindowEntry) -> bool {
-    let status = entry.current_status();
-    status != WindowStatus::Unknown && is_ready(status)
-}
-
-/// Types `push`'s text, returning how the attempt ended and what a declined
-/// one left in the composer.
-async fn type_push(
-    entry: &WindowEntry,
-    push: &Push,
-    config: &DaemonConfig,
-    carried: Option<CarriedResidue>,
-    budget_held: bool,
-) -> (Attempt, Option<CarriedResidue>) {
-    let compose = || accepts_input(entry).then(|| push.text.clone());
-    let budget = match &push.budget {
-        Some(_) if budget_held => SharedBudget::NotNeeded,
-        Some(budget) => SharedBudget::Counter {
-            counter: Arc::clone(&budget.counter),
-            max: budget.max,
-        },
-        None => SharedBudget::NotNeeded,
-    };
-    let delivered = super::run_delivery(
-        entry,
-        &compose,
-        config,
-        None,
-        0,
-        carried,
-        budget,
-        Some(push),
-    )
-    .await;
-    match delivered {
-        DeliveryEnd::Finished {
-            verdict,
-            residue,
-            foreign_draft,
-        } => {
-            tracing::info!(
-                window_id = entry.window_id(),
-                attempts = verdict.attempts,
-                elapsed_since_submitted_ms = verdict.submitted_at.elapsed().as_millis(),
-                status_before_submit = %crate::window::window_status_wire(verdict.status_before_submit),
-                ready_hold_wait_ms = verdict.ready_hold_wait_ms,
-                delivery = ?verdict.delivery,
-                "typed delivery finished"
-            );
-            match verdict.delivery {
-                TypedOutcome::NotWritten if foreign_draft => (Attempt::DeclinedForeign, residue),
-                TypedOutcome::NotWritten => (Attempt::Declined("not_written"), residue),
-                TypedOutcome::Confirmed => {
-                    (Attempt::Written("confirmed", verdict.submitted_at), None)
-                }
-                TypedOutcome::Unconfirmed => {
-                    (Attempt::Written("unconfirmed", verdict.submitted_at), None)
-                }
-                TypedOutcome::NotObserved => {
-                    (Attempt::Written("not_observed", verdict.submitted_at), None)
-                }
-            }
-        }
-        DeliveryEnd::WriteFailed(err, guard) => {
-            drop(guard);
-            tracing::warn!(window_id = entry.window_id(), error = %err, "notice write failed");
-            // Past the submit key the text has reached the CLI: put back, it
-            // would be typed a second time.
-            if *push.submitted.borrow() {
-                (Attempt::Written("write_failed", Instant::now()), None)
-            } else {
-                (Attempt::Declined("write_failed"), None)
-            }
-        }
-        DeliveryEnd::Skipped => (Attempt::Declined("skipped"), None),
-        DeliveryEnd::Exhausted(Scarce::TurnWaiters) => {
-            (Attempt::Declined("turn_waiters_exhausted"), None)
-        }
-        DeliveryEnd::Exhausted(Scarce::SharedBudget) => {
-            (Attempt::Exhausted("budget_exhausted"), None)
-        }
-        DeliveryEnd::Aborted => (Attempt::Declined("withdrawn"), None),
     }
 }
 
@@ -618,7 +256,7 @@ async fn push_by_command(agents: &NoticeAgents, entry: &WindowEntry, args: &[Str
         );
         return false;
     };
-    let Some(push) = entry.inbox().begin_push(true) else {
+    let Some(push) = entry.inbox().begin_push() else {
         return true;
     };
     let mut argv = wake.argv;
@@ -734,26 +372,7 @@ fn finish(agents: &NoticeAgents, entry: &WindowEntry) {
 
 #[cfg(test)]
 mod tests {
-    use yagura_protocol::DetectedStatus;
-
     use super::*;
-
-    fn status_at(generation: u64) -> StatusAt {
-        let now = Instant::now();
-        StatusAt {
-            status: DetectedStatus::Idle,
-            changed_at: now,
-            evidence_since: now,
-            generation,
-        }
-    }
-
-    fn declined_now(generation: u64) -> Declined {
-        Declined {
-            generation,
-            at: Instant::now(),
-        }
-    }
 
     #[test]
     fn a_wake_argument_is_filled_in_once_and_what_it_carries_is_not_read_again() {
@@ -765,78 +384,5 @@ mod tests {
             fill_wake_argument("{text}", "s-1", "say {session} and {text}"),
             "say {session} and {text}"
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_retry_is_held_back_for_the_whole_interval_while_the_status_stays() {
-        let (_tx, mut rx) = watch::channel(status_at(3));
-        let last = declined_now(3);
-        let start = Instant::now();
-        let waiting = wait_to_retry(&mut rx, &last);
-        tokio::pin!(waiting);
-
-        let early = tokio::time::timeout(
-            NOTICE_RETRY_INTERVAL - Duration::from_millis(1),
-            &mut waiting,
-        )
-        .await;
-        assert!(
-            early.is_err(),
-            "the retry must not be released before the interval"
-        );
-
-        assert!(waiting.await);
-        assert_eq!(start.elapsed(), NOTICE_RETRY_INTERVAL);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_new_status_generation_releases_the_retry_without_waiting_out_the_interval() {
-        let (tx, mut rx) = watch::channel(status_at(3));
-        let last = declined_now(3);
-        let start = Instant::now();
-        let waiting = wait_to_retry(&mut rx, &last);
-        tokio::pin!(waiting);
-
-        let early = tokio::time::timeout(Duration::from_millis(500), &mut waiting).await;
-        assert!(early.is_err());
-        tx.send(status_at(4)).expect("the waiter holds a receiver");
-
-        assert!(waiting.await);
-        assert_eq!(start.elapsed(), Duration::from_millis(500));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_value_with_the_declined_generation_does_not_release_the_retry() {
-        let (tx, mut rx) = watch::channel(status_at(3));
-        let last = declined_now(3);
-        let start = Instant::now();
-        let waiting = wait_to_retry(&mut rx, &last);
-        tokio::pin!(waiting);
-
-        let early = tokio::time::timeout(Duration::from_millis(500), &mut waiting).await;
-        assert!(early.is_err());
-        tx.send(status_at(3)).expect("the waiter holds a receiver");
-
-        assert!(waiting.await);
-        assert_eq!(start.elapsed(), NOTICE_RETRY_INTERVAL);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_generation_already_past_the_declined_one_releases_the_retry_at_once() {
-        let (_tx, mut rx) = watch::channel(status_at(5));
-        let last = declined_now(3);
-        let start = Instant::now();
-
-        assert!(wait_to_retry(&mut rx, &last).await);
-        assert_eq!(start.elapsed(), Duration::ZERO);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_dropped_status_sender_ends_the_wait_with_false() {
-        let (tx, mut rx) = watch::channel(status_at(3));
-        let last = declined_now(3);
-        drop(tx);
-
-        assert!(!wait_to_retry(&mut rx, &last).await);
     }
 }

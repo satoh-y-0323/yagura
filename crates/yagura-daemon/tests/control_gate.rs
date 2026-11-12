@@ -16,10 +16,9 @@ use std::time::{Duration, Instant};
 use tracing_test::traced_test;
 use yagura_daemon::config::{APPROVAL_TIMEOUT_DEFAULT_SECS, DaemonConfig};
 use yagura_daemon::control::{
-    ApprovalPolicy, ApprovalSection, ChatSection, ComposerAccess, ComposerWrite, DenyReason,
-    DestructiveTool, GateVerdict, PolicyError, PolicyLimits, PolicySource, RateBucket,
-    RequestOrigin, apply_chat_section, apply_limits, check_destructive, composer_gate, load_policy,
-    parse_policy, policy_gate, status_gate,
+    ApprovalPolicy, ApprovalSection, ChatSection, DenyReason, DestructiveTool, GateVerdict,
+    PolicyError, PolicyLimits, PolicySource, RateBucket, RequestOrigin, apply_chat_section,
+    apply_limits, check_destructive, load_policy, parse_policy, policy_gate, status_gate,
 };
 use yagura_daemon::room::ChatLimits;
 use yagura_protocol::{DetectedStatus, UnknownReason};
@@ -57,16 +56,6 @@ impl TempFile {
 /// and any other window id reads as "somebody else's window".
 const TARGET: &str = "w1-abc";
 
-/// A window that takes a judged write: its definition declares a composer and
-/// a probe.
-const JUDGED: ComposerAccess = ComposerAccess::Judged;
-
-/// Every value a window's composer access can take.
-const ALL_ACCESS: [ComposerAccess; 3] = [ComposerAccess::Absent, ComposerAccess::RawOnly, JUDGED];
-
-/// Every shape a write can take at the gate.
-const ALL_WRITES: [ComposerWrite; 2] = [ComposerWrite::Judged, ComposerWrite::Raw];
-
 /// The origin an unidentified caller (an MCP or CLI client) has.
 fn external() -> RequestOrigin {
     RequestOrigin::External
@@ -90,8 +79,6 @@ fn check_destructive_needs_approval_for_interrupt_without_a_policy() {
         PolicySource::NotConfigured,
         DestructiveTool::InterruptWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -108,8 +95,6 @@ fn check_destructive_needs_approval_for_close_without_a_policy() {
         PolicySource::NotConfigured,
         DestructiveTool::CloseWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -126,8 +111,6 @@ fn check_destructive_needs_approval_for_send_message_without_a_policy() {
         PolicySource::NotConfigured,
         DestructiveTool::SendMessage,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -146,8 +129,6 @@ fn check_destructive_approves_only_the_tool_listed_in_auto_approve() {
         PolicySource::Loaded(&policy),
         DestructiveTool::InterruptWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -161,8 +142,6 @@ fn check_destructive_approves_only_the_tool_listed_in_auto_approve() {
         PolicySource::Loaded(&policy),
         DestructiveTool::CloseWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -211,8 +190,6 @@ fn check_destructive_denies_interrupt_on_unknown_status_even_when_approved() {
         PolicySource::Loaded(&policy),
         DestructiveTool::InterruptWindow,
         DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -231,8 +208,6 @@ fn check_destructive_denies_interrupt_on_unknown_status_before_consulting_the_po
         PolicySource::NotConfigured,
         DestructiveTool::InterruptWindow,
         DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -253,8 +228,6 @@ fn check_destructive_lets_close_through_on_unknown_status() {
         PolicySource::Loaded(&policy),
         DestructiveTool::CloseWindow,
         DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -411,9 +384,7 @@ fn apply_limits_overrides_every_specified_field() {
         interrupt_bytes: Some(vec![0x1B]),
         wait_timeout_max_secs: Some(120),
         approval_timeout_secs: Some(90),
-        handoff_ready_timeout_secs: Some(120),
-        handoff_delivery_timeout_secs: None,
-        chat_delivery_max: Some(64),
+        ..PolicyLimits::default()
     };
 
     apply_limits(&mut config, Some(&limits));
@@ -428,10 +399,6 @@ fn apply_limits_overrides_every_specified_field() {
     assert_eq!(
         config.approval_timeout_secs, 90,
         "[limits] approval_timeout_secs must replace the built-in default"
-    );
-    assert_eq!(
-        config.chat_delivery_max, 64,
-        "[limits] chat_delivery_max must replace the built-in default"
     );
 }
 
@@ -454,10 +421,7 @@ fn apply_limits_overrides_only_the_specified_field() {
     let limits = PolicyLimits {
         interrupt_bytes: None,
         wait_timeout_max_secs: Some(42),
-        approval_timeout_secs: None,
-        handoff_ready_timeout_secs: None,
-        handoff_delivery_timeout_secs: None,
-        chat_delivery_max: None,
+        ..PolicyLimits::default()
     };
 
     apply_limits(&mut config, Some(&limits));
@@ -559,10 +523,6 @@ fn parse_policy_warns_about_an_unknown_auto_approve_name_and_keeps_it() {
         .expect("an unknown name is warned about, not an error");
 
     assert!(logs_contain("bogus_tool"));
-    assert!(
-        !logs_contain("\"send_keys\""),
-        "a known tool name must not be warned about"
-    );
     assert_eq!(
         policy.approval.expect("approval section").auto_approve,
         vec!["send_keys".to_string(), "bogus_tool".to_string()]
@@ -578,7 +538,6 @@ fn status_gate_denies_input_injection_on_an_unknown_window() {
     for tool in [
         DestructiveTool::InterruptWindow,
         DestructiveTool::SendMessage,
-        DestructiveTool::SendKeys,
         DestructiveTool::SendHandoff,
     ] {
         let result = status_gate(tool, DetectedStatus::Unknown(UnknownReason::NoRuleMatched));
@@ -610,7 +569,6 @@ fn status_gate_lets_every_tool_through_on_a_detected_status() {
         DestructiveTool::InterruptWindow,
         DestructiveTool::CloseWindow,
         DestructiveTool::SendMessage,
-        DestructiveTool::SendKeys,
         DestructiveTool::SendHandoff,
     ] {
         for status in [
@@ -641,7 +599,6 @@ fn status_gate_lets_every_tool_through_on_an_exited_window() {
         DestructiveTool::InterruptWindow,
         DestructiveTool::CloseWindow,
         DestructiveTool::SendMessage,
-        DestructiveTool::SendKeys,
         DestructiveTool::SendHandoff,
     ] {
         let result = status_gate(tool, DetectedStatus::Exited);
@@ -672,7 +629,7 @@ enum SourceKind {
 }
 
 /// The input gate's judgement order, transcribed as an oracle: status gate ->
-/// composer gate -> own window -> approver -> playbook -> needs approval. The
+/// own window -> approver -> playbook -> needs approval. The
 /// exhaustive test below compares the implementation against this, so a
 /// reordering shows up as a specific failing combination rather than as one
 /// hand-picked case.
@@ -680,8 +637,6 @@ fn expected_verdict(
     kind: SourceKind,
     tool: DestructiveTool,
     status: DetectedStatus,
-    access: ComposerAccess,
-    write: ComposerWrite,
     origin: &RequestOrigin,
 ) -> Result<GateVerdict, DenyReason> {
     // 1. status gate
@@ -690,7 +645,6 @@ fn expected_verdict(
             tool,
             DestructiveTool::InterruptWindow
                 | DestructiveTool::SendMessage
-                | DestructiveTool::SendKeys
                 | DestructiveTool::SendHandoff
                 | DestructiveTool::SendChat
                 | DestructiveTool::BroadcastChat
@@ -698,36 +652,17 @@ fn expected_verdict(
     {
         return Err(DenyReason::StatusUnknown(reason));
     }
-    // 2. composer gate: a judged write needs a probe, an unjudged one only a
-    //    composer, and a handoff is always judged.
-    let judged = matches!(access, ComposerAccess::Judged);
-    let refused = match tool {
-        DestructiveTool::SendHandoff => !judged,
-        DestructiveTool::SendMessage => match write {
-            ComposerWrite::Judged => !judged,
-            ComposerWrite::Raw => matches!(access, ComposerAccess::Absent),
-        },
-        DestructiveTool::OpenWindow
-        | DestructiveTool::InterruptWindow
-        | DestructiveTool::CloseWindow
-        | DestructiveTool::SendKeys
-        | DestructiveTool::SendChat
-        | DestructiveTool::BroadcastChat => false,
-    };
-    if refused {
-        return Err(DenyReason::NoComposer);
-    }
-    // 3. the target window acting on itself
+    // 2. the target window acting on itself
     if let RequestOrigin::Window(window_id) = origin
         && window_id == TARGET
     {
         return Ok(GateVerdict::Allow);
     }
-    // 4. a registered approver
+    // 3. a registered approver
     if matches!(origin, RequestOrigin::Approver) {
         return Ok(GateVerdict::Allow);
     }
-    // 5. the playbook, whose reach is exactly what is left: another window and
+    // 4. the playbook, whose reach is exactly what is left: another window and
     //    an unidentified caller.
     match kind {
         SourceKind::ApprovesEverything => Ok(GateVerdict::Allow),
@@ -743,7 +678,6 @@ fn check_destructive_follows_the_judgement_order_for_every_combination() {
         "interrupt_window",
         "close_window",
         "send_message",
-        "send_keys",
         "send_handoff",
         "send_chat",
         "broadcast_chat",
@@ -762,7 +696,6 @@ fn check_destructive_follows_the_judgement_order_for_every_combination() {
             DestructiveTool::InterruptWindow,
             DestructiveTool::CloseWindow,
             DestructiveTool::SendMessage,
-            DestructiveTool::SendKeys,
             DestructiveTool::SendHandoff,
             DestructiveTool::SendChat,
             DestructiveTool::BroadcastChat,
@@ -771,44 +704,36 @@ fn check_destructive_follows_the_judgement_order_for_every_combination() {
                 DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
                 DetectedStatus::Idle,
             ] {
-                for access in ALL_ACCESS {
-                    for write in ALL_WRITES {
-                        for origin in [
-                            external(),
-                            own_window(),
-                            other_window(),
-                            RequestOrigin::Approver,
-                        ] {
-                            let source = match kind {
-                                SourceKind::NotConfigured => PolicySource::NotConfigured,
-                                SourceKind::ApprovesEverything => PolicySource::Loaded(&everything),
-                                SourceKind::ApprovesNothing => PolicySource::Loaded(&nothing),
-                                SourceKind::Failed => PolicySource::Failed,
-                            };
-                            let actual = check_destructive(
-                                source, tool, status, access, write, &origin, TARGET,
-                            );
-                            let expected =
-                                expected_verdict(kind, tool, status, access, write, &origin);
-                            assert_eq!(
-                                actual,
-                                expected,
-                                "gate disagreement for policy {kind:?}, tool {}, status \
-                                 {status:?}, composer access {access:?}, write {write:?}, \
-                                 origin {origin:?}, target {TARGET}",
-                                tool.as_tool_name()
-                            );
-                            cases += 1;
-                        }
-                    }
+                for origin in [
+                    external(),
+                    own_window(),
+                    other_window(),
+                    RequestOrigin::Approver,
+                ] {
+                    let source = match kind {
+                        SourceKind::NotConfigured => PolicySource::NotConfigured,
+                        SourceKind::ApprovesEverything => PolicySource::Loaded(&everything),
+                        SourceKind::ApprovesNothing => PolicySource::Loaded(&nothing),
+                        SourceKind::Failed => PolicySource::Failed,
+                    };
+                    let actual = check_destructive(source, tool, status, &origin, TARGET);
+                    let expected = expected_verdict(kind, tool, status, &origin);
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "gate disagreement for policy {kind:?}, tool {}, status \
+                         {status:?}, origin {origin:?}, target {TARGET}",
+                        tool.as_tool_name()
+                    );
+                    cases += 1;
                 }
             }
         }
     }
     assert_eq!(
-        cases, 1536,
-        "the combination sweep must cover 4 policy shapes x 8 tools x 2 statuses \
-         x 3 composer accesses x 2 write shapes x 4 origins"
+        cases, 224,
+        "the combination sweep must cover 4 policy shapes x 7 tools x 2 statuses \
+         x 4 origins"
     );
 }
 
@@ -841,8 +766,6 @@ fn input_injection_on_an_unknown_window_is_denied_whoever_asks() {
                 PolicySource::Loaded(&policy),
                 tool,
                 DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-                JUDGED,
-                ComposerWrite::Judged,
                 &origin,
                 TARGET,
             );
@@ -869,8 +792,6 @@ fn a_window_acting_on_itself_is_allowed_without_a_playbook() {
             PolicySource::NotConfigured,
             tool,
             DetectedStatus::Idle,
-            JUDGED,
-            ComposerWrite::Judged,
             &own_window(),
             TARGET,
         );
@@ -892,8 +813,6 @@ fn a_window_acting_on_itself_is_allowed_even_with_a_broken_playbook() {
         PolicySource::Failed,
         DestructiveTool::CloseWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &own_window(),
         TARGET,
     );
@@ -909,8 +828,6 @@ fn a_window_acting_on_another_window_gets_no_r1_relief() {
         PolicySource::NotConfigured,
         DestructiveTool::CloseWindow,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &other_window(),
         TARGET,
     );
@@ -937,8 +854,6 @@ fn an_approver_is_allowed_whatever_the_policy_says() {
             source,
             DestructiveTool::CloseWindow,
             DetectedStatus::Idle,
-            JUDGED,
-            ComposerWrite::Judged,
             &RequestOrigin::Approver,
             TARGET,
         );
@@ -965,8 +880,6 @@ fn a_broken_playbook_denies_an_outside_caller_rather_than_asking_a_human() {
                 PolicySource::Failed,
                 tool,
                 DetectedStatus::Idle,
-                JUDGED,
-                ComposerWrite::Judged,
                 &origin,
                 TARGET,
             );
@@ -987,8 +900,6 @@ fn a_playbook_that_omits_the_tool_needs_approval_rather_than_being_broken() {
         PolicySource::Loaded(&policy),
         DestructiveTool::SendMessage,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -1006,8 +917,6 @@ fn a_playbook_can_auto_approve_send_message_for_an_outside_caller() {
         PolicySource::Loaded(&policy),
         DestructiveTool::SendMessage,
         DetectedStatus::Idle,
-        JUDGED,
-        ComposerWrite::Judged,
         &external(),
         TARGET,
     );
@@ -1016,157 +925,6 @@ fn a_playbook_can_auto_approve_send_message_for_an_outside_caller() {
         "send_message is relaxable through the playbook like the other two \
          tools, got {result:?}"
     );
-}
-
-// =============================================================================
-// The composer gate: a window whose detection definition
-// declares no `[composer]` table refuses the two tools that write daemon-
-// composed text into a PTY, before any of the identity or playbook relief
-// clauses run.
-// =============================================================================
-
-#[test]
-fn composer_gate_denies_only_send_message_and_send_handoff_when_no_composer_is_declared() {
-    for tool in DestructiveTool::ALL {
-        for write in ALL_WRITES {
-            let result = composer_gate(tool, ComposerAccess::Absent, write);
-            if matches!(
-                tool,
-                DestructiveTool::SendMessage | DestructiveTool::SendHandoff
-            ) {
-                assert!(
-                    matches!(result, Err(DenyReason::NoComposer)),
-                    "{} ({write:?}) writes daemon-composed text and must be refused with \
-                     NoComposer when no composer is declared, got {result:?}",
-                    tool.as_tool_name()
-                );
-            } else {
-                assert!(
-                    result.is_ok(),
-                    "{} does not write daemon-composed text and must pass the composer \
-                     gate regardless of whether one is declared, got {result:?}",
-                    tool.as_tool_name()
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn composer_gate_allows_every_tool_when_a_composer_and_a_probe_are_declared() {
-    for tool in DestructiveTool::ALL {
-        for write in ALL_WRITES {
-            let result = composer_gate(tool, JUDGED, write);
-            assert!(
-                result.is_ok(),
-                "{} ({write:?}) must pass the composer gate once a composer and a probe \
-                 are declared, got {result:?}",
-                tool.as_tool_name()
-            );
-        }
-    }
-}
-
-#[test]
-fn composer_gate_lets_only_an_unjudged_send_message_into_a_composer_without_a_probe() {
-    for tool in DestructiveTool::ALL {
-        for write in ALL_WRITES {
-            let result = composer_gate(tool, ComposerAccess::RawOnly, write);
-            let judged_text = match tool {
-                DestructiveTool::SendHandoff => true,
-                DestructiveTool::SendMessage => matches!(write, ComposerWrite::Judged),
-                DestructiveTool::OpenWindow
-                | DestructiveTool::InterruptWindow
-                | DestructiveTool::CloseWindow
-                | DestructiveTool::SendKeys
-                | DestructiveTool::SendChat
-                | DestructiveTool::BroadcastChat => false,
-            };
-            if judged_text {
-                assert!(
-                    matches!(result, Err(DenyReason::NoComposer)),
-                    "{} ({write:?}) needs a probe to judge whether its text showed, so a \
-                     composer without one must refuse it with NoComposer, got {result:?}",
-                    tool.as_tool_name()
-                );
-            } else {
-                assert!(
-                    result.is_ok(),
-                    "{} ({write:?}) judges nothing on screen and must pass a composer \
-                     without a probe, got {result:?}",
-                    tool.as_tool_name()
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn an_unknown_status_outranks_a_missing_composer() {
-    // The status gate precedes the composer gate: the reason reported for an
-    // Unknown window must stay StatusUnknown even when the window also
-    // declares no composer, so a caller is never told the wrong one is the
-    // blocker.
-    for tool in [DestructiveTool::SendMessage, DestructiveTool::SendHandoff] {
-        let result = check_destructive(
-            PolicySource::NotConfigured,
-            tool,
-            DetectedStatus::Unknown(UnknownReason::NoRuleMatched),
-            ComposerAccess::Absent,
-            ComposerWrite::Judged,
-            &external(),
-            TARGET,
-        );
-        assert!(
-            matches!(result, Err(DenyReason::StatusUnknown(_))),
-            "{} on an Unknown window must report StatusUnknown even with no \
-             composer declared, got {result:?}",
-            tool.as_tool_name()
-        );
-    }
-}
-
-#[test]
-fn a_missing_composer_outranks_acting_on_ones_own_window_an_approver_and_a_broken_playbook() {
-    // The composer gate precedes the own-window and approver clauses and the
-    // playbook: none of those relief clauses can put a daemon-composed body
-    // into a window that declares no composer.
-    for tool in [DestructiveTool::SendMessage, DestructiveTool::SendHandoff] {
-        for (label, source, origin) in [
-            ("its own window", PolicySource::NotConfigured, own_window()),
-            (
-                "a registered approver",
-                PolicySource::NotConfigured,
-                RequestOrigin::Approver,
-            ),
-            (
-                "its own window with a broken playbook",
-                PolicySource::Failed,
-                own_window(),
-            ),
-            (
-                "an approver with a broken playbook",
-                PolicySource::Failed,
-                RequestOrigin::Approver,
-            ),
-        ] {
-            let result = check_destructive(
-                source,
-                tool,
-                DetectedStatus::Idle,
-                ComposerAccess::Absent,
-                ComposerWrite::Judged,
-                &origin,
-                TARGET,
-            );
-            assert!(
-                matches!(result, Err(DenyReason::NoComposer)),
-                "{} via {label} must still be refused with NoComposer when no \
-                 composer is declared, got {result:?}",
-                tool.as_tool_name()
-            );
-        }
-    }
 }
 
 // =============================================================================
@@ -1205,12 +963,12 @@ fn every_destructive_tool_maps_onto_its_external_name() {
 // =============================================================================
 
 #[test]
-fn destructive_tool_all_has_exactly_eight_elements() {
+fn destructive_tool_all_has_exactly_seven_elements() {
     assert_eq!(
         DestructiveTool::ALL.len(),
-        8,
-        "ALL must list exactly the eight gated tools: open_window, interrupt_window, \
-         close_window, send_message, send_keys, send_handoff, send_chat and broadcast_chat"
+        7,
+        "ALL must list exactly the seven gated tools: open_window, interrupt_window, \
+         close_window, send_message, send_handoff, send_chat and broadcast_chat"
     );
     let names: Vec<_> = DestructiveTool::ALL
         .iter()
@@ -1223,7 +981,6 @@ fn destructive_tool_all_has_exactly_eight_elements() {
             "interrupt_window",
             "close_window",
             "send_message",
-            "send_keys",
             "send_handoff",
             "send_chat",
             "broadcast_chat",
@@ -1253,9 +1010,8 @@ fn is_known_tool_name_is_true_for_every_name_in_all_and_false_for_unknown_names(
 /// a profile). `check_destructive` against a window id that matches none of
 /// the origins used in this sweep stands in for "no target window" here: the
 /// acting-on-itself relief can never trigger, exactly as when `target` is
-/// literally absent. The composer access is fixed at [`JUDGED`] throughout, so
-/// `check_destructive`'s composer gate is a no-op and the comparison isolates
-/// the status-and-policy halves `policy_gate` actually covers.
+/// literally absent. The status is fixed at `Idle`, so the comparison isolates
+/// the policy half `policy_gate` actually covers.
 #[test]
 fn policy_gate_matches_check_destructive_against_a_window_none_of_the_origins_can_be() {
     let everything = policy_approving(&[
@@ -1263,7 +1019,6 @@ fn policy_gate_matches_check_destructive_against_a_window_none_of_the_origins_ca
         "interrupt_window",
         "close_window",
         "send_message",
-        "send_keys",
         "send_handoff",
         "send_chat",
         "broadcast_chat",
@@ -1289,7 +1044,6 @@ fn policy_gate_matches_check_destructive_against_a_window_none_of_the_origins_ca
                 DestructiveTool::InterruptWindow,
                 DestructiveTool::CloseWindow,
                 DestructiveTool::SendMessage,
-                DestructiveTool::SendKeys,
                 DestructiveTool::SendHandoff,
                 DestructiveTool::SendChat,
                 DestructiveTool::BroadcastChat,
@@ -1301,15 +1055,8 @@ fn policy_gate_matches_check_destructive_against_a_window_none_of_the_origins_ca
                     SourceKind::Failed => PolicySource::Failed,
                 };
                 let pre_flight = policy_gate(source, tool, &origin, None);
-                let against_a_stand_in_window = check_destructive(
-                    source,
-                    tool,
-                    DetectedStatus::Idle,
-                    JUDGED,
-                    ComposerWrite::Judged,
-                    &origin,
-                    NO_SUCH_WINDOW,
-                );
+                let against_a_stand_in_window =
+                    check_destructive(source, tool, DetectedStatus::Idle, &origin, NO_SUCH_WINDOW);
                 assert_eq!(
                     pre_flight,
                     against_a_stand_in_window,
@@ -1322,87 +1069,7 @@ fn policy_gate_matches_check_destructive_against_a_window_none_of_the_origins_ca
             }
         }
     }
-    assert_eq!(cases, 128, "4 policy shapes x 4 origins x 8 tools");
-}
-
-// =============================================================================
-// [limits] handoff_ready_timeout_secs
-// =============================================================================
-
-#[test]
-fn handoff_ready_timeout_secs_accepts_the_whole_permitted_range() {
-    for seconds in [1u64, 60, 599, 600] {
-        let source = format!("[limits]\nhandoff_ready_timeout_secs = {seconds}\n");
-        let policy = parse_policy(&source)
-            .unwrap_or_else(|err| panic!("{seconds} is inside 1..=600 and must parse: {err}"));
-        assert_eq!(
-            policy
-                .limits()
-                .expect("[limits] is present")
-                .handoff_ready_timeout_secs,
-            Some(seconds)
-        );
-    }
-}
-
-#[test]
-fn handoff_ready_timeout_secs_rejects_a_value_outside_the_permitted_range_naming_the_key() {
-    for seconds in [0u64, 601] {
-        let source = format!("[limits]\nhandoff_ready_timeout_secs = {seconds}\n");
-        let result = parse_policy(&source);
-        match result {
-            Err(err) => {
-                let message = err.to_string();
-                assert!(
-                    message.contains("handoff_ready_timeout_secs"),
-                    "{seconds} is outside 1..=600 and the load failure message must name \
-                     the offending key, got {message:?}"
-                );
-            }
-            Ok(_) => panic!("{seconds} is outside 1..=600 and must fail the whole load"),
-        }
-    }
-}
-
-#[test]
-fn handoff_ready_timeout_secs_is_none_when_omitted_from_the_limits_section() {
-    let policy = parse_policy("[limits]\ninterrupt_bytes = [3]\n")
-        .expect("a [limits] section without handoff_ready_timeout_secs must parse");
-    assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .handoff_ready_timeout_secs,
-        None,
-        "an omitted handoff_ready_timeout_secs must stay None so apply_limits keeps \
-         the built-in default"
-    );
-}
-
-#[test]
-fn apply_limits_overrides_handoff_ready_timeout_secs_when_specified() {
-    let mut config = DaemonConfig::default();
-    let limits = PolicyLimits {
-        handoff_ready_timeout_secs: Some(90),
-        ..PolicyLimits::default()
-    };
-
-    apply_limits(&mut config, Some(&limits));
-
-    assert_eq!(config.handoff_ready_timeout_secs, 90);
-}
-
-#[test]
-fn apply_limits_keeps_the_default_handoff_ready_timeout_when_no_limits_are_given() {
-    let defaults = DaemonConfig::default();
-    let mut config = DaemonConfig::default();
-
-    apply_limits(&mut config, None);
-
-    assert_eq!(
-        config.handoff_ready_timeout_secs,
-        defaults.handoff_ready_timeout_secs
-    );
+    assert_eq!(cases, 112, "4 policy shapes x 4 origins x 7 tools");
 }
 
 #[test]
@@ -1533,7 +1200,7 @@ fn daemon_config_defaults_to_the_built_in_approval_timeout() {
 }
 
 // =============================================================================
-// [chat] and [limits] chat_delivery_max (documented in the bundled playbook.toml)
+// [chat] (documented in the bundled playbook.toml)
 // =============================================================================
 
 /// A `[chat]` section with every key omitted, so a test overrides only the
@@ -1766,54 +1433,23 @@ fn parse_policy_rejects_a_chat_value_outside_its_range() {
     );
 }
 
+/// `[limits] chat_delivery_max` bounded the chat posts typed into windows at once.
+/// Nothing is typed any more, so an older playbook still writing it loads whatever the
+/// value, is told about it, and changes no setting.
 #[test]
-fn parse_policy_rejects_a_chat_delivery_max_outside_its_range() {
-    for value in [0u64, 257] {
-        let source = format!("[limits]\nchat_delivery_max = {value}\n");
-        let result = parse_policy(&source);
-        assert!(
-            matches!(result, Err(PolicyError::Parse { .. })),
-            "{value} is outside 1..=256 and must fail the whole load, got {result:?}"
-        );
-    }
-}
-
-#[test]
-fn parse_policy_accepts_the_whole_chat_delivery_max_range() {
-    for value in [1u64, 32, 256] {
+#[traced_test]
+fn chat_delivery_max_loads_with_a_warning_and_changes_no_setting_whatever_its_value() {
+    for value in [0u64, 32, 257] {
         let source = format!("[limits]\nchat_delivery_max = {value}\n");
         let policy = parse_policy(&source)
-            .unwrap_or_else(|err| panic!("{value} is inside 1..=256 and must parse: {err}"));
+            .unwrap_or_else(|err| panic!("chat_delivery_max = {value} must still load: {err}"));
+        let mut config = DaemonConfig::default();
+        apply_limits(&mut config, policy.limits());
         assert_eq!(
-            policy
-                .limits()
-                .expect("[limits] is present")
-                .chat_delivery_max,
-            Some(value)
+            format!("{config:?}"),
+            format!("{:?}", DaemonConfig::default()),
+            "chat_delivery_max = {value} must change no setting of the daemon"
         );
     }
-}
-
-#[test]
-fn chat_delivery_max_is_none_when_omitted_from_the_limits_section() {
-    let policy = parse_policy("[limits]\ninterrupt_bytes = [3]\n")
-        .expect("a [limits] section without chat_delivery_max must parse");
-    assert_eq!(
-        policy
-            .limits()
-            .expect("[limits] is present")
-            .chat_delivery_max,
-        None,
-        "an omitted chat_delivery_max must stay None so apply_limits keeps the \
-         built-in default"
-    );
-}
-
-#[test]
-fn daemon_config_defaults_to_a_chat_delivery_max_of_32() {
-    assert_eq!(
-        DaemonConfig::default().chat_delivery_max,
-        32,
-        "the default documented in the bundled playbook.toml"
-    );
+    assert!(logs_contain("chat_delivery_max"));
 }

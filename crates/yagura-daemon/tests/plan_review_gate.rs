@@ -8,9 +8,8 @@
 //! review mark until an approver sends `mark_plan_seen`.
 //!
 //! Every case sets `plan_approval_required` explicitly rather than relying on
-//! the built-in default. Windows are `echo_child`, `ready_child` or a
-//! composer-draw `submit_child`, never a real vendor CLI, never a running
-//! daemon.
+//! the built-in default. Windows are `echo_child` or `ready_child`, never a
+//! real vendor CLI, never a running daemon.
 
 use crate::common;
 
@@ -18,28 +17,21 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::{
-    Harness, SubmitDefinitionInput, approver_base_config, call_list_windows, call_open_window,
-    detection_config, expect_error, identify, open_submit_child_window_with_composer,
-    read_response, register_approver, send, text_tail, unique_temp_dir, wait_until_status,
-    write_profile,
+    Harness, approver_base_config, call_list_windows, call_open_window, detection_config,
+    expect_error, identify, read_response, register_approver, send, unique_temp_dir, write_profile,
 };
 
 use common::store_fixtures::{last_opened_seq, opened_seq, wire_window_table};
 use yagura_daemon::DaemonConfig;
 use yagura_protocol::{
     AssignmentSource, ClientMessage, DaemonMessage, PlanInfo, PlanReview, PlanSummary,
-    PlanTaskInfo, PlanTaskSpec, ReviewMark, TaskAssignment, WindowStatus,
+    PlanTaskInfo, PlanTaskSpec, ReviewMark, TaskAssignment,
 };
 use yagura_test_support::ipc::Connection;
 use yagura_test_support::process::{echo_child_command, ready_child_profile_source};
 
 /// The fixed marker every plan notice starts with.
 const PLAN_NOTICE_MARKER: &str = "[yagura plan]";
-
-/// The owner's `[input] ready_hold_ms`.
-const READY_HOLD_MS: u64 = 200;
-
-const OWNER_MARKER: &str = "prg-owner-ready";
 
 const TASK_PROFILE: &str = "prg-task-profile";
 const OVERRIDE_PROFILE: &str = "prg-override-profile";
@@ -123,39 +115,15 @@ async fn approver_connection(h: &Harness) -> Connection {
     client
 }
 
-fn owner_input() -> SubmitDefinitionInput {
-    SubmitDefinitionInput {
-        bracketed_paste: false,
-        ready_hold_ms: READY_HOLD_MS,
-        submit_delay_ms: 50,
-        clear: "",
-        delivery_confirm_ms: 0,
-        resend_max: 0,
-    }
-}
-
-/// An owner that can be typed into: a composer-draw `submit_child` that
-/// prints `SUBMITTED <line>` for every line written into it, ready again after
-/// `common::redraw_screen`, and a connection identified as it.
+/// An owner whose profile declares delivery, whose notices wait in its inbox
+/// for its take door, and a connection identified as it.
 struct ReadyOwner {
     window_id: String,
     conn: Connection,
 }
 
-async fn open_ready_owner(h: &Harness, dirs: &Dirs, probe: &mut Connection) -> ReadyOwner {
-    let window_id = open_submit_child_window_with_composer(
-        h,
-        probe,
-        &dirs.root,
-        "prg-owner",
-        &common::ready_pattern_with_redraw(OWNER_MARKER),
-        0,
-        0,
-        0,
-        owner_input(),
-        0,
-    )
-    .await;
+async fn open_ready_owner(h: &Harness, probe: &mut Connection) -> ReadyOwner {
+    let window_id = h.open_idle_window(probe).await;
     let mut conn = h.connect().await;
     identify(&mut conn, &window_id).await;
     ReadyOwner { window_id, conn }
@@ -352,22 +320,26 @@ fn marks(plan: &PlanInfo) -> Vec<(String, Option<ReviewMark>)> {
     marks
 }
 
-// --- reading what reached the owner's input ------------------------------------
+// --- reading what reached the owner's inbox ------------------------------------
 
-async fn wait_for_submitted(h: &Harness, window_id: &str, text: &str) {
+/// Everything `window_id`'s CLI takes through its take door, the way its hook does,
+/// until what it took holds `text`.
+async fn take_until(h: &Harness, window_id: &str, text: &str) -> String {
+    let entry = h.registry.get(window_id).expect("the window is registered");
     let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    let mut taken = String::new();
     loop {
-        if h.submitted_count(window_id, text) >= 1 {
-            return;
+        if entry.inbox().pending_count() > 0 {
+            taken.push_str(&crate::send_message_lifecycle::take_and_print(h, window_id).await);
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for {window_id} to accept {text:?}; flattened scrollback \
-                 tail: {:?}",
-                text_tail(&h.flattened_scrollback(window_id)),
-            );
+        if taken.contains(text) {
+            return taken;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {window_id} to take {text:?}; it took {taken:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -530,38 +502,29 @@ async fn approving_a_plan_that_needs_no_review_is_invalid_state() {
 
 #[tokio::test]
 async fn approving_an_approved_plan_again_succeeds_unchanged_and_does_not_notify_again() {
-    let (h, dirs) = start("prg-reapprove", true).await;
+    let (h, _dirs) = start("prg-reapprove", true).await;
     let mut probe = h.connect().await;
-    let mut owner = open_ready_owner(&h, &dirs, &mut probe).await;
+    let mut owner = open_ready_owner(&h, &mut probe).await;
     let plan = create_plan(&mut owner.conn, "plan", vec![task("t1", "first")]).await;
     let mut approver = approver_connection(&h).await;
     let notice = expected_notice(&plan.plan_id);
 
     let first = approve_ok(&mut approver, &plan.plan_id, plan.version).await;
-    wait_for_submitted(&h, &owner.window_id, &notice).await;
+    let taken = take_until(&h, &owner.window_id, &notice).await;
+    assert_eq!(taken.matches(&notice).count(), 1, "{taken:?}");
 
     let again = approve_ok(&mut approver, &plan.plan_id, plan.version).await;
     assert_eq!(again.version, first.version);
     assert_eq!(again.tasks, first.tasks);
 
-    // A later notice queued behind any re-sent one is typed after it, so the
-    // re-sent one would be counted once the later one shows. The typed notice
-    // left the owner's screen running; it takes the next one once it has
-    // redrawn its prompt.
-    common::redraw_screen(
-        &h,
-        &owner.window_id,
-        &common::ready_pattern_with_redraw(OWNER_MARKER),
-    )
-    .await;
-    wait_until_status(&mut probe, &owner.window_id, WindowStatus::WaitingInput).await;
+    // A later notice is deposited after any re-sent one, so the re-sent one would be
+    // in the inbox by the time the later one is taken.
     let sentinel = create_plan(&mut owner.conn, "sentinel", vec![task("t1", "first")]).await;
     approve_ok(&mut approver, &sentinel.plan_id, sentinel.version).await;
-    wait_for_submitted(&h, &owner.window_id, &expected_notice(&sentinel.plan_id)).await;
-    assert_eq!(
-        h.submitted_count(&owner.window_id, &notice),
-        1,
-        "approving an approved plan again must not type its notice again"
+    let later = take_until(&h, &owner.window_id, &expected_notice(&sentinel.plan_id)).await;
+    assert!(
+        !later.contains(&notice),
+        "approving an approved plan again must not hand its notice over again: {later:?}"
     );
     h.registry.terminate_all().await;
 }
@@ -591,31 +554,28 @@ async fn the_owners_own_window_cannot_approve_or_mark_its_plan_seen() {
 // --- the approval notice ----------------------------------------------------------------
 
 #[tokio::test]
-async fn approving_types_the_fixed_notice_into_the_owner_without_the_title() {
-    let (h, dirs) = start("prg-notice-text", true).await;
+async fn approving_hands_the_owner_the_fixed_notice_without_the_title() {
+    let (h, _dirs) = start("prg-notice-text", true).await;
     let mut probe = h.connect().await;
-    let mut owner = open_ready_owner(&h, &dirs, &mut probe).await;
+    let mut owner = open_ready_owner(&h, &mut probe).await;
     let title = "PRGTITLEMUSTNOTAPPEAR";
     let plan = create_plan(&mut owner.conn, title, vec![task("t1", "first")]).await;
     let mut approver = approver_connection(&h).await;
 
     approve_ok(&mut approver, &plan.plan_id, plan.version).await;
-    wait_for_submitted(&h, &owner.window_id, &expected_notice(&plan.plan_id)).await;
-
-    let flattened = h.flattened_scrollback(&owner.window_id);
+    let taken = take_until(&h, &owner.window_id, &expected_notice(&plan.plan_id)).await;
     assert!(
-        !flattened.contains(title),
-        "the notice must carry the plan id only, never its title: {:?}",
-        text_tail(&flattened),
+        !taken.contains(title),
+        "the notice must carry the plan id only, never its title: {taken:?}"
     );
     h.registry.terminate_all().await;
 }
 
 #[tokio::test]
-async fn approving_two_plans_of_one_owner_back_to_back_types_both_notices() {
-    let (h, dirs) = start("prg-notice-two", true).await;
+async fn approving_two_plans_of_one_owner_back_to_back_hands_over_both_notices() {
+    let (h, _dirs) = start("prg-notice-two", true).await;
     let mut probe = h.connect().await;
-    let mut owner = open_ready_owner(&h, &dirs, &mut probe).await;
+    let mut owner = open_ready_owner(&h, &mut probe).await;
     let first = create_plan(&mut owner.conn, "first", vec![task("t1", "first")]).await;
     let second = create_plan(&mut owner.conn, "second", vec![task("t1", "first")]).await;
     let mut approver = approver_connection(&h).await;
@@ -623,26 +583,21 @@ async fn approving_two_plans_of_one_owner_back_to_back_types_both_notices() {
     approve_ok(&mut approver, &first.plan_id, first.version).await;
     approve_ok(&mut approver, &second.plan_id, second.version).await;
 
-    wait_for_submitted(&h, &owner.window_id, &expected_notice(&first.plan_id)).await;
-    // The typed notice left the owner's screen running; the second notice
-    // waits for the prompt to be redrawn, as it would behind a real CLI.
-    common::redraw_screen(
-        &h,
-        &owner.window_id,
-        &common::ready_pattern_with_redraw(OWNER_MARKER),
-    )
-    .await;
-    wait_for_submitted(&h, &owner.window_id, &expected_notice(&second.plan_id)).await;
+    let taken = take_until(&h, &owner.window_id, &expected_notice(&second.plan_id)).await;
+    assert!(
+        taken.contains(&expected_notice(&first.plan_id)),
+        "the first plan's notice must not be replaced by the second's: {taken:?}"
+    );
     h.registry.terminate_all().await;
 }
 
 #[tokio::test]
-async fn approving_a_plan_whose_owner_died_types_nothing_into_another_live_window() {
-    let (h, dirs) = start("prg-notice-dead-owner", true).await;
+async fn approving_a_plan_whose_owner_died_hands_nothing_to_another_live_window() {
+    let (h, _dirs) = start("prg-notice-dead-owner", true).await;
     let mut probe = h.connect().await;
     // The opener is a ready window the dead owner's notice could wrongly
     // fall back to.
-    let mut opener = open_ready_owner(&h, &dirs, &mut probe).await;
+    let mut opener = open_ready_owner(&h, &mut probe).await;
     let dead_owner = call_open_window(&mut opener.conn, echo_child_command()).await;
     let mut dead_conn = h.connect().await;
     identify(&mut dead_conn, &dead_owner).await;
@@ -653,22 +608,19 @@ async fn approving_a_plan_whose_owner_died_types_nothing_into_another_live_windo
 
     approve_ok(&mut approver, &orphaned.plan_id, orphaned.version).await;
 
-    // The opener's own plan is approved afterwards: its notice is queued
-    // behind anything the orphaned plan's approval queued on the opener.
+    // The opener's own plan is approved afterwards: its notice is deposited
+    // behind anything the orphaned plan's approval deposited on the opener.
     let sentinel = create_plan(&mut opener.conn, "sentinel", vec![task("t1", "first")]).await;
     approve_ok(&mut approver, &sentinel.plan_id, sentinel.version).await;
-    wait_for_submitted(&h, &opener.window_id, &expected_notice(&sentinel.plan_id)).await;
-
-    let flattened = h.flattened_scrollback(&opener.window_id);
+    let taken = take_until(&h, &opener.window_id, &expected_notice(&sentinel.plan_id)).await;
     assert!(
-        !flattened.contains(&format!("Plan {}", orphaned.plan_id)),
-        "a plan whose owner is dead must not be announced to another window: {:?}",
-        text_tail(&flattened),
+        !taken.contains(&format!("Plan {}", orphaned.plan_id)),
+        "a plan whose owner is dead must not be announced to another window: {taken:?}"
     );
     assert_eq!(
-        h.submitted_count(&opener.window_id, PLAN_NOTICE_MARKER),
+        taken.matches(PLAN_NOTICE_MARKER).count(),
         1,
-        "only the opener's own plan may be announced to it"
+        "only the opener's own plan may be announced to it: {taken:?}"
     );
     h.registry.terminate_all().await;
 }

@@ -20,26 +20,14 @@ use yagura_daemon::DaemonConfig;
 use yagura_daemon::detector::definition::bundled_definition_names;
 use yagura_protocol::{ClientMessage, DaemonMessage, Frame, WindowStatus};
 
-use common::{
-    Harness, READY_MARKER, open_exited_window_via_ipc, unique_temp_dir, write_window_input,
-};
+use common::{Harness, open_exited_window_via_ipc, unique_temp_dir, write_window_input};
 
 /// A config whose detection directory holds [`common::control_definition`]
 /// under [`common::CONTROL_DETECTION_NAME`]: a window opened with `detection
 /// = Some(common::CONTROL_DETECTION_NAME)` can leave `Unknown` once
-/// [`READY_MARKER`] reaches its PTY.
+/// [`common::READY_MARKER`] reaches its PTY.
 fn detection_config(dir: &Path) -> DaemonConfig {
     common::detection_config(dir, common::opening_config())
-}
-
-/// Drives `window_id` out of `Unknown` by writing [`READY_MARKER`] straight
-/// into its PTY input through `harness.registry`, bypassing the
-/// approval-gated `send_text` path: a `send_text` aimed at an `Unknown`
-/// window is refused before any policy is even consulted (the status gate
-/// outranks it), so it cannot be used to reach `idle` in the first place.
-async fn drive_window_idle(harness: &Harness, client: &mut Connection, window_id: &str) {
-    write_window_input(&harness.registry, window_id, READY_MARKER).await;
-    wait_for_window_status(client, window_id, WindowStatus::Idle).await;
 }
 
 /// Reads a raw frame, returning `None` if `timeout` elapses before one starts
@@ -252,7 +240,6 @@ fn daemon_message_kind(msg: &DaemonMessage) -> String {
         DaemonMessage::WindowList { .. } => "WindowList".to_string(),
         DaemonMessage::WindowStatus { .. } => "WindowStatus".to_string(),
         DaemonMessage::TextSent { .. } => "TextSent".to_string(),
-        DaemonMessage::KeysSent { .. } => "KeysSent".to_string(),
         DaemonMessage::WindowInterrupted { .. } => "WindowInterrupted".to_string(),
         DaemonMessage::WindowClosed { .. } => "WindowClosed".to_string(),
         DaemonMessage::WaitResult { .. } => "WaitResult".to_string(),
@@ -647,26 +634,16 @@ async fn attach_replacement_case_i_switching_windows_stops_old_output() {
     let mut client = h.connect().await;
     let window_a = open_window_via_ipc(&mut client, echo_child_command()).await;
     let window_b = open_window_via_ipc(&mut client, echo_child_command()).await;
-    // `send_text` targeting an Unknown window is refused before any policy is
-    // consulted, so B must be driven to `idle` before its marker can be sent.
-    drive_window_idle(&h, &mut client, &window_b).await;
 
     // A's attach frame is acknowledged, so a view of A still bound to this
     // connection after the switch would send A's next screen here.
     attach_and_acknowledge(&mut client, &window_a).await;
     attach_and_acknowledge(&mut client, &window_b).await;
 
-    // Every frame for A's marker is queued before B's marker is even sent, so
+    // Every frame for A's marker is queued before B's marker is even written, so
     // it would come before the frame showing B's.
     print_through_the_feeder(&h, &window_a, MARKER_A).await;
-    send_client_message(
-        &mut client,
-        &ClientMessage::SendText {
-            window_id: window_b.clone(),
-            text: MARKER_B.to_string(),
-        },
-    )
-    .await;
+    print_through_the_feeder(&h, &window_b, MARKER_B).await;
 
     let observed = collect_frames_through_pong(&mut client, MARKER_B).await;
     assert!(
@@ -699,7 +676,6 @@ async fn attach_replacement_case_ii_no_superseded_on_separate_attach() {
     let mut client1 = h.connect().await;
     let window_a = open_window_via_ipc(&mut client1, echo_child_command()).await;
     let window_b = open_window_via_ipc(&mut client1, echo_child_command()).await;
-    drive_window_idle(&h, &mut client1, &window_b).await;
 
     attach_via_ipc(&mut client1, &window_a).await;
     attach_via_ipc(&mut client1, &window_b).await;
@@ -711,15 +687,8 @@ async fn attach_replacement_case_ii_no_superseded_on_separate_attach() {
 
     // Positive control: "no superseded arrived" is equally true of a connection
     // attached to nothing, so the same window must also show client1 still
-    // receiving B's output. This SendText's ack is left for the collection.
-    send_client_message(
-        &mut client1,
-        &ClientMessage::SendText {
-            window_id: window_b.clone(),
-            text: MARKER_B.to_string(),
-        },
-    )
-    .await;
+    // receiving B's output.
+    print_through_the_feeder(&h, &window_b, MARKER_B).await;
 
     let observed = collect_frames_through_pong(&mut client1, MARKER_B).await;
     assert!(
@@ -733,54 +702,6 @@ async fn attach_replacement_case_ii_no_superseded_on_separate_attach() {
     assert!(
         observed.shown_text().contains(MARKER_B),
         "client1 must still be attached to B for the absence of superseded to mean anything"
-    );
-}
-
-#[tokio::test]
-async fn send_text_does_not_require_attach() {
-    // Unlike input, send_text is not behind the attach gate.
-    let dir = unique_temp_dir("send-text-no-attach");
-    let config = DaemonConfig {
-        approval_policy: Some(common::policy_opening(&["send_message"])),
-        ..detection_config(&dir)
-    };
-    let h = Harness::start("send-text-no-attach", config).await;
-    let mut client = h.connect().await;
-    let window_id = open_window_via_ipc(&mut client, echo_child_command()).await;
-    drive_window_idle(&h, &mut client, &window_id).await;
-
-    send_client_message(
-        &mut client,
-        &ClientMessage::SendText {
-            window_id: window_id.clone(),
-            text: "send-text-before-attach;".to_string(),
-        },
-    )
-    .await;
-    let response = read_status_skipping_message(&mut client)
-        .await
-        .expect_message("send_text response");
-    match response {
-        DaemonMessage::TextSent {
-            window_id: acked, ..
-        } => assert_eq!(acked, window_id),
-        other => panic!("expected TextSent, got {other:?}"),
-    }
-
-    // The echo must be in the window's model before the attach snapshots it.
-    common::wait_until_model_shows(&h, &window_id, b"send-text-before-attach;").await;
-
-    let DaemonMessage::Attached { .. } = attach_via_ipc(&mut client, &window_id).await else {
-        panic!("attach_via_ipc must return an Attached response");
-    };
-    let observed = collect_frames(
-        &mut client,
-        |msg| matches!(msg, DaemonMessage::Frame(part) if part.last),
-    )
-    .await;
-    assert!(
-        observed.shown_text().contains("send-text-before-attach;"),
-        "the attach frame must show text sent via send_text before any attach occurred"
     );
 }
 
