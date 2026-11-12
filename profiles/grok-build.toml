@@ -91,14 +91,20 @@ confirm = {}
 file = ".grok/hooks/{server}.json"
 
 [mcp_registration.json_entry.entries."/hooks"]
-UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "UserPromptSubmit"], timeout = 10 }] }]
-PreToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PreToolUse"], timeout = 10 }] }]
-PostToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUse"], timeout = 10 }] }]
-PostToolUseFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUseFailure"], timeout = 10 }] }]
-Notification = [{ matcher = "permission_prompt", hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Notification"], timeout = 10 }] }]
-Stop = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Stop"], timeout = 10 }] }]
-StopFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopFailure"], timeout = 10 }] }]
-StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopCancelled"], timeout = 10 }] }]
+UserPromptSubmit = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "UserPromptSubmit"], timeout = "{hook_timeout}" }] }]
+PreToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PreToolUse"], timeout = "{hook_timeout}" }] }]
+PostToolUse = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUse"], timeout = "{hook_timeout}" }] }]
+PostToolUseFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "PostToolUseFailure"], timeout = "{hook_timeout}" }] }]
+Notification = [{ matcher = "permission_prompt", hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Notification"], timeout = "{hook_timeout}" }] }]
+Stop = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "Stop"], timeout = "{hook_timeout}" }] }]
+StopFailure = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopFailure"], timeout = "{hook_timeout}" }] }]
+StopCancelled = [{ hooks = [{ type = "command", command = "{daemon}", args = ["--for-instance", "{server}", "--hook", "grok-build", "StopCancelled"], timeout = "{hook_timeout}" }] }]
+
+# The seconds this CLI gives a hook command. The registered entries name it
+# through `{hook_timeout}`, and the daemon names it to a door that asks, so
+# the two are one value.
+[hook_timeout]
+default = 10
 
 [hook_events]
 UserPromptSubmit = { status = "running", skip_if = "/subagentType" }

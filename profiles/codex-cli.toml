@@ -162,6 +162,15 @@ default = [
   '/<session-flags>/config.toml:user_prompt_submit:0:2',
 ]
 
+# The seconds Codex gives a hook command. The `-c` hooks above register no
+# `timeout`, so Codex's own applies: its documentation
+# (https://learn.chatgpt.com/docs/hooks, "Config shape") gives `timeout` in
+# seconds, 600 when it is omitted for most hooks, and 1 for `Interrupt` (at
+# most 3). The daemon names these to a door that asks.
+[hook_timeout]
+default = 600
+events = { Interrupt = 1 }
+
 [hook_events]
 SessionStart = { deliver = "context" }
 UserPromptSubmit = { status = "running", deliver = "take", session = "/session_id" }

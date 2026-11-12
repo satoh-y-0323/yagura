@@ -130,20 +130,19 @@ async fn call_door(
 ) -> String {
     let token = common::VALID_TOKEN.to_string();
     let window_id = window_id.to_string();
-    let message = match door {
-        "context" => ClientMessage::DeliverContext {
-            window_id,
-            token,
-            held: false,
-        },
-        "take" => ClientMessage::DeliverTake {
-            window_id,
-            token,
-            held: false,
-        },
+    let door = match door {
+        "context" => yagura_protocol::Door::Context,
+        "take" => yagura_protocol::Door::Take,
         other => panic!("no door named {other}"),
     };
+    let message = ClientMessage::DoorRead {
+        window_id,
+        token,
+        door,
+    };
     let (output, _, _) = common::expect_delivery(common::call_door(client, &message).await);
+    // A door says it printed once it has, which ends what it took.
+    common::send(client, &ClientMessage::DeliverPrinted).await;
     output
 }
 

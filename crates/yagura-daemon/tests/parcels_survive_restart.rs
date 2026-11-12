@@ -272,18 +272,34 @@ async fn post_chat(client: &mut Connection, body: String) -> u64 {
     }
 }
 
-async fn take(daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) -> String {
-    send(
-        &mut daemon.client,
-        &ClientMessage::DeliverTake {
-            window_id: window_id.to_owned(),
-            token: VALID_TOKEN.to_owned(),
-            held: false,
-        },
-    )
-    .await;
-    match read_response(&mut daemon.client).await {
-        DaemonMessage::Delivery { output, .. } => output,
+/// A door's read of the take door of `window_id`, as a door of revision 34 sends it.
+fn door_read_take(window_id: &str) -> ClientMessage {
+    let wire = serde_json::json!({
+        "type": "door_read",
+        "window_id": window_id,
+        "token": VALID_TOKEN,
+        "door": { "kind": "take" },
+    });
+    serde_json::from_value(wire.clone())
+        .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
+}
+
+/// The notice a door sends once it has printed what its read was answered with.
+fn printed() -> ClientMessage {
+    serde_json::from_value(serde_json::json!({ "type": "deliver_printed" }))
+        .unwrap_or_else(|err| panic!("the wire must know deliver_printed: {err}"))
+}
+
+/// Takes through the window's door as a hook does: on a connection of its own, printing
+/// what it was answered with and saying so before it ends.
+async fn take(_daemon: &mut RunningDaemon, sandbox: &Sandbox, window_id: &str) -> String {
+    let mut door = connect(sandbox).await;
+    send(&mut door, &door_read_take(window_id)).await;
+    match read_response(&mut door).await {
+        DaemonMessage::Delivery { output, .. } => {
+            send(&mut door, &printed()).await;
+            output
+        }
         other => panic!(
             "expected a delivery from the door of {window_id}, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()
@@ -685,16 +701,14 @@ async fn a_parcel_ending_as_the_daemon_ends_leaves_its_chat_delivery_and_its_row
     let window_id = first.open_profile_window(&sandbox, CHAT_PROFILE).await;
     make_ready(&mut first, &window_id).await;
     let seq = post_chat(&mut first.client, format!("@{window_id} {CHAT_MARK}")).await;
-    // Taking it ends the parcel; the daemon ends before it could answer or settle.
-    send(
-        &mut first.client,
-        &ClientMessage::DeliverTake {
-            window_id: window_id.clone(),
-            token: VALID_TOKEN.to_owned(),
-            held: false,
-        },
-    )
-    .await;
+    // The door's printing ends the parcel; the daemon ends before it could settle.
+    let mut door = connect(&sandbox).await;
+    send(&mut door, &door_read_take(&window_id)).await;
+    match read_response(&mut door).await {
+        DaemonMessage::Delivery { output, .. } => assert_eq!(count(&output, CHAT_MARK), 1),
+        other => panic!("expected the door's delivery, got {other:?}"),
+    }
+    send(&mut door, &printed()).await;
     let ended = first.wait_for_fault_end().await;
     assert!(
         !ended.success(),
@@ -911,12 +925,13 @@ async fn run_door_with(sandbox: &Sandbox, window_id: &str, args: &[&str]) -> Out
     }
 }
 
-/// A door whose daemon ends after handing it a chat post and before confirming the take
-/// writes nothing and fails, as a door the daemon never answered does; the next daemon's
-/// door hands the post out once. Once a door has written it after the confirmation, the
-/// room records it as taken and no later daemon hands it out again.
+/// A door prints a chat post before it says so, and ends without waiting for an answer.
+/// When its daemon ends between that notice and settling the take, the door has printed the
+/// post and succeeded, and the post is still kept: the next daemon's door hands it out
+/// again, once. Once a door has printed it under a daemon that settled the take, the room
+/// records it as taken and no later daemon hands it out again.
 #[tokio::test]
-async fn a_door_whose_daemon_ends_before_confirming_writes_nothing_and_the_post_comes_out_once() {
+async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemon_hands_it_again() {
     const CHAT_MARK: &str = "PERSIST-DOOR-5C8";
     let sandbox = Sandbox::new("persist-door");
     let detections = write_chat_profile(&sandbox);
@@ -932,7 +947,7 @@ async fn a_door_whose_daemon_ends_before_confirming_writes_nothing_and_the_post_
     );
     assert!(
         !ended.success(),
-        "the daemon must end itself once the door holds the post: {ended:?}"
+        "the daemon must end itself once the door says it printed the post: {ended:?}"
     );
 
     let mut next = start_chatting(&sandbox, &detections).await;
@@ -947,7 +962,7 @@ async fn a_door_whose_daemon_ends_before_confirming_writes_nothing_and_the_post_
             count(&printed_again, CHAT_MARK),
             again.status.success(),
         ),
-        (0, Some(1), 1, true),
+        (1, Some(0), 1, true),
         "(marks the first door printed, its exit code, marks the next daemon's door printed, \
          whether it succeeded); first door stdout {printed:?} stderr {:?}; next door stdout \
          {printed_again:?} stderr {:?}; daemon log:\n{}",
@@ -970,15 +985,15 @@ async fn a_door_whose_daemon_ends_before_confirming_writes_nothing_and_the_post_
     assert_eq!(
         count(&printed_after, CHAT_MARK),
         0,
-        "a post a door wrote after its daemon confirmed the take must not come out again: \
+        "a post a door printed under a daemon that settled the take must not come out again: \
          {printed_after:?}"
     );
 }
 
-/// A door that ends before confirming a take it was handed leaves the post with the same
+/// A door that ends before it printed a take it was handed leaves the post with the same
 /// daemon: that daemon's next take hands it out once.
 #[tokio::test]
-async fn a_take_whose_door_ends_before_confirming_is_handed_out_again_by_the_same_daemon() {
+async fn a_take_whose_door_ends_before_printing_is_handed_out_again_by_the_same_daemon() {
     const CHAT_MARK: &str = "PERSIST-DOOR-GONE-2L6";
     let sandbox = Sandbox::new("persist-door-gone");
     let detections = write_chat_profile(&sandbox);
@@ -989,12 +1004,12 @@ async fn a_take_whose_door_ends_before_confirming_is_handed_out_again_by_the_sam
     post_chat(&mut daemon.client, format!("@{window_id} {CHAT_MARK}")).await;
 
     let mut door = connect(&sandbox).await;
-    // Sent as the frame a door that writes only once the take is confirmed sends.
+    // Sent as the frame a door of revision 34 sends: it says it printed only once it has.
     let body = serde_json::json!({
-        "type": "deliver_take",
+        "type": "door_read",
         "window_id": window_id,
         "token": VALID_TOKEN,
-        "held": true,
+        "door": { "kind": "take" },
     });
     door.write_all(&yagura_protocol::frame_encode(
         &serde_json::to_vec(&body).unwrap(),
@@ -1012,7 +1027,7 @@ async fn a_take_whose_door_ends_before_confirming_is_handed_out_again_by_the_sam
         "the door's take must hand it the post once: {handed:?}; daemon log:\n{}",
         sandbox.daemon_log()
     );
-    // The door ends without confirming.
+    // The door ends without printing.
     drop(door);
 
     let deadline = tokio::time::Instant::now() + HANG_GUARD;
@@ -1023,7 +1038,7 @@ async fn a_take_whose_door_ends_before_confirming_is_handed_out_again_by_the_sam
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the post a door never confirmed must come out of the same daemon again; daemon \
+            "the post a door never printed must come out of the same daemon again; daemon \
              log:\n{}",
             sandbox.daemon_log()
         );
@@ -1042,11 +1057,11 @@ async fn a_take_whose_door_ends_before_confirming_is_handed_out_again_by_the_sam
 /// on the `deliver_*` ones.
 const HOOK_EVENT: &str = "TurnStart";
 
-/// A hook event's take is a door like the others: a daemon that ends after handing the door
-/// a chat post and before confirming it leaves nothing written, and the next daemon's hook
-/// hands the post out once.
+/// A hook event's take is a door like the others: when its daemon ends between the hook's
+/// notice that it printed a chat post and settling the take, the hook has printed it and
+/// succeeded, and the next daemon's hook hands the post out again, once.
 #[tokio::test]
-async fn a_hook_event_whose_daemon_ends_before_confirming_writes_nothing_and_the_post_comes_out_once()
+async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next_daemon_hands_it_again()
  {
     const CHAT_MARK: &str = "PERSIST-HOOK-DOOR-7Q4";
     let sandbox = Sandbox::new("persist-hook-door");
@@ -1073,7 +1088,7 @@ async fn a_hook_event_whose_daemon_ends_before_confirming_writes_nothing_and_the
     );
     assert!(
         !ended.success(),
-        "the daemon must end itself once the hook holds the post: {ended:?}"
+        "the daemon must end itself once the hook says it printed the post: {ended:?}"
     );
 
     let mut next = start_chatting(&sandbox, &detections).await;
@@ -1088,7 +1103,7 @@ async fn a_hook_event_whose_daemon_ends_before_confirming_writes_nothing_and_the
             count(&printed_again, CHAT_MARK),
             again.status.success(),
         ),
-        (0, false, 1, true),
+        (1, true, 1, true),
         "(marks the first hook printed, whether it succeeded, marks the next daemon's hook          printed, whether it succeeded); first hook stdout {printed:?} stderr {:?}; next hook          stdout {printed_again:?} stderr {:?}; daemon log:
 {}",
         String::from_utf8_lossy(&door.stderr),
@@ -1110,6 +1125,61 @@ async fn a_hook_event_whose_daemon_ends_before_confirming_writes_nothing_and_the
     assert_eq!(
         count(&printed_after, CHAT_MARK),
         0,
-        "a post a hook wrote after its daemon confirmed the take must not come out again:          {printed_after:?}"
+        "a post a hook printed under a daemon that settled the take must not come out again:          {printed_after:?}"
+    );
+}
+
+/// A post a door holds goes on to the CLI even when its room's history goes meanwhile: the
+/// door prints it, and settling it once the room no longer has the post updates nothing and
+/// fails nothing, so its parcel row goes and it is not handed out again.
+#[tokio::test]
+async fn a_post_a_door_holds_when_its_rooms_history_goes_is_printed_and_settles_without_its_row() {
+    const CHAT_MARK: &str = "PERSIST-CLEARED-HELD-8K3";
+    let sandbox = Sandbox::new("persist-cleared-held");
+    let detections = write_chat_profile(&sandbox);
+
+    let mut daemon = start_chatting(&sandbox, &detections).await;
+    let window_id = daemon.open_profile_window(&sandbox, CHAT_PROFILE).await;
+    make_ready(&mut daemon, &window_id).await;
+    post_chat(&mut daemon.client, format!("@{window_id} {CHAT_MARK}")).await;
+    until_kept(&sandbox, &[&format!("{CHAT_MARK}\"")]).await;
+
+    let mut door = connect(&sandbox).await;
+    send(&mut door, &door_read_take(&window_id)).await;
+    match read_response(&mut door).await {
+        DaemonMessage::Delivery { output, .. } => assert_eq!(
+            count(&output, CHAT_MARK),
+            1,
+            "the door must be handed the post: {output:?}"
+        ),
+        other => panic!("expected the door's delivery, got {other:?}"),
+    }
+
+    // The room's history goes while the door holds the post, as clearing the room removes it.
+    let mut chat = yagura_daemon::chat_store::ChatStore::open(&store_db(&sandbox))
+        .expect("a second connection to the store must open");
+    chat.clear_history("main")
+        .expect("clearing the room's history must succeed");
+    drop(chat);
+
+    send(&mut door, &printed()).await;
+    drop(door);
+
+    let db = store_db(&sandbox);
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while store_holds(&db, &format!("{CHAT_MARK}\"")) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a printed post must leave no parcel row once settled; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let again = take(&mut daemon, &sandbox, &window_id).await;
+    assert_eq!(
+        count(&again, CHAT_MARK),
+        0,
+        "a printed post must not come out again: {again:?}; daemon log:\n{}",
+        sandbox.daemon_log()
     );
 }

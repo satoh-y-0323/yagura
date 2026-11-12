@@ -1,26 +1,27 @@
-//! The doors a CLI's hook reads a window's inbox through: `deliver_context`,
-//! `deliver_take`, `deliver_wait`, and `report_session`, which tells the
-//! daemon the CLI's own session.
+//! The doors a CLI's hook reads a window's inbox through: `door_read`, which
+//! names the door (context, take, wait, or a hook event), and `report_session`,
+//! which tells the daemon the CLI's own session.
 //!
 //! They answer in any status, `Unknown` included: the CLI asks for what is
 //! waiting for it, the daemon pushes nothing. Pushing is the wait's doing,
 //! and it never pushes to a window whose status is `Unknown`
 //! ([`crate::inbox::Inbox`]).
 //!
-//! A held read's parcels stay with the connection it was answered on until
-//! the door sends `deliver_done` there; a read that is not held is settled
-//! before it is answered.
+//! A read's parcels stay with the connection it was answered on until the door
+//! sends `deliver_printed` there; a connection that ends first gives them back.
+//! The reads and the confirmation of a door before revision 34 are answered
+//! with nothing to print and take nothing: such a door prints after it took.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use yagura_protocol::DaemonMessage;
+use yagura_protocol::{DaemonMessage, Door};
 
 use crate::inbox::{DoorHold, DoorRead, Wait, silence};
 use crate::window::WindowEntry;
 
-use super::{ConnectionState, Outbound, error_msg, pending_waits_exhausted_msg};
+use super::{ConnectionState, IpcServer, Outbound, hook::HookRead, pending_waits_exhausted_msg};
 
-/// A held read waiting for its door's `deliver_done`.
+/// A read waiting for its door's `deliver_printed`.
 pub(super) struct HeldRead {
     hold: DoorHold,
     #[cfg(feature = "fault-injection")]
@@ -38,23 +39,20 @@ impl HeldRead {
         }
     }
 
-    /// Commits the end of what the read took; whether it was withdrawn
-    /// instead. `by_door` when its door confirmed it.
-    async fn settle(self, by_door: bool) -> bool {
+    /// Commits the end of what the read took, its door having printed it.
+    async fn settle(self) {
         #[cfg(feature = "fault-injection")]
-        if by_door && self.hold.keeps_rows() {
+        if self.hold.keeps_rows() {
             self.faults
                 .reach(crate::fault_point::FaultPoint::DoorBeforeSettle);
         }
-        #[cfg(not(feature = "fault-injection"))]
-        let _ = by_door;
-        self.hold.confirm().await
+        self.hold.confirm().await;
     }
 }
 
-/// Where a connection keeps its held read: the only place `deliver_done`
-/// finds one, so no other connection can confirm it. A wait's task fills it
-/// from outside the connection's loop.
+/// Where a connection keeps its held read: the only place `deliver_printed`
+/// finds one, so no other connection can say a read was printed. A wait's task
+/// fills it from outside the connection's loop.
 pub(super) type HeldSlot = Arc<Mutex<Option<HeldRead>>>;
 
 fn put_held(slot: &HeldSlot, held: HeldRead) {
@@ -66,68 +64,123 @@ fn put_held(slot: &HeldSlot, held: HeldRead) {
     drop(replaced);
 }
 
-/// Answers a door with `read`: held in `held`, its parcels stay there for the
-/// door's `deliver_done`; otherwise their end is committed first.
-pub(super) async fn answer_read(
+/// Answers a door with `read`, naming `hook_timeout_sec`, the time its CLI
+/// gives the hook; the parcels the read took stay held in `slot` for the door's
+/// `deliver_printed`.
+pub(super) fn answer_read(
     entry: &WindowEntry,
     outbound: &Outbound,
     read: DoorRead,
-    held: Option<&HeldSlot>,
+    slot: &HeldSlot,
+    hook_timeout_sec: Option<u64>,
 ) {
     let DoorRead { message, hold } = read;
-    let read = HeldRead::new(entry, hold);
-    if let Some(slot) = held {
-        put_held(slot, read);
-        outbound.reply(&message);
-    } else if read.settle(false).await {
-        outbound.reply(&silence());
-    } else {
-        outbound.reply(&message);
+    put_held(slot, HeldRead::new(entry, hold));
+    outbound.reply(&timed(message, hook_timeout_sec));
+}
+
+/// `message`, a delivery, as it is sent with the time its CLI gives the hook.
+fn timed(message: DaemonMessage, hook_timeout_sec: Option<u64>) -> DaemonMessage {
+    match message {
+        DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+            ..
+        } => DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+            hook_timeout_sec,
+        },
+        other => other,
     }
 }
 
-/// Answers `deliver_context`.
-pub(super) async fn handle_context(
-    entry: &WindowEntry,
-    outbound: &Outbound,
-    intro: &str,
-    held: Option<&HeldSlot>,
-) {
-    let read = entry.inbox().read_context(intro, None);
-    answer_read(entry, outbound, read, held).await;
-}
-
-/// Answers `deliver_take`.
-pub(super) async fn handle_take(entry: &WindowEntry, outbound: &Outbound, held: Option<&HeldSlot>) {
-    let read = entry.inbox().read_take(None);
-    answer_read(entry, outbound, read, held).await;
-}
-
-/// Answers `deliver_done` with whether the connection's held read was
-/// withdrawn, once what it took is settled.
-pub(super) async fn handle_done(outbound: &Outbound, slot: &HeldSlot) {
+/// Answers `deliver_printed`: the connection's held read, if it has one, ends
+/// as taken once what it took is settled. There is no answer; the door has
+/// ended or ends without waiting for one.
+pub(super) async fn handle_printed(slot: &HeldSlot) {
     let held = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
-    match held {
-        Some(held) => {
-            let withdrawn = held.settle(true).await;
-            outbound.reply(&DaemonMessage::DeliverConfirmed { withdrawn });
-        }
-        None => outbound.reply(&error_msg(
-            "invalid_argument",
-            "deliver_done needs a held read answered on this connection",
-        )),
+    if let Some(held) = held {
+        held.settle().await;
     }
 }
 
-/// Answers `deliver_wait` at once when a parcel can be pushed, and otherwise
-/// leaves the wait registered until a parcel arrives, a newer wait replaces it,
-/// or the connection ends.
-pub(super) async fn handle_wait(
+/// Answers a read of a door before revision 34: it prints after it took, so
+/// letting it take would lose what it took.
+pub(super) fn handle_older_read(outbound: &Outbound) {
+    outbound.reply(&silence());
+}
+
+/// Answers the `deliver_done` of a door before revision 34 as withdrawn, which
+/// ends such a door without printing.
+pub(super) fn handle_older_done(outbound: &Outbound) {
+    outbound.reply(&DaemonMessage::DeliverConfirmed { withdrawn: true });
+}
+
+impl IpcServer {
+    /// Answers `door_read`.
+    pub(super) async fn handle_door_read(
+        &self,
+        outbound: &Arc<Outbound>,
+        state: &mut ConnectionState,
+        window_id: &str,
+        token: &str,
+        door: Door,
+    ) {
+        if let Door::Hook {
+            profile,
+            name,
+            input,
+        } = door
+        {
+            let request = super::hook::HookRequest {
+                window_id,
+                token,
+                profile_id: &profile,
+                name: &name,
+                input,
+            };
+            self.handle_run_hook(outbound, request, HookRead::Door(&state.held_read))
+                .await;
+            return;
+        }
+        let Some(entry) = self
+            .authenticate_window(outbound, "door_read", token, Some(window_id))
+            .await
+        else {
+            return;
+        };
+        let hook_timeout_sec = self.window_hook_timeout(&entry, &door).await;
+        match door {
+            Door::Context => {
+                let intro = self.chat.intro_for(&entry);
+                let read = entry.inbox().read_context(intro, None);
+                answer_read(&entry, outbound, read, &state.held_read, hook_timeout_sec);
+            }
+            Door::Take => {
+                let read = entry.inbox().read_take(None);
+                answer_read(&entry, outbound, read, &state.held_read, hook_timeout_sec);
+            }
+            Door::Wait => {
+                let max_waiters = self.config.max_waiters_per_conn;
+                handle_wait(&entry, outbound, state, max_waiters, hook_timeout_sec);
+            }
+            Door::Hook { .. } => {}
+        }
+    }
+}
+
+/// Answers a wait at once when a parcel can be pushed, and otherwise leaves the
+/// wait registered until a parcel arrives, a newer wait replaces it, or the
+/// connection ends.
+fn handle_wait(
     entry: &Arc<WindowEntry>,
     outbound: &Arc<Outbound>,
     state: &mut ConnectionState,
     max_waiters: usize,
-    held: bool,
+    hook_timeout_sec: Option<u64>,
 ) {
     if state.live_waiter_count() >= max_waiters {
         outbound.reply(&pending_waits_exhausted_msg());
@@ -135,7 +188,7 @@ pub(super) async fn handle_wait(
     }
     match entry.inbox().wait() {
         Wait::Answered(read) => {
-            answer_read(entry, outbound, *read, held.then_some(&state.held_read)).await;
+            answer_read(entry, outbound, *read, &state.held_read, hook_timeout_sec);
         }
         Wait::Registered { guard, answer } => {
             let entry = Arc::clone(entry);
@@ -144,13 +197,8 @@ pub(super) async fn handle_wait(
             state.waiters.push(tokio::spawn(async move {
                 // Dropped with the task, which the connection aborts when it ends.
                 let _guard = guard;
-                match answer.await {
-                    Ok(read) => answer_read(&entry, &outbound, read, held.then_some(&slot)).await,
-                    Err(_) => {
-                        let silent = DoorRead::silent();
-                        answer_read(&entry, &outbound, silent, held.then_some(&slot)).await;
-                    }
-                }
+                let read = answer.await.unwrap_or_else(|_| DoorRead::silent());
+                answer_read(&entry, &outbound, read, &slot, hook_timeout_sec);
             }));
         }
     }

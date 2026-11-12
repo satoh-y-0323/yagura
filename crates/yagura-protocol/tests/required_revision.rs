@@ -371,7 +371,35 @@ fn one_message_per_variant_without_launch_option() -> Vec<ClientMessage> {
             input: None,
             held: false,
         },
+        door_read("take"),
+        client_from_wire(serde_json::json!({ "type": "deliver_printed" })),
     ]
+}
+
+/// The wire tags of revision 34's door requests, which this file builds from their wire
+/// form.
+const DOOR_TAGS: [&str; 2] = ["door_read", "deliver_printed"];
+
+/// A message decoded from its wire form.
+fn client_from_wire(wire: Value) -> ClientMessage {
+    serde_json::from_value(wire.clone())
+        .unwrap_or_else(|err| panic!("the decoder must accept {wire}: {err}"))
+}
+
+/// A door's read of the door `kind` names (`context`, `take`, `wait`, or `hook` with the
+/// profile and event it runs).
+fn door_read(kind: &str) -> ClientMessage {
+    let door = if kind == "hook" {
+        serde_json::json!({ "kind": "hook", "profile": "p", "name": "Stop" })
+    } else {
+        serde_json::json!({ "kind": kind })
+    };
+    client_from_wire(serde_json::json!({
+        "type": "door_read",
+        "window_id": "w1",
+        "token": "t",
+        "door": door,
+    }))
 }
 
 fn is_launch_option_bearing_variant(msg: &ClientMessage) -> bool {
@@ -482,6 +510,7 @@ fn every_other_variant_requires_no_more_than_baseline() {
         .filter(|msg| {
             !is_launch_option_bearing_variant(msg)
                 && !is_model_alias_variant(msg)
+                && !DOOR_TAGS.contains(&wire_tag_of(msg).as_str())
                 && !matches!(
                     msg,
                     ClientMessage::AttachView { .. }
@@ -935,7 +964,7 @@ fn the_view_messages_require_the_frame_threshold_whatever_they_carry() {
 }
 
 #[test]
-fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_three() {
+fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_four() {
     let message = ClientMessage::RunHook {
         window_id: "w1".to_string(),
         token: "t".to_string(),
@@ -949,5 +978,24 @@ fn run_hook_requires_revision_thirty_one_and_the_current_revision_is_thirty_thre
         HOOK_EVENTS_MIN_REVISION
     );
     assert_eq!(HOOK_EVENTS_MIN_REVISION, 31);
-    assert_eq!(PROTOCOL_REVISION, 33);
+    assert_eq!(PROTOCOL_REVISION, 34);
+}
+
+/// A daemon before revision 34 refuses a door's read and its printed notice by name, so
+/// both are sent only to a peer that speaks revision 34, whichever door the read names.
+#[test]
+fn a_doors_read_and_its_printed_notice_require_revision_thirty_four() {
+    for kind in ["context", "take", "wait", "hook"] {
+        assert_eq!(
+            required_protocol_revision(&door_read(kind)),
+            34,
+            "the read of the {kind} door"
+        );
+    }
+    assert_eq!(
+        required_protocol_revision(&client_from_wire(
+            serde_json::json!({ "type": "deliver_printed" })
+        )),
+        34
+    );
 }

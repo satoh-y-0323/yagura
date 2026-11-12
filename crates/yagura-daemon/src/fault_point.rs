@@ -51,7 +51,7 @@ pub enum FaultPoint {
     /// A typed push has pressed the submit key, and the push has not ended
     /// yet. The daemon ends there.
     AfterSendKey,
-    /// A door has confirmed a held read that took kept parcels, and the end
+    /// A door has said it printed a read that took kept parcels, and the end
     /// of what it took is not committed yet. The daemon ends there.
     DoorBeforeSettle,
     /// A relay session's `wait_for_report` has taken its reports, and its

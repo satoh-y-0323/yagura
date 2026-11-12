@@ -45,7 +45,9 @@ use crate::host_paths::{HostPaths, HostPathsError, RawHostPaths, parse_host_path
 use crate::profile_delivery::{
     DeliveryError, ProfileDelivery, WakeMode, parse_delivery, parse_guidance,
 };
-use crate::profile_hook_events::{HookEventsError, ProfileHookEvents, parse_hook_events};
+use crate::profile_hook_events::{
+    HookEventsError, ProfileHookEvents, is_hook_event_name, parse_hook_events,
+};
 use crate::window::{
     CliInjection, InjectedConfigDir, InjectedConfigFile, InjectionKind, RequestedCwd,
 };
@@ -347,6 +349,11 @@ pub struct Profile {
     /// The `[hook_events]` table, already validated: what the daemon does when
     /// a hook calls `--hook` with this profile's id. `None` means no such table.
     pub hook_events: Option<ProfileHookEvents>,
+    /// The `[hook_timeout]` table, already validated: the whole seconds this
+    /// profile's CLI gives a hook command, which the daemon names to a door
+    /// and the registration texts take by placeholder. Empty when the document
+    /// has none.
+    pub hook_timeouts: HookTimeouts,
     /// The top-level `[host_paths]` table, already validated: how a
     /// daemon-side path becomes the path this profile's CLI sees. `None`
     /// means paths are handed over unchanged.
@@ -891,6 +898,10 @@ struct RawProfile {
     /// [`ProfileParseError::InvalidHookEvents`].
     #[serde(default)]
     hook_events: Option<toml::Value>,
+    /// Untyped for the same reason: every rule it breaks is
+    /// [`ProfileParseError::InvalidHookEvents`].
+    #[serde(default)]
+    hook_timeout: Option<toml::Value>,
     #[serde(default)]
     host_paths: Option<RawHostPaths>,
     /// Untyped so every rule it breaks is
@@ -1072,7 +1083,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         return Err(ProfileParseError::InvalidIdentifier);
     }
 
-    let raw: RawProfile = toml::from_str(source)?;
+    let mut raw: RawProfile = toml::from_str(source)?;
 
     if raw.schema != SUPPORTED_SCHEMA {
         return Err(ProfileParseError::UnsupportedSchema(
@@ -1117,6 +1128,14 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
             LaunchOptionError::EnvKeyClash,
         ));
     }
+    let hook_timeouts = parse_hook_timeouts(raw.hook_timeout.take())
+        .map_err(ProfileParseError::InvalidHookEvents)?;
+    fill_hook_timeouts(
+        raw.hooks.as_mut(),
+        raw.mcp_registration.as_mut(),
+        &hook_timeouts,
+    )
+    .map_err(ProfileParseError::InvalidHookEvents)?;
     let credentials =
         parse_credentials(raw.credentials).map_err(ProfileParseError::InvalidCredentials)?;
     let launch = credentials.mode == CredentialsMode::Launch;
@@ -1192,10 +1211,207 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         mcp_registration,
         delivery,
         hook_events,
+        hook_timeouts,
         host_paths,
         shim_guidance,
         warnings,
     })
+}
+
+/// The `[hook_timeout]` table of a profile: the whole seconds its CLI gives a
+/// hook command before it cuts the command off.
+///
+/// The one place these times are written. The daemon names them to a door in
+/// the answer to its read, and the profile's registration texts take them by
+/// placeholder (`{hook_timeout}` for `default`, `{hook_timeout.doors.<door>}`,
+/// `{hook_timeout.events.<event>}`), so a CLI is never given a time the door
+/// does not know. A CLI whose registration names none keeps its own default,
+/// which the table then records with the source of the value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HookTimeouts {
+    default: Option<u64>,
+    doors: BTreeMap<String, u64>,
+    events: BTreeMap<String, u64>,
+}
+
+/// The `--deliver-*` doors a `[hook_timeout]` table may name.
+const TIMEOUT_DOORS: [&str; 3] = ["context", "take", "wait"];
+
+/// The start of every timeout placeholder.
+const TIMEOUT_PLACEHOLDER: &str = "{hook_timeout";
+
+/// The error of a `[hook_timeout]` table, or of a placeholder naming a time
+/// of it, that breaks its rule.
+const HOOK_TIMEOUT_RULE: HookEventsError = HookEventsError::Invalid("hook_timeout");
+
+impl HookTimeouts {
+    /// The time the CLI gives the hook `door` reads for: the one named for the
+    /// door's kind or event, else the table's `default`. `None` when the table
+    /// gives none.
+    #[must_use]
+    pub fn for_door(&self, door: &yagura_protocol::Door) -> Option<u64> {
+        use yagura_protocol::Door;
+        let named = match door {
+            Door::Context => self.doors.get("context"),
+            Door::Take => self.doors.get("take"),
+            Door::Wait => self.doors.get("wait"),
+            Door::Hook { name, .. } => return self.for_event(name),
+        };
+        named.copied().or(self.default)
+    }
+
+    /// The time the CLI gives the hook of the event `name`: the one named for
+    /// the event, else the table's `default`.
+    #[must_use]
+    pub fn for_event(&self, name: &str) -> Option<u64> {
+        self.events.get(name).copied().or(self.default)
+    }
+
+    /// The time the placeholder `{hook_timeout<path>}` names; `path` is what
+    /// follows the name: empty, `.doors.<door>` or `.events.<event>`.
+    fn named(&self, path: &str) -> Option<u64> {
+        if path.is_empty() {
+            return self.default;
+        }
+        match path.strip_prefix('.')?.split_once('.')? {
+            ("doors", door) => self.doors.get(door).copied(),
+            ("events", event) => self.events.get(event).copied(),
+            _ => None,
+        }
+    }
+
+    /// `text` with every timeout placeholder replaced by its time in decimal.
+    fn fill(&self, text: &str) -> Result<String, HookEventsError> {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(open) = rest.find(TIMEOUT_PLACEHOLDER) {
+            let (before, after) = rest.split_at(open);
+            out.push_str(before);
+            let after = &after[TIMEOUT_PLACEHOLDER.len()..];
+            let Some((path, tail)) = after.split_once('}') else {
+                return Err(HOOK_TIMEOUT_RULE);
+            };
+            let seconds = self.named(path).ok_or(HOOK_TIMEOUT_RULE)?;
+            out.push_str(&seconds.to_string());
+            rest = tail;
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    /// `value` with the timeout placeholders in its strings replaced. A string
+    /// that is exactly one placeholder becomes the number itself, so a JSON
+    /// entry's `timeout` stays a number.
+    fn fill_value(&self, value: &mut toml::Value) -> Result<(), HookEventsError> {
+        match value {
+            toml::Value::String(text) if text.contains(TIMEOUT_PLACEHOLDER) => {
+                let whole = text
+                    .strip_prefix(TIMEOUT_PLACEHOLDER)
+                    .and_then(|after| after.strip_suffix('}'))
+                    .filter(|path| !path.contains('}'))
+                    .and_then(|path| self.named(path));
+                *value = match whole {
+                    Some(seconds) => {
+                        toml::Value::Integer(i64::try_from(seconds).map_err(|_| HOOK_TIMEOUT_RULE)?)
+                    }
+                    None => toml::Value::String(self.fill(text)?),
+                };
+            }
+            toml::Value::Array(items) => {
+                for item in items {
+                    self.fill_value(item)?;
+                }
+            }
+            toml::Value::Table(table) => {
+                for (_, item) in table.iter_mut() {
+                    self.fill_value(item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// Reads and validates a profile's `hook_timeout` value. `None` in, an empty
+/// table out.
+fn parse_hook_timeouts(raw: Option<toml::Value>) -> Result<HookTimeouts, HookEventsError> {
+    let Some(raw) = raw else {
+        return Ok(HookTimeouts::default());
+    };
+    let toml::Value::Table(mut table) = raw else {
+        return Err(HOOK_TIMEOUT_RULE);
+    };
+    let default = table.remove("default").map(timeout_seconds).transpose()?;
+    let doors = timeout_names(table.remove("doors"), |name| TIMEOUT_DOORS.contains(&name))?;
+    let events = timeout_names(table.remove("events"), is_hook_event_name)?;
+    if !table.is_empty() {
+        return Err(HOOK_TIMEOUT_RULE);
+    }
+    Ok(HookTimeouts {
+        default,
+        doors,
+        events,
+    })
+}
+
+/// A time in whole seconds, from 1 to `u32::MAX`.
+fn timeout_seconds(value: toml::Value) -> Result<u64, HookEventsError> {
+    match value {
+        toml::Value::Integer(seconds) => u64::try_from(seconds)
+            .ok()
+            .filter(|seconds| (1..=u64::from(u32::MAX)).contains(seconds))
+            .ok_or(HOOK_TIMEOUT_RULE),
+        _ => Err(HOOK_TIMEOUT_RULE),
+    }
+}
+
+/// A table of times keyed by names `allowed` accepts.
+fn timeout_names(
+    raw: Option<toml::Value>,
+    allowed: impl Fn(&str) -> bool,
+) -> Result<BTreeMap<String, u64>, HookEventsError> {
+    let Some(raw) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let toml::Value::Table(table) = raw else {
+        return Err(HOOK_TIMEOUT_RULE);
+    };
+    table
+        .into_iter()
+        .map(|(name, value)| {
+            if !allowed(&name) {
+                return Err(HOOK_TIMEOUT_RULE);
+            }
+            Ok((name, timeout_seconds(value)?))
+        })
+        .collect()
+}
+
+/// Puts the times of `[hook_timeout]` into the texts that register a hook with
+/// its CLI: the `[hooks]` table and the `[mcp_registration]` entries name them
+/// by placeholder, so the time a CLI is given and the time a door is told are
+/// one value.
+fn fill_hook_timeouts(
+    hooks: Option<&mut RawInjection>,
+    registration: Option<&mut toml::Value>,
+    timeouts: &HookTimeouts,
+) -> Result<(), HookEventsError> {
+    if let Some(hooks) = hooks {
+        for arg in hooks.args.iter_mut().flatten() {
+            *arg = timeouts.fill(arg)?;
+        }
+        if let Some(config_file) = hooks.config_file.as_mut() {
+            *config_file = timeouts.fill(config_file)?;
+        }
+        for content in hooks.config_dir.iter_mut().flat_map(BTreeMap::values_mut) {
+            *content = timeouts.fill(content)?;
+        }
+    }
+    if let Some(registration) = registration {
+        timeouts.fill_value(registration)?;
+    }
+    Ok(())
 }
 
 /// Validates the `[credentials]` table (`None` in, the default out).

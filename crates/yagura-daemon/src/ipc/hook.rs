@@ -1,4 +1,4 @@
-//! The `run_hook` door: a CLI's hook names a profile and an event, and the
+//! The hook event door: a CLI's hook names a profile and an event, and the
 //! daemon does what that profile's `[hook_events]` says for it.
 //!
 //! The table is looked up in the named profile on every request, not in the
@@ -7,20 +7,32 @@
 //! request carries no state between its two round trips: the second one is
 //! answered from a fresh read.
 
-use yagura_protocol::{DaemonMessage, HookInputValue, HookPointer, HookPointerKind};
+use yagura_protocol::{DaemonMessage, Door, HookInputValue, HookPointer, HookPointerKind};
 
-use crate::inbox::{DeliverySpec, DoorRead};
-use crate::profile::{self, validate_profile_id};
+use crate::inbox::{DeliverySpec, DoorRead, silence};
+use crate::profile::{self, ListedProfileFile, validate_profile_id};
 use crate::profile_hook_events::{HookDeliver, HookEvent, is_hook_event_name};
+use crate::window::WindowEntry;
 
 use super::inbox::{HeldSlot, answer_read};
 use super::{IpcServer, Outbound, error_msg};
 
-/// What a profile says about one event: the event, and how that profile's CLI
-/// wants the text a hook prints.
+/// What a profile says about one event: the event, how that profile's CLI
+/// wants the text a hook prints, and the time its CLI gives the hook.
 struct Resolved {
     event: HookEvent,
     delivery: Option<DeliverySpec>,
+    hook_timeout_sec: Option<u64>,
+}
+
+/// How a hook event's read ends.
+pub(super) enum HookRead<'a> {
+    /// A door of revision 34: what the read takes stays in the connection's
+    /// slot for the door's `deliver_printed`.
+    Door(&'a HeldSlot),
+    /// A `run_hook` of a door before revision 34, which prints after it took:
+    /// nothing is taken, and the event's status and session are still recorded.
+    Older,
 }
 
 /// The values `event` reads from a hook's input, in the order they are asked
@@ -47,15 +59,14 @@ pub(super) struct HookRequest<'a> {
 }
 
 impl IpcServer {
-    /// Answers `run_hook`, holding what it takes in `held` for the door's
-    /// `deliver_done`, or settling it first when `None`. See
+    /// Answers a hook event's read as `read` says. See
     /// [`crate::profile_hook_events::HookEvent`] for the order the parts of an
     /// event run in.
     pub(super) async fn handle_run_hook(
         &self,
         outbound: &Outbound,
         request: HookRequest<'_>,
-        held: Option<&HeldSlot>,
+        read: HookRead<'_>,
     ) {
         let HookRequest {
             window_id,
@@ -70,6 +81,10 @@ impl IpcServer {
         else {
             return;
         };
+        let finish = |taken: DoorRead, hook_timeout_sec: Option<u64>| match &read {
+            HookRead::Door(slot) => answer_read(&entry, outbound, taken, slot, hook_timeout_sec),
+            HookRead::Older => outbound.reply(&silence()),
+        };
         if !validate_profile_id(profile_id) || !is_hook_event_name(name) {
             outbound.reply(&error_msg(
                 "invalid_argument",
@@ -77,7 +92,11 @@ impl IpcServer {
             ));
             return;
         }
-        let Some(Resolved { event, delivery }) = self.resolve_hook_event(profile_id, name).await
+        let Some(Resolved {
+            event,
+            delivery,
+            hook_timeout_sec,
+        }) = self.resolve_hook_event(profile_id, name).await
         else {
             tracing::warn!(
                 window_id = %entry.window_id(),
@@ -85,7 +104,7 @@ impl IpcServer {
                 event = name,
                 "run_hook names an event its profile does not define; nothing was done"
             );
-            answer_read(&entry, outbound, DoorRead::silent(), held).await;
+            finish(DoorRead::silent(), None);
             return;
         };
 
@@ -108,7 +127,7 @@ impl IpcServer {
         let mut values = values.into_iter();
 
         if event.skip_if.is_some() && !matches!(values.next(), Some(HookInputValue::Absent)) {
-            answer_read(&entry, outbound, DoorRead::silent(), held).await;
+            finish(DoorRead::silent(), hook_timeout_sec);
             return;
         }
         if event.session.is_some()
@@ -126,31 +145,70 @@ impl IpcServer {
                 "run_hook could not record the event's status; continuing"
             );
         }
-        let read = match event.deliver {
-            Some(HookDeliver::Context) => entry
+        let taken = match (&read, event.deliver) {
+            (HookRead::Door(_), Some(HookDeliver::Context)) => entry
                 .inbox()
                 .read_context(self.chat.intro_for(&entry), delivery.as_ref()),
-            Some(HookDeliver::Take) => entry.inbox().read_take(delivery.as_ref()),
-            None => DoorRead::silent(),
+            (HookRead::Door(_), Some(HookDeliver::Take)) => {
+                entry.inbox().read_take(delivery.as_ref())
+            }
+            _ => DoorRead::silent(),
         };
-        answer_read(&entry, outbound, read, held).await;
+        finish(taken, hook_timeout_sec);
     }
 
-    /// Reads `profile_id` and picks `name` out of its `[hook_events]`. The read
-    /// is blocking file I/O, so it runs on a blocking thread under
-    /// `hook_profile_reads`; nothing times it out, since a blocking thread
-    /// cannot be stopped. `None` when the profile cannot be read or has no such
-    /// event.
+    /// The time the CLI of `entry`'s profile gives the hook `door` reads for,
+    /// in whole seconds; `None` when the window has no profile, the profile
+    /// cannot be read, or it gives no time for the door. A hook event's read is
+    /// answered from the profile it names instead, in
+    /// [`Self::handle_run_hook`].
+    pub(super) async fn window_hook_timeout(
+        &self,
+        entry: &WindowEntry,
+        door: &Door,
+    ) -> Option<u64> {
+        let profile_id = entry.vendor()?;
+        let door = door.clone();
+        self.read_hook_profile(profile_id, move |listed| {
+            listed.profile.hook_timeouts.for_door(&door)
+        })
+        .await
+    }
+
+    /// Reads `profile_id` and picks `name` out of its `[hook_events]`, with the
+    /// time its CLI gives that hook. `None` when the profile cannot be read or
+    /// has no such event.
     async fn resolve_hook_event(&self, profile_id: &str, name: &str) -> Option<Resolved> {
+        let name = name.to_string();
+        self.read_hook_profile(profile_id, move |listed| {
+            let event = listed.profile.hook_events.as_ref()?.get(&name)?.clone();
+            let delivery = listed.profile.delivery.as_ref().map(|d| d.spec());
+            let hook_timeout_sec = listed.profile.hook_timeouts.for_event(&name);
+            Some(Resolved {
+                event,
+                delivery,
+                hook_timeout_sec,
+            })
+        })
+        .await
+    }
+
+    /// Reads `profile_id` and takes what `pick` makes of it. The read is
+    /// blocking file I/O, so it runs on a blocking thread under
+    /// `hook_profile_reads`; nothing times it out, since a blocking thread
+    /// cannot be stopped. `None` when the profile cannot be read or `pick`
+    /// finds nothing.
+    async fn read_hook_profile<T: Send + 'static>(
+        &self,
+        profile_id: &str,
+        pick: impl FnOnce(&ListedProfileFile) -> Option<T> + Send + 'static,
+    ) -> Option<T> {
         let _permit = self.hook_profile_reads.acquire().await.ok()?;
         let config = self.config.clone();
         let profile_id = profile_id.to_string();
-        let name = name.to_string();
         tokio::task::spawn_blocking(move || {
             let listed = profile::read_listed_profile(&config, &profile_id)?;
-            let event = listed.profile.hook_events.as_ref()?.get(&name)?.clone();
-            let delivery = listed.profile.delivery.as_ref().map(|d| d.spec());
-            Some(Resolved { event, delivery })
+            pick(&listed)
         })
         .await
         .ok()

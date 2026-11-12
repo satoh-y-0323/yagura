@@ -826,7 +826,29 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             input,
             held,
         }),
+        // Revision 34's door requests, built from their wire form: one read
+        // naming the door (the hook kind carries the most fields) and the
+        // notice a door sends once it has printed.
+        message_from_wire::<ClientMessage>(serde_json::json!({
+            "type": "door_read",
+            "window_id": "sample",
+            "token": "sample",
+            "door": {
+                "kind": "hook",
+                "profile": "sample",
+                "name": "sample",
+                "input": [{ "session": "sample" }],
+            },
+        })),
+        message_from_wire::<ClientMessage>(serde_json::json!({ "type": "deliver_printed" })),
     ]
+}
+
+/// A corpus value decoded from its wire form, for a message whose Rust
+/// spelling this file does not name.
+fn message_from_wire<T: serde::de::DeserializeOwned>(wire: Value) -> T {
+    serde_json::from_value(wire.clone())
+        .unwrap_or_else(|err| panic!("the decoder must accept {wire}: {err}"))
 }
 
 /// One `DaemonMessage` per variant the decoder accepts (WL-1 measures this
@@ -934,11 +956,15 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
         wire_sample!(DaemonMessage::ChatHistoryCleared { room_id }),
         wire_sample!(DaemonMessage::ProtocolRevision { revision }),
         wire_sample!(DaemonMessage::DaemonHealth { problems }),
-        wire_sample!(DaemonMessage::Delivery {
-            output,
-            stream,
-            exit_code,
-        }),
+        // Built from its wire form with the hook's deadline (revision 34),
+        // which a daemon puts on the answer to a door's read.
+        message_from_wire::<DaemonMessage>(serde_json::json!({
+            "type": "delivery",
+            "output": "sample",
+            "stream": "stdout",
+            "exit_code": 1,
+            "hook_timeout_sec": 1,
+        })),
         wire_sample!(DaemonMessage::SessionRecorded { held }),
         wire_sample!(DaemonMessage::DeliverConfirmed { withdrawn }),
         wire_sample!(DaemonMessage::PlanDetail { plan }),

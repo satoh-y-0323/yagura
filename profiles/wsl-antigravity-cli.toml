@@ -81,9 +81,15 @@ command = "/mcpServers/{server}/command"
 file = ".gemini/config/hooks.json"
 
 [mcp_registration.json_entry.entries."{server}"]
-PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PreInvocation", timeout = 10 }]
-SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli SessionStart", timeout = 10 }]
-PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PostToolUse", timeout = 10 }] }]
+PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PreInvocation", timeout = "{hook_timeout}" }]
+SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli SessionStart", timeout = "{hook_timeout}" }]
+PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PostToolUse", timeout = "{hook_timeout}" }] }]
+
+# The seconds this CLI gives a hook command. The registered entries name it
+# through `{hook_timeout}`, and the daemon names it to a door that asks, so
+# the two are one value.
+[hook_timeout]
+default = 10
 
 [hook_events]
 PreInvocation = { status = "running", deliver = "take" }

@@ -184,12 +184,24 @@ async fn every_inbox_command_is_silent_and_succeeds_outside_a_window() {
 async fn take_prints_the_parcels_on_stdout_and_exits_zero() {
     let setup = Setup::start(|_| {}).await;
     let id = setup.window().await;
-    setup.deposit(&id, "a", "PARCEL-ALPHA");
+    let deposited =
+        setup
+            .entry(&id)
+            .inbox()
+            .deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"), None, None);
+    let end = deposited.end.expect("the inbox must take the parcel in");
     let output = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
     assert_eq!(output.status.code(), Some(0), "{}", err(&output));
     assert!(out(&output).contains("PARCEL-ALPHA"));
     assert!(output.stderr.is_empty());
     assert_eq!(setup.entry(&id).inbox().pending_count(), 0);
+    // The door ended right after saying it printed; that still ends the parcel as taken.
+    assert_eq!(
+        tokio::time::timeout(yagura_test_support::HANG_GUARD, end)
+            .await
+            .expect("the depositor learns the end"),
+        Ok(yagura_daemon::inbox::ParcelEnd::Taken)
+    );
 
     let again = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
     assert_eq!(again.status.code(), Some(0));
@@ -315,6 +327,92 @@ async fn a_wait_in_an_unknown_window_prints_nothing_while_the_window_cannot_be_p
     let output = finish(child).await;
     assert!(!out(&output).contains("PARCEL-ALPHA"));
     assert!(!err(&output).contains("PARCEL-ALPHA"));
+}
+
+// --- the door prints first, then says so -------------------------------------------------
+
+/// A door whose output cannot be written never says it printed: what it took goes back to
+/// the inbox, its depositor is not told it was taken, and the next door prints it.
+#[tokio::test]
+async fn a_take_door_that_cannot_print_puts_the_parcel_back_untold() {
+    use yagura_daemon::inbox::ParcelEnd;
+
+    let setup = Setup::start(|_| {}).await;
+    let id = setup.window().await;
+    let inbox = setup.entry(&id).inbox().clone();
+    let deposited = inbox.deposit_tracked(Parcel::new("a", "PARCEL-ALPHA"), None, None);
+    let mut end = deposited.end.expect("the inbox must take the parcel in");
+
+    // A stdout whose reading end is already gone: the door's write fails.
+    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    drop(reader);
+    let child = setup
+        .command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN))
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the yagura-daemon binary");
+    let _ = finish(child).await;
+
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    loop {
+        if inbox.holds("a") {
+            break;
+        }
+        match end.try_recv() {
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            told => panic!("a parcel no door printed must not end: {told:?}"),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the parcel the door could not print never came back"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        matches!(
+            end.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "its depositor is still waiting"
+    );
+
+    let next = setup.run(&["--deliver-take"], &id, VALID_TOKEN).await;
+    assert!(out(&next).contains("PARCEL-ALPHA"), "{}", err(&next));
+    assert_eq!(
+        tokio::time::timeout(yagura_test_support::HANG_GUARD, end)
+            .await
+            .expect("the depositor learns the end"),
+        Ok(ParcelEnd::Taken)
+    );
+}
+
+/// A door goes on once its input's document has ended: a CLI that keeps stdin open after
+/// writing the input does not hold the door back.
+#[tokio::test]
+async fn a_take_door_goes_on_once_its_input_has_ended_without_waiting_for_eof() {
+    let setup = Setup::start(|_| {}).await;
+    let id = setup.window().await;
+    setup.deposit(&id, "a", "PARCEL-ALPHA");
+    let mut child = setup
+        .command(&["--deliver-take"], Some(&id), Some(VALID_TOKEN))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the yagura-daemon binary");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(br#"{"session_id":"s-1"}"#)
+        .and_then(|()| stdin.flush())
+        .expect("write the hook input");
+    let output = tokio::time::timeout(yagura_test_support::HANG_GUARD, finish(child))
+        .await
+        .expect("the door must end while its stdin is still open");
+    drop(stdin);
+    assert_eq!(output.status.code(), Some(0), "{}", err(&output));
+    assert!(out(&output).contains("PARCEL-ALPHA"), "{}", err(&output));
 }
 
 // --- report_session through the process ------------------------------------------

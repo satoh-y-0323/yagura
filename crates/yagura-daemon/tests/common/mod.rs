@@ -3996,6 +3996,7 @@ pub fn expect_delivery(msg: DaemonMessage) -> (String, yagura_protocol::Delivery
             output,
             stream,
             exit_code,
+            ..
         } => (output, stream, exit_code),
         other => panic!("expected delivery, got {other:?}"),
     }

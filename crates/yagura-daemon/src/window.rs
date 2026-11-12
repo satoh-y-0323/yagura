@@ -5138,6 +5138,13 @@ impl WindowEntry {
         lock_recover(&self.name).clone()
     }
 
+    /// The vendor label this window was opened with: the id of the profile it
+    /// was launched from, when it was.
+    #[must_use]
+    pub fn vendor(&self) -> Option<&str> {
+        self.vendor.as_deref()
+    }
+
     /// Stores `name` and returns the value as stored, with the write of it to
     /// the row. Reached only through [`WindowRegistry::rename_window`], which
     /// has already judged the name.

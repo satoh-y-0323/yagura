@@ -490,10 +490,10 @@ async fn connect(sandbox: &Sandbox) -> Connection {
 }
 
 fn deliver_take(window_id: &str, token: &str) -> ClientMessage {
-    ClientMessage::DeliverTake {
+    ClientMessage::DoorRead {
         window_id: window_id.to_owned(),
         token: token.to_owned(),
-        held: false,
+        door: yagura_protocol::Door::Take,
     }
 }
 
@@ -1673,7 +1673,11 @@ async fn door_output(sandbox: &Sandbox, window_id: &str) -> String {
     let mut door = connect(sandbox).await;
     send(&mut door, &deliver_take(window_id, TOKEN)).await;
     match read_response(&mut door).await {
-        DaemonMessage::Delivery { output, .. } => output,
+        DaemonMessage::Delivery { output, .. } => {
+            // A door says it printed once it has, which ends what it took.
+            send(&mut door, &ClientMessage::DeliverPrinted).await;
+            output
+        }
         other => panic!(
             "expected delivery, got {other:?}; daemon log:\n{}",
             sandbox.daemon_log()

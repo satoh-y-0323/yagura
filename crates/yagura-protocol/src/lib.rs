@@ -204,6 +204,17 @@
 //! connection, answered with `deliver_confirmed`. A read without `held` is
 //! settled before it is answered. A caller establishes
 //! [`DELIVER_DONE_MIN_REVISION`] before sending a held read or `deliver_done`.
+//!
+//! Revision 34 makes a door print before it says so. One request, `door_read`
+//! ([`ClientMessage::DoorRead`]), replaces the four held reads and names the
+//! door in `door` ([`Door`]); the daemon keeps what it took until the door sends
+//! `deliver_printed` ([`ClientMessage::DeliverPrinted`], never answered) or its
+//! connection ends, and a connection that ends first gives the parcels back. The
+//! answer, [`DaemonMessage::Delivery`], carries `hook_timeout_sec`: the time the
+//! CLI gives the hook, which the door measures its own end against. The reads of
+//! revision 33 and `deliver_done` are answered with nothing to print, for a door
+//! built before this revision. A caller establishes [`DOOR_READ_MIN_REVISION`]
+//! before sending `door_read` or `deliver_printed`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -228,7 +239,7 @@ pub use screen_copy::{
 /// anything a peer can observe on the wire. It is what a peer reports when
 /// asked which wire it speaks, and what a caller compares against before
 /// sending something an older peer would mishandle.
-pub const PROTOCOL_REVISION: u32 = 33;
+pub const PROTOCOL_REVISION: u32 = 34;
 
 /// The largest column count, and the largest row count, a window takes.
 ///
@@ -389,6 +400,17 @@ pub const HOOK_EVENTS_MIN_REVISION: u32 = 31;
 /// refuses `deliver_done` by name, so a door establishes this revision before
 /// holding a read.
 pub const DELIVER_DONE_MIN_REVISION: u32 = 33;
+
+/// The first wire revision that understands [`ClientMessage::DoorRead`] and
+/// [`ClientMessage::DeliverPrinted`].
+///
+/// An older daemon refuses them by name and takes nothing, so a door that gets
+/// that refusal prints nothing and ends with success.
+pub const DOOR_READ_MIN_REVISION: u32 = 34;
+
+/// How long a hook door waits for one answer of the daemon, and the time it
+/// takes its hook to be given when the daemon names none for it.
+pub const DOOR_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The most vendors one [`DefaultPalettes`] may assign a palette to; the
 /// daemon refuses a larger one as `invalid_argument`.
@@ -3020,9 +3042,11 @@ pub enum ClientMessage {
     /// [`DaemonMessage::DaemonHealth`]. Needs no permission: the answer names
     /// no window, path or user data.
     GetDaemonHealth,
-    /// A CLI's start-up hook asks for the window's start-up context: the
-    /// introduction plus whatever its inbox holds; answered with
-    /// [`DaemonMessage::Delivery`]. Authenticated like a status event.
+    /// A door before revision 34 asks for the window's start-up context;
+    /// answered with a [`DaemonMessage::Delivery`] that holds nothing to print,
+    /// since such a door prints after taking and would lose what it took.
+    /// Authenticated like a status event. Revision 34's door sends
+    /// [`ClientMessage::DoorRead`].
     DeliverContext {
         /// The window the hook runs in.
         window_id: String,
@@ -3033,8 +3057,9 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         held: bool,
     },
-    /// A CLI's turn-start hook takes the parcels waiting in the window's
-    /// inbox; answered with [`DaemonMessage::Delivery`].
+    /// A door before revision 34 takes the parcels waiting in the window's
+    /// inbox; answered with a [`DaemonMessage::Delivery`] that holds nothing to
+    /// print. Revision 34's door sends [`ClientMessage::DoorRead`].
     DeliverTake {
         /// The window the hook runs in.
         window_id: String,
@@ -3045,10 +3070,9 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         held: bool,
     },
-    /// An idle window's hook waits for a parcel. The daemon answers with
-    /// [`DaemonMessage::Delivery`] when one arrives, or with an empty one
-    /// when a newer wait for the same window replaces this one. The wait ends
-    /// when the connection closes.
+    /// A door before revision 34 waits for a parcel; answered at once with a
+    /// [`DaemonMessage::Delivery`] that holds nothing to print, and no wait is
+    /// registered. Revision 34's door sends [`ClientMessage::DoorRead`].
     DeliverWait {
         /// The window the hook runs in.
         window_id: String,
@@ -3059,9 +3083,10 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         held: bool,
     },
-    /// A door confirms the held read its connection was answered with,
-    /// before it prints; answered with [`DaemonMessage::DeliverConfirmed`].
-    /// Only the connection that was answered can confirm it.
+    /// A door before revision 34 confirms its read before it prints; answered
+    /// with [`DaemonMessage::DeliverConfirmed`] saying `withdrawn`, which ends
+    /// such a door without printing. Revision 34's door sends
+    /// [`ClientMessage::DeliverPrinted`] after it printed.
     DeliverDone,
     /// A CLI's hook tells the daemon its session identifier; answered with
     /// [`DaemonMessage::SessionRecorded`].
@@ -3370,10 +3395,12 @@ pub enum ClientMessage {
         /// Where the milestone sorts; equal positions sort by name.
         position: i64,
     },
-    /// A CLI's hook runs one event of a profile's `[hook_events]`; answered
-    /// with [`DaemonMessage::Delivery`], or with
-    /// [`DaemonMessage::HookInputWanted`] when `input` is `None` and the event
-    /// reads values from the hook's input. Authenticated like a status event.
+    /// A door before revision 34 runs one event of a profile's `[hook_events]`;
+    /// answered with [`DaemonMessage::HookInputWanted`] when `input` is `None`
+    /// and the event reads values from the hook's input, and otherwise with a
+    /// [`DaemonMessage::Delivery`] that holds nothing to print: the event's
+    /// status and session are still recorded. Authenticated like a status
+    /// event. Revision 34's door sends [`ClientMessage::DoorRead`].
     RunHook {
         /// The window the hook runs in.
         window_id: String,
@@ -3392,9 +3419,51 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         held: bool,
     },
+    /// A door's read: what the door of a CLI's hook is to print. The daemon
+    /// keeps what it took until the door sends [`ClientMessage::DeliverPrinted`]
+    /// on the same connection; a connection that ends first gives it back.
+    /// Answered with [`DaemonMessage::Delivery`], or, for a hook event that
+    /// reads values from the hook's input and was sent without `input`, with
+    /// [`DaemonMessage::HookInputWanted`], after which the door reads again
+    /// with `input`. Authenticated like a status event.
+    DoorRead {
+        /// The window the hook runs in.
+        window_id: String,
+        /// That window's own token.
+        token: String,
+        /// Which door reads.
+        door: Door,
+    },
+    /// The door printed what its [`ClientMessage::DoorRead`] was answered with.
+    /// Never answered: the door ends without waiting. Only the connection that
+    /// was answered can say it.
+    DeliverPrinted,
 }
 
-/// What a hook's input holds at one pointer, as [`ClientMessage::RunHook`]
+/// The door a [`ClientMessage::DoorRead`] reads for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Door {
+    /// The window's start-up context: the introduction and what its inbox holds.
+    Context,
+    /// What the window's inbox holds, at the start of a turn.
+    Take,
+    /// A wait for a parcel, answered when one can be pushed.
+    Wait,
+    /// One event of a profile's `[hook_events]`.
+    Hook {
+        /// The id of the profile whose `[hook_events]` names the event.
+        profile: String,
+        /// The event's name.
+        name: String,
+        /// What the hook read at the pointers the daemon asked for, in order;
+        /// absent on the first read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Vec<HookInputValue>>,
+    },
+}
+
+/// What a hook's input holds at one pointer, as [`Door::Hook`]
 /// reports it. Carries no catch-all variant: the daemon asked for a kind and
 /// gets exactly that kind back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3536,6 +3605,7 @@ pub fn required_protocol_revision(msg: &ClientMessage) -> u32 {
         | ClientMessage::ReportSession { .. } => INBOX_MIN_REVISION,
         ClientMessage::SetDefaultPalettes(_) => DEFAULT_PALETTES_MIN_REVISION,
         ClientMessage::RunHook { .. } => HOOK_EVENTS_MIN_REVISION,
+        ClientMessage::DoorRead { .. } | ClientMessage::DeliverPrinted => DOOR_READ_MIN_REVISION,
         _ => PROTOCOL_REVISION_BASELINE,
     }
 }
@@ -3906,9 +3976,8 @@ pub enum DaemonMessage {
         /// Every problem the daemon has right now; empty when it has none.
         problems: Vec<DaemonProblem>,
     },
-    /// Response to [`ClientMessage::DeliverContext`],
-    /// [`ClientMessage::DeliverTake`], [`ClientMessage::DeliverWait`] and
-    /// [`ClientMessage::RunHook`]: what the hook prints and how it ends.
+    /// Response to [`ClientMessage::DoorRead`] (and to the reads of doors
+    /// before revision 34): what the hook prints and how it ends.
     Delivery {
         /// The text for the hook to print; empty when there is nothing to
         /// say.
@@ -3917,10 +3986,15 @@ pub enum DaemonMessage {
         stream: DeliveryStream,
         /// The exit code the hook ends with.
         exit_code: u8,
+        /// The whole seconds the CLI gives the hook, which the door measures
+        /// its own end against. Absent when the daemon names none for the
+        /// door; the door then takes the time it had before revision 34
+        /// ([`DOOR_ANSWER_TIMEOUT`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_timeout_sec: Option<u64>,
     },
-    /// Response to [`ClientMessage::DeliverDone`]. `withdrawn` means the
-    /// parcels were taken back before the confirmation, so the door prints
-    /// nothing.
+    /// Response to [`ClientMessage::DeliverDone`], sent to a door before
+    /// revision 34 only. `withdrawn` means the door prints nothing.
     DeliverConfirmed {
         /// Whether the held read was withdrawn instead of settled.
         withdrawn: bool,
@@ -5226,6 +5300,8 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "add_ticket_result",
     "set_milestone",
     "run_hook",
+    "door_read",
+    "deliver_printed",
 ];
 
 /// The `type` values recognized by [`DaemonMessage`].

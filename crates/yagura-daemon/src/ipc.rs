@@ -245,8 +245,8 @@ struct ConnectionState {
     /// whose requester left can still take its own body back; they count
     /// against the same per-connection budget as `waiters`.
     open_sends: Arc<AtomicUsize>,
-    /// The held read this connection was answered with, until its door
-    /// confirms it with `deliver_done`; dropped with the connection, it puts
+    /// The read this connection was answered with, until its door says it
+    /// printed it with `deliver_printed`; dropped with the connection, it puts
     /// the parcels back.
     held_read: inbox::HeldSlot,
     /// On a relay session's connection for `wait_for_report`: where the
@@ -1931,50 +1931,43 @@ impl IpcServer {
                 });
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverContext {
+            Ok(ClientMessage::DoorRead {
                 window_id,
                 token,
-                held,
+                door,
             }) => {
-                if let Some(entry) = self
-                    .authenticate_window(outbound, "deliver_context", &token, Some(&window_id))
-                    .await
-                {
-                    let intro = self.chat.intro_for(&entry);
-                    let held = held.then_some(&state.held_read);
-                    inbox::handle_context(&entry, outbound, intro, held).await;
-                }
+                self.handle_door_read(outbound, state, &window_id, &token, door)
+                    .await;
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverTake {
-                window_id,
-                token,
-                held,
-            }) => {
-                if let Some(entry) = self
-                    .authenticate_window(outbound, "deliver_take", &token, Some(&window_id))
-                    .await
-                {
-                    inbox::handle_take(&entry, outbound, held.then_some(&state.held_read)).await;
-                }
+            Ok(ClientMessage::DeliverPrinted) => {
+                inbox::handle_printed(&state.held_read).await;
                 FrameOutcome::Continue
             }
-            Ok(ClientMessage::DeliverWait {
-                window_id,
-                token,
-                held,
-            }) => {
-                if let Some(entry) = self
-                    .authenticate_window(outbound, "deliver_wait", &token, Some(&window_id))
+            // The reads of a door before revision 34 take nothing: it prints
+            // after it took, so what it took would be lost.
+            Ok(
+                ClientMessage::DeliverContext {
+                    window_id, token, ..
+                }
+                | ClientMessage::DeliverTake {
+                    window_id, token, ..
+                }
+                | ClientMessage::DeliverWait {
+                    window_id, token, ..
+                },
+            ) => {
+                if self
+                    .authenticate_window(outbound, "deliver", &token, Some(&window_id))
                     .await
+                    .is_some()
                 {
-                    let max_waiters = self.config.max_waiters_per_conn;
-                    inbox::handle_wait(&entry, outbound, state, max_waiters, held).await;
+                    inbox::handle_older_read(outbound);
                 }
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::DeliverDone) => {
-                inbox::handle_done(outbound, &state.held_read).await;
+                inbox::handle_older_done(outbound);
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::ReportSession {
@@ -1996,7 +1989,7 @@ impl IpcServer {
                 profile,
                 name,
                 input,
-                held,
+                ..
             }) => {
                 let request = hook::HookRequest {
                     window_id: &window_id,
@@ -2005,7 +1998,7 @@ impl IpcServer {
                     name: &name,
                     input,
                 };
-                self.handle_run_hook(outbound, request, held.then_some(&state.held_read))
+                self.handle_run_hook(outbound, request, hook::HookRead::Older)
                     .await;
                 FrameOutcome::Continue
             }
@@ -5619,12 +5612,7 @@ async fn await_handoff_end(
                     }
                     Ok(ParcelEnd::TurnedAway) => SlotExhausted::Daemon.to_message(),
                     Ok(ParcelEnd::Closed | ParcelEnd::Stopped) => child_exited_msg(),
-                    // Dropped unsettled: it was withdrawn under way, and its
-                    // push failed -- after the submit key it still reached
-                    // the CLI.
-                    Err(_) if submitted.as_ref().is_some_and(|pressed| *pressed.borrow()) => {
-                        sent(HandoffDelivery::Taken)
-                    }
+                    // Dropped unsettled: its row could not be written.
                     Err(_) => sent(HandoffDelivery::UndeliveredTimeout),
                 };
             }
@@ -5661,8 +5649,11 @@ async fn await_handoff_end(
                 if pressed {
                     return sent(HandoffDelivery::Taken);
                 }
-                // The push ended without pressing it: `end` says how.
+                // What held the parcel ended without the key: `end` says how
+                // if it ended the parcel, and otherwise the parcel waits again
+                // and the bound, already run out, withdraws it.
                 submitted = None;
+                timed_out = false;
             }
         }
     }
@@ -6853,11 +6844,11 @@ mod tests {
         vec!["sh".into(), "-c".into(), "true".into()]
     }
 
-    /// A handoff withdrawn at its bound while its push was still short of the
-    /// submit key, whose push then pressed the key and failed a later write,
-    /// reached the CLI: it is answered taken, never undelivered.
+    /// A handoff whose bound runs out while its push has pressed the submit
+    /// key reached the CLI, whatever the push's cleanup does after: it is
+    /// answered taken, never undelivered.
     #[tokio::test]
-    async fn a_withdrawn_handoff_whose_push_pressed_the_key_before_failing_is_answered_taken() {
+    async fn a_handoff_whose_push_pressed_the_key_before_its_bound_is_answered_taken() {
         let config = DaemonConfig {
             handoff_delivery_timeout_secs: 0,
             ..DaemonConfig::default()
@@ -6886,23 +6877,14 @@ mod tests {
             .deposit_tracked(Parcel::new(key.clone(), "envelope"), None, None)
             .end
             .expect("taken in");
-        let mut push = entry.inbox().begin_push(false).expect("the parcel waits");
+        let push = entry.inbox().begin_push(false).expect("the parcel waits");
+        push.submitted.send_replace(true);
         let (_closed_tx, mut closed) = watch::channel(false);
 
-        let answering = tokio::spawn({
-            let entry = Arc::clone(&entry);
-            async move { await_handoff_end(&entry, &key, end, &mut closed, &config).await }
-        });
-        push.withdrawn
-            .wait_for(|withdrawn| *withdrawn)
-            .await
-            .expect("the inbox holds the push");
-        push.submitted.send_replace(true);
+        let answer = await_handoff_end(&entry, &key, end, &mut closed, &config).await;
         entry
             .inbox()
             .finish_push(push.id, crate::inbox::PushEnd::Failed);
-
-        let answer = answering.await.expect("the answer");
         assert!(
             matches!(
                 answer,

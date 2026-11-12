@@ -1884,9 +1884,8 @@ async fn handle_room_removal(
             };
             for (seq, window_id) in pending {
                 if let Some(entry) = store_registry.get(&window_id) {
-                    entry
-                        .inbox()
-                        .withdraw_waiting(&chat_parcel_key(&store_room, seq));
+                    // A post a door or a push already holds goes on to the CLI.
+                    let _ = entry.inbox().withdraw(&chat_parcel_key(&store_room, seq));
                 }
             }
             Ok(RemovalEnd::Done)
@@ -2035,7 +2034,10 @@ mod tests {
 
         let pending = store.clear_history(ROOM).expect("the clear must succeed");
         for (seq, _window_id) in &pending {
-            assert!(inbox.withdraw_waiting(&parcel_key(*seq)));
+            assert!(matches!(
+                inbox.withdraw(&parcel_key(*seq)),
+                crate::inbox::Withdrawal::Removed
+            ));
         }
 
         assert_eq!(pending, vec![(seq, "w-b".to_string())]);

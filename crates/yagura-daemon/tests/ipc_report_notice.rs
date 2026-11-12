@@ -503,33 +503,31 @@ async fn a_notice_queued_on_the_delivery_lock_is_not_typed_once_the_parent_start
     s.h.registry.terminate_all().await;
 }
 
+/// A notice already carried (queued on the delivery lock) is not taken back
+/// when `wait_for_report` empties the inbox: it is typed once the lock is
+/// released, and it only signals a report that a later `wait_for_report`
+/// finds already read.
 #[tokio::test]
-async fn a_notice_queued_on_the_delivery_lock_is_not_typed_once_wait_for_report_emptied_the_inbox()
-{
+async fn a_notice_queued_on_the_delivery_lock_is_still_typed_once_wait_for_report_emptied_the_inbox()
+ {
     let mut s = scene("notice-lock-drained", notice_config).await;
     pin_status(&mut s.probe, &s.parent, WindowStatus::WaitingInput).await;
 
     let entry = s.h.registry.get(&s.parent).expect("parent window entry");
-    let before = writes_after_attempts(&s.h, &s.parent, 0).await;
     let guard = entry.lock_delivery().await;
     report(&mut s.child_conn, "queued", None).await;
     queue_on_the_held_lock(&entry).await;
     assert_eq!(drain_inbox(&mut s.parent_conn).await.len(), 1);
     drop(guard);
 
-    assert_eq!(
-        writes_after_attempts(&s.h, &s.parent, 1).await,
-        before,
-        "the notice queued on the lock was written after wait_for_report emptied the inbox"
+    wait_for_submitted(&s.h, &s.parent, &expected_notice(1), 1).await;
+    assert_eq!(s.h.submitted_count(&s.parent, ""), 1);
+    assert!(
+        drain_inbox(&mut s.parent_conn).await.is_empty(),
+        "the report was read before the notice arrived, so nothing is left to read"
     );
-    assert_nothing_more_written(
-        &s.h,
-        &s.parent,
-        before,
-        1,
-        "after the lock was released with the inbox already emptied",
-    )
-    .await;
+    let writes = writes_after_attempts(&s.h, &s.parent, 1).await;
+    assert_nothing_more_written(&s.h, &s.parent, writes, 1, "after the notice").await;
     s.h.registry.terminate_all().await;
 }
 

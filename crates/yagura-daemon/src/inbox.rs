@@ -9,9 +9,10 @@
 //! parcel never reaches the CLI twice.
 //!
 //! A door's read takes its parcels into a [`DoorHold`]: they stay the
-//! daemon's, out of reach of every other door and push, until the door
-//! confirms the read ([`DoorHold::confirm`]), which commits their end before
-//! the door prints. A hold dropped unconfirmed puts them back.
+//! daemon's, out of reach of every other door and push, until the door says it
+//! printed them ([`DoorHold::confirm`]), which commits their end. A hold
+//! dropped before that puts them back. Withdrawing a parcel takes only one
+//! that still waits; one a door or a push holds ends with that door or push.
 //!
 //! An inbox given an [`InboxKeeper`] is the copy of what the store keeps for
 //! its window: each change is sent to the store under the inbox's lock. A
@@ -574,10 +575,6 @@ impl Held {
 struct Carried {
     id: u64,
     held: Vec<Held>,
-    /// Raised when the depositor withdraws it while it is under way: the push
-    /// gives up if it still can, and if it fails the parcels are dropped
-    /// instead of going back.
-    withdrawn: watch::Sender<bool>,
     /// Raised once the push has pressed the submit key: what it carries has
     /// reached the CLI, whatever its cleanup still has to do.
     submitted: Arc<watch::Sender<bool>>,
@@ -622,15 +619,13 @@ struct Waiter {
 }
 
 /// Parcels a door's read has taken out of the inbox and its door has not
-/// confirmed yet.
+/// said it printed yet.
 struct DoorHeld {
     id: u64,
     held: Vec<Held>,
-    /// Raised when one of them was withdrawn before the confirmation: the
-    /// door prints nothing, and the others go back.
-    withdrawn: bool,
-    /// Raised once the confirmation has started: nothing withdraws them now.
-    confirming: bool,
+    /// Never raised: it is dropped when the door ends the hold, which is what
+    /// a withdrawal that found the parcels here waits for.
+    ended: watch::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -661,19 +656,14 @@ impl State {
         self.next_id
     }
 
-    /// Removes the waiting parcel named `key`, or the one a door holds
-    /// unconfirmed, whose door then prints nothing; `None` when neither.
+    /// Removes the waiting parcel named `key`; `None` when no parcel waiting
+    /// has it.
     fn remove_waiting(&mut self, key: &str) -> Option<Held> {
-        if let Some(position) = self.parcels.iter().position(|held| held.parcel.key == key) {
-            return self.parcels.remove(position);
-        }
-        let door = self
-            .doors
-            .iter_mut()
-            .find(|door| !door.confirming && door.held.iter().any(|held| held.parcel.key == key))?;
-        let position = door.held.iter().position(|held| held.parcel.key == key)?;
-        door.withdrawn = true;
-        Some(door.held.remove(position))
+        let position = self
+            .parcels
+            .iter()
+            .position(|held| held.parcel.key == key)?;
+        self.parcels.remove(position)
     }
 
     /// How many waiting parcels are not notices: the ones the capacity bounds.
@@ -858,6 +848,7 @@ impl Shared {
             output: form.render(text),
             stream: DeliveryStream::Stdout,
             exit_code: 0,
+            hook_timeout_sec: None,
         }
     }
 
@@ -866,6 +857,7 @@ impl Shared {
             output: self.spec.output.wait.render(text),
             stream: self.spec.wake_stream,
             exit_code: self.spec.wake_exit,
+            hook_timeout_sec: None,
         }
     }
 
@@ -904,8 +896,7 @@ impl Shared {
         state.doors.push(DoorHeld {
             id,
             held: taken,
-            withdrawn: false,
-            confirming: false,
+            ended: watch::channel(false).0,
         });
         DoorHold {
             shared: self.me.clone(),
@@ -933,24 +924,16 @@ impl Shared {
         self.wake(state);
     }
 
-    /// Commits the end of what door hold `id` took, before its door prints:
+    /// Commits the end of what door hold `id` took, once its door printed it:
     /// the rows of the kept parcels are forgotten, with the chat delivery each
     /// carries recorded as taken, in one transaction; then each depositor
-    /// learns it was taken. Returns whether it was withdrawn instead, and the
-    /// rest put back.
-    async fn confirm(self: Arc<Self>, id: u64) -> bool {
+    /// learns it was taken.
+    async fn confirm(self: Arc<Self>, id: u64) {
         let (rows, recorded) = {
             let mut state = self.lock();
             let Some(door) = state.doors.iter_mut().find(|door| door.id == id) else {
-                return true;
+                return;
             };
-            if door.withdrawn {
-                if let Some(door) = state.remove_door(id) {
-                    self.put_back(&mut state, door.held);
-                }
-                return true;
-            }
-            door.confirming = true;
             let mut rows = Vec::new();
             if self.keeper.is_some() {
                 for held in door.held.iter_mut().filter(|held| held.parcel.saved) {
@@ -988,7 +971,6 @@ impl Shared {
                 }
             }
         }
-        false
     }
 
     /// Whether door hold `id` took a parcel whose row the store keeps.
@@ -1001,7 +983,8 @@ impl Shared {
                 .any(|door| door.id == id && door.held.iter().any(|held| held.parcel.saved))
     }
 
-    /// Puts back what door hold `id` took: its door went away unconfirmed.
+    /// Puts back what door hold `id` took: its door went away before it
+    /// printed.
     fn release_door(&self, id: u64) {
         let mut state = self.lock();
         if let Some(door) = state.remove_door(id) {
@@ -1037,7 +1020,7 @@ impl DoorRead {
 }
 
 /// The parcels a door's answer took, out of reach of every other door and
-/// push until [`Self::confirm`] ends them; dropped unconfirmed, they go back.
+/// push until [`Self::confirm`] ends them; dropped before that, they go back.
 pub struct DoorHold {
     shared: Weak<Shared>,
     /// `None` once ended, or when the answer took nothing.
@@ -1069,16 +1052,15 @@ impl DoorHold {
         }
     }
 
-    /// Confirms the read: once the end of what it took is committed, its
-    /// depositors learn it was taken. Returns whether it was withdrawn
-    /// before that instead, in which case the door prints nothing and the
-    /// parcels it did not lose go back. A future dropped early still
-    /// finishes the confirmation.
-    pub async fn confirm(mut self) -> bool {
+    /// Ends the read once its door printed what it took: when the end of what
+    /// it took is committed, its depositors learn it was taken. A future
+    /// dropped early still finishes the confirmation.
+    pub async fn confirm(mut self) {
         let (Some(id), Some(shared)) = (self.id.take(), self.shared.upgrade()) else {
-            return false;
+            return;
         };
-        tokio::spawn(shared.confirm(id)).await.unwrap_or(true)
+        // A confirmation that panicked left nothing to tell: the hold is gone.
+        let _ = tokio::spawn(shared.confirm(id)).await;
     }
 }
 
@@ -1097,6 +1079,7 @@ pub fn silence() -> DaemonMessage {
         output: String::new(),
         stream: DeliveryStream::Stdout,
         exit_code: 0,
+        hook_timeout_sec: None,
     }
 }
 
@@ -1155,8 +1138,6 @@ pub struct Push {
     pub text: String,
     /// The budget the first parcel it carries draws on, if any.
     pub budget: Option<PushBudget>,
-    /// Raised when what it carries is withdrawn while it is under way.
-    pub withdrawn: watch::Receiver<bool>,
     /// To be raised by the push when it presses the submit key.
     pub submitted: Arc<watch::Sender<bool>>,
 }
@@ -1177,10 +1158,11 @@ pub enum PushEnd {
 pub enum Withdrawal {
     /// It was waiting and is out of the inbox: it never reaches the CLI.
     Removed,
-    /// A push is carrying it: it ends with that push, and does not come back
-    /// if the push fails. `submitted` turns true once the push has pressed
-    /// the submit key, which it may do despite the withdrawal: the parcel has
-    /// then reached the CLI.
+    /// A door or a push holds it: it ends with that door or push, and goes
+    /// back to waiting when they fail. `submitted` turns true once a push has
+    /// pressed the submit key: the parcel has then reached the CLI. A door's
+    /// is never raised. Either closes when the door or push ends, which is when
+    /// the parcel is waiting again or ended.
     UnderWay {
         /// Whether the push has pressed the submit key.
         submitted: watch::Receiver<bool>,
@@ -1602,12 +1584,10 @@ impl Inbox {
         let key = first.parcel.key.clone();
         state.next_push += 1;
         let id = state.next_push;
-        let (withdrawn_tx, withdrawn) = watch::channel(false);
         let submitted = Arc::new(watch::channel(false).0);
         state.carrying.push(Carried {
             id,
             held,
-            withdrawn: withdrawn_tx,
             submitted: Arc::clone(&submitted),
             settling: None,
         });
@@ -1616,19 +1596,8 @@ impl Inbox {
             key,
             text,
             budget,
-            withdrawn,
             submitted,
         })
-    }
-
-    /// Whether what push `id` carries was withdrawn while it was under way.
-    #[must_use]
-    pub fn push_withdrawn(&self, id: u64) -> bool {
-        self.shared
-            .lock()
-            .carrying
-            .iter()
-            .any(|carried| carried.id == id && *carried.withdrawn.borrow())
     }
 
     /// Settles push `id` right before its first submit key, once: the rows
@@ -1750,9 +1719,6 @@ impl Inbox {
                     held.settle(ParcelEnd::TurnedAway);
                 }
             }
-            // A withdrawn parcel is dropped unsettled: its depositor answers
-            // for it.
-            PushEnd::Failed if *carried.withdrawn.borrow() => self.shared.forget(&carried.held),
             PushEnd::Failed => match state.closed {
                 Some(closed) => {
                     for held in carried.held {
@@ -1769,10 +1735,11 @@ impl Inbox {
         }
     }
 
-    /// Withdraws the parcel named `key`. A waiting one is removed under the
-    /// same lock the doors take it under, so once this returns
-    /// [`Withdrawal::Removed`] nothing hands it to the CLI; its depositor
-    /// learns nothing more from it.
+    /// Withdraws the parcel named `key`, if it still waits. A waiting one is
+    /// removed under the same lock the doors take it under, so once this
+    /// returns [`Withdrawal::Removed`] nothing hands it to the CLI; its
+    /// depositor learns nothing more from it. A parcel a door or a push holds
+    /// is left to them.
     pub fn withdraw(&self, key: &str) -> Withdrawal {
         #[cfg(test)]
         {
@@ -1791,32 +1758,25 @@ impl Inbox {
             self.shared.forget([&removed]);
             return Withdrawal::Removed;
         }
-        match state
+        if let Some(carried) = state
             .carrying
-            .iter_mut()
+            .iter()
             .find(|carried| carried.held.iter().any(|held| held.parcel.key == key))
         {
-            Some(carried) => {
-                carried.withdrawn.send_replace(true);
-                Withdrawal::UnderWay {
-                    submitted: carried.submitted.subscribe(),
-                }
-            }
+            return Withdrawal::UnderWay {
+                submitted: carried.submitted.subscribe(),
+            };
+        }
+        match state
+            .doors
+            .iter()
+            .find(|door| door.held.iter().any(|held| held.parcel.key == key))
+        {
+            Some(door) => Withdrawal::UnderWay {
+                submitted: door.ended.subscribe(),
+            },
             None => Withdrawal::Gone,
         }
-    }
-
-    /// Removes the parcel named `key` if it is still waiting, and reports
-    /// whether it did. A parcel a push is carrying is left alone, and so is
-    /// everything else that push carries: unlike [`Self::withdraw`], this
-    /// never marks a push withdrawn.
-    pub fn withdraw_waiting(&self, key: &str) -> bool {
-        let mut state = self.shared.lock();
-        let Some(removed) = state.remove_waiting(key) else {
-            return false;
-        };
-        self.shared.forget([&removed]);
-        true
     }
 
     /// Replaces the text of the waiting parcel named `key`. `false` when no

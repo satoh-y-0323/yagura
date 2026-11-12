@@ -498,10 +498,7 @@ async fn type_push(
     carried: Option<CarriedResidue>,
     budget_held: bool,
 ) -> (Attempt, Option<CarriedResidue>) {
-    // A parcel withdrawn while this waited for the window's turn is not typed.
-    let compose = || {
-        (accepts_input(entry) && !entry.inbox().push_withdrawn(push.id)).then(|| push.text.clone())
-    };
+    let compose = || accepts_input(entry).then(|| push.text.clone());
     let budget = match &push.budget {
         Some(_) if budget_held => SharedBudget::NotNeeded,
         Some(budget) => SharedBudget::Counter {
@@ -510,14 +507,11 @@ async fn type_push(
         },
         None => SharedBudget::NotNeeded,
     };
-    // Withdrawing what is under way ends the typing the way a departed
-    // requester does: before the first byte nothing is written, after it the
-    // body is taken back if it can be.
     let delivered = super::run_delivery(
         entry,
         &compose,
         config,
-        Some(push.withdrawn.clone()),
+        None,
         0,
         carried,
         budget,

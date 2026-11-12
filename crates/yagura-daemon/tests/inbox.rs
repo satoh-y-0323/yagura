@@ -89,32 +89,50 @@ async fn until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// A door's read of `kind` (`context`, `take` or `wait`) with `token`, in the form a door
+/// of revision 34 sends it.
+fn door_read(window_id: &str, token: &str, kind: &str) -> ClientMessage {
+    let wire = serde_json::json!({
+        "type": "door_read",
+        "window_id": window_id,
+        "token": token,
+        "door": { "kind": kind },
+    });
+    serde_json::from_value(wire.clone())
+        .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
+}
+
+/// The notice a door sends once it has printed what its read was answered with.
+fn printed() -> ClientMessage {
+    serde_json::from_value(serde_json::json!({ "type": "deliver_printed" }))
+        .unwrap_or_else(|err| panic!("the wire must know deliver_printed: {err}"))
+}
+
 fn take_msg(window_id: &str) -> ClientMessage {
-    ClientMessage::DeliverTake {
-        window_id: window_id.into(),
-        token: VALID_TOKEN.into(),
-        held: false,
-    }
+    door_read(window_id, VALID_TOKEN, "take")
 }
 
 fn context_msg(window_id: &str) -> ClientMessage {
-    ClientMessage::DeliverContext {
-        window_id: window_id.into(),
-        token: VALID_TOKEN.into(),
-        held: false,
-    }
+    door_read(window_id, VALID_TOKEN, "context")
 }
 
 fn wait_msg(window_id: &str) -> ClientMessage {
-    ClientMessage::DeliverWait {
-        window_id: window_id.into(),
-        token: VALID_TOKEN.into(),
-        held: false,
-    }
+    door_read(window_id, VALID_TOKEN, "wait")
 }
 
-async fn take(client: &mut Connection, window_id: &str) -> String {
-    expect_delivery(call_door(client, &take_msg(window_id)).await).0
+/// Reads through a door as a hook does: on a connection of its own, printing what it was
+/// answered with and saying so before it ends.
+async fn read(h: &Harness, msg: &ClientMessage) -> DaemonMessage {
+    let mut door = h.connect().await;
+    let answer = call_door(&mut door, msg).await;
+    if matches!(answer, DaemonMessage::Delivery { .. }) {
+        common::send(&mut door, &printed()).await;
+    }
+    answer
+}
+
+async fn take(h: &Harness, window_id: &str) -> String {
+    expect_delivery(read(h, &take_msg(window_id)).await).0
 }
 
 fn pos(haystack: &str, needle: &str) -> usize {
@@ -134,15 +152,15 @@ async fn a_take_returns_the_windows_parcels_in_order_and_takes_them_out() {
     deposit(&h, &first, "b", "PARCEL-BETA");
     deposit(&h, &second, "c", "PARCEL-GAMMA");
 
-    let got = take(&mut client, &first).await;
+    let got = take(&h, &first).await;
     assert!(pos(&got, "PARCEL-ALPHA") < pos(&got, "PARCEL-BETA"));
     assert!(!got.contains("PARCEL-GAMMA"), "another window's parcel");
     assert_eq!(pending(&h, &first), 0);
 
-    let again = take(&mut client, &first).await;
+    let again = take(&h, &first).await;
     assert!(again.is_empty(), "a taken parcel returns once: {again:?}");
 
-    let other = take(&mut client, &second).await;
+    let other = take(&h, &second).await;
     assert!(other.contains("PARCEL-GAMMA"));
     assert!(!other.contains("PARCEL-ALPHA"));
 }
@@ -164,11 +182,11 @@ async fn a_take_stays_within_the_limit_and_never_cuts_a_parcel() {
     deposit(&h, &id, "b", &b);
     deposit(&h, &id, "c", &c);
 
-    let first = take(&mut client, &id).await;
+    let first = take(&h, &id).await;
     assert!(first.chars().count() <= 100, "{}", first.chars().count());
     assert!(first.contains(&a), "the oldest parcel comes first, whole");
     assert!(!first.contains(&c), "three parcels of 40 do not fit in 100");
-    let second = take(&mut client, &id).await;
+    let second = take(&h, &id).await;
     assert!(second.chars().count() <= 100);
     let all = format!("{first}{second}");
     for parcel in [&a, &b, &c] {
@@ -192,7 +210,7 @@ async fn the_limit_counts_characters_not_bytes() {
     let (a, b) = ("あ".repeat(40), "い".repeat(40));
     deposit(&h, &id, "a", &a);
     deposit(&h, &id, "b", &b);
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(got.contains(&a) && got.contains(&b), "{got:?}");
     assert!(got.chars().count() <= 100);
 }
@@ -214,14 +232,11 @@ async fn the_limit_includes_the_intro_in_the_context() {
     deposit(&h, &id, "a", &a);
     deposit(&h, &id, "b", &b);
 
-    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(context.contains(&intro) && context.contains(&a));
     assert!(!context.contains(&b), "30 + 40 + 40 does not fit in 100");
     assert!(context.chars().count() <= 100);
-    assert!(
-        take(&mut client, &id).await.contains(&b),
-        "the rest follows"
-    );
+    assert!(take(&h, &id).await.contains(&b), "the rest follows");
 }
 
 // --- context ----------------------------------------------------------------
@@ -235,12 +250,12 @@ async fn the_context_is_the_intro_and_the_pending_parcels_and_takes_them() {
     let id = h.open_idle_window(&mut client).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
 
-    let (context, stream, code) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (context, stream, code) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(pos(&context, "WELCOME-INTRO") < pos(&context, "PARCEL-ALPHA"));
     assert_eq!(stream, DeliveryStream::Stdout);
     assert_eq!(code, 0);
     assert_eq!(pending(&h, &id), 0);
-    let next = take(&mut client, &id).await;
+    let next = take(&h, &id).await;
     assert!(
         !next.contains("PARCEL-ALPHA"),
         "a parcel the context returned is not returned again"
@@ -254,11 +269,11 @@ async fn an_empty_intro_leaves_the_context_with_the_parcels_only() {
     })
     .await;
     let id = h.open_idle_window(&mut client).await;
-    let (nothing, _, code) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (nothing, _, code) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(nothing.is_empty(), "no intro and no parcel: {nothing:?}");
     assert_eq!(code, 0);
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(context.contains("PARCEL-ALPHA"));
 }
 
@@ -272,10 +287,10 @@ async fn the_doors_a_cli_reads_answer_in_an_unknown_window() {
     .await;
     let id = unknown_window(&h, &mut client).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(context.contains("WELCOME-INTRO") && context.contains("PARCEL-ALPHA"));
     deposit(&h, &id, "b", "PARCEL-BETA");
-    assert!(take(&mut client, &id).await.contains("PARCEL-BETA"));
+    assert!(take(&h, &id).await.contains("PARCEL-BETA"));
     assert_eq!(query_status(&mut client, &id).await, WindowStatus::Unknown);
 }
 
@@ -313,23 +328,8 @@ async fn a_wrong_or_malformed_token_returns_nothing_and_takes_nothing() {
     let id = h.open_idle_window(&mut client).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
     for token in ["ffffffffffffffffffffffffffffffff", "short", ""] {
-        for msg in [
-            ClientMessage::DeliverTake {
-                window_id: id.clone(),
-                token: token.into(),
-                held: false,
-            },
-            ClientMessage::DeliverContext {
-                window_id: id.clone(),
-                token: token.into(),
-                held: false,
-            },
-            ClientMessage::DeliverWait {
-                window_id: id.clone(),
-                token: token.into(),
-                held: false,
-            },
-        ] {
+        for kind in ["take", "context", "wait"] {
+            let msg = door_read(&id, token, kind);
             expect_error(call_door(&mut client, &msg).await, "auth_failed");
         }
     }
@@ -398,7 +398,7 @@ async fn a_wait_registered_with_a_pushable_parcel_returns_at_once() {
     let (h, mut client) = start("inbox-i6-now", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     deposit(&h, &id, "a", "PARCEL-ALPHA");
-    let (output, _, code) = expect_delivery(call_door(&mut client, &wait_msg(&id)).await);
+    let (output, _, code) = expect_delivery(read(&h, &wait_msg(&id)).await);
     assert!(output.contains("PARCEL-ALPHA"));
     assert_eq!(code, 2);
     assert!(!has_waiter(&h, &id));
@@ -576,7 +576,7 @@ async fn a_json_form_embeds_the_text_as_one_escaped_json_string_substituted_once
     let text = "say \"hi\"\nnext\tline \\ back \u{1} ctrl {text} {session} 日本語";
     deposit(&h, &id, "a", text);
 
-    let output = take(&mut client, &id).await;
+    let output = take(&h, &id).await;
     let value: serde_json::Value =
         serde_json::from_str(&output).unwrap_or_else(|err| panic!("not JSON ({err}): {output:?}"));
     let embedded = value["injectSteps"][0]["systemMessage"]["systemMessage"]
@@ -604,8 +604,8 @@ async fn a_json_form_prints_nothing_when_there_is_nothing_to_deliver() {
     })
     .await;
     let id = h.open_idle_window(&mut client).await;
-    assert!(take(&mut client, &id).await.is_empty());
-    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    assert!(take(&h, &id).await.is_empty());
+    let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(context.is_empty());
 }
 
@@ -642,23 +642,23 @@ async fn each_door_prints_in_its_own_form_and_prints_nothing_when_nothing_waits(
     .await;
     let id = h.open_idle_window(&mut client).await;
 
-    let (empty_context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (empty_context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     assert!(empty_context.is_empty(), "{empty_context:?}");
-    assert!(take(&mut client, &id).await.is_empty());
+    assert!(take(&h, &id).await.is_empty());
 
     deposit(&h, &id, "a", "PARCEL-CONTEXT");
-    let (context, _, _) = expect_delivery(call_door(&mut client, &context_msg(&id)).await);
+    let (context, _, _) = expect_delivery(read(&h, &context_msg(&id)).await);
     let (door, text) = door_and_text(&context);
     assert_eq!(door, "context");
     assert!(text.contains("PARCEL-CONTEXT"), "{text:?}");
 
     deposit(&h, &id, "b", "PARCEL-TAKE");
-    let (door, text) = door_and_text(&take(&mut client, &id).await);
+    let (door, text) = door_and_text(&take(&h, &id).await);
     assert_eq!(door, "take");
     assert!(text.contains("PARCEL-TAKE"), "{text:?}");
 
     deposit(&h, &id, "c", "PARCEL-WAIT");
-    let (woken, _, _) = expect_delivery(call_door(&mut client, &wait_msg(&id)).await);
+    let (woken, _, _) = expect_delivery(read(&h, &wait_msg(&id)).await);
     let (door, text) = door_and_text(&woken);
     assert_eq!(door, "wait");
     assert!(text.contains("PARCEL-WAIT"), "{text:?}");
@@ -681,7 +681,7 @@ async fn an_inbox_over_its_limit_turns_the_new_parcel_away_and_says_which() {
     }
     assert_eq!(dropped, ["k3", "k4"]);
     assert_eq!(pending(&h, &id), 3);
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(!got.contains("PARCEL-3") && !got.contains("PARCEL-4"));
     assert!(pos(&got, "PARCEL-0") < pos(&got, "PARCEL-1"));
     assert!(pos(&got, "PARCEL-1") < pos(&got, "PARCEL-2"));
@@ -707,7 +707,7 @@ async fn a_notice_is_not_pushed_out_by_the_parcels_that_fill_the_inbox() {
         inbox.holds("report"),
         "the notice stays however full the inbox gets"
     );
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(got.contains("NOTICE-REPORT"), "{got:?}");
 }
 
@@ -728,7 +728,7 @@ async fn a_notice_is_taken_in_by_an_inbox_full_of_other_parcels() {
             .is_empty()
     );
     assert_eq!(pending(&h, &id), 3);
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(got.contains("PARCEL-0") && got.contains("PARCEL-1") && got.contains("NOTICE-PLAN"));
 }
 
@@ -781,7 +781,7 @@ async fn a_notice_deposited_again_replaces_the_one_waiting_under_its_key() {
         ),
         "the replaced notice's owner is left unsettled, as for a withdrawn parcel"
     );
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(
         got.contains("NOTICE-NEW") && !got.contains("NOTICE-OLD"),
         "{got:?}"
@@ -798,7 +798,7 @@ async fn a_replacing_notice_is_the_one_whose_owner_learns_it_was_taken() {
         .deposit_tracked(Parcel::notice("plan:p1", "NOTICE-NEW"), None, None)
         .end
         .expect("taken in");
-    let _ = take(&mut client, &id).await;
+    let _ = take(&h, &id).await;
     assert_eq!(end.await, Ok(yagura_daemon::inbox::ParcelEnd::Taken));
 }
 
@@ -812,57 +812,143 @@ async fn a_notice_does_not_replace_a_parcel_that_merely_shares_its_key() {
     assert_eq!(pending(&h, &id), 2);
 }
 
-// --- withdraw_waiting -------------------------------------------------------
+// --- withdrawing: only what still waits in the inbox ------------------------
+
+fn output_of(msg: DaemonMessage) -> String {
+    expect_delivery(msg).0
+}
 
 #[tokio::test]
-async fn withdraw_waiting_removes_a_waiting_parcel_and_nothing_else() {
+async fn withdrawing_a_waiting_parcel_removes_it_and_nothing_else() {
+    use yagura_daemon::inbox::Withdrawal;
+
     let (h, mut client) = start("inbox-withdraw-waiting", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
     deposit(&h, &id, "gone", "PARCEL-GONE");
     deposit(&h, &id, "stays", "PARCEL-STAYS");
 
-    assert!(inbox.withdraw_waiting("gone"));
+    assert!(matches!(inbox.withdraw("gone"), Withdrawal::Removed));
     assert!(
-        !inbox.withdraw_waiting("gone"),
+        matches!(inbox.withdraw("gone"), Withdrawal::Gone),
         "a parcel that is no longer waiting is not withdrawn twice"
     );
-    assert!(!inbox.withdraw_waiting("never-deposited"));
+    assert!(matches!(
+        inbox.withdraw("never-deposited"),
+        Withdrawal::Gone
+    ));
 
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(!got.contains("PARCEL-GONE"), "withdrawn: {got:?}");
     assert!(got.contains("PARCEL-STAYS"));
 }
 
+/// A door's read takes the parcel out of the inbox: withdrawing it then leaves it to the
+/// door, whose printing ends it as taken.
 #[tokio::test]
-async fn withdraw_waiting_leaves_a_parcel_a_push_is_carrying_alone() {
-    use yagura_daemon::inbox::{ParcelEnd, PushEnd};
+async fn withdrawing_a_parcel_a_door_holds_leaves_it_to_the_door_that_prints_it() {
+    use yagura_daemon::inbox::{ParcelEnd, Withdrawal};
 
-    let (h, mut client) = start("inbox-withdraw-waiting-carried", |_| {}).await;
+    let (h, mut client) = start("inbox-withdraw-door-held", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
     let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
-    let carried = inbox.deposit_tracked(Parcel::new("carried", "PARCEL-CARRIED"), None, None);
-    let end = carried.end.expect("the inbox must take the parcel in");
-    let push = inbox
-        .begin_push(false)
-        .expect("a push must pick the waiting parcel up");
+    let deposited = inbox.deposit_tracked(Parcel::new("held", "PARCEL-HELD"), None, None);
+    let end = deposited.end.expect("the inbox must take the parcel in");
+    let read = inbox.read_take(None);
+    let (output, _, _) = expect_delivery(read.message.clone());
+    assert!(output.contains("PARCEL-HELD"), "{output:?}");
+
+    let withdrawal = inbox.withdraw("held");
+    assert!(
+        matches!(withdrawal, Withdrawal::UnderWay { .. }),
+        "a parcel a door holds is not the inbox's to pull back: {withdrawal:?}"
+    );
+    let _ = read.hold.confirm().await;
+    assert_eq!(
+        tokio::time::timeout(yagura_test_support::HANG_GUARD, end)
+            .await
+            .expect("the depositor must learn how the parcel ended"),
+        Ok(ParcelEnd::Taken),
+        "the door printed it, so it was taken"
+    );
+    assert!(!inbox.holds("held"), "a printed parcel does not come back");
+}
+
+/// A door that ends without printing hands its parcel back to where it was, ahead of what
+/// came after it; from there it can be withdrawn.
+#[tokio::test]
+async fn a_parcel_a_door_ends_without_printing_goes_back_to_its_place_and_can_then_be_withdrawn() {
+    use yagura_daemon::inbox::Withdrawal;
+
+    let (h, mut client) = start("inbox-withdraw-door-back", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+    deposit(&h, &id, "first", "PARCEL-FIRST");
+    let read = inbox.read_take(None);
+    deposit(&h, &id, "second", "PARCEL-SECOND");
 
     assert!(
-        !inbox.withdraw_waiting("carried"),
-        "a parcel under way is not the inbox's to pull back"
+        matches!(inbox.withdraw("first"), Withdrawal::UnderWay { .. }),
+        "a parcel a door holds is not the inbox's to pull back"
     );
+    drop(read);
+    assert!(inbox.holds("first"), "an unprinted parcel comes back");
+    let again = inbox.read_take(None);
+    let both = output_of(again.message.clone());
     assert!(
-        !inbox.push_withdrawn(push.id),
-        "the push carrying it must not be marked withdrawn"
+        pos(&both, "PARCEL-FIRST") < pos(&both, "PARCEL-SECOND"),
+        "it comes back ahead of what came after it: {both:?}"
     );
+    drop(again);
 
+    assert!(
+        matches!(inbox.withdraw("first"), Withdrawal::Removed),
+        "a parcel that came back waits, so it can be withdrawn"
+    );
+    assert!(!inbox.holds("first"));
+    assert!(inbox.holds("second"));
+}
+
+/// A parcel a wake command carries ends with that command: a command that succeeds took
+/// it, and one that fails puts it back in front of the inbox even after a withdrawal,
+/// where it can then be withdrawn.
+#[tokio::test]
+async fn withdrawing_a_parcel_a_wake_command_carries_leaves_it_to_the_command() {
+    use yagura_daemon::inbox::{ParcelEnd, PushEnd, Withdrawal};
+
+    let (h, mut client) = start("inbox-withdraw-carried", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    let inbox = h.registry.get(&id).expect("window exists").inbox().clone();
+
+    let taken = inbox.deposit_tracked(Parcel::new("taken", "PARCEL-TAKEN"), None, None);
+    let taken_end = taken.end.expect("the inbox must take the parcel in");
+    let push = inbox.begin_push(false).expect("a push picks the parcel up");
+    assert!(matches!(
+        inbox.withdraw("taken"),
+        Withdrawal::UnderWay { .. }
+    ));
     inbox.finish_push(push.id, PushEnd::Taken);
-    assert_eq!(end.await, Ok(ParcelEnd::Taken));
+    assert_eq!(taken_end.await, Ok(ParcelEnd::Taken));
+
+    deposit(&h, &id, "failed", "PARCEL-FAILED");
+    let push = inbox.begin_push(false).expect("a push picks the parcel up");
+    assert!(matches!(
+        inbox.withdraw("failed"),
+        Withdrawal::UnderWay { .. }
+    ));
+    inbox.finish_push(push.id, PushEnd::Failed);
+    assert!(
+        inbox.holds("failed"),
+        "a command that failed puts its parcel back, withdrawn or not"
+    );
+    assert_eq!(pending(&h, &id), 1);
+    assert!(matches!(inbox.withdraw("failed"), Withdrawal::Removed));
+    assert_eq!(pending(&h, &id), 0);
 }
 
 #[tokio::test]
 async fn withdrawing_a_waiting_parcel_does_not_disturb_another_that_a_push_carries() {
-    use yagura_daemon::inbox::PushEnd;
+    use yagura_daemon::inbox::{PushEnd, Withdrawal};
 
     let (h, mut client) = start("inbox-withdraw-waiting-sibling", |_| {}).await;
     let id = h.open_idle_window(&mut client).await;
@@ -873,12 +959,63 @@ async fn withdrawing_a_waiting_parcel_does_not_disturb_another_that_a_push_carri
         .expect("a push must pick the waiting parcel up");
     deposit(&h, &id, "waiting", "PARCEL-WAITING");
 
-    assert!(inbox.withdraw_waiting("waiting"));
+    assert!(matches!(inbox.withdraw("waiting"), Withdrawal::Removed));
 
     // The push fails: what it carried goes back, because nothing withdrew it.
     inbox.finish_push(push.id, PushEnd::Failed);
     assert_eq!(pending(&h, &id), 1);
     assert!(inbox.holds("under-way"));
+}
+
+// --- the reads of doors before revision 34 -------------------------------------
+
+/// A door before revision 34 settles or confirms before it prints, so letting it take
+/// would lose what it took. It is answered with nothing to print, takes nothing, and its
+/// confirmation is answered as withdrawn, which such a door ends on with 0.
+#[tokio::test]
+async fn an_older_doors_read_takes_nothing_and_its_confirmation_is_answered_as_withdrawn() {
+    let (h, mut client) = start("inbox-older-door", |_| {}).await;
+    let id = h.open_idle_window(&mut client).await;
+    deposit(&h, &id, "a", "PARCEL-ALPHA");
+    let (window_id, token) = (id.clone(), VALID_TOKEN.to_string());
+    for held in [false, true] {
+        for msg in [
+            ClientMessage::DeliverContext {
+                window_id: window_id.clone(),
+                token: token.clone(),
+                held,
+            },
+            ClientMessage::DeliverTake {
+                window_id: window_id.clone(),
+                token: token.clone(),
+                held,
+            },
+            ClientMessage::DeliverWait {
+                window_id: window_id.clone(),
+                token: token.clone(),
+                held,
+            },
+        ] {
+            let mut door = h.connect().await;
+            let (output, _, code) = expect_delivery(call_door(&mut door, &msg).await);
+            assert!(
+                output.is_empty() && code == 0,
+                "{msg:?} must be answered with nothing to print: {output:?} / {code}"
+            );
+            if held {
+                match call_door(&mut door, &ClientMessage::DeliverDone).await {
+                    DaemonMessage::DeliverConfirmed { withdrawn } => assert!(
+                        withdrawn,
+                        "{msg:?}: its confirmation must say there is nothing to print"
+                    ),
+                    other => panic!("{msg:?}: expected deliver_confirmed, got {other:?}"),
+                }
+            }
+            assert_eq!(pending(&h, &id), 1, "{msg:?} took the parcel");
+            assert!(!has_waiter(&h, &id), "{msg:?} left a wait registered");
+        }
+    }
+    assert!(take(&h, &id).await.contains("PARCEL-ALPHA"));
 }
 
 // --- parcels are shown once they are written, in the order they were deposited -----
@@ -919,8 +1056,7 @@ async fn writer_reached(faults: &FaultPoints) {
 /// rows are written, and then in the order they were deposited.
 #[tokio::test]
 async fn parcels_are_shown_only_once_written_and_in_the_order_deposited() {
-    let (h, mut client, id, guard) =
-        start_keeping("inbox-r15-paused", FaultPoint::WriterPaused).await;
+    let (h, _client, id, guard) = start_keeping("inbox-r15-paused", FaultPoint::WriterPaused).await;
     deposit(&h, &id, "first", "PARCEL-FIRST");
     deposit(&h, &id, "second", "PARCEL-SECOND");
     writer_reached(&guard.0).await;
@@ -930,7 +1066,7 @@ async fn parcels_are_shown_only_once_written_and_in_the_order_deposited() {
         0,
         "a parcel whose row is not written yet must not be shown"
     );
-    let early = take(&mut client, &id).await;
+    let early = take(&h, &id).await;
     assert!(
         early.is_empty(),
         "nothing is handed out unwritten: {early:?}"
@@ -938,7 +1074,7 @@ async fn parcels_are_shown_only_once_written_and_in_the_order_deposited() {
 
     guard.0.release();
     until("both parcels to be shown", || pending(&h, &id) == 2).await;
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(
         pos(&got, "PARCEL-FIRST") < pos(&got, "PARCEL-SECOND"),
         "parcels are shown in the order they were deposited: {got:?}"
@@ -949,7 +1085,7 @@ async fn parcels_are_shown_only_once_written_and_in_the_order_deposited() {
 /// deposited after it.
 #[tokio::test]
 async fn a_parcel_that_could_not_be_written_never_shows_and_holds_nothing_back() {
-    let (h, mut client, id, guard) = start_keeping("inbox-r15-fails", FaultPoint::WriteFails).await;
+    let (h, _client, id, guard) = start_keeping("inbox-r15-fails", FaultPoint::WriteFails).await;
     deposit(&h, &id, "doomed", "PARCEL-DOOMED");
     writer_reached(&guard.0).await;
 
@@ -962,7 +1098,7 @@ async fn a_parcel_that_could_not_be_written_never_shows_and_holds_nothing_back()
         !inbox.holds("doomed"),
         "a parcel whose row was not written must not be shown"
     );
-    let got = take(&mut client, &id).await;
+    let got = take(&h, &id).await;
     assert!(got.contains("PARCEL-LATER"), "{got:?}");
     assert!(!got.contains("PARCEL-DOOMED"), "{got:?}");
 }

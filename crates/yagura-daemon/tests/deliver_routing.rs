@@ -624,14 +624,16 @@ async fn call_take(client: &mut Connection, window_id: &str) -> String {
     let (output, _, _) = common::expect_delivery(
         common::call_door(
             client,
-            &ClientMessage::DeliverTake {
+            &ClientMessage::DoorRead {
                 window_id: window_id.to_string(),
                 token: VALID_TOKEN.to_string(),
-                held: false,
+                door: yagura_protocol::Door::Take,
             },
         )
         .await,
     );
+    // A door says it printed once it has, which ends what it took.
+    common::send(client, &ClientMessage::DeliverPrinted).await;
     output
 }
 

@@ -16,7 +16,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -42,9 +42,9 @@ use yagura_daemon::profile::ProfileOs;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DaemonMessage, DeliveryStream, HookInputValue, HookPointerKind,
-    WindowCredentials, WindowStatus, decode_daemon_message, encode_client_message, frame_encode,
-    process_window_credentials,
+    ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, HookInputValue,
+    HookPointerKind, WindowCredentials, WindowStatus, decode_daemon_message, encode_client_message,
+    frame_encode, process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -54,13 +54,22 @@ type ClientConnection = <PlatformIpc as IpcTransport>::ClientConnection;
 /// Stands in for a startup-log field the OS would not tell us.
 const UNKNOWN_LOG_FIELD: &str = "unknown";
 
-/// How long a hook waits for the daemon to answer a door that is not a wait.
-const DOOR_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The most a hook waits for the rest of its stdin to be read, after its
-/// answer inside a window and in place of one outside. Bounds a CLI that
+/// The most a hook waits for the rest of its stdin to be read, before it prints
+/// inside a window and in place of an answer outside one. Bounds a CLI that
 /// leaves stdin open.
 const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// What a door keeps out of the time its CLI gives the hook for printing,
+/// saying so, and ending. A door with less than this left prints nothing.
+///
+/// Measured with Claude Code (Windows), Copilot and Muse (WSL): a hook given 3
+/// seconds had its output taken when it printed 2.8 seconds after it started
+/// and exited 0, and not when it printed at 3.6 seconds, so the CLI's cut-off
+/// lies above the 0.2 seconds those runs kept. A door adds its own start-up
+/// before it takes the time and the notice and exit after the print, so it
+/// keeps more than twice that, and still leaves a hook given one second (the
+/// least a profile gives) half a second.
+const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 
 fn main() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -820,6 +829,29 @@ async fn send_shutdown(ipc: &PlatformIpc, endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// A hook's stdin being read to its end on a thread of its own, so the CLI
+/// that wrote it never sees its write fail.
+struct StdinDrain {
+    ended: std::sync::mpsc::Receiver<()>,
+    waited: std::cell::Cell<bool>,
+}
+
+impl StdinDrain {
+    fn new(ended: std::sync::mpsc::Receiver<()>) -> Self {
+        Self {
+            ended,
+            waited: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Waits for stdin to end, at most `bound`; only the first call waits.
+    fn wait(&self, bound: Duration) {
+        if !self.waited.replace(true) {
+            let _ = self.ended.recv_timeout(bound);
+        }
+    }
+}
+
 /// Runs a hook door that has the credentials of its window
 /// (`yagura_protocol::window_credentials`).
 ///
@@ -827,13 +859,15 @@ async fn send_shutdown(ipc: &PlatformIpc, endpoint: &str) -> Result<()> {
 /// fails. The values the door needs (`--skip-if`, `--report-session`) are
 /// looked for as stdin is read, and the door goes on as soon as they are found
 /// or the document has ended, so an answer is not held back by a CLI that
-/// leaves stdin open after its input.
+/// leaves stdin open after its input. The end of stdin is waited for, bounded,
+/// before the door prints.
 async fn run_hook(
     ipc: &PlatformIpc,
     endpoint: &str,
     command: CliCommand,
     credentials: Option<WindowCredentials>,
 ) -> Result<ExitCode> {
+    let started = Instant::now();
     let credentials = credentials.context("a hook door runs only with its window's credentials")?;
     let session_pointer = match &command {
         CliCommand::ReportSession { pointer, .. } => Some(pointer.clone()),
@@ -846,6 +880,7 @@ async fn run_hook(
         .cloned()
         .collect();
     let (found, drained) = read_hook_stdin(pointers);
+    let drained = StdinDrain::new(drained);
     let mut values = found
         .await
         .context("reading the hook input failed")?
@@ -861,11 +896,13 @@ async fn run_hook(
                     .await
                     .map(succeeded)
             }
-            door => run_hook_door(ipc, endpoint, door, session, credentials).await,
+            door => {
+                run_hook_door(ipc, endpoint, door, session, credentials, started, &drained).await
+            }
         }
     };
     // Only the end of stdin is waited for; the rest of it is of no use.
-    let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
+    drained.wait(HOOK_STDIN_DRAIN_GRACE);
     result
 }
 
@@ -915,36 +952,26 @@ async fn send_status_event(
 /// What a hook prints and how it ends is the daemon's answer, so a `wait` ends
 /// with the exit code the window's profile declares. A refusal prints nothing
 /// to stdout and ends with 1, which is never a code a hook reads as a wake.
-///
-/// A delivery is printed only once the daemon has confirmed it
-/// (`deliver_done`), so a daemon that ends in between leaves its parcels for
-/// the next one instead of having them printed and handed out again.
 async fn run_hook_door(
     ipc: &PlatformIpc,
     endpoint: &str,
     command: CliCommand,
     session: Option<String>,
     credentials: WindowCredentials,
+    started: Instant,
+    drained: &StdinDrain,
 ) -> Result<ExitCode> {
     let WindowCredentials { window_id, token } = credentials;
     let waits = matches!(command, CliCommand::DeliverWait { .. });
-    let held = true;
+    let read = |door| ClientMessage::DoorRead {
+        window_id: window_id.clone(),
+        token: token.clone(),
+        door,
+    };
     let message = match command {
-        CliCommand::DeliverContext { .. } => ClientMessage::DeliverContext {
-            window_id,
-            token,
-            held,
-        },
-        CliCommand::DeliverTake { .. } => ClientMessage::DeliverTake {
-            window_id,
-            token,
-            held,
-        },
-        CliCommand::DeliverWait { .. } => ClientMessage::DeliverWait {
-            window_id,
-            token,
-            held,
-        },
+        CliCommand::DeliverContext { .. } => read(Door::Context),
+        CliCommand::DeliverTake { .. } => read(Door::Take),
+        CliCommand::DeliverWait { .. } => read(Door::Wait),
         CliCommand::ReportSession { .. } => {
             let Some(session) = session.filter(|s| is_session_id(s)) else {
                 return Ok(ExitCode::SUCCESS);
@@ -973,44 +1000,60 @@ async fn run_hook_door(
     if let Some(DaemonMessage::SessionRecorded { .. }) = answer {
         return Ok(ExitCode::SUCCESS);
     }
-    let Some(answer) = confirmed(&mut client, answer).await else {
-        return Ok(ExitCode::SUCCESS);
-    };
     match answer {
-        // The daemon went away before it answered or confirmed: nothing to
-        // wake for, and nothing was taken.
+        // The daemon went away before it answered a wait: nothing to wake for,
+        // and nothing was taken.
         None if waits => Ok(ExitCode::SUCCESS),
-        answer => finish_with_answer(answer),
+        answer => finish_door(&mut client, answer, started, drained).await,
     }
 }
 
-/// The daemon's `answer` once a delivery in it is confirmed on `client`, to be
-/// printed only then; `None` when what it carried was withdrawn in the
-/// meantime, so there is nothing to print.
-async fn confirmed(
+/// Ends a door with the daemon's `answer` to its read.
+///
+/// A delivery is printed, then the daemon is told it was, and the door ends
+/// without waiting for a reply: a daemon that ends in between leaves its
+/// parcels for the next one, which hands them out again, and none is lost. A
+/// door with less than [`HOOK_DOOR_MARGIN`] left of the time its CLI gives the
+/// hook prints nothing and does not say it did, so the daemon takes the
+/// parcels back. A daemon that names no time is taken to give the hook the
+/// time a door had before revision 34.
+async fn finish_door(
     client: &mut ClientConnection,
     answer: Option<DaemonMessage>,
-) -> Option<Option<DaemonMessage>> {
+    started: Instant,
+    drained: &StdinDrain,
+) -> Result<ExitCode> {
     match answer {
-        Some(delivery @ DaemonMessage::Delivery { .. }) => match confirm_delivery(client).await {
-            Some(DaemonMessage::DeliverConfirmed { withdrawn: false }) => Some(Some(delivery)),
-            Some(DaemonMessage::DeliverConfirmed { withdrawn: true }) => None,
-            other => Some(other),
-        },
-        answer => Some(answer),
+        Some(DaemonMessage::Delivery {
+            output,
+            stream,
+            exit_code,
+            hook_timeout_sec,
+        }) => {
+            let time = hook_timeout_sec.map_or(DOOR_ANSWER_TIMEOUT, Duration::from_secs);
+            let left = || (started + time).saturating_duration_since(Instant::now());
+            drained.wait(
+                left()
+                    .saturating_sub(HOOK_DOOR_MARGIN)
+                    .min(HOOK_STDIN_DRAIN_GRACE),
+            );
+            if left() < HOOK_DOOR_MARGIN {
+                return Ok(ExitCode::SUCCESS);
+            }
+            write_hook_output(stream, &output)?;
+            // The text is printed whatever comes of this: a daemon that cannot
+            // be told puts the parcels back and hands them out again.
+            let _ = send_hook_request(client, &ClientMessage::DeliverPrinted).await;
+            Ok(ExitCode::from(exit_code))
+        }
+        // A daemon before revision 34 refuses the read by name and takes
+        // nothing: there is nothing to print, and the text waits for a newer one.
+        Some(DaemonMessage::Error { code, .. }) if code == "unknown_type" => Ok(ExitCode::SUCCESS),
+        Some(DaemonMessage::Error { code, .. }) => {
+            anyhow::bail!("the daemon refused the request: {code}")
+        }
+        _ => anyhow::bail!("the daemon sent no usable answer"),
     }
-}
-
-/// Sends `deliver_done` on `client` and reads the daemon's confirmation;
-/// `None` when the daemon gave none.
-async fn confirm_delivery(client: &mut ClientConnection) -> Option<DaemonMessage> {
-    send_hook_request(client, &ClientMessage::DeliverDone)
-        .await
-        .ok()?;
-    tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(client))
-        .await
-        .ok()
-        .flatten()
 }
 
 /// Sends one request of a hook door on `client`.
@@ -1022,31 +1065,13 @@ async fn send_hook_request(client: &mut ClientConnection, message: &ClientMessag
     client.flush().await.context("failed to flush the request")
 }
 
-/// Ends a hook door with the daemon's `answer`: a delivery is printed and its
-/// exit code returned, anything else is a failure.
-fn finish_with_answer(answer: Option<DaemonMessage>) -> Result<ExitCode> {
-    match answer {
-        Some(DaemonMessage::Delivery {
-            output,
-            stream,
-            exit_code,
-        }) => {
-            write_hook_output(stream, &output)?;
-            Ok(ExitCode::from(exit_code))
-        }
-        Some(DaemonMessage::Error { code, .. }) => {
-            anyhow::bail!("the daemon refused the request: {code}")
-        }
-        _ => anyhow::bail!("the daemon sent no usable answer"),
-    }
-}
-
 /// Runs `--hook <profile> <event>`: the daemon does what the profile's
 /// `[hook_events]` says for the event, asking for the values of the hook's stdin
 /// it needs. `credentials` name the window the hook runs in.
 ///
 /// Stdin is read to its end whichever way this ends: the reader is let go with
-/// no pointers once the exchange is over, and its end is waited for, bounded.
+/// no pointers once the exchange is over, and its end is waited for, bounded,
+/// before the door prints.
 async fn run_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
@@ -1054,16 +1079,26 @@ async fn run_hook_event(
     event: &str,
     credentials: Option<WindowCredentials>,
 ) -> Result<ExitCode> {
+    let started = Instant::now();
     let (pointers, values, drained) = read_hook_stdin_on_request();
+    let drained = StdinDrain::new(drained);
     let result = match credentials {
         Some(credentials) => {
-            exchange_hook_event(ipc, endpoint, profile, event, credentials, pointers, values).await
+            exchange_hook_event(
+                ipc,
+                endpoint,
+                (profile, event),
+                credentials,
+                (pointers, values),
+                (started, &drained),
+            )
+            .await
         }
         None => Err(anyhow::anyhow!(
             "a hook door runs only with its window's credentials"
         )),
     };
-    let _ = drained.recv_timeout(HOOK_STDIN_DRAIN_GRACE);
+    drained.wait(HOOK_STDIN_DRAIN_GRACE);
     result
 }
 
@@ -1072,20 +1107,20 @@ async fn run_hook_event(
 async fn exchange_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
-    profile: &str,
-    event: &str,
+    (profile, event): (&str, &str),
     credentials: WindowCredentials,
-    pointers: std::sync::mpsc::Sender<Vec<String>>,
-    values: FoundValues,
+    (pointers, values): (std::sync::mpsc::Sender<Vec<String>>, FoundValues),
+    (started, drained): (Instant, &StdinDrain),
 ) -> Result<ExitCode> {
     let WindowCredentials { window_id, token } = credentials;
-    let request = |input| ClientMessage::RunHook {
+    let request = |input| ClientMessage::DoorRead {
         window_id: window_id.clone(),
         token: token.clone(),
-        profile: profile.to_string(),
-        name: event.to_string(),
-        input,
-        held: true,
+        door: Door::Hook {
+            profile: profile.to_string(),
+            name: event.to_string(),
+            input,
+        },
     };
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --hook")
@@ -1110,10 +1145,7 @@ async fn exchange_hook_event(
             .await
             .context("the daemon did not answer")?;
     }
-    let Some(answer) = confirmed(&mut client, answer).await else {
-        return Ok(ExitCode::SUCCESS);
-    };
-    finish_with_answer(answer)
+    finish_door(&mut client, answer, started, drained).await
 }
 
 /// What the daemon asked about one pointer, answered from the `value` found

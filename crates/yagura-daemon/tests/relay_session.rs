@@ -1057,8 +1057,11 @@ async fn closing_the_relay_connection_during_a_send_message_presses_no_submit_ke
     stage.expect_taken_back_without_a_submit_key().await;
 }
 
+/// A handoff the CLI is already carrying is not the requester's to take back:
+/// its relay connection closing leaves the typing to finish with the
+/// carrier's own result, so the body is submitted and never cleared.
 #[tokio::test]
-async fn closing_the_relay_connection_during_a_handoff_withdraws_its_envelope() {
+async fn closing_the_relay_connection_during_a_handoff_leaves_the_carried_envelope_to_finish() {
     let stage = Stage::start("relay-end-handoff").await;
     let mut client = stage.requester_session().await;
 
@@ -1076,12 +1079,13 @@ async fn closing_the_relay_connection_during_a_handoff_withdraws_its_envelope() 
         .await;
     drop(client);
 
-    stage.expect_taken_back_without_a_submit_key().await;
-    assert_eq!(
-        stage.receiver_entry().inbox().pending_count(),
-        0,
-        "the envelope of a handoff whose requester left is no longer waiting"
+    std::fs::write(&stage.resume, b"").expect("let the receiver read on");
+    let read = wait_until_input_log_contains(&stage.input_log, b"\r").await;
+    assert!(
+        !read.contains(&0x15),
+        "a carried handoff must not be cleared from the composer when its requester leaves: {read:?}"
     );
+    assert_eq!(stage.receiver_entry().inbox().pending_count(), 0);
 }
 
 // =====================================================================

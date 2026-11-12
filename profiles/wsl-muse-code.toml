@@ -49,11 +49,17 @@ absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}"
 # check for being inside a window. It replaces the user's own
 # `managed_hooks_path` for this window only.
 [hooks]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":10}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":10},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":10}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":10}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":10,"async":true}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":{hook_timeout}},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout},"async":true}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
   "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
 ]
+
+# The seconds this CLI gives a hook command. The registered entries name it
+# through `{hook_timeout}`, and the daemon names it to a door that asks, so
+# the two are one value.
+[hook_timeout]
+default = 10
 
 # SessionStart runs on the first prompt, not at start-up. Muse takes plain
 # text from a hook too; the JSON form names the event the text arrives for.

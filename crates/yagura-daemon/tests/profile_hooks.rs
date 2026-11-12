@@ -113,13 +113,27 @@ async fn an_invalid_hooks_table_takes_its_profile_out_of_the_listing_with_one_wa
 
 fn shipped_table(id: &str, name: &str) -> toml::Table {
     let source = read_doc_verbatim(&format!("../../profiles/{id}.toml"));
-    parse_profile(id, &source)
+    let profile = parse_profile(id, &source)
         .unwrap_or_else(|err| panic!("bundled profile {id} must still parse: {err}"));
     let mut root: toml::Table = source.parse().expect("bundled profile is TOML");
-    match root.remove(name) {
+    let mut table = match root.remove(name) {
         Some(toml::Value::Table(table)) => table,
         other => panic!("{id} must ship a [{name}] table, got {other:?}"),
+    };
+    // The texts as the profile resolves them (its time placeholders filled), not as written.
+    if let (Some(spec), "hooks") = (&profile.hooks, name) {
+        table.insert(
+            "args".to_string(),
+            toml::Value::Array(spec.args.iter().cloned().map(toml::Value::String).collect()),
+        );
+        if let Some(content) = &spec.config_file {
+            table.insert(
+                "config_file".to_string(),
+                toml::Value::String(content.clone()),
+            );
+        }
     }
+    table
 }
 
 fn shipped_hooks_table(id: &str) -> toml::Table {

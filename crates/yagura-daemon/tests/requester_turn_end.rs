@@ -471,41 +471,33 @@ async fn a_send_message_is_answered_not_written_when_its_requester_window_is_clo
     expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
 
-/// A window-addressed handoff is ended the same way. It answers
-/// `handoff_sent` with an undelivered `delivery`, and its envelope no longer
-/// waits in the receiver's inbox: nothing is handed over after the answer.
+/// A handoff the receiver's CLI is already carrying is not taken back when its
+/// requester's turn ends: the typing finishes, so the body is submitted and
+/// never cleared from the composer, and the handoff is still answered once.
 #[tokio::test]
-async fn a_handoff_is_answered_undelivered_when_its_requester_goes_from_running_to_waiting_input() {
+async fn a_carried_handoff_is_not_taken_back_when_its_requester_goes_from_running_to_waiting_input()
+{
     let (mut stage, mut requester) = stage("turn-end-handoff", Some(&abandoned_table(true))).await;
     start_handoff(&stage, &mut requester).await;
 
     stage.drive_all(&[Step::Running, Step::WaitingInput]).await;
+    std::fs::write(&stage.resume, b"").expect("let the receiver read on");
     match read_response(&mut requester).await {
         DaemonMessage::HandoffSent {
-            window_id,
-            opened,
-            delivery,
-            ..
+            window_id, opened, ..
         } => {
             assert_eq!(window_id, stage.receiver);
             assert!(!opened, "the handoff was addressed to an open window");
-            let delivery = serde_json::to_value(delivery).expect("a delivery encodes");
-            assert!(
-                delivery
-                    .as_str()
-                    .is_some_and(|wire| wire.starts_with("undelivered_")),
-                "an envelope taken back before it was submitted is undelivered, got {delivery}"
-            );
         }
-        other => panic!("expected handoff_sent with an undelivered delivery, got {other:?}"),
+        other => panic!("expected handoff_sent with the carrier's result, got {other:?}"),
     }
-    assert_eq!(
-        stage.receiver_entry().inbox().pending_count(),
-        0,
-        "the envelope of an answered handoff no longer waits for the receiver"
+    let read = wait_until_input_log_contains(&stage.input_log, b"\r").await;
+    assert!(
+        !read.contains(&0x15),
+        "a carried handoff must not be cleared from the composer: {read:?}"
     );
+    assert_eq!(stage.receiver_entry().inbox().pending_count(), 0);
     expect_pong(&mut requester).await;
-    expect_withdrawn_without_a_submit_key_and_no_second_answer(&stage, &mut requester).await;
 }
 
 /// A `wait_for_status` the requester dropped at the end of its turn ends then,

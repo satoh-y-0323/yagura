@@ -18,7 +18,7 @@ use common::docs::read_doc_verbatim;
 use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
 use yagura_daemon::profile::{
     InjectedPaths, JsonFilter, ModelChoicesSpec, OutputFormat, Profile, ProfileCommand, ProfileOs,
-    argv_for_os, parse_profile, render_hooks_args,
+    argv_for_os, parse_profile, prepare_hooks_injection, render_hooks_args,
 };
 use yagura_daemon::profile_hook_events::{HookDeliver, HookEvent};
 use yagura_os::program::HostOs;
@@ -776,5 +776,304 @@ async fn the_codex_cli_family_spawns_with_no_daemon_but_wakes_without_it() {
             "{id}: the wake command, which the CLI refuses with --no-daemon, lacks it; got {woken:?}"
         );
         h.registry.terminate_all().await;
+    }
+}
+
+// ---------------------------------------------------------------------
+// The time a CLI gives a hook: one source, the profile's data
+// ---------------------------------------------------------------------
+
+/// Every text a profile's hooks are written into a CLI's settings with: each
+/// registration `json_entry` rendered for every OS, and the `[hooks]` injection (its
+/// arguments, with the paths a launch picks put back as placeholders, and the content of
+/// its settings file and directory).
+fn hook_registration_text(profile: &Profile) -> String {
+    let mut text = String::new();
+    let target = RegistrationTarget::for_instance(None);
+    if let Some(spec) = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|spec| spec.json_entry())
+    {
+        for os in [HostOs::Windows, HostOs::MacOs, HostOs::Linux] {
+            let vars = EntryVars {
+                target: &target,
+                os,
+                daemon: Some("/yagura/yagura-daemon"),
+                bridge: Some("/yagura/yagura-mcp"),
+            };
+            for file in spec.files() {
+                for (key, value) in file.entries(&vars).expect("the entries render") {
+                    text.push_str(&format!("{os:?} {key} {value}\n"));
+                }
+            }
+        }
+    }
+    if let Some(spec) = &profile.hooks {
+        let injection = prepare_hooks_injection(spec, Some(std::path::Path::new("cfg")))
+            .expect("a shipped [hooks] table renders");
+        let file_path = injection
+            .config_file
+            .as_ref()
+            .map(|file| file.path().display().to_string());
+        let dir_path = injection
+            .config_dir
+            .as_ref()
+            .map(|dir| dir.path().display().to_string());
+        for arg in &injection.args {
+            let mut arg = arg.clone();
+            for (path, placeholder) in [(&file_path, "{file}"), (&dir_path, "{dir}")] {
+                if let Some(path) = path {
+                    arg = arg.replace(path.as_str(), placeholder);
+                }
+            }
+            text.push_str(&format!("arg {arg}\n"));
+        }
+        if let Some(file) = &injection.config_file {
+            text.push_str(&format!("file {}\n", file.content));
+        }
+        if let Some(dir) = &injection.config_dir {
+            for (name, content) in &dir.files {
+                text.push_str(&format!("dir {name} {content}\n"));
+            }
+        }
+    }
+    text
+}
+
+/// The sha256 of [`hook_registration_text`] for every shipped profile that writes hooks, as
+/// the build before the time a hook has moved into the profile's data rendered it.
+/// A registered hook whose text changes is one a CLI no longer recognizes (Codex keeps a
+/// hash of each, and the JSON registrations are compared with the CLI's settings), so the
+/// data must render the same text.
+const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
+    (
+        "antigravity-cli",
+        "1bffedb10965434acd8cf5d42b24cecb613c38b16059756935826b20b8d11939",
+    ),
+    (
+        "claude-code",
+        "7eb52cfd916af6d83b44317f043a352b64270ef43bef78ddd3670cca4e9953fb",
+    ),
+    (
+        "codex-cli",
+        "be0e13bf5cd2a5cd9cf8f00c7af76f40ca5cfb82e41de165f67c7d3a389c96f2",
+    ),
+    (
+        "copilot-cli",
+        "3d8ffcd33ed225b69eaaa2aad4377af8acbc342602a5368720b57a216f427add",
+    ),
+    (
+        "grok-build",
+        "fb311bce0a32936f98185b5a8703cd9ca8146c316e414bb6c6c91d1b434314ac",
+    ),
+    (
+        "muse-code",
+        "17c850dac4eaa24c95fd3488397832d8267da9357d7c7b6d540b9a6314c8fd7e",
+    ),
+    (
+        "wsl-antigravity-cli",
+        "1492c21f0632ddc2af88dd426ab097a8a33b0b3509358d17abdad942cf376adb",
+    ),
+    (
+        "wsl-claude-code",
+        "5a9ab51f54a14f0d39b8f25a0d77fcf9544c64aff8debb35a81402c27b1cfc9c",
+    ),
+    (
+        "wsl-codex-cli",
+        "def25e055f30196298e30101e9a53142079a8000ab775d7c69544ee76489a720",
+    ),
+    (
+        "wsl-copilot-cli",
+        "5fe4e1cee9a1c629d568f47f3fec237d0302c047d894bf34507cd92e79549a3e",
+    ),
+    (
+        "wsl-grok-build",
+        "912215a46894603ebe5decb1df569458806728cbf9bb91c97241b7db6f449497",
+    ),
+    (
+        "wsl-muse-code",
+        "8b4adac523b2017d2001c0f7c526b408ed44ee711c4c098e8d580f7b8977b29c",
+    ),
+];
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[test]
+fn the_hook_registrations_a_cli_keeps_render_the_same_text_from_the_profiles_data() {
+    let measured: Vec<(String, String)> = bundled_profile_ids()
+        .into_iter()
+        .filter_map(|id| {
+            let text = hook_registration_text(&parse_repo_profile(&id));
+            (!text.is_empty()).then(|| (id, sha256_hex(&text)))
+        })
+        .collect();
+    let expected: Vec<(String, String)> = HOOK_REGISTRATION_TEXT_SHA256
+        .iter()
+        .map(|(id, hash)| ((*id).to_string(), (*hash).to_string()))
+        .collect();
+    assert_eq!(
+        measured, expected,
+        "the hook texts a CLI keeps must not change with where their values come from"
+    );
+}
+
+/// Adds `(event, timeout)` for every handler under `value` whose command runs the hook
+/// door of `profile`; `timeout` is the one the handler declares.
+fn collect_hook_timeouts(
+    profile: &str,
+    event: &str,
+    value: &serde_json::Value,
+    out: &mut Vec<(String, Option<u64>)>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_hook_timeouts(profile, event, item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(command) = map.get("command").and_then(serde_json::Value::as_str) {
+                let mut words = vec![command];
+                if let Some(args) = map.get("args").and_then(serde_json::Value::as_array) {
+                    words.extend(args.iter().filter_map(serde_json::Value::as_str));
+                }
+                let line = words.join(" ");
+                if line.contains(&format!("--hook {profile} {event}")) {
+                    let timeout = map.get("timeout").and_then(serde_json::Value::as_u64);
+                    let entry = (event.to_string(), timeout);
+                    if !out.contains(&entry) {
+                        out.push(entry);
+                    }
+                }
+            }
+            if let Some(inner) = map.get("hooks") {
+                collect_hook_timeouts(profile, event, inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `--hook` door a profile registers, with the timeout its text gives the CLI.
+fn registered_hook_timeouts(id: &str) -> Vec<(String, Option<u64>)> {
+    let profile = parse_repo_profile(id);
+    let mut out = Vec::new();
+    if let Some(spec) = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|spec| spec.json_entry())
+    {
+        let target = RegistrationTarget::for_instance(None);
+        for os in [HostOs::Windows, HostOs::MacOs, HostOs::Linux] {
+            let vars = EntryVars {
+                target: &target,
+                os,
+                daemon: Some("/yagura/yagura-daemon"),
+                bridge: Some("/yagura/yagura-mcp"),
+            };
+            for file in spec.files() {
+                for (_, value) in file.entries(&vars).expect("the entries render") {
+                    let Some(events) = value
+                        .as_object()
+                        .filter(|map| map.values().all(serde_json::Value::is_array))
+                    else {
+                        continue;
+                    };
+                    for (event, groups) in events {
+                        collect_hook_timeouts(id, event, groups, &mut out);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(spec) = &profile.hooks {
+        for arg in render_hooks_args(spec, InjectedPaths::default()) {
+            if !arg.starts_with("hooks.") {
+                continue;
+            }
+            let document: toml::Table = arg
+                .parse()
+                .unwrap_or_else(|err| panic!("{arg} must decode as TOML: {err}"));
+            for (event, groups) in document["hooks"].as_table().expect("a hooks table") {
+                let groups = serde_json::to_value(groups).expect("groups are data");
+                collect_hook_timeouts(id, event, &groups, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// What the daemon answers a door's read of `--hook <profile> <event>` with, as its wire
+/// form: the values of the hook's input it asks for are all reported absent.
+async fn hook_door_answer(
+    h: &common::Harness,
+    window_id: &str,
+    profile: &str,
+    event: &str,
+) -> serde_json::Value {
+    use yagura_protocol::{ClientMessage, DaemonMessage};
+    let read = |input: Option<Vec<serde_json::Value>>| -> ClientMessage {
+        let mut door = serde_json::json!({ "kind": "hook", "profile": profile, "name": event });
+        if let Some(input) = input {
+            door["input"] = serde_json::Value::Array(input);
+        }
+        let wire = serde_json::json!({
+            "type": "door_read",
+            "window_id": window_id,
+            "token": common::VALID_TOKEN,
+            "door": door,
+        });
+        serde_json::from_value(wire.clone())
+            .unwrap_or_else(|err| panic!("the wire must know a door's read {wire}: {err}"))
+    };
+    let mut client = h.connect().await;
+    let mut answer = common::call_door(&mut client, &read(None)).await;
+    if let DaemonMessage::HookInputWanted { pointers } = &answer {
+        let input = vec![serde_json::json!("absent"); pointers.len()];
+        answer = common::call_door(&mut client, &read(Some(input))).await;
+    }
+    serde_json::to_value(&answer).expect("a daemon message serializes")
+}
+
+/// The time the daemon names to a `--hook` door is the one the profile's registration
+/// gives the CLI for that hook, so the two come from one value. A registration that names
+/// no time (Codex's `-c` handlers) leaves the CLI's own, which the daemon names too.
+#[tokio::test]
+async fn the_daemon_names_each_hook_door_the_time_its_registration_gives_the_cli() {
+    let dir = common::unique_temp_dir("bundled-hook-deadline");
+    let mut config = common::detection_config(&dir, common::approver_base_config());
+    config.bundled_profiles = true;
+    let h = common::Harness::start("bundled-hook-deadline", config).await;
+    let mut client = h.connect().await;
+    let window_id = h.open_idle_window(&mut client).await;
+    for id in ["antigravity-cli", "grok-build", "muse-code", "codex-cli"] {
+        let hooks = registered_hook_timeouts(id);
+        assert!(!hooks.is_empty(), "{id} registers --hook doors");
+        for (event, registered) in hooks {
+            let answer = hook_door_answer(&h, &window_id, id, &event).await;
+            assert_eq!(
+                answer["type"], "delivery",
+                "{id}/{event}: the read is answered with a delivery: {answer}"
+            );
+            let named = answer["hook_timeout_sec"].as_u64();
+            match registered {
+                Some(seconds) => assert_eq!(
+                    named,
+                    Some(seconds),
+                    "{id}/{event}: the daemon must name the time the registration gives: {answer}"
+                ),
+                None => assert!(
+                    named.is_some_and(|seconds| seconds > 0),
+                    "{id}/{event}: the daemon must name the CLI's own time: {answer}"
+                ),
+            }
+        }
     }
 }

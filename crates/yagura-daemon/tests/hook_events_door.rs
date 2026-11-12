@@ -386,3 +386,241 @@ fn a_malformed_hook_events_entry_is_refused_with_the_tables_fixed_reason() {
         "both refusals report the same fixed reason"
     );
 }
+
+// --- a door before revision 34, against this daemon -------------------------------------
+
+/// A `run_hook` of a door before revision 34 confirms before it prints, so it takes
+/// nothing; what the same request reports (the status and the session) is still handled,
+/// so a window whose CLI keeps an older registration does not lose its status.
+#[tokio::test]
+async fn an_older_hook_request_takes_nothing_but_still_records_the_status_and_the_session() {
+    use yagura_protocol::{ClientMessage, DaemonMessage, HookInputValue};
+
+    let setup = Setup::start_without_screen_rules().await;
+    setup.deposit("PARCEL-FOR-THE-MAIN-SESSION");
+    let request = |input| ClientMessage::RunHook {
+        window_id: setup.window_id.clone(),
+        token: VALID_TOKEN.to_string(),
+        profile: PROFILE_ID.to_string(),
+        name: EVENT.to_string(),
+        input,
+        held: true,
+    };
+    let mut door = setup.h.connect().await;
+    common::send(&mut door, &request(None)).await;
+    let wanted = match common::read_response(&mut door).await {
+        DaemonMessage::HookInputWanted { pointers } => pointers,
+        other => panic!("the event reads its input, so its values are asked for: {other:?}"),
+    };
+    let input = wanted
+        .iter()
+        .map(|wanted| match wanted.pointer.as_str() {
+            "/session_id" => HookInputValue::Session("sess-older".to_string()),
+            _ => HookInputValue::Absent,
+        })
+        .collect();
+    common::send(&mut door, &request(Some(input))).await;
+    match common::read_response(&mut door).await {
+        DaemonMessage::Delivery {
+            output, exit_code, ..
+        } => assert!(
+            output.is_empty() && exit_code == 0,
+            "an older hook request is answered with nothing to print: {output:?} / {exit_code}"
+        ),
+        other => panic!("expected a delivery, got {other:?}"),
+    }
+    assert_eq!(
+        setup.entry().inbox().pending_count(),
+        1,
+        "an older hook request must leave the parcel in the inbox"
+    );
+    assert_eq!(setup.entry().session_id().as_deref(), Some("sess-older"));
+    let mut client = setup.h.connect().await;
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::Running).await;
+}
+
+// --- the door's own end, against a stand-in daemon ---------------------------------------
+
+/// Reads one frame of a door's as JSON; `None` once the door has closed.
+async fn read_json_frame<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Option<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+    let guard = yagura_test_support::HANG_GUARD;
+    let mut len = [0u8; 4];
+    match tokio::time::timeout(guard, stream.read_exact(&mut len)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => return None,
+        Err(_) => panic!("the door neither wrote nor closed within {guard:?}"),
+    }
+    let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+    tokio::time::timeout(guard, stream.read_exact(&mut body))
+        .await
+        .expect("the door finishes a frame it began")
+        .expect("the door finishes a frame it began");
+    Some(serde_json::from_slice(&body).expect("a door writes JSON frames"))
+}
+
+/// A stand-in for a daemon at `instance`'s endpoint: it answers the first frame of the one
+/// door that connects with `answer`, then records what else the door sends until it closes.
+/// Binding claims the endpoint, so the door can reach nothing else.
+async fn stand_in_daemon(
+    instance: &str,
+    answer: serde_json::Value,
+) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
+    use tokio::io::AsyncWriteExt;
+    use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
+
+    let ipc = PlatformIpc::default();
+    let user = ipc.current_user_id().expect("the current user id resolves");
+    let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
+        .expect("the test's instance id is valid");
+    let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
+    let security = ipc.endpoint_security().expect("endpoint security resolves");
+    let mut listener = ipc
+        .bind(&endpoint, security)
+        .await
+        .unwrap_or_else(|err| panic!("the stand-in must claim {endpoint:?}: {err}"));
+    tokio::spawn(async move {
+        let mut conn =
+            tokio::time::timeout(yagura_test_support::HANG_GUARD, ipc.accept(&mut listener))
+                .await
+                .expect("the door connects")
+                .expect("the door connects");
+        let mut frames = Vec::new();
+        let Some(first) = read_json_frame(&mut conn).await else {
+            return frames;
+        };
+        frames.push(first);
+        let body = serde_json::to_vec(&answer).unwrap();
+        conn.write_all(&yagura_protocol::frame_encode(&body))
+            .await
+            .expect("answer the door");
+        conn.flush().await.expect("answer the door");
+        while let Some(frame) = read_json_frame(&mut conn).await {
+            frames.push(frame);
+        }
+        frames
+    })
+}
+
+/// The doors a stand-in daemon is asked by, with the door each one's read must name.
+fn stand_in_doors() -> [(Vec<&'static str>, serde_json::Value); 2] {
+    [
+        (
+            vec!["--deliver-take"],
+            serde_json::json!({ "kind": "take" }),
+        ),
+        (
+            hook_args().to_vec(),
+            serde_json::json!({ "kind": "hook", "profile": PROFILE_ID, "name": EVENT }),
+        ),
+    ]
+}
+
+/// Runs the door `args` against a stand-in daemon answering with `answer`; returns the
+/// door's output and every frame it sent.
+async fn run_against_stand_in(
+    args: &[&str],
+    answer: serde_json::Value,
+) -> (Output, Vec<serde_json::Value>) {
+    let instance = unique_instance();
+    let bases = TempDir::new("yagura-door", "stand-in");
+    let frames = stand_in_daemon(&instance, answer).await;
+    let command = door_command(args, &instance, &bases, Some(("w-stand-in", VALID_TOKEN)));
+    let (output, _) = tokio::task::spawn_blocking(move || run_with_input(command, b"{}".to_vec()))
+        .await
+        .expect("join");
+    let frames = frames.await.expect("the stand-in daemon");
+    (output, frames)
+}
+
+fn frame_types(frames: &[serde_json::Value]) -> Vec<&str> {
+    frames
+        .iter()
+        .map(|frame| frame["type"].as_str().unwrap_or("?"))
+        .collect()
+}
+
+/// The time a door has is the one its daemon names in the answer: with less of it left
+/// than the door keeps for printing and ending, the door prints nothing, ends with 0, and
+/// never says it printed, so the daemon puts what it took back.
+#[tokio::test]
+async fn a_door_left_less_time_than_its_margin_prints_nothing_and_never_says_it_printed() {
+    for (args, door) in stand_in_doors() {
+        let answer = serde_json::json!({
+            "type": "delivery",
+            "output": "PARCEL-WITHOUT-TIME",
+            "stream": "stdout",
+            "exit_code": 0,
+            "hook_timeout_sec": 0,
+        });
+        let (output, frames) = run_against_stand_in(&args, answer).await;
+        assert_eq!(
+            frames.first().map(|read| (&read["type"], &read["door"])),
+            Some((&serde_json::json!("door_read"), &door)),
+            "{args:?}: the door reads with one request naming its door; sent {frames:?}"
+        );
+        assert!(
+            output.status.code() == Some(0) && output.stdout.is_empty(),
+            "{args:?}: {}",
+            describe(&output)
+        );
+        assert_eq!(
+            frame_types(&frames),
+            ["door_read"],
+            "{args:?}: a door that printed nothing must not say it printed"
+        );
+    }
+}
+
+/// A daemon that names no deadline is taken to give the time the door had before revision
+/// 34. The door prints, then says so, and ends at once without an answer to that.
+#[tokio::test]
+async fn a_door_whose_daemon_names_no_deadline_prints_then_says_so_and_ends_without_an_answer() {
+    for (args, _) in stand_in_doors() {
+        let answer = serde_json::json!({
+            "type": "delivery",
+            "output": "PARCEL-WITH-THE-OLD-DEADLINE",
+            "stream": "stdout",
+            "exit_code": 0,
+        });
+        let (output, frames) = run_against_stand_in(&args, answer).await;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            describe(&output)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("PARCEL-WITH-THE-OLD-DEADLINE"),
+            "{args:?}: {}",
+            describe(&output)
+        );
+        assert_eq!(
+            frame_types(&frames),
+            ["door_read", "deliver_printed"],
+            "{args:?}: the door says once that it printed"
+        );
+    }
+}
+
+/// A daemon before revision 34 refuses the door's read by name and takes nothing: the
+/// door prints nothing and ends with 0, and the text waits for a newer daemon.
+#[tokio::test]
+async fn a_door_whose_daemon_refuses_its_read_by_name_prints_nothing_and_exits_zero() {
+    for (args, _) in stand_in_doors() {
+        let answer = serde_json::json!({
+            "type": "error",
+            "code": "unknown_type",
+            "message": "unknown message type",
+        });
+        let (output, frames) = run_against_stand_in(&args, answer).await;
+        assert!(
+            output.status.code() == Some(0) && output.stdout.is_empty(),
+            "{args:?}: {}",
+            describe(&output)
+        );
+        assert_eq!(frame_types(&frames), ["door_read"], "{args:?}");
+    }
+}
