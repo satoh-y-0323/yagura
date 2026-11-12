@@ -16,7 +16,7 @@
 //! Flags:
 //! - `--daemon <path>`: the `yagura-daemon` executable the doors run.
 //! - `--instance <id>`: `YAGURA_INSTANCE` for every door.
-//! - `--bases <dir>`: the data, state and config base directories every door
+//! - `--bases <dir>`: the data, state, config and home directories every door
 //!   runs under, so none of them writes into the user's own.
 //! - `--log <dir>`: where `events.jsonl`, `woken.jsonl` and `input.log` go.
 //! - `--context` / `--context-first-turn`: run `--deliver-context` at
@@ -231,6 +231,10 @@ fn run_door_as(options: &Options, args: &[&str], stdin: Option<&[u8]>, own: bool
             ("XDG_DATA_HOME", "data"),
             ("XDG_STATE_HOME", "state"),
             ("XDG_CONFIG_HOME", "config"),
+            // macOS resolves every base from `HOME` alone, and the daemon reads
+            // its home directory from `HOME` (`USERPROFILE` on Windows).
+            ("HOME", "home"),
+            ("USERPROFILE", "home"),
         ] {
             let dir = bases.join(sub);
             let _ = std::fs::create_dir_all(&dir);
