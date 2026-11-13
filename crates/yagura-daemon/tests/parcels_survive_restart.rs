@@ -996,12 +996,8 @@ async fn a_door_whose_daemon_ends_before_settling_has_printed_and_the_next_daemo
         chat_envelope_id(&printed_again, CHAT_MARK),
         "the kept post is handed out again under the same id, so its reader can tell it is          the one it already has"
     );
-    let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
-    assert_eq!(
-        state.as_deref(),
-        Some("delivered"),
-        "a post a door has written must already be recorded as delivered"
-    );
+    // The door ends without waiting for the take to settle, so the record follows it.
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
     next.kill_keeping_windows();
 
     let mut last = start_chatting(&sandbox, &detections).await;
@@ -1136,12 +1132,8 @@ async fn a_hook_event_whose_daemon_ends_before_settling_has_printed_and_the_next
         String::from_utf8_lossy(&again.stderr),
         sandbox.daemon_log()
     );
-    let state = chat_delivery_state(&mut next.client, seq, &window_id).await;
-    assert_eq!(
-        state.as_deref(),
-        Some("delivered"),
-        "a post a hook has written must already be recorded as delivered"
-    );
+    // The hook ends without waiting for the take to settle, so the record follows it.
+    until_chat_taken(&mut next.client, &sandbox, seq, &window_id).await;
     next.kill_keeping_windows();
 
     let mut last = start_chatting(&sandbox, &detections).await;
