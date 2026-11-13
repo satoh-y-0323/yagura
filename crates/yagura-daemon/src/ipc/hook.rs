@@ -18,6 +18,7 @@ use crate::profile::{self, ListedProfileFile, validate_profile_id};
 use crate::profile_hook_events::{
     HookDeliver, HookEffect, HookEvent, HookOrigin, is_hook_event_name,
 };
+use crate::profile_interrupt::{AiMeans, HookStops, ProfileInterrupt, TurnRole};
 use crate::window::WindowEntry;
 
 use super::inbox::{HeldSlot, StopEnd, answer_read, answer_read_ending};
@@ -31,6 +32,8 @@ struct Resolved {
     subagent: Option<String>,
     delivery: Option<DeliverySpec>,
     hook_timeout_sec: Option<u64>,
+    /// The events of the profile's `[interrupt]` hook form, when it has one.
+    stops: Option<HookStops>,
 }
 
 /// How a hook event's read ends.
@@ -143,6 +146,7 @@ impl IpcServer {
             subagent,
             delivery,
             hook_timeout_sec,
+            stops,
         }) = self.resolve_hook_event(profile_id, name).await
         else {
             tracing::warn!(
@@ -182,6 +186,14 @@ impl IpcServer {
         {
             entry.record_session_id(&session);
         }
+        // A main hook moves the turn before anything is answered, so a stop
+        // is judged against the turn this hook belongs to.
+        let role = stops
+            .as_ref()
+            .map_or(TurnRole::Other, |stops| stops.role(name));
+        if stops.is_some() && HookEffect::Turn.applies_to(origin) {
+            entry.turn().main_hook(role);
+        }
         // What is left answers `when`, one value per condition.
         let met = values.all(|value| value == HookInputValue::Equal(true));
         let spec = delivery
@@ -195,6 +207,10 @@ impl IpcServer {
             if let (Some(block), HookRead::Door(slot)) = (block, &read)
                 && block.prints()
             {
+                // The block makes the CLI go on with it: a turn of its own.
+                if stops.is_some() {
+                    entry.turn().block_started();
+                }
                 let end = event
                     .status
                     .and_then(|status| self.stop_end(&entry, status, profile_id, name));
@@ -206,6 +222,17 @@ impl IpcServer {
             && HookEffect::Status(status).applies_to(origin)
         {
             self.record_hook_status(&entry, status, profile_id, name);
+        }
+        // A stop leaves the inbox alone: what waits there is the next door's.
+        if let TurnRole::Stop(answer) = role
+            && HookEffect::Stop.applies_to(origin)
+            && entry.turn().stops_now()
+        {
+            if answer.ends_turn() && HookEffect::Turn.applies_to(origin) {
+                entry.turn().stop_ended_turn();
+            }
+            finish(DoorRead::printing(answer.render()), hook_timeout_sec);
+            return;
         }
         let taken = match event.deliver {
             Some(HookDeliver::Context) if reads => entry
@@ -264,6 +291,15 @@ impl IpcServer {
         .await
     }
 
+    /// The `[interrupt]` table of the profile `entry` was launched from.
+    /// `None` when the window was opened without a profile, or the profile
+    /// cannot be read or has no such table.
+    pub(super) async fn window_interrupt(&self, entry: &WindowEntry) -> Option<ProfileInterrupt> {
+        let profile_id = entry.launch_profile()?;
+        self.read_hook_profile(profile_id, |listed| listed.profile.interrupt.clone())
+            .await
+    }
+
     /// Reads `profile_id` and picks `name` out of its `[hook_events]`, with the
     /// time its CLI gives that hook. `None` when the profile cannot be read or
     /// has no such event.
@@ -275,11 +311,16 @@ impl IpcServer {
             let subagent = events.subagent_pointer().map(str::to_string);
             let delivery = listed.profile.delivery.as_ref().map(|d| d.spec());
             let hook_timeout_sec = listed.profile.hook_timeouts.for_event(&name);
+            let stops = match listed.profile.interrupt.as_ref().map(|i| &i.ai) {
+                Some(AiMeans::Hook(stops)) => Some(stops.clone()),
+                _ => None,
+            };
             Some(Resolved {
                 event,
                 subagent,
                 delivery,
                 hook_timeout_sec,
+                stops,
             })
         })
         .await

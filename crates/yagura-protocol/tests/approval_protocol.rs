@@ -340,14 +340,18 @@ fn daemon_message_approval_requested_nests_the_request() {
 
 #[test]
 fn daemon_message_approval_withdrawn_round_trips_every_reason() {
-    // The three reasons a pending request ends without a decision, each
-    // wire-tagged as its snake_case spelling.
+    // The reasons a pending request ends without a decision, each wire-tagged
+    // as its snake_case spelling.
     for (reason, wire) in [
         (WithdrawReason::Resolved, "resolved"),
         (WithdrawReason::Timeout, "timeout"),
         (
             WithdrawReason::RequesterDisconnected,
             "requester_disconnected",
+        ),
+        (
+            WithdrawReason::RequesterInterrupted,
+            "requester_interrupted",
         ),
     ] {
         let decoded = DaemonMessage::ApprovalWithdrawn {

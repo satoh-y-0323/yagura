@@ -136,3 +136,24 @@ Notification = { status = "waiting_approval" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false, "/stopHookActive" = false } }
 StopFailure = { status = "waiting_input" }
 StopCancelled = { status = "waiting_input" }
+
+# How the user and an AI stop the CLI. The user's own interrupt types Ctrl+C.
+# An AI's marks the window's open turn, and its tool calls are answered with a
+# stop until the turn ends. Only the answer to `PostToolUse` was measured to
+# end the turn; `PostToolUseFailure` could not be raised to measure, so it is
+# not stopped at.
+[interrupt]
+user_keys = ["ctrl_c"]
+ai = "hook"
+
+[interrupt.turn]
+starts = ["UserPromptSubmit"]
+ends = ["Stop", "StopFailure", "StopCancelled"]
+
+[interrupt.stops.PreToolUse]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = false
+
+[interrupt.stops.PostToolUse]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = true

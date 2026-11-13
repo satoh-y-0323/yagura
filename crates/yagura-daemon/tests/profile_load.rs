@@ -2814,3 +2814,113 @@ fn a_host_paths_state_base_is_read_only_as_an_argv_naming_no_placeholder() {
         );
     }
 }
+
+// --- `[interrupt]`: how the user and an AI stop the window's CLI --------------------------
+
+/// A profile whose `[interrupt]` gives an AI the hook form, its stop event `Tool` and the
+/// turn's start and end events, all from its own `[hook_events]`.
+fn hook_interrupt_profile(turn: &str, stops: &str) -> String {
+    format!(
+        "schema = 1\ndisplay_name = \"Interrupt Hook\"\nsubagent_pointer = \"/agent\"\n\n\
+         [command]\ndefault = ['x']\n\n\
+         [hook_events]\nSubmit = {{ status = \"running\" }}\nTool = {{ status = \"running\" }}\n\
+         Done = {{ status = \"waiting_input\" }}\n\n\
+         [interrupt]\nuser_keys = [\"ctrl_c\"]\nai = \"hook\"\n\n\
+         [interrupt.turn]\n{turn}\n\n{stops}"
+    )
+}
+
+const WELL_FORMED_TURN: &str = "starts = [\"Submit\"]\nends = [\"Done\"]";
+const WELL_FORMED_STOP: &str = "[interrupt.stops.Tool]\n\
+     answer = '{\"continue\":false,\"stopReason\":{reason}}'\nends_turn = true";
+
+/// The three means an AI may be given parse; a hook form whose events do not hold
+/// together is refused: a stop event its `[hook_events]` lacks, a turn with no start or no
+/// end event, an answer with no `{reason}`, a stop event that does not say whether its
+/// answer ends the main turn, and an event in two of the stop, start and end lists.
+#[test]
+fn an_interrupt_table_parses_only_when_its_hook_form_holds_together() {
+    let well_formed = [
+        (
+            "hook",
+            hook_interrupt_profile(WELL_FORMED_TURN, WELL_FORMED_STOP),
+        ),
+        (
+            "keys",
+            "schema = 1\ndisplay_name = \"Interrupt Keys\"\n\n[command]\ndefault = ['x']\n\n\
+             [interrupt]\nuser_keys = [\"escape\"]\nai = \"keys\"\nai_keys = [\"escape\"]\n"
+                .to_string(),
+        ),
+        (
+            "none",
+            "schema = 1\ndisplay_name = \"Interrupt None\"\n\n[command]\ndefault = ['x']\n\n\
+             [interrupt]\nuser_keys = [\"escape\"]\nai = \"none\"\n"
+                .to_string(),
+        ),
+    ];
+    for (what, source) in &well_formed {
+        if let Err(err) = parse_profile("interrupt-ok", source) {
+            panic!("the {what} form parses, got {err:?}\n{source}");
+        }
+    }
+
+    let answer = "answer = '{\"continue\":false,\"stopReason\":{reason}}'";
+    let refused = [
+        (
+            "a stop event its [hook_events] lacks",
+            hook_interrupt_profile(
+                WELL_FORMED_TURN,
+                &format!("[interrupt.stops.Elsewhere]\n{answer}\nends_turn = true"),
+            ),
+        ),
+        (
+            "no start event",
+            hook_interrupt_profile("starts = []\nends = [\"Done\"]", WELL_FORMED_STOP),
+        ),
+        (
+            "no end event",
+            hook_interrupt_profile("starts = [\"Submit\"]\nends = []", WELL_FORMED_STOP),
+        ),
+        (
+            "an answer with no {reason}",
+            hook_interrupt_profile(
+                WELL_FORMED_TURN,
+                "[interrupt.stops.Tool]\nanswer = '{\"continue\":false}'\nends_turn = true",
+            ),
+        ),
+        (
+            "a stop event that does not say whether its answer ends the turn",
+            hook_interrupt_profile(
+                WELL_FORMED_TURN,
+                &format!("[interrupt.stops.Tool]\n{answer}"),
+            ),
+        ),
+        (
+            "an event that both starts and ends a turn",
+            hook_interrupt_profile(
+                "starts = [\"Submit\"]\nends = [\"Done\", \"Submit\"]",
+                WELL_FORMED_STOP,
+            ),
+        ),
+        (
+            "a stop event that also starts a turn",
+            hook_interrupt_profile(
+                "starts = [\"Submit\", \"Tool\"]\nends = [\"Done\"]",
+                WELL_FORMED_STOP,
+            ),
+        ),
+        (
+            "a stop event that also ends a turn",
+            hook_interrupt_profile(
+                "starts = [\"Submit\"]\nends = [\"Done\", \"Tool\"]",
+                WELL_FORMED_STOP,
+            ),
+        ),
+    ];
+    for (what, source) in &refused {
+        assert!(
+            parse_profile("interrupt-refused", source).is_err(),
+            "a hook form with {what} is refused:\n{source}"
+        );
+    }
+}

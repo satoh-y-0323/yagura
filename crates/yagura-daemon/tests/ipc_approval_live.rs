@@ -313,7 +313,7 @@ async fn switching_interrupt_window_to_automatic_and_back_takes_effect_on_the_ne
     request_interrupt(&mut requester, &first).await;
     let reply: DaemonMessage = read_response(&mut requester).await;
     match reply {
-        DaemonMessage::WindowInterrupted { window_id } => assert_eq!(window_id, first),
+        DaemonMessage::WindowInterrupted { window_id, .. } => assert_eq!(window_id, first),
         other => panic!("expected window_interrupted without approval, got {other:?}"),
     }
     assert_eq!(

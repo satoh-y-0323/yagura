@@ -813,7 +813,9 @@ async fn switching_a_tool_to_match_a_manually_added_files_on_value_changes_only_
     .await;
     let reply: DaemonMessage = read_response(&mut requester).await;
     match reply {
-        DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::WindowInterrupted {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected window_interrupted without approval, got {other:?}"),
     }
 

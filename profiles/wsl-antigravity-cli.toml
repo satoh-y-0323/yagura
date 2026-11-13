@@ -118,3 +118,10 @@ PreInvocation = { status = "running", deliver = "take" }
 SessionStart = { deliver = "context" }
 PostToolUse = { status = "running" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/terminationReason" = "NO_TOOL_CALL", "/executionNum" = 0 } }
+
+# How the user and an AI stop the CLI. The user's own interrupt types Ctrl+C.
+# No way for an AI to stop it has been measured, so an AI's interrupt is
+# refused.
+[interrupt]
+user_keys = ["ctrl_c"]
+ai = "none"

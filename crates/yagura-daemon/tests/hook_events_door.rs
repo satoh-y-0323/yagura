@@ -2795,3 +2795,885 @@ async fn a_window_run_directly_is_judged_by_process_ids_whatever_root_a_request_
 
     cli.exit().await;
 }
+
+// --- an AI's interrupt: a mark on the window's main turn ---------------------------------
+
+/// What an answer without an `outcome` reads as, so a failure says what was missing.
+const NO_OUTCOME: &str = "<no outcome>";
+const TURN_SCREEN: &str = "TURN-DOOR-READY";
+const TURN_DETECTION: &str = "hook-door-turns";
+
+/// The form of a profile's stop answer for one of its stop events.
+#[derive(Clone, Copy, Debug)]
+enum StopForm {
+    /// `{"continue":false,"stopReason":…}`.
+    Continue,
+    /// `{"permissionDecision":"deny","permissionDecisionReason":…}`.
+    Deny,
+    /// [`StopForm::Continue`] with a `PreToolUse` `hookSpecificOutput` that denies the tool.
+    ContinueDenyingTool,
+}
+
+/// A daemon reading the shipped profiles, letting any caller interrupt a window, with one
+/// window opened from a shipped profile whose screen reads `waiting_input` until a hook
+/// reports a turn.
+struct Turns {
+    h: Harness,
+    instance: String,
+    bases: TempDir,
+    window_id: String,
+    profile: &'static str,
+}
+
+impl Turns {
+    async fn start(profile: &'static str) -> Self {
+        Self::start_with(profile, common::wake_none_delivery(), Some(TURN_DETECTION)).await
+    }
+
+    /// [`Turns::start`] with the window's own `[delivery]`, under `detection` (`None`
+    /// leaves the window `Unknown`).
+    async fn start_with(
+        profile: &'static str,
+        delivery: yagura_daemon::profile_delivery::ProfileDelivery,
+        detection: Option<&str>,
+    ) -> Self {
+        let instance = unique_instance();
+        let profiles_dir = unique_temp_dir("interrupt-turn-profiles");
+        std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+        let detection_dir = unique_temp_dir("interrupt-turns");
+        let mut config = detection_config(&detection_dir, approver_base_config());
+        config.profiles_dir = Some(profiles_dir);
+        config.bundled_profiles = true;
+        config.approval_policy = Some(common::policy(&["open_window", "interrupt_window"]));
+        std::fs::write(
+            detection_dir.join(format!("{TURN_DETECTION}.toml")),
+            format!(
+                "schema_version = 1\nname = \"{TURN_DETECTION}\"\nbottom_line_count = 5\n\n\
+                 [debounce]\nconfirm_ms = 30\n\n[[rules]]\nstatus = \"waiting_input\"\n\
+                 pattern = '{TURN_SCREEN}'\npriority = 10\nregion = \"bottom\"\n"
+            ),
+        )
+        .expect("write the turn window's definition");
+        let h = Harness::start_on_instance(&instance, config).await;
+        let window_id = h
+            .registry
+            .open_with_extra_env(
+                yagura_daemon::OpenWindowRequest {
+                    command: yagura_test_support::process::echo_child_command(),
+                    cwd: None,
+                    name: None,
+                    vendor: None,
+                    detection: Some(
+                        detection
+                            .unwrap_or(common::CONTROL_DETECTION_NAME)
+                            .to_string(),
+                    ),
+                    on_name_taken: Default::default(),
+                },
+                Vec::new(),
+                Vec::new(),
+                WindowProvenance {
+                    launch: Some(LaunchIdentity {
+                        profile: profile.to_string(),
+                        model: None,
+                        effort: None,
+                    }),
+                    delivery: Some(delivery),
+                    hooks: HooksRoute::Unarranged,
+                    ..WindowProvenance::default()
+                },
+            )
+            .await
+            .expect("the launched window opens")
+            .window_id;
+        if detection.is_some() {
+            h.write_input(&window_id, format!("{TURN_SCREEN}\r").as_bytes())
+                .await;
+            let mut client = h.connect().await;
+            wait_until_status(&mut client, &window_id, WindowStatus::WaitingInput).await;
+        }
+        Self {
+            h,
+            instance,
+            bases: TempDir::new("yagura-door", "turns"),
+            window_id,
+            profile,
+        }
+    }
+
+    fn entry(&self) -> std::sync::Arc<yagura_daemon::WindowEntry> {
+        self.h.registry.get(&self.window_id).expect("window exists")
+    }
+
+    /// Runs the window's CLI's hook for `event` with `input`; it must take the input and
+    /// end with 0.
+    async fn hook(&self, event: &str, input: &str) -> Output {
+        let command = door_command(
+            &["--hook", self.profile, event],
+            &self.instance,
+            &self.bases,
+            Some((&self.window_id, VALID_TOKEN)),
+        );
+        let input = input.as_bytes().to_vec();
+        let (output, written) = tokio::task::spawn_blocking(move || run_with_input(command, input))
+            .await
+            .expect("join");
+        assert!(written.is_ok(), "{} {event}: {written:?}", self.profile);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{} {event}: {}",
+            self.profile,
+            describe(&output)
+        );
+        output
+    }
+
+    /// Runs `event` and asserts it was answered as nothing but the event: no stop answer.
+    async fn hook_unstopped(&self, event: &str, input: &str, why: &str) -> Output {
+        let output = self.hook(event, input).await;
+        assert!(
+            stop_answer(&output).is_none(),
+            "{} {event}: {why}, so it gets no stop answer; {}",
+            self.profile,
+            describe(&output)
+        );
+        output
+    }
+
+    /// Runs `event` and asserts it was answered with the stop answer of `form`.
+    async fn hook_stopped(&self, event: &str, input: &str, form: StopForm, why: &str) {
+        let output = self.hook(event, input).await;
+        assert_stop_form(&output, form, &format!("{} {event}: {why}", self.profile));
+    }
+
+    /// `interrupt_window` on the window from a connection that is no window's.
+    async fn interrupt(&self) -> Result<String, String> {
+        let mut client = self.h.connect().await;
+        interrupt_from(&mut client, &self.window_id).await
+    }
+
+    /// Asserts `interrupt_window` answered `expected`, as `why` says.
+    async fn interrupt_answers(&self, expected: &str, why: &str) {
+        assert_eq!(
+            self.interrupt().await,
+            Ok(expected.to_string()),
+            "{}: {why}",
+            self.profile
+        );
+    }
+
+    /// Asserts `interrupt_window` answered that no turn is open: it put no mark and ended
+    /// nothing.
+    async fn interrupt_finds_no_open_turn(&self, why: &str) {
+        self.interrupt_answers("no_open_turn", why).await;
+    }
+
+    fn deposit(&self, text: &str) {
+        self.entry().inbox().deposit(Parcel::new(text, text));
+    }
+}
+
+/// Sends `interrupt_window` for `window_id` over `client`: the answer's `outcome`, or the
+/// error code it was refused with.
+pub(crate) async fn interrupt_from(
+    client: &mut yagura_test_support::ipc::Connection,
+    window_id: &str,
+) -> Result<String, String> {
+    common::send(
+        client,
+        &yagura_protocol::ClientMessage::InterruptWindow {
+            window_id: window_id.to_string(),
+        },
+    )
+    .await;
+    let answer = common::read_response(client).await;
+    match &answer {
+        yagura_protocol::DaemonMessage::Error { code, .. } => Err(code.clone()),
+        yagura_protocol::DaemonMessage::WindowInterrupted { .. } => {
+            let encoded = serde_json::to_value(&answer).expect("an answer encodes");
+            assert_eq!(encoded["window_id"].as_str(), Some(window_id), "{encoded}");
+            Ok(encoded["outcome"]
+                .as_str()
+                .unwrap_or(NO_OUTCOME)
+                .to_string())
+        }
+        other => panic!("expected window_interrupted or an error, got {other:?}"),
+    }
+}
+
+/// What the door printed, when it is a stop answer of any form: a JSON object that ends
+/// the turn or denies the tool.
+fn stop_answer(output: &Output) -> Option<serde_json::Value> {
+    let printed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
+    let stops = printed["continue"] == serde_json::Value::Bool(false)
+        || printed["permissionDecision"].as_str() == Some("deny")
+        || printed["hookSpecificOutput"]["permissionDecision"].as_str() == Some("deny");
+    stops.then_some(printed)
+}
+
+fn assert_stop_form(output: &Output, form: StopForm, who: &str) {
+    let printed = stop_answer(output)
+        .unwrap_or_else(|| panic!("{who}: expected a stop answer; {}", describe(output)));
+    let named = |value: &serde_json::Value| value.as_str().is_some_and(|text| !text.is_empty());
+    let holds = match form {
+        StopForm::Continue => {
+            printed["continue"] == serde_json::Value::Bool(false) && named(&printed["stopReason"])
+        }
+        StopForm::Deny => {
+            printed["permissionDecision"].as_str() == Some("deny")
+                && named(&printed["permissionDecisionReason"])
+        }
+        StopForm::ContinueDenyingTool => {
+            let specific = &printed["hookSpecificOutput"];
+            printed["continue"] == serde_json::Value::Bool(false)
+                && named(&printed["stopReason"])
+                && specific["hookEventName"].as_str() == Some("PreToolUse")
+                && specific["permissionDecision"].as_str() == Some("deny")
+                && named(&specific["permissionDecisionReason"])
+        }
+    };
+    assert!(
+        holds,
+        "{who}: expected the {form:?} stop answer, got {printed}"
+    );
+}
+
+const GROK_SUBAGENT: &str = r#"{"subagentType":"explore"}"#;
+
+/// A window no main hook has reached yet: its CLI may have no door, so an interrupt is a
+/// mark that may never be read, and a subagent's hook does not change that. The next main
+/// stop event is stopped all the same; once a main turn starts, its stop events are not.
+#[tokio::test]
+async fn a_window_no_main_hook_reached_is_marked_unconfirmed_and_a_turn_started_later_is_not_stopped()
+ {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("PreToolUse", GROK_SUBAGENT, "nothing was interrupted")
+        .await;
+    turns
+        .interrupt_answers(
+            "stop_requested_unconfirmed",
+            "only a subagent's hook has reached the daemon",
+        )
+        .await;
+    turns
+        .hook_stopped(
+            "PreToolUse",
+            "{}",
+            StopForm::Continue,
+            "the window was marked while no turn had been seen",
+        )
+        .await;
+
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .hook_unstopped(
+            "PreToolUse",
+            "{}",
+            "the turn started after the mark was put",
+        )
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook has reached the daemon")
+        .await;
+}
+
+/// In an open turn, every stop event of the main session and of its subagents is
+/// stopped, however often the AI asks, until a main stop answer whose answer ends the turn
+/// (Grok Build's `PostToolUse`); the answer leaves the inbox alone. A subagent after it is
+/// not stopped, and an interrupt then finds no open turn.
+#[tokio::test]
+async fn an_open_turn_is_stopped_at_every_stop_event_until_a_stop_answer_that_ends_it() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "asking again is the same request")
+        .await;
+    turns
+        .hook_stopped(
+            "PreToolUse",
+            GROK_SUBAGENT,
+            StopForm::Continue,
+            "a subagent of the open turn",
+        )
+        .await;
+    for round in ["first", "second"] {
+        turns
+            .hook_stopped(
+                "PreToolUse",
+                "{}",
+                StopForm::Continue,
+                &format!(
+                    "the {round} main PreToolUse: its answer does not end the turn, so the \
+                     mark still applies"
+                ),
+            )
+            .await;
+    }
+
+    turns.deposit("PARCEL-KEPT-BY-STOP");
+    turns
+        .hook_stopped(
+            "PostToolUse",
+            "{}",
+            StopForm::Continue,
+            "the main PostToolUse of the marked turn",
+        )
+        .await;
+    assert_eq!(
+        turns.entry().inbox().pending_count(),
+        1,
+        "a stop answer reads nothing from the inbox"
+    );
+
+    turns
+        .hook_unstopped(
+            "PreToolUse",
+            GROK_SUBAGENT,
+            "the main PostToolUse's stop answer ended the turn",
+        )
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the main PostToolUse's stop answer ended the turn")
+        .await;
+    let taken = turns
+        .hook_unstopped("PostToolUse", "{}", "no turn is open")
+        .await;
+    assert!(
+        String::from_utf8_lossy(&taken.stdout).contains("PARCEL-KEPT-BY-STOP"),
+        "the parcel the stop answer left is the next door's; {}",
+        describe(&taken)
+    );
+}
+
+/// A turn its end event closed takes no mark: a subagent working while the window waits
+/// is not stopped. A stop's block hands the next round its text, which starts a turn of
+/// its own: a mark put before it does not stop that round.
+#[tokio::test]
+async fn a_turn_its_end_event_closed_takes_no_mark_and_a_stops_block_starts_the_next() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .hook_unstopped("Stop", GROK_FIRST_STOP, "a turn's end is never stopped")
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the last main hook ended the turn")
+        .await;
+    turns
+        .hook_unstopped(
+            "PreToolUse",
+            GROK_SUBAGENT,
+            "a subagent working while the window waits is outside any turn",
+        )
+        .await;
+    turns
+        .hook_unstopped("PreToolUse", "{}", "no mark was put")
+        .await;
+
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns.deposit("PARCEL-FOR-THE-BLOCK");
+    let block = turns.hook("Stop", GROK_FIRST_STOP).await;
+    assert!(
+        String::from_utf8_lossy(&block.stdout).contains("PARCEL-FOR-THE-BLOCK"),
+        "a stop with something waiting hands it over in a block; {}",
+        describe(&block)
+    );
+    turns
+        .hook_unstopped(
+            "PreToolUse",
+            "{}",
+            "the block's round started after the mark was put",
+        )
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "the block's round is an open turn")
+        .await;
+}
+
+/// A turn's end is what its CLI's hooks say, never the window's status: a long tool with
+/// no output can leave a `waiting_input` status while the turn is still open.
+#[tokio::test]
+async fn a_mark_outlives_a_waiting_input_status_no_end_event_reported() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    let mut client = turns.h.connect().await;
+    common::send(
+        &mut client,
+        &yagura_protocol::ClientMessage::StatusEvent {
+            source: "interrupt-test".to_string(),
+            status: WindowStatus::WaitingInput,
+            window_id: Some(turns.window_id.clone()),
+            token: VALID_TOKEN.to_string(),
+        },
+    )
+    .await;
+    wait_until_status(&mut client, &turns.window_id, WindowStatus::WaitingInput).await;
+    turns
+        .hook_stopped(
+            "PreToolUse",
+            "{}",
+            StopForm::Continue,
+            "no end event has reported the turn's end",
+        )
+        .await;
+}
+
+/// Copilot CLI's deny does not end its turn: every tool of the open turn is denied, main
+/// or subagent, until the turn's end event. A stop's block then starts a round that is
+/// not denied.
+#[tokio::test]
+async fn copilot_denies_every_tool_of_an_open_turn_until_its_end_event() {
+    const SUBAGENT: &str = r#"{"agentId":"agent-1"}"#;
+    const FIRST_STOP: &str = r#"{"stop_hook_active":false}"#;
+    let turns = Turns::start("copilot-cli").await;
+    turns
+        .hook_unstopped(
+            "userPromptSubmitted",
+            "{}",
+            "a turn's start is never stopped",
+        )
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns
+        .hook_stopped("preToolUse", SUBAGENT, StopForm::Deny, "a subagent's tool")
+        .await;
+    for round in ["first", "second"] {
+        turns
+            .hook_stopped(
+                "preToolUse",
+                "{}",
+                StopForm::Deny,
+                &format!("the {round} main tool: a deny does not end the turn"),
+            )
+            .await;
+    }
+    turns
+        .hook_unstopped("agentStop", FIRST_STOP, "a turn's end is never stopped")
+        .await;
+    turns
+        .hook_unstopped("preToolUse", "{}", "the end event closed the turn")
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the last main hook ended the turn")
+        .await;
+
+    turns
+        .hook_unstopped(
+            "userPromptSubmitted",
+            "{}",
+            "a turn's start is never stopped",
+        )
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns.deposit("PARCEL-FOR-COPILOT-BLOCK");
+    let block = turns.hook("agentStop", FIRST_STOP).await;
+    assert!(
+        String::from_utf8_lossy(&block.stdout).contains("PARCEL-FOR-COPILOT-BLOCK"),
+        "{}",
+        describe(&block)
+    );
+    turns
+        .hook_unstopped(
+            "preToolUse",
+            "{}",
+            "the block's round started after the mark was put",
+        )
+        .await;
+}
+
+/// Claude Code's `PreToolUse` stop answer denies the tool and ends the turn, so a
+/// subagent after it is not stopped; its `PostToolUse` ends the turn too.
+#[tokio::test]
+async fn claude_codes_stop_answer_denies_the_tool_and_ends_the_turn() {
+    const SUBAGENT: &str = r#"{"agent_id":"agent-1"}"#;
+    let turns = Turns::start("claude-code").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns
+        .hook_stopped(
+            "PreToolUse",
+            "{}",
+            StopForm::ContinueDenyingTool,
+            "the main tool of the marked turn",
+        )
+        .await;
+    turns
+        .hook_unstopped(
+            "PreToolUse",
+            SUBAGENT,
+            "the PreToolUse stop answer ended the turn",
+        )
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the PreToolUse stop answer ended the turn")
+        .await;
+
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    turns
+        .hook_stopped(
+            "PostToolUse",
+            "{}",
+            StopForm::Continue,
+            "the main tool result of the marked turn",
+        )
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the PostToolUse stop answer ended the turn")
+        .await;
+}
+
+/// Muse Code tells no subagent apart, so its stop answers never end a turn: every tool
+/// result of the open turn is stopped until `Interrupt` (a stopped turn's end) or `Stop`
+/// (a turn with no tool) closes it. The two stop events carry nothing else: no status, no
+/// session and no take.
+#[tokio::test]
+async fn muse_code_stops_every_tool_result_of_an_open_turn_until_its_end_event() {
+    let turns = Turns::start("muse-code").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    for event in ["PostToolUse", "PostToolUseFailure", "PostToolUse"] {
+        turns
+            .hook_stopped(
+                event,
+                "{}",
+                StopForm::Continue,
+                "no stop answer ends a turn of a CLI that tells no subagent apart",
+            )
+            .await;
+    }
+    turns
+        .hook_unstopped("Interrupt", "{}", "a turn's end is never stopped")
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("Interrupt ended the stopped turn")
+        .await;
+    turns
+        .hook_unstopped("PostToolUse", "{}", "Interrupt ended the turn")
+        .await;
+
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .hook_unstopped(
+            "Stop",
+            r#"{"stop_hook_active":false}"#,
+            "a turn's end is never stopped",
+        )
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("Stop ended a turn that called no tool")
+        .await;
+
+    turns.deposit("PARCEL-NOT-FOR-A-STOP-EVENT");
+    let entry = turns.entry();
+    let reported = entry.status_event_count();
+    for event in ["PostToolUse", "PostToolUseFailure"] {
+        turns
+            .hook_unstopped(event, r#"{"session_id":"muse-session"}"#, "no turn is open")
+            .await;
+    }
+    assert_eq!(entry.status_event_count(), reported, "no status");
+    assert_eq!(entry.session_id(), None, "no session");
+    assert_eq!(entry.inbox().pending_count(), 1, "nothing taken");
+}
+
+/// An `Unknown` window is never interrupted by an AI: the refusal puts no mark, so the
+/// next main stop event gets its ordinary answer.
+#[tokio::test]
+async fn an_ais_interrupt_of_an_unknown_window_is_refused_and_marks_nothing() {
+    let turns = Turns::start_with("grok-build", common::wake_none_delivery(), None).await;
+    let mut client = turns.h.connect().await;
+    assert_eq!(
+        common::query_status(&mut client, &turns.window_id).await,
+        WindowStatus::Unknown,
+        "fixture precondition"
+    );
+    assert_eq!(
+        turns.interrupt().await,
+        Err("status_unknown".to_string()),
+        "an Unknown window is refused before its profile's means is looked at"
+    );
+    turns
+        .hook_unstopped("PreToolUse", "{}", "the refused interrupt put no mark")
+        .await;
+}
+
+/// The user's own interrupt (the GUI's button, an approver's connection) writes the
+/// user's key and puts no mark: the next stop event is not stopped.
+#[tokio::test]
+async fn an_approvers_interrupt_writes_the_users_key_and_puts_no_mark() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    let mut approver = turns.h.connect().await;
+    common::register_approver(&mut approver).await;
+    assert_eq!(
+        interrupt_from(&mut approver, &turns.window_id).await,
+        Ok("interrupted".to_string()),
+        "the user's interrupt writes the user's key"
+    );
+    turns
+        .hook_unstopped("PreToolUse", "{}", "the user's interrupt puts no mark")
+        .await;
+}
+
+// --- the window's own requests end with the mark -----------------------------------------
+
+/// A connection identified as `turns`' window, with a `wait_for_status` sent on it for that
+/// window to exit, which nothing but the mark can end before its time runs out.
+async fn own_wait(turns: &Turns) -> yagura_test_support::ipc::Connection {
+    let mut own = turns.h.connect().await;
+    common::identify(&mut own, &turns.window_id).await;
+    start_wait_for_exit(&mut own, &turns.window_id).await;
+    own
+}
+
+/// Sends a `wait_for_status` for `window_id` to exit. Frames on one connection are handled
+/// in order: the pong proves the wait is registered.
+async fn start_wait_for_exit(client: &mut yagura_test_support::ipc::Connection, window_id: &str) {
+    common::send(
+        client,
+        &yagura_protocol::ClientMessage::WaitForStatus {
+            window_id: window_id.to_string(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: 300,
+        },
+    )
+    .await;
+    common::send(client, &yagura_protocol::ClientMessage::Ping).await;
+    match common::read_response(client).await {
+        yagura_protocol::DaemonMessage::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
+}
+
+/// Asserts the next answer on `client` is the end of its `wait_for_status` by the mark:
+/// neither reached nor timed out, with the status the window shows.
+async fn expect_wait_ended_by_the_mark(
+    client: &mut yagura_test_support::ipc::Connection,
+    status: WindowStatus,
+    why: &str,
+) {
+    match common::read_response(client).await {
+        yagura_protocol::DaemonMessage::WaitResult {
+            outcome,
+            status: shown,
+            ..
+        } => {
+            assert_eq!(
+                outcome, "stop_requested",
+                "{why}: the wait ends as ended by the mark, told apart from its time running out"
+            );
+            assert_eq!(
+                shown, status,
+                "{why}: the answer carries the current status"
+            );
+        }
+        other => panic!("{why}: expected a wait_result, got {other:?}"),
+    }
+}
+
+/// Lets every clock bound run out, then asserts the next answer on `client` is its
+/// `wait_for_status` timing out: nothing else ended it.
+async fn expect_wait_outlived_the_mark(
+    client: &mut yagura_test_support::ipc::Connection,
+    why: &str,
+) {
+    common::let_every_clock_bound_run_out().await;
+    match common::read_response(client).await {
+        yagura_protocol::DaemonMessage::WaitResult { outcome, .. } => {
+            assert_eq!(outcome, "timeout", "{why}: only its time ended the wait");
+        }
+        other => panic!("{why}: expected a timed-out wait_result, got {other:?}"),
+    }
+}
+
+/// The mark ends, at once, what the open turn's window is waiting for, and a request the
+/// window starts while the mark still applies; another caller's wait on that window is not
+/// the window's own and lives on.
+#[tokio::test]
+async fn the_mark_on_an_open_turn_ends_the_windows_own_waits_and_those_it_starts_after() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    let mut own = own_wait(&turns).await;
+    let mut other = turns.h.connect().await;
+    start_wait_for_exit(&mut other, &turns.window_id).await;
+    let status = turns.entry().current_status();
+
+    turns
+        .interrupt_answers("stop_requested", "a main hook started the turn")
+        .await;
+    expect_wait_ended_by_the_mark(&mut own, status, "the window's own wait").await;
+    // Ended at once, so its answer comes before any ping sent after it.
+    common::send(
+        &mut own,
+        &yagura_protocol::ClientMessage::WaitForStatus {
+            window_id: turns.window_id.clone(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: 300,
+        },
+    )
+    .await;
+    expect_wait_ended_by_the_mark(
+        &mut own,
+        turns.entry().current_status(),
+        "a wait the marked turn started",
+    )
+    .await;
+    expect_wait_outlived_the_mark(&mut other, "another caller's wait on the window").await;
+}
+
+/// Waiting outside a turn is the window's own business: an interrupt that finds no open
+/// turn ends nothing, now or later.
+#[tokio::test]
+async fn an_interrupt_finding_no_open_turn_ends_none_of_the_windows_waits() {
+    let turns = Turns::start("grok-build").await;
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .hook_unstopped("Stop", GROK_FIRST_STOP, "a turn's end is never stopped")
+        .await;
+    let mut own = own_wait(&turns).await;
+    turns
+        .interrupt_finds_no_open_turn("the last main hook ended the turn")
+        .await;
+    let mut later = turns.h.connect().await;
+    common::identify(&mut later, &turns.window_id).await;
+    start_wait_for_exit(&mut later, &turns.window_id).await;
+    expect_wait_outlived_the_mark(&mut own, "a wait from before the interrupt").await;
+    expect_wait_outlived_the_mark(&mut later, "a wait started after it").await;
+}
+
+/// A window no main hook has reached may have no door, so the mark ends what it is
+/// waiting for at once but not what it starts later: those would end at once for as long
+/// as the window lives.
+#[tokio::test]
+async fn an_unconfirmed_mark_ends_the_windows_waits_but_not_those_it_starts_after() {
+    let turns = Turns::start("grok-build").await;
+    let mut own = own_wait(&turns).await;
+    let status = turns.entry().current_status();
+    turns
+        .interrupt_answers(
+            "stop_requested_unconfirmed",
+            "no main hook has reached the daemon",
+        )
+        .await;
+    expect_wait_ended_by_the_mark(&mut own, status, "the window's own wait").await;
+    start_wait_for_exit(&mut own, &turns.window_id).await;
+    expect_wait_outlived_the_mark(&mut own, "a wait the unconfirmed window started after").await;
+}
+
+// --- a wake starts a turn where the daemon hands its answer ------------------------------
+
+/// Deposits a parcel into `inbox` once a waiting door has registered there.
+async fn deposit_once_waited(inbox: &yagura_daemon::inbox::Inbox, key: &str, text: &str) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while !inbox.has_waiter() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the waiting door registers"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    inbox.deposit(Parcel::new(key, text));
+}
+
+/// In a window of a CLI the daemon wakes through a waiting door, handing that door its
+/// parcel starts a turn, before the door says it printed. A waiting door's read that ends
+/// without saying so puts its parcel back, and the turn it started is closed again.
+#[tokio::test]
+async fn a_wake_answer_starts_a_turn_before_its_notice_and_one_never_printed_closes_it() {
+    let delivery = yagura_daemon::profile_delivery::ProfileDelivery {
+        wake: yagura_daemon::profile_delivery::WakeMode::Wait,
+        ..common::wake_none_delivery()
+    };
+    let turns = Turns::start_with("claude-code", delivery, Some(TURN_DETECTION)).await;
+    let inbox = turns.entry().inbox().clone();
+
+    turns
+        .hook_unstopped("UserPromptSubmit", "{}", "a turn's start is never stopped")
+        .await;
+    turns
+        .hook_unstopped("Stop", "{}", "a turn's end is never stopped")
+        .await;
+    turns
+        .interrupt_finds_no_open_turn("the last main hook ended the turn")
+        .await;
+    let (relayed, ()) = tokio::join!(
+        relay_door(
+            &turns.h,
+            &turns.window_id,
+            &["--deliver-wait"],
+            Vec::new(),
+            Printed::Withhold,
+        ),
+        deposit_once_waited(&inbox, "wake", "PARCEL-THAT-WAKES")
+    );
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stderr).contains("PARCEL-THAT-WAKES"),
+        "fixture precondition: the waiting door printed the parcel; {}",
+        describe(&relayed.output)
+    );
+    turns
+        .interrupt_answers(
+            "stop_requested",
+            "handing a waiting door its parcel started a turn, before the door's notice",
+        )
+        .await;
+
+    drop(relayed);
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while !inbox.holds("wake") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fixture precondition: a parcel no notice settled comes back"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    turns
+        .interrupt_finds_no_open_turn("the parcel that started the turn came back unprinted")
+        .await;
+}

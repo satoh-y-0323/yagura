@@ -3487,3 +3487,60 @@ async fn a_chat_post_that_cannot_be_written_is_refused_and_never_shown() {
         "a post that was not written must not be handed out: {taken:?}"
     );
 }
+
+/// A window's chat post still waiting for an approver is withdrawn when an AI interrupts
+/// that window, for a reason of its own, and nothing is posted: the poster's connection
+/// is still open and is told so.
+#[tokio::test]
+async fn a_windows_chat_post_waiting_for_an_approver_is_withdrawn_when_an_ai_interrupts_it() {
+    let dir = unique_temp_dir("chat-interrupted");
+    let mut config = common::chat_config(
+        &dir,
+        &ChatPlaybook {
+            auto_approve: &["send_chat", "open_window", "interrupt_window"],
+            ..ChatPlaybook::default()
+        },
+    );
+    // `0x03` would end the `echo_child` poster on Windows.
+    config.interrupt_bytes = b"CHAT-INTERRUPT-KEY\r\n".to_vec();
+    let h = Harness::start_with_chat("chat-interrupted", config).await;
+    let mut poster_conn = h.connect().await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+    let poster_id = h.open_idle_window(&mut poster_conn).await;
+    identify(&mut poster_conn, &poster_id).await;
+
+    send(
+        &mut poster_conn,
+        &ClientMessage::BroadcastChat {
+            room_id: None,
+            body: "never posted".to_string(),
+        },
+    )
+    .await;
+    let request = expect_approval_requested(&mut approver).await;
+
+    let mut ai = h.connect().await;
+    assert_eq!(
+        crate::hook_events_door::interrupt_from(&mut ai, &poster_id).await,
+        Ok("interrupted".to_string()),
+        "the key was written"
+    );
+    match read_response(&mut approver).await {
+        DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
+            assert_eq!(request_id, request.request_id);
+            assert_eq!(
+                serde_json::to_value(reason).expect("a reason encodes"),
+                "requester_interrupted",
+                "the dialog is withdrawn for the interrupt, a reason of its own"
+            );
+        }
+        other => panic!("expected approval_withdrawn, got {other:?}"),
+    }
+    match read_response(&mut poster_conn).await {
+        DaemonMessage::Error { .. } => {}
+        other => panic!(
+            "the post was never approved, so it answers that nothing was posted; got {other:?}"
+        ),
+    }
+}

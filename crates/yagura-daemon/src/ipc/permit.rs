@@ -11,7 +11,6 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use tokio::sync::watch;
 use yagura_protocol::{APPROVAL_TEXT_MAX_BYTES, ApprovalTarget, DaemonMessage, DetectedStatus};
 
 use crate::approval::{ApprovalDraft, SubmitError, Ticket};
@@ -22,8 +21,9 @@ use crate::live_policy;
 use crate::window::WindowEntry;
 
 use super::{
-    ApprovalEnd, GateContext, HandoffSlot, PendingAction, approval_limits, await_approval,
-    deny_msg, deny_no_approver, error_msg, requester_for, window_info,
+    ApprovalEnd, GateContext, HandoffSlot, InterruptMeans, LeftWatch, PendingAction,
+    approval_limits, await_approval, deny_msg, deny_no_approver, error_msg, requester_for,
+    window_info,
 };
 
 /// One gated tool, named as a type so that a permit can be tied to it.
@@ -418,13 +418,13 @@ pub(super) type OpenVerdict = Verdict<OpenWindow>;
 pub(super) async fn await_verdict<T: GatedTool>(
     mut ticket: Ticket,
     config: &DaemonConfig,
-    closed: &mut watch::Receiver<bool>,
+    closed: &mut LeftWatch,
 ) -> Option<Verdict<T>> {
     let deadline = Duration::from_secs(config.approval_timeout_secs);
     match await_approval(&mut ticket, deadline, closed).await {
         ApprovalEnd::Approved => Some(Verdict::Approved(Permit::issue())),
         ApprovalEnd::Refused(message) => Some(Verdict::Refused(message)),
-        ApprovalEnd::RequesterGone => None,
+        ApprovalEnd::RequesterGone(_) => None,
     }
 }
 
@@ -433,7 +433,7 @@ pub(super) async fn await_verdict<T: GatedTool>(
 /// issued.
 pub(super) enum PermittedAction {
     SendText(String, Sender, Permit<SendMessage>),
-    Interrupt(Permit<InterruptWindow>),
+    Interrupt(InterruptMeans, Permit<InterruptWindow>),
     Close(bool, Permit<CloseWindow>),
     SendHandoff {
         text: String,
@@ -467,7 +467,7 @@ pub(super) fn gate_approved(action: PendingAction, detected: DetectedStatus) -> 
         PendingAction::SendText(text, sender) => {
             PermittedAction::SendText(text, sender, Permit::issue())
         }
-        PendingAction::Interrupt => PermittedAction::Interrupt(Permit::issue()),
+        PendingAction::Interrupt(means) => PermittedAction::Interrupt(means, Permit::issue()),
         PendingAction::Close(force) => PermittedAction::Close(force, Permit::issue()),
         PendingAction::SendHandoff {
             text,

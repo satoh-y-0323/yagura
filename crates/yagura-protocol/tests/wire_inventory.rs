@@ -81,7 +81,7 @@ use yagura_protocol::{
     ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
     Declaration, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
     GuestLineage, GuestStep, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
-    InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
+    InstructionNoticeState, InterruptOutcome, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
     McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
     McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
     McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
@@ -236,6 +236,7 @@ wire_sample!(enum WireWindowStatus => Running);
 wire_sample!(enum UnknownReason => NoDefinition);
 wire_sample!(enum ApprovalRequesterKind => External);
 wire_sample!(enum WithdrawReason => Resolved);
+wire_sample!(enum InterruptOutcome => StopRequested);
 wire_sample!(enum WithdrawOutcome => Withdrawn);
 wire_sample!(enum DeliveryState => Delivered);
 wire_sample!(enum AssignmentSource => User);
@@ -916,7 +917,7 @@ fn daemon_message_corpus() -> Vec<DaemonMessage> {
             note
         }),
         wire_sample!(DaemonMessage::MessageWithdrawn { id, outcome }),
-        wire_sample!(DaemonMessage::WindowInterrupted { window_id }),
+        wire_sample!(DaemonMessage::WindowInterrupted { window_id, outcome }),
         wire_sample!(DaemonMessage::WindowClosed { window_id }),
         wire_sample!(DaemonMessage::WaitResult {
             window_id,
@@ -1186,6 +1187,7 @@ fn withdraw_reason_wire_variants() -> BTreeSet<String> {
         WithdrawReason::Resolved,
         WithdrawReason::Timeout,
         WithdrawReason::RequesterDisconnected,
+        WithdrawReason::RequesterInterrupted,
         WithdrawReason::Unknown,
     ]
     .into_iter()
@@ -1194,9 +1196,30 @@ fn withdraw_reason_wire_variants() -> BTreeSet<String> {
             WithdrawReason::Resolved => "resolved",
             WithdrawReason::Timeout => "timeout",
             WithdrawReason::RequesterDisconnected => "requester_disconnected",
+            WithdrawReason::RequesterInterrupted => "requester_interrupted",
             WithdrawReason::Unknown => "unknown",
         };
         serde_spelling(&reason, hand)
+    })
+    .collect()
+}
+
+fn interrupt_outcome_wire_variants() -> BTreeSet<String> {
+    [
+        InterruptOutcome::Interrupted,
+        InterruptOutcome::StopRequested,
+        InterruptOutcome::StopRequestedUnconfirmed,
+        InterruptOutcome::NoOpenTurn,
+    ]
+    .into_iter()
+    .map(|outcome| {
+        let hand = match &outcome {
+            InterruptOutcome::Interrupted => "interrupted",
+            InterruptOutcome::StopRequested => "stop_requested",
+            InterruptOutcome::StopRequestedUnconfirmed => "stop_requested_unconfirmed",
+            InterruptOutcome::NoOpenTurn => "no_open_turn",
+        };
+        serde_spelling(&outcome, hand)
     })
     .collect()
 }
@@ -1719,6 +1742,10 @@ fn current_enum_wire_variants() -> BTreeMap<String, BTreeSet<String>> {
         (
             "WithdrawReason".to_string(),
             withdraw_reason_wire_variants(),
+        ),
+        (
+            "InterruptOutcome".to_string(),
+            interrupt_outcome_wire_variants(),
         ),
         (
             "DeliveryState".to_string(),

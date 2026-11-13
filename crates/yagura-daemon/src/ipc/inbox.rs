@@ -26,6 +26,9 @@ pub(super) struct HeldRead {
     // Before `hold`, so it is dropped first: the status is decided before the
     // parcels go back, and whoever sees them back sees the status decided.
     end: Option<StopEnd>,
+    // Before `hold` for the same reason: the turn the parcels started is
+    // closed before they go back.
+    wake: Option<WakeTurn>,
     hold: DoorHold,
     #[cfg(feature = "fault-injection")]
     faults: crate::fault_point::FaultPoints,
@@ -37,6 +40,7 @@ impl HeldRead {
         let _ = entry;
         Self {
             end: None,
+            wake: None,
             hold,
             #[cfg(feature = "fault-injection")]
             faults: entry.faults().clone(),
@@ -47,6 +51,9 @@ impl HeldRead {
     async fn settle(mut self) {
         if let Some(end) = self.end.take() {
             end.printed();
+        }
+        if let Some(wake) = self.wake.take() {
+            wake.printed();
         }
         #[cfg(feature = "fault-injection")]
         if self.hold.keeps_rows() {
@@ -93,6 +100,31 @@ impl Drop for StopEnd {
             && let Some(entry) = self.entry.upgrade()
         {
             entry.record_status_event_unless_newer(self.status, self.seen);
+        }
+    }
+}
+
+/// The turn a waiting door's parcel started by waking its CLI: the CLI was
+/// never woken if the door ends without saying it printed, so the turn is
+/// closed again then.
+struct WakeTurn {
+    entry: Weak<WindowEntry>,
+    number: u64,
+    printed: bool,
+}
+
+impl WakeTurn {
+    fn printed(mut self) {
+        self.printed = true;
+    }
+}
+
+impl Drop for WakeTurn {
+    fn drop(&mut self) {
+        if !self.printed
+            && let Some(entry) = self.entry.upgrade()
+        {
+            entry.turn().wake_unprinted(self.number);
         }
     }
 }
@@ -260,7 +292,7 @@ fn handle_wait(
     }
     match entry.inbox().wait() {
         Wait::Answered(read) => {
-            answer_read(entry, outbound, *read, &state.held_read, hook_timeout_sec);
+            answer_wait(entry, outbound, *read, &state.held_read, hook_timeout_sec);
         }
         Wait::Registered { guard, answer } => {
             let entry = Arc::clone(entry);
@@ -270,10 +302,36 @@ fn handle_wait(
                 // Dropped with the task, which the connection aborts when it ends.
                 let _guard = guard;
                 let read = answer.await.unwrap_or_else(|_| DoorRead::silent());
-                answer_read(&entry, &outbound, read, &slot, hook_timeout_sec);
+                answer_wait(&entry, &outbound, read, &slot, hook_timeout_sec);
             }));
         }
     }
+}
+
+/// [`answer_read`] for a wait. Handing a waiting door a parcel wakes its CLI,
+/// which starts a turn now: before the door prints, so before every hook of
+/// the turn it wakes.
+fn answer_wait(
+    entry: &Arc<WindowEntry>,
+    outbound: &Outbound,
+    read: DoorRead,
+    slot: &HeldSlot,
+    hook_timeout_sec: Option<u64>,
+) {
+    let wake = if read.hold.holds() {
+        entry.turn().wake_started().map(|number| WakeTurn {
+            entry: Arc::downgrade(entry),
+            number,
+            printed: false,
+        })
+    } else {
+        None
+    };
+    let DoorRead { message, hold } = read;
+    let mut held = HeldRead::new(entry, hold);
+    held.wake = wake;
+    put_held(slot, held);
+    outbound.reply(&timed(message, hook_timeout_sec));
 }
 
 /// Answers `report_session`. The value is neither logged nor echoed.

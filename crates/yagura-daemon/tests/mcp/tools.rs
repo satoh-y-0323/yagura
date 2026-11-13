@@ -1445,26 +1445,48 @@ async fn interrupt_window_rejects_an_empty_window_id_without_calling_the_transpo
     assert_eq!(transport.call_count(), 0);
 }
 
+/// A `window_interrupted` answer as the daemon sends it, read off the wire, so a case
+/// names the outcome by its wire value alone.
+fn window_interrupted(window_id: &str, outcome: &str) -> DaemonMessage {
+    yagura_protocol::decode_daemon_message(
+        serde_json::json!({
+            "type": "window_interrupted",
+            "window_id": window_id,
+            "outcome": outcome,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+    .expect("a window_interrupted answer decodes")
+}
+
+/// The tool's output is the window and what the daemon did there, as the daemon named it.
 #[tokio::test]
-async fn interrupt_window_maps_a_window_interrupted_response_to_the_window_id() {
-    let transport = MockTransport::with_response(Ok(DaemonMessage::WindowInterrupted {
-        window_id: "w1".to_string(),
-    }));
-    let args = InterruptWindowArgs {
-        window_id: Some("w1".to_string()),
-    };
+async fn interrupt_window_maps_a_window_interrupted_response_to_the_window_id_and_its_outcome() {
+    for outcome in [
+        "interrupted",
+        "stop_requested",
+        "stop_requested_unconfirmed",
+        "no_open_turn",
+    ] {
+        let transport = MockTransport::with_response(Ok(window_interrupted("w1", outcome)));
+        let args = InterruptWindowArgs {
+            window_id: Some("w1".to_string()),
+        };
 
-    let result = interrupt_window(&transport, args)
-        .await
-        .expect("must succeed");
+        let result = interrupt_window(&transport, args)
+            .await
+            .expect("must succeed");
 
-    assert_eq!(
-        transport.last_sent(),
-        ClientMessage::InterruptWindow {
-            window_id: "w1".to_string(),
-        }
-    );
-    assert_eq!(result["window_id"], "w1");
+        assert_eq!(
+            transport.last_sent(),
+            ClientMessage::InterruptWindow {
+                window_id: "w1".to_string(),
+            }
+        );
+        assert_eq!(result["window_id"], "w1");
+        assert_eq!(result["outcome"], outcome, "{result}");
+    }
 }
 
 #[tokio::test]
@@ -3194,9 +3216,7 @@ async fn gated_tool_results(
     .expect("send_message must succeed");
 
     let interrupt = MockTransport::with_identity(
-        Ok(DaemonMessage::WindowInterrupted {
-            window_id: "w1".to_string(),
-        }),
+        Ok(window_interrupted("w1", "interrupted")),
         identity.clone(),
     );
     let interrupted = interrupt_window(

@@ -51,6 +51,14 @@ pub enum ToolError {
     /// handed a request at launch.
     #[error("the window has no composer: {0}")]
     NoComposer(String),
+    /// The daemon refused an AI's interrupt because the window's profile
+    /// gives an AI no means to stop its CLI.
+    #[error("the window cannot be interrupted by an AI: {0}")]
+    InterruptUnsupported(String),
+    /// The request's own window was interrupted while the request waited, so
+    /// it was withdrawn and nothing was done.
+    #[error("the requesting window was interrupted: {0}")]
+    RequesterInterrupted(String),
     /// The daemon refused the request because a rate limit was exceeded.
     #[error("rate limited: {0}")]
     RateLimited(String),
@@ -123,6 +131,8 @@ impl ToolError {
             Self::ApprovalRequired(_) => "approval_required",
             Self::StatusUnknown(_) => "status_unknown",
             Self::NoComposer(_) => "no_composer",
+            Self::InterruptUnsupported(_) => "interrupt_unsupported",
+            Self::RequesterInterrupted(_) => "requester_interrupted",
             Self::RateLimited(_) => "rate_limited",
             Self::AuthFailed(_) => "auth_failed",
             Self::ApprovalDenied(_) => "approval_denied",
@@ -388,6 +398,8 @@ pub(crate) fn map_daemon_error(code: &str, message: String) -> ToolError {
         "approval_required" => ToolError::ApprovalRequired(message),
         "status_unknown" => ToolError::StatusUnknown(message),
         "no_composer" => ToolError::NoComposer(message),
+        "interrupt_unsupported" => ToolError::InterruptUnsupported(message),
+        "requester_interrupted" => ToolError::RequesterInterrupted(message),
         "rate_limited" => ToolError::RateLimited(message),
         "auth_failed" => ToolError::AuthFailed(message),
         "approval_denied" => ToolError::ApprovalDenied(message),
@@ -732,8 +744,8 @@ pub async fn interrupt_window<T: DaemonTransport>(
         .await
         .map_err(map_transport_error)?;
     match response {
-        DaemonMessage::WindowInterrupted { window_id } => Ok(with_requester(
-            json!({ "window_id": window_id }),
+        DaemonMessage::WindowInterrupted { window_id, outcome } => Ok(with_requester(
+            json!({ "window_id": window_id, "outcome": outcome }),
             transport.requester_identity(),
         )),
         DaemonMessage::Error { code, message, .. } => Err(map_daemon_error(&code, message)),

@@ -91,6 +91,48 @@ fn encode_legacy(input: &KeyInput, modes: InputModes) -> Vec<u8> {
     }
 }
 
+/// A key a profile names by word, for the daemon to press in a window: the
+/// vocabulary of `[interrupt]`'s `user_keys` and `ai_keys`. The words name
+/// presses, not bytes, so each is written in the form the window's CLI reads
+/// keys in ([`encode_key`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedPress {
+    /// `escape`.
+    Escape,
+    /// `ctrl_c`.
+    CtrlC,
+}
+
+impl NamedPress {
+    /// The press `word` names; `None` for a word outside the vocabulary.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "escape" => Some(Self::Escape),
+            "ctrl_c" => Some(Self::CtrlC),
+            _ => None,
+        }
+    }
+
+    /// The key press itself.
+    #[must_use]
+    pub fn press(self) -> KeyInput {
+        match self {
+            Self::Escape => KeyInput {
+                key: Key::Named(NamedKey::Escape),
+                mods: Modifiers::default(),
+            },
+            Self::CtrlC => KeyInput {
+                key: Key::Char('c'),
+                mods: Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+            },
+        }
+    }
+}
+
 /// One write of GUI input to a window. Built only from key presses or a
 /// client message, so client input never reaches a window as bare bytes.
 #[derive(Debug)]

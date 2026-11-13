@@ -30,10 +30,10 @@ use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ClientMessage, DaemonMessage, DeliveryState, Frame,
     FrameError, GuestLineage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
-    InstructionNoticeState, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton,
-    PointerInput, PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo,
-    WindowStatus, check_input_bounds, decode_client_message, encode_daemon_message, frame_decode,
-    frame_encode, is_valid_source, validate_handoff_target, validate_handoff_text,
+    InstructionNoticeState, InterruptOutcome, MessageError, OnNameTaken, PROTOCOL_REVISION,
+    PointerButton, PointerInput, PointerKind, ProfileInfo, RestoreCandidate, TerminalSize,
+    WindowInfo, WindowStatus, check_input_bounds, decode_client_message, encode_daemon_message,
+    frame_decode, frame_encode, is_valid_source, validate_handoff_target, validate_handoff_text,
     validate_launch_option_value, validate_message_text,
 };
 
@@ -75,6 +75,7 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
+use crate::profile_interrupt::Marked;
 use crate::pty::{
     AttachGeneration, ChildAnchor, FrameSend, FrameSink, InputState, SendKey, ViewNote,
 };
@@ -244,7 +245,7 @@ struct ConnectionState {
     /// approval, handoff and `send_message` tasks this connection spawned have
     /// no other way to learn that their requester is gone, since they are
     /// deliberately not tracked in `waiters` and never aborted.
-    closed: watch::Sender<bool>,
+    closed: ConnectionClosed,
     /// How many windows this connection has opened for a handoff that has
     /// neither been delivered nor torn down yet. Reference-counted because a
     /// slot outlives the connection: the detached task holding it still has
@@ -274,7 +275,7 @@ impl ConnectionState {
             identify_failures: 0,
             peer_executable,
             approver_refusal_logged: false,
-            closed: watch::channel(false).0,
+            closed: ConnectionClosed::new(),
             open_handoffs: Arc::new(AtomicUsize::new(0)),
             held_read: inbox::HeldSlot::default(),
             report_receipt: None,
@@ -347,7 +348,7 @@ enum StreamSend {
 enum PendingAction {
     /// A message envelope and who sends it.
     SendText(String, Sender),
-    Interrupt,
+    Interrupt(InterruptMeans),
     Close(bool),
     /// A handoff envelope and who sends it, plus the requesting window's id
     /// for the audit line (the envelope's own bytes are never logged) and the
@@ -365,7 +366,7 @@ impl PendingAction {
     fn tool(&self) -> DestructiveTool {
         match self {
             Self::SendText(..) => DestructiveTool::SendMessage,
-            Self::Interrupt => DestructiveTool::InterruptWindow,
+            Self::Interrupt(_) => DestructiveTool::InterruptWindow,
             Self::Close(_) => DestructiveTool::CloseWindow,
             Self::SendHandoff { .. } => DestructiveTool::SendHandoff,
         }
@@ -384,8 +385,9 @@ enum ApprovalEnd {
     /// entry vanished without an answer, which leaves the requester the same
     /// fail-closed outcome). Carries the answer the requester must get.
     Refused(DaemonMessage),
-    /// The requesting connection closed first, so nobody is left to answer.
-    RequesterGone,
+    /// The requester left it first, for this reason: its connection may be
+    /// gone, with nobody left to answer.
+    RequesterGone(Left),
 }
 
 /// One `send_handoff` request's caller-supplied arguments, kept together so
@@ -551,8 +553,9 @@ struct ProfileHandoffOpen {
     config: DaemonConfig,
     origin: RequestOrigin,
     conn_id: u64,
-    /// Raised when the requesting connection closes.
-    closed: watch::Receiver<bool>,
+    /// Raised when the requester leaves: its connection closes, or its
+    /// window is interrupted.
+    closed: LeftWatch,
     envelope: String,
     /// What the approver of the envelope reads: the lines naming what would
     /// be started, then the envelope.
@@ -582,10 +585,10 @@ struct DeliveryJob {
     sender: Sender,
     requester: Option<String>,
     slot: Option<HandoffSlot>,
-    /// Raised when the requester left: its connection closed, or its CLI
-    /// ended the turn the request was made in. Read only before the envelope
-    /// is put in.
-    closed: watch::Receiver<bool>,
+    /// Raised when the requester left: its connection closed, its CLI ended
+    /// the turn the request was made in, or its window was interrupted. Read
+    /// only before the envelope is put in.
+    closed: LeftWatch,
     /// The licence this delivery runs under, taken by value so a job cannot
     /// be assembled for a handoff no gate allowed.
     permit: Permit<permit::SendHandoff>,
@@ -1467,7 +1470,7 @@ impl IpcServer {
         // opposite: it is never aborted, because the ledger entry it owns has
         // to be withdrawn (which it does itself, once told the connection is
         // gone) rather than leaked into the approvers' queues forever.
-        let _ = state.closed.send(true);
+        state.closed.close();
         state.abort_waiters();
         self.broker.unregister_approver(state.conn_id);
 
@@ -2692,12 +2695,12 @@ impl IpcServer {
         };
         let RequestWatch {
             left: mut closed, ..
-        } = RequestWatch::new(&self.registry, outbound, state, open_withdrawn_msg());
+        } = RequestWatch::new(&self.registry, outbound, state, open_withdrawn_msg);
         let config = self.config.clone();
         tokio::spawn(async move {
             let verdict = await_verdict(ticket, &config, &mut closed).await;
             // A requester that left as the decision came in is still gone.
-            let requester_left = *closed.borrow();
+            let requester_left = closed.now().is_some();
             // Dropped before the open runs: a watch that outlives the wait
             // could still answer the call as withdrawn while the window opens.
             drop(closed);
@@ -3418,12 +3421,16 @@ impl IpcServer {
         });
     }
 
-    /// Interrupts a window the way the configured interrupt method prescribes.
+    /// Interrupts a window the way its profile's `[interrupt]` declares for
+    /// who asks ([`interrupt_means`]).
     ///
     /// Decision order: window resolution -> pre-validation (an exited window)
-    /// -> the status and approval gates -> the operation itself. An exited
-    /// window is reported to every caller alike, since its exit is already
-    /// readable through `get_window_status`.
+    /// -> the status gate -> the means the profile gives the caller (none for
+    /// an AI is refused `interrupt_unsupported`) -> the approval gate -> the
+    /// operation itself. An exited window is reported to every caller alike,
+    /// since its exit is already readable through `get_window_status`; an
+    /// `Unknown` window is refused before its profile is read, whatever it
+    /// declares.
     async fn handle_interrupt_window(
         &self,
         outbound: &Arc<Outbound>,
@@ -3438,6 +3445,17 @@ impl IpcServer {
             outbound.reply(&child_exited_msg());
             return;
         }
+        if let Err(reason) =
+            control::status_gate(DestructiveTool::InterruptWindow, entry.current_detected())
+        {
+            outbound.reply(&deny_msg(DestructiveTool::InterruptWindow, reason));
+            return;
+        }
+        let interrupt = self.window_interrupt(&entry).await;
+        let Some(means) = interrupt_means(interrupt, &state.origin) else {
+            outbound.reply(&interrupt_unsupported_msg());
+            return;
+        };
         let permit = match gate_destructive(
             &self.gate_context(state),
             &entry,
@@ -3447,11 +3465,11 @@ impl IpcServer {
             GateOutcome::Proceed(permit) => permit,
             GateOutcome::Pending(ticket) => {
                 spawn_pending(
-                    RequestWatch::connection_only(outbound, state),
+                    RequestWatch::connection_only(&self.registry, outbound, state),
                     Arc::clone(&self.registry),
                     self.config.clone(),
                     entry,
-                    PendingAction::Interrupt,
+                    PendingAction::Interrupt(means),
                     ticket,
                 );
                 return;
@@ -3459,7 +3477,7 @@ impl IpcServer {
             GateOutcome::Refused(message) => return reply_refused(outbound, &message),
         };
 
-        execute_interrupt(outbound, &entry, &self.config, permit).await;
+        execute_interrupt(outbound, &entry, &self.config, means, permit).await;
     }
 
     /// Closes a window and terminates its whole process tree.
@@ -3486,7 +3504,7 @@ impl IpcServer {
                 GateOutcome::Proceed(permit) => permit,
                 GateOutcome::Pending(ticket) => {
                     spawn_pending(
-                        RequestWatch::connection_only(outbound, state),
+                        RequestWatch::connection_only(&self.registry, outbound, state),
                         Arc::clone(&self.registry),
                         self.config.clone(),
                         entry,
@@ -3744,7 +3762,7 @@ impl IpcServer {
                     config: self.config.clone(),
                     origin: state.origin.clone(),
                     conn_id: state.conn_id,
-                    closed: state.closed.subscribe(),
+                    closed: RequestWatch::connection_only(&self.registry, outbound, state).left,
                     approval_text: format!("{}\n{}", description.text(), envelope.text),
                     envelope: envelope.text,
                     slot,
@@ -3981,12 +3999,23 @@ impl IpcServer {
         let wait_rx = entry.watch_status();
         let now = entry.watch_status();
         state.waiters.push(tokio::spawn(async move {
-            // A wait its requester's CLI has dropped ends as if its time ran out.
             let outcome = tokio::select! {
                 outcome = waiter::wait_for_status(wait_rx, target_status, timeout) => outcome,
-                () = request_left(&mut left) => WaitOutcome::Timeout {
-                    current: now.borrow().status,
-                },
+                left = left.wait() => {
+                    let current = now.borrow().status;
+                    // An interrupt of the requester ends its wait as such; a
+                    // wait its requester's CLI has dropped ends as if its
+                    // time ran out.
+                    if left == Left::Interrupted {
+                        outbound.reply(&DaemonMessage::WaitResult {
+                            window_id,
+                            outcome: WAIT_STOP_REQUESTED.to_string(),
+                            status: current.status(),
+                        });
+                        return;
+                    }
+                    WaitOutcome::Timeout { current }
+                }
             };
             send_wait_result(&outbound, &window_id, outcome, target_status);
         }));
@@ -5162,8 +5191,8 @@ async fn execute_send_text(
     });
 }
 
-/// Delivers an approved interrupt the way the configured method prescribes
-/// and answers the caller.
+/// Delivers an approved interrupt by `means` and answers the caller with what
+/// was done.
 ///
 /// The permit is taken by value: only a gate can issue one, so no caller can
 /// reach the interrupt without having passed one.
@@ -5171,15 +5200,102 @@ async fn execute_interrupt(
     outbound: &Outbound,
     entry: &WindowEntry,
     config: &DaemonConfig,
+    means: InterruptMeans,
     _permit: Permit<permit::InterruptWindow>,
 ) {
-    match control::interrupt_window(entry, config).await {
-        Ok(()) => outbound.reply(&DaemonMessage::WindowInterrupted {
-            window_id: entry.window_id().to_string(),
+    let outcome = match means {
+        InterruptMeans::Mark => match entry.turn().mark() {
+            Marked::Open => InterruptOutcome::StopRequested,
+            Marked::Unobserved => InterruptOutcome::StopRequestedUnconfirmed,
+            Marked::NoOpenTurn => InterruptOutcome::NoOpenTurn,
+        },
+        InterruptMeans::Keys { keys, ends_waits } => {
+            let bytes = match keys {
+                Some(keys) => {
+                    let presses: Vec<_> = keys.iter().map(|key| key.press()).collect();
+                    ClientWrite::from_presses(&presses, entry.session().input_state().modes)
+                        .bytes()
+                        .to_vec()
+                }
+                None => config.interrupt_bytes.clone(),
+            };
+            if let Err(err) = control::interrupt_window(entry, &bytes).await {
+                outbound.reply(&control_error_msg(&err));
+                return;
+            }
+            // The keys take effect at once, so what the window waited for
+            // ends with them.
+            if ends_waits {
+                entry.turn().interrupted_by_keys();
+            }
+            InterruptOutcome::Interrupted
+        }
+    };
+    outbound.reply(&DaemonMessage::WindowInterrupted {
+        window_id: entry.window_id().to_string(),
+        outcome,
+    });
+}
+
+/// How an `interrupt_window` stops its window's CLI, decided by who asks and
+/// the `[interrupt]` of the profile the window was launched from.
+#[derive(Debug)]
+enum InterruptMeans {
+    /// Writing keys: the profile's (`None`: the daemon's `interrupt_bytes`,
+    /// for a window whose profile declares none). `ends_waits` for an AI's
+    /// interrupt, which ends what the window waits for.
+    Keys {
+        keys: Option<Vec<crate::input_encode::NamedPress>>,
+        ends_waits: bool,
+    },
+    /// Marking the window's open turn.
+    Mark,
+}
+
+/// The means `origin`'s interrupt of a window whose profile declares
+/// `interrupt` takes; `None` when the profile gives an AI none. The user's
+/// own interrupt (an approver's) is never refused and puts no mark: it writes
+/// the user's keys.
+fn interrupt_means(
+    interrupt: Option<crate::profile_interrupt::ProfileInterrupt>,
+    origin: &RequestOrigin,
+) -> Option<InterruptMeans> {
+    use crate::profile_interrupt::AiMeans;
+
+    let ai = !matches!(origin, RequestOrigin::Approver);
+    let Some(interrupt) = interrupt else {
+        return Some(InterruptMeans::Keys {
+            keys: None,
+            ends_waits: ai,
+        });
+    };
+    if !ai {
+        return Some(InterruptMeans::Keys {
+            keys: Some(interrupt.user_keys),
+            ends_waits: false,
+        });
+    }
+    match interrupt.ai {
+        AiMeans::Keys(keys) => Some(InterruptMeans::Keys {
+            keys: Some(keys),
+            ends_waits: true,
         }),
-        Err(err) => outbound.reply(&control_error_msg(&err)),
+        AiMeans::Hook(_) => Some(InterruptMeans::Mark),
+        AiMeans::None => None,
     }
 }
+
+/// The refusal of an AI's interrupt of a window whose profile gives an AI no
+/// means to stop its CLI.
+fn interrupt_unsupported_msg() -> DaemonMessage {
+    error_msg(
+        "interrupt_unsupported",
+        "the window's profile gives an AI no way to interrupt its CLI; nothing was written",
+    )
+}
+
+/// What a `wait_for_status` ended by an interrupt of its requester answers.
+const WAIT_STOP_REQUESTED: &str = "stop_requested";
 
 /// Terminates an approved window's whole process tree and answers the caller.
 ///
@@ -5265,8 +5381,11 @@ async fn deliver_handoff(job: DeliveryJob) {
     } = job;
 
     // A requester gone before anything was put in leaves nothing to deliver.
-    if *closed.borrow() {
+    if let Some(left) = closed.now() {
         drop(slot);
+        if left.can_answer() {
+            outbound.reply(&send_withdrawn_msg(left));
+        }
         return;
     }
     drop(closed);
@@ -5569,13 +5688,13 @@ async fn approve_profile_handoff(job: ProfileHandoffOpen) {
                 &job.registry,
                 &job.outbound,
                 &job.origin,
-                job.closed.clone(),
-                open_withdrawn_msg(),
+                &job.closed,
+                open_withdrawn_msg,
             );
             let config = job.config.clone();
             tokio::spawn(async move {
                 let verdict = await_verdict(ticket, &config, &mut closed).await;
-                let requester_left = *closed.borrow();
+                let requester_left = closed.now().is_some();
                 drop(closed);
                 let job = ProfileHandoffOpen { outbound, ..job };
                 match verdict {
@@ -5607,8 +5726,11 @@ async fn start_profile_handoff(job: ProfileHandoffOpen, permit: Permit<permit::L
         slot,
         ..
     } = job;
-    if *closed.borrow() {
+    if let Some(left) = closed.now() {
         drop(slot);
+        if left.can_answer() {
+            outbound.reply(&open_withdrawn_msg(left));
+        }
         return;
     }
     let Some(prompt) = planned
@@ -6239,7 +6361,7 @@ fn reply_refused(outbound: &Outbound, message: &DaemonMessage) {
 async fn await_approval(
     ticket: &mut Ticket,
     deadline: Duration,
-    closed: &mut watch::Receiver<bool>,
+    closed: &mut LeftWatch,
 ) -> ApprovalEnd {
     tokio::select! {
         decided = &mut ticket.rx => match decided {
@@ -6251,11 +6373,9 @@ async fn await_approval(
             Err(_) => timed_out(ticket),
         },
         () = tokio::time::sleep(deadline) => timed_out(ticket),
-        // An `Err` here means the connection's sender is gone, which
-        // is the same news as the value it would have carried.
-        _ = closed.changed() => {
-            ticket.withdraw(WithdrawReason::RequesterDisconnected);
-            ApprovalEnd::RequesterGone
+        left = closed.wait() => {
+            ticket.withdraw(left.withdraw_reason());
+            ApprovalEnd::RequesterGone(left)
         }
     }
 }
@@ -6291,12 +6411,21 @@ fn spawn_pending(
                 outbound.reply(&message);
                 return;
             }
-            ApprovalEnd::RequesterGone => {
-                // A send's watch answers nothing itself; one whose requester
-                // only ended its turn still has a connection to answer on.
-                if let PendingAction::SendHandoff { .. } | PendingAction::SendText(..) = action {
-                    drop(action);
-                    outbound.reply(&send_withdrawn_msg());
+            ApprovalEnd::RequesterGone(left) => {
+                // These watches answer nothing themselves; a requester that
+                // ended its turn or was interrupted still has a connection to
+                // answer on.
+                let answer = match &action {
+                    PendingAction::SendHandoff { .. } | PendingAction::SendText(..) => {
+                        send_withdrawn_msg(left)
+                    }
+                    PendingAction::Interrupt(_) | PendingAction::Close(_) => {
+                        control_withdrawn_msg(left)
+                    }
+                };
+                drop(action);
+                if left.can_answer() {
+                    outbound.reply(&answer);
                 }
                 return;
             }
@@ -6318,8 +6447,8 @@ fn spawn_pending(
             PermittedAction::SendText(envelope, sender, permit) => {
                 execute_send_text(&outbound, &registry, &entry, envelope, sender, permit).await;
             }
-            PermittedAction::Interrupt(permit) => {
-                execute_interrupt(&outbound, &entry, &config, permit).await;
+            PermittedAction::Interrupt(means, permit) => {
+                execute_interrupt(&outbound, &entry, &config, means, permit).await;
             }
             PermittedAction::Close(force, permit) => {
                 execute_close(&outbound, &config, &entry, force, permit).await;
@@ -6410,210 +6539,424 @@ fn requester_window(registry: &WindowRegistry, origin: &RequestOrigin) -> Option
     }
 }
 
-/// What a detached `send_message` or handoff answers through, and the signal
-/// it hands the window as "the requester left".
-struct RequestWatch {
-    outbound: Arc<Outbound>,
-    left: watch::Receiver<bool>,
-}
+/// How a request learns that its requester left it, and why. The one place a
+/// connection's end is watched: what a request waits on carries the reason,
+/// so every receiver ends the way its reason asks.
+mod request_watch {
+    use std::sync::Arc;
 
-impl RequestWatch {
-    /// Watches the requesting connection and nothing else.
-    fn connection_only(outbound: &Arc<Outbound>, state: &ConnectionState) -> Self {
-        Self {
-            outbound: Arc::clone(outbound),
-            left: state.closed.subscribe(),
+    use tokio::sync::{broadcast, watch};
+    use yagura_protocol::{DaemonMessage, WindowStatus};
+
+    use super::{ConnectionState, Outbound, RequestOrigin, WindowRegistry, WithdrawReason};
+    use crate::waiter::StatusAt;
+
+    /// Raised once, when a connection ends. Read only through a
+    /// [`RequestWatch`], so no request waits on the connection alone and
+    /// misses the other reasons its requester leaves it.
+    pub(super) struct ConnectionClosed(watch::Sender<bool>);
+
+    impl ConnectionClosed {
+        pub(super) fn new() -> Self {
+            Self(watch::channel(false).0)
+        }
+
+        /// The connection ended.
+        pub(super) fn close(&self) {
+            let _ = self.0.send(true);
         }
     }
 
-    /// Watches the requesting connection, and also, when the requester is a
-    /// window whose CLI drops its calls at the end of a turn without
-    /// cancelling them, that window ending the turn the request was made in.
-    ///
-    /// In the latter case the connection is still open, so `withdrawn` is
-    /// answered on it at once, and whatever the window later returns for the
-    /// same request is not answered again.
-    fn new(
-        registry: &WindowRegistry,
-        outbound: &Arc<Outbound>,
-        state: &ConnectionState,
-        withdrawn: DaemonMessage,
-    ) -> Self {
-        Self::watching(
-            registry,
-            outbound,
-            &state.origin,
-            state.closed.subscribe(),
-            Some(withdrawn),
-        )
+    /// Why a requester left its request.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Left {
+        /// Its connection closed: nobody is left to answer.
+        Disconnected,
+        /// Its window's CLI ended the turn the request was made in, dropping
+        /// the call.
+        TurnEnded,
+        /// An AI interrupted its window, which ends what that window waits
+        /// for.
+        Interrupted,
     }
 
-    /// [`RequestWatch::new`] that answers nothing itself when the turn ends:
-    /// the request answers once it has let go of what it holds.
-    fn quiet(registry: &WindowRegistry, outbound: &Arc<Outbound>, state: &ConnectionState) -> Self {
-        Self::watching(
-            registry,
-            outbound,
-            &state.origin,
-            state.closed.subscribe(),
-            None,
-        )
-    }
-
-    /// [`RequestWatch::new`] for a task that no longer holds the
-    /// connection's state: `origin` and `closed` are what it took from it.
-    fn detached(
-        registry: &WindowRegistry,
-        outbound: &Arc<Outbound>,
-        origin: &RequestOrigin,
-        closed: watch::Receiver<bool>,
-        withdrawn: DaemonMessage,
-    ) -> Self {
-        Self::watching(registry, outbound, origin, closed, Some(withdrawn))
-    }
-
-    /// The watch every constructor above builds; `withdrawn` is answered at
-    /// the end of the turn when given.
-    fn watching(
-        registry: &WindowRegistry,
-        outbound: &Arc<Outbound>,
-        origin: &RequestOrigin,
-        closed: watch::Receiver<bool>,
-        withdrawn: Option<DaemonMessage>,
-    ) -> Self {
-        let requester = match origin {
-            RequestOrigin::Window(window_id) => registry
-                .get(window_id)
-                .filter(|entry| entry.abandons_calls_at_turn_end()),
-            RequestOrigin::External | RequestOrigin::Approver => None,
-        };
-        let Some(requester) = requester else {
-            return Self {
-                outbound: Arc::clone(outbound),
-                left: closed,
-            };
-        };
-        // Subscribed before the current status is read, so no change between
-        // the two is missed.
-        let changes = requester.subscribe_status();
-        let turn = TurnWatch {
-            ran: requester.current_status() == WindowStatus::Running,
-        };
-        let outbound = outbound.for_one_answer();
-        let (left_tx, left) = watch::channel(false);
-        tokio::spawn(withdraw_at_turn_end(
-            closed,
-            changes,
-            turn,
-            left_tx,
-            Arc::clone(&outbound),
-            withdrawn,
-        ));
-        Self { outbound, left }
-    }
-}
-
-/// The requester's turn, as its confirmed statuses tell it.
-struct TurnWatch {
-    /// Whether the requester has been `Running` since the request was made,
-    /// the moment it was made included: a CLI is running when it calls a tool.
-    ran: bool,
-}
-
-impl TurnWatch {
-    /// Whether `now` ends the turn. `Unknown` and `WaitingApproval` say
-    /// nothing about it: an undetectable window never ends a request, and an
-    /// approval dialog is part of a turn.
-    fn ends_at(&mut self, now: WindowStatus) -> bool {
-        match now {
-            WindowStatus::Running => {
-                self.ran = true;
-                false
+    impl Left {
+        /// The reason an approval it waited for is withdrawn with.
+        pub(super) fn withdraw_reason(self) -> WithdrawReason {
+            match self {
+                Self::Disconnected | Self::TurnEnded => WithdrawReason::RequesterDisconnected,
+                Self::Interrupted => WithdrawReason::RequesterInterrupted,
             }
-            WindowStatus::WaitingInput
-            | WindowStatus::Interrupted
-            | WindowStatus::Idle
-            | WindowStatus::Exited => self.ran,
-            WindowStatus::WaitingApproval | WindowStatus::Unknown => false,
+        }
+
+        /// Whether the request's connection is still open to be answered on.
+        pub(super) fn can_answer(self) -> bool {
+            self != Self::Disconnected
         }
     }
-}
 
-/// Raises `left` once the requesting connection closes, or once `turn` ends
-/// (answering `withdrawn` first when given, since that connection is still
-/// open).
-///
-/// Holds `left` for as long as anyone watches it: a dropped sender reads as a
-/// requester that left. Ends without raising it once nobody does, which is
-/// when the request it watches for has ended.
-async fn withdraw_at_turn_end(
-    mut closed: watch::Receiver<bool>,
-    mut changes: broadcast::Receiver<StatusAt>,
-    mut turn: TurnWatch,
-    left: watch::Sender<bool>,
-    outbound: Arc<Outbound>,
-    withdrawn: Option<DaemonMessage>,
-) {
-    let mut window_open = true;
-    loop {
-        tokio::select! {
-            biased;
-            () = left.closed() => return,
-            changed = closed.changed() => {
-                if changed.is_err() || *closed.borrow_and_update() {
-                    let _ = left.send(true);
-                    return;
-                }
+    /// Tells whether, and why, a request's requester left it.
+    #[derive(Clone)]
+    pub(super) struct LeftWatch {
+        closed: watch::Receiver<bool>,
+        /// Raised by the watch of the requester's window; `None` for a
+        /// requester that is no window.
+        window: Option<watch::Receiver<Option<Left>>>,
+    }
+
+    impl LeftWatch {
+        /// Why the requester left, if it has.
+        pub(super) fn now(&self) -> Option<Left> {
+            if *self.closed.borrow() {
+                return Some(Left::Disconnected);
             }
-            change = changes.recv(), if window_open => {
-                let now = match change {
-                    Ok(change) => change.status.status(),
-                    // Statuses were missed: whether the turn ended among them
-                    // cannot be told, so it is left to the ones that follow.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    // The window is gone.
-                    Err(broadcast::error::RecvError::Closed) => {
-                        window_open = false;
-                        WindowStatus::Exited
-                    }
+            self.window.as_ref().and_then(|window| *window.borrow())
+        }
+
+        /// Resolves once the requester left, with why; never when nothing
+        /// can tell any more.
+        pub(super) async fn wait(&mut self) -> Left {
+            let Self { closed, window } = self;
+            let window = async {
+                let left = match window.as_mut() {
+                    Some(window) => window.wait_for(Option::is_some).await.map(|left| *left),
+                    None => return std::future::pending().await,
                 };
-                if turn.ends_at(now) {
-                    if let Some(withdrawn) = &withdrawn {
-                        outbound.reply(withdrawn);
+                match left {
+                    Ok(left) => left.unwrap_or(Left::Disconnected),
+                    Err(_) => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                // A connection's state that is gone without a word is the
+                // same news.
+                () = connection_closed(closed) => Left::Disconnected,
+                left = window => left,
+            }
+        }
+    }
+
+    /// What a request answers through, and what tells it its requester left.
+    pub(super) struct RequestWatch {
+        pub(super) outbound: Arc<Outbound>,
+        pub(super) left: LeftWatch,
+    }
+
+    /// The answer a watch gives on its own, when its requester's window left
+    /// the request with its connection still open.
+    pub(super) type Withdrawn = fn(Left) -> DaemonMessage;
+
+    impl RequestWatch {
+        /// Watches the requesting connection, and a requesting window being
+        /// interrupted; the request answers itself.
+        pub(super) fn connection_only(
+            registry: &WindowRegistry,
+            outbound: &Arc<Outbound>,
+            state: &ConnectionState,
+        ) -> Self {
+            Self::watching(
+                registry,
+                outbound,
+                &state.origin,
+                state.closed.0.subscribe(),
+                Watching {
+                    turn_end: false,
+                    withdrawn: None,
+                },
+            )
+        }
+
+        /// [`RequestWatch::connection_only`], also watching, when the
+        /// requester is a window whose CLI drops its calls at the end of a
+        /// turn without cancelling them, that window ending the turn the
+        /// request was made in.
+        ///
+        /// When the requester's window leaves the request, its connection is
+        /// still open, so `withdrawn` is answered on it at once, and whatever
+        /// is later returned for the same request is not answered again.
+        pub(super) fn new(
+            registry: &WindowRegistry,
+            outbound: &Arc<Outbound>,
+            state: &ConnectionState,
+            withdrawn: Withdrawn,
+        ) -> Self {
+            Self::watching(
+                registry,
+                outbound,
+                &state.origin,
+                state.closed.0.subscribe(),
+                Watching {
+                    turn_end: true,
+                    withdrawn: Some(withdrawn),
+                },
+            )
+        }
+
+        /// [`RequestWatch::new`] that answers nothing itself: the request
+        /// answers, why its requester left included, once it has let go of
+        /// what it holds.
+        pub(super) fn quiet(
+            registry: &WindowRegistry,
+            outbound: &Arc<Outbound>,
+            state: &ConnectionState,
+        ) -> Self {
+            Self::watching(
+                registry,
+                outbound,
+                &state.origin,
+                state.closed.0.subscribe(),
+                Watching {
+                    turn_end: true,
+                    withdrawn: None,
+                },
+            )
+        }
+
+        /// [`RequestWatch::new`] for a task that no longer holds the
+        /// connection's state: `origin` is the requester it took from it, and
+        /// `base` a watch made while it held it.
+        pub(super) fn detached(
+            registry: &WindowRegistry,
+            outbound: &Arc<Outbound>,
+            origin: &RequestOrigin,
+            base: &LeftWatch,
+            withdrawn: Withdrawn,
+        ) -> Self {
+            Self::watching(
+                registry,
+                outbound,
+                origin,
+                base.closed.clone(),
+                Watching {
+                    turn_end: true,
+                    withdrawn: Some(withdrawn),
+                },
+            )
+        }
+
+        fn watching(
+            registry: &WindowRegistry,
+            outbound: &Arc<Outbound>,
+            origin: &RequestOrigin,
+            closed: watch::Receiver<bool>,
+            watching: Watching,
+        ) -> Self {
+            let requester = match origin {
+                RequestOrigin::Window(window_id) => registry.get(window_id),
+                RequestOrigin::External | RequestOrigin::Approver => None,
+            };
+            let Some(requester) = requester else {
+                return Self {
+                    outbound: Arc::clone(outbound),
+                    left: LeftWatch {
+                        closed,
+                        window: None,
+                    },
+                };
+            };
+            // Subscribed before the current turn and status are read, so no
+            // change between the two is missed.
+            let stops = requester.turn().subscribe_stops();
+            let (changes, turn) = if watching.turn_end && requester.abandons_calls_at_turn_end() {
+                let changes = requester.subscribe_status();
+                let turn = TurnWatch {
+                    ran: requester.current_status() == WindowStatus::Running,
+                };
+                (Some(changes), Some(turn))
+            } else {
+                (None, None)
+            };
+            // A request the window starts while its marked turn is open ends
+            // at once, as the ones it waited on did.
+            let already = requester.turn().ends_requests_now();
+            let outbound = match watching.withdrawn {
+                Some(_) => outbound.for_one_answer(),
+                None => Arc::clone(outbound),
+            };
+            let (left_tx, window) = watch::channel(None);
+            tokio::spawn(watch_requester(
+                Requester {
+                    closed: closed.clone(),
+                    stops,
+                    changes,
+                    turn,
+                    already,
+                },
+                left_tx,
+                Arc::clone(&outbound),
+                watching.withdrawn,
+            ));
+            Self {
+                outbound,
+                left: LeftWatch {
+                    closed,
+                    window: Some(window),
+                },
+            }
+        }
+    }
+
+    /// What a watch looks for besides the connection and an interrupt.
+    struct Watching {
+        /// The end of the requester's turn, for a CLI that drops its calls
+        /// there.
+        turn_end: bool,
+        withdrawn: Option<Withdrawn>,
+    }
+
+    /// What a requesting window's watch follows.
+    struct Requester {
+        closed: watch::Receiver<bool>,
+        stops: watch::Receiver<u64>,
+        changes: Option<broadcast::Receiver<StatusAt>>,
+        turn: Option<TurnWatch>,
+        /// The window's marked turn was open when the request was made.
+        already: bool,
+    }
+
+    /// The requester's turn, as its confirmed statuses tell it.
+    struct TurnWatch {
+        /// Whether the requester has been `Running` since the request was
+        /// made, the moment it was made included: a CLI is running when it
+        /// calls a tool.
+        ran: bool,
+    }
+
+    impl TurnWatch {
+        /// Whether `now` ends the turn. `Unknown` and `WaitingApproval` say
+        /// nothing about it: an undetectable window never ends a request, and
+        /// an approval dialog is part of a turn.
+        fn ends_at(&mut self, now: WindowStatus) -> bool {
+            match now {
+                WindowStatus::Running => {
+                    self.ran = true;
+                    false
+                }
+                WindowStatus::WaitingInput
+                | WindowStatus::Interrupted
+                | WindowStatus::Idle
+                | WindowStatus::Exited => self.ran,
+                WindowStatus::WaitingApproval | WindowStatus::Unknown => false,
+            }
+        }
+    }
+
+    /// Raises `left` once the requesting window leaves the request: it is
+    /// interrupted, or its turn ends (answering `withdrawn` first when given,
+    /// since its connection is still open).
+    ///
+    /// Ends without raising it once nobody watches it, which is when the
+    /// request it watches for has ended, or once the connection closed,
+    /// which every [`LeftWatch`] sees for itself.
+    async fn watch_requester(
+        requester: Requester,
+        left: watch::Sender<Option<Left>>,
+        outbound: Arc<Outbound>,
+        withdrawn: Option<Withdrawn>,
+    ) {
+        let Requester {
+            mut closed,
+            mut stops,
+            mut changes,
+            mut turn,
+            already,
+        } = requester;
+        let raise = |reason: Left| {
+            if let Some(withdrawn) = withdrawn {
+                outbound.reply(&withdrawn(reason));
+            }
+            let _ = left.send(Some(reason));
+        };
+        if already {
+            raise(Left::Interrupted);
+            return;
+        }
+        let mut stops_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                () = left.closed() => return,
+                () = connection_closed(&mut closed) => return,
+                changed = stops.changed(), if stops_open => {
+                    if changed.is_err() {
+                        // The window is gone: no interrupt can reach it.
+                        stops_open = false;
+                        continue;
                     }
-                    let _ = left.send(true);
+                    raise(Left::Interrupted);
                     return;
+                }
+                change = next_status(&mut changes), if changes.is_some() => {
+                    let now = match change {
+                        Ok(change) => change.status.status(),
+                        // Statuses were missed: whether the turn ended among
+                        // them cannot be told, so it is left to the ones
+                        // that follow.
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        // The window is gone.
+                        Err(broadcast::error::RecvError::Closed) => {
+                            changes = None;
+                            WindowStatus::Exited
+                        }
+                    };
+                    if turn.as_mut().is_some_and(|turn| turn.ends_at(now)) {
+                        raise(Left::TurnEnded);
+                        return;
+                    }
                 }
             }
         }
     }
-}
 
-/// Resolves once a [`RequestWatch`]'s requester has left the request; never
-/// when the watch can no longer say so.
-async fn request_left(left: &mut watch::Receiver<bool>) {
-    if left.wait_for(|left| *left).await.is_err() {
-        std::future::pending::<()>().await;
+    /// Resolves once the connection ended, or its state is gone.
+    async fn connection_closed(closed: &mut watch::Receiver<bool>) {
+        let _ = closed.wait_for(|closed| *closed).await.map(|_| ());
+    }
+
+    async fn next_status(
+        changes: &mut Option<broadcast::Receiver<StatusAt>>,
+    ) -> Result<StatusAt, broadcast::error::RecvError> {
+        match changes {
+            Some(changes) => changes.recv().await,
+            None => std::future::pending().await,
+        }
     }
 }
 
-/// The answer to a `send_message` or `send_handoff` whose requester ended
-/// its turn before an approver decided: nothing was put in the window's
-/// inbox.
-fn send_withdrawn_msg() -> DaemonMessage {
-    error_msg(
-        "approval_timeout",
-        "the requester ended its turn before an approver decided, so nothing was sent",
-    )
+use request_watch::{ConnectionClosed, Left, LeftWatch, RequestWatch};
+
+/// The answer to a request whose requester left it before an approver
+/// decided, with its connection still open: nothing was done.
+fn withdrawn_msg(left: Left, nothing_done: &str) -> DaemonMessage {
+    match left {
+        Left::Interrupted => error_msg(
+            "requester_interrupted",
+            &format!(
+                "the requesting window was interrupted before an approver decided, so {nothing_done}"
+            ),
+        ),
+        Left::TurnEnded | Left::Disconnected => error_msg(
+            "approval_timeout",
+            &format!("the requester ended its turn before an approver decided, so {nothing_done}"),
+        ),
+    }
 }
 
-/// The answer to a request to open a window whose requester ended its turn
-/// before an approver decided: nothing was opened.
-fn open_withdrawn_msg() -> DaemonMessage {
-    error_msg(
-        "approval_timeout",
-        "the requester ended its turn before an approver decided, so no window was opened",
-    )
+/// [`withdrawn_msg`] for a `send_message` or `send_handoff`: nothing was put
+/// in the window's inbox.
+fn send_withdrawn_msg(left: Left) -> DaemonMessage {
+    withdrawn_msg(left, "nothing was sent")
+}
+
+/// [`withdrawn_msg`] for a request to open a window.
+fn open_withdrawn_msg(left: Left) -> DaemonMessage {
+    withdrawn_msg(left, "no window was opened")
+}
+
+/// [`withdrawn_msg`] for an `interrupt_window` or `close_window`.
+fn control_withdrawn_msg(left: Left) -> DaemonMessage {
+    withdrawn_msg(left, "the window was left as it was")
 }
 
 /// Who a request on this connection sends as: the window it identified as,

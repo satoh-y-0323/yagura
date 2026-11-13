@@ -1346,3 +1346,89 @@ async fn a_task_report_sent_while_the_writer_forgets_a_taken_one_is_still_kept_f
         "the store must keep the report the owner has not read, and not the one it took"
     );
 }
+
+// --- an AI's interrupt of the window waiting for reports ---------------------------------
+
+/// Sends `wait_for_report` on `client`; frames on one connection are handled in order, so
+/// the pong proves the wait is registered.
+async fn start_report_wait(client: &mut Connection, timeout_sec: u64) {
+    send(client, &ClientMessage::WaitForReport { timeout_sec }).await;
+    send(client, &ClientMessage::Ping).await;
+    match read_response(client).await {
+        DaemonMessage::Pong => {}
+        other => panic!("expected pong, got {other:?}"),
+    }
+}
+
+fn summaries(answer: DaemonMessage) -> Vec<String> {
+    match answer {
+        DaemonMessage::Reports { reports, .. } => {
+            reports.into_iter().map(|report| report.summary).collect()
+        }
+        other => panic!("expected a reports answer, got {other:?}"),
+    }
+}
+
+/// An AI's interrupt of a window ends that window's `wait_for_report` at once, as the end
+/// of its turn would. A report that arrives as the interrupt does is never lost: the wait
+/// carries it, or it stays for the next call.
+#[tokio::test]
+async fn an_ais_interrupt_ends_the_windows_wait_for_report_and_loses_no_report() {
+    let dir = unique_temp_dir("report-interrupted");
+    let config = DaemonConfig {
+        approval_policy: Some(common::policy_opening(&["interrupt_window"])),
+        // `0x03` would end the `echo_child` requester on Windows.
+        interrupt_bytes: b"REPORT-INTERRUPT-KEY\r\n".to_vec(),
+        wait_timeout_max_secs: 7200,
+        ..detection_config(&dir, approver_base_config())
+    };
+    let h = Harness::start("report-interrupted", config).await;
+    let mut observer = h.connect().await;
+    let requester = h.open_idle_window(&mut observer).await;
+    let mut waiting = h.connect().await;
+    identify(&mut waiting, &requester).await;
+    let child = call_open_window(&mut waiting, echo_child_command()).await;
+
+    start_report_wait(&mut waiting, 7200).await;
+    assert_eq!(
+        crate::hook_events_door::interrupt_from(&mut observer, &requester).await,
+        Ok("interrupted".to_string()),
+        "the key was written"
+    );
+    assert_eq!(
+        summaries(read_response(&mut waiting).await),
+        Vec::<String>::new(),
+        "the interrupt ended the wait, with nothing taken"
+    );
+
+    start_report_wait(&mut waiting, 7200).await;
+    let mut reporter = h.connect().await;
+    identify(&mut reporter, &child).await;
+    send(
+        &mut reporter,
+        &ClientMessage::SendReport {
+            outcome: ReportOutcome::Succeeded,
+            summary: "AS-THE-INTERRUPT".to_string(),
+            path: None,
+        },
+    )
+    .await;
+    let interrupted = crate::hook_events_door::interrupt_from(&mut observer, &requester).await;
+    assert_eq!(interrupted, Ok("interrupted".to_string()));
+    let mut seen = summaries(read_response(&mut waiting).await);
+    match read_response(&mut reporter).await {
+        DaemonMessage::ReportSent { .. } => {}
+        other => panic!("expected report_sent, got {other:?}"),
+    }
+    send(
+        &mut waiting,
+        &ClientMessage::WaitForReport { timeout_sec: 0 },
+    )
+    .await;
+    seen.extend(summaries(read_response(&mut waiting).await));
+    assert_eq!(
+        seen,
+        ["AS-THE-INTERRUPT"],
+        "the report reaches the requester exactly once"
+    );
+}

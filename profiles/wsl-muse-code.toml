@@ -49,7 +49,7 @@ absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}"
 # check for being inside a window. It replaces the user's own
 # `managed_hooks_path` for this window only.
 [hooks]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":{hook_timeout}},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout},"async":true}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code Interrupt","timeout":{hook_timeout},"async":true}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code PostToolUse","timeout":{hook_timeout}}]}],"PostToolUseFailure":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code PostToolUseFailure","timeout":{hook_timeout}}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
   "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
@@ -83,6 +83,34 @@ read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat 
 absent_exit = 3
 
 # The Stop hook calls the `--hook` door, so its status and its block are one
-# handler: a second handler's status could land after the block's.
+# handler: a second handler's status could land after the block's. The events
+# that start and end a turn call it too, for [interrupt].
 [hook_events]
+UserPromptSubmit = { status = "running", deliver = "take" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }
+StopFailure = { status = "waiting_input" }
+Interrupt = { status = "waiting_input" }
+# Declared only to be stopped at ([interrupt]): no status, delivery or session.
+PostToolUse = {}
+PostToolUseFailure = {}
+
+# How the user and an AI stop the CLI. The user's own interrupt types Escape.
+# An AI's marks the window's open turn, and each tool result of that turn is
+# answered with a stop until the turn ends. Muse tells no subagent's hook
+# apart, so no answer may end the turn: the stop answers stop a subagent alone
+# (measured), and the turn ends at `Interrupt` or `Stop`.
+[interrupt]
+user_keys = ["escape"]
+ai = "hook"
+
+[interrupt.turn]
+starts = ["UserPromptSubmit"]
+ends = ["Stop", "StopFailure", "Interrupt"]
+
+[interrupt.stops.PostToolUse]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = false
+
+[interrupt.stops.PostToolUseFailure]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = false

@@ -48,8 +48,8 @@ use super::plan::PlanRuntime;
 use super::report;
 use super::store_gate::{StoreAccessError, StoreGate};
 use super::{
-    ApprovalEnd, Outbound, approval_limits, await_approval, deny_msg, deny_no_approver, error_msg,
-    now_ms, requester_for, window_info,
+    ApprovalEnd, Outbound, RequestWatch, approval_limits, await_approval, deny_msg,
+    deny_no_approver, error_msg, now_ms, requester_for, window_info,
 };
 
 /// The one room every caller may reach, whatever workspace it belongs to.
@@ -1107,7 +1107,9 @@ async fn submit_for_approval(
             let broker = Arc::clone(broker);
             let config = config.clone();
             let outbound = Arc::clone(outbound);
-            let mut closed = state.closed.subscribe();
+            let RequestWatch {
+                left: mut closed, ..
+            } = RequestWatch::connection_only(registry.as_ref(), &outbound, state);
             let deadline = Duration::from_secs(config.approval_timeout_secs);
             tokio::spawn(async move {
                 match await_approval(&mut ticket, deadline, &mut closed).await {
@@ -1115,7 +1117,12 @@ async fn submit_for_approval(
                         complete_post(&chat, &registry, &broker, &outbound, post).await;
                     }
                     ApprovalEnd::Refused(message) => outbound.reply(&message),
-                    ApprovalEnd::RequesterGone => {}
+                    // A poster whose window was interrupted is still there to
+                    // be told nothing was posted.
+                    ApprovalEnd::RequesterGone(left) if left.can_answer() => {
+                        outbound.reply(&super::withdrawn_msg(left, "nothing was posted"));
+                    }
+                    ApprovalEnd::RequesterGone(_) => {}
                 }
             });
         }

@@ -598,3 +598,117 @@ async fn an_open_window_waiting_for_an_approver_is_withdrawn_when_its_requester_
     expect_pong(&mut requester).await;
     assert_eq!(call_list_windows(&mut stage.observer).await.len(), before);
 }
+
+// =====================================================================
+// An AI's interrupt of the requester
+// =====================================================================
+
+/// What an AI's interrupt writes to a window no profile declares a means for, in place
+/// of `0x03`, which would end the `echo_child` requester on Windows.
+const INTERRUPT_KEY: &[u8] = b"REQ-INTERRUPT-KEY\r\n";
+
+/// A window no profile declares a means for is interrupted by its key, which takes effect
+/// at once: what that window was waiting for ends then, on its still open connections, the
+/// way the end of its turn would end it. Its `wait_for_status` says it ended for the
+/// interrupt, apart from a timeout, with the waited window's status; its `send_message`
+/// still waiting for an approver is withdrawn for that reason and sends nothing.
+#[tokio::test]
+async fn an_ais_interrupt_by_key_ends_what_the_requester_was_waiting_for() {
+    let dir = unique_temp_dir("interrupt-key-requests");
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["interrupt_window"])),
+        interrupt_bytes: INTERRUPT_KEY.to_vec(),
+        ..config(&dir)
+    };
+    let h = Harness::start("interrupt-key-requests", config).await;
+    let mut observer = h.connect().await;
+    write_requester_definition(&dir, "requester", None);
+    let requester_window = h
+        .open(process::echo_child_command(), Some("requester"))
+        .await;
+    h.write_input(&requester_window, format!("{WAITING_INPUT}\r\n").as_bytes())
+        .await;
+    wait_until_status(&mut observer, &requester_window, WindowStatus::WaitingInput).await;
+    common::write_control_definition(&dir);
+    let receiver = h.open_idle_window(&mut observer).await;
+    let mut approver = h.connect().await;
+    register_approver(&mut approver).await;
+
+    let mut waiting = h.connect().await;
+    identify(&mut waiting, &requester_window).await;
+    send(
+        &mut waiting,
+        &ClientMessage::WaitForStatus {
+            window_id: receiver.clone(),
+            target_status: WindowStatus::Exited,
+            timeout_sec: 300,
+        },
+    )
+    .await;
+    expect_pong(&mut waiting).await;
+    let mut sending = h.connect().await;
+    identify(&mut sending, &requester_window).await;
+    send(
+        &mut sending,
+        &ClientMessage::SendText {
+            window_id: receiver.clone(),
+            text: "never sent".to_string(),
+        },
+    )
+    .await;
+    let request = expect_approval_requested(&mut approver).await;
+
+    let answered = crate::hook_events_door::interrupt_from(&mut observer, &requester_window).await;
+    assert_eq!(
+        answered,
+        Ok("interrupted".to_string()),
+        "the key was written"
+    );
+    match read_response(&mut waiting).await {
+        DaemonMessage::WaitResult {
+            window_id,
+            outcome,
+            status,
+        } => {
+            assert_eq!(window_id, receiver);
+            assert_eq!(
+                outcome, "stop_requested",
+                "the wait ends as ended by the interrupt, told apart from a timeout"
+            );
+            assert_eq!(
+                status,
+                WindowStatus::Idle,
+                "with the waited window's status"
+            );
+        }
+        other => panic!("expected the wait's end, got {other:?}"),
+    }
+    expect_pong(&mut waiting).await;
+    match read_approver_reply(&mut approver).await {
+        DaemonMessage::ApprovalWithdrawn { request_id, reason } => {
+            assert_eq!(request_id, request.request_id);
+            assert_eq!(
+                serde_json::to_value(reason).expect("a reason encodes"),
+                "requester_interrupted",
+                "the approval is withdrawn for the interrupt, a reason of its own"
+            );
+        }
+        other => panic!("expected approval_withdrawn, got {other:?}"),
+    }
+    match read_response(&mut sending).await {
+        DaemonMessage::Error { .. } => {}
+        other => {
+            panic!("the send was never approved, so it answers that it sent nothing; got {other:?}")
+        }
+    }
+    expect_pong(&mut sending).await;
+    assert_eq!(
+        h.registry
+            .get(&receiver)
+            .expect("receiver exists")
+            .inbox()
+            .pending_count(),
+        0,
+        "nothing was sent"
+    );
+}

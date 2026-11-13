@@ -435,6 +435,10 @@ pub struct Profile {
     /// The `[hook_events]` table, already validated: what the daemon does when
     /// a hook calls `--hook` with this profile's id. `None` means no such table.
     pub hook_events: Option<ProfileHookEvents>,
+    /// The `[interrupt]` table, already validated against `hook_events`: how
+    /// the user and an AI stop this profile's CLI. `None` means no such table:
+    /// both write the daemon's `interrupt_bytes`.
+    pub interrupt: Option<crate::profile_interrupt::ProfileInterrupt>,
     /// The `[hook_timeout]` table, already validated: the whole seconds this
     /// profile's CLI gives a hook command, which the daemon names to a door
     /// and the registration texts take by placeholder. Empty when the document
@@ -1055,6 +1059,11 @@ struct RawProfile {
     /// [`ProfileParseError::InvalidHookEvents`].
     #[serde(default)]
     hook_timeout: Option<toml::Value>,
+    /// Untyped for the same reason: every rule it breaks is
+    /// [`ProfileParseError::InvalidHookEvents`], since its hook form is read
+    /// against `[hook_events]`.
+    #[serde(default)]
+    interrupt: Option<toml::Value>,
     #[serde(default)]
     host_paths: Option<RawHostPaths>,
     // Not in the design: a type its rule refuses is a decode failure
@@ -1389,8 +1398,19 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
     let mut warnings = Vec::new();
     let delivery =
         parse_delivery(raw.delivery, &mut warnings).map_err(ProfileParseError::InvalidDelivery)?;
-    let hook_events = parse_hook_events(raw.hook_events, raw.subagent_pointer, &mut warnings)
-        .map_err(ProfileParseError::InvalidHookEvents)?;
+    let interrupt = crate::profile_interrupt::parse_interrupt(raw.interrupt)
+        .map_err(|err| ProfileParseError::InvalidHookEvents(HookEventsError::Interrupt(err)))?;
+    let hook_events = parse_hook_events(
+        raw.hook_events,
+        raw.subagent_pointer,
+        &crate::profile_interrupt::stop_event_names(interrupt.as_ref()),
+        &mut warnings,
+    )
+    .map_err(ProfileParseError::InvalidHookEvents)?;
+    if let Some(interrupt) = &interrupt {
+        crate::profile_interrupt::check_against_events(interrupt, hook_events.as_ref())
+            .map_err(|err| ProfileParseError::InvalidHookEvents(HookEventsError::Interrupt(err)))?;
+    }
     let shim_guidance = raw
         .shim_guidance
         .map(|raw| parse_guidance(raw).ok_or(ProfileParseError::InvalidShimGuidance))
@@ -1443,6 +1463,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         mcp_registration,
         delivery,
         hook_events,
+        interrupt,
         hook_timeouts,
         host_paths,
         process_image: raw.process_image,

@@ -62,10 +62,12 @@ pub struct DaemonConfig {
     /// Defaults to 32.
     pub max_windows: usize,
 
-    /// Byte sequence `interrupt_window` writes to a window's PTY.
-    /// Defaults to `[0x03]` (Ctrl-C), which ConPTY turns into the console
-    /// interrupt event. A CLI that does not react to it can be served by
-    /// overriding this through a playbook's `[limits]`.
+    /// Byte sequence `interrupt_window` writes to the PTY of a window whose
+    /// profile declares no `[interrupt]`, or that was opened without a
+    /// profile. Defaults to `[0x03]` (Ctrl-C), which ConPTY turns into the
+    /// console interrupt event. A CLI that does not react to it can be served
+    /// by overriding this through a playbook's `[limits]`, or by declaring
+    /// its keys in its profile.
     pub interrupt_bytes: Vec<u8>,
 
     /// How long `close_window` waits, at most, for each of two things: on a

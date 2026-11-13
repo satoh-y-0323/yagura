@@ -743,23 +743,17 @@ pub enum ControlError {
     WriteFailed(String),
 }
 
-/// Interrupts `entry`'s child by writing `DaemonConfig::interrupt_bytes` into
-/// its PTY.
-///
-/// The bytes are configuration, overridable through a playbook's `[limits]`,
-/// rather than a constant: whether `0x03` interrupts a given CLI depends on
-/// that CLI's console input mode.
+/// Interrupts `entry`'s child by writing `bytes` into its PTY: the keys its
+/// profile's `[interrupt]` names, encoded for the window, or, for a window
+/// whose profile declares none, `DaemonConfig::interrupt_bytes`.
 ///
 /// # Errors
 ///
 /// Returns [`ControlError::ChildExited`] when the child is already gone and
 /// [`ControlError::WriteFailed`] when the PTY write fails.
-pub async fn interrupt_window(
-    entry: &WindowEntry,
-    config: &DaemonConfig,
-) -> Result<(), ControlError> {
+pub async fn interrupt_window(entry: &WindowEntry, bytes: &[u8]) -> Result<(), ControlError> {
     entry
-        .write_pty_input(&config.interrupt_bytes, InputOrigin::Control)
+        .write_pty_input(bytes, InputOrigin::Control)
         .await
         .map_err(|err| match err {
             crate::pty::PtyError::ChildExited => ControlError::ChildExited,

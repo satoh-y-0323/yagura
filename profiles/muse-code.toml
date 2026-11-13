@@ -62,14 +62,14 @@ args = ["-c", "mcpServers.{server}={\"transport\":\"stdio\",\"command\":{bridge_
 absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}" }
 
 [hooks.linux]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PostToolUse","timeout":{hook_timeout}}]}],"PostToolUseFailure":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PostToolUseFailure","timeout":{hook_timeout}}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
   "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
 ]
 
 [hooks.macos]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code SessionStart","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code UserPromptSubmit","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PermissionRequest","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code StopFailure","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code Interrupt","timeout":{hook_timeout},"async":true}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PostToolUse","timeout":{hook_timeout}}]}],"PostToolUseFailure":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook muse-code PostToolUseFailure","timeout":{hook_timeout}}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
   "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
@@ -115,7 +115,7 @@ claim = "/managed_hooks_path"
 file = ".config/muse/yagura-managed-hooks.json"
 
 [mcp_registration.json_entry.by_os.windows]
-"/hooks" = { SessionStart = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code SessionStart)", timeout = "{hook_timeout}" }] }], UserPromptSubmit = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code UserPromptSubmit)", timeout = "{hook_timeout}" }] }], PermissionRequest = [{ matcher = "*", hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code PermissionRequest)", timeout = "{hook_timeout}" }] }], Stop = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Stop)", timeout = "{hook_timeout}" }] }], StopFailure = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code StopFailure)", timeout = "{hook_timeout}" }] }], Interrupt = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Interrupt)", timeout = "{hook_timeout}", async = true }] }] }
+"/hooks" = { SessionStart = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code SessionStart)", timeout = "{hook_timeout}" }] }], UserPromptSubmit = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code UserPromptSubmit)", timeout = "{hook_timeout}" }] }], PermissionRequest = [{ matcher = "*", hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code PermissionRequest)", timeout = "{hook_timeout}" }] }], Stop = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Stop)", timeout = "{hook_timeout}" }] }], StopFailure = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code StopFailure)", timeout = "{hook_timeout}" }] }], Interrupt = [{ hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code Interrupt)", timeout = "{hook_timeout}", async = true }] }], PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code PostToolUse)", timeout = "{hook_timeout}" }] }], PostToolUseFailure = [{ matcher = "*", hooks = [{ type = "command", command = "if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code PostToolUseFailure)", timeout = "{hook_timeout}" }] }] }
 
 # The seconds this CLI gives a hook command. The registered entries name it
 # through `{hook_timeout}`, and the daemon names it to a door that asks, so
@@ -130,3 +130,27 @@ PermissionRequest = { status = "waiting_approval" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }
 StopFailure = { status = "waiting_input" }
 Interrupt = { status = "waiting_input" }
+# Declared only to be stopped at ([interrupt]): no status, delivery or session.
+PostToolUse = {}
+PostToolUseFailure = {}
+
+# How the user and an AI stop the CLI. The user's own interrupt types Escape.
+# An AI's marks the window's open turn, and each tool result of that turn is
+# answered with a stop until the turn ends. Muse tells no subagent's hook
+# apart, so no answer may end the turn: the stop answers stop a subagent alone
+# (measured), and the turn ends at `Interrupt` or `Stop`.
+[interrupt]
+user_keys = ["escape"]
+ai = "hook"
+
+[interrupt.turn]
+starts = ["UserPromptSubmit"]
+ends = ["Stop", "StopFailure", "Interrupt"]
+
+[interrupt.stops.PostToolUse]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = false
+
+[interrupt.stops.PostToolUseFailure]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = false

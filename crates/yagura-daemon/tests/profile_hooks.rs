@@ -196,35 +196,35 @@ fn commands_by_event(document: &str) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-/// The hooks the shipped profiles inject: the status reports, the three doors a window's
-/// CLI reads its inbox through (start-up context, the start of a turn, and a wait that the
+/// The hooks the shipped profiles inject: the `--hook` door of each event `[hook_events]`
+/// names (the status reports, the start of a turn's take, and the stops of `[interrupt]`),
+/// the doors a window's CLI reads its inbox through (start-up context, and a wait that the
 /// daemon answers when something arrives for a waiting CLI), the wait its wake file starts
 /// again, and the answers that hand the CLI the wake file to watch without asking the
 /// daemon (at start-up, and again whenever the CLI changes directory).
-fn expected_commands(program: &str, credentials: &str) -> BTreeMap<String, Vec<String>> {
-    let report = |status: &str| {
-        hook_command(
-            program,
-            credentials,
-            &format!("--emit-status {status} --source claude-code --skip-if /agent_id"),
-        )
-    };
+fn expected_commands(
+    program: &str,
+    profile: &str,
+    credentials: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let report =
+        |event: &str| hook_command(program, credentials, &format!("--hook {profile} {event}"));
     let door = |name: &str| hook_command(program, credentials, &format!("--deliver-{name}"));
     let answer =
         |event: &str| hook_command(program, credentials, &format!("--print-answer {event}"));
     let mut expected: BTreeMap<String, Vec<String>> = [
-        ("PreToolUse", vec![report("running")]),
-        ("PostToolUse", vec![report("running")]),
-        ("PermissionRequest", vec![report("waiting_approval")]),
-        ("StopFailure", vec![report("waiting_input")]),
-        ("UserPromptSubmit", vec![report("running"), door("take")]),
+        ("PreToolUse", vec![report("PreToolUse")]),
+        ("PostToolUse", vec![report("PostToolUse")]),
+        ("PermissionRequest", vec![report("PermissionRequest")]),
+        ("StopFailure", vec![report("StopFailure")]),
+        ("UserPromptSubmit", vec![report("UserPromptSubmit")]),
         (
             "SessionStart",
             vec![door("context"), door("wait"), answer("SessionStart")],
         ),
         ("CwdChanged", vec![answer("CwdChanged")]),
         ("FileChanged", vec![door("wait")]),
-        ("Stop", vec![report("waiting_input"), door("wait")]),
+        ("Stop", vec![report("Stop"), door("wait")]),
     ]
     .into_iter()
     .map(|(event, commands)| (event.to_string(), commands))
@@ -248,7 +248,7 @@ fn claude_code_ships_hooks_that_report_turn_start_approval_and_end() {
     let document = hooks["config_file"].as_str().expect("config_file");
     assert_eq!(
         commands_by_event(document),
-        expected_commands("yagura-daemon", CREDENTIALS_FILE)
+        expected_commands("yagura-daemon", "claude-code", CREDENTIALS_FILE)
     );
 }
 
@@ -269,7 +269,7 @@ fn wsl_claude_code_ships_the_same_mapping_calling_the_windows_executable() {
     assert_eq!(args[0], "--settings");
     assert_eq!(
         commands_by_event(args[1]),
-        expected_commands("yagura-daemon.exe", CREDENTIALS_FILE)
+        expected_commands("yagura-daemon.exe", "wsl-claude-code", CREDENTIALS_FILE)
     );
 }
 
@@ -358,7 +358,11 @@ fn the_hooks_that_answer_at_once_are_not_asynchronous() {
         let wait = hook_command(program, CREDENTIALS_FILE, "--deliver-wait");
         let doors = [
             hook_command(program, CREDENTIALS_FILE, "--deliver-context"),
-            hook_command(program, CREDENTIALS_FILE, "--deliver-take"),
+            hook_command(
+                program,
+                CREDENTIALS_FILE,
+                &format!("--hook {id} UserPromptSubmit"),
+            ),
         ];
         let mut doors_seen = 0;
         for (event, hooks) in hooks_by_event(&document) {
@@ -485,7 +489,10 @@ async fn the_shipped_claude_code_hooks_table_is_written_out_when_a_window_opens(
         "the credentials file the commands name must exist: {}",
         locations[0]
     );
-    assert_eq!(by_event, expected_commands("yagura-daemon", locations[0]));
+    assert_eq!(
+        by_event,
+        expected_commands("yagura-daemon", "claude-code", locations[0])
+    );
     h.registry.terminate_all().await;
 }
 

@@ -852,6 +852,9 @@ pub struct WindowEntry {
     /// Set by [`WindowEntry::mark_closed`] once `close_window` has succeeded,
     /// which a window whose child merely exited on its own never is.
     closed: AtomicBool,
+    /// The turns of the window's CLI, as its hooks report them, and the mark
+    /// an AI's interrupt puts on one.
+    turn: crate::profile_interrupt::TurnLedger,
     session: Arc<PtySession>,
     /// The one and only long-lived strong holder besides
     /// `spawn_exit_watcher`'s task. Taken (set to `None`) by
@@ -1215,6 +1218,12 @@ impl WindowEntry {
     /// The parcels waiting for this window's CLI.
     pub fn inbox(&self) -> &Inbox {
         &self.inbox
+    }
+
+    /// The turns of the window's CLI and the mark an AI's interrupt put on
+    /// one.
+    pub fn turn(&self) -> &crate::profile_interrupt::TurnLedger {
+        &self.turn
     }
 
     /// The point this window's daemon has armed.
@@ -2725,6 +2734,7 @@ impl WindowRegistry {
             detection_warning,
             layout_json: Mutex::new(None),
             closed: AtomicBool::new(false),
+            turn: crate::profile_interrupt::TurnLedger::default(),
             session,
             detector: Mutex::new(Some(detector_handle)),
             detector_weak,

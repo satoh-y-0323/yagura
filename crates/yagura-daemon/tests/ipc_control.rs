@@ -210,14 +210,182 @@ async fn interrupt_window_acknowledges_and_delivers_configured_bytes_when_approv
     )
     .await;
 
-    match read_response(&mut client).await {
-        DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
+    let answer = read_response(&mut client).await;
+    match &answer {
+        DaemonMessage::WindowInterrupted {
+            window_id: acked, ..
+        } => assert_eq!(acked, &window_id),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
+    assert_eq!(
+        outcome_of(&answer),
+        Some("interrupted"),
+        "a window opened without a profile is interrupted with the configured bytes"
+    );
 
     // The echo child writes back whatever reaches the PTY input, so the
     // configured bytes show as a line of the window's text.
     h.wait_for_scrollback(&window_id, b"INTERRUPT-MARK").await;
+}
+
+/// The `outcome` an `interrupt_window` answer carries, read off the wire.
+fn outcome_of(answer: &DaemonMessage) -> Option<&'static str> {
+    let encoded = serde_json::to_value(answer).expect("an answer encodes");
+    [
+        "interrupted",
+        "stop_requested",
+        "stop_requested_unconfirmed",
+    ]
+    .into_iter()
+    .find(|named| encoded["outcome"].as_str() == Some(named))
+}
+
+/// Opens `command` the way the profile `profile` opens a window, under the control
+/// definition, and returns once the window is `Idle` (`ready`) or right away.
+async fn open_as_profile(h: &Harness, profile: &str, command: Vec<String>, ready: bool) -> String {
+    let window_id = h
+        .registry
+        .open_with_extra_env(
+            OpenWindowRequest {
+                command,
+                cwd: None,
+                name: None,
+                vendor: None,
+                detection: Some(CONTROL_DETECTION_NAME.to_string()),
+                on_name_taken: Default::default(),
+            },
+            Vec::new(),
+            Vec::new(),
+            yagura_daemon::window::WindowProvenance {
+                launch: Some(yagura_daemon::window::LaunchIdentity {
+                    profile: profile.to_string(),
+                    model: None,
+                    effort: None,
+                }),
+                delivery: Some(common::wake_none_delivery()),
+                ..yagura_daemon::window::WindowProvenance::default()
+            },
+        )
+        .await
+        .expect("the window opens")
+        .window_id;
+    if ready {
+        let mut client = h.connect().await;
+        wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
+    }
+    window_id
+}
+
+/// A window opened from a profile of the user's own that declares no interrupt is
+/// interrupted the way a window opened without a profile is: with the configured bytes.
+#[tokio::test]
+async fn interrupt_window_writes_the_configured_bytes_to_a_profile_window_that_declares_no_interrupt()
+ {
+    let dir = unique_temp_dir("interrupt-undeclared-profile");
+    let profiles_dir = unique_temp_dir("interrupt-undeclared-profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+    common::write_profile(
+        &profiles_dir,
+        "plain-cli",
+        &yagura_test_support::process::profile_source(
+            "Plain CLI",
+            &yagura_test_support::process::echo_child_command(),
+        ),
+    );
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["interrupt_window"])),
+        interrupt_bytes: INTERRUPT_MARKER.to_vec(),
+        profiles_dir: Some(profiles_dir),
+        ..detection_config(&dir)
+    };
+    let h = Harness::start("interrupt-undeclared-profile", config).await;
+    let window_id = open_as_profile(
+        &h,
+        "plain-cli",
+        yagura_test_support::process::echo_child_command(),
+        false,
+    )
+    .await;
+    h.write_input(&window_id, common::READY_MARKER).await;
+    let mut client = h.connect().await;
+    wait_until_status(&mut client, &window_id, WindowStatus::Idle).await;
+
+    send(
+        &mut client,
+        &ClientMessage::InterruptWindow {
+            window_id: window_id.clone(),
+        },
+    )
+    .await;
+    let answer = read_response(&mut client).await;
+    assert_eq!(
+        outcome_of(&answer),
+        Some("interrupted"),
+        "a profile that declares no interrupt is interrupted with the configured bytes; \
+         got {answer:?}"
+    );
+    h.wait_for_scrollback(&window_id, b"INTERRUPT-MARK").await;
+}
+
+/// A window whose profile gives an AI no means to stop its CLI (Codex CLI) refuses an
+/// AI's interrupt and writes nothing; the user's own interrupt there writes the user's key,
+/// Escape.
+#[tokio::test]
+async fn a_window_whose_profile_gives_an_ai_no_means_refuses_the_ai_and_takes_the_users_key() {
+    let dir = unique_temp_dir("interrupt-no-means");
+    let config = DaemonConfig {
+        approval_policy: Some(policy(&["interrupt_window"])),
+        interrupt_bytes: INTERRUPT_MARKER.to_vec(),
+        bundled_profiles: true,
+        ..detection_config(&dir)
+    };
+    let h = Harness::start("interrupt-no-means", config).await;
+    let window_id = open_as_profile(
+        &h,
+        "codex-cli",
+        vec![
+            common::hex_echo_path()
+                .to_str()
+                .expect("the hex_echo path is UTF-8")
+                .to_string(),
+        ],
+        true,
+    )
+    .await;
+
+    let mut ai = h.connect().await;
+    send(
+        &mut ai,
+        &ClientMessage::InterruptWindow {
+            window_id: window_id.clone(),
+        },
+    )
+    .await;
+    expect_error(read_response(&mut ai).await, "interrupt_unsupported");
+
+    let mut user = h.connect().await;
+    register_approver(&mut user).await;
+    send(
+        &mut user,
+        &ClientMessage::InterruptWindow {
+            window_id: window_id.clone(),
+        },
+    )
+    .await;
+    let answer = read_response(&mut user).await;
+    assert_eq!(
+        outcome_of(&answer),
+        Some("interrupted"),
+        "the user's interrupt is never refused; got {answer:?}"
+    );
+    common::assert_hex_echo_receives(&h, &window_id, b"CTRL-READY", b"\x1b").await;
+    let received = common::output_after_marker(&h, &window_id, b"CTRL-READY");
+    assert!(
+        !common::contains_subsequence(&received, common::hex_of(b"INTERRUPT-MARK").as_bytes()),
+        "the refused interrupt wrote nothing, and the user's wrote the user's key, not the \
+         configured bytes: {:?}",
+        String::from_utf8_lossy(&received)
+    );
 }
 
 #[tokio::test]
@@ -237,9 +405,11 @@ async fn interrupt_window_returns_approval_required_without_a_policy() {
 #[tokio::test]
 async fn interrupt_window_returns_status_unknown_even_when_the_tool_is_approved() {
     // The Unknown gate outranks the playbook (fail-safe).
+    let dir = unique_temp_dir("interrupt-unknown");
     let config = DaemonConfig {
         approval_policy: Some(policy(&["interrupt_window"])),
-        ..base_config()
+        bundled_profiles: true,
+        ..detection_config(&dir)
     };
     let h = Harness::start("interrupt-unknown", config).await;
     let mut client = h.connect().await;
@@ -254,6 +424,25 @@ async fn interrupt_window_returns_status_unknown_even_when_the_tool_is_approved(
 
     let msg = read_response(&mut client).await;
     expect_error(msg, "status_unknown");
+
+    // A profile's means (a hook for Grok Build, none for Codex CLI) is looked at only
+    // after the window's status: an Unknown window is refused as Unknown either way.
+    for profile in ["grok-build", "codex-cli"] {
+        let window_id = open_as_profile(
+            &h,
+            profile,
+            yagura_test_support::process::echo_child_command(),
+            false,
+        )
+        .await;
+        assert_eq!(
+            query_status(&mut client, &window_id).await,
+            WindowStatus::Unknown,
+            "fixture precondition: {profile}'s window has shown nothing yet"
+        );
+        send(&mut client, &ClientMessage::InterruptWindow { window_id }).await;
+        expect_error(read_response(&mut client).await, "status_unknown");
+    }
 }
 
 #[tokio::test]
@@ -656,7 +845,9 @@ async fn identify_with_the_correct_window_and_token_unlocks_that_windows_own_ope
     )
     .await;
     match read_response(&mut client).await {
-        DaemonMessage::WindowInterrupted { window_id: acked } => assert_eq!(acked, window_id),
+        DaemonMessage::WindowInterrupted {
+            window_id: acked, ..
+        } => assert_eq!(acked, window_id),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
 }
@@ -3228,7 +3419,7 @@ async fn an_approvers_own_close_window_and_interrupt_window_bypass_the_gate_with
     )
     .await;
     match read_response(&mut approver).await {
-        DaemonMessage::WindowInterrupted { window_id } => assert_eq!(window_id, window_a),
+        DaemonMessage::WindowInterrupted { window_id, .. } => assert_eq!(window_id, window_a),
         other => panic!("expected window_interrupted, got {other:?}"),
     }
 

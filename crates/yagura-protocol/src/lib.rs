@@ -2367,9 +2367,29 @@ pub enum WithdrawReason {
     Timeout,
     /// The requester's connection closed.
     RequesterDisconnected,
+    /// An AI interrupted the window that made the request, which ends what
+    /// that window was waiting for.
+    RequesterInterrupted,
     /// A reason this build does not know.
     #[serde(other)]
     Unknown,
+}
+
+/// What an `interrupt_window` did ([`DaemonMessage::WindowInterrupted`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptOutcome {
+    /// The window's interrupt keys were written to its PTY.
+    Interrupted,
+    /// The window's open turn is marked to stop: its CLI's next stop event
+    /// is answered with a stop, and what the window was waiting for ended.
+    StopRequested,
+    /// As [`InterruptOutcome::StopRequested`], for a window no main hook has
+    /// reached yet: its CLI may have no hooks, so it may not stop.
+    StopRequestedUnconfirmed,
+    /// The window's last hook ended its turn: there is no turn to stop, and
+    /// nothing was done.
+    NoOpenTurn,
 }
 
 /// What became of an envelope a sender asked to withdraw
@@ -3851,11 +3871,13 @@ pub enum DaemonMessage {
         /// What became of the envelope.
         outcome: WithdrawOutcome,
     },
-    /// Response to [`ClientMessage::InterruptWindow`]: the interrupt byte
-    /// sequence was written to the target window's PTY.
+    /// Response to [`ClientMessage::InterruptWindow`]: what the daemon did to
+    /// stop the target window's CLI.
     WindowInterrupted {
         /// The window ID that was interrupted.
         window_id: String,
+        /// What was done there.
+        outcome: InterruptOutcome,
     },
     /// Response to [`ClientMessage::CloseWindow`]: the window's process tree
     /// was terminated (idempotently, if the child had already exited).

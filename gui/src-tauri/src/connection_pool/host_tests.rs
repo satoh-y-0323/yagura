@@ -25,6 +25,7 @@ fn obliging_daemon() -> ScriptedDaemon {
         ClientMessage::InterruptWindow { window_id } => {
             Reaction::reply(DaemonMessage::WindowInterrupted {
                 window_id: window_id.clone(),
+                outcome: yagura_protocol::InterruptOutcome::Interrupted,
             })
         }
         _ => None,

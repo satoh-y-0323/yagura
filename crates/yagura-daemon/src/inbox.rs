@@ -1300,6 +1300,21 @@ impl DoorRead {
             hold: DoorHold::empty(),
         }
     }
+
+    /// The answer that makes a hook print `output` and succeed, taking
+    /// nothing from the inbox.
+    #[must_use]
+    pub fn printing(output: String) -> Self {
+        Self {
+            message: DaemonMessage::Delivery {
+                output,
+                stream: DeliveryStream::Stdout,
+                exit_code: 0,
+                hook_timeout_sec: None,
+            },
+            hold: DoorHold::empty(),
+        }
+    }
 }
 
 /// The parcels a door's answer took, out of reach of every other door and
@@ -1324,6 +1339,12 @@ impl DoorHold {
             shared: Weak::new(),
             id: None,
         }
+    }
+
+    /// Whether it holds a parcel.
+    #[must_use]
+    pub fn holds(&self) -> bool {
+        self.id.is_some()
     }
 
     /// Whether it holds a parcel whose row the store keeps.

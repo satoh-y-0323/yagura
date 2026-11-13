@@ -51,6 +51,11 @@ pub enum HookEffect {
     Session,
     /// Handing the inbox over: a take, the context, a wait or a block.
     Deliver,
+    /// Moving the window's turn: a hook reached the daemon, and a turn
+    /// started or ended (`[interrupt]`'s hook form).
+    Turn,
+    /// Answering a stop at a stop event of the marked turn.
+    Stop,
 }
 
 impl HookEffect {
@@ -68,6 +73,10 @@ impl HookEffect {
             (Self::Status(_), HookOrigin::Subagent) => false,
             // The session and the inbox are the main session's.
             (Self::Session | Self::Deliver, HookOrigin::Subagent) => false,
+            // A subagent's start or end is not the window's turn's.
+            (Self::Turn, HookOrigin::Subagent) => false,
+            // A subagent works in the window's turn, so it stops with it.
+            (Self::Stop, HookOrigin::Subagent) => true,
         }
     }
 }
@@ -88,9 +97,11 @@ pub enum HookDeliver {
 }
 
 /// What the daemon does for one event. Applied in a fixed order: `session`,
-/// then `status`, then `deliver` (which `when` gates; a block moves `status`
-/// to where its door ends, see [`HookDeliver::Block`]), each only when it
-/// [`HookEffect::applies_to`] the hook's [`HookOrigin`].
+/// then the window's turn (an `[interrupt]` hook form's start or end), then
+/// `status`, then a stop when the event is a stop event of the marked turn
+/// (answered in place of `deliver`), then `deliver` (which `when` gates; a
+/// block moves `status` to where its door ends, see [`HookDeliver::Block`]),
+/// each only when it [`HookEffect::applies_to`] the hook's [`HookOrigin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEvent {
     /// The status the window is recorded in.
@@ -156,6 +167,10 @@ pub enum HookEventsError {
     /// keeps what each event told apart.
     #[error("the events' `skip_if` values differ")]
     SkipIfDiffers,
+    /// The `[interrupt]` table breaks its rule, which its hook form reads
+    /// against this table.
+    #[error("the interrupt table breaks its rule")]
+    Interrupt(#[source] crate::profile_interrupt::InterruptError),
 }
 
 impl HookEventsError {
@@ -168,6 +183,7 @@ impl HookEventsError {
             Self::SkipIfDiffers => {
                 "invalid hook events table: the events' skip_if differ; name one subagent_pointer instead"
             }
+            Self::Interrupt(_) => "invalid interrupt table",
             _ => "invalid hook events table",
         }
     }
@@ -184,7 +200,8 @@ pub fn is_hook_event_name(name: &str) -> bool {
 }
 
 /// Reads and validates a profile's `hook_events` value with its top-level
-/// [`SUBAGENT_POINTER_KEY`]. `None` in, `None` out.
+/// [`SUBAGENT_POINTER_KEY`]. `None` in, `None` out. An event named in
+/// `stop_only` may do nothing else: `[interrupt]` answers a stop at it.
 ///
 /// An older per-event `skip_if` becomes the subagent pointer when every event
 /// that writes it writes the same value, with a warning naming the key to
@@ -193,6 +210,7 @@ pub fn is_hook_event_name(name: &str) -> bool {
 pub(crate) fn parse_hook_events(
     raw: Option<toml::Value>,
     raw_subagent: Option<toml::Value>,
+    stop_only: &BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Result<Option<ProfileHookEvents>, HookEventsError> {
     let subagent = raw_subagent
@@ -218,7 +236,7 @@ pub(crate) fn parse_hook_events(
         if !is_hook_event_name(&name) {
             return Err(HookEventsError::InvalidEventName);
         }
-        let (event, skip_if) = parse_event(value)?;
+        let (event, skip_if) = parse_event(value, stop_only.contains(&name))?;
         older.extend(skip_if);
         events.insert(name, event);
     }
@@ -245,7 +263,10 @@ pub(crate) fn parse_hook_events(
 }
 
 /// One event and the older `skip_if` it wrote, if any.
-fn parse_event(value: toml::Value) -> Result<(HookEvent, Option<String>), HookEventsError> {
+fn parse_event(
+    value: toml::Value,
+    stop_only: bool,
+) -> Result<(HookEvent, Option<String>), HookEventsError> {
     let toml::Value::Table(mut table) = value else {
         return Err(HookEventsError::EventNotATable);
     };
@@ -265,7 +286,7 @@ fn parse_event(value: toml::Value) -> Result<(HookEvent, Option<String>), HookEv
     if let Some(key) = table.keys().next() {
         return Err(HookEventsError::UnknownKey(key.clone()));
     }
-    if status.is_none() && deliver.is_none() && session.is_none() {
+    if status.is_none() && deliver.is_none() && session.is_none() && !stop_only {
         return Err(HookEventsError::NoAction);
     }
     if !when.is_empty() && deliver.is_none() {

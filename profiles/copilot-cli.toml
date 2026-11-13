@@ -95,3 +95,18 @@ preToolUse = { status = "running" }
 postToolUse = { status = "running", deliver = "take" }
 postToolUseFailure = { status = "running" }
 agentStop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }
+
+# How the user and an AI stop the CLI. The user's own interrupt types Ctrl+C.
+# An AI's marks the window's open turn: every tool of that turn is denied
+# until it ends, since a deny does not end Copilot's turn (measured).
+[interrupt]
+user_keys = ["ctrl_c"]
+ai = "hook"
+
+[interrupt.turn]
+starts = ["userPromptSubmitted"]
+ends = ["agentStop"]
+
+[interrupt.stops.preToolUse]
+answer = '{"permissionDecision":"deny","permissionDecisionReason":{reason}}'
+ends_turn = false

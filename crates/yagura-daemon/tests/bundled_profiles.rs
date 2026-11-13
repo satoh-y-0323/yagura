@@ -799,6 +799,9 @@ fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
             ("Stop", blocking_stop(&[not_a_continuation])),
             ("StopFailure", event(Some(WaitingInput), None, None)),
             ("Interrupt", event(Some(WaitingInput), None, None)),
+            // Declared only to be stopped at: [interrupt] answers there.
+            ("PostToolUse", event(None, None, None)),
+            ("PostToolUseFailure", event(None, None, None)),
         ],
         "codex-cli" | "wsl-codex-cli" => vec![
             ("SessionStart", event(None, Some(Context), None)),
@@ -1045,7 +1048,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "claude-code",
-        "48910c227e355a392e368d1d099e9370998f58b2ecf5305177d83a8c5296d2ef",
+        "283e7e1326367cb0b4af9a3630ee6972a0b437986e44b079002e5f9e8dd227d6",
     ),
     (
         "codex-cli",
@@ -1061,11 +1064,11 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "muse-code",
-        "e436d3f9a47d79c7790cce38a69221ab9b630958a31c925d0ee1d8f8adf0da63",
+        "4ebfd0a9fc6e6e8f82b2fd493e04244b95cbaa6ad9929a434bb1ce15f5d9d33c",
     ),
     (
         "wsl-claude-code",
-        "4310ef4041bdc08779c94070edd5c1f90612426e61a6d21966f1eef0a11c20f5",
+        "bb3116aa73f739d9cb1c2b94859a7abb58627f1eb4c3d199e8e37090297d5ce2",
     ),
     (
         "wsl-codex-cli",
@@ -1081,7 +1084,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-muse-code",
-        "488fe1eae72c56c9725fda83c3b7d7d86851c827958af042d77e5880915038ed",
+        "a584d593af635c51f028dceb4456c154ed5db904562e3d300a252fd24239a9a4",
     ),
 ];
 

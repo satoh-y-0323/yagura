@@ -582,19 +582,33 @@ fn client_message_status_event_encodes_the_token_field() {
 // Control tools: DaemonMessage additions
 // =============================================================================
 
+/// `window_interrupted` carries what the daemon did, by name, through a round trip.
 #[test]
 fn daemon_message_window_interrupted_round_trips() {
-    let body = br#"{"type":"window_interrupted","window_id":"w1"}"#;
-    let decoded = decode_daemon_message(body).expect("window_interrupted must decode");
-    assert_eq!(
-        decoded,
-        DaemonMessage::WindowInterrupted {
-            window_id: "w1".to_string(),
+    for outcome in [
+        "interrupted",
+        "stop_requested",
+        "stop_requested_unconfirmed",
+        "no_open_turn",
+    ] {
+        let body = serde_json::json!({
+            "type": "window_interrupted",
+            "window_id": "w1",
+            "outcome": outcome,
+        });
+        let decoded = decode_daemon_message(body.to_string().as_bytes())
+            .expect("window_interrupted must decode");
+        match &decoded {
+            DaemonMessage::WindowInterrupted { window_id, .. } => assert_eq!(window_id, "w1"),
+            other => panic!("expected window_interrupted, got {other:?}"),
         }
-    );
-    let encoded = encode_daemon_message(&decoded);
-    let decoded2 = decode_daemon_message(&encoded).expect("round trip must succeed");
-    assert_eq!(decoded, decoded2);
+        let encoded = encode_daemon_message(&decoded);
+        let reencoded: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("an encoded frame is JSON");
+        assert_eq!(reencoded, body, "the outcome survives the round trip");
+        let decoded2 = decode_daemon_message(&encoded).expect("round trip must succeed");
+        assert_eq!(decoded, decoded2);
+    }
 }
 
 #[test]

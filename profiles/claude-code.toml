@@ -5,6 +5,9 @@
 schema = 1
 display_name = "Claude Code"
 detection = "claude-code"
+# A subagent's hooks carry `agent_id`: its running and waiting for approval
+# are the window's, and nothing else of it is.
+subagent_pointer = "/agent_id"
 
 [command]
 default = ["claude"]
@@ -36,15 +39,15 @@ mode = "launch"
 config_file = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--profile","claude-code","--credentials","{credentials_file}"]}}}'
 args = ["--mcp-config", "{mcp_config_file}"]
 
-# Each hook event reports the turn's start, a permission prompt, or its end to
-# the daemon, each door handed the credentials file (verified with Claude Code
+# Each hook event calls the `--hook` door, which does what [hook_events] says
+# for it, each door handed the credentials file (verified with Claude Code
 # 2.1.285). The `--deliver-*` hooks read the window's inbox: the start-up
-# context, the start of a turn, and a wait (`asyncRewake`) the daemon answers
-# when something arrives for an idle session. When none is registered, the
+# context and a wait (`asyncRewake`) the daemon answers when something
+# arrives for an idle session. When none is registered, the
 # daemon writes the window's wake file, whose change (`FileChanged`, matched by
 # its name) registers the wait again.
 [hooks]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-context"},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --print-answer SessionStart"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-take"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source claude-code --skip-if /agent_id"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_approval --source claude-code --skip-if /agent_id"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"CwdChanged":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --print-answer CwdChanged"}]}],"FileChanged":[{"matcher":"yagura_wake","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source claude-code --skip-if /agent_id"}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-context"},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --print-answer SessionStart"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code UserPromptSubmit"}]}],"PreToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code PreToolUse"}]}],"PostToolUse":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code PostToolUse"}]}],"PermissionRequest":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code PermissionRequest"}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code Stop"},{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"CwdChanged":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --print-answer CwdChanged"}]}],"FileChanged":[{"matcher":"yagura_wake","hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --deliver-wait","asyncRewake":true,"timeout":{hook_timeout.doors.wait}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon --credentials '{credentials_file}' --hook claude-code StopFailure"}]}]}}'''
 args = ["--settings", "{hooks_config_file}"]
 
 # What the window's open leaves beside its credentials file for the
@@ -87,3 +90,34 @@ command = "Command:"
 args_line = "Args:"
 require = { "Scope:" = "User" }
 absent = "No MCP server named"
+
+# What each `--hook` door above does. A subagent's hooks carry `agent_id`: the
+# daemon reports their running and waiting for approval, and does nothing else
+# for them.
+[hook_events]
+UserPromptSubmit = { status = "running", deliver = "take" }
+PreToolUse = { status = "running" }
+PostToolUse = { status = "running" }
+PermissionRequest = { status = "waiting_approval" }
+Stop = { status = "waiting_input" }
+StopFailure = { status = "waiting_input" }
+
+# How the user and an AI stop the CLI. The user's own interrupt types Ctrl+C.
+# An AI's marks the window's open turn, and the next tool call of that turn is
+# answered with a stop. Both answers stop the tool and end the main session's
+# turn, so a subagent's call after them is not stopped (measured).
+[interrupt]
+user_keys = ["ctrl_c"]
+ai = "hook"
+
+[interrupt.turn]
+starts = ["UserPromptSubmit"]
+ends = ["Stop", "StopFailure"]
+
+[interrupt.stops.PreToolUse]
+answer = '{"continue":false,"stopReason":{reason},"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":{reason}}}'
+ends_turn = true
+
+[interrupt.stops.PostToolUse]
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = true

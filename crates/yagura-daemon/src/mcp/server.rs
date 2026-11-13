@@ -481,9 +481,17 @@ impl<T: DaemonTransport + 'static> YaguraMcpServer<T> {
     }
 
     #[tool(
-        description = "Interrupt the command running in a window by writing the \
-            daemon's configured interrupt byte sequence (Ctrl+C by default) to its \
-            PTY. This is a destructive, gated operation: it succeeds immediately \
+        description = "Interrupt the command running in a window the way its profile \
+            declares for an AI: by its keys (outcome interrupted), or by marking its open \
+            turn so its CLI's next tool call is answered with a stop (stop_requested; \
+            stop_requested_unconfirmed when no hook of the window's CLI has reached the \
+            daemon yet, so it may not stop; no_open_turn when its last hook ended its turn \
+            and nothing was done). Either way, what the interrupted window itself was \
+            waiting for ends: its wait_for_status as stop_requested, its requests awaiting \
+            an approver as requester_interrupted. A profile that gives an AI no means is \
+            refused (interrupt_unsupported); a window opened without a profile is written \
+            the daemon's configured interrupt bytes. The reply carries window_id and \
+            outcome. This is a destructive, gated operation: it succeeds immediately \
             when it targets this bridge's own window, and is otherwise held pending \
             a decision (by the active playbook or a human approver) unless the \
             target window's status is unknown, in which case it is refused outright \

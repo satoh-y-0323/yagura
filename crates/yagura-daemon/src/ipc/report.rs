@@ -48,10 +48,10 @@ use crate::pty::lock_recover;
 use crate::store::StoreError;
 use crate::window::{TaskOrigin, WindowEntry, WindowLiveness, WindowRegistry};
 
+use super::RequestWatch;
 use super::notice_queue;
 use super::plan::{self, PlanRuntime};
 use super::{ConnectionState, Outbound, error_msg, now_ms};
-use super::{RequestWatch, request_left};
 
 /// How many reports one window's inbox holds before `send_report` to it is
 /// refused with `resource_exhausted`.
@@ -1346,7 +1346,7 @@ pub(super) async fn handle_wait_for_report(
                 // dropped registration puts back what reached it.
                 let taken = tokio::select! {
                     taken = registration.wait(timeout) => taken,
-                    () = request_left(&mut left) => None,
+                    _ = left.wait() => None,
                 };
                 answer_taken(&inboxes, &ledger, &outbound, &window_id, taken, receipt).await;
             }));

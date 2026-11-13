@@ -91,3 +91,10 @@ Stop = { status = "waiting_input", deliver = "block", when = { "/terminationReas
 [process_image]
 windows = "agy.exe"
 linux = "agy"
+
+# How the user and an AI stop the CLI. The user's own interrupt types Ctrl+C.
+# No way for an AI to stop it has been measured, so an AI's interrupt is
+# refused.
+[interrupt]
+user_keys = ["ctrl_c"]
+ai = "none"
