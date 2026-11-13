@@ -95,8 +95,13 @@ your own that uses one -- for example `env` under `[model]` or `[effort]`,
 `launch_context` under `[delivery]`, `notice` under `[mcp_registration]`,
 `items` and `name` under `[mcp_registration.status]`, the `[credentials]`
 table, the `[hook_events]` table, `retired` under
-`[mcp_registration.toml_set.entries]`, or `launch_only` under `[command]`
--- is left out of its
+`[mcp_registration.toml_set.entries]`, `launch_only` under `[command]`, the
+top-level `subagent_pointer`, the `[hook_timeout]`, `[interrupt]`,
+`[process_image]` and `[launch_overlay]` tables, `when` or `deliver = "block"`
+in a `[hook_events]` event, `max_bytes` or a `block` output under
+`[delivery]`, `answers` under `[hooks]`, `state_base` under `[host_paths]`,
+`args_line` under `[mcp_registration.status]`, or a `[credentials]`, `[mcp]`
+or `[hooks]` table written per operating system -- is left out of its
 listing with a
 warning. A `{server}` in a `json_entry` `file` is no placeholder to such a
 daemon: it is taken as part of the file's name.
@@ -106,6 +111,15 @@ that calls `--hook` for it (see [Hook events](#hook-events)), and those
 hooks can outlive a launch in the CLI's own settings. Renaming the file
 leaves them naming an id the daemon no longer finds, so they do nothing
 until the CLI is registered again.
+
+An earlier per-event `skip_if` in `[hook_events]` is read as
+`subagent_pointer` when every event that writes it writes the same pointer,
+with a warning naming the new key; pointers that differ fail the table, and a
+file of yours that lays such a table over a bundled profile then takes that
+profile out of the listing too, so its windows stop reporting their status and
+taking part in delivery until the file is fixed (see
+[Hook events](#hook-events)). `max_chars` under `[delivery]` is read as
+`max_bytes`, with a warning.
 
 ## Schema
 
@@ -125,6 +139,8 @@ detection = "codex-cli"        # optional; a detection definition name the
                                 # crates/yagura-daemon/detection/README.md).
                                 # Omitted selects the daemon's own default
                                 # definition
+subagent_pointer = "/agent_id" # optional; where a subagent's hook input has
+                                # a value. See "Hook events" below
 # cwd = "C:\\work"              # optional; must be an absolute path. A
                                 # relative path or one starting with "~" is
                                 # ignored with a warning, not resolved against
@@ -187,10 +203,10 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
 # mode = "launch"              # "env" (the default) or "launch"
 # launch_args = ["-c", "..."]  # argv added to the spawn only
 
-[delivery]                     # optional table; how the daemon hands the
-                                # CLI the text it sends of its own accord.
-                                # See "Delivery" below
+[delivery]                     # optional table; how the CLI takes what a
+                                # window is sent. See "Delivery" below
 # output = "plain"
+# max_bytes = 10000
 # wake = "none"
 # launch_context = ["--rules", "{context}"]
 # launch_prompt = ["{prompt}"]
@@ -200,6 +216,27 @@ args = ["-c", "mcp_servers.{server}.command={bridge_toml}"]
                                 # environment sees, and how the CLI's own
                                 # files are read there. See "Host paths" below
 # convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
+
+[hook_events]                  # optional table; what each `--hook` event
+                                # does. See "Hook events" below
+# Stop = { status = "waiting_input" }
+
+[hook_timeout]                 # optional table; the seconds the CLI gives a
+                                # hook. See "Hook timeout" below
+# default = 10
+
+[interrupt]                    # optional table; how the user and an AI
+                                # interrupt the CLI. See "Interrupt" below
+# user_keys = ["ctrl_c"]
+# ai = "none"
+
+[process_image]                # optional table; the name of the CLI's own
+                                # process. See "A window's own CLI" below
+# linux = "codex"
+
+[launch_overlay]               # optional table; a settings layer that keeps
+                                # the credentials from the CLI's tools. See
+                                # "Launch overlay" below
 
 [shim_guidance]                # optional table; what to tell a user when
                                 # the program is a Windows .cmd / .bat file
@@ -222,7 +259,12 @@ argv element under `[command]` is empty or contains a NUL byte; a
 [Launch options](#launch-options); an `[mcp]` or `[hooks]` table breaks
 one of the rules under [MCP injection](#mcp-injection) and
 [Hooks injection](#hooks-injection); a `[delivery]` table breaks a rule
-under [Delivery](#delivery); a `[host_paths]` table breaks a rule under
+under [Delivery](#delivery); `subagent_pointer`, a `[hook_events]`,
+`[hook_timeout]` or `[interrupt]` table breaks a rule under
+[Hook events](#hook-events), [Hook timeout](#hook-timeout) or
+[Interrupt](#interrupt); a `[process_image]` table breaks a rule under
+[A window's own CLI](#a-windows-own-cli); a `[launch_overlay]` table breaks a
+rule under [Launch overlay](#launch-overlay); a `[host_paths]` table breaks a rule under
 [Host paths](#host-paths); or a `[shim_guidance]` table breaks a rule under
 [Shim guidance](#shim-guidance). A profile stays valid, with the offending
 value dropped and a warning attached, when: `cwd` is relative or starts with
@@ -250,6 +292,12 @@ On any other operating system this profile has nothing to launch: it does not
 appear in any profile listing there, and naming it directly is refused as an
 unknown profile. The `windows` argv itself is
 explained under [WSL profiles](#wsl-profiles).
+
+An argv element that is exactly `{daemon}` stands for the window's overlay
+door, and is `-` in a run that opens no window; it is for a profile with a
+`[launch_overlay]` whose CLI runs in another environment (see
+[Launch overlay](#launch-overlay)). `{daemon}` anywhere else in an element
+fails the profile.
 
 ### Arguments for starting a window only
 
@@ -992,17 +1040,185 @@ that cannot be read, is larger than 4 KiB, is not the expected JSON object
 (`window_id` and `token`) or has an empty field names no window either.
 
 **The bundled profiles.** `claude-code`, `copilot-cli` and `wsl-muse-code`,
-and the WSL variants of the first two, use `"launch"`. `codex-cli` and
+the WSL variants of the first two, and `muse-code` on macOS and Linux
+(`[credentials.linux]`, `[credentials.macos]`), use `"launch"`. `codex-cli` and
 `wsl-codex-cli` stay on `"env"`: Codex runs a hook only while the hash of its
 command is the one it has recorded as trusted, so the command cannot carry a
 per-window path. Their `launch_args` set both variables to the empty string in
 `shell_environment_policy`, which keeps the real values out of the environment
 of the tools Codex runs. Their `[command] launch_only` adds `--no-daemon` to the
 window's spawn alone, so neither the wake nor the registration carries it.
-`grok-build`, `antigravity-cli`, `muse-code` and
-`shell` (and the WSL variants of the first two) keep `"env"` too: their hooks are
-written into the CLI's own settings by a registration, once for all windows,
-which has no place for a per-window path.
+`grok-build`, `antigravity-cli`, `muse-code` on Windows and `shell` (and the WSL
+variants of the first two) keep `"env"` too: their hooks are written into the
+CLI's own settings by a registration, once for all windows, which has no place
+for a per-window path. Grok Build hands its environment to the shells its tools
+run, so its profiles hand the CLI a [launch overlay](#launch-overlay) that keeps
+the credentials out of those shells.
+
+**A bridge names its profile.** The bundled bridges are started with
+`--profile <id>`, and a hook calls `--hook <id> <Event>` with the id of the
+profile it was written for. In a window opened from a launch profile that gives
+its CLI hooks (a `[hooks]` table, or hook entries its registration writes), the
+daemon takes a bridge as the window only when it declares the window's own
+profile, and a hook door does nothing when it names another; a plain shell
+window, and one opened from a raw command, accept them as before. The
+declaration is the bridge's own word: a mark that keeps yagura's own parts --
+a nested CLI's bridge, a registration written for another profile -- from
+claiming the wrong window, not a check that a process holding the credentials
+cannot get past.
+
+### A window's own CLI
+
+The credentials reach every process the window's CLI starts that can read
+them -- in `"env"` mode its whole process tree. A CLI that one of the window's
+tools starts, running the same hooks and bridge, would then speak for the
+window. A profile that declares the image of its CLI's process stops that:
+
+```toml
+[process_image]
+windows = "agy.exe"             # keys chosen like [command]'s: windows,
+linux = "agy"                   # macos, linux, default
+```
+
+Each value is one name or a list of them, compared with the name the
+operating system recorded when the process started: on Windows the
+executable's file name, compared whole and without regard to case; on Linux
+the command name (`comm`); on macOS `pbi_comm`; for a CLI in a WSL guest, the
+guest's `comm`. A CLI that updates its own executable (renames it away,
+overwrites it, deletes it) keeps that name, so an update needs no new window.
+On Linux and macOS the name is at most 15 bytes and is compared to its first
+15 bytes; a pattern whose part before the `*` is shorter than 15 bytes does not
+check what follows the `*` against a 15-byte name, and a name of another length
+is compared whole. A name may carry one `*`, standing for any run of
+characters; a pattern with two, one that starts with `*` (`*agy`, `*`), or one
+holding `/` fails the profile. A pattern is matched against the whole name,
+never a part of a path. For a profile with [`[host_paths]`](#host-paths), whose
+CLI runs in a WSL guest, write the guest's name under the host's key
+(`windows`), compared with regard to case.
+
+**How a request is judged.** With the declaration, a hook door's request and a
+bridge's `identify` in the window's name are traced from the requesting
+process through its parents to the window's child: the request is the
+window's only when exactly one process on that path has a declared name. Two
+or more mean a CLI nested in the window's CLI, and the request is refused. So
+is a request whose path cannot be followed -- it does not reach the window's
+child, the system does not answer, the requester's process id is not known,
+or no process on it has the name -- since a verdict is never guessed. A
+refused hook door prints nothing, exits 0 and records neither a status nor a
+session, and what waits in the inbox stays there; a refused bridge stays
+`External`, with an `identity_warning` naming why (`lineage_refused`). The
+daemon logs a warning the first time a window refuses one; when the window's
+own CLI is refused, the declaration no longer matches its release. A window
+whose CLI has exited lets no request speak for it. A window whose profile
+declares no image is judged by its credentials alone, as before.
+
+In a WSL guest the daemon cannot follow the guest's processes, so the guest
+reports them. The window's `[command]` wraps the CLI in `bash`, which puts
+`YAGURA_GUEST_ROOT=<pid>:<boot id>:<start time>` in the CLI's environment; the
+hook's shell and the bridge's wrapper collect each step of their parents' line
+from `/proc/<pid>/stat`, up to that root, and hand them to the door as
+`--guest-root` and `--guest-step`. The daemon applies the same rule to those
+steps, and refuses a path that does not reach the root or holds a step it
+cannot read. Which rule applies is the window's fact, not the request's: a
+window whose profile has `[host_paths]` takes the guest's report, and any
+other is traced by the host's own process ids, whatever a request claims.
+
+**What this protects, and what it does not.** The judgement is made against a
+CLI nested in the window that runs its hooks and bridge as written. The
+declaration, the guest's report and the environment are the requester's own,
+so a tool that deliberately reads the credentials and speaks to the daemon
+itself, or rewrites what it reports, while it runs inside the window's CLI, is
+not stopped; neither is a nested CLI started through a link of another name,
+or from a copy renamed, whose recorded name is not the declared one. The bundled
+`antigravity-cli` and `wsl-antigravity-cli` declare `agy.exe` on Windows and
+`agy` on Linux and in the guest (Antigravity CLI 1.5.6); macOS is not declared
+yet, so a macOS window is judged by its credentials alone. A declaration you
+change takes effect for a window when it is opened again, or when the daemon
+starts again.
+
+**Windows opened before this release.** A window whose holder does not name
+its child process is not traced: it is judged by its credentials alone, with
+one warning per window, until it is opened again. A window recorded before
+this release carries no fact of whether its CLI runs in a guest: it takes
+the guest's report when the profile has `[host_paths]` now, and the host's
+process ids otherwise. A WSL window opened before this release has no
+`YAGURA_GUEST_ROOT`, and its hooks and bridge -- and a bridge registered before
+this release, which hands over no steps -- are judged by their credentials
+alone, with one warning per window, until it is opened again or registered
+again.
+
+## Launch overlay
+
+A CLI whose tools inherit its whole environment can still be told to keep
+some variables from them through its own settings. A profile's optional
+`[launch_overlay]` table hands such a CLI, at launch, a settings layer of
+its own -- the *overlay* -- that keeps the window's credentials, and the
+overlay's own variables, out of the shells its tools run, while every setting
+you wrote stays yours:
+
+```toml
+[launch_overlay]
+env = "GROK_CONFIG"             # the variable the CLI reads an inline overlay from
+file_env = "GROK_CONFIG_PATH"   # the variable naming an overlay file
+dir_env = "GROK_HOME"           # optional; the variable naming the settings folder
+dir = ".grok"                   # that folder relative to home, without dir_env
+layers = ["config.toml", "managed_config.toml", "/etc/grok/managed_config.toml"]
+list = "/shell_environment_policy/exclude"
+```
+
+`layers` are the settings files below the overlay, each a file in the folder
+or an absolute path starting with `/`; `list` is the JSON Pointer of the list
+of variable names the CLI keeps from its tools. The overlay is your own
+overlay as the CLI would read it -- `env` when it holds a JSON object,
+otherwise the file `file_env` names (JSON when its name ends in `.json`, TOML
+otherwise) -- with `list` made the union of every list the layers and your
+overlay hold and the names the window keeps from the tools (the window's
+credentials, and `env`, `file_env` and `dir_env`). Whatever cannot be read is
+left out of the overlay, never the window's names. The variable names must be
+distinct, not empty, without `=`, and not the daemon's own (`YAGURA_...`);
+`dir` and the layers must be plain paths. Another key, or a value of the wrong
+type, fails the profile. The bundled `grok-build` and `wsl-grok-build` declare
+it.
+
+The overlay is made from what the window's environment holds when it opens: a
+change you make to those files while the window runs does not reach it.
+
+**A CLI the daemon starts directly** is handed the overlay in `env` by the
+daemon itself, which reads the variables and files on the host.
+
+**A CLI in another environment** (a WSL guest) makes it through the overlay
+door. Its `[command]` names the door as an element that is exactly
+`{daemon}` -- converted the way a registration's `{daemon}` is, and handed
+over as an argument of its own -- and the statement calls it before starting
+the CLI:
+
+- `yagura-daemon --launch-overlay` takes no argument and reads the window's
+  credentials from its environment. Its standard input is a sequence of
+  records, each three fields ending in a NUL byte: `env`, a variable's name and
+  its value, or `file`, a layer's name as `layers` writes it (or `file_env`'s
+  name, for the overlay file) and its text. At most 2 MiB are read, a name
+  given twice or text that is not UTF-8 is refused, and the door prints the
+  overlay on its standard output and exits 0; on any failure it prints one line
+  on its standard error, which holds no value, prints nothing on standard
+  output and exits non-zero.
+- The statement must start the CLI only with the overlay the door printed, in
+  `env`, and must not start it when the door fails or prints nothing. The
+  bundled `wsl-grok-build` statement does this; keep that part when you write
+  your own.
+- A run of the argv that opens no window -- a registration, a listing, a wake,
+  a model listing -- has no door: there `{daemon}` becomes `-`, and the
+  statement must start the CLI without calling the door.
+
+`{daemon}` is accepted in `[command]` only as a whole element. Until the
+window's overlay is made, its credentials do not speak for it: its status
+reports, its deliveries and its bridge as the window are refused
+(`launch_overlay_pending`), and the daemon's log and the bridge's
+`identity_warning` say why. A statement that drops the door, or starts the
+CLI without the overlay, leaves the window's credentials in its tools'
+shells, and the window then never reports or takes part in delivery: the
+daemon does not take the credentials for the window. A tool that calls the
+door itself, with the credentials it can read, is the limit described under
+[A window's own CLI](#a-windows-own-cli).
 
 ## MCP injection
 
@@ -1019,10 +1235,10 @@ in. Reaching yagura's MCP bridge from an `agy` window means registering it
 once -- from Settings > Integrations in the GUI (see
 [MCP registration](#mcp-registration) below), or by hand with `agy mcp add`,
 see [docs/mcp-setup.md's "Configuring Antigravity CLI"](../docs/mcp-setup.md#configuring-antigravity-cli).
-`muse-code` has none either: Muse Code's Windows launcher cannot carry the
-JSON a launch would pass, so on every operating system that profile reaches
-yagura through its registration instead (see
-[MCP registration](#mcp-registration)). Nor do `grok-build` and
+`muse-code` has none on Windows: Muse Code's Windows launcher cannot carry the
+JSON a launch would pass, so there that profile reaches yagura through its
+registration instead (see [MCP registration](#mcp-registration)); on macOS
+and Linux it passes its server at every launch, as `wsl-muse-code` does. Nor do `grok-build` and
 `wsl-grok-build`: Grok Build takes MCP servers only from the settings files
 it reads, with no launch argument that adds one (see
 [Configuring Grok Build](../docs/mcp-setup.md#configuring-grok-build)).
@@ -1030,18 +1246,31 @@ it reads, with no launch argument that adds one (see
 ```toml
 # Claude Code on Windows: the server definition goes into a settings file
 [mcp]
-config_file = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+config_file = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--profile","claude-code"]}}}'
 args = ["--mcp-config", "{mcp_config_file}"]
 
 # Codex CLI on Windows: -c overrides written as TOML literal strings
 [mcp]
 args = [
   "-c", "mcp_servers.{server}.command={bridge_toml}",
-  "-c", "mcp_servers.{server}.args=[]",
+  "-c", "mcp_servers.{server}.args=['--profile','codex-cli']",
   "-c", "mcp_servers.{server}.env_vars={env_names_toml}",
   "-c", "mcp_servers.{server}.tool_timeout_sec=86400",
 ]
 ```
+
+Each bridge the bundled tables start is passed `--profile <id>`, the id of
+the profile it is started for: the window accepts a bridge as itself only
+when it declares the window's own profile (see [Credentials](#credentials)).
+Pass it in a profile of your own too.
+
+`[credentials]`, `[mcp]` and `[hooks]` may each be written once, or per
+operating system with the keys `[command]` uses: a table whose every key is
+`windows`, `macos`, `linux` or `default` and holds a table of its own
+(`[mcp.linux]`, say) is chosen the way an argv is (see
+[OS-specific `[command]` selection](#os-specific-command-selection)). The
+bundled `muse-code` writes them per operating system: nothing on Windows,
+the launch form on macOS and Linux.
 
 The table takes four keys, and any other key excludes the profile:
 
@@ -1076,7 +1305,7 @@ The table takes four keys, and any other key excludes the profile:
 args = ["--config-dir", "{mcp_config_dir}"]
 
 [mcp.config_dir]
-"mcp.json" = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":[]}}}'
+"mcp.json" = '{"mcpServers":{"{server}":{"command":"${YAGURA_MCP_BRIDGE}","args":["--profile","my-cli"]}}}'
 ```
 
 These placeholders are substituted inside `args` elements, always within an
@@ -1186,7 +1415,7 @@ The same hooks carry the doors a CLI reads its inbox through,
 profile's [`[hook_events]`](#hook-events) table says for that event.
 It follows the `[mcp]` rules above -- the same `args`, `config_file` and
 `config_dir` keys, the same settings directory, argv order and drop rules --
-with three differences:
+with these differences:
 
 - The placeholders are `{hooks_config_file}`, the path of the file written
   from `config_file` (usable only when the table has `config_file`), and
@@ -1198,6 +1427,9 @@ with three differences:
   `yagura-mcp` was found.
 - In a profile whose credentials mode is `"launch"`, each door's command
   carries `--credentials '{credentials_file}'` (see [Credentials](#credentials)).
+- In a profile whose credentials mode is `"launch"`, it may also carry
+  `answers`, texts its hooks print without the daemon (see
+  [Answers a hook prints without the daemon](#answers-a-hook-prints-without-the-daemon)).
 - Its elements are appended after the `[mcp]` ones. When `argv[0]` resolves
   to a `.cmd` / `.bat` shim, each table is judged on its own: a `[hooks]`
   element with a character the command interpreter would act on drops only
@@ -1273,29 +1505,31 @@ were checked with):
 | `codex-cli` (Codex CLI 0.159.2), `wsl-codex-cli` (0.158.0) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | `antigravity-cli`, `wsl-antigravity-cli` (Antigravity CLI 1.2.14, through `json_entry`) | `PreInvocation`, `PostToolUse` | -- | -- |
 | `copilot-cli`, `wsl-copilot-cli` (GitHub Copilot CLI 1.0.101) | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
-| `muse-code` (through `json_entry`), `wsl-muse-code` (Muse Code 1.4.12) | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
+| `muse-code` (through `json_entry` on Windows), `wsl-muse-code` (Muse Code 1.4.12) | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | `grok-build`, `wsl-grok-build` (Grok Build 1.0.70, through `json_entry`) | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `Notification` (`permission_prompt`) | `Stop`, `StopFailure`, `StopCancelled` |
 
-The bundled profiles also call the delivery doors from the hooks above: at
-session start, at the start of a turn and, for Claude Code, in a background
-wait. The hooks of the Antigravity CLI, Grok Build, `muse-code` and Codex CLI
-profiles call `--hook` for every event instead, and their `[hook_events]`
-tables say which event reports, delivers or skips (see
-[Hook events](#hook-events)). Grok Build hands the model a hook's output only
-from the tool-call hooks, so the Grok Build entry takes the inbox after each tool call
-(`PostToolUse`, `PostToolUseFailure`) and has no session-start door; the
-room's introduction goes in at launch instead (`launch_context`, see
-[Delivery](#delivery)).
+Every bundled profile's hooks above call `--hook`, and its `[hook_events]`
+table says which event reports, delivers, hands a block over or records the
+session (see [Hook events](#hook-events)); Claude Code's start-up context,
+background wait and answers call `--deliver-context`, `--deliver-wait` and
+`--print-answer` directly. Grok Build hands the model a hook's output only
+from the tool-call hooks and a stop's block, so the Grok Build entry takes the
+inbox after each tool call (`PostToolUse`, `PostToolUseFailure`) and at the
+end of a turn, and has no session-start door; the room's introduction goes in
+at launch instead (`launch_context`, see [Delivery](#delivery)).
 
-Grok Build also runs these hooks in a sub-agent's session, whose input
-carries `subagentType`, so each of its events has `skip_if = "/subagentType"`.
-The other doors take such a pointer as `--skip-if <JSON Pointer>` (starting
-with `/`). Either way, when the JSON the CLI writes to the hook's standard
-input has a value other than `null` there, the door does nothing and exits
-0. The pointer is the profile's data; the daemon knows no CLI's field. Every door reads its
-standard input to the end, so the CLI's write to it does not fail; inside a
-window, a door that has answered waits at most 2 seconds more for a CLI that
-keeps its standard input open.
+A CLI that runs the same hooks in its subagents' sessions marks their input,
+and the profile's top-level `subagent_pointer` names where (see
+[Hook events](#hook-events)). The other doors take such a pointer as
+`--skip-if <JSON Pointer>` (starting with `/`): when the JSON the CLI writes
+to the hook's standard input has a value other than `null` there, the door
+does only what a subagent's hook does -- `--emit-status running` and
+`--emit-status waiting_approval` still report, and every other door and
+status does nothing and exits 0. The pointer is the profile's data; the
+daemon knows no CLI's field. Every door reads its standard input to the end,
+so the CLI's write to it does not fail; inside a window, a door that has
+answered waits at most 2 seconds more for a CLI that keeps its standard input
+open.
 
 Copilot CLI takes launch-time hooks only from a plugin directory
 (`--plugin-dir`), so the Copilot profiles write one with `config_dir`: a
@@ -1322,10 +1556,9 @@ reports a failed hook on every turn. The bundled `muse-code` hooks therefore
 check for the window in the shell before they start the daemon, and do
 nothing outside one:
 
-| Host | Command form (`%COMSPEC% /C` on Windows, `$SHELL -c` elsewhere) |
+| Host | Command form (`%COMSPEC% /C`) |
 | --- | --- |
 | Windows (`by_os.windows`) | `if defined YAGURA_WINDOW_ID (set NoDefaultCurrentDirectoryInExePath=1& yagura-daemon --hook muse-code UserPromptSubmit)` |
-| macOS, Linux (`by_os.default`) | `[ -z "$YAGURA_WINDOW_ID" ] \|\| exec yagura-daemon --hook muse-code UserPromptSubmit` |
 
 The check only tests whether the variable is set and non-empty; its value is not expanded
 into the command. On Windows the same command also sets
@@ -1333,9 +1566,9 @@ into the command. On Windows the same command also sets
 `cmd` does not run a `yagura-daemon.bat` or `.exe` from the session's working
 folder ahead of the one on `PATH`; it applies whether yagura or the user
 started that Muse. The door itself still does nothing outside a
-window, which covers a hook written by hand without the check. The
-`wsl-muse-code` hooks file is passed with each launch and read only by that
-window's CLI, so its commands carry no check.
+window, which covers a hook written by hand without the check. On macOS and
+Linux, and in `wsl-muse-code`, the hooks file is passed with each launch and
+read only by that window's CLI, so its commands carry no check.
 
 A CLI whose hook can name a program and its arguments apart, with no shell
 in between, takes a second form: the hook runs `{daemon}`, the absolute path
@@ -1376,6 +1609,40 @@ the window's own instance does nothing, like a door outside a window (see
 Hooks passed with a launch, or one file all instances share, run only once
 and need no `--for-instance`.
 
+### Answers a hook prints without the daemon
+
+A `[hooks]` table may carry `answers`: hook event names, each with the text
+a hook of that event is to print. Only a profile whose
+[credentials](#credentials) mode is `"launch"` may have them, and only in
+`[hooks]` (an `[mcp]` table cannot); a key follows the event-name rule of
+[Hook events](#hook-events).
+
+```toml
+[hooks.answers]
+SessionStart = '{"hookSpecificOutput":{"hookEventName":"SessionStart","watchPaths":{wake_paths}}}'
+CwdChanged = '{"hookSpecificOutput":{"hookEventName":"CwdChanged","watchPaths":{wake_paths}}}'
+```
+
+When a window opens, the daemon writes each answer beside the window's
+credentials file, as `answer-<Event>`, and the hook prints it with
+`yagura-daemon --credentials '{credentials_file}' --print-answer <Event>`. That
+door does not connect to the daemon, so it answers while no daemon runs, and
+prints nothing when there is no such answer. The one placeholder an answer
+may name is `{wake_paths}`, replaced in one pass by the JSON array of the
+paths the window's CLI is to watch -- today one, its [wake file](#delivery).
+A window with no wake file (its hooks were left out, or the place for the
+file could not be found) gets no answer that names `{wake_paths}`, so its
+door prints nothing. An answer larger than 64 KiB is not written.
+
+The bundled Claude Code profiles use them to hand Claude Code the wake file
+to watch, at session start and again on each change of directory, with a
+`FileChanged` hook matched on `yagura_wake` that registers the wait again (see
+[Delivery](#delivery)). A file of your own that lays another `[hooks]`
+`config_file` or `args` over a bundled Claude Code profile must keep the three
+hooks that go together -- `SessionStart`'s and `CwdChanged`'s
+`--print-answer`, and `FileChanged`'s `--deliver-wait` -- and `answers` in
+step with each other, or the CLI is never told, or never acts on, the file.
+
 ## Hook events
 
 A profile's optional `[hook_events]` table says what the daemon does when a
@@ -1383,11 +1650,13 @@ hook calls `yagura-daemon --hook <profile-id> <Event>` with the profile's id.
 The table is data: the daemon never branches on which CLI a profile is for.
 
 ```toml
+subagent_pointer = "/agentId"   # top level, before the first table
+
 [hook_events]
-PreInvocation = { status = "running", deliver = "take" }
-SessionStart = { deliver = "context" }
-PostToolUse = { status = "running", skip_if = "/subagentType" }
-UserPromptSubmit = { status = "running", session = "/session_id" }
+sessionStart = { deliver = "context" }
+userPromptSubmitted = { status = "running" }
+postToolUse = { status = "running", deliver = "take" }
+agentStop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }
 ```
 
 Each key is an event name, matching `[A-Za-z0-9_-]{1,64}`: the name the
@@ -1397,52 +1666,220 @@ Each value is a table of these keys:
 | Key | Meaning |
 | --- | --- |
 | `status` | The status to report for the window, one of the seven statuses, as `--emit-status` reports it (see [What a report means](../crates/yagura-daemon/detection/README.md#what-a-report-means)) |
-| `deliver` | `"context"`: print the room's introduction and what waits in the inbox, as `--deliver-context` does. `"take"`: print what waits and mark it taken, as `--deliver-take` does |
+| `deliver` | `"context"`: print the room's introduction and what waits in the inbox, as `--deliver-context` does. `"take"`: print what waits and take it out of the inbox, as `--deliver-take` does. `"block"`: hand everything waiting over in one block of the event's answer -- for a stop event whose block makes the CLI go on with it (see below) |
 | `session` | A JSON Pointer to the CLI's session identifier in the hook's input, recorded as `--report-session` records it |
-| `skip_if` | A JSON Pointer: when the hook's input has a value other than `null` there, the event does nothing |
+| `when` | A table of JSON Pointers to the values the hook's input must hold for `deliver` to hand anything over: a string, an integer or a boolean each. Only when every one is equal does the event deliver. A pointer the input has no value at counts as not equal. Needs `deliver` |
 
-They run in a fixed order: `skip_if`, then `session`, then `status`, then
-`deliver`. An event needs at least one of `status`, `deliver` and `session`.
-A pointer starts with `/` and has at most 256 characters. An unknown key, or
-a value of the wrong type or outside its domain, fails the table, and the
-profile is left out of the listing with a warning.
+They run in a fixed order: `session`, then the window's turn (an
+[`[interrupt]`](#interrupt) hook form's start or end), then `status`, then a
+stop when the event is one an AI's interrupt is answered at (in place of
+`deliver`), then `deliver`. An event needs at least one of `status`,
+`deliver` and `session`, unless `[interrupt]` names it as a stop event, which
+may then be written `Event = {}`. A pointer starts with `/` and has at most
+256 characters. An unknown key, or a value of the wrong type or outside its
+domain, fails the table, and the profile is left out of the listing with a
+warning.
+
+**A block.** `deliver = "block"` is for the event a CLI runs when its turn
+stops and whose answer can make it go on: what waits is handed over in one
+block, in the form [`[delivery.output]`](#delivery)'s `block` gives, and the
+CLI continues the same session with it. The door answers at once, never
+waits, and answers whatever the window's status. The event's `status` is
+recorded where the door ends: at once when there is nothing to hand over, or
+when `when` does not hold; `running` once the door says it printed the block;
+and the event's own when the door ends without saying so and no other status
+was reported since it began. Use `when` to hand a block over once per stop:
+the bundled profiles hand one over only at a stop that is not itself the
+continuation of a block (`stop_hook_active` false), so a block never keeps a
+CLI going block after block. A block is started by the CLI's own stop hook,
+not by the screen, so it is answered even while the window's status is
+`unknown`; the daemon's own ways of pushing text (answering a wait, a wake
+command) still never run for an `unknown` window. The door compares `when`
+itself and sends the daemon only whether each pointer matched.
+
+**Telling a subagent's hook apart.** A CLI that runs the same hooks in its
+subagents' sessions marks their input. The top-level `subagent_pointer` names
+where: a JSON Pointer at which a subagent's hook input has a value other than
+`null` and the main session's has none, on every event. It is read only with
+a `[hook_events]` table (without one it is ignored, with a warning). What a
+subagent's hook does is yagura's decision, made once for every profile:
+
+| What a hook does | The main session's hook | A subagent's hook |
+| --- | --- | --- |
+| report `running` or `waiting_approval` | yes | yes: a subagent's work is the window's work, a background subagent's included |
+| report any other status (`waiting_input`, ...) | yes | no: a subagent's end is not the end of the window's turn |
+| record the session | yes | no |
+| hand over the inbox (`context`, `take`, `wait`, `block`) | yes | no: it prints nothing and exits 0 |
+| start or end the window's turn (`[interrupt]`) | yes | no |
+| answer a stop (`[interrupt]`) | yes | yes: a subagent works in the window's turn, so it stops with it |
+
+So a subagent running in the background reports `running` for the window
+while it works. A profile without `subagent_pointer` takes every hook for the
+main session's, and its author must not declare an effect that only the main
+session may have -- a status other than `running` and `waiting_approval`, a
+session, a delivery -- on an event the CLI also runs in a subagent's session
+(`PreToolUse`, `PostToolUse` and `PostToolBatch`, for example), and must not
+let a stop end the turn (see [Interrupt](#interrupt)). The bundled profiles
+name `/agent_id` (Claude Code, Codex CLI), `/agentId` (GitHub Copilot CLI) and
+`/subagentType` (Grok Build); Muse Code tells no subagent's hook apart, so
+its profiles name none.
+
+An earlier per-event `skip_if` is read as `subagent_pointer` when every event
+that writes it writes the same pointer, with a warning naming
+`subagent_pointer`; it is ignored, with a warning, when `subagent_pointer` is
+given too. Pointers that differ from event to event fail the table, and the
+warning asks for one `subagent_pointer` instead.
 
 **Which profile is read.** The daemon reads the profile the hook names --
 the shipped one with your own file laid over it, like any other read -- each
-time the hook runs, not the profile the window was opened from. So the hook
-works in a window opened from another profile or from a raw command, and a
-change to your file applies from the next hook on. Text is printed in that
-profile's [`[delivery]`](#delivery) `output` form (its `context` or `take`
-template) and within its `max_chars`; a profile without `[delivery]` prints
-in the window's own form. A profile the daemon cannot read or would not
-list, or one with no such event, does nothing: the hook prints nothing,
-exits 0, and the daemon logs a warning.
+time the hook runs, not the profile the window was opened from. A change to
+your file therefore applies from the next hook on. Text is printed in that
+profile's [`[delivery]`](#delivery) `output` form and within its `max_bytes`;
+a profile without `[delivery]` prints in the window's own form. A profile the
+daemon cannot read or would not list, or one with no such event, does
+nothing: the hook prints nothing, exits 0, and the daemon logs a warning.
+In a window opened from a launch profile that gives its CLI hooks (a
+`[hooks]` table, or hook entries its registration writes), a hook that names
+another profile's id does nothing: the hooks of a CLI nested in the window
+are not the window's. A plain shell window, and one opened from a raw
+command, run whichever profile a hook names, so a CLI you start inside one
+reports for it.
 
 **What leaves the hook.** The door reads the hook's input itself and sends
-the daemon only what the event asks for: whether `skip_if` holds a value, and
-the session identifier when it has the shape of one. Nothing else of the
-input reaches the daemon. Like the other doors, `--hook` does nothing
-outside a window and takes `--for-instance` and `--credentials`; it takes no
-`--skip-if`, since the pointers are the profile's.
+the daemon only what the event asks for: whether the `subagent_pointer` holds
+a value, whether each `when` pointer matched, and the session identifier when
+it has the shape of one. Nothing else of the input reaches the daemon. Like
+the other doors, `--hook` does nothing outside a window and takes
+`--for-instance` and `--credentials`; it takes no `--skip-if`, since the
+pointers are the profile's.
 
 **When to use it.** A hook that stays in the CLI's own settings after a
 window ends -- written there by a registration, or trusted by a hash the CLI
 records over its command -- calls `--hook`, so its text does not change from
 release to release and a later release can change what it does without
-anyone writing the entry again. The bundled Antigravity CLI, Grok Build,
-`muse-code` and Codex CLI profiles do this. Hooks passed with every launch
-may call the other doors directly.
+anyone writing the entry again. Every bundled profile's status hooks call
+it; Claude Code's start-up, wait and answer hooks call the other doors
+directly, since they are passed with every launch.
+
+### Hook timeout
+
+A profile's optional `[hook_timeout]` table records how many seconds the CLI
+gives a hook command before cutting it off, so the daemon can tell a door how
+long it has:
+
+```toml
+[hook_timeout]
+default = 10                    # every hook not named below
+doors = { wait = 86400 }        # a --deliver-context, --deliver-take or --deliver-wait hook
+events = { Interrupt = 1 }      # a --hook <id> <Event> hook
+```
+
+Each time is a whole number of seconds from 1 to 4294967295. A hook text in
+`[hooks]` or a registration's entries names the same time by placeholder --
+`{hook_timeout}` for `default`, `{hook_timeout.doors.<door>}` and
+`{hook_timeout.events.<event>}` -- so the time the CLI is given and the time
+the door is told are one value; a placeholder whose time the table does not
+give fails the profile. A string that is exactly one placeholder becomes the
+number itself, so a JSON entry's `timeout` stays a number. A CLI that is given
+no time keeps its own default, which the table may record for the door.
+
+## Interrupt
+
+A profile's optional `[interrupt]` table says how the user and an AI
+interrupt the profile's CLI through [`interrupt_window`](../docs/mcp-setup.md#interrupt_window).
+The user's own interrupt is the GUI's button, or any registered approver's;
+every other caller's is an AI's.
+
+```toml
+[interrupt]
+user_keys = ["ctrl_c"]          # required: the keys the user's interrupt writes
+ai = "hook"                     # required: "keys", "hook" or "none"
+# ai_keys = ["escape"]          # with ai = "keys" only: the keys an AI's writes
+
+[interrupt.turn]                # with ai = "hook" only
+starts = ["UserPromptSubmit"]   # the events that start the main session's turn
+ends = ["Stop", "StopFailure"]  # the events that end it
+
+[interrupt.stops.PreToolUse]    # with ai = "hook" only: one table per stop event
+answer = '{"continue":false,"stopReason":{reason}}'
+ends_turn = true
+```
+
+- **Keys** are words, not bytes: `escape` and `ctrl_c`. Each is written the
+  way the same key pressed in the window would be, in the window's current
+  input mode, as the GUI writes a key. A list must not be empty; another word
+  fails the table.
+- **`ai = "keys"`** writes `ai_keys`. Choose keys that stop the CLI's work
+  without discarding what it keeps for the user -- a draft in its input line,
+  the session -- since an AI's interrupt can arrive at any moment.
+- **`ai = "hook"`** marks the window's open turn instead of writing anything:
+  each event under `[interrupt.stops]` of that turn is answered with its
+  `answer` until the turn ends. `[interrupt.turn]`'s `starts` and `ends` tell
+  the daemon where the main session's turn begins and ends, and neither may
+  be empty. An event may stand in only one of the three lists (`starts`,
+  `ends`, `stops`), and every event in them must be in the profile's
+  [`[hook_events]`](#hook-events); an event declared only to be stopped at
+  may be written there as `Event = {}`. Either breaks the profile.
+- **`answer`** is the JSON the stop event's hook prints. It must carry
+  `{reason}` at least once, which is filled in with the daemon's reason as
+  one JSON string (escaped the way `{text}` is), and must be JSON once filled
+  in.
+- **`ends_turn`** (required, `true` or `false`) says whether that answer,
+  given to the main session, ends its turn: the tool does not run and the CLI
+  waits for its user. Set it to `true` only for an event at which you have
+  measured that the answer ends the turn without running the tool; the daemon
+  then closes the turn there, so the turn's next request no longer counts as
+  stopped. A profile without `subagent_pointer` may not set it (it fails the
+  table): a subagent's stop could not be told apart from the main session's,
+  and would end the window's turn.
+- **`ai = "none"`** gives an AI no means: its interrupt is refused as
+  `interrupt_unsupported`, and nothing is written. The user's interrupt still
+  writes `user_keys`.
+
+A profile without `[interrupt]`, and a window opened without a profile, have
+both the user's and an AI's interrupt write the playbook's
+`[limits] interrupt_bytes` (`0x03`, Ctrl+C, by default).
+
+**What the mark means.** It belongs to the turn that was open when it was
+put, and stops nothing once that turn ends. A window no hook of whose main
+session has reached the daemon since it opened, was taken back, or the daemon
+started, is marked all the same, and answered `stop_requested_unconfirmed`;
+one whose last hook ended its turn is not marked (`no_open_turn`). The turn
+and the mark are daemon memory: a daemon restart forgets both. An AI's
+interrupt, by keys or by mark, also ends what the interrupted window itself
+waits on (see [interrupt_window](../docs/mcp-setup.md#interrupt_window)).
+
+The bundled profiles:
+
+| Profiles | `user_keys` | `ai` | Stop events (`ends_turn`) | Turn starts | Turn ends | An instruction sent after the stop arrives |
+| --- | --- | --- | --- | --- | --- | --- |
+| `claude-code`, `wsl-claude-code` | `ctrl_c` | `hook` | `PreToolUse` (true), `PostToolUse` (true) | `UserPromptSubmit` | `Stop`, `StopFailure` | through the wait Claude Code leaves registered (`wake = "wait"`, see [Delivery](#delivery)) |
+| `copilot-cli`, `wsl-copilot-cli` | `ctrl_c` | `hook` | `preToolUse` (false) | `userPromptSubmitted` | `agentStop` | at the end of the turn, as `agentStop`'s block |
+| `grok-build`, `wsl-grok-build` | `ctrl_c` | `hook` | `PreToolUse` (false), `PostToolUse` (true) | `UserPromptSubmit` | `Stop`, `StopFailure`, `StopCancelled` | at the user's next turn |
+| `muse-code`, `wsl-muse-code` | `escape` | `hook` | `PostToolUse` (false), `PostToolUseFailure` (false) | `UserPromptSubmit` | `Stop`, `StopFailure`, `Interrupt` | at the user's next turn |
+| `codex-cli`, `wsl-codex-cli` | `escape` | `none` | -- | -- | -- | -- |
+| `antigravity-cli`, `wsl-antigravity-cli` | `ctrl_c` | `none` | -- | -- | -- | -- |
+
+Grok Build and Muse Code take an instruction sent after the stop only at the
+user's next turn: a turn their stop answer ends runs no stop hook that could
+hand a block over, the events that end such a turn (`StopCancelled`,
+`Interrupt`) take no answer, and neither CLI documents a way to wake an idle
+session. This is to change once their documentation offers an event that
+ends a stopped turn and takes an answer, or a way to wake a session from
+outside. Codex CLI and Antigravity CLI offer no measured way for an AI to stop
+them that keeps the user's draft and session, so an AI's interrupt is refused
+there; close the window, or ask the user.
 
 ## Delivery
 
-A profile's optional `[delivery]` table says how the daemon hands the profile's CLI the text it sends of its own accord -- chat, handoffs and notices -- without typing it into the composer. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
+A profile's optional `[delivery]` table says how the profile's CLI takes what a window is sent -- messages, handoffs, chat and notices -- none of which is ever typed into its input. The mechanism (the inbox, the doors a CLI's hooks run, and when each text arrives) is described once, in [How the daemon delivers text](../docs/mcp-setup.md#how-the-daemon-delivers-text); this section covers the table.
 
-The table is data: the daemon reads it and never branches on which CLI a profile is for. A window is handed text this way only if its profile declares `[delivery]` **and** the hooks that call the doors were put in place when it opened (`[hooks]`, or a `json_entry` for a CLI that reads hooks only from its own file; see [Hooks injection](#hooks-injection)). A window that is not -- a profile with no `[delivery]` table, a raw `command`, a hook table that was dropped on the way -- is no chat participant, gets no announcement, and a handoff addressed to it is answered `undelivered_no_delivery`.
+The table is data: the daemon reads it and never branches on which CLI a profile is for. A window is handed text this way only if its profile declares `[delivery]` **and** the hooks that call the doors were put in place when it opened (`[hooks]`, or a `json_entry` for a CLI that reads hooks only from its own file; see [Hooks injection](#hooks-injection)). A window that is not -- a profile with no `[delivery]` table, a raw `command`, a hook table that was dropped on the way -- is no chat participant, gets no announcement, and a `send_message` or `send_handoff` addressed to it is answered `undelivered_no_delivery`.
 
 ```toml
 [delivery]
 output = "plain"                # "plain", or a JSON template containing {text}
-max_chars = 10000               # the most characters one answer carries
+max_bytes = 10000               # the most bytes one answer carries
 wake = "wait"                   # "none" (default), "wait" or "command"
 wake_stream = "stderr"          # "stderr" (default) or "stdout"
 wake_exit = 2                   # exit code of an answered wait (default 2)
@@ -1452,21 +1889,24 @@ launch_prompt = ["--", "{prompt}"]
 [delivery.output]               # or this table instead of the one string
 context = '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":{text}}}'
 take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":{text}}}'
+block = '{"decision":"block","reason":{text}}'
 ```
 
 | Key | Meaning |
 | --- | --- |
-| `output` | How a door prints the text. `"plain"` (the default) prints it as it is. Anything else is a JSON template that contains `{text}`: the text is inserted as a JSON string (quoted and escaped), and the template must still be valid JSON with it in. A CLI that wants its hook output wrapped in a structure takes this form. One string applies to every door. A table `[delivery.output]` gives each door its own, keyed `context` (`--deliver-context`, and a [hook event](#hook-events) with `deliver = "context"`), `take` (`--deliver-take`, and `deliver = "take"`) and `wait` (`--deliver-wait`), each value following the same rule; a door the table leaves out prints plain, and any other key fails the table. A CLI that checks a hook's output against the event the hook ran for takes this form |
-| `max_chars` | The most characters one answer carries, the chat announcement included (default 10000). Texts are never cut; the ones that do not fit wait for the next answer. Where the CLI limits a hook's output itself, set this to that limit |
-| `wake` | How a CLI that is waiting for input is woken. `"none"` (the default): the daemon cannot, so it types the oldest waiting text into the composer while the window waits for input (this needs a composer and an `[input].probe` in the window's detection definition, see [Detection definitions](../crates/yagura-daemon/detection/README.md#composer)). `"wait"`: the CLI leaves a wait registered through the `--deliver-wait` door and the daemon answers it. `"command"`: the daemon runs the profile's own program with `wake_args` |
+| `output` | How a door prints the text. `"plain"` (the default) prints it as it is. Anything else is a JSON template that contains `{text}`: the text is inserted as a JSON string (quoted and escaped), and the template must still be valid JSON with it in. A template may also carry `{event}`, filled in with the name of the event the door runs for, as a JSON string (`null` for a door that names none). A CLI that wants its hook output wrapped in a structure takes this form. One string applies to every door. A table `[delivery.output]` gives each door its own, keyed `context` (`--deliver-context`, and a [hook event](#hook-events) with `deliver = "context"`), `take` (`--deliver-take`, and `deliver = "take"`), `wait` (`--deliver-wait`) and `block` (`deliver = "block"`), each value following the same rule; a door the table leaves out prints plain, and any other key fails the table. A CLI that checks a hook's output against the event the hook ran for takes this form |
+| `max_bytes` | The most bytes one answer carries (default 10000): the UTF-8 of the output in the form the door prints, JSON escapes and the room's introduction included, and for a wake command the arguments that carry `{text}` (a `{session}` counted as 128 bytes; an `{event}` as the longest event name, 64). Texts are never cut; the ones that do not fit wait for the next answer, and one that fits no answer of the profile's forms is refused when it is sent. Where the CLI limits a hook's output itself, set this to that limit. The older `max_chars` is read as that many bytes, with a warning naming `max_bytes`, and is ignored, with a warning, beside `max_bytes` |
+| `wake` | How a CLI that is waiting for input is woken. `"none"` (the default): it is not; what waits is handed over at the CLI's next door -- its next turn, a tool call, or the end of a turn with a [block](#hook-events). `"wait"`: the CLI leaves a wait registered through the `--deliver-wait` door and the daemon answers it (see "Asking for the wait again" below). `"command"`: the daemon runs the profile's own program with `wake_args` |
 | `wake_args` | Required with `wake = "command"` and rejected otherwise. The arguments the program is run with; each is a non-empty argv element, at least one contains `{text}`, and `{session}` stands for the session identifier a hook reported with `--report-session` (or a [hook event](#hook-events)'s `session`). The command runs once the CLI has reported its session, so not before its first turn |
 | `wake_stream`, `wake_exit` | For `wake = "wait"`: the stream an answered wait prints on and the exit code it ends with. The CLI's own hook documentation says which code wakes it |
 | `launch_prompt` | Arguments that hand the CLI a first request when it starts; `{prompt}` (required in at least one element) is replaced with the text. The elements are appended after the launch's other elements, after `[mcp]` and `[hooks]`. A task window with an instruction, and a window a `send_handoff` opens from this profile, are started this way. A profile without it cannot be used for either (`no_composer`) |
 | `launch_context` | Arguments that hand the CLI the room's introduction (the playbook's `[chat] intro`) when it starts, for a CLI with no session-start hook whose output reaches its model; `{context}` (required in at least one element) is replaced with the text. They are added only for a window that will take part in chat -- the profile's hooks are in place and its detection definition is not in `[chat] exclude_detections` -- and come after the launch's other elements, ahead of the `launch_prompt` elements. When the program is a Windows `.cmd` / `.bat` file they are left out, and the daemon logs one warning (see [Shim guidance](#shim-guidance)) |
 
-`wake_timeout_secs`, `session_pointer` and `shim_guidance` are not keys: writing any of them is an error (what to tell a user when the program is a `.cmd` / `.bat` file is the top-level [`[shim_guidance]`](#shim-guidance) table). An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` / `{context}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
+`wake_timeout_secs`, `session_pointer` and `shim_guidance` are not keys: writing any of them is an error (what to tell a user when the program is a `.cmd` / `.bat` file is the top-level [`[shim_guidance]`](#shim-guidance) table). An unknown key, a value of the wrong type or outside its domain, or a `{text}` / `{prompt}` / `{session}` / `{context}` / `{event}` placeholder in a place that does not take it fails the table, and the profile is left out of the listing with a warning, like any other invalid table.
 
-**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml`, `grok-build.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`), Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI, Muse Code and Grok Build have no way to be woken (`wake = "none"`), so while one of their windows waits for input the daemon types the text. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context` and `take` their own templates. Grok Build passes no session-start hook's output to its model, so its profiles hand it the room's introduction with `--rules` (`launch_context`), and take the inbox only after a tool call. Their start-up requests are given on each CLI's command line.
+**Asking for the wait again.** A CLI with `wake = "wait"` can lose its registered wait while it waits for input: the daemon ended abnormally and the window outlived it, or the CLI's own time limit for the wait ran out. A window whose open recorded a *wake file* -- its profile's `[hooks]` has an [answer](#answers-a-hook-prints-without-the-daemon) naming `{wake_paths}`, and its hooks were put in place -- is asked again: when something waits that can be handed over, no wait is registered, and the window is neither `unknown` nor `exited`, the daemon writes the wake file once (its content changes with each write, and the file is never removed). It writes it again only after one of the window's doors ran, a wait was registered, or the window's status changed. A write that fails is logged once per window and tried again at the next of those. The CLI is to watch the file and register a wait again when it changes; the bundled Claude Code profiles do this with a `FileChanged` hook whose `matcher` is the file's name, `yagura_wake`, running `--deliver-wait`. That matcher compares file names, so a file of the same name in the working folder that changes also runs one `--deliver-wait`, which prints nothing when nothing waits. A window with no wake file -- a profile without such an answer, a window whose hooks were left out, one opened before this release -- and a window of an older daemon wait as before, for the CLI's next door. This is to be revisited when Claude Code's hooks documentation limits which events `asyncRewake` may be used on, or limits what `FileChanged` watches to the working folder; or when its documentation puts `CwdChanged`'s `watchPaths` at the top level, or a Claude Code release no longer brings the watch list back after a change of directory.
+
+**Where each bundled profile declares what.** The tables are in `claude-code.toml`, `codex-cli.toml`, `antigravity-cli.toml`, `copilot-cli.toml`, `muse-code.toml`, `grok-build.toml` and their `wsl-` counterparts; read them as the working examples. In short: Claude Code leaves a wait that ends with exit code 2 (`wake = "wait"`) and is asked for it again through its wake file, Codex CLI is woken with its own `queue` subcommand (`wake = "command"`), and Antigravity CLI, GitHub Copilot CLI, Muse Code and Grok Build have no way to be woken (`wake = "none"`): what waits is handed over at their next door, and as a block when their turn stops. Muse Code takes a hook's output for JSON once it starts with `[`, as yagura's texts can (`[yagura handoff] ...`), and a JSON answer must name the event it is for, so its profiles give `context`, `take` and `block` their own templates. Grok Build passes no session-start hook's output to its model, so its profiles hand it the room's introduction with `--rules` (`launch_context`), and take the inbox only after a tool call and at the end of a turn. Their start-up requests are given on each CLI's command line.
 
 **Windows and Codex CLI.** A wake command passes the text as a command-line argument, and a Windows `.cmd` / `.bat` file is started through the command interpreter, which reads parts of an argument as its own syntax. Such a profile is therefore listed as unavailable (reason kind 5 under [Availability](#availability)) instead of being started and failing later. For Codex CLI, whose npm package installs a `.cmd` shim, install the standalone build and put it ahead of the npm one on `PATH`; the bundled `codex-cli` profile's [`[shim_guidance]`](#shim-guidance) gives the command. A `launch_prompt` is subject to the same limit: a request that must be passed on the command line is refused when the program is a `.cmd` / `.bat` file (see [Shim guidance](#shim-guidance)).
 
@@ -1539,6 +1979,32 @@ both `[mcp_registration.files]` and `[host_paths]`'s `read` fails the
 registration table, so the CLI's files are reached one way only. The bundled
 WSL profiles that read the CLI's files use `[host_paths]`.
 
+The table can also say where a CLI in that environment keeps its state, for a
+window's [wake file](#delivery):
+
+- `state_base` (optional): an argv, naming no placeholder, that prints two
+  lines -- the environment's state folder as that environment names it
+  (starting with `/`), then the same folder as the daemon reaches it (for
+  WSL, the UNC path `wslpath -w` prints, starting with `\\wsl.localhost\` or
+  `\\wsl$\`). It runs as a standalone command, like `convert`, each time a
+  window that is to have a wake file opens, within the daemon's listing time
+  limit (10 seconds). The wake file then goes in the instance's own folder
+  under it (see [docs/wsl.md](../docs/wsl.md)). Output of any other shape, a
+  failure, or a run past the limit opens the window without a wake file, and
+  the daemon logs one warning; so does a profile with `[host_paths]` but no
+  `state_base`. The bundled `wsl-claude-code` prints `$XDG_STATE_HOME`
+  (`~/.local/state` when it is unset) and `wslpath -w` of it.
+
+```toml
+state_base = ["wsl", "-e", "sh", "-c", 'b="${XDG_STATE_HOME:-$HOME/.local/state}"; printf "%s\n" "$b"; wslpath -w "$b"']
+```
+
+Without `[host_paths]` the wake file goes in the window's credentials folder.
+A profile of your own that runs its CLI in another distribution than the
+shipped one -- a `[command]` naming `-d <distribution>` -- must name the same
+distribution in `convert`, `read` and `state_base`, or the daemon converts and
+reads in one distribution while the CLI runs in another.
+
 ## MCP registration
 
 A profile's optional `[mcp_registration]` table tells the daemon how to
@@ -1570,7 +2036,10 @@ notice = "While this is registered, ..."
 args = ["mcp", "get", "{server}", "--json"]  # exactly one of args / file
 format = "json"                 # "json" or "lines"
 command = "/transport/command"  # JSON Pointer ("json") or line prefix ("lines")
-args_pointer = "/transport/args"  # optional; "json" only
+args_pointer = "/transport/args"  # optional; "json" only: the registered
+                                # arguments, compared element by element
+# args_line = "Args:"           # optional; "lines" only: the line prefix of the
+                                # registered arguments, compared as one line
 # items = ""                    # optional, "json" only, together with `name`:
 # name = "/name"                # the array of servers, and the pointer to an
                                 # element's name; see "Reading a row's state"
@@ -1788,6 +2257,21 @@ itself, or its `[host_paths]` conversion, could not be found or run), or
 **unknown**
 (the output could not be read as the declared format -- never guessed as
 registered or not).
+
+**The bridge's arguments.** A row also compares the arguments the record
+holds with the ones this daemon registers -- those after `add`'s `--`, or
+from `{bridge}` on when there is no `--`, rendered as for Register (the
+bundled tables register `--profile <id>`, see [Credentials](#credentials)).
+`args_pointer` (`"json"`) points at the registered argument array, whose
+elements are compared one by one, a `{bridge}` element as a path and every
+other one as text; a record that leaves the array out holds no arguments.
+`args_line` (`"lines"`) names the line prefix of the arguments, whose value
+is compared with the expected arguments joined by single spaces. Arguments
+that differ make the row **differs**, with `args` in `differs_in`, and Update
+registers them again. A table with `args_line` whose expected arguments hold
+a space or `{bridge}` fails, since one line cannot tell them apart.
+So does `args_line` in a `"json"` table. A
+pointer may carry `{server}`.
 
 A CLI with no command that shows one server (Grok Build has `grok mcp list
 --json`, an array, and no `get`) is read with `items` and `name` in a

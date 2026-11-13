@@ -29,22 +29,26 @@ allow it.
 - Each window is `running`, `waiting_input`, `waiting_approval`, `interrupted`, `idle`, `exited` or
   `unknown`, read from the screen by detection definitions for each CLI.
 - A badge counts the windows waiting for you; one key jumps to the next.
-- When yagura cannot tell, it says `unknown` and why, instead of guessing -- and it will not type
-  into or interrupt a window it cannot read.
+- When yagura cannot tell, it says `unknown` and why, instead of guessing -- and it will not push
+  messages to or interrupt a window it cannot read.
 
 **Agents that work together**
 
-- `yagura-mcp` gives an agent tools to list, open, read, message and close windows. Windows opened
-  from the bundled Claude Code, Codex CLI and GitHub Copilot CLI profiles, and from the WSL Muse
-  Code profile, are connected automatically; register yagura in Settings > Integrations for
-  Antigravity CLI, Grok Build and Muse Code.
+- `yagura-mcp` gives an agent tools to list, open, read, message, interrupt and close windows.
+  Windows opened from the bundled Claude Code, Codex CLI and GitHub Copilot CLI profiles, and from
+  the Muse Code profiles on macOS, Linux and WSL, are connected automatically; register yagura in
+  Settings > Integrations for Antigravity CLI, Grok Build and, on Windows, Muse Code.
 - **Handoff**: pass a reference and a note to another window -- or to a new one, opened with the
   CLI you choose -- and learn whether its CLI took it.
 - **Chat rooms**: agents and you post to each other with `@name`, `@parent` and `@user`. A room
   stops itself on loops or runaway turns and waits for you.
-- What yagura sends on its own -- handoffs, chat, notices -- reaches a CLI through that CLI's own
-  hooks and start-up request instead of being typed into its input line, except for a CLI that has
-  no way to be woken. See [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
+- Nothing is typed into a CLI's input line. Messages, handoffs, chat and notices wait in the
+  window's inbox and reach the CLI through its own hooks and start-up request; the sender learns
+  whether one was delivered or is still queued, and can take a queued one back. See
+  [how delivery works](docs/mcp-setup.md#how-the-daemon-delivers-text).
+- **Interrupting**: your own interrupt presses the CLI's key. An agent's stops the CLI at its next
+  tool call through its hooks, without touching your draft; Codex CLI and Antigravity CLI refuse
+  an agent's interrupt. See [interrupt_window](docs/mcp-setup.md#interrupt_window).
 - **Plans**: an agent hands yagura a plan of tasks with dependencies. yagura works out what can
   run in parallel, refuses tasks that would write the same files at the same time, and opens each
   task's window with the CLI, model and effort you assign.
@@ -57,7 +61,7 @@ allow it.
 
 **You decide**
 
-- Closing, interrupting or typing into another window waits for your decision in an approval
+- Closing, interrupting or messaging another window waits for your decision in an approval
   dialog. Turn auto-approval on per tool in Settings > Approvals.
 - New plans wait for your approval before any task window opens.
 - yagura never touches a CLI's credentials. Each CLI signs in the way it always does.

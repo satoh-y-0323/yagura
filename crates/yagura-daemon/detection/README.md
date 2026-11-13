@@ -3,17 +3,12 @@
 This directory holds the state-detection definitions the yagura daemon matches
 PTY output against: one TOML file per CLI, named `<name>.toml`.
 
-A definition holds both directions of that terminal: how to *read* it -- the
-patterns and clocks below -- and, in its `[composer]` and `[input]` tables,
-how to *write* to it. `[composer]` says whether the daemon may type into a
-window running this definition at all, and where on screen to look before it
-does; `[input]` says how, once it may. The daemon types in two cases only: a
-caller's `send_message`, and the text it sends of its own accord to a CLI whose
-profile declares no way to wake it (see
+A definition says how to *read* that terminal: the patterns and clocks
+below, and, in its `[composer]` table, where the CLI draws its input area, so
+that what is being typed there never decides the window's status. The daemon
+never types into a window: what a window is sent reaches its CLI through the
+CLI's own doors (see
 [How the daemon delivers text](../../../docs/mcp-setup.md#how-the-daemon-delivers-text)).
-A definition that leaves `[composer]` out declares no composer, so the daemon
-never types a line into that CLI (see [`[composer]`](#composer)); one that
-declares a composer but names no `[input].probe` gets no such line either.
 
 Definitions are data, not code. When a CLI changes its TUI, only the file
 here should need editing -- the daemon knows nothing about any particular
@@ -34,8 +29,7 @@ Definitions in this directory:
 - `generic-shell` -- a plain interactive shell, and the daemon's built-in
   default when nothing selects a definition. It declares no `[composer]`: a
   plain shell's screen alone cannot tell its prompt apart from a program's
-  own output, so it only reports the window's status and the daemon never
-  writes into a window running it.
+  own output.
 
 Adding a definition to this directory means adding it to that list too.
 
@@ -212,56 +206,6 @@ blank_lines_in_body = false    # optional; a blank line above the cursor
                                # belongs to the body (default false)
 left_panel = '^[^│]*│'         # optional, no default; regex matching a
                                # panel drawn left of the composer
-right_border = '│\s*$'         # optional, no default; regex matching an
-                               # edge drawn at the right end of each
-                               # composer line
-placeholder = '^Ask anything$' # optional, no default; regex matching the
-                               # whole hint an empty composer shows
-
-[input]                        # optional; every key optional
-bracketed_paste = false        # wrap the body in ESC[200~ / ESC[201~ before
-                               # writing it. Default: false
-submit = "\r"                  # the bytes that submit a line, written
-                               # verbatim. 1..=8 bytes. Default: "\r"
-ready_hold_ms = 0              # how long the window's status must have
-                               # stayed one that accepts input, once, before
-                               # the daemon writes into it. 0..=10000.
-                               # Default: 0
-submit_delay_ms = 800          # how long to wait after the body before the
-                               # submit bytes. 0..=5000. Default: 800
-clear = ""                     # one key that takes text back out of the
-                               # composer and does nothing on an empty one;
-                               # the daemon repeats it to retract a write it
-                               # could not confirm. 0..=8 bytes; empty means
-                               # "send nothing". Default: ""
-probe = "xzv"                  # 1..=8 distinct printable, non-blank
-                               # characters, none of them "[" or one of
-                               # leading_keys. Each is one probe, typed on
-                               # its own to learn that everything before it
-                               # was handled: behind every line the daemon
-                               # writes, before writing into a composer that
-                               # reads empty, and after a retraction; the
-                               # next one is typed when a dialog may have
-                               # taken the last. Omitted, the daemon writes
-                               # no line of its own into the window.
-                               # Default: none
-erase = "\u007f"               # the key that erases one character, used to
-                               # take the probe back out. 1..=8 bytes.
-                               # Default: DEL
-delivery_confirm_ms = 8000     # how long to wait, after the submit bytes,
-                               # for the composer to empty or the status to
-                               # react. Also the longest a typed delivery
-                               # waits for that reaction before typing the
-                               # next text. 0..=30000; 0 means "do not look
-                               # for either". Default: 8000
-resend_max = 0                 # how many times an unconfirmed submit may be
-                               # written again. 0..=4. Default: 0
-leading_keys = ["!", "?"]      # characters the CLI takes as a key, not as
-                               # text, when one is the first non-blank
-                               # character of its composer; a send_message
-                               # starting with one is refused. Each entry is
-                               # one printable, non-blank character.
-                               # Default: none
 
 [requests]                     # optional; every key optional
 abandoned_at_turn_end = false  # this CLI drops a tool call still out when
@@ -273,53 +217,27 @@ Statuses: `running`, `waiting_input`, `waiting_approval`, `interrupted`,
 `idle`, `exited`, `unknown`.
 
 Rejection is always loud: unknown keys -- at the top level and inside
-`[debounce]`, `[quiescence]`, `[activity]`, `[composer]`, `[input]`,
+`[debounce]`, `[quiescence]`, `[activity]`, `[composer]`,
 `[requests]` and each `[[rules]]` entry alike -- unknown status/region values, missing required keys, an
-unsupported `schema_version`, an uncompilable `pattern`, an `[input]` value
-outside its range or contradicting another, more than 200 rules, or a source
+unsupported `schema_version`, an uncompilable `pattern`, more than 200 rules, or a source
 file larger than 256 KiB all fail the load instead of being ignored.
+
+The keys of the daemon's typing, which is gone, still load, each with one
+warning that names it and says it has no effect: the whole `[input]` table
+(`bracketed_paste`, `submit`, `ready_hold_ms`, `submit_delay_ms`, `clear`,
+`delivery_confirm_ms`, `resend_max`, `reflect_wait_ms`, `probe`, `erase` and
+`leading_keys`), and `placeholder` and `right_border` under `[composer]`.
+Remove them from a definition of your own. `schema_version` stays 1.
 
 ### `[composer]`
 
-`[composer]` says where this CLI draws its own input area, and is what makes
-a window running this definition writable at all: a definition that carries
-this table declares a composer, and one that omits it does not. The
-distinction is not cosmetic -- a plain shell's screen alone cannot tell its
-prompt apart from a program's own output (see the `generic-shell` paragraph
-above), so a definition for one leaves this table out rather than guess.
-
-A window whose definition declares no composer is never typed into by the
-daemon: `send_message` is refused there as `no_composer` before anything is
-read, and so is text the daemon would type of its own accord (see above). A
-CLI whose profile can hand it text another way (a hook, a start-up request or
-a wake command) needs no composer for that, so whether a window takes part in
-chat or receives a handoff is decided by its profile, not by this table (see
-[Delivery](../../../profiles/README.md#delivery)). `send_keys` is unaffected,
-since it writes a caller's own bytes rather than anything the daemon
-composed.
-
-A definition that declares a composer but names no `[input].probe` is
-written to only as far as needs no judgement. Whether a line the daemon
-writes has shown in the composer is decided by the probe typed behind it
-(see [`[input]`](#input)), so without one the daemon types no such line: a
-one-line `send_message` (text ending in its single terminator) is refused there
-as `no_composer` the same way, and text the daemon would type of its own
-accord waits in the window's inbox instead. A `send_message` text with no
-terminator, or one that is only a terminator, is still written as it is,
-behind the same screen check every write goes through. The definition still
-loads and the window's status is still detected; naming a `probe` is all it
-takes for the daemon to type lines into it.
-
-The daemon writes only on a screen the CLI has finished painting: the cursor
-is shown and no synchronized update (`CSI ? 2026 h`) is open. A screen that
-is not finished -- one read halfway through a repaint, or one held open in a
-synchronized update -- is neither written to nor declined on; the daemon reads
-it again once more output arrives, however long that takes, rather than
-taking it as finished after a pause. A screen the rules read as an approval
-prompt or declare `unknown` is declined on whether or not it is finished,
-since a dialog keeps the cursor hidden. So a CLI that hides the cursor while
-its composer sits idle receives no write from the daemon at all: that is the
-safe side, since such a screen cannot be told apart from a half-drawn dialog.
+`[composer]` says where this CLI draws its own input area: a definition that
+carries this table declares a composer, and one that omits it does not. A
+plain shell's screen alone cannot tell its prompt apart from a program's own
+output (see the `generic-shell` paragraph above), so a definition for one
+leaves this table out rather than guess. The composer is read only to keep
+what is being typed there out of the rules (see the end of this section); the
+daemon never writes into it.
 
 `marker` is a regex identifying the composer's marker line (its prompt).
 Match the marker itself, not what follows it, unless `separator` is empty --
@@ -343,9 +261,8 @@ option row drawn with the marker's glyph could otherwise be taken for the
 marker line.
 When the walk meets another line before it reaches a marker line, the
 composer is not observed, and so is a marker line with visible text after the
-marker but no `separator`; the daemon does not write into a composer it
-cannot observe, and waits for a reading it can use rather than deciding on
-one it cannot. A frame the CLI has erased and not yet drawn again reads this
+marker but no `separator`; nothing is taken out of a composer that cannot
+be observed. A frame the CLI has erased and not yet drawn again reads this
 way.
 
 When every line from the cursor up to the top row of the screen is a
@@ -362,319 +279,20 @@ cursor left of it is not in the composer. On any other screen the composer is
 read from the first column, as without the key. The column is counted in
 cells, a wide character taking two.
 
-When the CLI draws its composer inside a box whose right border is drawn
-like text, `right_border` is a regex matching that border. On the marker line
-and every continuation line, a match that ends at the line's last visible
-character is cut off before the line is read: the border is neither part of
-the body nor text right of the cursor, which would otherwise leave the
-composer unobserved. A line it does not match is read whole. The bundled
-`grok-build` definition uses it.
-
-When the CLI writes a hint into its empty composer and tells it apart from a
-draft by color alone, `placeholder` is a regex matching that hint. The
-composer reads as empty when nothing is typed between the marker and the
-cursor and one match of `placeholder` spans the whole visible text to the
-right of the cursor; a hint followed by anything else is read as a draft. The
-bundled `muse-code` definition lists the hints Muse Code was seen to show. A
-hint the regex does not know reads as a draft, so the daemon does not type
-into it; add the new hint to the regex. Declare it only for a CLI whose hint
-is replaced by the first key typed, since the daemon's `probe` is typed right
-after it.
-
 While the cursor is visible and the composer can be located this way, the
 composer's body is taken out of the screen before `[[rules]]` are matched
 (see [What patterns are matched against](#what-patterns-are-matched-against)),
 so text being typed never decides the window's status.
 
-### `[input]`
-
-`[input]` is read when the daemon types into a window running this
-definition -- a [`send_message`](../../../docs/mcp-setup.md#send_message), or a
-text it sends of its own accord to a CLI it cannot wake. The body is written
-followed by one space of the daemon's own, whatever the body ends with (inside
-the paste when `bracketed_paste` is set), because a CLI's input completion
-opens on the word right before the cursor. The body and the
-submit bytes are written as two steps, `submit_delay_ms` apart, because a CLI that reads a fast burst of input
-as a paste takes a carriage return arriving inside that burst as a line break
-rather than as "submit". After the submit bytes are written, the daemon
-watches the window for `delivery_confirm_ms` to see whether the receiver
-took the text: its painted composer empties with nothing else written into
-the window, or its status moves from waiting for input to working. When
-neither shows, the daemon may press the submit key
-again, up to `resend_max` times. A re-send only ever presses that key: it
-runs where the envelope this delivery wrote is still the only thing in the
-composer, so the body is neither cleared nor written a second time, and a
-definition needs no `clear` sequence to declare `resend_max`. The key is
-pressed on its own only when the screen shows that envelope itself. When the
-screen shows it as a placeholder, or shows only its end, the daemon first
-types the probe behind it, and presses the key once the probe has shown at the
-cursor and been erased again.
-
-Whether a written body has shown is decided by the order the CLI handles its
-input in, never by a clock. The daemon types `probe` right behind the body's
-trailing space and
-reads the composer again whenever the window draws output, changes status or
-takes another write:
-
-- The composer ends with the probe behind something: the CLI has handled the
-  body. The daemon types `erase`, and writes the submit bytes once the
-  composer reads as it did before the probe. A body taller than the screen
-  shows only its end: that end, followed by the probe, counts when it ends the
-  body once the probe is left off, and the composer must read as such an end
-  again before the submit bytes are written. A composer that cannot be read
-  at all is waited on, not taken for either.
-- The probe shows alone: the CLI dropped the body, as a CLI that is still
-  starting up can. The daemon erases the probe and reports the write as
-  `not_written`, with nothing left behind.
-- Nothing shows yet: the CLI has not got to its input. The daemon keeps
-  waiting, for as long as that takes. A screen that stops accepting input
-  meanwhile -- an approval dialog -- is waited out the same way rather than
-  refused. A dialog may take the probe as its own input, so once the rules
-  have read a screen as an approval prompt or `unknown` and the screen
-  accepts input again with the probe still not shown, the daemon types the
-  next character of `probe` behind it. Once the last character it typed
-  shows, the probes at the end of the composer are its own, counted back
-  from the end (one a dialog took is simply missing), and the daemon erases
-  that many. A dialog that took no probe costs one probe typed and erased.
-  When every character of `probe` has been typed, the daemon declines the
-  write instead (`not_written`), and writes nothing more into that window
-  until someone else does, since its probes may still be in the composer.
-  Only another writer's input into the window (typing, `send_keys`,
-  `interrupt_window`), the child exiting (`close_window` included), or the
-  requester cancelling the call or disconnecting ends the wait otherwise
-  without an answer from the screen.
-
-The probe behind the body is typed only on a screen that accepts input: a
-dialog that comes up as the body lands is waited out before it, so the
-closed screens of that dialog are not taken for one that took the probe.
-
-So a CLI that stops handling its input -- a dialog this definition has no rule
-for, for instance -- holds a write into its window until one of those events
-comes; see [`send_message`'s Maximum wait](../../../docs/mcp-setup.md#send_message)
-for how to end one. A dialog is counted only on a screen the daemon's detector
-reads, so one drawn and gone between two of its readings that took the probe
-holds the write the same way. Two more cases are not covered: a dialog that
-takes part of the body while it is still being pasted and closes, which
-leaves the rest of the body and the probe to show and the shortened body to be
-submitted; and a draft the screen has not drawn yet, in a composer that read
-empty, ending in a character the dialog took as a probe, which the daemon may
-count as its own and erase. This is also why the daemon writes no line of its
-own into a window whose definition names no `probe` (see
-[`[composer]`](#composer)): nothing would say whether the line showed.
-
-`reflect_wait_ms`, which earlier definitions set to bound how long the daemon
-read the composer for a write to show, is still accepted in `[input]` so that
-such a definition keeps loading, with any value. It has no effect.
-
-`clear` is used to take the daemon's own text back out of the composer. Its
-main use is a requester that leaves -- an MCP client cancels the call, or its
-connection closes -- after the body was written and before the submit bytes:
-the daemon then takes the body back rather than leave it in front of the
-receiver, and finishes that take-back even though nobody is waiting for the
-answer any more, holding the window's turn meanwhile so nothing is written
-on top. `clear` is one key that the daemon may repeat until the composer is
-empty: it must take text back out of the composer a piece at a time -- a
-display line, for instance -- and do nothing on an empty one. The take-back is
-`clear` repeated once per display line the body may occupy at the window's
-current width, with a margin, written in a single write right behind the
-body; since the CLI handles its input in order, the keys follow the body
-however late the CLI gets to it, and the keys left over land on an empty
-composer. The bundled definitions all use Ctrl+U (`"\u0015"`).
-
-`clear` also takes the daemon's text back when another writer's input reaches
-the window while that text sits unsubmitted in the composer. The take-back is
-written in the same write, in front of the other writer's bytes, counted at the
-window's width at that moment; it relies on `clear` doing nothing on an empty
-composer. The daemon then writes nothing more in that attempt -- no submit
-bytes, no re-send. It reads the composer once the screen accepts input and
-writes `probe` only if its own text is still all that shows; the probe then
-tells whether the take-back got through (it is taken back again if not), and is
-erased. When the composer shows anything else, nothing is written and the text
-is reported as possibly left behind. The one write nothing is put in front of
-is the interrupt key sequence: it reaches the CLI as sent, and the daemon
-takes its text back after it. A key press (a GUI key or `send_keys`) is that
-sequence when the press's traditional bytes are the configured interrupt bytes;
-a raw byte write (`interrupt_window`) is when the bytes are.
-
-An empty composer right after the take-back proves nothing: a CLI that has
-not read the body yet shows exactly that. So the daemon types `probe` behind
-the take-back and reads the composer until it shows the probe and nothing
-else. The CLI handles its input in order, so at that point the body and the
-take-back have both been handled and nothing of the body is left; the daemon
-then types `erase` and reports the retraction as leaving nothing behind once
-the composer reads empty. Everything else is reported as leaving something
-behind:
-
-- The probe shows behind something -- the take-back left part of the body.
-  The daemon types `erase` (input is handled in order, so it removes the
-  daemon's own probe whenever the CLI gets to it).
-- Anyone else writes into the window meanwhile. The daemon stops there: it
-  writes nothing more to finish the delivery, and beyond taking its own text
-  back (in front of that writer's input, as described above) and erasing its
-  own probe it takes back or erases nothing.
-
-Until the probe shows, the daemon waits for it, the same way it waits for a
-body to show.
-
-The submit bytes never follow a take-back, even when the body shows up in
-the composer afterwards: the keys queued behind it may still empty or cut it
-short.
-
-The same probe guards the first write. A composer that reads empty may only
-not have drawn what someone just typed or pasted into it, and a body written
-there would land behind that draft and be submitted with it. So, unless the
-only writes since the delivery's own last attempt are its own, the daemon
-types `probe` before writing the body and reads the composer until the probe
-shows. The probe alone means the composer is empty: the daemon types `erase`
-and writes the body once the composer reads empty again. Anything in front of
-the probe is someone's draft: the daemon erases the probe and leaves the
-draft alone. A delivery about to re-send the submit key over its own envelope
-does the same when someone else wrote into the window since its last attempt,
-and presses the key only when the probe shows right behind the envelope. A
-requester that leaves before such a probe shows leaves it to the next write
-into the window, which erases it once it shows alone with nothing written
-since. Until then, that next write types another character of `probe` behind
-it and decides by which of them show at the end of the composer. With a
-one-character `probe` it waits for the earlier probe instead, and declines
-when a dialog came and went since that probe was typed.
-
-#### Choosing `probe` for a CLI
-
-A definition needs a `probe` wherever the daemon types: for `send_message`,
-and for the text it sends of its own accord to a CLI whose profile declares
-no way to wake it (`wake = "none"`; the bundled Antigravity CLI profiles). A
-CLI whose profile hands it text through hooks, a start-up request or a wake
-command is never typed daemon-composed text, so its definition needs a
-`probe` only for `send_message`. The procedure for a new CLI, including how
-to find out which of these applies, is in
-[Adding a CLI](../../../docs/adding-a-cli.md).
-
-`probe` names the characters the daemon types into the CLI's composer, each
-on its own, so every one of them has to be harmless there. Check each
-candidate on the CLI itself, with an empty composer, before putting it in a
-definition:
-
-1. Typed alone it shows in the composer as that one character; typed behind
-   text already there, or behind another of the characters, it shows at the
-   end.
-2. It triggers nothing, in any of those places: no command menu, completion
-   list, mode switch or shortcut. Characters that start commands or mentions
-   at the beginning of a line (`/`, `@`, `!`, `#`, `?`) are poor choices; `~`
-   disconnected Claude Code from its editor integration.
-3. `erase` (DEL unless the definition says otherwise) removes exactly that
-   one character.
-4. The characters are all different, printable and not blank, and none is
-   `[` or one of `leading_keys`; a definition breaking this fails to load.
-5. Where possible, none is a key an approval dialog of the CLI answers to
-   (`y`, `n`, `a`, digits, `q`, `e`, `h`, `j`, `k`, `l`, `r`, `i`).
-
-`[` is never accepted: every line the daemon types of its own accord -- a
-`[yagura handoff] ` envelope, and the chat, task, plan and report lines --
-starts with `[`, so such a probe showing alone could not be told apart from
-one of those lines beginning to show. A character of `leading_keys` is never
-accepted either, since a probe may be typed into an empty composer on its own.
-
-The daemon starts with the first character that differs from both the end of
-the text in front of it and the probes still on their way, and types the
-next such character only after a dialog may have taken one. Three characters
-are enough for the dialogs the bundled CLIs show; a one-character `probe`
-still loads, but a write whose probe a dialog may have taken can then only be
-declined, never checked again.
-
-The bundled definitions use `xzv`, each character checked as above on each of
-their CLIs, on Windows, Linux and macOS. If a CLI -- or a later version of
-one -- treats one of them differently, replace it in that definition with
-another character that passes the same checks; nothing else in the daemon
-depends on which characters they are. A probe only means "everything before
-me was handled" while the composer takes typed text: in a dialog, or in an
-editor mode where keys are commands (vim's normal mode, for instance), it is
-read as something else and never shows where the daemon looks for it. After
-a dialog the next character is typed as described above; in an editor mode
-with no rule, the write waits.
-
-An empty `clear` cannot retract anything -- the body the daemon wrote for a
-requester that left, or in front of which another writer typed, is left
-sitting in the composer instead, and the
-write ends as `not_written` with the text still in front of the receiver (see
-the `not_written` error under
-[Error Handling](../../../docs/mcp-setup.md#error-handling)).
-
-`ready_hold_ms` decides *when* the daemon may start writing. A CLI that is
-still starting up can alternate between drawing its prompt and drawing a
-working line, so a prompt on screen is not on its own evidence that input
-will be accepted; this key asks for the prompt to stay. The judgement is made
-once per window: once a window has been seen to hold a status that accepts
-input for that long, nothing written to it afterwards waits for it again. The
-wait applies only while a window has not yet been seen to hold, and only when
-the write is requested at a moment that window is in one of those statuses --
-a write into a busy window is never delayed, and a write never fails because
-of this key. A definition that leaves this key out may see a write into a
-freshly started window dropped by a CLI that is not yet taking input, so a new
-vendor definition should measure it: sample the
-confirmed status every 50 ms over the first ten seconds of a window's life,
-read the longest run of a status that accepts input within the startup phase,
-and take that sample under load as well -- with other windows working, an
-observed run grew more than twofold. Two limits on what the value means: it
-is measured from the last confirmed *change*, so a move from one status that
-accepts input to another restarts it, and it is never compared against
-`[quiescence].after_ms`, which the engine reads only when no rule matches at
-all and which therefore does not bound how long a rule-driven judgement
-lasts.
-
-Two combinations are contradictory and are rejected rather than quietly
-resolved:
-
-- `delivery_confirm_ms = 0` with `resend_max > 0` -- a re-send only ever
-  happens as the outcome of a confirmation that was looked for and did not
-  come, so switching the confirmation off leaves `resend_max` meaning
-  nothing.
-- `delivery_confirm_ms > 0` with `submit_delay_ms` at or below the same
-  definition's `[debounce] confirm_ms` -- the reaction that confirms a
-  delivery is read after the submit bytes, and it can only be told apart from
-  the body's own echo if that echo has had time to become the confirmed
-  status first. A definition that omits `submit_delay_ms` is judged on the
-  800 ms default it will actually run under. This check has one blind spot: a
-  definition that writes no `[debounce]` table of its own runs on the
-  daemon's `confirm_ms` instead, which the loader never sees, so no such
-  definition is checked at all.
-
-#### Choosing `leading_keys` for a CLI
-
-Most CLIs read the first character of their composer as a key when it is one
-of a few symbols: `!` switches to a shell, `?` opens the help. The daemon
-writes a body into an empty composer, so a body starting with such a
-character would switch the CLI's mode instead of being typed: the daemon
-could never read its own text back, and the body would be changed or run as a
-shell command without passing the CLI's own permission prompt. So
-`send_message` refuses, as `invalid_argument` and before any approval is
-asked for, a text whose first non-blank character is in `leading_keys`.
-Blanks are skipped because a CLI may trim them before it reads its first
-character. Only `send_message` is checked: the lines the daemon writes on its
-own start with `[`, and `send_keys` sends named keys only.
-
-To fill it for a CLI, read its documentation for the symbols its composer
-treats specially at the start, type `?` into an empty composer to see its
-help, and then type each candidate followed by a word into an empty composer:
-a character belongs in the list when the composer does not show it as typed
-(it switched a mode or opened a view). A character the composer keeps as text
-and the daemon can read back (`/` and `@` on the bundled CLIs) does not
-belong. Keep a character the CLI treats as a key only under one of its
-settings, since the daemon cannot see that setting.
-
-A copy of a bundled definition placed in your own detection directory before
-this key existed has no `leading_keys`, so nothing is refused for windows
-running it; add the line from the bundled definition to your copy.
-
 ### `[requests]`
 
-`[requests]` says how this CLI treats a tool call of its own -- a
-`send_message` or `send_handoff` made from its window -- that has not
-returned yet. It changes nothing about how the window itself is detected or
-written to.
+`[requests]` says how this CLI treats a tool call of its own, made from its
+window, that has not returned yet. It changes nothing about how the window
+itself is detected.
 
 | Key | Meaning |
 | --- | --- |
-| `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered at once (a `send_message` as `not_written`, with its text taken back as for a cancelled call; a `send_handoff` as `undelivered_timeout`, with its envelope withdrawn from the inbox; a `wait_for_status` as timed out; a `wait_for_report` with no report taken, so a report arriving later stays in the inbox). `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
+| `abandoned_at_turn_end` | `true` when the CLI, on ending its turn, drops a call that is still out and does not cancel it, so the call's connection stays open and nothing tells the daemon the call was given up. The daemon then reads the window instead: once the window has been `running` since the call was made and comes to rest at `waiting_input`, `interrupted`, `idle` or `exited` (a window that is closed counts as `exited`), the call is answered at once (a call still waiting for an approver as `approval_timeout`, withdrawn with nothing done; a `wait_for_status` as timed out; a `wait_for_report` with no report taken, so a report arriving later stays in the inbox). `unknown` and `waiting_approval` never end a call. Leave it `false` for a CLI that cancels the calls it drops or keeps them alive past the end of a turn: for such a CLI, coming back to `waiting_input` does not mean the call was given up. Default: `false`. |
 
 The bundled `codex-cli` definition sets it to `true`; `claude-code` and
 `antigravity-cli` set it to `false`. `copilot-cli` leaves it out (so
@@ -755,8 +373,7 @@ from the terminal can end halfway through, and the half-drawn screen can match
 a rule the finished one does not. So the daemon judges when the cursor is
 shown, or when it has stayed hidden and output has paused for 50 ms (a dialog
 that keeps the cursor hidden). Output that keeps the cursor hidden without
-pausing is still judged within 250 ms. These pauses only time the status; a
-write never rests on them (see [`[composer]`](#composer)).
+pausing is still judged within 250 ms. These pauses only time the status.
 
 Two fail-safe routes reach `unknown` without waiting out `confirm_ms`: a
 screen model that failed and was rebuilt blank, and a window whose detection
@@ -872,7 +489,7 @@ Typing at a shell prompt is itself output: the terminal echoes every keystroke
 back. Counting those echoes as activity would report a window as `running`
 while someone is merely editing a line. What decides this is the payload, not
 who wrote it: a write whose bytes carry no CR or LF submits nothing, whether
-it came from a person typing, from a tool, or from a typed delivery's body, so a
+it came from a person typing or from a tool, so a
 chunk arriving within `input_echo_window_ms` of such a write is attributed to
 that write's echo and does not advance `a`. The chunk still reaches the
 screen, so rules match it exactly as before; only the activity clock ignores
@@ -896,8 +513,7 @@ drag is exactly that: a train of consecutive re-arms), and disarms the same
 way a submitted line disarms echo attribution below.
 
 Writes that may start work are never attributed: any write whose payload does
-contain CR or LF -- a typed line, a `send_message` or `send_text` carrying
-one, a typed delivery's submit bytes -- and an interrupt, which carries no terminator
+contain CR or LF -- a typed line, for instance -- and an interrupt, which carries no terminator
 of its own but is never line editing, all leave the following output counting
 as activity evidence -- and, the same way, immediately disarm any resize
 window still open, so a submitted line's own output counts right away even if
@@ -943,11 +559,16 @@ yagura-daemon --emit-status <status> [--source <name>] [--skip-if <pointer>] [--
   line it cannot parse (see below).
 - `--source <name>`: who is reporting, matching `[a-z0-9_-]{1,64}`. Default:
   `cli`.
-- `--skip-if <pointer>`: a JSON Pointer starting with `/`. When the JSON the
-  CLI writes to the hook's standard input has a value other than `null`
-  there, nothing is sent and the command exits 0 -- for a CLI that runs the
-  same hooks in its sub-agents' sessions and marks their input (Grok Build's
-  `subagentType`).
+- `--skip-if <pointer>`: a JSON Pointer starting with `/`, for a CLI that
+  runs the same hooks in its subagents' sessions and marks their input there.
+  When the JSON the CLI writes to the hook's standard input has a value other
+  than `null` at it, the hook is a subagent's and does only what a subagent's
+  hook does: `running` and `waiting_approval` are still reported -- a
+  subagent's work, a background one's included, is the window's work, so a
+  background subagent that is working shows the window `running` -- and any
+  other status is not sent, the command exiting 0 (see
+  [Hook events](../../../profiles/README.md#hook-events)). The other doors
+  take it the same way, and do nothing for a subagent's hook.
 - `--for-instance <server>`: the name of the registration the hook was
   written for -- `yagura` for the default instance, `yagura-<instance>` for a
   named one. Given at most once, and taken by every hook door
@@ -999,12 +620,25 @@ yagura-daemon --hook <profile-id> <Event> [--for-instance <server>] [--credentia
 
 `--hook` names a profile and one of its events instead of a status. What the
 event does -- the status it reports, the session identifier it records, the
-inbox it prints, the pointer that makes it skip -- comes from that profile's
-`[hook_events]` table, which the daemon reads each time the hook runs (see
+inbox it prints or hands over as a block, a stop it answers -- and how a
+subagent's hook is told apart come from that profile's `[hook_events]` table
+and `subagent_pointer`, which the daemon reads each time the hook runs (see
 [Hook events](../../../profiles/README.md#hook-events)). A status reported
 this way means what a `--emit-status` report means. `<profile-id>` follows the
 profile id rule and `<Event>` matches `[A-Za-z0-9_-]{1,64}`. Its pointers
-come from the profile, so it refuses `--skip-if`. A profile or event the daemon does not find
+come from the profile, so it refuses `--skip-if`. In a window opened from a
+launch profile that gives its CLI hooks, a `--hook` that names another
+profile's id does nothing.
+
+```
+yagura-daemon --credentials <path> --print-answer <Event>
+```
+
+`--print-answer` prints the answer the window's open wrote for `<Event>`
+beside its credentials file (see
+[Answers a hook prints without the daemon](../../../profiles/README.md#answers-a-hook-prints-without-the-daemon)),
+and nothing when there is none. It does not connect to the daemon, so it
+answers while no daemon runs. A profile or event the daemon does not find
 reports nothing, and the daemon logs a warning. A hook a registration writes
 into a CLI's own settings uses this form, so its text stays the same from
 release to release.
@@ -1073,7 +707,7 @@ named:
 | Codex CLI 0.159.2 on Windows, 0.158.0 in WSL (`codex-cli`, `wsl-codex-cli`) | `-c hooks.<Event>=...` at every launch, while their trust is registered | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` | `PermissionRequest` | `Stop`, `Interrupt` |
 | Antigravity CLI 1.2.14 (`antigravity-cli`, `wsl-antigravity-cli`) | a `yagura` entry in `~/.gemini/config/hooks.json`, written by registration | `PreInvocation`, `PostToolUse` | -- | -- |
 | GitHub Copilot CLI 1.0.101 (`copilot-cli`, `wsl-copilot-cli`) | a plugin directory, `--plugin-dir` at every launch | `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure` | -- | `agentStop` |
-| Muse Code 1.4.12 (`muse-code`) | a managed hooks file named in `~/.config/muse/settings.json`, written by registration | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
+| Muse Code 1.4.12 (`muse-code`) | on Windows, a managed hooks file named in `%USERPROFILE%\.config\muse\settings.json`, written by registration; on macOS and Linux, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | Muse Code 1.4.12 (`wsl-muse-code`) | a managed hooks file, `-c managed_hooks_path=...` at every launch | `UserPromptSubmit` | `PermissionRequest` | `Stop`, `StopFailure`, `Interrupt` |
 | Grok Build 1.0.70 (`grok-build`, `wsl-grok-build`) | `~/.grok/hooks/yagura.json` (`yagura-<instance>.json` for a named instance), written by registration | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure` | `Notification` with `permission_prompt` | `Stop`, `StopFailure`, `StopCancelled` |
 
@@ -1083,7 +717,9 @@ also run the commands a CLI reads its inbox through (see
 [Delivery](../../../profiles/README.md#delivery)); those are not status
 reports and are left out of the table.
 
-**How a hook finds the daemon.** When the daemon starts, it places a copy of
+**How a hook finds the daemon.** A hook's door connects to the daemon of its
+window's instance; `--print-answer` alone connects to none (see above). When
+the daemon starts, it places a copy of
 its own executable (a hard link where the file system allows one) in a `bin`
 folder under the instance's state directory -- on Windows,
 `%LOCALAPPDATA%\io.github.satoh-y-0323.yagura\bin\yagura-daemon.exe` for the default instance;
@@ -1141,15 +777,17 @@ folder trust prompt, so a window reports nothing before that.
 
 **Muse Code** hands a hook only a fixed list of variables, plus those its
 settings name in `managed_hooks_env_vars` for the one file `managed_hooks_path`
-names, so yagura's hooks go in that managed file. On the host, registering
+names, so yagura's hooks go in that managed file. On Windows, registering
 yagura with Muse from Settings > Integrations writes the file and points
-`~/.config/muse/settings.json` at it; it applies to every Muse session, and
-each hook command first checks that it runs inside a window (see
+`%USERPROFILE%\.config\muse\settings.json` at it; it applies to every Muse
+session, and each hook command first checks that it runs inside a window (see
 [Hooks that run outside a window](../../../profiles/README.md#hooks-that-run-outside-a-window)).
-The WSL profile passes its own file at every launch instead and registers
-nothing. `PreToolUse` and `PostToolUse` are not used: Muse runs them for its
-own reviewing sub-sessions too, after the turn's `Stop`, so they would leave
-the window `running`.
+On macOS and Linux, and in WSL, the profile passes its own file at every
+launch instead and registers nothing. `PreToolUse` reports nothing, and
+`PostToolUse` and `PostToolUseFailure` only answer an AI's interrupt (see
+[Interrupt](../../../profiles/README.md#interrupt)): Muse runs them for its own
+reviewing sub-sessions too, after the turn's `Stop`, and tells no subagent's
+hook apart, so a status from them would leave the window `running`.
 
 **Grok Build** reads hooks only from its own files, and its hooks file has
 no place to keep one instance's entries apart from another's, so registering
@@ -1163,9 +801,9 @@ machine -- and inside WSL starts the Windows executable through its
 hook passes `--for-instance` so that another instance's file stays silent
 inside a window (see above).
 Grok Build runs the same hooks in a sub-agent's session, whose input carries
-`subagentType`, so every event of the profile's `[hook_events]` has
-`skip_if = "/subagentType"` and a sub-agent neither reports for the window
-nor takes its inbox. The approval
+`subagentType`, so the profile names `subagent_pointer = "/subagentType"`: a
+sub-agent reports only `running` and `waiting_approval` for the window, and
+neither takes its inbox nor ends its turn. The approval
 notification comes a few seconds after the tool's own `PreToolUse`, and the
 approval box is read from the screen too. While any hook is in your own Grok Build settings, Grok Build asks about
 folder trust in every folder outside your home directory (see
@@ -1206,9 +844,7 @@ single event (only `Stop`, say) is not.
 - **A window whose input line has grown taller than the screen** shows
   nothing a rule can match. While a turn is open it reads as `running`; once
   the turn closes it cannot be told apart from a selection list that shows no
-  key hint, so it stays `unknown` (`no_rule_matched`). With a `continuation_prefix` declared, the
-  daemon can still write into it: it reads the end of the input line, which is
-  what a write is confirmed against.
+  key hint, so it stays `unknown` (`no_rule_matched`).
 - **Antigravity CLI reports neither an approval prompt nor an interrupt.**
   Only `PreInvocation` and `PostToolUse` are used: `agy` expects the output of
   a `PreToolUse` or `Stop` hook to carry a decision, which a status report does
@@ -1227,8 +863,8 @@ single event (only `Stop`, say) is not.
   (`declared_unknown`).
 - **Muse Code puts a submitted text back in its input line when the turn is
   interrupted before any output.** Pressing Esc between a submit and the
-  first output cancels the turn and refills the composer with what was sent,
-  text the daemon typed included; send it again or clear it by hand.
+  first output cancels the turn and refills the composer with what was sent;
+  send it again or clear it by hand.
 - **Grok Build's folder trust prompt is read from its question.** The
   question sits in the middle of the screen, at a distance from the bottom
   that changes with the window's height, so the `grok-build` definition reads
@@ -1241,12 +877,13 @@ single event (only `Stop`, say) is not.
   turn is cancelled with Ctrl+C, or Esc is pressed while a permission box is
   shown, keys act on the history rather than the input line, and its footer
   shows `Space:prompt`. The window reads as `unknown` (`declared_unknown`), so
-  nothing is typed into it and `interrupt_window` is refused, until the focus
+  nothing is pushed to it and `interrupt_window` is refused, until the focus
   is back in the input line on the window's screen.
-- **Grok Build's interrupt key also empties a draft.** `interrupt_window`
-  writes Ctrl+C, which cancels a running turn, but which, while the window
-  waits for input, erases whatever its input line holds, text typed by hand
-  included.
+- **Grok Build's interrupt key also empties a draft.** The user's own
+  interrupt writes Ctrl+C, which cancels a running turn, but which, while the
+  window waits for input, erases whatever its input line holds, text typed by
+  hand included. An AI's interrupt writes no key to Grok Build (see
+  [Interrupt](../../../profiles/README.md#interrupt)).
 
 ### Writing hooks by hand
 

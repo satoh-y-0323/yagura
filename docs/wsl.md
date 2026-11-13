@@ -46,7 +46,7 @@ open a window the same way but need their own MCP registration -- see
 
 ## The Launch Form of the Bundled WSL Profiles
 
-The six WSL profiles start their CLI with
+The WSL profiles start their CLI with
 
 ```
 wsl -e bash -lic 'exec "$0" "$@"' <cli> <appended arguments...>
@@ -61,6 +61,21 @@ every later element -- launch options and the MCP injection -- as one argument e
 unexpanded. This needs `bash` in the distribution, and the **Linux** build of the CLI installed
 inside it: the Windows build on the host is not what runs. See
 [profiles/README.md](../profiles/README.md#wsl-profiles).
+
+Two of them add a step before that form:
+
+- `wsl-antigravity-cli` first runs a plain `bash -c` that records where the CLI's own process line
+  starts -- its process id, the guest's boot id and its start time -- in `YAGURA_GUEST_ROOT`, then
+  starts the form above. The window's hooks and bridge report their parent processes up to that
+  root, so the daemon can tell the window's own `agy` from one nested in it (see
+  [A window's own CLI](../profiles/README.md#a-windows-own-cli)).
+- `wsl-grok-build` runs, after the shell files and before Grok Build, the window's overlay door
+  (`yagura-daemon.exe --launch-overlay`, the `{daemon}` element of its `[command]`) with what the
+  guest holds of Grok Build's settings, and starts Grok Build only with the overlay it printed, in
+  `GROK_CONFIG`; a door that fails or prints nothing ends the window with one line saying so. The
+  overlay keeps the window's credentials out of the shells Grok Build's tools run (see
+  [Launch overlay](../profiles/README.md#launch-overlay)). A run that opens no window -- a
+  registration, a listing -- starts Grok Build without the door.
 
 A Windows path is not readable from the Linux CLI as it is, so each of the six profiles also has
 a top-level `[host_paths]` table that converts every path the daemon hands the CLI with
@@ -146,9 +161,11 @@ The bridge then reaches the daemon over the same Windows named pipe as any other
 `wsl-antigravity-cli` carries no `[mcp]` table -- Antigravity CLI (`agy`) reads MCP servers only
 from its own global registration, the same as its Windows-native counterpart (see
 [Configuring Antigravity CLI](mcp-setup.md#configuring-antigravity-cli)). Register it with
-`agy mcp add yagura -- bash -c 'exec "$YAGURA_MCP_BRIDGE"'` inside the distribution; a WSL window
-yagura opens carries the same `YAGURA_MCP_BRIDGE` (translated by `/p`, as above), so the variable
-resolves there exactly as it does for the two profiles above.
+its row in Settings > Integrations: the registration starts the bridge through `bash -c`, which
+collects the bridge's parent processes in the guest and hands them to it with `--guest-root` and
+`--guest-step`, so the daemon can trace the bridge to the window's own `agy` (see
+[A window's own CLI](../profiles/README.md#a-windows-own-cli)). A registration written before this
+release starts the bridge without them; the row reads as differing, and **Update** writes it again.
 
 `wsl-grok-build` carries no `[mcp]` table either: Grok Build has no launch argument that adds an MCP
 server. Its row in Settings > Integrations registers the bridge inside the distribution by the
@@ -168,6 +185,21 @@ delivered (see
 [How a hook finds the daemon](../crates/yagura-daemon/detection/README.md#bundled-profiles)). The
 `wsl-grok-build` hooks are the exception: they name the daemon's copy by the `/mnt/c/...` path
 `wslpath` gives, so they do not depend on `PATH`.
+
+**The wake file.** A `wsl-claude-code` window whose wait is gone is asked to register it again
+through a wake file (see [How the daemon delivers text](mcp-setup.md#how-the-daemon-delivers-text)).
+Claude Code inside the distribution watches it by its Linux path, so the file lives in the guest's
+own state folder, under the instance's folder there:
+`$XDG_STATE_HOME/yagura[-<instance>]/host-wake/<number>/yagura_wake` (`~/.local/state/...` when
+`XDG_STATE_HOME` is unset), which the profile's `[host_paths] state_base` prints together with the
+`\\wsl.localhost\...` path the daemon writes it by (see
+[Host paths](../profiles/README.md#host-paths)). The numbered folders are used again, lowest free
+number first, and never removed: there are never more of them than WSL Claude Code windows open at
+once. yagura never wakes a distribution that has stopped: it reaches the guest's files only when a
+window opens (the `state_base` run) and when it writes the file of a window that is running. A
+window whose `state_base` did not finish within the daemon's listing time limit (10 seconds; a
+distribution that is still starting can take that long) opens without a wake file, and what is sent
+to it while its CLI waits arrives at its next turn, as the reply's `note` says.
 
 `wsl-codex-cli` wakes a waiting Codex CLI with the profile's own launch form followed by
 `queue --thread <session> --message <text>`, the same way a model listing runs (see

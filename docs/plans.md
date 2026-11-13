@@ -176,9 +176,10 @@ closed or its process exits, opening the task again starts a fresh window and re
 A task can carry an `instruction`: the request the parent has for the window opened for that task,
 in as many lines as it needs. yagura never hands the request itself to that window.
 It stores it with the task, starts the window with a short fixed notice as its first request, and
-the window reads the request back with `get_plan`. This is how a parent hands a window a multi-line request:
-`send_message` refuses text with a line break anywhere but at its very end (see
-[docs/mcp-setup.md](mcp-setup.md#send_message)).
+the window reads the request back with `get_plan`. This is how a parent hands a window a long request
+that stays readable for as long as the plan lasts: a `send_message` text is bounded by what one answer
+of the window's doors carries, and by 2048 bytes when it is held for an approver (see
+[docs/mcp-setup.md](mcp-setup.md#send_message)), and once handed over it is gone from yagura.
 
 - **The instruction is set with `create_plan` and `update_plan`**, and shown by `get_plan` (the
   task's `instruction`). `update_plan` always replaces it with the value the new task list gives,
@@ -225,11 +226,11 @@ the window reads the request back with `get_plan`. This is how a parent hands a 
   never been opened. Opening the task's window again starts it over at `pending`.
 - **The window is not closed when the notice does not arrive.** Whatever `instruction_notice`
   says, the window stays open and bound to its task. The instruction stays readable with
-  `get_plan`; to prompt the window, send it a one-line `send_message` telling it to call `get_plan`
+  `get_plan`; to prompt the window, send it a short `send_message` telling it to call `get_plan`
   (which goes through the approval gate like any other `send_message`).
 - **Changing an instruction does not notify a window already open for the task.** yagura has no
   separate path for handing an open window a second multi-line request: change the instruction with
-  `update_plan`, then prompt the window with a one-line `send_message` to read it again, or open the
+  `update_plan`, then prompt the window with a short `send_message` to read it again, or open the
   task's window again once the old one has closed.
 
 Instructions are kept in the session store in plain text; do not put secrets in them.
@@ -355,8 +356,8 @@ window. Reaching either plan limit refuses creation with `resource_exhausted`.
   `name`.
 - Call `wait_for_report` to collect the reports of the task windows you opened, and whenever the
   `[yagura report]` notice reaches your CLI.
-- Put a request that spans more than one line in the task's `instruction` rather than sending it
-  with `send_message`, and check the task's `instruction_notice` in `get_plan` to see whether the
+- Put a long request in the task's `instruction` rather than sending it with `send_message`, and
+  check the task's `instruction_notice` in `get_plan` to see whether the
   window has been told about it (see [Task instructions](#task-instructions)).
 - Use `get_plan` to read the current assignments before opening a window: the operator may have
   changed them since the plan was created.

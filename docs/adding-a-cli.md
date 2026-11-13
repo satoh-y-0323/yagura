@@ -34,9 +34,12 @@ quotation, or "not documented". When the source is public, add the file and iden
 | Tell it at start-up | Whether an MCP server's `instructions` reach the model; whether a hook runs at session start (a `SessionStart` equivalent) and how its output is treated; flags or settings that add to the system prompt; where instruction files live |
 | Wake an idle session | A command or hook that delivers text to an existing session from outside (the equivalents of Claude Code's background hook that wakes the CLI, or Codex CLI's `queue` subcommand) |
 | Deliver while it works | Hooks that run in the middle of a turn or at its start, and whether their output can carry text into the next model call |
+| Continue at the end of a turn | A hook that runs when the turn stops and whose answer can make the CLI go on with a text (a "block"), and how the CLI marks a stop that is itself such a continuation |
+| Stop a turn from outside | A hook whose answer stops a tool call or ends the turn, which events it is, and whether the turn's end still runs its hooks afterwards; a key that stops the work without discarding the user's draft or session |
+| Subagents | Whether the CLI runs the same hooks in its subagents' sessions, and which field of their input tells them apart |
 | Pass it per launch | Whether a flag, an environment variable or a settings-file path can carry it for one launch, or whether it can only live in the user's global settings or in a repository file |
 | Relation to the user's settings | Whether what you pass adds to or replaces the user's own; whether there is a trust or approval gate before a hook runs |
-| Limits | Characters, tokens and timeouts: of a hook's output, of a hook's run time, of a start-up request |
+| Limits | Bytes, characters, tokens and timeouts: of a hook's output, of a hook's run time, of a start-up request |
 
 - The research can be delegated to an agent, provided it must give a quotation and a URL for every
   claim. Check any claim about source code yourself, by file and identifier.
@@ -93,7 +96,6 @@ going to change, and when you are done restore it and compare it byte for byte w
   per-launch hooks only from a plugin directory (`--plugin-dir`), not from one settings file. A
   profile writes such a directory with `config_dir` (see
   [MCP injection](../profiles/README.md#mcp-injection)).
-- While the daemon types into a window, it tells the child that the window has the focus, but only when the CLI turned on focus reports (`?1004`). A CLI that changes its cursor or its drawing with the focus, such as GitHub Copilot CLI hiding the cursor without it, therefore draws as if focused for the length of a delivery, even in a window at the back; the view's focus is told again after the CLI's next output.
 - A setting a CLI takes only by its path cannot reach a CLI that runs in another environment, such
   as WSL, as the daemon's own path. Give the profile a [`[host_paths]`](../profiles/README.md#host-paths)
   table so the daemon converts the path first, rather than inlining the content to avoid one.
@@ -117,12 +119,11 @@ going to change, and when you are done restore it and compare it byte for byte w
   run after the flag had been saved once did not show.
 - A hook that ends with exit code 2 can block the user's prompt or keep the turn going. Make sure
   no door yagura's hooks call can exit 2 at that event.
-- An Enter sent right after the text can add a line instead of sending (Muse Code needs about
-  100 ms after the text shows). Measure the shortest gap that sends, and set `submit_delay_ms`
-  well above it.
 - A CLI can run hooks for its own sub-sessions after the turn's `Stop`: Muse Code's tool hooks
-  fire for its internal reviewer too. A status hook on such an event leaves the window `running`;
-  map only the events the main session alone runs.
+  fire for its internal reviewer too, and nothing in their input tells them apart. A status hook on
+  such an event leaves the window `running`; map only the events the main session alone runs, or,
+  for a CLI that marks a subagent's input, name the field as `subagent_pointer` (see
+  [Hook events](../profiles/README.md#hook-events)).
 - A settings file can accept an unknown key without complaint while the command line refuses it
   (Muse Code takes `tool_timeout_sec` in `settings.json` but not with `-c`). That a key was
   accepted is not proof that it works; measure its effect.
@@ -157,9 +158,6 @@ going to change, and when you are done restore it and compare it byte for byte w
   Grok Build's user settings, it asks about folder trust in every folder outside the home
   directory. Say so on the registration's row with `notice` (see
   [MCP registration](../profiles/README.md#mcp-registration)).
-- A CLI may draw its input line inside a box whose right border is drawn like text. The daemon then
-  reads text right of the cursor and cannot observe the composer; declare the border as
-  `right_border` (see [`[composer]`](../crates/yagura-daemon/detection/README.md#composer)).
 - A CLI may hand an MCP server its whole environment and offer no launch argument that leaves a
   registered server out, so a window starts every instance's bridge. Look for a launch argument
   that refuses a server's tools and put it in `[mcp_registration.list]`'s `disable` (Grok Build's
@@ -169,32 +167,22 @@ going to change, and when you are done restore it and compare it byte for byte w
   the CLI takes a hook as a program and its arguments, run `{daemon}` directly and let the door
   stay silent outside a window (see
   [Hooks that run outside a window](../profiles/README.md#hooks-that-run-outside-a-window)).
-- A CLI can pay a cost per redraw that grows with the text typed outside a bracketed paste. Grok
-  Build looks `ffmpeg` up on `PATH` at every redraw while it is not found, and inside WSL the
-  Windows part of `PATH` makes each lookup take tens of milliseconds, so 320 unwrapped characters
-  took about 16 seconds to appear, with every later key waiting behind them; the same text inside a
-  paste is one redraw (Grok Build 1.0.70). Its definition sets `[input] bracketed_paste = true` so
-  the daemon's typed bodies arrive as one paste. A `send_message` text with no terminator is still
-  written unwrapped. Wait long enough before you read a stall like this as a CLI that stopped.
 
 ## 4. Turn the findings into a profile
 
 - Each route you will use maps to a key of the profile's [`[delivery]` table](../profiles/README.md#delivery):
-  the hook output's shape to `output`, the hook's output limit to `max_chars`, the way to wake an
-  idle session to `wake` (and `wake_args` or the wait's exit code), the way to pass a start-up
-  request to `launch_prompt`.
-- A CLI with no documented way to wake an idle session gets `wake = "none"`. The daemon then types
-  waiting text into its composer while the window waits for input, so its detection definition needs
-  a composer and an `[input].probe` (see [Choosing `probe` for a CLI](../crates/yagura-daemon/detection/README.md#choosing-probe-for-a-cli)).
-  Write down why, and what would let you drop the workaround (a documented way to wake the CLI).
+  the hook output's shape to `output`, the hook's output limit to `max_bytes` (in bytes of the
+  output as printed), the way to wake an idle session to `wake` (and `wake_args` or the wait's exit
+  code), the way to pass a start-up request to `launch_prompt`.
+- A CLI with no documented way to wake an idle session gets `wake = "none"`. Nothing is typed into
+  it: what waits is handed over at its next door. Give it the doors it has -- a take at the start
+  of a turn or after a tool call, and a block from the hook that runs when its turn stops
+  (`deliver = "block"`, once per stop that is not itself a continuation, with `when`) -- and write
+  down what would let it be woken (a documented way to wake the CLI).
 - A flag that only the CLI's interactive start takes, and that its other subcommands (the wake,
   `mcp add`, a model listing) do not, goes into `launch_only` under `[command]` (see
   [Arguments for starting a window only](../profiles/README.md#arguments-for-starting-a-window-only)),
   not into the argv itself: every command the daemon builds from the argv would carry it too.
-- Find the characters the CLI's composer takes as a key when one comes first (a shell mode, a help
-  view): read the CLI's documentation, type `?` into an empty composer for its help, and try each
-  candidate there. List them as `[input].leading_keys` so `send_message` refuses a text starting with
-  one instead of switching the CLI's mode (see [Choosing `leading_keys` for a CLI](../crates/yagura-daemon/detection/README.md#choosing-leading_keys-for-a-cli)).
 - The hooks that call the doors go into the profile's `[hooks]` table, or a `json_entry` for a CLI
   that reads hooks only from its own files (see [Hooks injection](../profiles/README.md#hooks-injection)).
   If the CLI asks the user to trust hooks, the profile's `[mcp_registration]` has to record that trust.
@@ -202,10 +190,23 @@ going to change, and when you are done restore it and compare it byte for byte w
   the CLI trusts by a hash over its command -- calls `--for-instance {server} --hook <profile-id>
   <Event>` (the `--for-instance` only for a registration that writes hooks of each instance's own),
   and what each event does goes into the profile's [`[hook_events]`](../profiles/README.md#hook-events)
-  table: its status, whether it prints the context or takes what waits, the pointer to the session
-  identifier, and the pointer that makes it skip. The hook's text then stays the same from release
-  to release, so an update changes what it does without leaving the registered entry out of date.
-  Write one handler per event. The profile's id is part of that text, so choose it before the first registration.
+  table: its status, whether it prints the context, takes what waits or hands it over as a block,
+  and the pointer to the session identifier. How a subagent's hook is told apart is the profile's
+  one `subagent_pointer`; what a subagent's hook then does is yagura's own rule. The hook's text
+  then stays the same from release to release, so an update changes what it does without leaving
+  the registered entry out of date. Write one handler per event. The profile's id is part of that
+  text, so choose it before the first registration. Pass the bridge `--profile <id>` as well.
+- Record how many seconds the CLI gives a hook command in `[hook_timeout]`, and name that time in
+  the hook texts by placeholder rather than as a number (see
+  [Hook timeout](../profiles/README.md#hook-timeout)).
+- Declare how the user and an AI interrupt the CLI in `[interrupt]` (see
+  [Interrupt](../profiles/README.md#interrupt)): the key that stops its work for the user, and for
+  an AI either a key that stops the work without discarding the user's draft or session, the hook
+  answers measured to stop a tool call (with `ends_turn = true` only where you measured that the
+  answer ends the turn), or `none`. Write down where an instruction sent after an AI's stop arrives.
+- Declare the name the operating system records for the CLI's own process in `[process_image]`,
+  measured on each operating system you declare it for, so a CLI nested in the window does not
+  speak for it (see [A window's own CLI](../profiles/README.md#a-windows-own-cli)).
 - Choose how the window's identity reaches the hooks and the MCP bridge (see
   [Credentials](../profiles/README.md#credentials)) by what the CLI lets a launch set:
   - If a launch-time setting (a flag, a settings file, a plugin directory) can carry both the hook
