@@ -210,9 +210,9 @@
   /** The status tone vocabulary the delivery chip is coloured from. */
   function deliveryTone(state: ChatDeliveryState): string {
     switch (state) {
-      case 'taken':
+      case 'delivered':
         return 'active';
-      case 'pending':
+      case 'queued':
         return 'quiet';
       default:
         return 'unknown';
@@ -599,7 +599,11 @@
           {#if message.deliveries.length > 0}
             <div class="msg__deliveries">
               {#each message.deliveries as delivery (delivery.window_id)}
-                <span class="delivery" data-tone={deliveryTone(delivery.state)}>
+                <span
+                  class="delivery"
+                  data-tone={deliveryTone(delivery.state)}
+                  title={delivery.state === 'queued' ? (delivery.note ?? undefined) : undefined}
+                >
                   <span class="delivery__to">{deliveryTarget(delivery.window_id)}</span>
                   <span
                     >{delivery.state === 'undelivered_unknown'

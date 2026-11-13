@@ -431,16 +431,16 @@ const CHAT_FROM_KIND_VALUES: ReadonlySet<string> = new Set([
 
 /** How one chat message landed in one addressed window. */
 export type ChatDeliveryState =
-  | 'pending'
-  | 'taken'
+  | 'queued'
+  | 'delivered'
   | 'undelivered_unknown'
   | 'undelivered_halted'
   | 'undelivered_exhausted'
   | 'undelivered_restart';
 
 const CHAT_DELIVERY_STATE_VALUES: ReadonlySet<string> = new Set([
-  'pending',
-  'taken',
+  'queued',
+  'delivered',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',
@@ -455,7 +455,16 @@ const CHAT_DELIVERY_STATE_VALUES: ReadonlySet<string> = new Set([
  * object, so every reader of `delivery.state` keeps reading it there.
  */
 export type ChatDeliveryOutcome =
-  | { state: Exclude<ChatDeliveryState, 'undelivered_unknown'> }
+  | { state: Exclude<ChatDeliveryState, 'queued' | 'undelivered_unknown'> }
+  | {
+      state: 'queued';
+      /**
+       * When the post is handed over, read off the window as it is now. The
+       * boundary always sets it, `null` when the daemon sent none; a value
+       * built in-process may leave it off, which reads the same.
+       */
+      note?: string | null;
+    }
   | { state: 'undelivered_unknown'; reason: UnknownReason | null };
 
 /** One delivery record of a chat message. */
@@ -629,6 +638,11 @@ export interface WindowInfo {
    * `mcp_connected`.
    */
   status_reports_missing?: boolean;
+  /**
+   * How many messages wait in the window's inbox to be read. Same discipline
+   * as `mcp_connected`; a reader treats an absent count as nothing waiting.
+   */
+  queued_count?: number;
 }
 
 const DAEMON_RECOVERY_STATUS_VALUES: ReadonlySet<string> = new Set<DaemonRecoveryStatus>([
@@ -1555,12 +1569,15 @@ export function narrowWindowInfo(value: unknown, context = 'window_info'): Windo
       ? withRev
       : { ...withRev, mcp_connected: requireBoolean(record, 'mcp_connected', context) };
   const rawReportsMissing = readOwnField(record, 'status_reports_missing');
-  return rawReportsMissing === null || rawReportsMissing === undefined
-    ? withMcp
-    : {
-        ...withMcp,
-        status_reports_missing: requireBoolean(record, 'status_reports_missing', context),
-      };
+  const withReports =
+    rawReportsMissing === null || rawReportsMissing === undefined
+      ? withMcp
+      : {
+          ...withMcp,
+          status_reports_missing: requireBoolean(record, 'status_reports_missing', context),
+        };
+  const queued_count = readOptionalInteger(record, 'queued_count', context);
+  return queued_count === null ? withReports : { ...withReports, queued_count };
 }
 
 /**
@@ -2257,6 +2274,9 @@ function readChatDeliveryOutcome(record: UntrustedRecord, context: string): Chat
   const reason = readArmReason(record, context, state === 'undelivered_unknown', 'drop');
   if (state === 'undelivered_unknown') {
     return { state, reason };
+  }
+  if (state === 'queued') {
+    return { state, note: readOptionalString(record, 'note', context) };
   }
   return { state };
 }

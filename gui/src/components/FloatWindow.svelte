@@ -37,6 +37,7 @@
     describeUnknownReasonSuffix,
   } from '../ui-messages';
   import McpMark from './McpMark.svelte';
+  import QueuedMark from './QueuedMark.svelte';
   import StatusReportMark from './StatusReportMark.svelte';
   import { pointerDrag, type PointerDragOptions } from './pointer-drag';
   import TerminalPane from './TerminalPane.svelte';
@@ -180,6 +181,7 @@
         <h2 class="float-window__title" title={entry.name}>{entry.name}</h2>
         <McpMark mcpConnected={entry.mcpConnected} />
         <StatusReportMark statusReportsMissing={entry.statusReportsMissing} />
+        <QueuedMark count={entry.queuedCount} />
         <!-- prettier-ignore -->
         <span class="float-window__status" data-tone={resolveTone(entry.detected.status)} title={describeUnknownExplanation(entry.detected, entry.detectionWarning)}>{describeStatus(entry.detected.status)}{describeUnknownReasonSuffix(entry.detected)}</span>
         {#if entry.detected.status === 'exited' && entry.exitCode !== null}

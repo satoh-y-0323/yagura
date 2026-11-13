@@ -16,8 +16,8 @@ import {
 
 /** Every delivery state the daemon can report for one target. */
 const DELIVERY_STATES = [
-  'pending',
-  'taken',
+  'queued',
+  'delivered',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',

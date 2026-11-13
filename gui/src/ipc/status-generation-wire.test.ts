@@ -17,20 +17,24 @@ import { itemBody } from '../test-utils/markup-scan';
 /** Sample window id; the boundary treats it as an opaque string. */
 const WINDOW_ID = 'w1-k3f9xa';
 
+/** The key this boundary reads the status generation under. */
+const GENERATION_KEY = 'status_rev';
+
 /**
- * The name of the one field a Rust item declares as `Option<u64>`. Found by
- * the field's shape rather than by its name, so this file never states the
- * name it is checking.
+ * The name of the `Option<u64>` field a Rust item declares under
+ * {@link GENERATION_KEY}. A record may carry other `Option<u64>` fields (a
+ * window record also counts its waiting messages), so the field is found by
+ * its name and its shape together.
  */
 function generationFieldName(source: string, header: string): string {
   const body = itemBody(source, header);
   const matches = [
     ...body.matchAll(/^[ \t]*(?:pub +)?([A-Za-z_][A-Za-z0-9_]*) *: *Option<u64> *,/gm),
   ];
-  const names = matches.map((match) => match[1] ?? '');
+  const names = matches.map((match) => match[1] ?? '').filter((name) => name === GENERATION_KEY);
   if (names.length !== 1) {
     throw new Error(
-      `expected exactly one Option<u64> field under ${header}, found ${names.length}`
+      `expected exactly one Option<u64> field named ${GENERATION_KEY} under ${header}, found ${names.length}`
     );
   }
   return names[0] ?? '';

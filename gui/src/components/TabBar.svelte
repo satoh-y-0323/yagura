@@ -16,6 +16,7 @@
   import { resolveTone } from '../status-tone';
   import type { ThemeStore } from '../theme/theme-store';
   import { hints, nav } from '../ui-messages';
+  import QueuedMark from './QueuedMark.svelte';
   import WindowControls from './WindowControls.svelte';
 
   /**
@@ -153,6 +154,7 @@
         <span class="tab-bar__dot" data-tone={resolveTone(entry.detected.status)} aria-hidden="true"
         ></span>
         <span class="tab-bar__label">{entry.name}</span>
+        <QueuedMark count={entry.queuedCount} />
       </button>
     {/each}
   </div>

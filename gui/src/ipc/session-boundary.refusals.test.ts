@@ -70,7 +70,7 @@ function windowInfoWire(overrides: Wire = {}): Wire {
 }
 
 function deliveryWire(overrides: Wire = {}): Wire {
-  return { window_id: 'w2', state: 'taken', ...overrides };
+  return { window_id: 'w2', state: 'delivered', ...overrides };
 }
 
 function chatMessageWire(overrides: Wire = {}): Wire {
@@ -272,12 +272,12 @@ describe('the unknown_reason and status generation of a record', () => {
       chatMessagesWire({
         messages: [
           chatMessageWire({
-            deliveries: [deliveryWire({ state: 'taken', unknown_reason: 'screen_lost' })],
+            deliveries: [deliveryWire({ state: 'delivered', unknown_reason: 'screen_lost' })],
           }),
         ],
       })
     );
-    expect(room.messages[0]?.deliveries[0]).toEqual({ window_id: 'w2', state: 'taken' });
+    expect(room.messages[0]?.deliveries[0]).toEqual({ window_id: 'w2', state: 'delivered' });
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -414,8 +414,8 @@ describe('the chat replies', () => {
   });
 
   it.each([
-    'pending',
-    'taken',
+    'queued',
+    'delivered',
     'undelivered_halted',
     'undelivered_exhausted',
     'undelivered_restart',
@@ -423,7 +423,9 @@ describe('the chat replies', () => {
     const room = narrowChatMessages(
       chatMessagesWire({ messages: [chatMessageWire({ deliveries: [deliveryWire({ state })] })] })
     );
-    expect(room.messages[0]?.deliveries[0]).toEqual({ window_id: 'w2', state });
+    expect(room.messages[0]?.deliveries[0]).toEqual(
+      state === 'queued' ? { window_id: 'w2', state, note: null } : { window_id: 'w2', state }
+    );
   });
 
   it('names the part of a history that is wrong', () => {

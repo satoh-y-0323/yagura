@@ -172,6 +172,30 @@ describe('invokeListWindows and invokeOpenWindow', () => {
     invokeMock.mockResolvedValueOnce([{ ...rawWindow, window_id: 1 }]);
     await expect(invokeListWindows()).rejects.toThrow(BoundaryError);
   });
+
+  it('carries how many messages wait in each window, and leaves the count off when the daemon sent none', async () => {
+    const rawWindow = {
+      window_id: WINDOW_A,
+      name: 'claude',
+      vendor: 'claude-code',
+      cwd: '/home/dev/project',
+      status: 'running',
+      exit_code: null,
+    };
+    invokeMock.mockResolvedValueOnce([
+      { ...rawWindow, queued_count: 2 },
+      { ...rawWindow, window_id: 'w-zero', queued_count: 0 },
+      { ...rawWindow, window_id: 'w-old' },
+      { ...rawWindow, window_id: 'w-null', queued_count: null },
+    ]);
+
+    const [two, zero, old, nulled] = await invokeListWindows();
+
+    expect(two?.queued_count).toBe(2);
+    expect(zero?.queued_count).toBe(0);
+    expect(old).not.toHaveProperty('queued_count');
+    expect(nulled).not.toHaveProperty('queued_count');
+  });
 });
 
 /**

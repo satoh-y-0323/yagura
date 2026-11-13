@@ -73,6 +73,11 @@ export interface WindowEntry {
    * arrived, `null` while the daemon has reported nothing about it.
    */
   statusReportsMissing: boolean | null;
+  /**
+   * How many messages wait in the window's inbox, present only while at least
+   * one does; see {@link queuedCountOf}.
+   */
+  queuedCount?: number;
   /** Presentation attributes; see {@link WindowDisplay}. */
   display: WindowDisplay;
 }
@@ -318,13 +323,35 @@ export function createWindowRegistry(): WindowRegistry {
   };
 }
 
+/**
+ * The count a window's waiting-messages mark shows, `null` when no mark is
+ * shown: nothing waits, or the daemon predates the count.
+ */
+export function queuedCountOf(info: WindowInfo): number | null {
+  const count = info.queued_count ?? 0;
+  return count > 0 ? count : null;
+}
+
+/** The entry with its waiting-messages count replaced; `null` leaves the field off. */
+function withQueuedCount(entry: WindowEntry, count: number | null): WindowEntry {
+  if (count !== null) {
+    return { ...entry, queuedCount: count };
+  }
+  if (entry.queuedCount === undefined) {
+    return entry;
+  }
+  const cleared = { ...entry };
+  delete cleared.queuedCount;
+  return cleared;
+}
+
 /** The wire's room, in the view's naming; `null` when the snapshot carries none. */
 function roomOf(info: WindowInfo): { roomId: string; name: string } | null {
   return info.room === undefined ? null : { roomId: info.room.room_id, name: info.room.name };
 }
 
 function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
-  return {
+  const entry: WindowEntry = {
     windowId: info.window_id,
     name: info.name,
     vendor: info.vendor,
@@ -345,6 +372,7 @@ function toEntry(info: WindowInfo, zOrder: number): WindowEntry {
       restoreBounds: null,
     },
   };
+  return withQueuedCount(entry, queuedCountOf(info));
 }
 
 function withName(state: WindowRegistryState, windowId: string, name: string): WindowRegistryState {
@@ -378,8 +406,8 @@ function withObservedPair(
 /**
  * Refreshes the fields a snapshot of an already-open window may carry anew.
  *
- * The display name, the room, the detection warning and the MCP connection
- * land whatever the generation says: they are what the list alone reports,
+ * The display name, the room, the detection warning, the MCP connection and
+ * the waiting-messages count land whatever the generation says: they are what the list alone reports,
  * and showing a name the daemon no longer uses would be worse than showing
  * an older one. The status pair is the only field a stale snapshot may not
  * move.
@@ -389,14 +417,17 @@ function withSnapshot(state: WindowRegistryState, info: WindowInfo): WindowRegis
     ...state,
     windows: state.windows.map((entry) =>
       entry.windowId === info.window_id
-        ? {
-            ...withObservedPair(entry, info.detected, info.status_rev ?? null),
-            name: info.name,
-            room: roomOf(info),
-            detectionWarning: info.detection_warning ?? null,
-            mcpConnected: info.mcp_connected ?? null,
-            statusReportsMissing: info.status_reports_missing ?? null,
-          }
+        ? withQueuedCount(
+            {
+              ...withObservedPair(entry, info.detected, info.status_rev ?? null),
+              name: info.name,
+              room: roomOf(info),
+              detectionWarning: info.detection_warning ?? null,
+              mcpConnected: info.mcp_connected ?? null,
+              statusReportsMissing: info.status_reports_missing ?? null,
+            },
+            queuedCountOf(info)
+          )
         : entry
     ),
   };

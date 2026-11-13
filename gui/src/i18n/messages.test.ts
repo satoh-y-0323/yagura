@@ -215,6 +215,8 @@ export const dummyMessages: Messages = {
       `DUMMY_restoreSelectionCount(${selected}, ${total})`,
     // The room heading's Unknown-count badge.
     unknownBadge: (count: number) => `DUMMY_unknownBadge(${count})`,
+    // The tooltip of a window's waiting-messages mark.
+    queuedMessages: (count: number) => `DUMMY_queuedMessages(${count})`,
   },
 
   // Top-level rather than nested under `statusLabels`, so that group's own

@@ -332,3 +332,17 @@ describe('approvalUpdateFailure', () => {
     expect(new Set(lines).size).toBe(lines.length);
   });
 });
+
+/**
+ * The Integrations tab's state line for a registration whose arguments differ
+ * (`differs_in` names `args`): its own English phrase, not the per-key
+ * template, which would print the wire token as a word.
+ */
+describe('the registration state that names differing arguments', () => {
+  it('words differing arguments in a phrase of their own', () => {
+    const templated = settings.integrationDiffersIn('some_key').replace('some_key', 'args');
+
+    expect(settings.integrationDiffersIn('args')).not.toBe(templated);
+    expect(settings.integrationDiffersIn('args')).not.toMatch(/\bargs\b/);
+  });
+});

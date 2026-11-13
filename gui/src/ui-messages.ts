@@ -14,6 +14,7 @@ import {
   describeInterruptHint as renderDescribeInterruptHint,
   describeOperationFailure,
   describePaneNotice as renderDescribePaneNotice,
+  describeQueuedMessages as renderDescribeQueuedMessages,
   describeRestoreBanner as renderDescribeRestoreBanner,
   describeRestoreSelectionCount as renderDescribeRestoreSelectionCount,
   describeRoomTitle as renderDescribeRoomTitle,
@@ -223,6 +224,11 @@ export function describeRoomTitle(name: string, count: number): string {
  */
 export function describeUnknownBadge(count: number): string {
   return renderDescribeUnknownBadge(messages, count);
+}
+
+/** Describes the tooltip of a window's waiting-messages mark. */
+export function describeQueuedMessages(count: number): string {
+  return renderDescribeQueuedMessages(messages, count);
 }
 
 /**

@@ -20,6 +20,7 @@ import {
   roomAfterRemoval,
   type ChatHistory,
 } from './chat-store';
+import { chat, describeDeliveryState } from '../ui-messages';
 import type {
   ChatChanged,
   ChatMessage,
@@ -118,19 +119,19 @@ describe('mergeChatMessages: message list', () => {
     const first = mergeChatMessages(
       emptyChatRoom('main'),
       page({
-        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'pending' }] })],
+        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'queued' }] })],
         next_after_seq: 1,
       })
     );
     const second = mergeChatMessages(
       first,
       page({
-        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'taken' }] })],
+        messages: [message(1, { deliveries: [{ window_id: 'w-b', state: 'delivered' }] })],
         next_after_seq: 1,
       })
     );
     expect(second.messages).toHaveLength(1);
-    expect(second.messages[0]?.deliveries).toEqual([{ window_id: 'w-b', state: 'taken' }]);
+    expect(second.messages[0]?.deliveries).toEqual([{ window_id: 'w-b', state: 'delivered' }]);
   });
 
   it('sorts a page that arrives out of order', () => {
@@ -644,5 +645,26 @@ describe('roomAfterRemoval', () => {
 
   it('leaves no room selected while none was', () => {
     expect(roomAfterRemoval('', listed)).toBe('');
+  });
+});
+
+/**
+ * The chip each delivery shows in the panel: the two states the daemon
+ * reports for a post that is waiting or handed over each read from a wording
+ * of their own, never the fallback for a state this build does not know.
+ */
+describe('the delivery chip wording', () => {
+  /** Every plain wording the chat resource holds. */
+  const chatWords = new Set(Object.values(chat).filter((value) => typeof value === 'string'));
+
+  it.each(['queued', 'delivered'])('words the %s state from its own resource entry', (state) => {
+    const word = describeDeliveryState(state);
+
+    expect(chatWords.has(word)).toBe(true);
+    expect(word).not.toBe(chat.deliveryUnknown);
+  });
+
+  it('words a queued delivery and a delivered one differently', () => {
+    expect(describeDeliveryState('queued')).not.toBe(describeDeliveryState('delivered'));
   });
 });

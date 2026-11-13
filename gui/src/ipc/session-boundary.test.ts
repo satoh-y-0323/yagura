@@ -725,12 +725,17 @@ function chatMessagesWireWithDelivery(delivery: Record<string, unknown>): Record
 
 /** The delivery states that can never carry a reason. */
 const REASONLESS_DELIVERY_STATES = [
-  'pending',
-  'taken',
+  'queued',
+  'delivered',
   'undelivered_halted',
   'undelivered_exhausted',
   'undelivered_restart',
 ];
+
+/** The narrowed reason-less arm for `w-b`; a queued one also carries its (absent) note. */
+function reasonlessArm(state: string): Record<string, unknown> {
+  return state === 'queued' ? { window_id: 'w-b', state, note: null } : { window_id: 'w-b', state };
+}
 
 /** The single delivery record of a narrowed one-message reply. */
 function soleDelivery(wire: Record<string, unknown>): unknown {
@@ -741,11 +746,11 @@ function soleDelivery(wire: Record<string, unknown>): unknown {
 describe('narrowChatMessages: a delivery record narrows to one value', () => {
   it.each(REASONLESS_DELIVERY_STATES)('gives the %s arm no reason own property', (state) => {
     const delivery = soleDelivery({ window_id: 'w-b', state });
-    expect(delivery).toEqual({ window_id: 'w-b', state });
+    expect(delivery).toEqual(reasonlessArm(state));
   });
 
   it('keeps the delivery state readable as a top-level key of the record', () => {
-    const delivery = soleDelivery({ window_id: 'w-b', state: 'taken' });
+    const delivery = soleDelivery({ window_id: 'w-b', state: 'delivered' });
     expect(Object.prototype.hasOwnProperty.call(delivery ?? {}, 'state')).toBe(true);
   });
 
@@ -788,7 +793,7 @@ describe('narrowChatMessages: the history route drops the reason instead of the 
           state,
           unknown_reason: 'screen_lost',
         });
-        expect(delivery).toEqual({ window_id: 'w-b', state });
+        expect(delivery).toEqual(reasonlessArm(state));
         expect(warn).toHaveBeenCalledTimes(1);
       } finally {
         warn.mockRestore();
@@ -819,7 +824,7 @@ describe('narrowChatMessages: the history route drops the reason instead of the 
         state: 'undelivered_unknown',
         unknown_reason: 'screen_lost',
       });
-      soleDelivery({ window_id: 'w-b', state: 'taken' });
+      soleDelivery({ window_id: 'w-b', state: 'delivered' });
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

@@ -13,10 +13,10 @@ import { narrowChatMessages, narrowChatRooms, BoundaryError } from './session-bo
 /** Every `from_kind` value the wire documents. */
 const FROM_KINDS = ['window', 'user', 'external', 'system'] as const;
 
-/** Every delivery state a chat envelope can be in. */
+/** Every delivery state a chat envelope can be in (`ChatDeliveryInfo::state` in the protocol crate). */
 const DELIVERY_STATES = [
-  'pending',
-  'taken',
+  'queued',
+  'delivered',
   'undelivered_unknown',
   'undelivered_halted',
   'undelivered_exhausted',
@@ -78,31 +78,73 @@ describe('narrowChatMessages: every from_kind crossed with every delivery state'
 describe('narrowChatMessages: from_window_id Option discipline across from_kind', () => {
   it('accepts null from_window_id for every non-window kind', () => {
     for (const fromKind of ['user', 'external', 'system'] as const) {
-      const decoded = narrowChatMessages(messagesWire(messageWire(fromKind, 'taken')));
+      const decoded = narrowChatMessages(messagesWire(messageWire(fromKind, 'delivered')));
       const [message] = decoded.messages;
       expect(message?.from_window_id).toBeNull();
     }
   });
 
   it('accepts a present from_window_id for the window kind', () => {
-    const decoded = narrowChatMessages(messagesWire(messageWire('window', 'taken')));
+    const decoded = narrowChatMessages(messagesWire(messageWire('window', 'delivered')));
     const [message] = decoded.messages;
     expect(message?.from_window_id).toBe('w-a');
+  });
+});
+
+describe('narrowChatMessages: the note a queued delivery carries', () => {
+  /** One message whose sole delivery is the given wire record. */
+  function withDelivery(delivery: Record<string, unknown>): Record<string, unknown> {
+    return { ...messageWire('window', 'queued'), deliveries: [delivery] };
+  }
+
+  it('keeps the note of a queued delivery verbatim', () => {
+    const note = 'the window is running; it is handed over at its next turn';
+    const decoded = narrowChatMessages(
+      messagesWire(withDelivery({ window_id: 'w-b', state: 'queued', note }))
+    );
+    const delivery = decoded.messages[0]?.deliveries[0];
+    expect(delivery?.state).toBe('queued');
+    expect(delivery !== undefined && 'note' in delivery ? delivery.note : undefined).toBe(note);
+  });
+
+  it('reads an absent or null note of a queued delivery as null', () => {
+    for (const delivery of [
+      { window_id: 'w-b', state: 'queued' },
+      { window_id: 'w-b', state: 'queued', note: null },
+    ]) {
+      const decoded = narrowChatMessages(messagesWire(withDelivery(delivery)));
+      const read = decoded.messages[0]?.deliveries[0];
+      expect(read !== undefined && 'note' in read ? read.note : undefined).toBeNull();
+    }
+  });
+
+  it('refuses a queued note that is not a string', () => {
+    expect(() =>
+      narrowChatMessages(messagesWire(withDelivery({ window_id: 'w-b', state: 'queued', note: 5 })))
+    ).toThrow(BoundaryError);
   });
 });
 
 describe('narrowChatMessages: fail-closed on values outside the closed sets', () => {
   it('rejects every from_kind value not in the documented set, one at a time', () => {
     for (const bogus of ['agent', 'daemon', '', 'Window']) {
-      expect(() => narrowChatMessages(messagesWire(messageWire(bogus, 'taken')))).toThrow(
+      expect(() => narrowChatMessages(messagesWire(messageWire(bogus, 'delivered')))).toThrow(
         BoundaryError
       );
     }
   });
 
   it('rejects every delivery state value not in the documented set, one at a time', () => {
-    for (const bogus of ['delivered', 'queued', '', 'Taken']) {
+    for (const bogus of ['', 'Queued', 'Delivered']) {
       expect(() => narrowChatMessages(messagesWire(messageWire('window', bogus)))).toThrow(
+        BoundaryError
+      );
+    }
+  });
+
+  it('rejects the names the daemon used before it renamed them to queued and delivered', () => {
+    for (const retired of ['pending', 'taken']) {
+      expect(() => narrowChatMessages(messagesWire(messageWire('window', retired)))).toThrow(
         BoundaryError
       );
     }

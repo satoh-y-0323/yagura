@@ -315,3 +315,24 @@
   background-color: transparent;
   border: 1px solid var(--color-text-secondary);
 }
+
+/* A window's waiting-messages mark (QueuedMark.svelte), drawn in the tab strip
+   and the float-window title bar: an outline in the secondary text colour and
+   no fill, so it stays quieter than the status pill beside it. */
+.queued-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--space-xs);
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--line-height-base);
+}
+
+.queued-mark__icon {
+  flex: 0 0 auto;
+}

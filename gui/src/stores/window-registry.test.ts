@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 import { createWindowRegistry } from './window-registry';
+import { resolveMessages } from '../i18n/messages';
 import type { WindowRegistry } from './window-registry';
 import type { DetectedStatusView, UnknownReason } from '../ipc/session-boundary';
 import type { WindowInfo, WindowEventHandlers } from '../ipc/session-client';
@@ -693,5 +694,53 @@ describe('createWindowRegistry: an entry never holds a reason without the unknow
     const entry = entryOf(registry, 'w-a');
     expect(pairHoldsTogether(entry?.detected)).toBe(true);
     expect(entry?.detected).toEqual({ status: 'running' });
+  });
+});
+
+/**
+ * The count a window's waiting-messages mark shows, read from the daemon's
+ * window record. Zero and a record from a daemon that predates the field both
+ * show no mark.
+ */
+describe('queuedCountOf', () => {
+  // Loaded per case so each case fails on its own while the export is missing.
+  async function loadQueuedCountOf(): Promise<
+    (typeof import('./window-registry'))['queuedCountOf']
+  > {
+    const module = await import('./window-registry');
+    return module.queuedCountOf;
+  }
+
+  it('gives the count when messages wait in the window', async () => {
+    const queuedCountOf = await loadQueuedCountOf();
+
+    expect(queuedCountOf(makeWindowInfo({ queued_count: 1 }))).toBe(1);
+    expect(queuedCountOf(makeWindowInfo({ queued_count: 7 }))).toBe(7);
+  });
+
+  it('shows no mark when nothing waits', async () => {
+    const queuedCountOf = await loadQueuedCountOf();
+
+    expect(queuedCountOf(makeWindowInfo({ queued_count: 0 }))).toBeNull();
+  });
+
+  it('shows no mark when the daemon does not report the count', async () => {
+    const queuedCountOf = await loadQueuedCountOf();
+
+    expect(queuedCountOf(makeWindowInfo())).toBeNull();
+  });
+});
+
+describe('the waiting-messages mark tooltip', () => {
+  it('says how many messages wait and when they are handed over, plural above one', () => {
+    expect(resolveMessages().formats.queuedMessages(2)).toBe(
+      '2 queued messages — delivered on its next turn'
+    );
+  });
+
+  it('says it in the singular for one message', () => {
+    expect(resolveMessages().formats.queuedMessages(1)).toBe(
+      '1 queued message — delivered on its next turn'
+    );
   });
 });

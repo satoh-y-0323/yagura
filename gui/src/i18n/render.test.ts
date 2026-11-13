@@ -368,8 +368,8 @@ describe('describeUndeliveredUnknownReason', () => {
   });
 
   it('renders every other outcome exactly as the reason-less facade does, reason or not', () => {
-    expect(describeUndeliveredUnknownReason(english, { state: 'taken' })).toBe(
-      describeDeliveryState(english, 'taken')
+    expect(describeUndeliveredUnknownReason(english, { state: 'delivered' })).toBe(
+      describeDeliveryState(english, 'delivered')
     );
     expect(describeUndeliveredUnknownReason(english, { state: 'undelivered_halted' })).toBe(
       describeDeliveryState(english, 'undelivered_halted')

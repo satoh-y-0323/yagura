@@ -398,6 +398,10 @@ export const messagesEn = {
     /** The room heading's Unknown-count badge. */
     unknownBadge: (count: number): string =>
       count === 1 ? '1 window in an unknown state' : `${count} windows in an unknown state`,
+
+    /** The tooltip of a window's waiting-messages mark. */
+    queuedMessages: (count: number): string =>
+      `${count} queued ${count === 1 ? 'message' : 'messages'} — delivered on its next turn`,
   },
 
   /**
@@ -863,7 +867,9 @@ export const messagesEn = {
     integrationNotInstalled: 'Not installed',
     integrationUnknown: 'Unknown',
     integrationChecking: 'Checking…',
-    integrationDiffersIn: (key: string): string => `Registered with a different ${key}`,
+    // `args` is a wire key, not an English noun, so it gets a phrase of its own.
+    integrationDiffersIn: (key: string): string =>
+      key === 'args' ? 'Registered with different arguments' : `Registered with a different ${key}`,
     integrationRegisterButton: 'Register',
     integrationUpdateButton: 'Update',
     integrationRemoveButton: 'Remove',

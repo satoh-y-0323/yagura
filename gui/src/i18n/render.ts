@@ -78,6 +78,11 @@ export function describeUnknownBadge(messages: Messages, count: number): string 
   return messages.formats.unknownBadge(count);
 }
 
+/** Describes the tooltip of a window's waiting-messages mark. */
+export function describeQueuedMessages(messages: Messages, count: number): string {
+  return messages.formats.queuedMessages(count);
+}
+
 /**
  * Describes the suffix a status label appends when the pair names the
  * `'unknown'` arm: the connector plus the reason's short label. Empty for
@@ -164,9 +169,9 @@ export function describeRestoreSelectionCount(
  */
 export function describeDeliveryState(messages: Messages, state: string): string {
   switch (state) {
-    case 'pending':
+    case 'queued':
       return messages.chat.deliveryPending;
-    case 'taken':
+    case 'delivered':
       return messages.chat.deliveryTaken;
     case 'undelivered_unknown':
       return messages.chat.deliveryUndeliveredUnknown;
