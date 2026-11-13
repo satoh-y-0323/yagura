@@ -486,10 +486,35 @@ pub fn seed_parcels_an_older_daemon_kept(
         )
         .expect("seeding an inbox parcel row must succeed");
     }
-    conn.execute("ALTER TABLE windows DROP COLUMN hooks", [])
-        .expect("dropping the column a later schema added must succeed");
+    drop_columns_added_after(&conn, SCHEMA_DROPPING_UNSAVED_PARCELS);
     conn.pragma_update(None, "user_version", SCHEMA_KEEPING_UNSAVED_PARCELS)
         .expect("rewinding the schema version must succeed");
+}
+
+/// The schema version whose migration drops the parcels a daemon no longer keeps.
+const SCHEMA_DROPPING_UNSAVED_PARCELS: usize = 20;
+
+/// Drops, newest first, every column the migrations after schema `version` add, so a
+/// daemon opening the store applies them again. A later migration that does anything
+/// but add columns cannot be undone this way, and panics.
+fn drop_columns_added_after(conn: &rusqlite::Connection, version: usize) {
+    for migration in yagura_daemon::store::MIGRATIONS[version..].iter().rev() {
+        let code: String = migration
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for statement in code.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let words: Vec<&str> = statement.split_whitespace().collect();
+            match words.as_slice() {
+                ["ALTER", "TABLE", table, "ADD", "COLUMN", column, ..] => {
+                    conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                        .expect("dropping a column a later schema added must succeed");
+                }
+                _ => panic!("only a column a later migration adds can be undone: {statement}"),
+            }
+        }
+    }
 }
 
 /// The keys of the `inbox_parcels` rows kept for `window_id`, by seq; `None` while the

@@ -3492,3 +3492,322 @@ async fn a_typing_mark_an_older_daemon_left_is_dropped_with_a_warning_and_nothin
         "the daemon log must not carry the marked text {BODY:?}:\n{log}"
     );
 }
+
+// --- a window taken back still speaks only from its own CLI (lineage) --------------------
+
+/// Keeps `mark` as a parcel for `window_id` while no daemon runs, for the next one to load.
+fn seed_parcel(sandbox: &Sandbox, window_id: &str, mark: &str) {
+    let db = rusqlite::Connection::open(store_db(sandbox)).unwrap();
+    db.execute(
+        "INSERT INTO inbox_parcels (window_id, seq, key, notice, body) VALUES (?1, 1, ?2, 0, ?3)",
+        [window_id, &format!("seeded:{mark}"), mark],
+    )
+    .unwrap();
+}
+
+/// Waits until the row of each of `window_ids` holds the hook route its open settled, so
+/// the next daemon builds each window from its row rather than from its holder's launch
+/// record.
+async fn until_rows_settled(sandbox: &Sandbox, window_ids: &[&str]) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    loop {
+        let settled = {
+            let conn = store::open_readonly(&store_db(sandbox)).expect("open the store");
+            window_ids.iter().all(|window_id| {
+                conn.query_row(
+                    "SELECT hooks FROM windows WHERE window_id = ?1",
+                    [window_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .is_some()
+            })
+        };
+        if settled {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rows of {window_ids:?} never held their hook routes; daemon log:
+{}",
+            sandbox.daemon_log()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Starts a daemon of the sandbox that gives the windows it opens [`TOKEN`].
+async fn start_with_token(sandbox: &Sandbox) -> RunningDaemon {
+    sandbox
+        .start_from(&[("YAGURA_STATUS_TOKEN_OVERRIDE", TOKEN)])
+        .await
+}
+
+/// The hook door of the lineage profile `profile`.
+fn lineage_hook(profile: &str) -> [&str; 3] {
+    ["--hook", profile, crate::hook_events_door::LINEAGE_EVENT]
+}
+
+/// A window taken back by the next daemon is judged against the child its holder names
+/// in its `Welcome`: its own CLI's hook takes what waits for it, and a CLI of the same
+/// image that CLI started takes nothing. A holder that names no child (one older than the
+/// field) leaves the window matched only, so a request carrying its token passes. A
+/// window whose CLI ended is claimed by no one.
+#[tokio::test]
+async fn a_taken_back_window_is_judged_against_the_child_its_holder_names() {
+    use crate::hook_events_door::{By, LineageImage};
+    const LIVE: &str = "lineage-live";
+    const OLD: &str = "lineage-old";
+    const ENDED: &str = "lineage-ended";
+    let sandbox = Sandbox::new("recover-lineage");
+    let image = LineageImage::install("recover");
+    let mut live = image.write_profile(&sandbox.profiles_dir, LIVE, &sandbox.instance, true, "");
+    image.write_profile(&sandbox.profiles_dir, OLD, &sandbox.instance, true, "");
+    let mut ended = image.write_profile(&sandbox.profiles_dir, ENDED, &sandbox.instance, true, "");
+
+    let mut first = start_with_token(&sandbox).await;
+    let live_id = first.open_profile_window(&sandbox, LIVE).await;
+    let old_id = first.open_profile_window(&sandbox, OLD).await;
+    let ended_id = first.open_profile_window(&sandbox, ENDED).await;
+    until_rows_settled(&sandbox, &[&live_id, &old_id, &ended_id]).await;
+    let old_record = record_of(&sandbox, &old_id);
+    first.kill_keeping_windows();
+    let ended_pid = ended.exit().await;
+    common::wait_processes_gone(&[ended_pid]).await;
+    for (window_id, mark) in [(&live_id, "PARCEL-FOR-LIVE"), (&old_id, "PARCEL-FOR-OLD")] {
+        seed_parcel(&sandbox, window_id, mark);
+    }
+    let fakes = sandbox.tree.make_dir("fake");
+    let old_launch = fakes.join("old.record");
+    std::fs::write(&old_launch, launch_record(&old_id, TOKEN)).unwrap();
+    let mut old_fake = replace_holder_with(
+        &sandbox,
+        &old_record,
+        &["gate", utf8(&old_launch)],
+        fakes.join("old.log"),
+    )
+    .await;
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &live_id).await;
+    old_fake
+        .wait_logged("the next daemon's Hello", hello_logged)
+        .await;
+    old_fake.answer("welcome");
+    exited_listing(&mut next, &sandbox, &ended_id).await;
+
+    let nested = live.door(By::Nested, &lineage_hook(LIVE), "{}").await;
+    assert!(
+        !nested.stdout.contains("PARCEL-FOR-LIVE"),
+        "a CLI the window's CLI started takes nothing after the take-back: {nested:?}; daemon \
+         log:\n{}",
+        sandbox.daemon_log()
+    );
+    let own = live.door(By::Cli, &lineage_hook(LIVE), "{}").await;
+    assert!(
+        own.stdout.contains("PARCEL-FOR-LIVE"),
+        "the window's own CLI takes what waits for it after the take-back: {own:?}; daemon \
+         log:\n{}",
+        sandbox.daemon_log()
+    );
+
+    let old = door_output(&sandbox, &old_id).await;
+    assert!(
+        old.contains("PARCEL-FOR-OLD"),
+        "a window whose holder names no child is matched only: {old:?}"
+    );
+
+    let mut claim = connect(&sandbox).await;
+    send(
+        &mut claim,
+        &ClientMessage::Identify {
+            window_id: ended_id.clone(),
+            token: TOKEN.to_owned(),
+            declaration: Some(yagura_protocol::Declaration {
+                profile: ENDED.to_owned(),
+            }),
+        },
+    )
+    .await;
+    let answer = read_response(&mut claim).await;
+    assert!(
+        matches!(answer, DaemonMessage::Error { .. }),
+        "a window whose CLI ended is claimed by no one, got {answer:?}"
+    );
+
+    live.exit().await;
+}
+
+/// Whether a window's CLI runs in another environment is a fact of the window, kept with
+/// it: a window taken back by the next daemon, with its row or from its holder's launch
+/// record, is judged as it was opened, whatever its profile says by then. One opened from
+/// a profile with `[host_paths]` only matches a hook, even from a CLI its CLI started; one
+/// opened from a profile without it takes nothing from such a CLI.
+#[tokio::test]
+async fn a_taken_back_window_keeps_whether_its_cli_runs_in_another_environment() {
+    use crate::hook_events_door::{By, LineageImage, guest_host_paths};
+    const GUEST: &str = "guest-kept";
+    const PLAIN: &str = "plain-kept";
+    const GUEST_ROWLESS: &str = "guest-rowless";
+    const PLAIN_ROWLESS: &str = "plain-rowless";
+    let sandbox = Sandbox::new("recover-guest");
+    let image = LineageImage::install("guest");
+    let host_paths = guest_host_paths();
+    let profiles = &sandbox.profiles_dir;
+    let instance = &sandbox.instance;
+    let mut guest = image.write_profile(profiles, GUEST, instance, true, &host_paths);
+    let mut plain = image.write_profile(profiles, PLAIN, instance, true, "");
+    let mut guest_rowless =
+        image.write_profile(profiles, GUEST_ROWLESS, instance, true, &host_paths);
+    let mut plain_rowless = image.write_profile(profiles, PLAIN_ROWLESS, instance, true, "");
+
+    let mut first = start_with_token(&sandbox).await;
+    let mut ids = Vec::new();
+    for profile in [GUEST, PLAIN, GUEST_ROWLESS, PLAIN_ROWLESS] {
+        ids.push(first.open_profile_window(&sandbox, profile).await);
+    }
+    let settled: Vec<&str> = ids.iter().map(String::as_str).collect();
+    until_rows_settled(&sandbox, &settled).await;
+    first.kill_keeping_windows();
+    // The profiles say the opposite by the time the next daemon takes the windows back.
+    image.write_profile(profiles, GUEST, instance, true, "");
+    image.write_profile(profiles, PLAIN, instance, true, &host_paths);
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        for window_id in &ids[2..] {
+            db.execute("DELETE FROM windows WHERE window_id = ?1", [window_id])
+                .unwrap();
+        }
+    }
+    for window_id in &ids {
+        seed_parcel(&sandbox, window_id, &format!("PARCEL-FOR-{window_id}"));
+    }
+
+    let mut next = start_with_token(&sandbox).await;
+    for window_id in &ids {
+        listed(&mut next, &sandbox, window_id).await;
+    }
+    for (cli, profile, window_id, guest_window) in [
+        (&mut guest, GUEST, &ids[0], true),
+        (&mut plain, PLAIN, &ids[1], false),
+        (&mut guest_rowless, GUEST_ROWLESS, &ids[2], true),
+        (&mut plain_rowless, PLAIN_ROWLESS, &ids[3], false),
+    ] {
+        let mark = format!("PARCEL-FOR-{window_id}");
+        let nested = cli.door(By::Nested, &lineage_hook(profile), "{}").await;
+        assert_eq!(
+            nested.stdout.contains(&mark),
+            guest_window,
+            "{profile}: whether a CLI the window's CLI started takes the parcel: {nested:?}; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        if !guest_window {
+            let own = cli.door(By::Cli, &lineage_hook(profile), "{}").await;
+            assert!(
+                own.stdout.contains(&mark),
+                "{profile}: the window's own CLI takes the parcel: {own:?}"
+            );
+        }
+        cli.exit().await;
+    }
+}
+
+/// Puts the sandbox's store back as it was before `022_window_guest.sql`, which keeps
+/// whether a window's CLI runs in another environment: every column that migration and
+/// the later ones add is dropped, and the schema version set back, so the next daemon
+/// migrates rows written before the fact was kept.
+fn store_before_the_guest_fact(sandbox: &Sandbox) {
+    const FIRST: &str = "022_window_guest.sql";
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let mut later: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .and_then(|name| name.get(..3))
+                .and_then(|number| number.parse::<u32>().ok())
+                .is_some_and(|number| number >= 22)
+        })
+        .collect();
+    later.sort();
+    assert_eq!(
+        later
+            .first()
+            .and_then(|path| path.file_name())
+            .and_then(OsStr::to_str),
+        Some(FIRST),
+        "the migration that keeps a window's guest fact is {FIRST}"
+    );
+    let db = rusqlite::Connection::open(store_db(sandbox)).unwrap();
+    for path in later.iter().rev() {
+        let text = std::fs::read_to_string(path).unwrap();
+        let code: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for statement in code.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let words: Vec<&str> = statement.split_whitespace().collect();
+            match words.as_slice() {
+                ["ALTER", "TABLE", table, "ADD", "COLUMN", column, ..] => {
+                    db.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])
+                        .unwrap();
+                }
+                _ => panic!(
+                    "{}: only a column a migration adds can be undone here: {statement}",
+                    path.display()
+                ),
+            }
+        }
+    }
+    db.pragma_update(None, "user_version", 21).unwrap();
+}
+
+/// A window whose row was written before the guest fact was kept is taken as one whose
+/// CLI does not run in another environment, unless the profile its row names has
+/// `[host_paths]` now: then a hook is only matched.
+#[tokio::test]
+async fn a_window_whose_row_predates_the_guest_fact_is_judged_by_its_profiles_host_paths() {
+    use crate::hook_events_door::{By, LineageImage, guest_host_paths};
+    const GUEST: &str = "guest-old";
+    const PLAIN: &str = "plain-old";
+    let sandbox = Sandbox::new("recover-guest-old");
+    let image = LineageImage::install("guest-old");
+    let profiles = &sandbox.profiles_dir;
+    let instance = &sandbox.instance;
+    let mut guest = image.write_profile(profiles, GUEST, instance, true, &guest_host_paths());
+    let mut plain = image.write_profile(profiles, PLAIN, instance, true, "");
+
+    let mut first = start_with_token(&sandbox).await;
+    let guest_id = first.open_profile_window(&sandbox, GUEST).await;
+    let plain_id = first.open_profile_window(&sandbox, PLAIN).await;
+    until_rows_settled(&sandbox, &[&guest_id, &plain_id]).await;
+    first.kill_keeping_windows();
+    store_before_the_guest_fact(&sandbox);
+    seed_parcel(&sandbox, &guest_id, "PARCEL-FOR-GUEST");
+    seed_parcel(&sandbox, &plain_id, "PARCEL-FOR-PLAIN");
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &guest_id).await;
+    listed(&mut next, &sandbox, &plain_id).await;
+    let matched = guest.door(By::Nested, &lineage_hook(GUEST), "{}").await;
+    assert!(
+        matched.stdout.contains("PARCEL-FOR-GUEST"),
+        "an older row whose profile has [host_paths] only matches the hook: {matched:?}; \
+         daemon log:\n{}",
+        sandbox.daemon_log()
+    );
+    let nested = plain.door(By::Nested, &lineage_hook(PLAIN), "{}").await;
+    assert!(
+        !nested.stdout.contains("PARCEL-FOR-PLAIN"),
+        "an older row whose profile has no [host_paths] is judged by the process ids: \
+         {nested:?}"
+    );
+    let own = plain.door(By::Cli, &lineage_hook(PLAIN), "{}").await;
+    assert!(own.stdout.contains("PARCEL-FOR-PLAIN"), "{own:?}");
+    guest.exit().await;
+    plain.exit().await;
+}

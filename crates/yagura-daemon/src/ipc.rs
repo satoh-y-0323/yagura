@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use yagura_os::ancestry::{LineageVerdict, judge_lineage, read_lineage};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
@@ -71,16 +72,18 @@ use crate::plan_permit::{self, ChangeKind, PermitError};
 use crate::profile_delivery::{
     ProfileDelivery, WakeMode, launch_context_injection, launch_prompt_injection,
 };
-use crate::pty::{AttachGeneration, FrameSend, FrameSink, InputState, SendKey, ViewNote};
+use crate::pty::{
+    AttachGeneration, ChildAnchor, FrameSend, FrameSink, InputState, SendKey, ViewNote,
+};
 use crate::store::{self, LostWindow, StoreError};
 use crate::ticket_store::{TicketChange, TicketQuery};
 use crate::token::StatusToken;
 use crate::waiter::{self, StatusAt, WaitOutcome};
 use crate::window::{
-    CliInjection, HooksRoute, InputOrigin, LaunchIdentity, McpConnectionClaim, NameRefusal,
-    OpenWindowRequest, OpenedWindow, RejectedArgument, RequestedCwd, TaskOrigin, WakeCommand,
-    WindowEntry, WindowLiveness, WindowOpenError, WindowProvenance, WindowRegistry,
-    WindowRenameError, resolve_existing_dir,
+    CliInjection, HooksRoute, InputOrigin, LaunchIdentity, LineageRule, McpConnectionClaim,
+    NameRefusal, OpenWindowRequest, OpenedWindow, RejectedArgument, RequestedCwd, TaskOrigin,
+    WakeCommand, WindowEntry, WindowFacts, WindowLiveness, WindowOpenError, WindowProvenance,
+    WindowRegistry, WindowRenameError, resolve_existing_dir,
 };
 use yagura_protocol::holder::HolderViewOp;
 
@@ -96,10 +99,15 @@ type Connection = <PlatformIpc as PeerAuth>::Connection;
 /// A bound endpoint owning its name, named through the OS boundary.
 type Listener = <PlatformIpc as IpcTransport>::Listener;
 
-/// Proof that a connection came through [`IpcServer::verify_peer`]: only
+/// Proof that a connection came through [`IpcServer::verify_peer`], with the
+/// peer's process id as read once it was: only
 /// [`IpcServer::handle_connection`] makes one, and a relay session needs it to
-/// open a connection of its own into the connection body.
-pub(crate) struct VerifiedPeer(());
+/// open a connection of its own into the connection body, which so speaks
+/// for the same process.
+pub(crate) struct VerifiedPeer {
+    /// `None` when the operating system did not tell.
+    process_id: Option<u32>,
+}
 
 /// The buffer of one internal connection, each way: it only paces the bytes
 /// of a frame, which is never bounded by it.
@@ -222,6 +230,9 @@ struct ConnectionState {
     /// connection was accepted. `None` when it could not be determined,
     /// which `register_approver` treats as a mismatch (fail-closed).
     peer_executable: Option<PathBuf>,
+    /// The peer's process id, as its [`VerifiedPeer`] carries it: a request
+    /// in a window's name is traced up from it.
+    peer_process_id: Option<u32>,
     /// Whether this connection's first refused `register_approver` has
     /// already been logged, so a client retrying in a loop cannot flood the
     /// log with its own failures.
@@ -246,9 +257,10 @@ struct ConnectionState {
 }
 
 impl ConnectionState {
-    fn new(conn_id: u64, peer_executable: Option<PathBuf>) -> Self {
+    fn new(conn_id: u64, peer: &VerifiedPeer, peer_executable: Option<PathBuf>) -> Self {
         Self {
             conn_id,
+            peer_process_id: peer.process_id,
             attachment: None,
             frames_failed: Arc::new(Notify::new()),
             status_rx: None,
@@ -268,16 +280,18 @@ impl ConnectionState {
 
     /// The state of a relay session's own connection, acting as `origin`: the
     /// identity the session settled, with no window claim of its own and no
-    /// peer executable, so it never becomes an approver.
+    /// peer executable, so it never becomes an approver. Its peer is the relay
+    /// connection's.
     fn internal(
         conn_id: u64,
+        peer: &VerifiedPeer,
         origin: RequestOrigin,
         report_receipt: Option<report::ReportReceipt>,
     ) -> Self {
         Self {
             origin,
             report_receipt,
-            ..Self::new(conn_id, None)
+            ..Self::new(conn_id, peer, None)
         }
     }
 
@@ -424,6 +438,8 @@ struct PlannedOpen {
     delivery: Option<ProfileDelivery>,
     /// What a wake by command runs, when the profile wakes that way.
     wake_command: Option<WakeCommand>,
+    /// The images of the CLI's process the profile declares for this host.
+    process_image: Vec<yagura_os::ancestry::ImagePattern>,
     /// How the launch turns the other instances' bridge registrations off,
     /// read right before spawn; `None` when the profile cannot say.
     bridge_scan: Option<mcp_registration::BridgeScan>,
@@ -949,6 +965,9 @@ pub struct IpcServer {
     /// Admits the profile reads of `run_hook`, each on a blocking thread, sized
     /// like `role_and_profile_reads`.
     hook_profile_reads: Semaphore,
+    /// Admits the lineage reads of requests in a window's name, each on a
+    /// blocking thread, sized like `hook_profile_reads`.
+    lineage_reads: Semaphore,
     /// Every window's inbox of reports from the windows it opened or owns
     /// tasks for. Memory only, and always enabled.
     reports: Arc<report::ReportInboxes>,
@@ -1007,6 +1026,7 @@ impl IpcServer {
         let role_and_profile_reads = Semaphore::new(config.max_windows);
         let window_text_reads = Semaphore::new(config.max_windows);
         let hook_profile_reads = Semaphore::new(config.max_windows);
+        let lineage_reads = Semaphore::new(config.max_windows);
         let model_choices_listing = Arc::new(Semaphore::new(config.model_choices_max_concurrent));
         let mcp_registration_listing = Arc::new(Semaphore::new(1));
         let mcp_registration_row_reads = Arc::new(Semaphore::new(
@@ -1045,6 +1065,7 @@ impl IpcServer {
             mcp_registration_changes,
             mcp_registration_writes,
             hook_profile_reads,
+            lineage_reads,
             reports,
             health_checks: Semaphore::new(1),
             palette_store: store_gate::StoreGate::disabled(),
@@ -1236,7 +1257,9 @@ impl IpcServer {
             tracing::warn!("rejecting ipc connection: peer verification failed");
             return;
         }
-        let verified = VerifiedPeer(());
+        let verified = VerifiedPeer {
+            process_id: PlatformIpc::default().peer_process_id(&connection),
+        };
 
         // Captured before the stream is handed on, and canonicalized here so no
         // later frame has to: one local filesystem lookup per accepted
@@ -1270,6 +1293,7 @@ impl IpcServer {
 
         let state = ConnectionState::new(
             self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            &verified,
             peer_executable,
         );
         self.serve_connection(connection, state, read_buf).await;
@@ -1281,13 +1305,14 @@ impl IpcServer {
     /// `report_receipt` is where its `wait_for_report` hands what it takes.
     pub(crate) fn open_internal_connection(
         self: &Arc<Self>,
-        _verified: &VerifiedPeer,
+        verified: &VerifiedPeer,
         origin: RequestOrigin,
         report_receipt: Option<report::ReportReceipt>,
     ) -> DuplexStream {
         let (client, body) = tokio::io::duplex(INTERNAL_CONNECTION_BUFFER);
         let state = ConnectionState::internal(
             self.next_conn_id.fetch_add(1, Ordering::Relaxed),
+            verified,
             origin,
             report_receipt,
         );
@@ -1549,8 +1574,15 @@ impl IpcServer {
                 window_id,
                 token,
             }) => {
-                self.handle_status_event(outbound, &token, &source, status, window_id.as_deref())
-                    .await;
+                self.handle_status_event(
+                    outbound,
+                    state.peer_process_id,
+                    &token,
+                    &source,
+                    status,
+                    window_id.as_deref(),
+                )
+                .await;
                 FrameOutcome::Continue
             }
             Ok(ClientMessage::OpenWindow {
@@ -1855,7 +1887,12 @@ impl IpcServer {
                 },
             ) => {
                 if self
-                    .authenticate_window(outbound, "deliver", &token, Some(&window_id))
+                    .authenticate_window(
+                        outbound,
+                        HookDoor::new("deliver", state.peer_process_id),
+                        &token,
+                        Some(&window_id),
+                    )
                     .await
                     .is_some()
                 {
@@ -1873,7 +1910,12 @@ impl IpcServer {
                 session,
             }) => {
                 if let Some(entry) = self
-                    .authenticate_window(outbound, "report_session", &token, Some(&window_id))
+                    .authenticate_window(
+                        outbound,
+                        HookDoor::new("report_session", state.peer_process_id),
+                        &token,
+                        Some(&window_id),
+                    )
                     .await
                 {
                     inbox::handle_report_session(&entry, outbound, &session);
@@ -1894,6 +1936,7 @@ impl IpcServer {
                     profile_id: &profile,
                     name: &name,
                     input,
+                    peer: state.peer_process_id,
                 };
                 self.handle_run_hook(outbound, request, hook::HookRead::Older)
                     .await;
@@ -2894,6 +2937,7 @@ impl IpcServer {
             launch_only: launch.launch_only,
             delivery: launch.delivery,
             wake_command,
+            process_image: launch.process_image,
             bridge_scan,
             limits: launch.limits,
             chat: Arc::clone(&self.chat),
@@ -3706,8 +3750,10 @@ impl IpcServer {
     /// the latter counts toward [`IDENTIFY_FAILURE_LIMIT`] and every refusal
     /// leaves the origin untouched.
     ///
-    /// The one place a claim's declaration is judged: a relay carries its
-    /// own into here unread.
+    /// The one place a claim's declaration and lineage are judged: a relay
+    /// carries its own into here unread, on a connection whose peer is the
+    /// relay's. A lineage refused is no credential failure either, so it is
+    /// not counted.
     async fn handle_identify(
         &self,
         outbound: &Outbound,
@@ -3750,6 +3796,10 @@ impl IpcServer {
                 "profile_mismatch",
                 "the claim does not declare the profile the window was opened from",
             ));
+            return FrameOutcome::Continue;
+        }
+        if let Err(refused) = self.trace_lineage(&entry, state.peer_process_id).await {
+            outbound.reply(&refused.message());
             return FrameOutcome::Continue;
         }
 
@@ -3976,13 +4026,19 @@ impl IpcServer {
     async fn handle_status_event(
         &self,
         outbound: &Outbound,
+        peer: Option<u32>,
         token: &str,
         source: &str,
         status: WindowStatus,
         window_id: Option<&str>,
     ) {
+        let door = HookDoor {
+            name: "status_event",
+            peer,
+            refused: LineageAnswer::Error,
+        };
         let Some(entry) = self
-            .authenticate_window(outbound, "status_event", token, window_id)
+            .authenticate_window(outbound, door, token, window_id)
             .await
         else {
             return;
@@ -4034,13 +4090,21 @@ impl IpcServer {
     /// taken back is listed before its holder returns its token, so the check
     /// waits for the take-back to end. Nothing is answered when the peer
     /// leaves first.
+    ///
+    /// The one place a door's lineage is judged, last: only a request whose
+    /// credentials hold is traced ([`IpcServer::trace_lineage`]).
     async fn authenticate_window(
         &self,
         outbound: &Outbound,
-        door: &str,
+        door: HookDoor,
         token: &str,
         window_id: Option<&str>,
     ) -> Option<Arc<WindowEntry>> {
+        let HookDoor {
+            name: door,
+            peer,
+            refused,
+        } = door;
         let auth_failed = || {
             error_msg(
                 "auth_failed",
@@ -4074,11 +4138,108 @@ impl IpcServer {
         }
         // Served by the window registered now: one taken back without a row
         // is replaced, while its token settles, by the window its values built.
-        let current = self.registry.get(entry.window_id());
-        if current.is_none() {
+        let Some(current) = self.registry.get(entry.window_id()) else {
             outbound.reply(&window_not_found_msg());
+            return None;
+        };
+        if let Err(lineage) = self.trace_lineage(&current, peer).await {
+            outbound.reply(&match refused {
+                LineageAnswer::Silence => crate::inbox::silence(),
+                LineageAnswer::Error => lineage.message(),
+            });
+            return None;
         }
-        current
+        Some(current)
+    }
+
+    /// Traces a request in `entry`'s name from the process `peer` back to the
+    /// window's child by the window's [`LineageRule`], logging a refusal the
+    /// way it deserves: a nested CLI's at every turn (debug), one no verdict
+    /// was reached for, and a request let through unjudged, the first time
+    /// for the window (warning), as either can be a declaration out of step
+    /// with the CLI.
+    async fn trace_lineage(
+        &self,
+        entry: &Arc<WindowEntry>,
+        peer: Option<u32>,
+    ) -> Result<(), LineageRefused> {
+        let LineageRule::ProcessIds(images) = entry.lineage_rule() else {
+            return Ok(());
+        };
+        let window_id = entry.window_id();
+        let note = |reason: &str| {
+            if entry.first_lineage_note() {
+                tracing::warn!(window_id, reason, "{LINEAGE_UNDECIDED}");
+            } else {
+                tracing::debug!(window_id, reason, "{LINEAGE_UNDECIDED}");
+            }
+        };
+        // Exited whether the holder said so at its `Welcome` or later.
+        let anchor = match entry.session().child_anchor() {
+            _ if entry.session().exit_status().is_some() => ChildAnchor::Exited,
+            anchor => anchor,
+        };
+        let (pid, start) = match anchor {
+            ChildAnchor::Child {
+                pid,
+                start: Some(start),
+            } => (pid, start),
+            ChildAnchor::Exited => {
+                tracing::debug!(
+                    window_id,
+                    "refusing a request of a window whose CLI has exited"
+                );
+                return Err(LineageRefused::Ended);
+            }
+            ChildAnchor::Unnamed => {
+                if entry.first_lineage_note() {
+                    tracing::warn!(
+                        window_id,
+                        "the window's holder names no child, so its requests are matched only;                          open the window again to have them traced"
+                    );
+                }
+                return Ok(());
+            }
+            ChildAnchor::Unwelcomed => {
+                note("the window's holder has not named its child");
+                return Err(LineageRefused::Undecided);
+            }
+            ChildAnchor::Child { start: None, .. } => {
+                note("the start of the window's child could not be read");
+                return Err(LineageRefused::Undecided);
+            }
+        };
+        let Some(peer) = peer else {
+            note("the operating system did not tell the requester's process id");
+            return Err(LineageRefused::Undecided);
+        };
+        let images = images.clone();
+        let verdict = match self.lineage_reads.acquire().await {
+            Ok(_permit) => tokio::task::spawn_blocking(move || {
+                judge_lineage(&read_lineage(peer), Some((pid, &start)), &images)
+            })
+            .await
+            .ok(),
+            Err(_) => None,
+        };
+        match verdict {
+            Some(LineageVerdict::Accepted | LineageVerdict::Unchecked) => Ok(()),
+            Some(LineageVerdict::Nested) => {
+                tracing::debug!(
+                    window_id,
+                    "refusing a request from a CLI nested in the window's CLI"
+                );
+                Err(LineageRefused::Nested)
+            }
+            Some(LineageVerdict::Undecidable(why)) => {
+                note(&why.to_string());
+                Err(LineageRefused::Undecided)
+            }
+            None => {
+                note("the lineage could not be read");
+                Err(LineageRefused::Undecided)
+            }
+        }
     }
 
     /// Takes one token from the daemon-wide `StatusEvent` bucket,
@@ -4567,6 +4728,67 @@ fn approver_allowed(state: &ConnectionState, config: &DaemonConfig) -> bool {
 ///
 /// The reply is the same whatever failed, so a caller cannot use the answer
 /// to tell a malformed token apart from a wrong one.
+/// The log line of a request whose lineage reached no verdict.
+const LINEAGE_UNDECIDED: &str = "refusing a request in a window's name whose lineage reached no \
+     verdict; if the window's own CLI is refused, the image its profile declares may be out of \
+     step with the CLI";
+
+/// A hook door's request in a window's name, as [`IpcServer::authenticate_window`]
+/// judges it.
+#[derive(Clone, Copy)]
+pub(super) struct HookDoor {
+    /// The door, as its refusals name it.
+    pub(super) name: &'static str,
+    /// The process id of the connection's peer.
+    pub(super) peer: Option<u32>,
+    /// How a request its window's lineage refuses is answered.
+    pub(super) refused: LineageAnswer,
+}
+
+impl HookDoor {
+    /// A door whose output the CLI reads, which a refusal leaves silent.
+    pub(super) fn new(name: &'static str, peer: Option<u32>) -> Self {
+        Self {
+            name,
+            peer,
+            refused: LineageAnswer::Silence,
+        }
+    }
+}
+
+/// How a request its window's lineage refuses is answered.
+#[derive(Clone, Copy)]
+pub(super) enum LineageAnswer {
+    /// As a door with nothing to do: it prints nothing and succeeds.
+    Silence,
+    /// With [`LineageRefused::message`].
+    Error,
+}
+
+/// Why a request in a window's name was refused by the window's lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageRefused {
+    /// It came from a CLI nested in the window's CLI.
+    Nested,
+    /// No verdict could be reached, which is never guessed.
+    Undecided,
+    /// The window's CLI has exited, so nothing speaks for the window.
+    Ended,
+}
+
+impl LineageRefused {
+    /// The error a refused request is answered with. Not a credential
+    /// failure: the requester holds the window's credentials.
+    fn message(self) -> DaemonMessage {
+        let reason = match self {
+            Self::Nested => "the request comes from a CLI the window's CLI started",
+            Self::Undecided => "the request cannot be traced to the window's CLI",
+            Self::Ended => "the window's CLI has exited",
+        };
+        error_msg("lineage_refused", reason)
+    }
+}
+
 fn reject_identify(outbound: &Outbound, state: &mut ConnectionState) -> FrameOutcome {
     state.identify_failures = state.identify_failures.saturating_add(1);
     if state.identify_failures == 1 {
@@ -5334,6 +5556,8 @@ async fn open_planned(
             "the MCP bridge was left out of this launch; the window opens without it"
         );
     }
+    // A CLI the daemon converts paths for runs in another environment.
+    let runs_in_guest = planned.host_paths.is_some();
     let credentials_dir = plan_window_credentials(config, &mut planned);
     // A table whose path cannot be converted is left out here; a `[hooks]`
     // table left out this way settles as left out at spawn.
@@ -5386,6 +5610,10 @@ async fn open_planned(
         wake_command: planned.wake_command,
         credentials: planned.credentials,
         credentials_dir,
+        facts: WindowFacts {
+            runs_in_guest: Some(runs_in_guest),
+        },
+        lineage: LineageRule::for_window(planned.process_image, runs_in_guest),
         ..provenance
     };
     let opened = registry
@@ -6111,7 +6339,7 @@ mod tests {
         let server = IpcServer::new(Arc::clone(&registry), "unused", DaemonConfig::default());
         let (tx, mut rx) = mpsc::channel(8);
         let outbound = Outbound::new(tx);
-        let mut state = ConnectionState::new(0, None);
+        let mut state = ConnectionState::new(0, &VerifiedPeer { process_id: None }, None);
         let opening = registry.begin_opening("w-pending", "pending");
 
         let identify = server.handle_identify(&outbound, &mut state, "w-pending", TOKEN, None);
@@ -6145,6 +6373,7 @@ mod tests {
 
         let event = server.handle_status_event(
             &outbound,
+            None,
             TOKEN,
             "hook-child",
             WindowStatus::WaitingApproval,

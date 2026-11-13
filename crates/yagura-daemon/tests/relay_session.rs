@@ -1532,3 +1532,81 @@ async fn a_session_whose_first_line_is_an_answer_is_logged_without_the_line() {
         "the warning names why the session's MCP server stopped: {log:?}"
     );
 }
+
+// =====================================================================
+// The process a bridge runs as (lineage)
+// =====================================================================
+
+/// A window whose profile declares its CLI's process image is claimed through a relay
+/// only by a bridge its own CLI started: the daemon judges the process that connected,
+/// as the relay's connection saw it, at the identify the relay makes on its behalf. A
+/// bridge a CLI of the same image started inside the window acts as no window. A claim
+/// from a process outside the window's CLI cannot be judged, so it is refused, but not as
+/// a credential failure: the connection is not closed for it. A window whose profile
+/// declares no image is claimed by its token alone, from any process.
+#[tokio::test]
+async fn a_bridge_claims_a_window_declaring_its_image_only_from_the_windows_own_cli() {
+    use crate::hook_events_door::{By, LineageImage, lineage_daemon, open_from_profile};
+    const DECLARED: &str = "lineage-bridge";
+    const UNDECLARED: &str = "lineage-bridge-plain";
+    let (h, instance, profiles_dir) = lineage_daemon().await;
+    let image = LineageImage::install("bridge");
+    let mut cli = image.write_profile(&profiles_dir, DECLARED, &instance, true, "");
+    let mut plain = image.write_profile(&profiles_dir, UNDECLARED, &instance, false, "");
+    let window_id = open_from_profile(&h, DECLARED).await;
+    let plain_id = open_from_profile(&h, UNDECLARED).await;
+
+    let nested = cli.bridge(By::Nested, DECLARED).await;
+    assert!(
+        nested.contains("\"result\""),
+        "the nested CLI's bridge is served: {nested}"
+    );
+    assert_eq!(
+        mcp_connected(&h, &window_id),
+        Some(false),
+        "the nested CLI's bridge does not claim the window"
+    );
+    cli.end_bridges().await;
+
+    let mut outside = h.connect().await;
+    for attempt in 1..=4 {
+        common::send(
+            &mut outside,
+            &yagura_protocol::ClientMessage::Identify {
+                window_id: window_id.clone(),
+                token: VALID_TOKEN.to_string(),
+                declaration: Some(yagura_protocol::Declaration {
+                    profile: DECLARED.to_string(),
+                }),
+            },
+        )
+        .await;
+        match common::read_response(&mut outside).await {
+            yagura_protocol::DaemonMessage::Error { code, .. } => assert_ne!(
+                code, "auth_failed",
+                "attempt {attempt}: a claim that cannot be judged is no credential failure"
+            ),
+            other => panic!(
+                "attempt {attempt}: a claim from outside the window's CLI must be refused, \
+                 got {other:?}"
+            ),
+        }
+    }
+    assert_eq!(mcp_connected(&h, &window_id), Some(false));
+    common::identify(&mut outside, &plain_id).await;
+
+    let own = cli.bridge(By::Cli, DECLARED).await;
+    assert!(
+        own.contains("\"result\""),
+        "the window's bridge is served: {own}"
+    );
+    assert_eq!(
+        mcp_connected(&h, &window_id),
+        Some(true),
+        "the window's own bridge claims the window"
+    );
+    cli.end_bridges().await;
+
+    cli.exit().await;
+    plain.exit().await;
+}

@@ -35,7 +35,7 @@ use yagura_protocol::holder::{
 use yagura_protocol::{MAX_WINDOW_DIMENSION, Palette, ScreenPush, ScreenRows};
 
 use super::views::ViewSlot;
-use super::{LostNotice, PtyError, PublishedInput, lock_recover};
+use super::{ChildAnchor, LostNotice, PtyError, PublishedInput, lock_recover};
 use crate::detector::SharedCopy;
 use crate::holder_host::{LinkContext, TakeBackContext};
 use crate::recovery::{HolderFiles, finish_after_holder};
@@ -169,6 +169,8 @@ struct Pending {
     /// The size the holder last confirmed: its `Welcome`, then each
     /// `Resized`.
     confirmed: (u16, u16),
+    /// The child the holder's `Welcome` named.
+    anchor: ChildAnchor,
 }
 
 impl Pending {
@@ -183,6 +185,7 @@ impl Pending {
             selections: HashMap::new(),
             settles: HashMap::new(),
             confirmed: (cols, rows),
+            anchor: ChildAnchor::Unwelcomed,
         }
     }
 
@@ -353,6 +356,11 @@ impl Link {
         lock_recover(&self.pending).confirmed
     }
 
+    /// The child the holder's `Welcome` named.
+    pub(super) fn child_anchor(&self) -> ChildAnchor {
+        lock_recover(&self.pending).anchor.clone()
+    }
+
     /// Writes `data` to the child, after every earlier write, and returns
     /// once the holder answered.
     fn write(&self, data: &[u8]) -> std::io::Result<()> {
@@ -421,8 +429,9 @@ impl Link {
         }
     }
 
-    fn welcomed(&self, cols: u16, rows: u16) {
+    fn welcomed(&self, cols: u16, rows: u16, anchor: ChildAnchor) {
         let mut pending = lock_recover(&self.pending);
+        pending.anchor = anchor;
         pending.confirmed = (cols, rows);
         pending.connected = true;
     }
@@ -450,10 +459,9 @@ impl Writer {
 }
 
 /// What the window learns once its holder let the daemon in and sent the
-/// first copy of the screen.
-pub(super) struct Opened {
-    pub(super) child_pid: u32,
-}
+/// first copy of the screen; the child it named is the link's
+/// [`Link::child_anchor`].
+pub(super) struct Opened;
 
 /// A link whose holder is being started.
 pub(super) struct Started {
@@ -787,9 +795,11 @@ fn run_take_back(
                 stay_refused(sink, &holder, ending, &files, lost).await;
             }
             Some(Ok(welcomed)) => {
-                on_welcome(&welcomed.record);
+                // Before the record gives the token back, so a request
+                // checked against the token is judged against the child.
                 let (cols, rows) = welcomed.size;
-                link.welcomed(cols, rows);
+                link.welcomed(cols, rows, welcomed.anchor());
+                on_welcome(&welcomed.record);
                 let mut reader = Reader {
                     window_id: &window_id,
                     link,
@@ -1218,9 +1228,9 @@ fn serve(
             }
         };
         let (cols, rows) = welcomed.size;
-        link.welcomed(cols, rows);
+        link.welcomed(cols, rows, welcomed.anchor());
         let opening = match welcomed.child_pid {
-            Some(child_pid) => Some(Opening { opened, child_pid }),
+            Some(_) => Some(Opening { opened }),
             None => {
                 tracing::warn!(
                     window_id = holder.window_id,
@@ -1300,6 +1310,7 @@ struct Welcomed {
     connection: Connection,
     frames: HolderFrameBuffer,
     child_pid: Option<u32>,
+    exited: bool,
     size: (u16, u16),
     /// The launch record the holder keeps.
     record: String,
@@ -1348,12 +1359,14 @@ async fn handshake(
                 cols,
                 rows,
                 record,
+                exited,
                 ..
             }) => {
                 return Ok(Welcomed {
                     connection,
                     frames,
                     child_pid,
+                    exited,
                     size: (cols, rows),
                     record,
                 });
@@ -1406,6 +1419,24 @@ async fn handshake(
     Err(PtyError::SpawnFailed.into())
 }
 
+impl Welcomed {
+    /// The child the `Welcome` named, its start read now: the holder keeps
+    /// the child unreaped for the window's life, so the id names no other
+    /// process meanwhile. Blocks on the operating system for one look.
+    fn anchor(&self) -> ChildAnchor {
+        if self.exited {
+            return ChildAnchor::Exited;
+        }
+        match self.child_pid {
+            None => ChildAnchor::Unnamed,
+            Some(pid) => ChildAnchor::Child {
+                pid,
+                start: yagura_os::process_start(pid).ok().flatten(),
+            },
+        }
+    }
+}
+
 fn hello(holder: &HolderAt<'_>) -> Vec<u8> {
     encode_holder_frame(&HolderFrame::Hello {
         protocol: HOLDER_PROTOCOL,
@@ -1440,11 +1471,13 @@ async fn take_back_handshake(
             cols,
             rows,
             record,
+            exited,
             ..
         }) => Ok(Welcomed {
             connection,
             frames,
             child_pid,
+            exited,
             size: (cols, rows),
             record,
         }),
@@ -1576,7 +1609,6 @@ async fn pump(
 /// The window still waiting to learn it opened.
 struct Opening {
     opened: oneshot::Sender<Result<Opened, PtyError>>,
-    child_pid: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1717,11 +1749,11 @@ impl Reader<'_> {
     }
 
     fn tell_opened(&mut self) {
-        let Some(Opening { opened, child_pid }) = self.opening.take() else {
+        let Some(Opening { opened }) = self.opening.take() else {
             return;
         };
         // Nobody waits for the window any more: it is closed at once.
-        if opened.send(Ok(Opened { child_pid })).is_err() {
+        if opened.send(Ok(Opened)).is_err() {
             self.link.terminate(true);
         }
     }

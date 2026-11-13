@@ -203,13 +203,19 @@ impl IpcServer {
                 profile_id: &profile,
                 name: &name,
                 input,
+                peer: state.peer_process_id,
             };
             self.handle_run_hook(outbound, request, HookRead::Door(&state.held_read))
                 .await;
             return;
         }
         let Some(entry) = self
-            .authenticate_window(outbound, "door_read", token, Some(window_id))
+            .authenticate_window(
+                outbound,
+                super::HookDoor::new("door_read", state.peer_process_id),
+                token,
+                Some(window_id),
+            )
             .await
         else {
             return;

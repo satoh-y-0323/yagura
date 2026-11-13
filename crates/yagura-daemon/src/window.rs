@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, mpsc, oneshot, watch};
+use yagura_os::ancestry::ImagePattern;
 use yagura_os::program;
 use yagura_protocol::{
     DefaultPalettes, DetectedStatus, INSTANCE_ENV, MCP_BRIDGE_ENV, OnNameTaken, Palette, RoomRef,
@@ -40,7 +41,7 @@ use crate::pty::{
 use crate::room::{mention_key, reserved_mention};
 use crate::token::StatusToken;
 use crate::waiter::StatusAt;
-pub use crate::window_table::HooksRoute;
+pub use crate::window_table::{HooksRoute, WindowFacts};
 use crate::window_table::{
     OpeningRow, OpeningWrite, PendingWrite, Reservation, RowScopes, WindowRow, WindowTable,
     WindowValues, credentials_kind, credentials_mode, launch_record, recorded_launch,
@@ -227,6 +228,7 @@ fn window_values(
         task_id: task.map(|task| task.task_id.clone()),
         credentials: credentials_kind(provenance.credentials),
         hooks: Some(provenance.hooks),
+        facts: provenance.facts.clone(),
     }
 }
 
@@ -380,6 +382,40 @@ pub struct WindowProvenance {
     /// ([`plan_credentials_folder`]); the open creates it there. `None` when
     /// the window has no usable place for one.
     pub credentials_dir: Option<PathBuf>,
+    /// What the open settled about the window for its whole life; a window
+    /// taken back has what its row or launch record kept.
+    pub facts: WindowFacts,
+    /// How a request in the window's name is traced back to its CLI.
+    pub lineage: LineageRule,
+}
+
+/// How a request in a window's name is traced back to the window's CLI,
+/// chosen from what is known of the window, never from the request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LineageRule {
+    /// Not traced: the window's credentials and declaration are matched
+    /// only. A window whose profile declares no image of its CLI, or whose
+    /// CLI runs in another environment, whose processes the kernel's ids do
+    /// not reach.
+    #[default]
+    Matched,
+    /// Traced by the kernel's process ids from the requester up to the
+    /// window's child: exactly one process on the way may run one of these
+    /// images.
+    ProcessIds(Vec<ImagePattern>),
+}
+
+impl LineageRule {
+    /// The rule for a window whose profile declares `images` for this host
+    /// and whose CLI runs in another environment when `runs_in_guest`.
+    #[must_use]
+    pub fn for_window(images: Vec<ImagePattern>, runs_in_guest: bool) -> Self {
+        if images.is_empty() || runs_in_guest {
+            Self::Matched
+        } else {
+            Self::ProcessIds(images)
+        }
+    }
 }
 
 /// Whether what the daemon sends of its own accord can reach a CLI: its
@@ -857,6 +893,9 @@ pub struct WindowEntry {
     /// The registry's windows, whose inboxes this window's end withdraws what
     /// it sent from. Weak, so an entry never keeps the registry's list alive.
     peers: Weak<Mutex<Vec<Arc<WindowEntry>>>>,
+    /// Whether this window's first request refused, or let through
+    /// unjudged, by its lineage was logged as a warning.
+    lineage_noted: AtomicBool,
     /// The window's row in the window table, removed before the window's
     /// holder is told to end ([`WindowEntry::remove_row_then`]).
     row: WindowRow,
@@ -1142,10 +1181,27 @@ impl WindowEntry {
         if self.provenance.hooks == HooksRoute::Unarranged {
             return None;
         }
+        self.launch_profile()
+    }
+
+    /// The profile the window was launched from, whatever became of its
+    /// hooks; `None` for a window opened from a raw argv.
+    pub(crate) fn launch_profile(&self) -> Option<&str> {
         self.provenance
             .launch
             .as_ref()
             .map(|launch| launch.profile.as_str())
+    }
+
+    /// How a request in the window's name is traced back to its CLI.
+    pub(crate) fn lineage_rule(&self) -> &LineageRule {
+        &self.provenance.lineage
+    }
+
+    /// `true` the first time it is asked: whether a lineage note about this
+    /// window is the first, and so a warning.
+    pub(crate) fn first_lineage_note(&self) -> bool {
+        !self.lineage_noted.swap(true, Ordering::SeqCst)
     }
 
     /// The program a wake by command runs, when the profile declares one.
@@ -2562,6 +2618,7 @@ impl WindowRegistry {
             mcp_connections: Arc::new(AtomicUsize::new(0)),
             participation: Arc::clone(&self.participation),
             peers: Arc::downgrade(&self.entries),
+            lineage_noted: AtomicBool::new(false),
             row,
             #[cfg(feature = "fault-injection")]
             faults: self.config().faults.clone(),
@@ -2816,10 +2873,17 @@ impl WindowRegistry {
                     );
                 }
                 let values = match kept {
-                    Some(kept) => Some(WindowValues {
-                        hooks: recorded.and_then(|recorded| recorded.values.hooks),
-                        ..kept
-                    }),
+                    Some(kept) => {
+                        let recorded = recorded.map(|recorded| recorded.values);
+                        Some(WindowValues {
+                            hooks: recorded.as_ref().and_then(|recorded| recorded.hooks),
+                            facts: match recorded {
+                                Some(recorded) => kept.facts.clone().or(recorded.facts),
+                                None => kept.facts.clone(),
+                            },
+                            ..kept
+                        })
+                    }
                     None => recorded
                         .filter(|_| needs_values)
                         .map(|recorded| recorded.values),
@@ -3027,6 +3091,13 @@ impl WindowRegistry {
             credentials: credentials_mode(values.credentials),
             // Only an open creates the folder; a window taken back has its own.
             credentials_dir: None,
+            // A row or record older than the fact: the window is taken to run
+            // in another environment when its profile converts paths for one.
+            lineage: LineageRule::for_window(
+                profile.process_image,
+                values.facts.runs_in_guest.unwrap_or(profile.host_paths),
+            ),
+            facts: values.facts.clone(),
         };
         if provenance.hooks.reaches() {
             detector_handle.expect_status_reports(true);
@@ -3217,6 +3288,7 @@ fn unknown_values(window_id: &str) -> WindowValues {
         task_id: None,
         credentials: credentials_kind(CredentialsMode::Env),
         hooks: None,
+        facts: WindowFacts::default(),
     }
 }
 
@@ -3225,6 +3297,10 @@ fn unknown_values(window_id: &str) -> WindowValues {
 struct ProfileDetermined {
     delivery: Option<ProfileDelivery>,
     wake_command: Option<WakeCommand>,
+    /// The images of its CLI the profile declares for this host.
+    process_image: Vec<ImagePattern>,
+    /// Whether the profile converts paths for a CLI in another environment.
+    host_paths: bool,
 }
 
 /// What the profile `profile` determines for a window taken back, resolved
@@ -3263,6 +3339,8 @@ fn profile_determined(config: &DaemonConfig, window_id: &str, profile: &str) -> 
     ProfileDetermined {
         delivery: launch.delivery,
         wake_command,
+        process_image: launch.process_image,
+        host_paths: launch.host_paths.is_some(),
     }
 }
 

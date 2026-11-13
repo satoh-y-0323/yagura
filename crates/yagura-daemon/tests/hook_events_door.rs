@@ -1583,3 +1583,631 @@ async fn until_pending(setup: &Setup, count: usize) {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
+
+// --- a window's credentials speak for it only from its own CLI (lineage) ---------------
+
+/// The ignored test a copy of this binary runs to play a window's CLI or a CLI that CLI
+/// started.
+const LINEAGE_ROLE: &str = "lineage_role";
+/// Which part the copy plays: `cli` (the window's command) or `nested`.
+const LINEAGE_ROLE_VAR: &str = "B8B_LINEAGE_ROLE";
+/// The folder a window's CLI reads its steps from and writes their results to.
+const LINEAGE_DIR_VAR: &str = "B8B_LINEAGE_DIR";
+/// The step a nested CLI runs, as JSON.
+const LINEAGE_TASK_VAR: &str = "B8B_LINEAGE_TASK";
+/// What a nested CLI writes ahead of its result, on the line libtest writes to.
+const LINEAGE_RESULT_MARK: &str = "B8B-LINEAGE-RESULT:";
+/// The `[hook_events]` event the lineage profiles name, and what it does.
+pub(crate) const LINEAGE_EVENT: &str = "PostToolUse";
+
+/// The value the shipped Antigravity CLI profile declares as its CLI's process image on
+/// this operating system. macOS has none shipped, so its place is read from the Linux one.
+fn shipped_image() -> &'static str {
+    if cfg!(windows) { "agy.exe" } else { "agy" }
+}
+
+/// The path of keys at which a profile declares its CLI's process image for this operating
+/// system, read from the shipped Antigravity CLI profile: the one place its value for this
+/// operating system sits, apart from the argv `[command]` runs. Whether the value there is
+/// one string or a list of them comes with it.
+pub(crate) fn image_declaration_path() -> (Vec<String>, bool) {
+    fn collect(
+        value: &toml::Value,
+        image: &str,
+        path: &mut Vec<String>,
+        found: &mut Vec<(Vec<String>, bool)>,
+    ) {
+        match value {
+            toml::Value::String(text) if text == image => found.push((path.clone(), false)),
+            toml::Value::Array(items)
+                if items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| text == image)) =>
+            {
+                found.push((path.clone(), true));
+            }
+            toml::Value::Table(table) => {
+                for (key, value) in table {
+                    path.push(key.clone());
+                    collect(value, image, path, found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let document: toml::Value =
+        common::docs::read_doc_verbatim("../../profiles/antigravity-cli.toml")
+            .parse()
+            .expect("the shipped Antigravity CLI profile is TOML");
+    let mut found = Vec::new();
+    collect(&document, shipped_image(), &mut Vec::new(), &mut found);
+    found.retain(|(path, _)| {
+        !(path.len() == 2
+            && path[0] == "command"
+            && ["default", "windows", "linux", "macos"].contains(&path[1].as_str()))
+    });
+    assert_eq!(
+        found.len(),
+        1,
+        "the shipped Antigravity CLI profile declares {:?} as its CLI's process image in one \
+         place outside its [command] argv; found it at {found:?}",
+        shipped_image()
+    );
+    let (mut path, list) = found.remove(0);
+    if cfg!(target_os = "macos") {
+        for key in &mut path {
+            if key == "linux" {
+                *key = "macos".to_string();
+            }
+        }
+    }
+    (path, list)
+}
+
+/// `source` declaring `image` as its CLI's process image for this operating system, at the
+/// place [`image_declaration_path`] reads it from.
+pub(crate) fn with_declared_image(source: &str, image: &str) -> String {
+    let mut document: toml::Table = source.parse().expect("the profile source is TOML");
+    let (path, list) = image_declaration_path();
+    let (key, tables) = path.split_last().expect("a path has a key");
+    let mut table = &mut document;
+    for name in tables {
+        table = table
+            .entry(name.clone())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+            .expect("the image is declared inside tables");
+    }
+    let value = toml::Value::String(image.to_string());
+    table.insert(
+        key.clone(),
+        if list {
+            toml::Value::Array(vec![value])
+        } else {
+            value
+        },
+    );
+    toml::to_string(&document).expect("the profile encodes as TOML")
+}
+
+/// Plays a window's CLI, or a CLI one started, for the lineage cases; does nothing when
+/// run any other way.
+#[test]
+#[ignore = "run by the lineage cases from a copy of this binary"]
+fn lineage_role() {
+    let Some(role) = std::env::var_os(LINEAGE_ROLE_VAR) else {
+        return;
+    };
+    let dir = PathBuf::from(std::env::var_os(LINEAGE_DIR_VAR).expect("the lineage folder"));
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("config.json")).expect("the lineage config"),
+    )
+    .expect("the lineage config is JSON");
+    match role.to_str() {
+        Some("cli") => lineage_cli(&dir, &config),
+        Some("nested") => {
+            let task: serde_json::Value = serde_json::from_str(
+                &std::env::var(LINEAGE_TASK_VAR).expect("the nested CLI's task"),
+            )
+            .expect("the task is JSON");
+            let mut held = Vec::new();
+            let result = lineage_task(&task, &config, &mut held);
+            let mut stdout = std::io::stdout().lock();
+            writeln!(stdout, "{LINEAGE_RESULT_MARK}{result}").expect("write the result");
+            stdout.flush().expect("write the result");
+            drop(stdout);
+            if !held.is_empty() {
+                // Held until the CLI that started it lets go of its stdin.
+                let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+                end_held(&mut held);
+            }
+        }
+        other => panic!("unknown lineage role {other:?}"),
+    }
+}
+
+/// A process a lineage step started and keeps running, with the stdin whose end tells it
+/// to finish.
+struct Held {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+}
+
+fn end_held(held: &mut Vec<Held>) {
+    for mut process in held.drain(..) {
+        drop(process.stdin.take());
+        let _ = process.child.wait();
+    }
+}
+
+/// The window's CLI: runs step `n` once the test has written `go-<n>`, and writes its
+/// result to `done-<n>.json`. Ends when told to, or when no step comes within
+/// [`yagura_test_support::HANG_GUARD`].
+fn lineage_cli(dir: &std::path::Path, config: &serde_json::Value) {
+    let mut held = Vec::new();
+    for step in 1u32.. {
+        let go = dir.join(format!("go-{step}"));
+        let deadline = std::time::Instant::now() + yagura_test_support::HANG_GUARD;
+        let task: serde_json::Value = loop {
+            if let Ok(text) = std::fs::read_to_string(&go) {
+                break serde_json::from_str(&text).expect("a step is JSON");
+            }
+            if std::time::Instant::now() > deadline {
+                end_held(&mut held);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let exit = task["exit"].as_bool() == Some(true);
+        let mut result = if exit {
+            serde_json::json!({})
+        } else if task["end"].as_bool() == Some(true) {
+            end_held(&mut held);
+            serde_json::json!({})
+        } else if task["by"] == "nested" {
+            run_nested(&task, &mut held)
+        } else {
+            lineage_task(&task, config, &mut held)
+        };
+        result["pid"] = std::process::id().into();
+        write_whole(&dir.join(format!("done-{step}.json")), &result.to_string());
+        if exit {
+            end_held(&mut held);
+            return;
+        }
+    }
+}
+
+/// Writes `text` to `path` so a reader sees all of it or nothing.
+fn write_whole(path: &std::path::Path, text: &str) {
+    let partial = path.with_extension("partial");
+    std::fs::write(&partial, text).expect("write a lineage file");
+    std::fs::rename(&partial, path).expect("put a lineage file in place");
+}
+
+/// Has a CLI of the same image, started by this one, run `task`; returns its result.
+fn run_nested(task: &serde_json::Value, held: &mut Vec<Held>) -> serde_json::Value {
+    let mut command = Command::new(std::env::current_exe().expect("current_exe"));
+    command
+        .args([
+            yagura_test_support::process::libtest_name(module_path!(), LINEAGE_ROLE).as_str(),
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(LINEAGE_ROLE_VAR, "nested")
+        .env(LINEAGE_TASK_VAR, task.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("start the nested CLI");
+    let stdin = child.stdin.take();
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    let result = loop {
+        let mut line = String::new();
+        let read =
+            std::io::BufRead::read_line(&mut reader, &mut line).expect("read the nested CLI");
+        assert!(read > 0, "the nested CLI ended without a result");
+        if let Some((_, result)) = line.split_once(LINEAGE_RESULT_MARK) {
+            break serde_json::from_str::<serde_json::Value>(result.trim())
+                .expect("the nested result is JSON");
+        }
+    };
+    std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    let process = Held { child, stdin };
+    if task.get("bridge").is_some() {
+        held.push(process);
+    } else {
+        end_held(&mut vec![process]);
+    }
+    result
+}
+
+/// Points what a lineage step starts at the test's daemon and keeps it out of the user's
+/// own folders.
+fn lineage_env(command: &mut Command, config: &serde_json::Value) {
+    let bases = PathBuf::from(config["bases"].as_str().expect("bases"));
+    command.env(
+        "YAGURA_INSTANCE",
+        config["instance"].as_str().expect("instance"),
+    );
+    if cfg!(windows) {
+        command
+            .env("LOCALAPPDATA", bases.join("local"))
+            .env("APPDATA", bases.join("roaming"));
+    } else {
+        command
+            .env("XDG_DATA_HOME", bases.join("data"))
+            .env("XDG_STATE_HOME", bases.join("state"))
+            .env("XDG_CONFIG_HOME", bases.join("config"))
+            .env("HOME", bases.join("home"));
+    }
+}
+
+/// Runs a door (`door`: its argv, `input`: its stdin) or starts a bridge (`bridge`: the
+/// profile it declares) from this process, which inherits the window's environment.
+fn lineage_task(
+    task: &serde_json::Value,
+    config: &serde_json::Value,
+    held: &mut Vec<Held>,
+) -> serde_json::Value {
+    if let Some(args) = task["door"].as_array() {
+        let mut command = Command::new(config["door"].as_str().expect("door"));
+        command
+            .args(
+                args.iter()
+                    .map(|arg| arg.as_str().expect("a door argument")),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        lineage_env(&mut command, config);
+        let input = task["input"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec();
+        let (output, _) = run_with_input(command, input);
+        return serde_json::json!({
+            "code": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+        });
+    }
+    let profile = task["bridge"]
+        .as_str()
+        .expect("a lineage step runs a door or a bridge");
+    let mut command = Command::new(config["relay"].as_str().expect("relay"));
+    command
+        .args(["--profile", profile])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    lineage_env(&mut command, config);
+    let mut child = command.spawn().expect("start the bridge");
+    let mut stdin = child.stdin.take().expect("stdin");
+    writeln!(stdin, "{}", common::relay::initialize_line(1)).expect("write initialize");
+    stdin.flush().expect("write initialize");
+    let mut reader = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut answer).expect("read the bridge");
+    std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+    held.push(Held {
+        child,
+        stdin: Some(stdin),
+    });
+    serde_json::json!({ "answer": answer.trim() })
+}
+
+/// Which process runs a lineage step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum By {
+    /// The window's CLI, its PTY child.
+    Cli,
+    /// A CLI of the same image the window's CLI started.
+    Nested,
+}
+
+impl By {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Nested => "nested",
+        }
+    }
+}
+
+/// What a door a lineage step ran printed, and how it ended.
+#[derive(Debug)]
+pub(crate) struct DoorRun {
+    pub(crate) code: Option<i64>,
+    pub(crate) stdout: String,
+}
+
+/// The window's CLI of a lineage profile, driven one step at a time.
+pub(crate) struct LineageCli {
+    dir: PathBuf,
+    step: u32,
+}
+
+impl LineageCli {
+    async fn run(&mut self, task: serde_json::Value) -> serde_json::Value {
+        self.step += 1;
+        write_whole(
+            &self.dir.join(format!("go-{}", self.step)),
+            &task.to_string(),
+        );
+        let done = self.dir.join(format!("done-{}.json", self.step));
+        let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&done) {
+                return serde_json::from_str(&text).expect("a result is JSON");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the window's CLI never finished {task} ({})",
+                self.dir.display()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Runs the door `args` with `input` on its stdin, from `by`.
+    pub(crate) async fn door(&mut self, by: By, args: &[&str], input: &str) -> DoorRun {
+        let result = self
+            .run(serde_json::json!({ "by": by.name(), "door": args, "input": input }))
+            .await;
+        DoorRun {
+            code: result["code"].as_i64(),
+            stdout: result["stdout"].as_str().unwrap_or_default().to_string(),
+        }
+    }
+
+    /// Starts a bridge declaring `profile` from `by`, and returns its answer to
+    /// `initialize` once it has one; the bridge runs on until [`Self::end_bridges`].
+    pub(crate) async fn bridge(&mut self, by: By, profile: &str) -> String {
+        let result = self
+            .run(serde_json::json!({ "by": by.name(), "bridge": profile }))
+            .await;
+        result["answer"].as_str().unwrap_or_default().to_string()
+    }
+
+    /// Ends every bridge the CLI started, and every nested CLI holding one.
+    pub(crate) async fn end_bridges(&mut self) {
+        self.run(serde_json::json!({ "end": true })).await;
+    }
+
+    /// Ends the window's CLI; returns its process id.
+    pub(crate) async fn exit(&mut self) -> u32 {
+        let result = self.run(serde_json::json!({ "exit": true })).await;
+        u32::try_from(result["pid"].as_u64().expect("the CLI's pid")).expect("a pid")
+    }
+}
+
+/// A copy of this test binary under a name of its own, which the lineage profiles run as
+/// their window's CLI and may declare as its process image.
+pub(crate) struct LineageImage {
+    tree: TempDir,
+    exe: PathBuf,
+}
+
+impl LineageImage {
+    pub(crate) fn install(tag: &str) -> Self {
+        let tree = TempDir::new("yagura-lineage", tag);
+        let exe = tree.make_dir("bin").join(format!(
+            "b8b-cli-{:x}{}{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+            std::env::consts::EXE_SUFFIX
+        ));
+        yagura_test_support::process::install_exe(
+            &std::env::current_exe().expect("current_exe"),
+            &exe,
+        );
+        Self { tree, exe }
+    }
+
+    /// The copy's file name: the process image its windows' CLIs run under.
+    pub(crate) fn image(&self) -> String {
+        self.exe
+            .file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Writes the profile `id` into `profiles_dir`: its window's CLI is this copy, reaching
+    /// the daemon of `instance`, declaring the copy's image when `declared`, with `tables`
+    /// after its own. Returns that window's CLI.
+    pub(crate) fn write_profile(
+        &self,
+        profiles_dir: &std::path::Path,
+        id: &str,
+        instance: &str,
+        declared: bool,
+        tables: &str,
+    ) -> LineageCli {
+        let dir = self.tree.make_dir(id);
+        let config = serde_json::json!({
+            "instance": instance,
+            "door": daemon_bin(),
+            "relay": yagura_test_support::process::relay_path(),
+            "bases": self.tree.make_dir(&format!("{id}-bases")),
+        });
+        std::fs::write(dir.join("config.json"), config.to_string()).expect("write the config");
+        let command = [
+            self.exe.display().to_string(),
+            yagura_test_support::process::libtest_name(module_path!(), LINEAGE_ROLE),
+            "--exact".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+            "--test-threads=1".to_string(),
+        ]
+        .iter()
+        .map(|arg| format!("'{arg}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+        let source = format!(
+            "schema = 1\ndisplay_name = \"{id}\"\n\n[command]\ndefault = [{command}]\n\n\
+             [env]\n{LINEAGE_ROLE_VAR} = \"cli\"\n{LINEAGE_DIR_VAR} = '{}'\n\n\
+             [delivery]\noutput = '{{\"lineageOut\":{{text}}}}'\n\n\
+             [hook_events]\n{LINEAGE_EVENT} = {{ status = \"running\", deliver = \"take\", \
+             session = \"/session_id\" }}\n{tables}",
+            dir.display()
+        );
+        let source = if declared {
+            with_declared_image(&source, &self.image())
+        } else {
+            source
+        };
+        write_profile(profiles_dir, id, &source);
+        LineageCli { dir, step: 0 }
+    }
+}
+
+/// The `[host_paths]` table of a profile whose CLI runs in another environment: a WSL
+/// distribution's, as far as the daemon can tell. Its converter only echoes the path.
+pub(crate) fn guest_host_paths() -> String {
+    format!(
+        "\n[host_paths]\nconvert = ['{}', 'echo', '0', '{{path}}']\n",
+        yagura_test_support::process::capture_child_path().display()
+    )
+}
+
+/// A daemon reading its profiles from a folder of its own, with an instance doors reach.
+pub(crate) async fn lineage_daemon() -> (Harness, String, PathBuf) {
+    let instance = unique_instance();
+    let profiles_dir = unique_temp_dir("lineage-profiles");
+    std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
+    let config = yagura_daemon::DaemonConfig {
+        profiles_dir: Some(profiles_dir.clone()),
+        ..approver_base_config()
+    };
+    let h = Harness::start_on_instance(&instance, config).await;
+    (h, instance, profiles_dir)
+}
+
+/// Opens a window from the profile `profile` of `h`'s daemon.
+pub(crate) async fn open_from_profile(h: &Harness, profile: &str) -> String {
+    let mut client = h.connect().await;
+    common::send(
+        &mut client,
+        &yagura_protocol::ClientMessage::OpenWindowFromProfile {
+            profile: profile.to_string(),
+            cwd: None,
+            name: None,
+            model: None,
+            effort: None,
+            on_name_taken: Default::default(),
+        },
+    )
+    .await;
+    match common::read_response(&mut client).await {
+        yagura_protocol::DaemonMessage::WindowOpened { window_id, .. } => window_id,
+        other => panic!("expected window_opened for {profile}, got {other:?}"),
+    }
+}
+
+/// In a window whose profile declares its CLI's process image, the window's credentials
+/// speak for it only from a process whose ancestors up to the window's PTY child hold that
+/// image once. A door the window's CLI runs does what its table says, at a door naming the
+/// profile and at one naming none. The same doors run by a CLI of that image the window's
+/// CLI started print nothing, exit 0, report no status, record no session and take
+/// nothing. A window whose profile runs its CLI in another environment (`[host_paths]`) is
+/// not judged by the process ids its requests come from, so the nested CLI's door there is
+/// only matched, and does what its table says.
+#[tokio::test]
+async fn only_the_windows_own_cli_speaks_for_a_window_whose_profile_declares_its_image() {
+    const DECLARED: &str = "lineage-declared";
+    const GUEST: &str = "lineage-guest";
+    let (h, instance, profiles_dir) = lineage_daemon().await;
+    let image = LineageImage::install("door");
+    let mut cli = image.write_profile(&profiles_dir, DECLARED, &instance, true, "");
+    let mut guest = image.write_profile(&profiles_dir, GUEST, &instance, true, &guest_host_paths());
+    let window_id = open_from_profile(&h, DECLARED).await;
+    let guest_id = open_from_profile(&h, GUEST).await;
+    let entry = h.registry.get(&window_id).expect("window exists");
+    let guest_entry = h.registry.get(&guest_id).expect("window exists");
+    let hook = ["--hook", DECLARED, LINEAGE_EVENT];
+    let take = ["--deliver-take"];
+
+    entry
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THE-WINDOW"));
+    let reported = entry.status_event_count();
+    for (door, input) in [
+        (&hook[..], r#"{"session_id":"sess-nested"}"#),
+        (&take[..], ""),
+    ] {
+        let nested = cli.door(By::Nested, door, input).await;
+        assert_eq!(
+            nested.code,
+            Some(0),
+            "{door:?} of the nested CLI exits 0: {nested:?}"
+        );
+        assert!(
+            nested.stdout.is_empty(),
+            "{door:?} of the nested CLI prints nothing: {nested:?}"
+        );
+    }
+    assert_eq!(
+        entry.status_event_count(),
+        reported,
+        "the nested CLI's hook reports no status"
+    );
+    assert_eq!(
+        entry.session_id(),
+        None,
+        "the nested CLI's hook records no session"
+    );
+    assert_eq!(
+        entry.inbox().pending_count(),
+        1,
+        "neither of the nested CLI's doors takes the parcel"
+    );
+
+    let own = cli.door(By::Cli, &take, "").await;
+    assert!(
+        own.stdout.contains("PARCEL-FOR-THE-WINDOW"),
+        "the window's own door that names no profile takes the parcel: {own:?}"
+    );
+    entry
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THE-HOOK"));
+    let own = cli
+        .door(By::Cli, &hook, r#"{"session_id":"sess-own"}"#)
+        .await;
+    assert_eq!(own.code, Some(0), "{own:?}");
+    assert!(
+        own.stdout.contains("PARCEL-FOR-THE-HOOK"),
+        "the window's own hook takes the parcel: {own:?}"
+    );
+    assert_eq!(entry.session_id().as_deref(), Some("sess-own"));
+    assert_eq!(entry.inbox().pending_count(), 0);
+    assert_eq!(
+        entry.status_event_count(),
+        reported + 1,
+        "the window's own hook reports its status"
+    );
+
+    guest_entry
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THE-GUEST"));
+    let guest_reported = guest_entry.status_event_count();
+    let matched = guest
+        .door(
+            By::Nested,
+            &["--hook", GUEST, LINEAGE_EVENT],
+            r#"{"session_id":"sess-guest"}"#,
+        )
+        .await;
+    assert!(
+        matched.stdout.contains("PARCEL-FOR-THE-GUEST"),
+        "a window whose CLI runs in another environment only matches the hook: {matched:?}"
+    );
+    assert_eq!(guest_entry.status_event_count(), guest_reported + 1);
+    assert_eq!(guest_entry.session_id().as_deref(), Some("sess-guest"));
+
+    cli.exit().await;
+    guest.exit().await;
+}

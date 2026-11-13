@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
+use yagura_os::ancestry::ImagePattern;
 use yagura_os::program;
 use yagura_protocol::{
     LaunchOptionAlias, LaunchOptionInfo, ProfileCapability, ProfileGuidance, ProfileLimit,
@@ -144,6 +145,66 @@ pub struct ProfileCommand {
     /// system. They never enter [`ProfileLaunch::argv`], so a wake, a
     /// listing, a registration and a model listing run without them.
     pub launch_only: Vec<String>,
+}
+
+/// A profile's `[process_image]` table: the image name types of its CLI's
+/// process, each a file name with at most one `*`, chosen per operating
+/// system as [`argv_for_os`] chooses an argv. Each key holds one type or a
+/// list of them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessImage {
+    #[serde(default)]
+    default: Option<ImagePatterns>,
+    #[serde(default)]
+    windows: Option<ImagePatterns>,
+    #[serde(default)]
+    macos: Option<ImagePatterns>,
+    #[serde(default)]
+    linux: Option<ImagePatterns>,
+}
+
+impl ProcessImage {
+    /// The types declared for `os`: its own key first, `default` next, none
+    /// when neither is present.
+    #[must_use]
+    pub fn for_os(&self, os: ProfileOs) -> &[ImagePattern] {
+        program::select_for_os(
+            os,
+            self.windows.as_ref(),
+            self.macos.as_ref(),
+            self.linux.as_ref(),
+            self.default.as_ref(),
+        )
+        .map_or(&[], |patterns| patterns.0.as_slice())
+    }
+}
+
+/// One image name type or a list of them. A type the rule refuses (more
+/// than one `*`, or not a file name) fails the decode, as a malformed table
+/// does.
+#[derive(Debug, Clone, Default)]
+struct ImagePatterns(Vec<ImagePattern>);
+
+impl<'de> Deserialize<'de> for ImagePatterns {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            One(String),
+            Many(Vec<String>),
+        }
+        let texts = match Written::deserialize(deserializer)? {
+            Written::One(text) => vec![text],
+            Written::Many(texts) => texts,
+        };
+        texts
+            .iter()
+            .map(|text| text.parse::<ImagePattern>())
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// The two launch options a profile can map. Named here only: what each
@@ -358,6 +419,11 @@ pub struct Profile {
     /// daemon-side path becomes the path this profile's CLI sees. `None`
     /// means paths are handed over unchanged.
     pub host_paths: Option<HostPaths>,
+    /// The top-level `[process_image]` table: the image names of this
+    /// profile's CLI process, which a request in one of its windows' names is
+    /// traced up to. `None` means the document declares none, and its
+    /// windows' requests are not traced.
+    pub process_image: Option<ProcessImage>,
     /// The top-level `[shim_guidance]` table: what to tell a user whose
     /// program is a Windows `.cmd` / `.bat` file that something cannot pass.
     pub shim_guidance: Option<ProfileGuidance>,
@@ -500,6 +566,9 @@ pub struct ProfileLaunch {
     /// injection names are converted before they reach the argv. `None` when
     /// the profile declares none.
     pub host_paths: Option<HostPaths>,
+    /// The images of the profile's CLI process it declares for this host
+    /// ([`ProcessImage::for_os`]); empty when it declares none.
+    pub process_image: Vec<ImagePattern>,
     /// The profile's `[delivery]` table, as declared. What it contributes to a
     /// spawn argv (a launch prompt) is rendered by
     /// [`crate::profile_delivery::launch_prompt_injection`] and never enters
@@ -908,6 +977,11 @@ struct RawProfile {
     hook_timeout: Option<toml::Value>,
     #[serde(default)]
     host_paths: Option<RawHostPaths>,
+    // Not in the design: a type its rule refuses is a decode failure
+    // ([`ProfileParseError::Toml`]) rather than a variant of its own, whose
+    // reason the listing would name.
+    #[serde(default)]
+    process_image: Option<ProcessImage>,
     /// Untyped so every rule it breaks is
     /// [`ProfileParseError::InvalidShimGuidance`].
     #[serde(default)]
@@ -1217,6 +1291,7 @@ pub fn parse_profile(id: &str, source: &str) -> Result<Profile, ProfileParseErro
         hook_events,
         hook_timeouts,
         host_paths,
+        process_image: raw.process_image,
         shim_guidance,
         warnings,
     })
@@ -2976,6 +3051,11 @@ pub fn resolve_launch(
         hooks_registration,
         bridge_listing,
         host_paths: profile.host_paths,
+        process_image: profile
+            .process_image
+            .as_ref()
+            .map(|image| image.for_os(config.host_os).to_vec())
+            .unwrap_or_default(),
         delivery: profile.delivery,
         limits,
     })

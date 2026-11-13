@@ -80,3 +80,11 @@ PreInvocation = { status = "running", deliver = "take" }
 SessionStart = { deliver = "context" }
 PostToolUse = { status = "running" }
 Stop = { status = "waiting_input", deliver = "block", when = { "/terminationReason" = "NO_TOOL_CALL", "/executionNum" = 0 } }
+
+# The file name of the CLI's own process, which a hook or bridge speaking for
+# one of its windows is traced up to: only one such process may stand between
+# it and the window's child. Measured with agy 1.5.6 (Windows: agy.exe, the
+# window's child itself; Linux: ~/.local/bin/agy). macOS is not measured yet.
+[process_image]
+windows = "agy.exe"
+linux = "agy"

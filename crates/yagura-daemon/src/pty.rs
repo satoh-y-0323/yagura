@@ -304,6 +304,26 @@ pub(crate) struct TakeBackSpawn<'a> {
     pub(crate) lost: LostNotice,
 }
 
+/// The window's PTY child as its holder's `Welcome` named it, which a request
+/// in the window's name is traced back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChildAnchor {
+    /// The holder has not let the daemon in yet.
+    Unwelcomed,
+    /// The holder named no child: one older than the field.
+    Unnamed,
+    /// The child had already exited by the `Welcome`.
+    Exited,
+    /// The child, with its start as read when the `Welcome` came; `None`
+    /// when it could not be read.
+    Child {
+        /// Its id.
+        pid: u32,
+        /// Its start.
+        start: Option<yagura_os::ProcessStart>,
+    },
+}
+
 /// What a session shares with its link, made before the link starts.
 struct Shared {
     copy: SharedCopy,
@@ -382,9 +402,6 @@ pub struct PtySession {
     /// How many writes [`PtySession::write_input`] made, counted while holding
     /// `writer`.
     writes: Arc<AtomicU64>,
-
-    /// OS process ID of the child, as the holder's welcome names it.
-    child_process_id: u32,
 
     /// Exit status, published once the holder reports it, after the copy
     /// holding the child's last output.
@@ -553,7 +570,6 @@ impl PtySession {
             .first()
             .is_some_and(|program| config.host_os.flattens_key_records(program));
         let (shared, sink) = Shared::new(Self::INITIAL_COLS, Self::INITIAL_ROWS);
-        let child_process_id = spawn.record.child_pid.unwrap_or(0);
         let take = holder_link::TakeBack {
             window_id: spawn.window_id.to_owned(),
             endpoint: spawn.record.endpoint,
@@ -571,7 +587,6 @@ impl PtySession {
             released,
             shared,
             key_records_flattened,
-            child_process_id,
             host,
         ))
     }
@@ -603,15 +618,12 @@ impl PtySession {
             opened,
             released,
         } = started;
-        let holder_link::Opened {
-            child_pid: child_process_id,
-        } = opened.await.map_err(|_| PtyError::SpawnFailed)??;
+        let holder_link::Opened = opened.await.map_err(|_| PtyError::SpawnFailed)??;
         Ok(Self::from_parts(
             link,
             released,
             shared,
             key_records_flattened,
-            child_process_id,
             host,
         ))
     }
@@ -621,7 +633,6 @@ impl PtySession {
         released: watch::Receiver<bool>,
         shared: Shared,
         key_records_flattened: bool,
-        child_process_id: u32,
         host: &Arc<HolderHost>,
     ) -> Self {
         let Shared {
@@ -643,7 +654,6 @@ impl PtySession {
             writer: Arc::new(WriterSlot::new(link.writer())),
             link,
             writes: Arc::new(AtomicU64::new(0)),
-            child_process_id,
             exit_code,
             is_exited,
             exit_notify_rx,
@@ -861,13 +871,22 @@ impl PtySession {
         Some(self.link.confirmed_size())
     }
 
-    /// Get the OS process ID of the child, as captured when it was spawned.
+    /// Get the OS process ID of the child, as the holder's `Welcome` named
+    /// it; `0` before the `Welcome`, or when it named none.
     ///
     /// The value is not cleared when the child exits, so callers must not
     /// treat it as a liveness indicator; use [`PtySession::exit_status`] for
     /// that.
     pub fn child_process_id(&self) -> u32 {
-        self.child_process_id
+        match self.link.child_anchor() {
+            ChildAnchor::Child { pid, .. } => pid,
+            _ => 0,
+        }
+    }
+
+    /// The child the holder's `Welcome` named, with its start.
+    pub(crate) fn child_anchor(&self) -> ChildAnchor {
+        self.link.child_anchor()
     }
 
     /// Get the exit status of the child process.
@@ -939,7 +958,7 @@ impl Drop for PtySession {
 impl std::fmt::Debug for PtySession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PtySession")
-            .field("child_process_id", &self.child_process_id)
+            .field("child_process_id", &self.child_process_id())
             .field("is_exited", &self.is_exited.load(Ordering::SeqCst))
             .field("exit_code", &self.exit_code.load(Ordering::SeqCst))
             .finish_non_exhaustive()
