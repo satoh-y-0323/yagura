@@ -381,7 +381,7 @@ async fn a_parcel_over_the_limit_in_any_form_the_window_prints_is_turned_away_wh
     let wake = "wake = \"command\"\n\
                 wake_args = [\"queue\", \"--thread\", \"{session}\", \"PREFIX-{text}\"]";
     // (what, the rest of the table, a text that fits, a text that does not)
-    let cases: [(&str, String, String, String); 7] = [
+    let cases: [(&str, String, String, String); 8] = [
         (
             "plain, counted in bytes",
             String::new(),
@@ -403,6 +403,12 @@ async fn a_parcel_over_the_limit_in_any_form_the_window_prints_is_turned_away_wh
         (
             "the wait door's form",
             format!("output = {{ wait = {JSON} }}"),
+            "a".repeat(92),
+            "a".repeat(93),
+        ),
+        (
+            "a stop's block form",
+            format!("output = {{ block = {JSON} }}"),
             "a".repeat(92),
             "a".repeat(93),
         ),
@@ -806,11 +812,7 @@ async fn the_daemon_does_not_log_a_session_value() {
 
 /// A form given by one string: every door prints the same way.
 fn every_door(form: OutputForm) -> DoorOutputs {
-    DoorOutputs {
-        context: form.clone(),
-        take: form.clone(),
-        wait: form,
-    }
+    DoorOutputs::all(&form)
 }
 
 const AGY_SHAPE: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
@@ -882,12 +884,12 @@ fn door_and_text(output: &str) -> (String, String) {
 async fn each_door_prints_in_its_own_form_and_prints_nothing_when_nothing_waits() {
     let (h, mut client) = start("inbox-door-forms", |config| {
         config.chat_intro = String::new();
+        let mut output = DoorOutputs::all(&OutputForm::Plain);
+        output.context = OutputForm::Template(r#"{"door":"context","t":{text}}"#.into());
+        output.take = OutputForm::Template(r#"{"door":"take","t":{text}}"#.into());
+        output.wait = OutputForm::Template(r#"{"door":"wait","t":{text}}"#.into());
         config.delivery = DeliverySpec {
-            output: DoorOutputs {
-                context: OutputForm::Template(r#"{"door":"context","t":{text}}"#.into()),
-                take: OutputForm::Template(r#"{"door":"take","t":{text}}"#.into()),
-                wait: OutputForm::Template(r#"{"door":"wait","t":{text}}"#.into()),
-            },
+            output,
             ..DeliverySpec::default()
         };
     })

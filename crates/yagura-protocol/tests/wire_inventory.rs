@@ -257,7 +257,7 @@ wire_sample!(enum PointerButton => Left);
 wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
 wire_sample!(enum HookPointerKind => Presence);
-wire_sample!(struct HookPointer { pointer, kind });
+wire_sample!(struct HookPointer { pointer, kind, value });
 
 /// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
 /// in one variant.
@@ -1648,16 +1648,21 @@ fn delivery_stream_wire_variants() -> BTreeSet<String> {
 }
 
 fn hook_pointer_kind_wire_variants() -> BTreeSet<String> {
-    [HookPointerKind::Presence, HookPointerKind::Session]
-        .into_iter()
-        .map(|kind| {
-            let hand = match &kind {
-                HookPointerKind::Presence => "presence",
-                HookPointerKind::Session => "session",
-            };
-            serde_spelling(&kind, hand)
-        })
-        .collect()
+    [
+        HookPointerKind::Presence,
+        HookPointerKind::Session,
+        HookPointerKind::Equals,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let hand = match &kind {
+            HookPointerKind::Presence => "presence",
+            HookPointerKind::Session => "session",
+            HookPointerKind::Equals => "equals",
+        };
+        serde_spelling(&kind, hand)
+    })
+    .collect()
 }
 
 /// `HookInputValue`'s variant set, keyed by its external tag.
@@ -1666,6 +1671,7 @@ fn hook_input_value_wire_variants() -> BTreeSet<String> {
         HookInputValue::Absent,
         HookInputValue::Present,
         HookInputValue::Session(String::new()),
+        HookInputValue::Equal(false),
     ]
     .into_iter()
     .map(|value| {
@@ -1673,6 +1679,7 @@ fn hook_input_value_wire_variants() -> BTreeSet<String> {
             HookInputValue::Absent => "absent",
             HookInputValue::Present => "present",
             HookInputValue::Session(_) => "session",
+            HookInputValue::Equal(_) => "equal",
         };
         serde_spelling(&value, hand)
     })

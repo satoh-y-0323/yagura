@@ -7,7 +7,9 @@
 use thiserror::Error;
 use yagura_protocol::{DeliveryStream, ProfileGuidance};
 
-use crate::inbox::{DEFAULT_MAX_BYTES, DEFAULT_WAKE_EXIT, DeliverySpec, DoorOutputs, OutputForm};
+use crate::inbox::{
+    DEFAULT_MAX_BYTES, DEFAULT_WAKE_EXIT, DeliverySpec, DoorOutputs, EVENT_PLACEHOLDER, OutputForm,
+};
 use crate::profile::contains_placeholder_outside;
 use crate::window::{CliInjection, InjectionKind};
 
@@ -216,7 +218,8 @@ fn is_https_url(url: &str) -> bool {
 }
 
 /// `output` is one string (every door prints the same way) or a table keyed
-/// `context` / `take` / `wait`; a door the table leaves out prints plain.
+/// `context` / `take` / `wait` / `block`; a door the table leaves out prints
+/// plain.
 fn parse_door_outputs(raw: Option<toml::Value>) -> Result<DoorOutputs, DeliveryError> {
     let invalid = || DeliveryError::Invalid("output");
     match raw {
@@ -234,6 +237,7 @@ fn parse_door_outputs(raw: Option<toml::Value>) -> Result<DoorOutputs, DeliveryE
                 context: door("context")?,
                 take: door("take")?,
                 wait: door("wait")?,
+                block: door("block")?,
             };
             if !table.is_empty() {
                 return Err(invalid());
@@ -244,12 +248,14 @@ fn parse_door_outputs(raw: Option<toml::Value>) -> Result<DoorOutputs, DeliveryE
     }
 }
 
-/// `plain`, or a JSON template that is still JSON once the text is in it.
+/// `plain`, or a JSON template that is still JSON once the text, and the
+/// event's name where it has `{event}`, are in it.
 fn parse_output(text: String) -> Option<OutputForm> {
     if text == "plain" {
         return Some(OutputForm::Plain);
     }
-    if !text.contains(TEXT_PLACEHOLDER) || contains_placeholder_outside(&text, &[TEXT_PLACEHOLDER])
+    if !text.contains(TEXT_PLACEHOLDER)
+        || contains_placeholder_outside(&text, &[TEXT_PLACEHOLDER, EVENT_PLACEHOLDER])
     {
         return None;
     }

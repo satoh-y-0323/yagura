@@ -43,8 +43,8 @@ use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
     ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, HookInputValue,
-    HookPointerKind, WindowCredentials, WindowStatus, decode_daemon_message, encode_client_message,
-    frame_encode, process_window_credentials,
+    HookPointer, HookPointerKind, WindowCredentials, WindowStatus, decode_daemon_message,
+    encode_client_message, frame_encode, process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -1138,7 +1138,7 @@ async fn exchange_hook_event(
         let input = wanted
             .iter()
             .zip(found)
-            .map(|(wanted, value)| hook_input_value(wanted.kind, value))
+            .map(|(wanted, value)| hook_input_value(wanted, value))
             .collect();
         send_hook_request(&mut client, &request(Some(input))).await?;
         answer = tokio::time::timeout(DOOR_ANSWER_TIMEOUT, read_one_daemon_message(&mut client))
@@ -1150,9 +1150,15 @@ async fn exchange_hook_event(
 
 /// What the daemon asked about one pointer, answered from the `value` found
 /// there. Only a session identifier is sent as text: a longer or odd string
-/// stays out of the request.
-fn hook_input_value(kind: HookPointerKind, value: Option<PointerValue>) -> HookInputValue {
-    match (kind, value) {
+/// stays out of the request, and a compared value is sent only as whether it
+/// matched, a missing one as not.
+fn hook_input_value(wanted: &HookPointer, value: Option<PointerValue>) -> HookInputValue {
+    match (wanted.kind, value) {
+        (HookPointerKind::Equals, value) => HookInputValue::Equal(
+            value
+                .zip(wanted.value.as_ref())
+                .is_some_and(|(found, expected)| found.equals(expected)),
+        ),
         (_, None) => HookInputValue::Absent,
         (HookPointerKind::Presence, Some(_)) => HookInputValue::Present,
         (HookPointerKind::Session, Some(value)) => value

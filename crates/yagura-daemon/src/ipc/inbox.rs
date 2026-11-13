@@ -12,9 +12,9 @@
 //! The reads and the confirmation of a door before revision 34 are answered
 //! with nothing to print and take nothing: such a door prints after it took.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use yagura_protocol::{DaemonMessage, Door};
+use yagura_protocol::{DaemonMessage, Door, WindowStatus};
 
 use crate::inbox::{DoorHold, DoorRead, Wait, silence};
 use crate::window::WindowEntry;
@@ -23,6 +23,9 @@ use super::{ConnectionState, IpcServer, Outbound, hook::HookRead, pending_waits_
 
 /// A read waiting for its door's `deliver_printed`.
 pub(super) struct HeldRead {
+    // Before `hold`, so it is dropped first: the status is decided before the
+    // parcels go back, and whoever sees them back sees the status decided.
+    end: Option<StopEnd>,
     hold: DoorHold,
     #[cfg(feature = "fault-injection")]
     faults: crate::fault_point::FaultPoints,
@@ -33,6 +36,7 @@ impl HeldRead {
         #[cfg(not(feature = "fault-injection"))]
         let _ = entry;
         Self {
+            end: None,
             hold,
             #[cfg(feature = "fault-injection")]
             faults: entry.faults().clone(),
@@ -40,13 +44,56 @@ impl HeldRead {
     }
 
     /// Commits the end of what the read took, its door having printed it.
-    async fn settle(self) {
+    async fn settle(mut self) {
+        if let Some(end) = self.end.take() {
+            end.printed();
+        }
         #[cfg(feature = "fault-injection")]
         if self.hold.keeps_rows() {
             self.faults
                 .reach(crate::fault_point::FaultPoint::DoorBeforeSettle);
         }
         self.hold.confirm().await;
+    }
+}
+
+/// Where a stop's block decides its window's status: `running` once the door
+/// says it printed, since the CLI then goes on; otherwise, when the read ends,
+/// the stop's own status, unless a status was reported after the door began
+/// (the window's count of reported statuses tells, not a clock).
+pub(super) struct StopEnd {
+    entry: Weak<WindowEntry>,
+    seen: u64,
+    status: WindowStatus,
+    printed: bool,
+}
+
+impl StopEnd {
+    /// The end of a stop's door that began with `entry` as it is now.
+    pub(super) fn new(entry: &Arc<WindowEntry>, status: WindowStatus) -> Self {
+        Self {
+            entry: Arc::downgrade(entry),
+            seen: entry.status_event_count(),
+            status,
+            printed: false,
+        }
+    }
+
+    fn printed(mut self) {
+        self.printed = true;
+        if let Some(entry) = self.entry.upgrade() {
+            entry.record_status_event(WindowStatus::Running);
+        }
+    }
+}
+
+impl Drop for StopEnd {
+    fn drop(&mut self) {
+        if !self.printed
+            && let Some(entry) = self.entry.upgrade()
+        {
+            entry.record_status_event_unless_newer(self.status, self.seen);
+        }
     }
 }
 
@@ -74,8 +121,23 @@ pub(super) fn answer_read(
     slot: &HeldSlot,
     hook_timeout_sec: Option<u64>,
 ) {
+    answer_read_ending(entry, outbound, read, slot, hook_timeout_sec, None);
+}
+
+/// [`answer_read`], with `end` deciding the window's status where the read
+/// ends.
+pub(super) fn answer_read_ending(
+    entry: &WindowEntry,
+    outbound: &Outbound,
+    read: DoorRead,
+    slot: &HeldSlot,
+    hook_timeout_sec: Option<u64>,
+    end: Option<StopEnd>,
+) {
     let DoorRead { message, hold } = read;
-    put_held(slot, HeldRead::new(entry, hold));
+    let mut held = HeldRead::new(entry, hold);
+    held.end = end;
+    put_held(slot, held);
     outbound.reply(&timed(message, hook_timeout_sec));
 }
 

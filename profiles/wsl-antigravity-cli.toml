@@ -36,7 +36,7 @@ separator = "\t"
 # How the daemon hands text to this CLI without typing it into the composer.
 # agy has no way to wake an idle session, so `wake` stays `none`.
 [delivery]
-output = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}'
+output = { context = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}', take = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}', wait = '{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}', block = '{"decision":"continue","reason":{text}}' }
 max_bytes = 10000
 wake = "none"
 launch_prompt = ["-i", "{prompt}"]
@@ -73,8 +73,11 @@ command = "/mcpServers/{server}/command"
 
 # agy takes no hooks at launch, only from its own hooks file, so
 # registration adds yagura's entry there and removal takes it out (checked
-# with agy 1.2.14). PreToolUse and Stop are not used: agy requires a
-# `decision` in their output, which a status report does not give.
+# with agy 1.2.14). PreToolUse is not used: agy requires a `decision` in its
+# output. Stop takes no output as "stop", and continues the turn with a
+# block's `reason` (checked with agy 1.5.7); only a stop of a turn that ended
+# without a tool call, and the first stop of it (`executionNum` 0), is given
+# one, so neither an interrupted turn nor a continuation is.
 # Each hook calls `--hook wsl-antigravity-cli <Event>`; what an event does is the
 # [hook_events] table below, so a daemon update never leaves this file stale.
 [mcp_registration.json_entry]
@@ -84,6 +87,7 @@ file = ".gemini/config/hooks.json"
 PreInvocation = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PreInvocation", timeout = "{hook_timeout}" }]
 SessionStart = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli SessionStart", timeout = "{hook_timeout}" }]
 PostToolUse = [{ matcher = "*", hooks = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli PostToolUse", timeout = "{hook_timeout}" }] }]
+Stop = [{ type = "command", command = "{daemon} --for-instance {server} --hook wsl-antigravity-cli Stop", timeout = "{hook_timeout}" }]
 
 # The seconds this CLI gives a hook command. The registered entries name it
 # through `{hook_timeout}`, and the daemon names it to a door that asks, so
@@ -95,3 +99,4 @@ default = 10
 PreInvocation = { status = "running", deliver = "take" }
 SessionStart = { deliver = "context" }
 PostToolUse = { status = "running" }
+Stop = { status = "waiting_input", deliver = "block", when = { "/terminationReason" = "NO_TOOL_CALL", "/executionNum" = 0 } }

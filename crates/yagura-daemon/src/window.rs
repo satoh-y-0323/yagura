@@ -833,6 +833,10 @@ pub struct WindowEntry {
     /// lives in the IPC layer and is started through
     /// [`WindowRegistry::wake_notices`].
     agent_running: Mutex<bool>,
+    /// How many reported statuses the detector was given, counted under its
+    /// lock: tells a status reported later from one reported earlier without
+    /// a clock.
+    status_events: AtomicU64,
     /// Wakes this window's running delivery agent.
     notice_wake: Notify,
     /// The parcels waiting for this window's CLI to read them through the
@@ -1161,12 +1165,35 @@ impl WindowEntry {
     /// Records a structured-source status event on this window's detector.
     /// Returns `false` without effect once the window has exited.
     pub fn record_status_event(&self, status: WindowStatus) -> bool {
-        match lock_recover(&self.detector).as_ref() {
-            Some(detector) => {
+        self.record_status_event_if(status, |_| true)
+    }
+
+    /// How many reported statuses this window's detector has been given; see
+    /// [`WindowEntry::record_status_event_unless_newer`].
+    #[must_use]
+    pub fn status_event_count(&self) -> u64 {
+        self.status_events.load(Ordering::SeqCst)
+    }
+
+    /// Records `status` as [`WindowEntry::record_status_event`] does, but
+    /// only when no status was reported since
+    /// [`WindowEntry::status_event_count`] read `seen`. Returns whether it was
+    /// recorded.
+    pub fn record_status_event_unless_newer(&self, status: WindowStatus, seen: u64) -> bool {
+        self.record_status_event_if(status, |count| count == seen)
+    }
+
+    fn record_status_event_if(&self, status: WindowStatus, when: impl FnOnce(u64) -> bool) -> bool {
+        // The count is read and moved under the detector's lock, so no report
+        // falls between the check and the record.
+        let detector = lock_recover(&self.detector);
+        match detector.as_ref() {
+            Some(detector) if when(self.status_events.load(Ordering::SeqCst)) => {
+                self.status_events.fetch_add(1, Ordering::SeqCst);
                 detector.record_status_event(status);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -2513,6 +2540,7 @@ impl WindowRegistry {
             status_token,
             abandons_calls_at_turn_end,
             agent_running: Mutex::new(false),
+            status_events: AtomicU64::new(0),
             notice_wake: Notify::new(),
             inbox,
             session_id: Mutex::new(None),

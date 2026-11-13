@@ -7,14 +7,18 @@
 //! request carries no state between its two round trips: the second one is
 //! answered from a fresh read.
 
-use yagura_protocol::{DaemonMessage, Door, HookInputValue, HookPointer, HookPointerKind};
+use std::sync::Arc;
+
+use yagura_protocol::{
+    DaemonMessage, Door, HookInputValue, HookPointer, HookPointerKind, WindowStatus,
+};
 
 use crate::inbox::{DeliverySpec, DoorRead, silence};
 use crate::profile::{self, ListedProfileFile, validate_profile_id};
 use crate::profile_hook_events::{HookDeliver, HookEvent, is_hook_event_name};
 use crate::window::WindowEntry;
 
-use super::inbox::{HeldSlot, answer_read};
+use super::inbox::{HeldSlot, StopEnd, answer_read, answer_read_ending};
 use super::{IpcServer, Outbound, error_msg};
 
 /// What a profile says about one event: the event, how that profile's CLI
@@ -41,12 +45,28 @@ fn wanted_pointers(event: &HookEvent) -> Vec<HookPointer> {
     let skip_if = event.skip_if.iter().map(|pointer| HookPointer {
         pointer: pointer.clone(),
         kind: HookPointerKind::Presence,
+        value: None,
     });
     let session = event.session.iter().map(|pointer| HookPointer {
         pointer: pointer.clone(),
         kind: HookPointerKind::Session,
+        value: None,
     });
-    skip_if.chain(session).collect()
+    let when = event.when.iter().map(|(pointer, value)| HookPointer {
+        pointer: pointer.clone(),
+        kind: HookPointerKind::Equals,
+        value: Some(value.clone()),
+    });
+    skip_if.chain(session).chain(when).collect()
+}
+
+fn warn_status_not_recorded(entry: &WindowEntry, profile_id: &str, name: &str) {
+    tracing::warn!(
+        window_id = %entry.window_id(),
+        profile = profile_id,
+        event = name,
+        "run_hook could not record the event's status; continuing"
+    );
 }
 
 /// One `run_hook` request as it was read.
@@ -135,26 +155,65 @@ impl IpcServer {
         {
             entry.record_session_id(&session);
         }
-        if let Some(status) = event.status
-            && self.apply_status_event(&entry, None, status).is_some()
-        {
-            tracing::warn!(
-                window_id = %entry.window_id(),
-                profile = profile_id,
-                event = name,
-                "run_hook could not record the event's status; continuing"
-            );
-        }
-        let taken = match (&read, event.deliver) {
-            (HookRead::Door(_), Some(HookDeliver::Context)) => entry
-                .inbox()
-                .read_context(self.chat.intro_for(&entry), delivery.as_ref()),
-            (HookRead::Door(_), Some(HookDeliver::Take)) => {
-                entry.inbox().read_take(delivery.as_ref())
+        // What is left answers `when`, one value per condition.
+        let met = values.all(|value| value == HookInputValue::Equal(true));
+        let spec = delivery
+            .unwrap_or_else(|| entry.inbox().spec().clone())
+            .for_event(name);
+        let reads = matches!(read, HookRead::Door(_)) && met;
+
+        if event.deliver == Some(HookDeliver::Block) {
+            let block = reads.then(|| entry.inbox().read_block(Some(&spec)));
+            if let (Some(block), HookRead::Door(slot)) = (block, &read)
+                && block.prints()
+            {
+                let end = event
+                    .status
+                    .and_then(|status| self.stop_end(&entry, status, profile_id, name));
+                answer_read_ending(&entry, outbound, block, slot, hook_timeout_sec, end);
+                return;
             }
+        }
+        if let Some(status) = event.status {
+            self.record_hook_status(&entry, status, profile_id, name);
+        }
+        let taken = match event.deliver {
+            Some(HookDeliver::Context) if reads => entry
+                .inbox()
+                .read_context(self.chat.intro_for(&entry), Some(&spec)),
+            Some(HookDeliver::Take) if reads => entry.inbox().read_take(Some(&spec)),
             _ => DoorRead::silent(),
         };
         finish(taken, hook_timeout_sec);
+    }
+
+    /// Records a hook event's `status` on `entry`.
+    fn record_hook_status(
+        &self,
+        entry: &WindowEntry,
+        status: WindowStatus,
+        profile_id: &str,
+        name: &str,
+    ) {
+        if self.apply_status_event(entry, None, status).is_some() {
+            warn_status_not_recorded(entry, profile_id, name);
+        }
+    }
+
+    /// Where a stop's block decides `entry`'s status, charged now as the one
+    /// status event the stop reports; `None` when the budget is spent.
+    fn stop_end(
+        &self,
+        entry: &Arc<WindowEntry>,
+        status: WindowStatus,
+        profile_id: &str,
+        name: &str,
+    ) -> Option<StopEnd> {
+        if self.charge_status_event_budget() {
+            return Some(StopEnd::new(entry, status));
+        }
+        warn_status_not_recorded(entry, profile_id, name);
+        None
     }
 
     /// The time the CLI of `entry`'s profile gives the hook `door` reads for,

@@ -38,6 +38,9 @@ const TEXT_PLACEHOLDER: &str = "{text}";
 /// Where a wake argument takes the CLI's session identifier.
 const SESSION_PLACEHOLDER: &str = "{session}";
 
+/// Where a template takes the name of the hook event its door ran for.
+pub(crate) const EVENT_PLACEHOLDER: &str = "{event}";
+
 /// Default value of [`DeliverySpec::max_bytes`].
 pub const DEFAULT_MAX_BYTES: usize = 10_000;
 
@@ -64,7 +67,9 @@ pub fn is_session_id(value: &str) -> bool {
 pub enum PointerValue {
     /// A string.
     Text(String),
-    /// A number, a boolean, an object or an array.
+    /// A number or a boolean.
+    Scalar(serde_json::Value),
+    /// An object or an array.
     Other,
 }
 
@@ -74,7 +79,18 @@ impl PointerValue {
     pub fn into_text(self) -> Option<String> {
         match self {
             Self::Text(text) => Some(text),
-            Self::Other => None,
+            Self::Scalar(_) | Self::Other => None,
+        }
+    }
+
+    /// Whether this is the string, number or boolean `value`. An object or an
+    /// array equals nothing.
+    #[must_use]
+    pub fn equals(&self, value: &serde_json::Value) -> bool {
+        match self {
+            Self::Text(text) => value.as_str() == Some(text.as_str()),
+            Self::Scalar(scalar) => scalar == value,
+            Self::Other => false,
         }
     }
 }
@@ -198,23 +214,27 @@ impl<'de> serde::de::Visitor<'de> for PointerSeek<'_, '_> {
         Ok(())
     }
 
-    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<(), E> {
-        self.record_scalar(&PointerValue::Other);
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<(), E> {
+        self.record_scalar(&PointerValue::Scalar(value.into()));
         Ok(())
     }
 
-    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<(), E> {
-        self.record_scalar(&PointerValue::Other);
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<(), E> {
+        self.record_scalar(&PointerValue::Scalar(value.into()));
         Ok(())
     }
 
-    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<(), E> {
-        self.record_scalar(&PointerValue::Other);
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<(), E> {
+        self.record_scalar(&PointerValue::Scalar(value.into()));
         Ok(())
     }
 
-    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<(), E> {
-        self.record_scalar(&PointerValue::Other);
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<(), E> {
+        // A value that is not finite has no JSON number, so it equals nothing.
+        let value = serde_json::Number::from_f64(value).map_or(PointerValue::Other, |number| {
+            PointerValue::Scalar(number.into())
+        });
+        self.record_scalar(&value);
         Ok(())
     }
 
@@ -394,17 +414,37 @@ pub enum OutputForm {
     /// The text as it is.
     Plain,
     /// A JSON document with the text embedded as one JSON string wherever
-    /// the template has `{text}`.
+    /// the template has `{text}`, and the name of the hook event its door ran
+    /// for as one JSON string wherever it has `{event}`.
     Template(String),
 }
 
 impl OutputForm {
-    /// The output for `text`; nothing at all when there is no text.
+    /// The output for `text`; nothing at all when there is no text. A
+    /// `{event}` left in the template (a door that names no event, or a form
+    /// not given one by [`Self::for_event`]) prints `null`.
     ///
     /// The text is inserted in a single pass, so a `{text}` inside it is
     /// never replaced.
     #[must_use]
     pub fn render(&self, text: &str) -> String {
+        self.render_with_event(text, "null")
+    }
+
+    /// This form with `{event}` filled in with `event`, a hook event name
+    /// ([`crate::profile_hook_events::is_hook_event_name`]).
+    #[must_use]
+    pub fn for_event(&self, event: &str) -> Self {
+        match self {
+            Self::Plain => Self::Plain,
+            Self::Template(template) => {
+                let named = serde_json::Value::String(event.to_string()).to_string();
+                Self::Template(template.replace(EVENT_PLACEHOLDER, &named))
+            }
+        }
+    }
+
+    fn render_with_event(&self, text: &str, event: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -413,6 +453,7 @@ impl OutputForm {
             Self::Template(template) => {
                 let embedded = serde_json::Value::String(text.to_string()).to_string();
                 template
+                    .replace(EVENT_PLACEHOLDER, event)
                     .split(TEXT_PLACEHOLDER)
                     .collect::<Vec<_>>()
                     .join(&embedded)
@@ -420,9 +461,15 @@ impl OutputForm {
         }
     }
 
-    /// The UTF-8 bytes [`Self::render`] prints for `text`.
+    /// The most UTF-8 bytes this form prints for `text`, whichever event its
+    /// door runs for: a `{event}` left in it counts as the longest event name,
+    /// so a parcel taken in by this measure fits every door that prints it.
     fn printed_len(&self, text: &str) -> usize {
-        self.render(text).len()
+        let longest = format!(
+            "\"{}\"",
+            "x".repeat(crate::profile_hook_events::MAX_EVENT_NAME_LEN)
+        );
+        self.render_with_event(text, &longest).len()
     }
 }
 
@@ -503,6 +550,8 @@ pub struct DoorOutputs {
     pub take: OutputForm,
     /// The answer to a wait.
     pub wait: OutputForm,
+    /// The block of a stop that is not a continuation.
+    pub block: OutputForm,
 }
 
 impl DoorOutputs {
@@ -513,6 +562,7 @@ impl DoorOutputs {
             context: form.clone(),
             take: form.clone(),
             wait: form.clone(),
+            block: form.clone(),
         }
     }
 }
@@ -549,6 +599,27 @@ impl Default for DeliverySpec {
 }
 
 impl DeliverySpec {
+    /// This spec with `{event}` in each form filled in with `event`, a hook
+    /// event name ([`crate::profile_hook_events::is_hook_event_name`]).
+    #[must_use]
+    pub fn for_event(&self, event: &str) -> Self {
+        let DoorOutputs {
+            context,
+            take,
+            wait,
+            block,
+        } = &self.output;
+        Self {
+            output: DoorOutputs {
+                context: context.for_event(event),
+                take: take.for_event(event),
+                wait: wait.for_event(event),
+                block: block.for_event(event),
+            },
+            ..self.clone()
+        }
+    }
+
     /// The bytes of the widest output `text` alone is handed over in: each
     /// door's form (the context's behind `intro`) and each wake argument that
     /// carries it.
@@ -564,6 +635,7 @@ impl DeliverySpec {
             context,
             self.output.take.printed_len(text),
             self.output.wait.printed_len(text),
+            self.output.block.printed_len(text),
             self.push_len(text),
         ]
         .into_iter()
@@ -1211,6 +1283,12 @@ pub struct DoorRead {
 }
 
 impl DoorRead {
+    /// Whether the door prints anything for this read.
+    #[must_use]
+    pub fn prints(&self) -> bool {
+        matches!(&self.message, DaemonMessage::Delivery { output, .. } if !output.is_empty())
+    }
+
     /// The answer that makes a hook print nothing and succeed, taking nothing.
     #[must_use]
     pub fn silent() -> Self {
@@ -1723,6 +1801,20 @@ impl Inbox {
     pub fn read_take(&self, spec: Option<&DeliverySpec>) -> DoorRead {
         let spec = spec.unwrap_or(&self.shared.spec);
         self.read("", &spec.output.take, spec.max_bytes)
+    }
+
+    /// The block of a stop: the parcels that fit in one answer, held for its
+    /// door, as [`Self::read_context`] answers. It never waits, and it reads
+    /// in any status, as the other doors do: the CLI's own hook asks.
+    pub fn read_block(&self, spec: Option<&DeliverySpec>) -> DoorRead {
+        let spec = spec.unwrap_or(&self.shared.spec);
+        self.read("", &spec.output.block, spec.max_bytes)
+    }
+
+    /// How this inbox's window answers at its doors.
+    #[must_use]
+    pub fn spec(&self) -> &DeliverySpec {
+        &self.shared.spec
     }
 
     fn read(&self, intro: &str, form: &OutputForm, limit: usize) -> DoorRead {

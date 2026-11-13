@@ -855,7 +855,8 @@
         "pointers": [
           {
             "kind": "string",
-            "pointer": "string"
+            "pointer": "string",
+            "value": "string"
           }
         ],
         "type": "string"
@@ -1536,10 +1537,12 @@
     ],
     "HookInputValue": [
       "absent",
+      "equal",
       "present",
       "session"
     ],
     "HookPointerKind": [
+      "equals",
       "presence",
       "session"
     ],

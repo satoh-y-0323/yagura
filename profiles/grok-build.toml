@@ -45,7 +45,7 @@ args = ["--reasoning-effort", "{value}"]
 # and other text waits for the next call. Grok has no way to wake an idle
 # session, so `wake` stays `none`.
 [delivery]
-output = '{"hookSpecificOutput":{"additionalContext":{text}}}'
+output = { context = '{"hookSpecificOutput":{"additionalContext":{text}}}', take = '{"hookSpecificOutput":{"additionalContext":{text}}}', wait = '{"hookSpecificOutput":{"additionalContext":{text}}}', block = '{"decision":"block","reason":{text}}' }
 max_bytes = 10000
 wake = "none"
 launch_context = ["--rules", "{context}"]
@@ -112,6 +112,6 @@ PreToolUse = { status = "running", skip_if = "/subagentType" }
 PostToolUse = { status = "running", deliver = "take", skip_if = "/subagentType" }
 PostToolUseFailure = { status = "running", deliver = "take", skip_if = "/subagentType" }
 Notification = { status = "waiting_approval", skip_if = "/subagentType" }
-Stop = { status = "waiting_input", skip_if = "/subagentType" }
+Stop = { status = "waiting_input", deliver = "block", skip_if = "/subagentType", when = { "/stop_hook_active" = false, "/stopHookActive" = false } }
 StopFailure = { status = "waiting_input", skip_if = "/subagentType" }
 StopCancelled = { status = "waiting_input", skip_if = "/subagentType" }

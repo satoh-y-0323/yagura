@@ -43,15 +43,20 @@ args = ["--plugin-dir", "{hooks_config_dir}"]
 
 [hooks.config_dir]
 "plugin.json" = '{"name":"yagura"}'
-"hooks.json" = '''{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --deliver-context","powershell":"yagura-daemon --credentials '{credentials_file}' --deliver-context"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"preToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"postToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status running --source copilot-cli"}],"agentStop":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source copilot-cli","powershell":"yagura-daemon --credentials '{credentials_file}' --emit-status waiting_input --source copilot-cli"}]}}'''
+"hooks.json" = '''{"version":1,"hooks":{"sessionStart":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli sessionStart","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli sessionStart"}],"userPromptSubmitted":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli userPromptSubmitted","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli userPromptSubmitted"}],"preToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli preToolUse","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli preToolUse"}],"postToolUse":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli postToolUse","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli postToolUse"}],"postToolUseFailure":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli postToolUseFailure","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli postToolUseFailure"}],"agentStop":[{"type":"command","bash":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli agentStop","powershell":"yagura-daemon --credentials '{credentials_file}' --hook copilot-cli agentStop"}]}}'''
 
 # How the daemon hands text to this CLI without typing it into the composer.
 # Copilot has no hook that fires on an idle session, so `wake` stays `none`.
 [delivery]
-output = '{"additionalContext":{text}}'
 max_bytes = 10000
 wake = "none"
 launch_prompt = ["-i", "{prompt}"]
+
+[delivery.output]
+context = '{"additionalContext":{text}}'
+take = '{"additionalContext":{text}}'
+wait = '{"additionalContext":{text}}'
+block = '{"decision":"block","reason":{text}}'
 
 # `copilot mcp get --json` prints one table keyed by the server's name.
 [mcp_registration]
@@ -74,3 +79,15 @@ args = ["mcp", "list", "--json"]
 items = "/mcpServers"
 command = "/command"
 disable = ["--disable-mcp-server", "{server}"]
+
+# What each hook does is this table: the hooks above all call the `--hook`
+# door. A sub-agent's hooks carry `agentId`, so they are skipped. `agentStop`
+# hands what waits over as a block, once per stop that is not a continuation
+# (`stop_hook_active` is false), which makes Copilot go on with it.
+[hook_events]
+sessionStart = { deliver = "context", skip_if = "/agentId" }
+userPromptSubmitted = { status = "running", skip_if = "/agentId" }
+preToolUse = { status = "running", skip_if = "/agentId" }
+postToolUse = { status = "running", deliver = "take", skip_if = "/agentId" }
+postToolUseFailure = { status = "running", skip_if = "/agentId" }
+agentStop = { status = "waiting_input", deliver = "block", skip_if = "/agentId", when = { "/stop_hook_active" = false } }

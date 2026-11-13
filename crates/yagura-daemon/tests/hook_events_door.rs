@@ -42,7 +42,22 @@ rules = []
 [debounce]
 confirm_ms = 30
 ";
+/// A definition with no rules that confirms a status as soon as it is judged, so every
+/// status the window is given is published, in the order it was given.
+const NO_RULES_AT_ONCE_DETECTION: &str = "hook-door-no-rules-at-once";
+const NO_RULES_AT_ONCE_DEFINITION: &str = "schema_version = 1
+name = \"hook-door-no-rules-at-once\"
+rules = []
+
+[debounce]
+confirm_ms = 0
+";
 const LARGE_INPUT_BYTES: usize = 1024 * 1024;
+const EVENT_FORM_PROFILE_ID: &str = "hook-door-event-form";
+/// A screen the definition reads as waiting for input, so a window shows `waiting_input`
+/// whenever no reported turn is open, and `running` while one is.
+const READY_SCREEN: &str = "STOP-DOOR-READY";
+const MARKED_DETECTION: &str = "hook-door-marked";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -67,6 +82,18 @@ fn fixture_profile_source() -> String {
          [delivery]\noutput = '{{\"fixtureOut\":{{text}}}}'\n\n\
          [hook_events]\n{EVENT} = {{ status = \"running\", deliver = \"take\", \
          session = \"/session_id\", skip_if = \"/subagentType\" }}\n",
+        common::echo_child_path().display()
+    )
+}
+
+/// A profile whose take form names the event its hook ran for.
+fn event_form_profile_source() -> String {
+    format!(
+        "schema = 1\ndisplay_name = \"Hook Door Event Form\"\n\n\
+         [command]\ndefault = ['{}']\n\n\
+         [delivery.output]\n\
+         take = '{{\"hookSpecificOutput\":{{\"hookEventName\":{{event}},\"additionalContext\":{{text}}}}}}'\n\n\
+         [hook_events]\nPostToolUse = {{ deliver = \"take\" }}\nUserPromptSubmit = {{ deliver = \"take\" }}\n",
         common::echo_child_path().display()
     )
 }
@@ -141,42 +168,84 @@ struct Setup {
     window_id: String,
 }
 
+/// What a window's screen shows its detection definition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    /// An idle prompt.
+    Idle,
+    /// Nothing a rule matches, so a reported status is not outranked by a screen rule.
+    NoRules,
+    /// [`Screen::NoRules`], under a definition that confirms a status at once.
+    NoRulesAtOnce,
+    /// [`READY_SCREEN`]: `waiting_input` unless a reported turn is open.
+    Ready,
+}
+
 impl Setup {
     async fn start() -> Self {
-        Self::start_with(false).await
+        Self::start_with(Screen::Idle, false).await
     }
 
     /// A window whose detection definition has no rule matching its screen, so a
     /// reported status is not outranked by a screen rule.
     async fn start_without_screen_rules() -> Self {
-        Self::start_with(true).await
+        Self::start_with(Screen::NoRules, false).await
     }
 
-    async fn start_with(without_screen_rules: bool) -> Self {
+    /// A window showing [`READY_SCREEN`], whose daemon reads the shipped profiles, so a
+    /// hook names a CLI's own profile as that CLI's registration does.
+    async fn start_with_shipped_profiles() -> Self {
+        Self::start_with(Screen::Ready, true).await
+    }
+
+    async fn start_with(screen: Screen, shipped_profiles: bool) -> Self {
         let instance = unique_instance();
         let profiles_dir = unique_temp_dir("hook-events-profiles");
         std::fs::create_dir_all(&profiles_dir).expect("create the profiles directory");
         write_profile(&profiles_dir, PROFILE_ID, &fixture_profile_source());
+        write_profile(
+            &profiles_dir,
+            EVENT_FORM_PROFILE_ID,
+            &event_form_profile_source(),
+        );
         let detection_dir = unique_temp_dir("hook-events");
         let mut config = detection_config(&detection_dir, approver_base_config());
         config.profiles_dir = Some(profiles_dir);
+        config.bundled_profiles = shipped_profiles;
         let h = Harness::start_on_instance(&instance, config).await;
         // The window is opened with a raw argv: no profile of its own declares
         // `[hook_events]`.
-        let window_id = if without_screen_rules {
-            std::fs::write(
-                detection_dir.join(format!("{NO_RULES_DETECTION}.toml")),
-                NO_RULES_DEFINITION,
-            )
-            .expect("write the rule-less detection definition");
-            h.open_delivering(
-                yagura_test_support::process::echo_child_command(),
-                Some(NO_RULES_DETECTION),
-            )
-            .await
-        } else {
-            let mut client = h.connect().await;
-            h.open_idle_window(&mut client).await
+        let window_id = match screen {
+            Screen::NoRules | Screen::NoRulesAtOnce => {
+                let (name, definition) = if screen == Screen::NoRules {
+                    (NO_RULES_DETECTION, NO_RULES_DEFINITION)
+                } else {
+                    (NO_RULES_AT_ONCE_DETECTION, NO_RULES_AT_ONCE_DEFINITION)
+                };
+                std::fs::write(detection_dir.join(format!("{name}.toml")), definition)
+                    .expect("write the rule-less detection definition");
+                h.open_delivering(
+                    yagura_test_support::process::echo_child_command(),
+                    Some(name),
+                )
+                .await
+            }
+            Screen::Ready => {
+                let mut client = h.connect().await;
+                common::open_marked_delivering_window(
+                    &h,
+                    &mut client,
+                    &detection_dir,
+                    MARKED_DETECTION,
+                    READY_SCREEN,
+                    None,
+                )
+                .await
+            }
+            Screen::Idle => {
+                let mut client = h.connect().await;
+                h.open_idle_window(&mut client).await
+            }
         };
         Self {
             h,
@@ -469,24 +538,10 @@ async fn stand_in_daemon(
     answer: serde_json::Value,
 ) -> tokio::task::JoinHandle<Vec<serde_json::Value>> {
     use tokio::io::AsyncWriteExt;
-    use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
 
-    let ipc = PlatformIpc::default();
-    let user = ipc.current_user_id().expect("the current user id resolves");
-    let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
-        .expect("the test's instance id is valid");
-    let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
-    let security = ipc.endpoint_security().expect("endpoint security resolves");
-    let mut listener = ipc
-        .bind(&endpoint, security)
-        .await
-        .unwrap_or_else(|err| panic!("the stand-in must claim {endpoint:?}: {err}"));
+    let accept = claim_endpoint(instance).await;
     tokio::spawn(async move {
-        let mut conn =
-            tokio::time::timeout(yagura_test_support::HANG_GUARD, ipc.accept(&mut listener))
-                .await
-                .expect("the door connects")
-                .expect("the door connects");
+        let mut conn = accept.await;
         let mut frames = Vec::new();
         let Some(first) = read_json_frame(&mut conn).await else {
             return frames;
@@ -502,6 +557,32 @@ async fn stand_in_daemon(
         }
         frames
     })
+}
+
+/// Claims `instance`'s endpoint; the returned future accepts the one door that connects.
+async fn claim_endpoint(
+    instance: &str,
+) -> impl std::future::Future<Output = <yagura_os::PlatformIpc as yagura_os::PeerAuth>::Connection>
++ Send
++ 'static {
+    use yagura_os::{IpcTransport, PeerAuth, PlatformIpc};
+
+    let ipc = PlatformIpc::default();
+    let user = ipc.current_user_id().expect("the current user id resolves");
+    let namespace = yagura_os::resolve_instance_from(Some(std::ffi::OsStr::new(instance)))
+        .expect("the test's instance id is valid");
+    let endpoint = yagura_os::default_endpoint_owning(&user, &namespace);
+    let security = ipc.endpoint_security().expect("endpoint security resolves");
+    let mut listener = ipc
+        .bind(&endpoint, security)
+        .await
+        .unwrap_or_else(|err| panic!("the stand-in must claim {endpoint:?}: {err}"));
+    async move {
+        tokio::time::timeout(yagura_test_support::HANG_GUARD, ipc.accept(&mut listener))
+            .await
+            .expect("the door connects")
+            .expect("the door connects")
+    }
 }
 
 /// The doors a stand-in daemon is asked by, with the door each one's read must name.
@@ -622,5 +703,430 @@ async fn a_door_whose_daemon_refuses_its_read_by_name_prints_nothing_and_exits_z
             describe(&output)
         );
         assert_eq!(frame_types(&frames), ["door_read"], "{args:?}");
+    }
+}
+
+// --- the name of the event a form prints -------------------------------------------------
+
+/// `{event}` in a form is the name of the event the hook ran for, whichever of the
+/// profile's events that is.
+#[tokio::test]
+async fn a_form_names_the_event_its_hook_ran_for() {
+    let setup = Setup::start().await;
+    for event in ["PostToolUse", "UserPromptSubmit"] {
+        setup.deposit(&format!("PARCEL-FOR-{event}"));
+        let (output, written) = setup
+            .run(
+                &["--hook", EVENT_FORM_PROFILE_ID, event],
+                br#"{"session_id":"s-1"}"#.to_vec(),
+            )
+            .await;
+        assert!(written.is_ok(), "{written:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{event}: {}",
+            describe(&output)
+        );
+        let printed: serde_json::Value = serde_json::from_str(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{event}: the form must print JSON ({error}); {}",
+                describe(&output)
+            )
+        });
+        assert_eq!(
+            printed["hookSpecificOutput"]["hookEventName"].as_str(),
+            Some(event),
+            "{event}: {}",
+            describe(&output)
+        );
+        assert!(
+            printed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .is_some_and(|text| text.contains(&format!("PARCEL-FOR-{event}"))),
+            "{event}: {}",
+            describe(&output)
+        );
+    }
+}
+
+// --- a stop's door: everything in one block, only when the stop is not a continuation ---
+
+/// A CLI whose stop hook can be made to continue the turn, as its own profile declares
+/// it: the event, an input of a stop that is not a continuation, inputs of stops that
+/// must not be blocked, and the `decision` its block form prints.
+struct StopCase {
+    profile: &'static str,
+    event: &'static str,
+    first_stop: &'static str,
+    not_to_block: &'static [(&'static str, &'static str)],
+    decision: &'static str,
+}
+
+/// The CLIs given a stop's block, with the marks their own stop input carries.
+fn stop_cases() -> [StopCase; 4] {
+    [
+        StopCase {
+            profile: "grok-build",
+            event: "Stop",
+            first_stop: GROK_FIRST_STOP,
+            not_to_block: &[
+                (
+                    "a continuation",
+                    r#"{"stop_hook_active":true,"stopHookActive":true}"#,
+                ),
+                ("no continuation mark", r#"{"session_id":"s-1"}"#),
+            ],
+            decision: "block",
+        },
+        StopCase {
+            profile: "copilot-cli",
+            event: "agentStop",
+            first_stop: r#"{"stop_hook_active":false}"#,
+            not_to_block: &[
+                ("a continuation", r#"{"stop_hook_active":true}"#),
+                ("no continuation mark", r#"{"sessionId":"s-1"}"#),
+            ],
+            decision: "block",
+        },
+        StopCase {
+            profile: "muse-code",
+            event: "Stop",
+            first_stop: r#"{"stop_hook_active":false}"#,
+            not_to_block: &[
+                ("a continuation", r#"{"stop_hook_active":true}"#),
+                ("no continuation mark", r#"{"session_id":"s-1"}"#),
+            ],
+            decision: "block",
+        },
+        StopCase {
+            profile: "antigravity-cli",
+            event: "Stop",
+            first_stop: AGY_FIRST_STOP,
+            not_to_block: &[
+                (
+                    "a continuation",
+                    r#"{"terminationReason":"NO_TOOL_CALL","executionNum":1}"#,
+                ),
+                (
+                    "no continuation mark",
+                    r#"{"terminationReason":"NO_TOOL_CALL"}"#,
+                ),
+                (
+                    "a stop for another reason",
+                    r#"{"terminationReason":"OTHER_REASON","executionNum":0}"#,
+                ),
+            ],
+            decision: "continue",
+        },
+    ]
+}
+
+/// A stop that is not a continuation, as Grok Build's stop input says it.
+const GROK_FIRST_STOP: &str = r#"{"stop_hook_active":false,"stopHookActive":false}"#;
+/// The first stop of a turn that ended without a tool call, as the Antigravity CLI's stop
+/// input says it.
+pub(crate) const AGY_FIRST_STOP: &str = r#"{"terminationReason":"NO_TOOL_CALL","executionNum":0}"#;
+
+/// A stop's door hands everything waiting over in one block, and only at a stop that is
+/// not a continuation and meets the profile's condition; at any other stop, and with
+/// nothing waiting, it prints nothing, keeps what waits, and never waits itself.
+#[tokio::test]
+async fn a_stop_hands_everything_waiting_in_one_block_only_when_it_is_not_a_continuation() {
+    let setup = Setup::start_with_shipped_profiles().await;
+    for case in stop_cases() {
+        let args = ["--hook", case.profile, case.event];
+        let who = format!("{} {}", case.profile, case.event);
+
+        let (output, written) = setup.run(&args, case.first_stop.as_bytes().to_vec()).await;
+        assert!(written.is_ok(), "{who}: {written:?}");
+        assert!(
+            output.status.code() == Some(0) && output.stdout.is_empty(),
+            "{who}: a stop with nothing waiting prints nothing and exits 0; {}",
+            describe(&output)
+        );
+        assert!(
+            !setup.entry().inbox().has_waiter(),
+            "{who}: a stop's door does not wait"
+        );
+
+        let (first, second) = (format!("FIRST-FOR-{who}"), format!("SECOND-FOR-{who}"));
+        setup.deposit(&first);
+        setup.deposit(&second);
+        for (what, input) in case.not_to_block {
+            let (output, written) = setup.run(&args, input.as_bytes().to_vec()).await;
+            assert!(written.is_ok(), "{who}, {what}: {written:?}");
+            assert!(
+                output.status.code() == Some(0) && output.stdout.is_empty(),
+                "{who}, {what}: the stop is not blocked; {}",
+                describe(&output)
+            );
+            assert_eq!(
+                setup.entry().inbox().pending_count(),
+                2,
+                "{who}, {what}: what waits stays in the inbox"
+            );
+        }
+
+        let (output, written) = setup.run(&args, case.first_stop.as_bytes().to_vec()).await;
+        assert!(written.is_ok(), "{who}: {written:?}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{who}: {}",
+            describe(&output)
+        );
+        let printed: serde_json::Value = serde_json::from_str(
+            String::from_utf8_lossy(&output.stdout).trim(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{who}: a block prints JSON ({error}); {}",
+                describe(&output)
+            )
+        });
+        assert_eq!(
+            printed["decision"].as_str(),
+            Some(case.decision),
+            "{who}: {}",
+            describe(&output)
+        );
+        let reason = printed["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains(&first) && reason.contains(&second),
+            "{who}: one block carries everything that waits; {}",
+            describe(&output)
+        );
+        assert_eq!(setup.entry().inbox().pending_count(), 0, "{who}");
+    }
+}
+
+// --- a stop's status is decided where its door ends --------------------------------------
+
+/// What a relay between a door and its daemon does with the door's notice that it printed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Printed {
+    /// Passes it on, as a door's own connection does.
+    Forward,
+    /// Drops it: the daemon sees the read end without it once the relay lets go.
+    Withhold,
+}
+
+/// A door run through a relay to its daemon.
+pub(crate) struct Relayed {
+    /// What the door printed and how it ended.
+    pub(crate) output: Output,
+    /// Every frame the door sent, in order.
+    pub(crate) sent: Vec<serde_json::Value>,
+    /// The relay's connection to the daemon, which stays open until it is dropped.
+    pub(crate) upstream: yagura_test_support::ipc::Connection,
+}
+
+/// Runs the door `args` in `window_id` with `input` on its stdin, relaying every frame
+/// between it and `h`'s daemon over one connection of the relay's own, and dealing with
+/// the door's notice that it printed as `printed` says.
+pub(crate) async fn relay_door(
+    h: &Harness,
+    window_id: &str,
+    args: &[&str],
+    input: Vec<u8>,
+    printed: Printed,
+) -> Relayed {
+    let instance = unique_instance();
+    let bases = TempDir::new("yagura-door", "relay");
+    let accept = claim_endpoint(&instance).await;
+    let mut upstream = h.connect().await;
+    let command = door_command(args, &instance, &bases, Some((window_id, VALID_TOKEN)));
+    let door = tokio::task::spawn_blocking(move || run_with_input(command, input));
+    let mut conn = accept.await;
+    let mut sent = Vec::new();
+    while let Some(frame) = read_json_frame(&mut conn).await {
+        let notice = frame["type"] == "deliver_printed";
+        sent.push(frame.clone());
+        if notice {
+            if printed == Printed::Forward {
+                write_json_frame(&mut upstream, &frame).await;
+            }
+            continue;
+        }
+        write_json_frame(&mut upstream, &frame).await;
+        let answer = loop {
+            let answer = read_json_frame(&mut upstream)
+                .await
+                .expect("the daemon answers the door's read");
+            if !answer["type"]
+                .as_str()
+                .is_some_and(|kind| kind.ends_with("_changed"))
+            {
+                break answer;
+            }
+        };
+        write_json_frame(&mut conn, &answer).await;
+    }
+    let (output, _) = door.await.expect("join");
+    Relayed {
+        output,
+        sent,
+        upstream,
+    }
+}
+
+async fn write_json_frame<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    frame: &serde_json::Value,
+) {
+    use tokio::io::AsyncWriteExt;
+    let body = serde_json::to_vec(frame).expect("a frame encodes");
+    stream
+        .write_all(&yagura_protocol::frame_encode(&body))
+        .await
+        .expect("relay a frame");
+    stream.flush().await.expect("relay a frame");
+}
+
+/// A stop's door decides the window's status where it ends: a block the door printed
+/// leaves the turn running; a read that ends without that notice leaves the window
+/// waiting for input.
+#[tokio::test]
+async fn a_stops_status_is_decided_where_its_door_ends() {
+    let setup = Setup::start_with_shipped_profiles().await;
+    let args = ["--hook", "grok-build", "Stop"];
+    let mut client = setup.h.connect().await;
+    let pending = || setup.entry().inbox().pending_count();
+    let first_stop = || GROK_FIRST_STOP.as_bytes().to_vec();
+
+    // Printed: the block continues the turn.
+    setup.deposit("PARCEL-PRINTED");
+    let relayed = relay_door(
+        &setup.h,
+        &setup.window_id,
+        &args,
+        first_stop(),
+        Printed::Forward,
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-PRINTED"),
+        "{}",
+        describe(&relayed.output)
+    );
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::Running).await;
+    drop(relayed);
+
+    // No notice and nothing newer: the CLI stops, and what the read took goes back.
+    setup.deposit("PARCEL-NOT-PRINTED");
+    let relayed = relay_door(
+        &setup.h,
+        &setup.window_id,
+        &args,
+        first_stop(),
+        Printed::Withhold,
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-NOT-PRINTED"),
+        "{}",
+        describe(&relayed.output)
+    );
+    assert_eq!(pending(), 0, "the door's read holds what it took");
+    drop(relayed.upstream);
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::WaitingInput).await;
+    until_pending(&setup, 1).await;
+}
+
+/// A stop's block publishes no status before its door ends: the first status published
+/// after it began is the `running` of its door's notice. A read that ends without that
+/// notice does not overwrite a status that came in after the door began. A definition
+/// confirming at once publishes every status the window is given, in order, so a later
+/// report is the mark that everything before it was taken; the read's parcel going back is
+/// the mark that the daemon has seen the read end.
+#[tokio::test]
+async fn a_stops_door_publishes_no_status_before_its_end_nor_over_a_newer_one() {
+    let setup = Setup::start_with(Screen::NoRulesAtOnce, true).await;
+    let mut client = setup.h.connect().await;
+    let args = ["--hook", "grok-build", "Stop"];
+
+    common::report_status(&mut client, &setup.window_id, WindowStatus::WaitingApproval).await;
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::WaitingApproval).await;
+    let mut published = setup.entry().subscribe_status();
+    setup.deposit("PARCEL-PRINTED");
+    let relayed = relay_door(
+        &setup.h,
+        &setup.window_id,
+        &args,
+        GROK_FIRST_STOP.as_bytes().to_vec(),
+        Printed::Forward,
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-PRINTED"),
+        "{}",
+        describe(&relayed.output)
+    );
+    let before_running = published_until(&mut published, WindowStatus::Running).await;
+    assert!(
+        before_running.is_empty(),
+        "a block publishes no status before its door says it printed; published {before_running:?} first"
+    );
+    drop(relayed);
+
+    setup.deposit("PARCEL-NOT-PRINTED");
+    let relayed = relay_door(
+        &setup.h,
+        &setup.window_id,
+        &args,
+        GROK_FIRST_STOP.as_bytes().to_vec(),
+        Printed::Withhold,
+    )
+    .await;
+    assert!(
+        String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-NOT-PRINTED"),
+        "{}",
+        describe(&relayed.output)
+    );
+    common::report_status(&mut client, &setup.window_id, WindowStatus::WaitingApproval).await;
+    wait_until_status(&mut client, &setup.window_id, WindowStatus::WaitingApproval).await;
+    let mut published = setup.entry().subscribe_status();
+    drop(relayed.upstream);
+    until_pending(&setup, 1).await;
+    common::report_status(&mut client, &setup.window_id, WindowStatus::Running).await;
+    let before_the_mark = published_until(&mut published, WindowStatus::Running).await;
+    assert!(
+        before_the_mark.is_empty(),
+        "the end of a door that began before the newer status must not overwrite it; published {before_the_mark:?} before the later report"
+    );
+}
+
+/// The statuses `published` carries before the first `mark`.
+async fn published_until(
+    published: &mut tokio::sync::broadcast::Receiver<yagura_daemon::waiter::StatusAt>,
+    mark: WindowStatus,
+) -> Vec<WindowStatus> {
+    let mut before = Vec::new();
+    loop {
+        let at = tokio::time::timeout(yagura_test_support::HANG_GUARD, published.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{mark:?} is published"))
+            .expect("the window's statuses are published");
+        if at.status.status() == mark {
+            return before;
+        }
+        before.push(at.status.status());
+    }
+}
+
+/// Polls the window's inbox until `count` parcels wait in it; the deadline only detects a
+/// hang.
+async fn until_pending(setup: &Setup, count: usize) {
+    let deadline = tokio::time::Instant::now() + yagura_test_support::HANG_GUARD;
+    while setup.entry().inbox().pending_count() != count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {count} parcels to wait in the inbox"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }

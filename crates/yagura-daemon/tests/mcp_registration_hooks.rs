@@ -55,11 +55,12 @@ const WINDOW_ALIVE_MS: &str = "8000";
 
 /// The vocabulary of yagura's own entry. A user's entries in the seeds below
 /// never use these names, so they can be told apart by key alone.
-const YAGURA_KEYS: [&str; 10] = [
+const YAGURA_KEYS: [&str; 11] = [
     "yagura",
     "PreInvocation",
     "SessionStart",
     "PostToolUse",
+    "Stop",
     "matcher",
     "hooks",
     "type",
@@ -429,17 +430,17 @@ fn assert_handler(handler: &Value, command: &str, context: &str) {
 }
 
 /// The shape agy's file takes: one call of the profile's `--hook` door per event -- the
-/// running report and the inbox on a new call, the start-up context when a session starts, and
-/// a running report after each tool. Nothing else is written, and not the events whose empty
-/// output agy may treat as a decision.
+/// running report and the inbox on a new call, the start-up context when a session starts, a
+/// running report after each tool, and the stop, whose block continues the turn. Nothing else
+/// is written: not PreToolUse, whose output agy requires to hold a decision.
 fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
     let entry = file
         .get("yagura")
         .unwrap_or_else(|| panic!("the file has a yagura entry: {file}"));
     assert_eq!(
         keys_of(entry),
-        set_of(&["PreInvocation", "PostToolUse", "SessionStart"]),
-        "the running events and the start-up door are used: {entry}"
+        set_of(&["PreInvocation", "PostToolUse", "SessionStart", "Stop"]),
+        "the running events, the start-up door and the stop are used: {entry}"
     );
     let call = |event: &str| format!("{daemon}{}", hook_call(profile, event));
     let pre = entry["PreInvocation"].as_array().expect("an array");
@@ -449,6 +450,10 @@ fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
     let start = entry["SessionStart"].as_array().expect("an array");
     assert_eq!(start.len(), 1, "{entry}");
     assert_handler(&start[0], &call("SessionStart"), "SessionStart");
+
+    let stop = entry["Stop"].as_array().expect("an array");
+    assert_eq!(stop.len(), 1, "{entry}");
+    assert_handler(&stop[0], &call("Stop"), "Stop");
 
     let post = entry["PostToolUse"].as_array().expect("an array");
     assert_eq!(post.len(), 1, "{entry}");

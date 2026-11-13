@@ -60,11 +60,7 @@ fn delivery_of(before_command: &str) -> ProfileDelivery {
 
 /// The output of a profile whose `output` is one string: every door prints the same way.
 fn every_door(form: OutputForm) -> DoorOutputs {
-    DoorOutputs {
-        context: form.clone(),
-        take: form.clone(),
-        wait: form,
-    }
+    DoorOutputs::all(&form)
 }
 
 fn strings(items: &[&str]) -> Vec<String> {
@@ -402,6 +398,7 @@ fn an_output_table_gives_each_door_its_own_form_and_a_door_it_leaves_out_prints_
             context: OutputForm::Template(CONTEXT_FORM.into()),
             take: OutputForm::Template(TAKE_FORM.into()),
             wait: OutputForm::Plain,
+            block: OutputForm::Plain,
         }
     );
 
@@ -414,6 +411,7 @@ fn an_output_table_gives_each_door_its_own_form_and_a_door_it_leaves_out_prints_
             context: OutputForm::Plain,
             take: OutputForm::Template(TAKE_FORM.into()),
             wait: OutputForm::Template(WAIT_FORM.into()),
+            block: OutputForm::Plain,
         }
     );
     assert_eq!(
@@ -515,6 +513,8 @@ fn an_invalid_delivery_table_leaves_its_profile_out_of_the_listing_with_one_warn
 // =============================================================================
 
 const AGY_OUTPUT: &str = r#"{"injectSteps":[{"systemMessage":{"systemMessage":{text}}}]}"#;
+/// agy goes on with a stop's `reason` when the stop's answer decides `continue`.
+const AGY_BLOCK: &str = r#"{"decision":"continue","reason":{text}}"#;
 
 #[test]
 fn the_claude_code_profiles_deliver_plain_text_and_wake_a_waiting_cli_through_a_wait() {
@@ -580,7 +580,10 @@ fn the_antigravity_profiles_inject_text_as_a_json_system_message_and_have_no_way
         let delivery = shipped_delivery(id);
         assert_eq!(
             delivery.output,
-            every_door(OutputForm::Template(AGY_OUTPUT.into())),
+            DoorOutputs {
+                block: OutputForm::Template(AGY_BLOCK.into()),
+                ..every_door(OutputForm::Template(AGY_OUTPUT.into()))
+            },
             "{id}"
         );
         assert_eq!(delivery.wake, WakeMode::None, "{id}");

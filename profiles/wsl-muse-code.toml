@@ -49,7 +49,7 @@ absent = { file = ".config/muse/settings.json", pointer = "/mcpServers/{server}"
 # check for being inside a window. It replaces the user's own
 # `managed_hooks_path` for this window only.
 [hooks]
-config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":{hook_timeout}},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout},"async":true}]}]}}'''
+config_file = '''{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-context","timeout":{hook_timeout}}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status running --source muse-code","timeout":{hook_timeout}},{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --deliver-take","timeout":{hook_timeout}}]}],"PermissionRequest":[{"matcher":"*","hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_approval --source muse-code","timeout":{hook_timeout}}]}],"Stop":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --hook wsl-muse-code Stop","timeout":{hook_timeout}}]}],"StopFailure":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout}}]}],"Interrupt":[{"hooks":[{"type":"command","command":"yagura-daemon.exe --credentials '{credentials_file}' --emit-status waiting_input --source muse-code","timeout":{hook_timeout},"async":true}]}]}}'''
 args = [
   "-c", "managed_hooks_path=\"{hooks_config_file}\"",
   "-c", "managed_hooks_env_vars=[\"YAGURA_INSTANCE\"]",
@@ -71,6 +71,7 @@ launch_prompt = ["--", "{prompt}"]
 [delivery.output]
 context = '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":{text}}}'
 take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":{text}}}'
+block = '{"decision":"block","reason":{text}}'
 
 # A Windows path is unreadable from the WSL CLI as it is: the bridge and the
 # hook file are converted with WSL's own tool. `{file}` is a positional
@@ -80,3 +81,8 @@ take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalCon
 convert = ["wsl", "-e", "wslpath", "-u", "{path}"]
 read = ["wsl", "-e", "sh", "-c", 'f="$HOME/$1"; [ -e "$f" ] || exit 3; exec cat -- "$f"', "sh", "{file}"]
 absent_exit = 3
+
+# The Stop hook calls the `--hook` door, so its status and its block are one
+# handler: a second handler's status could land after the block's.
+[hook_events]
+Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }

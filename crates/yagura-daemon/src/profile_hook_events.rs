@@ -12,7 +12,7 @@ use thiserror::Error;
 use yagura_protocol::WindowStatus;
 
 /// The longest event name a table key, or a door argument, may be.
-const MAX_EVENT_NAME_LEN: usize = 64;
+pub(crate) const MAX_EVENT_NAME_LEN: usize = 64;
 /// The longest JSON pointer, in characters, an event may name.
 const MAX_POINTER_CHARS: usize = 256;
 
@@ -23,10 +23,18 @@ pub enum HookDeliver {
     Context,
     /// What is waiting, taken out of the inbox.
     Take,
+    /// What is waiting, taken out of the inbox as the block of a stop, which
+    /// makes the CLI go on with it. The event's `status` is recorded where its
+    /// door ends instead: at once when nothing is handed over, `running` once
+    /// the door says it printed the block, and the event's own when the read
+    /// ends without saying so and no status was reported since it began.
+    Block,
 }
 
 /// What the daemon does for one event. Applied in a fixed order:
-/// `skip_if`, then `session`, then `status`, then `deliver`.
+/// `skip_if`, then `session`, then `status`, then `deliver` (which `when`
+/// gates; a block moves `status` to where its door ends, see
+/// [`HookDeliver::Block`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEvent {
     /// The status the window is recorded in.
@@ -38,6 +46,10 @@ pub struct HookEvent {
     /// The JSON pointer that, when the hook's input has a value there, makes
     /// the event do nothing.
     pub skip_if: Option<String>,
+    /// The values the hook's input must hold, at these JSON pointers, for
+    /// `deliver` to hand anything over. The door compares them and tells the
+    /// daemon only whether each one matched; a value that is missing does not.
+    pub when: BTreeMap<String, serde_json::Value>,
 }
 
 /// A parsed and validated `[hook_events]` table.
@@ -121,22 +133,61 @@ fn parse_event(value: toml::Value) -> Result<HookEvent, HookEventsError> {
         None => None,
         Some("context") => Some(HookDeliver::Context),
         Some("take") => Some(HookDeliver::Take),
+        Some("block") => Some(HookDeliver::Block),
         Some(_) => return Err(HookEventsError::Invalid("deliver")),
     };
     let session = take_pointer(&mut table, "session")?;
     let skip_if = take_pointer(&mut table, "skip_if")?;
+    let when = parse_when(table.remove("when"))?;
     if let Some(key) = table.keys().next() {
         return Err(HookEventsError::UnknownKey(key.clone()));
     }
     if status.is_none() && deliver.is_none() && session.is_none() {
         return Err(HookEventsError::NoAction);
     }
+    if !when.is_empty() && deliver.is_none() {
+        return Err(HookEventsError::Invalid("when"));
+    }
     Ok(HookEvent {
         status,
         deliver,
         session,
         skip_if,
+        when,
     })
+}
+
+/// `when`: a table of JSON pointers to a string, an integer or a boolean.
+fn parse_when(
+    raw: Option<toml::Value>,
+) -> Result<BTreeMap<String, serde_json::Value>, HookEventsError> {
+    let invalid = || HookEventsError::Invalid("when");
+    let Some(raw) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let toml::Value::Table(table) = raw else {
+        return Err(invalid());
+    };
+    table
+        .into_iter()
+        .map(|(pointer, value)| {
+            if !is_pointer(&pointer) {
+                return Err(invalid());
+            }
+            let value = match value {
+                toml::Value::String(text) => serde_json::Value::String(text),
+                toml::Value::Integer(number) => number.into(),
+                toml::Value::Boolean(flag) => flag.into(),
+                _ => return Err(invalid()),
+            };
+            Ok((pointer, value))
+        })
+        .collect()
+}
+
+/// Whether `pointer` is a JSON pointer an event may name.
+fn is_pointer(pointer: &str) -> bool {
+    pointer.starts_with('/') && pointer.chars().count() <= MAX_POINTER_CHARS
 }
 
 /// Reads a status through `WindowStatus`'s own serde spelling, so the set a
@@ -164,11 +215,7 @@ fn take_pointer(
 ) -> Result<Option<String>, HookEventsError> {
     let pointer = take_string(table, key)?;
     match pointer {
-        Some(pointer)
-            if !pointer.starts_with('/') || pointer.chars().count() > MAX_POINTER_CHARS =>
-        {
-            Err(HookEventsError::Invalid(key))
-        }
+        Some(pointer) if !is_pointer(&pointer) => Err(HookEventsError::Invalid(key)),
         pointer => Ok(pointer),
     }
 }

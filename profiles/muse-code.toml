@@ -45,6 +45,7 @@ launch_prompt = ["--", "{prompt}"]
 [delivery.output]
 context = '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":{text}}}'
 take = '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":{text}}}'
+block = '{"decision":"block","reason":{text}}'
 
 [mcp_registration.status]
 file = ".config/muse/settings.json"
@@ -88,6 +89,6 @@ default = 10
 SessionStart = { deliver = "context" }
 UserPromptSubmit = { status = "running", deliver = "take" }
 PermissionRequest = { status = "waiting_approval" }
-Stop = { status = "waiting_input" }
+Stop = { status = "waiting_input", deliver = "block", when = { "/stop_hook_active" = false } }
 StopFailure = { status = "waiting_input" }
 Interrupt = { status = "waiting_input" }

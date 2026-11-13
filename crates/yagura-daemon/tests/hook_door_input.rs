@@ -178,8 +178,19 @@ struct Setup {
 
 impl Setup {
     async fn start() -> Self {
+        Self::start_with(false).await
+    }
+
+    /// A window whose daemon reads the shipped profiles, so a hook names a CLI's own
+    /// profile as that CLI's registration does.
+    async fn start_with_shipped_profiles() -> Self {
+        Self::start_with(true).await
+    }
+
+    async fn start_with(shipped_profiles: bool) -> Self {
         let instance = unique_instance();
-        let config = detection_config(&unique_temp_dir("hook-door"), approver_base_config());
+        let mut config = detection_config(&unique_temp_dir("hook-door"), approver_base_config());
+        config.bundled_profiles = shipped_profiles;
         let h = Harness::start_on_instance(&instance, config).await;
         // An Unknown window is never pushed to, so the doors are measured on a window
         // whose transition to idle has been observed.
@@ -335,6 +346,69 @@ fn a_status_whose_input_has_the_skip_pointer_sends_nothing_to_the_daemon() {
          daemon listening; {}",
         describe(&sent)
     );
+}
+
+/// The strings anywhere in `value`.
+fn strings_in(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::String(text) => vec![text.as_str()],
+        serde_json::Value::Array(items) => items.iter().flat_map(strings_in).collect(),
+        serde_json::Value::Object(fields) => fields.values().flat_map(strings_in).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A value a profile's condition compares is compared by the door: whatever the hook's
+/// input holds there, the daemon learns only whether it was the value the condition
+/// names. Measured on the Antigravity CLI's stop, whose condition names a string.
+#[tokio::test]
+async fn a_compared_value_reaches_the_daemon_only_as_whether_it_matched() {
+    use crate::hook_events_door::{AGY_FIRST_STOP, Printed, relay_door};
+
+    let setup = Setup::start_with_shipped_profiles().await;
+    setup
+        .entry()
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-FOR-THE-MAIN-SESSION"));
+    let args = ["--hook", "antigravity-cli", "Stop"];
+    let secret = "SECRET-TERMINATION-REASON-7f3a";
+    let other_stop = format!(r#"{{"terminationReason":"{secret}","executionNum":0}}"#);
+    // What the hook's input holds at the compared pointer, and whether the stop is blocked.
+    for (input, compared, blocked) in [
+        (other_stop.as_str(), secret, false),
+        (AGY_FIRST_STOP, "NO_TOOL_CALL", true),
+    ] {
+        let relayed = relay_door(
+            &setup.h,
+            &setup.window_id,
+            &args,
+            input.as_bytes().to_vec(),
+            Printed::Forward,
+        )
+        .await;
+        let answered: Vec<&serde_json::Value> = relayed
+            .sent
+            .iter()
+            .filter_map(|frame| frame["door"].get("input"))
+            .collect();
+        assert!(
+            !answered.is_empty(),
+            "{input}: the door is asked for the values the condition compares; sent {:?}",
+            relayed.sent
+        );
+        for frame in &relayed.sent {
+            assert!(
+                !strings_in(frame).iter().any(|text| text.contains(compared)),
+                "{input}: the door must not send the value it compared; sent {frame}"
+            );
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&relayed.output.stdout).contains("PARCEL-FOR-THE-MAIN-SESSION"),
+            blocked,
+            "{input}: {}",
+            describe(&relayed.output)
+        );
+    }
 }
 
 // --- another instance's hook inside a window --------------------------------------

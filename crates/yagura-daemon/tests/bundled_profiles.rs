@@ -422,9 +422,10 @@ fn the_codex_cli_family_lists_models_as_json_filtered_to_the_listed_ones() {
 // Hooks that outlive a launch call `--hook <profile-id> <Event>`
 // ---------------------------------------------------------------------
 
-/// The profiles whose hook text stays in a CLI's settings (a registration's
-/// `json_entry`, or Codex's trust record) and so must not change with a version.
-const HOOK_DOOR_PROFILES: [&str; 7] = [
+/// The profiles whose every hook calls the `--hook` door: those whose hook text stays in
+/// a CLI's settings (a registration's `json_entry`, or Codex's trust record) and so must
+/// not change with a version, and Copilot's, whose events the door's table tells apart.
+const HOOK_DOOR_PROFILES: [&str; 9] = [
     "antigravity-cli",
     "wsl-antigravity-cli",
     "grok-build",
@@ -432,7 +433,13 @@ const HOOK_DOOR_PROFILES: [&str; 7] = [
     "muse-code",
     "codex-cli",
     "wsl-codex-cli",
+    "copilot-cli",
+    "wsl-copilot-cli",
 ];
+
+/// The keys a hook handler of Copilot's `hooks.json` names its command line under, one
+/// per shell it runs in.
+const SHELL_KEYS: [&str; 2] = ["bash", "powershell"];
 
 /// Flags of the doors that each named one handling, before `--hook` replaced them.
 const OLD_DOOR_FLAGS: [&str; 5] = [
@@ -447,7 +454,8 @@ const OLD_DOOR_FLAGS: [&str; 5] = [
 type HookLine = (String, String);
 
 /// Every hook a profile ships, as one list of command lines per way it is written: the
-/// registration's `json_entry` rendered for each OS, and the `[hooks]` arguments.
+/// registration's `json_entry` rendered for each OS, the `[hooks]` arguments, and each
+/// shell's command lines of a `[hooks]` directory's `hooks.json`.
 fn shipped_hook_commands(profile: &Profile) -> Vec<Vec<HookLine>> {
     let mut renderings = Vec::new();
     if let Some(spec) = profile
@@ -495,7 +503,30 @@ fn shipped_hook_commands(profile: &Profile) -> Vec<Vec<HookLine>> {
                 collect_command_lines(event, &groups, &mut lines);
             }
         }
-        renderings.push(lines);
+        if !lines.is_empty() {
+            renderings.push(lines);
+        }
+        if let Some(hooks_json) = spec
+            .config_dir
+            .as_ref()
+            .and_then(|dir| dir.get("hooks.json"))
+        {
+            let document: serde_json::Value =
+                serde_json::from_str(hooks_json).expect("hooks.json is JSON");
+            for shell in SHELL_KEYS {
+                let mut lines = Vec::new();
+                for (event, handlers) in document["hooks"].as_object().expect("a hooks object") {
+                    for handler in handlers.as_array().expect("an array of handlers") {
+                        if let Some(line) = handler[shell].as_str() {
+                            lines.push((event.clone(), line.to_string()));
+                        }
+                    }
+                }
+                if !lines.is_empty() {
+                    renderings.push(lines);
+                }
+            }
+        }
     }
     renderings
 }
@@ -582,15 +613,34 @@ fn event(
         deliver,
         session: session.map(str::to_string),
         skip_if: skip_if.map(str::to_string),
+        when: std::collections::BTreeMap::new(),
     }
 }
 
-/// Each event's handling, summed from the flags of the handlers that ran for it:
-/// `--emit-status X` is `status`, `--deliver-take` / `--deliver-context` is `deliver`,
-/// `--report-session P` is `session`, `--skip-if P` is `skip_if`.
+/// A stop whose door hands what waits over as a block, when the hook's input holds `when`.
+fn blocking_stop(skip_if: Option<&str>, when: &[(&str, serde_json::Value)]) -> HookEvent {
+    HookEvent {
+        when: when
+            .iter()
+            .map(|(pointer, value)| ((*pointer).to_string(), value.clone()))
+            .collect(),
+        ..event(
+            Some(WindowStatus::WaitingInput),
+            Some(HookDeliver::Block),
+            None,
+            skip_if,
+        )
+    }
+}
+
+/// Each event's handling: what the handlers of the older doors that ran for it did
+/// (`--emit-status X` is `status`, `--deliver-take` / `--deliver-context` is `deliver`,
+/// `--report-session P` is `session`, `--skip-if P` is `skip_if`), with a stop's block
+/// where the CLI takes one.
 fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
     use HookDeliver::{Context, Take};
     use WindowStatus::{Running, WaitingApproval, WaitingInput};
+    let not_a_continuation = ("/stop_hook_active", serde_json::json!(false));
     match id {
         "antigravity-cli" | "wsl-antigravity-cli" => vec![
             (
@@ -599,7 +649,31 @@ fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
             ),
             ("SessionStart", event(None, Some(Context), None, None)),
             ("PostToolUse", event(Some(Running), None, None, None)),
+            (
+                "Stop",
+                blocking_stop(
+                    None,
+                    &[
+                        ("/terminationReason", serde_json::json!("NO_TOOL_CALL")),
+                        ("/executionNum", serde_json::json!(0)),
+                    ],
+                ),
+            ),
         ],
+        "copilot-cli" | "wsl-copilot-cli" => {
+            let skip = Some("/agentId");
+            vec![
+                ("sessionStart", event(None, Some(Context), None, skip)),
+                (
+                    "userPromptSubmitted",
+                    event(Some(Running), None, None, skip),
+                ),
+                ("preToolUse", event(Some(Running), None, None, skip)),
+                ("postToolUse", event(Some(Running), Some(Take), None, skip)),
+                ("postToolUseFailure", event(Some(Running), None, None, skip)),
+                ("agentStop", blocking_stop(skip, &[not_a_continuation])),
+            ]
+        }
         "grok-build" | "wsl-grok-build" => {
             let skip = Some("/subagentType");
             vec![
@@ -614,7 +688,16 @@ fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
                     "Notification",
                     event(Some(WaitingApproval), None, None, skip),
                 ),
-                ("Stop", event(Some(WaitingInput), None, None, skip)),
+                (
+                    "Stop",
+                    blocking_stop(
+                        skip,
+                        &[
+                            not_a_continuation,
+                            ("/stopHookActive", serde_json::json!(false)),
+                        ],
+                    ),
+                ),
                 ("StopFailure", event(Some(WaitingInput), None, None, skip)),
                 ("StopCancelled", event(Some(WaitingInput), None, None, skip)),
             ]
@@ -629,7 +712,7 @@ fn expected_hook_events(id: &str) -> Vec<(&'static str, HookEvent)> {
                 "PermissionRequest",
                 event(Some(WaitingApproval), None, None, None),
             ),
-            ("Stop", event(Some(WaitingInput), None, None, None)),
+            ("Stop", blocking_stop(None, &[not_a_continuation])),
             ("StopFailure", event(Some(WaitingInput), None, None, None)),
             ("Interrupt", event(Some(WaitingInput), None, None, None)),
         ],
@@ -841,15 +924,15 @@ fn hook_registration_text(profile: &Profile) -> String {
     text
 }
 
-/// The sha256 of [`hook_registration_text`] for every shipped profile that writes hooks, as
-/// the build before the time a hook has moved into the profile's data rendered it.
+/// The sha256 of [`hook_registration_text`] for every shipped profile that writes hooks: the
+/// text the profile's data renders, which changes only when its hooks are changed on purpose.
 /// A registered hook whose text changes is one a CLI no longer recognizes (Codex keeps a
 /// hash of each, and the JSON registrations are compared with the CLI's settings), so the
-/// data must render the same text.
+/// data must render the same text wherever its values come from.
 const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     (
         "antigravity-cli",
-        "1bffedb10965434acd8cf5d42b24cecb613c38b16059756935826b20b8d11939",
+        "3a8f276af1e57b4d9305ccd60e49ac136c2c57ba9733be79e589b43c20a791f5",
     ),
     (
         "claude-code",
@@ -861,7 +944,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "copilot-cli",
-        "3d8ffcd33ed225b69eaaa2aad4377af8acbc342602a5368720b57a216f427add",
+        "4b09a16ed9044b35100217ce218de472727930719f43362ff02bf01425258efa",
     ),
     (
         "grok-build",
@@ -873,7 +956,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-antigravity-cli",
-        "1492c21f0632ddc2af88dd426ab097a8a33b0b3509358d17abdad942cf376adb",
+        "d48fe04b10130a122f70876bfcb11ed08555ed1dcf070f66bfe81745a07e27b8",
     ),
     (
         "wsl-claude-code",
@@ -885,7 +968,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-copilot-cli",
-        "5fe4e1cee9a1c629d568f47f3fec237d0302c047d894bf34507cd92e79549a3e",
+        "1b99a109c1739a3f1eb3021f92fb7d795f2cbde04c6e89b9c3f6e30fb414bd34",
     ),
     (
         "wsl-grok-build",
@@ -893,7 +976,7 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
     (
         "wsl-muse-code",
-        "8b4adac523b2017d2001c0f7c526b408ed44ee711c4c098e8d580f7b8977b29c",
+        "488fe1eae72c56c9725fda83c3b7d7d86851c827958af042d77e5880915038ed",
     ),
 ];
 

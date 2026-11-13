@@ -3372,6 +3372,9 @@ pub enum HookInputValue {
     /// The value at the pointer is a string of the shape of a session
     /// identifier.
     Session(String),
+    /// Whether the value at the pointer equals [`HookPointer::value`]. The
+    /// door compares; the value itself is not sent.
+    Equal(bool),
 }
 
 /// What the daemon wants to know about a hook's input at one pointer.
@@ -3382,6 +3385,8 @@ pub enum HookPointerKind {
     Presence,
     /// The value, when it is a session identifier.
     Session,
+    /// Whether the value equals [`HookPointer::value`].
+    Equals,
 }
 
 /// One value of a hook's input the daemon asks for in
@@ -3392,6 +3397,10 @@ pub struct HookPointer {
     pub pointer: String,
     /// What to report about the value there.
     pub kind: HookPointerKind,
+    /// The value an [`HookPointerKind::Equals`] compares with; absent for the
+    /// other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 /// The wire revision a peer must implement before `msg` may be sent to it.
