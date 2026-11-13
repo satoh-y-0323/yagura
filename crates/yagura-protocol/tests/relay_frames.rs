@@ -23,8 +23,8 @@ fn body_of(framed: &[u8]) -> Value {
 
 #[test]
 fn every_relay_frame_has_the_catalogued_type_and_field_names() {
-    use yagura_protocol::Declaration;
     use yagura_protocol::relay::{RelayFrame, RelayRefusedKind, RelayResume};
+    use yagura_protocol::{Declaration, GuestLineage, GuestStep};
 
     let cases: Vec<(RelayFrame, Value)> = vec![
         (
@@ -64,6 +64,7 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 resume: None,
                 declaration: Some(Declaration {
                     profile: "grok-build".to_owned(),
+                    guest: None,
                 }),
             },
             json!({
@@ -72,6 +73,37 @@ fn every_relay_frame_has_the_catalogued_type_and_field_names() {
                 "window_id": "w1",
                 "token": "tok",
                 "declaration": {"profile": "grok-build"},
+            }),
+        ),
+        (
+            RelayFrame::Hello {
+                contract: 1,
+                window_id: Some("w1".to_owned()),
+                token: Some("tok".to_owned()),
+                resume: None,
+                declaration: Some(Declaration {
+                    profile: "wsl-antigravity-cli".to_owned(),
+                    guest: Some(GuestLineage {
+                        root: Some("7:boot:900".to_owned()),
+                        steps: vec![GuestStep {
+                            stat: "7 (agy) S 1".to_owned(),
+                            exe: "agy".to_owned(),
+                        }],
+                    }),
+                }),
+            },
+            json!({
+                "type": "relay_hello",
+                "contract": 1,
+                "window_id": "w1",
+                "token": "tok",
+                "declaration": {
+                    "profile": "wsl-antigravity-cli",
+                    "guest": {
+                        "root": "7:boot:900",
+                        "steps": [{"stat": "7 (agy) S 1", "exe": "agy"}],
+                    },
+                },
             }),
         ),
         (

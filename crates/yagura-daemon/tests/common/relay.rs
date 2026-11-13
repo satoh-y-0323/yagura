@@ -97,6 +97,7 @@ pub fn hello_declaring(window_id: &str, token: &str, profile: &str) -> RelayFram
         resume: None,
         declaration: Some(Declaration {
             profile: profile.to_string(),
+            guest: None,
         }),
     }
 }

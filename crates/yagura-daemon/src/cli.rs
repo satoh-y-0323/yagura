@@ -21,7 +21,10 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 use yagura_os::{InstanceIdError, InstanceNamespace};
-use yagura_protocol::{CREDENTIALS_FLAG, WindowStatus, is_valid_source};
+use yagura_protocol::{
+    CREDENTIALS_FLAG, GUEST_ROOT_FLAG, GUEST_STEP_FLAG, GuestArgsError, GuestLineage, WindowStatus,
+    guest_lineage_arg, is_valid_source,
+};
 
 use crate::detector::definition::is_valid_detection_name;
 use crate::mcp_registration::RegistrationTarget;
@@ -115,6 +118,9 @@ pub enum CliCommand {
         profile: String,
         /// The event name, a key of that profile's `[hook_events]`.
         event: String,
+        /// What the hook command collected of its lineage in a WSL guest
+        /// (`--guest-root`, `--guest-step`); `None` when it handed over none.
+        guest: Option<GuestLineage>,
     },
 }
 
@@ -282,6 +288,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     let mut approver_exe_arg: Option<PathBuf> = None;
     let mut roles_arg: Option<PathBuf> = None;
     let mut tickets_arg: Option<PathBuf> = None;
+    let mut guest_given = false;
 
     let mut remaining = args.iter();
     while let Some(arg) = remaining.next() {
@@ -307,6 +314,7 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
                     CliCommand::Hook {
                         profile: profile.clone(),
                         event: event.clone(),
+                        guest: None,
                     },
                 )?;
             }
@@ -384,6 +392,17 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
             "--approver-exe" => {
                 approver_exe_arg = Some(next_path(&mut remaining, "--approver-exe")?);
             }
+            // Read from the raw arguments by `guest_lineage_arg`, so only
+            // stepped over here.
+            GUEST_ROOT_FLAG => {
+                next_value(&mut remaining, GUEST_ROOT_FLAG)?;
+                guest_given = true;
+            }
+            GUEST_STEP_FLAG => {
+                next_value(&mut remaining, GUEST_STEP_FLAG)?;
+                next_value(&mut remaining, GUEST_STEP_FLAG)?;
+                guest_given = true;
+            }
             "--roles" => roles_arg = Some(next_path(&mut remaining, "--roles")?),
             "--tickets" => tickets_arg = Some(next_path(&mut remaining, "--tickets")?),
             other => return Err(CliError::UnknownArgument(other.to_string())),
@@ -396,10 +415,27 @@ pub fn parse_args(args: &[String]) -> Result<CliCommand, CliError> {
     if requested > 1 {
         return Err(CliError::ConflictingCommands);
     }
+    // Only a `--hook` door hands its lineage over.
+    if guest_given && !matches!(hook_door, Some(CliCommand::Hook { .. })) {
+        return Err(CliError::UnknownArgument(GUEST_ROOT_FLAG.to_string()));
+    }
     if let Some(door) = hook_door {
         // The pointers of a `--hook` door come from its profile alone.
         if matches!(door, CliCommand::Hook { .. }) && skip_if.is_some() {
             return Err(CliError::UnknownArgument("--skip-if".to_string()));
+        }
+        if let CliCommand::Hook { profile, event, .. } = door {
+            let guest = guest_lineage_arg(args).map_err(|err| match err {
+                GuestArgsError::MissingValue(flag) => CliError::MissingValue {
+                    flag: flag.to_string(),
+                },
+                GuestArgsError::Repeated(flag) => CliError::RepeatedArgument(flag.to_string()),
+            })?;
+            return Ok(CliCommand::Hook {
+                profile,
+                event,
+                guest,
+            });
         }
         return Ok(with_skip_if(door, skip_if));
     }

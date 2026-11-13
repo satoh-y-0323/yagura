@@ -43,9 +43,9 @@ use yagura_daemon::profile_hook_events::HookOrigin;
 use yagura_daemon::store;
 use yagura_daemon::{DaemonConfig, IpcServer, WindowRegistry, WindowsShellSearch, resolve_shell};
 use yagura_protocol::{
-    ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, HookInputValue,
-    HookPointer, HookPointerKind, WindowCredentials, WindowStatus, decode_daemon_message,
-    encode_client_message, frame_encode, process_window_credentials,
+    ClientMessage, DOOR_ANSWER_TIMEOUT, DaemonMessage, DeliveryStream, Door, GuestLineage,
+    HookInputValue, HookPointer, HookPointerKind, WindowCredentials, WindowStatus,
+    decode_daemon_message, encode_client_message, frame_encode, process_window_credentials,
 };
 
 /// A client-side connection to the daemon's endpoint, named through the OS
@@ -73,7 +73,7 @@ const HOOK_STDIN_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const HOOK_DOOR_MARGIN: Duration = Duration::from_millis(500);
 
 fn main() -> Result<ExitCode> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = yagura_protocol::process_args();
     // A hook also runs outside any window (a CLI started by hand) and may carry
     // arguments only a newer copy knows, so it is decided on the raw arguments,
     // before they are parsed and before logging is set up: such a hook stays
@@ -196,8 +196,12 @@ async fn async_main(
         | CliCommand::ReportSession { .. }) => {
             return run_hook(&ipc, &endpoint, door, credentials).await;
         }
-        CliCommand::Hook { profile, event } => {
-            return run_hook_event(&ipc, &endpoint, &profile, &event, credentials).await;
+        CliCommand::Hook {
+            profile,
+            event,
+            guest,
+        } => {
+            return run_hook_event(&ipc, &endpoint, (&profile, &event), guest, credentials).await;
         }
         // `--detection` / `--detection-dir` / `--playbook` /
         // `--profiles-dir` / `--approver-exe` / `--roles` / `--tickets`
@@ -973,6 +977,7 @@ async fn run_hook_door(
         window_id: window_id.clone(),
         token: token.clone(),
         door,
+        guest: None,
     };
     let message = match command {
         CliCommand::DeliverContext { .. } => read(Door::Context),
@@ -1081,8 +1086,8 @@ async fn send_hook_request(client: &mut ClientConnection, message: &ClientMessag
 async fn run_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
-    profile: &str,
-    event: &str,
+    (profile, event): (&str, &str),
+    guest: Option<GuestLineage>,
     credentials: Option<WindowCredentials>,
 ) -> Result<ExitCode> {
     let started = Instant::now();
@@ -1093,7 +1098,7 @@ async fn run_hook_event(
             exchange_hook_event(
                 ipc,
                 endpoint,
-                (profile, event),
+                (profile, event, guest),
                 credentials,
                 (pointers, values),
                 (started, &drained),
@@ -1113,7 +1118,7 @@ async fn run_hook_event(
 async fn exchange_hook_event(
     ipc: &PlatformIpc,
     endpoint: &str,
-    (profile, event): (&str, &str),
+    (profile, event, guest): (&str, &str, Option<GuestLineage>),
     credentials: WindowCredentials,
     (pointers, values): (std::sync::mpsc::Sender<Vec<String>>, FoundValues),
     (started, drained): (Instant, &StdinDrain),
@@ -1127,6 +1132,7 @@ async fn exchange_hook_event(
             name: event.to_string(),
             input,
         },
+        guest: guest.clone(),
     };
     let mut client = ipc.connect(endpoint).await.with_context(|| {
         format!("failed to connect to the daemon endpoint {endpoint} for --hook")

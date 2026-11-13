@@ -292,6 +292,59 @@ async fn a_window_relay_given_its_profile_declares_it_on_every_connection() {
     );
 }
 
+/// What a window's relay is given of its guest (the root and each step up from its parent,
+/// as `--guest-root` and `--guest-step <stat> <exe>`) is carried, in the order given, in
+/// the declaration of every `relay_hello`; a relay given none carries none.
+#[tokio::test]
+async fn a_relay_given_its_guest_lineage_carries_it_in_its_declaration() {
+    const INSTANCE: &str = "mcprelay-guest";
+    let files = TempDir::new("yagura-mcp-credentials", "guest");
+    let path = files.path().join("credentials.json");
+    std::fs::write(
+        &path,
+        json!({"window_id": WINDOW, "token": TOKEN}).to_string(),
+    )
+    .expect("write the credentials file");
+    let mut daemon = FakeDaemon::bind(INSTANCE).await;
+    let _relay = spawn_relay(
+        INSTANCE,
+        &[],
+        &[
+            OsStr::new("--credentials"),
+            path.as_os_str(),
+            OsStr::new("--profile"),
+            OsStr::new("wsl-antigravity-cli"),
+            OsStr::new("--guest-root"),
+            OsStr::new("7:boot-a:900"),
+            OsStr::new("--guest-step"),
+            OsStr::new("601 (sh) S 7 601 601 0 -1 0 0 0 0 0 0 0 0 0 0 1 0 960"),
+            OsStr::new("dash"),
+            OsStr::new("--guest-step"),
+            OsStr::new("7 (a b) S 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 0 1 0 900"),
+            OsStr::new("agy"),
+        ],
+    );
+    let hello = daemon.accept().await.hello().await;
+    let guest = hello.declaration.and_then(|declared| declared.guest);
+    assert_eq!(
+        guest,
+        Some(yagura_protocol::GuestLineage {
+            root: Some("7:boot-a:900".to_string()),
+            steps: vec![
+                yagura_protocol::GuestStep {
+                    stat: "601 (sh) S 7 601 601 0 -1 0 0 0 0 0 0 0 0 0 0 1 0 960".to_string(),
+                    exe: "dash".to_string(),
+                },
+                yagura_protocol::GuestStep {
+                    stat: "7 (a b) S 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 0 1 0 900".to_string(),
+                    exe: "agy".to_string(),
+                },
+            ],
+        }),
+        "the relay_hello carries the guest lineage the relay was given"
+    );
+}
+
 // --- the requests a lost connection leaves open --------------------------
 
 #[tokio::test]

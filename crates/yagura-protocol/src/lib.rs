@@ -492,6 +492,92 @@ pub struct Declaration {
     /// The id of the profile whose registration or launch started the
     /// claimant.
     pub profile: String,
+    /// What a claimant in a WSL guest collected of its own lineage there;
+    /// absent states none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestLineage>,
+}
+
+/// The argument that hands a claimant in a WSL guest the root of its window's
+/// CLI there (see [`GuestLineage::root`]).
+pub const GUEST_ROOT_FLAG: &str = "--guest-root";
+
+/// The argument, given once per step, that hands a claimant in a WSL guest
+/// one step of its lineage: `--guest-step <stat line> <exe link>`.
+pub const GUEST_STEP_FLAG: &str = "--guest-step";
+
+/// What a hook door or MCP bridge running in a WSL guest collected of its
+/// own lineage there, raw: the daemon cannot read the guest's processes, so
+/// it judges these facts. Self-stated, like the rest of a [`Declaration`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestLineage {
+    /// The root the window's launch put in its CLI's environment,
+    /// `<pid>:<boot_id>:<starttime>`; absent when the environment held none
+    /// (a window opened before its launch put one there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// The claimant's ancestors from its parent up, in the order collected.
+    #[serde(default)]
+    pub steps: Vec<GuestStep>,
+}
+
+/// One process of a [`GuestLineage`], as the guest's `/proc` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestStep {
+    /// Its `/proc/<pid>/stat` line.
+    pub stat: String,
+    /// Where its `/proc/<pid>/exe` link points.
+    pub exe: String,
+}
+
+/// Guest lineage arguments that cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GuestArgsError {
+    /// A flag without the values it takes.
+    #[error("{0} is missing its value")]
+    MissingValue(&'static str),
+    /// [`GUEST_ROOT_FLAG`] given more than once.
+    #[error("{0} is given more than once")]
+    Repeated(&'static str),
+}
+
+/// The [`GuestLineage`] `args` (the command line without the program name)
+/// hand over through [`GUEST_ROOT_FLAG`] and [`GUEST_STEP_FLAG`]; `None` when
+/// neither is there. An empty root is no root: the variable it was expanded
+/// from was unset.
+///
+/// # Errors
+///
+/// Returns [`GuestArgsError`] when a flag lacks its values or the root is
+/// given twice.
+pub fn guest_lineage_arg(args: &[String]) -> Result<Option<GuestLineage>, GuestArgsError> {
+    let mut lineage: Option<GuestLineage> = None;
+    let mut root_given = false;
+    let mut remaining = args.iter();
+    while let Some(arg) = remaining.next() {
+        if arg == GUEST_ROOT_FLAG {
+            let root = remaining
+                .next()
+                .ok_or(GuestArgsError::MissingValue(GUEST_ROOT_FLAG))?;
+            if std::mem::replace(&mut root_given, true) {
+                return Err(GuestArgsError::Repeated(GUEST_ROOT_FLAG));
+            }
+            lineage.get_or_insert_with(GuestLineage::default).root =
+                (!root.is_empty()).then(|| root.clone());
+        } else if arg == GUEST_STEP_FLAG {
+            let (Some(stat), Some(exe)) = (remaining.next(), remaining.next()) else {
+                return Err(GuestArgsError::MissingValue(GUEST_STEP_FLAG));
+            };
+            lineage
+                .get_or_insert_with(GuestLineage::default)
+                .steps
+                .push(GuestStep {
+                    stat: stat.clone(),
+                    exe: exe.clone(),
+                });
+        }
+    }
+    Ok(lineage)
 }
 
 /// The value of `--credentials` in `args` (the command line without the program
@@ -502,13 +588,21 @@ pub fn credentials_path_arg(args: &[String]) -> Option<std::path::PathBuf> {
 }
 
 /// The [`Declaration`] `args` (the command line without the program name)
-/// makes through [`PROFILE_FLAG`]; `None` when the flag is absent, empty,
+/// makes through [`PROFILE_FLAG`], with the guest lineage they hand over
+/// ([`guest_lineage_arg`]); `None` when the profile flag is absent, empty,
 /// repeated or missing its value.
-#[must_use]
-pub fn declaration_arg(args: &[String]) -> Option<Declaration> {
-    single_flag_value(args, PROFILE_FLAG).map(|profile| Declaration {
-        profile: profile.clone(),
-    })
+///
+/// # Errors
+///
+/// Returns [`GuestArgsError`] when the guest lineage arguments cannot be read.
+pub fn declaration_arg(args: &[String]) -> Result<Option<Declaration>, GuestArgsError> {
+    let guest = guest_lineage_arg(args)?;
+    Ok(
+        single_flag_value(args, PROFILE_FLAG).map(|profile| Declaration {
+            profile: profile.clone(),
+            guest,
+        }),
+    )
 }
 
 fn single_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
@@ -545,6 +639,21 @@ pub fn window_credentials(
         return Some(WindowCredentials { window_id, token });
     }
     read_credentials_file(file?)
+}
+
+/// This process's command line without the program name. An argument that is
+/// not valid Unicode is read with each invalid part as U+FFFD rather than
+/// panicking as `std::env::args` does: a WSL guest's stat line may hold any
+/// bytes, and the daemon refuses a lineage step carrying that character.
+#[must_use]
+pub fn process_args() -> Vec<String> {
+    std::env::args_os()
+        .skip(1)
+        .map(|arg| {
+            arg.into_string()
+                .unwrap_or_else(|arg| arg.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 /// [`window_credentials`] over this process's environment and the
@@ -3350,6 +3459,10 @@ pub enum ClientMessage {
         /// before it prints; absent means `false`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         held: bool,
+        /// What a door in a WSL guest collected of its lineage there; absent
+        /// states none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest: Option<GuestLineage>,
     },
     /// A door's read: what the door of a CLI's hook is to print. The daemon
     /// keeps what it took until the door sends [`ClientMessage::DeliverPrinted`]
@@ -3365,6 +3478,10 @@ pub enum ClientMessage {
         token: String,
         /// Which door reads.
         door: Door,
+        /// What a door in a WSL guest collected of its lineage there; absent
+        /// states none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest: Option<GuestLineage>,
     },
     /// The door printed what its [`ClientMessage::DoorRead`] was answered with.
     /// Never answered: the door ends without waiting. Only the connection that

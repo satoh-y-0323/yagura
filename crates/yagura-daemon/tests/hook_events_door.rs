@@ -23,8 +23,10 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use yagura_daemon::inbox::Parcel;
+use yagura_daemon::mcp_registration::{EntryVars, RegistrationTarget};
 use yagura_daemon::profile::parse_profile;
 use yagura_daemon::window::{HooksRoute, LaunchIdentity, WindowProvenance};
+use yagura_os::program::HostOs;
 use yagura_protocol::WindowStatus;
 use yagura_test_support::paths::TempDir;
 
@@ -414,6 +416,7 @@ async fn every_event_of_a_profile_that_names_the_subagent_pointer_asks_for_its_v
                 name: name.to_string(),
                 input: None,
                 held: true,
+                guest: None,
             },
         )
         .await;
@@ -927,6 +930,7 @@ async fn an_older_hook_request_takes_nothing_but_still_records_the_status_and_th
         name: EVENT.to_string(),
         input,
         held: true,
+        guest: None,
     };
     let mut door = setup.h.connect().await;
     common::send(&mut door, &request(None)).await;
@@ -1765,8 +1769,8 @@ fn lineage_cli(dir: &std::path::Path, config: &serde_json::Value) {
         } else if task["end"].as_bool() == Some(true) {
             end_held(&mut held);
             serde_json::json!({})
-        } else if task["by"] == "nested" {
-            run_nested(&task, &mut held)
+        } else if task["by"] == "nested" || task["by"] == "rooted" {
+            run_nested(&task, config, &mut held)
         } else {
             lineage_task(&task, config, &mut held)
         };
@@ -1786,17 +1790,36 @@ fn write_whole(path: &std::path::Path, text: &str) {
     std::fs::rename(&partial, path).expect("put a lineage file in place");
 }
 
-/// Has a CLI of the same image, started by this one, run `task`; returns its result.
-fn run_nested(task: &serde_json::Value, held: &mut Vec<Held>) -> serde_json::Value {
-    let mut command = Command::new(std::env::current_exe().expect("current_exe"));
-    command
-        .args([
+/// Has a CLI of the same image, started by this one, run `task`; returns its result. A
+/// `rooted` one is started the way the window's own CLI was, through the launch statement
+/// of the guest profile in the config, so it is the root of its own environment.
+fn run_nested(
+    task: &serde_json::Value,
+    config: &serde_json::Value,
+    held: &mut Vec<Held>,
+) -> serde_json::Value {
+    let mut command = if task["by"] == "rooted" {
+        let argv: Vec<&str> = config["rooted"]
+            .as_array()
+            .expect("a guest profile's launch argv")
+            .iter()
+            .map(|arg| arg.as_str().expect("an argument"))
+            .collect();
+        let mut command = Command::new(argv[0]);
+        command.args(&argv[1..]);
+        command
+    } else {
+        let mut command = Command::new(std::env::current_exe().expect("current_exe"));
+        command.args([
             yagura_test_support::process::libtest_name(module_path!(), LINEAGE_ROLE).as_str(),
             "--exact",
             "--ignored",
             "--nocapture",
             "--test-threads=1",
-        ])
+        ]);
+        command
+    };
+    command
         .env(LINEAGE_ROLE_VAR, "nested")
         .env(LINEAGE_TASK_VAR, task.to_string())
         .stdin(Stdio::piped())
@@ -1817,7 +1840,7 @@ fn run_nested(task: &serde_json::Value, held: &mut Vec<Held>) -> serde_json::Val
     };
     std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
     let process = Held { child, stdin };
-    if task.get("bridge").is_some() {
+    if task.get("bridge").is_some() || task.get("server").is_some() {
         held.push(process);
     } else {
         end_held(&mut vec![process]);
@@ -1874,12 +1897,47 @@ fn lineage_task(
             "stdout": String::from_utf8_lossy(&output.stdout),
         });
     }
-    let profile = task["bridge"]
-        .as_str()
-        .expect("a lineage step runs a door or a bridge");
-    let mut command = Command::new(config["relay"].as_str().expect("relay"));
+    if let Some(argv) = task["run"].as_array() {
+        let argv: Vec<&str> = argv
+            .iter()
+            .map(|arg| arg.as_str().expect("an argument"))
+            .collect();
+        let mut command = Command::new(argv[0]);
+        command
+            .args(&argv[1..])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        lineage_env(&mut command, config);
+        for name in task["unset"].as_array().into_iter().flatten() {
+            command.env_remove(name.as_str().expect("a variable name"));
+        }
+        let input = task["input"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec();
+        let (output, _) = run_with_input(command, input);
+        return serde_json::json!({
+            "code": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+        });
+    }
+    let mut command;
+    if let Some(argv) = task["server"].as_array() {
+        let argv: Vec<&str> = argv
+            .iter()
+            .map(|arg| arg.as_str().expect("an argument"))
+            .collect();
+        command = Command::new(argv[0]);
+        command.args(&argv[1..]);
+    } else {
+        let profile = task["bridge"]
+            .as_str()
+            .expect("a lineage step runs a door, a command or a bridge");
+        command = Command::new(config["relay"].as_str().expect("relay"));
+        command.args(["--profile", profile]);
+    }
     command
-        .args(["--profile", profile])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1906,6 +1964,9 @@ pub(crate) enum By {
     Cli,
     /// A CLI of the same image the window's CLI started.
     Nested,
+    /// A CLI of the same image the window's CLI started through the guest profile's launch
+    /// statement, as the window's own CLI was: the root of an environment of its own.
+    Rooted,
 }
 
 impl By {
@@ -1913,6 +1974,7 @@ impl By {
         match self {
             Self::Cli => "cli",
             Self::Nested => "nested",
+            Self::Rooted => "rooted",
         }
     }
 }
@@ -1963,6 +2025,35 @@ impl LineageCli {
         }
     }
 
+    /// Runs the command `argv` (a program, then its arguments) with `input` on its stdin from
+    /// `by`, without the variables named in `unset`.
+    pub(crate) async fn run_command(
+        &mut self,
+        by: By,
+        argv: &[String],
+        input: &str,
+        unset: &[String],
+    ) -> DoorRun {
+        let result = self
+            .run(serde_json::json!({
+                "by": by.name(), "run": argv, "input": input, "unset": unset
+            }))
+            .await;
+        DoorRun {
+            code: result["code"].as_i64(),
+            stdout: result["stdout"].as_str().unwrap_or_default().to_string(),
+        }
+    }
+
+    /// Starts the bridge the command `argv` is, from `by`, and returns its answer to
+    /// `initialize` once it has one; the bridge runs on until [`Self::end_bridges`].
+    pub(crate) async fn bridge_command(&mut self, by: By, argv: &[String]) -> String {
+        let result = self
+            .run(serde_json::json!({ "by": by.name(), "server": argv }))
+            .await;
+        result["answer"].as_str().unwrap_or_default().to_string()
+    }
+
     /// Starts a bridge declaring `profile` from `by`, and returns its answer to
     /// `initialize` once it has one; the bridge runs on until [`Self::end_bridges`].
     pub(crate) async fn bridge(&mut self, by: By, profile: &str) -> String {
@@ -1989,6 +2080,9 @@ impl LineageCli {
 pub(crate) struct LineageImage {
     tree: TempDir,
     exe: PathBuf,
+    /// The base directories a door or bridge of the window's CLI finds its daemon through,
+    /// when a daemon of its own (a `Sandbox`) sets them; one of this copy's own otherwise.
+    bases: Option<PathBuf>,
 }
 
 impl LineageImage {
@@ -2004,7 +2098,24 @@ impl LineageImage {
             &std::env::current_exe().expect("current_exe"),
             &exe,
         );
-        Self { tree, exe }
+        Self {
+            tree,
+            exe,
+            bases: None,
+        }
+    }
+
+    /// Has what this copy's windows start reach a daemon whose data, state, config and home
+    /// directories are `data`, `state`, `config` and `home` under `bases`.
+    pub(crate) fn sharing_bases(mut self, bases: &std::path::Path) -> Self {
+        self.bases = Some(bases.to_path_buf());
+        self
+    }
+
+    fn bases_for(&self, id: &str) -> PathBuf {
+        self.bases
+            .clone()
+            .unwrap_or_else(|| self.tree.make_dir(&format!("{id}-bases")))
     }
 
     /// The copy's file name: the process image its windows' CLIs run under.
@@ -2032,7 +2143,7 @@ impl LineageImage {
             "instance": instance,
             "door": daemon_bin(),
             "relay": yagura_test_support::process::relay_path(),
-            "bases": self.tree.make_dir(&format!("{id}-bases")),
+            "bases": self.bases_for(id),
         });
         std::fs::write(dir.join("config.json"), config.to_string()).expect("write the config");
         let command = [
@@ -2210,4 +2321,450 @@ async fn only_the_windows_own_cli_speaks_for_a_window_whose_profile_declares_its
 
     cli.exit().await;
     guest.exit().await;
+}
+
+// --- a WSL guest's hooks: the shipped commands, run for real under dash ------------------
+//
+// The guest is this machine when it runs Linux: the shipped WSL profile's launch statement
+// and hook command are run as they are, with the profile's `wsl -e` left off, and the
+// daemon judges what they collect. Where there is no `/proc` there is nothing to read, and
+// these cases return without a run.
+
+/// The id of the shipped profile that runs Antigravity CLI in a WSL distribution.
+pub(crate) const GUEST_PROFILE: &str = "wsl-antigravity-cli";
+/// A hook event that profile names, which reports a status and takes what waits.
+pub(crate) const GUEST_EVENT: &str = "PreInvocation";
+
+fn shipped_guest_text() -> String {
+    common::docs::read_doc_verbatim("../../profiles/wsl-antigravity-cli.toml")
+}
+
+/// The shell script the shipped WSL profile has `bash -c` run before the CLI.
+pub(crate) fn guest_statement() -> String {
+    let document: toml::Table = shipped_guest_text()
+        .parse()
+        .expect("the shipped WSL profile is TOML");
+    let argv: Vec<String> = document["command"]["windows"]
+        .as_array()
+        .expect("the shipped WSL profile has a Windows argv")
+        .iter()
+        .map(|arg| arg.as_str().expect("an argument").to_string())
+        .collect();
+    assert_eq!(
+        argv.len(),
+        6,
+        "the shipped WSL profile starts its CLI as `wsl -e bash -c <statement> agy`: {argv:?}"
+    );
+    assert_eq!(argv[..4], ["wsl", "-e", "bash", "-c"]);
+    assert_eq!(argv[5], "agy");
+    argv[4].clone()
+}
+
+/// The shell a guest's CLI runs a hook command with: `/bin/sh`, which is dash on Ubuntu, or
+/// `dash` by name where it is not. `None` where there is no guest to read; a Linux without
+/// dash fails rather than leaving the case unrun.
+pub(crate) fn guest_shell() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let is_dash = |path: &str| {
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|real| real.file_name().map(|name| name == "dash"))
+            .unwrap_or(false)
+    };
+    let found = ["/bin/sh", "/usr/bin/dash", "/bin/dash"]
+        .into_iter()
+        .find(|path| is_dash(path));
+    assert!(
+        found.is_some(),
+        "a guest runs a hook command with dash, and this machine has none (/bin/sh is not \
+         dash and there is no dash to run it with): install dash"
+    );
+    found.map(str::to_string)
+}
+
+pub(crate) fn bash_path() -> String {
+    ["/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .expect("bash is installed")
+        .to_string()
+}
+
+fn collect_commands(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_commands(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(command) = map.get("command").and_then(serde_json::Value::as_str) {
+                out.push(command.to_string());
+            }
+            if let Some(inner) = map.get("hooks") {
+                collect_commands(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The hook command the shipped WSL profile registers for [`GUEST_EVENT`], rendered for
+/// `instance` with `daemon` as the daemon, naming `profile_id` where it names its profile.
+pub(crate) fn guest_hook_command(instance: &str, profile_id: &str, daemon: &str) -> String {
+    let profile = parse_profile(GUEST_PROFILE, &shipped_guest_text())
+        .expect("the shipped WSL profile is valid");
+    let spec = profile
+        .mcp_registration
+        .as_ref()
+        .and_then(|spec| spec.json_entry())
+        .expect("the shipped WSL profile registers its hook entries");
+    let target = RegistrationTarget::for_instance(Some(instance));
+    let vars = EntryVars {
+        target: &target,
+        os: HostOs::Linux,
+        daemon: Some(daemon),
+        bridge: Some("/yagura/yagura-mcp"),
+    };
+    let mut commands = Vec::new();
+    for file in spec.files() {
+        for (_, value) in file.entries(&vars).expect("the entries render") {
+            if let Some(handlers) = value.get(GUEST_EVENT) {
+                collect_commands(handlers, &mut commands);
+            }
+        }
+    }
+    assert_eq!(
+        commands.len(),
+        1,
+        "the shipped WSL profile registers one command for {GUEST_EVENT}: {commands:?}"
+    );
+    commands.remove(0).replace(GUEST_PROFILE, profile_id)
+}
+
+/// The argv that runs the shipped hook command as a guest's CLI does: the shell, `-c`, the
+/// command, with the test's daemon as `{daemon}`.
+pub(crate) fn guest_hook_argv(shell: &str, instance: &str, profile_id: &str) -> Vec<String> {
+    vec![
+        shell.to_string(),
+        "-c".to_string(),
+        guest_hook_command(instance, profile_id, &daemon_bin().display().to_string()),
+    ]
+}
+
+/// The command a guest's CLI runs to start the yagura bridge, as the shipped WSL profile's
+/// registration has it written for `instance`: what follows `--` in the registration's add
+/// command, with `bridge` as the bridge and `profile_id` where it names its profile.
+pub(crate) fn guest_server_argv(instance: &str, profile_id: &str, bridge: &str) -> Vec<String> {
+    let profile = parse_profile(GUEST_PROFILE, &shipped_guest_text())
+        .expect("the shipped WSL profile is valid");
+    let spec = profile
+        .mcp_registration
+        .as_ref()
+        .expect("the shipped WSL profile registers the bridge");
+    let target = RegistrationTarget::for_instance(Some(instance));
+    let add = spec
+        .render_add(&target, bridge)
+        .expect("the add command renders");
+    let at = add
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("the add command separates the server's command with `--`");
+    add[at + 1..]
+        .iter()
+        .map(|arg| {
+            if arg == GUEST_PROFILE {
+                profile_id.to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
+}
+
+/// The pid a process printed and its environment, started through the shipped launch
+/// statement (`statement`) or through the plain login-shell wrapper that statement ends with.
+fn started_environment(
+    statement: Option<&str>,
+) -> (String, std::collections::BTreeMap<String, String>) {
+    let tree = TempDir::new("yagura-guest-env", "home");
+    let home = tree.make_dir("home");
+    let mut command = Command::new(bash_path());
+    match statement {
+        Some(statement) => command.args(["-c", statement]),
+        None => command.args(["-lic", "exec \"$0\" \"$@\""]),
+    };
+    let output = command
+        .args(["/bin/sh", "-c", "echo \"PID:$$\"; exec env"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the launch statement");
+    assert!(
+        output.status.success(),
+        "the launch statement ({statement:?}) must start the CLI it is given: {output:?}"
+    );
+    // A login shell may print its distribution's greeting first; what follows the pid line
+    // is the environment.
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut lines = text.lines().skip_while(|line| !line.starts_with("PID:"));
+    let pid = lines
+        .next()
+        .and_then(|line| line.strip_prefix("PID:"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let variables = lines
+        .filter_map(|line| line.split_once('='))
+        .filter(|(name, _)| {
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    (pid, variables)
+}
+
+/// What the shipped launch statement prints when it starts `program` with `arguments`, run
+/// as bash in a guest runs it with a clean environment.
+pub(crate) fn run_guest_statement(program: &std::path::Path, arguments: &[&str]) -> String {
+    let tree = TempDir::new("yagura-guest-args", "home");
+    let home = tree.make_dir("home");
+    let output = Command::new(bash_path())
+        .args(["-c", &guest_statement()])
+        .arg(program)
+        .args(arguments)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the launch statement");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The variable the shipped launch statement exports for the CLI it starts: the guest's root,
+/// `<pid>:<boot_id>:<starttime>`.
+pub(crate) const GUEST_ROOT_VAR: &str = "YAGURA_GUEST_ROOT";
+
+/// What `shell -c command` prints, run with a window id and the guest root `root` in its
+/// environment as a guest's CLI runs a hook command.
+pub(crate) fn run_hook_command(shell: &str, command: &str, root: &str) -> String {
+    let output = Command::new(shell)
+        .args(["-c", command])
+        .env("YAGURA_WINDOW_ID", "w")
+        .env(GUEST_ROOT_VAR, root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("run the hook command");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The pid of the CLI the shipped launch statement started, and the variables the statement
+/// added to its environment beyond what the plain login-shell wrapper gives: the root a
+/// guest's requests are judged against.
+pub(crate) fn guest_root_variables() -> (String, Vec<(String, String)>) {
+    let (pid, started) = started_environment(Some(&guest_statement()));
+    let (_, plain) = started_environment(None);
+    let added = started
+        .into_iter()
+        .filter(|(name, _)| !["_", "SHLVL", "PWD", "OLDPWD"].contains(&name.as_str()))
+        .filter(|(name, _)| !plain.contains_key(name))
+        .collect();
+    (pid, added)
+}
+
+impl LineageImage {
+    /// Writes the profile `id` into `profiles_dir`: the shipped WSL profile's tables for
+    /// hooks and delivery, whose CLI is this copy, started through the shipped launch
+    /// statement and declaring the copy's image. A `guest_window` also has the
+    /// `[host_paths]` of a CLI in another environment. Returns the window's CLI.
+    pub(crate) fn write_guest_profile(
+        &self,
+        profiles_dir: &std::path::Path,
+        id: &str,
+        instance: &str,
+        guest_window: bool,
+    ) -> LineageCli {
+        let dir = self.tree.make_dir(id);
+        let launch: Vec<String> = vec![
+            bash_path(),
+            "-c".to_string(),
+            guest_statement(),
+            self.exe.display().to_string(),
+            yagura_test_support::process::libtest_name(module_path!(), LINEAGE_ROLE),
+            "--exact".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+            "--test-threads=1".to_string(),
+        ];
+        let config = serde_json::json!({
+            "instance": instance,
+            "door": daemon_bin(),
+            "relay": yagura_test_support::process::relay_path(),
+            "bases": self.bases_for(id),
+            "rooted": launch,
+        });
+        std::fs::write(dir.join("config.json"), config.to_string()).expect("write the config");
+        let shipped: toml::Table = shipped_guest_text()
+            .parse()
+            .expect("the shipped WSL profile is TOML");
+        let mut document = toml::Table::new();
+        for key in ["schema", "delivery", "hook_timeout", "hook_events"] {
+            document.insert(key.to_string(), shipped[key].clone());
+        }
+        document.insert("display_name".to_string(), id.to_string().into());
+        let mut command = toml::Table::new();
+        command.insert(
+            "default".to_string(),
+            toml::Value::Array(launch.into_iter().map(toml::Value::String).collect()),
+        );
+        document.insert("command".to_string(), toml::Value::Table(command));
+        let mut env = toml::Table::new();
+        env.insert(LINEAGE_ROLE_VAR.to_string(), "cli".to_string().into());
+        env.insert(
+            LINEAGE_DIR_VAR.to_string(),
+            dir.display().to_string().into(),
+        );
+        // A daemon of its own (a `Sandbox`) runs with a short PATH; the launch statement and the
+        // hook command need the system's tools.
+        env.insert(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default().into(),
+        );
+        // A login shell reads its home's profile files; the user's own are not wanted here.
+        env.insert(
+            "HOME".to_string(),
+            self.tree
+                .make_dir(&format!("{id}-home"))
+                .display()
+                .to_string()
+                .into(),
+        );
+        document.insert("env".to_string(), toml::Value::Table(env));
+        if guest_window {
+            let convert: Vec<toml::Value> = [
+                yagura_test_support::process::capture_child_path()
+                    .display()
+                    .to_string(),
+                "echo".to_string(),
+                "0".to_string(),
+                "{path}".to_string(),
+            ]
+            .into_iter()
+            .map(toml::Value::String)
+            .collect();
+            let mut host_paths = toml::Table::new();
+            host_paths.insert("convert".to_string(), toml::Value::Array(convert));
+            document.insert("host_paths".to_string(), toml::Value::Table(host_paths));
+        }
+        let source = with_declared_image(
+            &toml::to_string(&document).expect("the profile encodes as TOML"),
+            &self.image(),
+        );
+        write_profile(profiles_dir, id, &source);
+        LineageCli { dir, step: 0 }
+    }
+}
+
+/// What a guest's hook is judged by is what the shipped hook command collects, run by dash
+/// (the shell a guest's CLI runs it with), and the root the shipped launch statement put in
+/// the CLI's environment. In a window whose CLI runs in another environment (`[host_paths]`),
+/// the hook command run by the window's own CLI does what its table says: it takes what
+/// waits and reports the status. Run by a CLI of the same image that CLI started, it prints
+/// nothing, exits 0, takes nothing and reports nothing. A request that carries no root (a
+/// window opened before the launch statement exported one) is only matched, whoever runs it.
+#[tokio::test]
+async fn a_guest_windows_hook_is_judged_by_what_the_shipped_command_collects_under_dash() {
+    let Some(shell) = guest_shell() else {
+        return;
+    };
+    const ID: &str = "lineage-wsl";
+    let (h, instance, profiles_dir) = lineage_daemon().await;
+    let image = LineageImage::install("guest-dash");
+    let mut cli = image.write_guest_profile(&profiles_dir, ID, &instance, true);
+    let window_id = open_from_profile(&h, ID).await;
+    let entry = h.registry.get(&window_id).expect("window exists");
+    let hook = guest_hook_argv(&shell, &instance, ID);
+    let (_, root_variables) = guest_root_variables();
+    let unset: Vec<String> = root_variables.into_iter().map(|(name, _)| name).collect();
+    assert!(
+        !unset.is_empty(),
+        "the shipped launch statement must put a root in the CLI's environment"
+    );
+
+    entry.inbox().deposit(Parcel::new("a", "PARCEL-FOR-NESTED"));
+    let reported = entry.status_event_count();
+    let nested = cli.run_command(By::Nested, &hook, "{}", &[]).await;
+    assert_eq!(nested.code, Some(0), "{nested:?}");
+    assert!(
+        nested.stdout.is_empty(),
+        "a CLI the window's CLI started takes nothing: {nested:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported);
+    assert_eq!(entry.inbox().pending_count(), 1);
+
+    let own = cli.run_command(By::Cli, &hook, "{}", &[]).await;
+    assert!(
+        own.stdout.contains("PARCEL-FOR-NESTED"),
+        "the window's own CLI takes the parcel: {own:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported + 1);
+    assert_eq!(entry.inbox().pending_count(), 0);
+
+    entry
+        .inbox()
+        .deposit(Parcel::new("a", "PARCEL-WITHOUT-ROOT"));
+    let rootless = cli.run_command(By::Nested, &hook, "{}", &unset).await;
+    assert!(
+        rootless.stdout.contains("PARCEL-WITHOUT-ROOT"),
+        "a request that carries no root is only matched: {rootless:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported + 2);
+
+    cli.exit().await;
+}
+
+/// Which rule judges a window is a fact of the window, not of what a request says. In a
+/// window run directly (no `[host_paths]`), a CLI of the same image that CLI started through
+/// the launch statement names a root of its own and a chain that counts one image up to it,
+/// yet takes nothing, because the process ids show two; the window's own CLI is taken.
+#[tokio::test]
+async fn a_window_run_directly_is_judged_by_process_ids_whatever_root_a_request_names() {
+    let Some(shell) = guest_shell() else {
+        return;
+    };
+    const ID: &str = "lineage-wsl-direct";
+    let (h, instance, profiles_dir) = lineage_daemon().await;
+    let image = LineageImage::install("guest-direct");
+    let mut cli = image.write_guest_profile(&profiles_dir, ID, &instance, false);
+    let window_id = open_from_profile(&h, ID).await;
+    let entry = h.registry.get(&window_id).expect("window exists");
+    let hook = guest_hook_argv(&shell, &instance, ID);
+
+    entry.inbox().deposit(Parcel::new("a", "PARCEL-FOR-ROOTED"));
+    let reported = entry.status_event_count();
+    let rooted = cli.run_command(By::Rooted, &hook, "{}", &[]).await;
+    assert_eq!(rooted.code, Some(0), "{rooted:?}");
+    assert!(
+        rooted.stdout.is_empty(),
+        "a CLI that names a root of its own does not become the window's: {rooted:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported);
+    assert_eq!(entry.inbox().pending_count(), 1);
+
+    let own = cli.run_command(By::Cli, &hook, "{}", &[]).await;
+    assert!(
+        own.stdout.contains("PARCEL-FOR-ROOTED"),
+        "the window's own CLI, whose requests carry the facts too, is taken: {own:?}"
+    );
+    assert_eq!(entry.status_event_count(), reported + 1);
+
+    cli.exit().await;
 }

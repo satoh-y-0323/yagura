@@ -1186,3 +1186,62 @@ fn parse_args_rejects_an_empty_missing_or_repeated_credentials_path() {
         Err(CliError::RepeatedArgument("--credentials".to_string()))
     );
 }
+
+/// The `--hook` door a guest's hook command runs, with what that command collected in the
+/// guest, is a command line the daemon reads: the shipped WSL hook command is run as a
+/// guest's CLI runs it (under dash), with a probe for the daemon, and the arguments the
+/// probe was given parse as the hook door of that profile and event.
+#[test]
+fn the_door_arguments_the_shipped_guest_hook_command_runs_with_are_read_as_a_hook_door() {
+    use crate::hook_events_door::{GUEST_EVENT, GUEST_PROFILE, guest_hook_command, guest_shell};
+    let Some(shell) = guest_shell() else {
+        return;
+    };
+    let probe = yagura_test_support::process::argv_probe_path();
+    let command = guest_hook_command("cli-args", GUEST_PROFILE, &probe.display().to_string());
+    const ROOT: &str = "4242:boot-id-for-the-test:777";
+    let shown = crate::hook_events_door::run_hook_command(&shell, &command, ROOT);
+    // `<<argv[N]=value>>` per argument; a value may hold line breaks.
+    let argv: Vec<String> = shown
+        .split("<<argv[")
+        .skip(1)
+        .map(|chunk| {
+            let (_, value) = chunk.split_once("]=").expect("a numbered argument");
+            let value = value.trim_end_matches('\n');
+            value
+                .strip_suffix(">>")
+                .expect("an argument ends its line")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        !argv.is_empty(),
+        "the hook command must run the daemon it was given; it printed {shown:?}"
+    );
+    // What the command collected is handed to the door: the root it was given, and each step
+    // up from its parent as the stat line and the executable's name.
+    let at = argv
+        .iter()
+        .position(|arg| arg == "--guest-root")
+        .unwrap_or_else(|| panic!("the door must be given --guest-root: {argv:?}"));
+    assert_eq!(argv.get(at + 1).map(String::as_str), Some(ROOT), "{argv:?}");
+    let own = format!("{} (", std::process::id());
+    let carries_this_process = argv
+        .windows(3)
+        .any(|w| w[0] == "--guest-step" && w[1].starts_with(&own) && !w[2].is_empty());
+    assert!(
+        carries_this_process,
+        "one --guest-step carries the stat line of this process and its executable: {argv:?}"
+    );
+    match parse_args(&argv) {
+        Ok(CliCommand::Hook {
+            ref profile,
+            ref event,
+            ..
+        }) => {
+            assert_eq!(profile, GUEST_PROFILE);
+            assert_eq!(event, GUEST_EVENT);
+        }
+        other => panic!("the door arguments {argv:?} must read as a hook door, got {other:?}"),
+    }
+}

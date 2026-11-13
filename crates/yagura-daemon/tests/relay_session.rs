@@ -1577,6 +1577,7 @@ async fn a_bridge_claims_a_window_declaring_its_image_only_from_the_windows_own_
                 token: VALID_TOKEN.to_string(),
                 declaration: Some(yagura_protocol::Declaration {
                     profile: DECLARED.to_string(),
+                    guest: None,
                 }),
             },
         )
@@ -1609,4 +1610,73 @@ async fn a_bridge_claims_a_window_declaring_its_image_only_from_the_windows_own_
 
     cli.exit().await;
     plain.exit().await;
+}
+
+/// A WSL agy starts the bridge the way its registration has it written, which carries what
+/// the guest shows of the bridge's own chain and the root the launch statement put in the
+/// CLI's environment, through the relay to the daemon's identify. In a window whose CLI runs
+/// in another environment, the bridge the window's own CLI started claims the window, and a
+/// bridge a CLI of the same image started inside it does not. A bridge registered before the
+/// registration carried those facts claims by matching alone, whoever started it.
+#[tokio::test]
+async fn a_wsl_agy_bridge_is_judged_by_the_chain_its_registered_command_collects() {
+    use crate::hook_events_door::{
+        By, LineageImage, guest_server_argv, guest_shell, lineage_daemon, open_from_profile,
+    };
+    if guest_shell().is_none() {
+        return;
+    }
+    const COLLECTING: &str = "lineage-wsl-bridge";
+    const OLDER: &str = "lineage-wsl-bridge-older";
+    let (h, instance, profiles_dir) = lineage_daemon().await;
+    let image = LineageImage::install("guest-bridge");
+    let mut cli = image.write_guest_profile(&profiles_dir, COLLECTING, &instance, true);
+    let mut older = image.write_guest_profile(&profiles_dir, OLDER, &instance, true);
+    let window_id = open_from_profile(&h, COLLECTING).await;
+    let older_id = open_from_profile(&h, OLDER).await;
+    let relay = process::relay_path().display().to_string();
+    let server = guest_server_argv(&instance, COLLECTING, &relay);
+    assert!(
+        server.iter().any(|arg| arg == "--profile"),
+        "the registered command still names the profile the bridge declares: {server:?}"
+    );
+
+    let nested = cli.bridge_command(By::Nested, &server).await;
+    assert!(
+        nested.contains("\"result\""),
+        "the nested CLI's bridge is served: {nested}"
+    );
+    assert_eq!(
+        mcp_connected(&h, &window_id),
+        Some(false),
+        "a bridge a CLI of the same image started does not claim the window"
+    );
+    cli.end_bridges().await;
+
+    let own = cli.bridge_command(By::Cli, &server).await;
+    assert!(
+        own.contains("\"result\""),
+        "the window's bridge is served: {own}"
+    );
+    assert_eq!(
+        mcp_connected(&h, &window_id),
+        Some(true),
+        "the window's own CLI's bridge claims the window"
+    );
+    cli.end_bridges().await;
+
+    let registered_before = older.bridge(By::Nested, OLDER).await;
+    assert!(
+        registered_before.contains("\"result\""),
+        "the older bridge is served: {registered_before}"
+    );
+    assert_eq!(
+        mcp_connected(&h, &older_id),
+        Some(true),
+        "a bridge that carries no facts claims by matching alone"
+    );
+    older.end_bridges().await;
+
+    cli.exit().await;
+    older.exit().await;
 }

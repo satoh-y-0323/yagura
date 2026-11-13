@@ -21,17 +21,20 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use yagura_os::ancestry::{LineageVerdict, judge_lineage, read_lineage};
+use yagura_os::ancestry::{
+    GuestRoot, GuestRootError, ImagePattern, LineageVerdict, guest_lineage, judge_lineage,
+    read_lineage,
+};
 use yagura_os::{IpcTransport, OsError, PeerAuth, PlatformIpc};
 
 use yagura_protocol::{
     ApprovalRequester, ApprovalRequesterKind, ClientMessage, DaemonMessage, DeliveryState, Frame,
-    FrameError, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES, InstructionNoticeState,
-    MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton, PointerInput, PointerKind,
-    ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo, WindowStatus, check_input_bounds,
-    decode_client_message, encode_daemon_message, frame_decode, frame_encode, is_valid_source,
-    validate_handoff_target, validate_handoff_text, validate_launch_option_value,
-    validate_message_text,
+    FrameError, GuestLineage, HANDOFF_NOTE_MAX_BYTES, HANDOFF_REFERENCE_MAX_BYTES,
+    InstructionNoticeState, MessageError, OnNameTaken, PROTOCOL_REVISION, PointerButton,
+    PointerInput, PointerKind, ProfileInfo, RestoreCandidate, TerminalSize, WindowInfo,
+    WindowStatus, check_input_bounds, decode_client_message, encode_daemon_message, frame_decode,
+    frame_encode, is_valid_source, validate_handoff_target, validate_handoff_text,
+    validate_launch_option_value, validate_message_text,
 };
 
 mod approval_settings;
@@ -1864,8 +1867,9 @@ impl IpcServer {
                 window_id,
                 token,
                 door,
+                guest,
             }) => {
-                self.handle_door_read(outbound, state, &window_id, &token, door)
+                self.handle_door_read(outbound, state, (&window_id, &token), door, guest.as_ref())
                     .await;
                 FrameOutcome::Continue
             }
@@ -1928,6 +1932,7 @@ impl IpcServer {
                 profile,
                 name,
                 input,
+                guest,
                 ..
             }) => {
                 let request = hook::HookRequest {
@@ -1937,6 +1942,7 @@ impl IpcServer {
                     name: &name,
                     input,
                     peer: state.peer_process_id,
+                    guest: guest.as_ref(),
                 };
                 self.handle_run_hook(outbound, request, hook::HookRead::Older)
                     .await;
@@ -3798,7 +3804,11 @@ impl IpcServer {
             ));
             return FrameOutcome::Continue;
         }
-        if let Err(refused) = self.trace_lineage(&entry, state.peer_process_id).await {
+        let guest = declaration.and_then(|declared| declared.guest.as_ref());
+        if let Err(refused) = self
+            .trace_lineage(&entry, state.peer_process_id, guest)
+            .await
+        {
             outbound.reply(&refused.message());
             return FrameOutcome::Continue;
         }
@@ -4035,6 +4045,7 @@ impl IpcServer {
         let door = HookDoor {
             name: "status_event",
             peer,
+            guest: None,
             refused: LineageAnswer::Error,
         };
         let Some(entry) = self
@@ -4096,13 +4107,14 @@ impl IpcServer {
     async fn authenticate_window(
         &self,
         outbound: &Outbound,
-        door: HookDoor,
+        door: HookDoor<'_>,
         token: &str,
         window_id: Option<&str>,
     ) -> Option<Arc<WindowEntry>> {
         let HookDoor {
             name: door,
             peer,
+            guest,
             refused,
         } = door;
         let auth_failed = || {
@@ -4142,7 +4154,7 @@ impl IpcServer {
             outbound.reply(&window_not_found_msg());
             return None;
         };
-        if let Err(lineage) = self.trace_lineage(&current, peer).await {
+        if let Err(lineage) = self.trace_lineage(&current, peer, guest).await {
             outbound.reply(&match refused {
                 LineageAnswer::Silence => crate::inbox::silence(),
                 LineageAnswer::Error => lineage.message(),
@@ -4153,7 +4165,8 @@ impl IpcServer {
     }
 
     /// Traces a request in `entry`'s name from the process `peer` back to the
-    /// window's child by the window's [`LineageRule`], logging a refusal the
+    /// window's child by the window's [`LineageRule`] (in a WSL guest, from
+    /// what the request collected there, `guest`), logging a refusal the
     /// way it deserves: a nested CLI's at every turn (debug), one no verdict
     /// was reached for, and a request let through unjudged, the first time
     /// for the window (warning), as either can be a declaration out of step
@@ -4162,10 +4175,8 @@ impl IpcServer {
         &self,
         entry: &Arc<WindowEntry>,
         peer: Option<u32>,
+        guest: Option<&GuestLineage>,
     ) -> Result<(), LineageRefused> {
-        let LineageRule::ProcessIds(images) = entry.lineage_rule() else {
-            return Ok(());
-        };
         let window_id = entry.window_id();
         let note = |reason: &str| {
             if entry.first_lineage_note() {
@@ -4173,6 +4184,14 @@ impl IpcServer {
             } else {
                 tracing::debug!(window_id, reason, "{LINEAGE_UNDECIDED}");
             }
+        };
+        let images = match entry.lineage_rule() {
+            LineageRule::Matched => return Ok(()),
+            LineageRule::Guest(images) => {
+                let verdict = trace_guest(entry, guest, images, &note)?;
+                return lineage_verdict(window_id, &note, verdict);
+            }
+            LineageRule::ProcessIds(images) => images,
         };
         // Exited whether the holder said so at its `Welcome` or later.
         let anchor = match entry.session().child_anchor() {
@@ -4222,24 +4241,11 @@ impl IpcServer {
             .ok(),
             Err(_) => None,
         };
-        match verdict {
-            Some(LineageVerdict::Accepted | LineageVerdict::Unchecked) => Ok(()),
-            Some(LineageVerdict::Nested) => {
-                tracing::debug!(
-                    window_id,
-                    "refusing a request from a CLI nested in the window's CLI"
-                );
-                Err(LineageRefused::Nested)
-            }
-            Some(LineageVerdict::Undecidable(why)) => {
-                note(&why.to_string());
-                Err(LineageRefused::Undecided)
-            }
-            None => {
-                note("the lineage could not be read");
-                Err(LineageRefused::Undecided)
-            }
-        }
+        let Some(verdict) = verdict else {
+            note("the lineage could not be read");
+            return Err(LineageRefused::Undecided);
+        };
+        lineage_verdict(window_id, &note, verdict)
     }
 
     /// Takes one token from the daemon-wide `StatusEvent` bucket,
@@ -4728,6 +4734,74 @@ fn approver_allowed(state: &ConnectionState, config: &DaemonConfig) -> bool {
 ///
 /// The reply is the same whatever failed, so a caller cannot use the answer
 /// to tell a malformed token apart from a wrong one.
+/// The verdict on a request of a window whose CLI runs in a WSL guest
+/// ([`LineageRule::Guest`]), judged against the root the request carries. A
+/// request carrying none (a window opened before its launch put one in the
+/// CLI's environment) is let through unjudged, with a warning the first time
+/// for the window.
+fn trace_guest(
+    entry: &WindowEntry,
+    guest: Option<&GuestLineage>,
+    images: &[ImagePattern],
+    note: &dyn Fn(&str),
+) -> Result<LineageVerdict, LineageRefused> {
+    let window_id = entry.window_id();
+    let Some((root, steps)) =
+        guest.and_then(|guest| guest.root.as_deref().map(|root| (root, &guest.steps)))
+    else {
+        if entry.first_lineage_note() {
+            tracing::warn!(
+                window_id,
+                "a request of a window in a WSL guest carries no root, so it is matched only; \
+                 the window was opened before its launch put one in the CLI's environment: \
+                 open the window again to have its requests traced"
+            );
+        }
+        return Ok(LineageVerdict::Unchecked);
+    };
+    if entry.session().exit_status().is_some() {
+        tracing::debug!(
+            window_id,
+            "refusing a request of a window whose CLI has exited"
+        );
+        return Err(LineageRefused::Ended);
+    }
+    let root: GuestRoot = root.parse().map_err(|err: GuestRootError| {
+        note(&err.to_string());
+        LineageRefused::Undecided
+    })?;
+    let lineage = guest_lineage(
+        &root,
+        steps
+            .iter()
+            .map(|step| (step.stat.as_str(), step.exe.as_str())),
+    );
+    Ok(judge_lineage(&lineage, Some(root.anchor()), images))
+}
+
+/// What `verdict` on a request in `window_id`'s name comes to, logged the way
+/// [`IpcServer::trace_lineage`] says, `note` saying why no verdict was reached.
+fn lineage_verdict(
+    window_id: &str,
+    note: &dyn Fn(&str),
+    verdict: LineageVerdict,
+) -> Result<(), LineageRefused> {
+    match verdict {
+        LineageVerdict::Accepted | LineageVerdict::Unchecked => Ok(()),
+        LineageVerdict::Nested => {
+            tracing::debug!(
+                window_id,
+                "refusing a request from a CLI nested in the window's CLI"
+            );
+            Err(LineageRefused::Nested)
+        }
+        LineageVerdict::Undecidable(why) => {
+            note(&why.to_string());
+            Err(LineageRefused::Undecided)
+        }
+    }
+}
+
 /// The log line of a request whose lineage reached no verdict.
 const LINEAGE_UNDECIDED: &str = "refusing a request in a window's name whose lineage reached no \
      verdict; if the window's own CLI is refused, the image its profile declares may be out of \
@@ -4736,23 +4810,31 @@ const LINEAGE_UNDECIDED: &str = "refusing a request in a window's name whose lin
 /// A hook door's request in a window's name, as [`IpcServer::authenticate_window`]
 /// judges it.
 #[derive(Clone, Copy)]
-pub(super) struct HookDoor {
+pub(super) struct HookDoor<'a> {
     /// The door, as its refusals name it.
     pub(super) name: &'static str,
     /// The process id of the connection's peer.
     pub(super) peer: Option<u32>,
+    /// What the request collected of its lineage in a WSL guest.
+    pub(super) guest: Option<&'a GuestLineage>,
     /// How a request its window's lineage refuses is answered.
     pub(super) refused: LineageAnswer,
 }
 
-impl HookDoor {
+impl<'a> HookDoor<'a> {
     /// A door whose output the CLI reads, which a refusal leaves silent.
     pub(super) fn new(name: &'static str, peer: Option<u32>) -> Self {
         Self {
             name,
             peer,
+            guest: None,
             refused: LineageAnswer::Silence,
         }
+    }
+
+    /// The door with what its request collected of its lineage in a WSL guest.
+    pub(super) fn with_guest(self, guest: Option<&'a GuestLineage>) -> Self {
+        Self { guest, ..self }
     }
 }
 

@@ -80,19 +80,19 @@ use yagura_protocol::{
     ChatDeliveryInfo, ChatHalt, ChatMessage, ChatParticipant, ChatRoomInfo, ClientMessage,
     ColorOverride, CursorShape, CursorState, DaemonMessage, DaemonProblem, DaemonProblemKind,
     Declaration, DefaultPalettes, DeliveryState, DeliveryStream, Frame, FrameLine, FrameRun,
-    HookInputValue, HookPointer, HookPointerKind, InstructionNotice, InstructionNoticeState, Key,
-    KeyInput, LaunchOptionAlias, LaunchOptionInfo, McpRegistrationAction, McpRegistrationCommand,
-    McpRegistrationEntry, McpRegistrationRow, McpRegistrationState, McpRegistrationStatusInfo,
-    McpRegistrationStep, McpRegistrationTomlSet, McpRegistrationTomlValue, MilestoneInfo,
-    ModelChoice, ModelChoiceSource, Modifiers, NamedKey, OnNameTaken, Palette, PaletteSlot,
-    PlanInfo, PlanReview, PlanSummary, PlanTaskInfo, PlanTaskSpec, PlaybookState, PointerButton,
-    PointerInput, PointerKind, ProfileCapability, ProfileCommandDetail, ProfileDetailEntry,
-    ProfileGuidance, ProfileInfo, ProfileLimit, ProfileUnavailableKind, ReceivedReport,
-    ReportOutcome, ReportTaskRef, ResolvedAssignment, RestoreCandidate, ReviewMark, RoleEntry,
-    RoomRef, TaskAssignment, TaskReport, TerminalSize, TicketConfigInfo, TicketFieldInfo,
-    TicketInfo, TicketResultInfo, TicketStateInfo, TicketSummary, TicketWorkspaceInfo,
-    ToolAutoApprove, UnknownReason, ViewState, WheelInput, WindowInfo,
-    WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
+    GuestLineage, GuestStep, HookInputValue, HookPointer, HookPointerKind, InstructionNotice,
+    InstructionNoticeState, Key, KeyInput, LaunchOptionAlias, LaunchOptionInfo,
+    McpRegistrationAction, McpRegistrationCommand, McpRegistrationEntry, McpRegistrationRow,
+    McpRegistrationState, McpRegistrationStatusInfo, McpRegistrationStep, McpRegistrationTomlSet,
+    McpRegistrationTomlValue, MilestoneInfo, ModelChoice, ModelChoiceSource, Modifiers, NamedKey,
+    OnNameTaken, Palette, PaletteSlot, PlanInfo, PlanReview, PlanSummary, PlanTaskInfo,
+    PlanTaskSpec, PlaybookState, PointerButton, PointerInput, PointerKind, ProfileCapability,
+    ProfileCommandDetail, ProfileDetailEntry, ProfileGuidance, ProfileInfo, ProfileLimit,
+    ProfileUnavailableKind, ReceivedReport, ReportOutcome, ReportTaskRef, ResolvedAssignment,
+    RestoreCandidate, ReviewMark, RoleEntry, RoomRef, TaskAssignment, TaskReport, TerminalSize,
+    TicketConfigInfo, TicketFieldInfo, TicketInfo, TicketResultInfo, TicketStateInfo,
+    TicketSummary, TicketWorkspaceInfo, ToolAutoApprove, UnknownReason, ViewState, WheelInput,
+    WindowInfo, WindowStatus as WireWindowStatus, WithdrawOutcome, WithdrawReason,
 };
 
 // ---------------------------------------------------------------------
@@ -258,7 +258,9 @@ wire_sample!(enum CellFlag => Bold);
 wire_sample!(enum CursorShape => Block);
 wire_sample!(enum HookPointerKind => Presence);
 wire_sample!(struct HookPointer { pointer, kind, value });
-wire_sample!(struct Declaration { profile });
+wire_sample!(struct Declaration { profile, guest });
+wire_sample!(struct GuestLineage { root, steps });
+wire_sample!(struct GuestStep { stat, exe });
 
 /// Hand-written for the same reason as `Key`'s: `HookInputValue` carries data
 /// in one variant.
@@ -830,6 +832,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
             name,
             input,
             held,
+            guest,
         }),
         // Revision 34's door requests, built from their wire form: one read
         // naming the door (the hook kind carries the most fields) and the
@@ -844,6 +847,7 @@ fn client_message_corpus() -> Vec<ClientMessage> {
                 "name": "sample",
                 "input": [{ "session": "sample" }],
             },
+            "guest": { "root": "sample", "steps": [{ "stat": "sample", "exe": "sample" }] },
         })),
         message_from_wire::<ClientMessage>(serde_json::json!({ "type": "deliver_printed" })),
     ]

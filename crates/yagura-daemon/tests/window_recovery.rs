@@ -497,6 +497,7 @@ fn deliver_take(window_id: &str, token: &str) -> ClientMessage {
         window_id: window_id.to_owned(),
         token: token.to_owned(),
         door: yagura_protocol::Door::Take,
+        guest: None,
     }
 }
 
@@ -3561,7 +3562,7 @@ async fn a_taken_back_window_is_judged_against_the_child_its_holder_names() {
     const OLD: &str = "lineage-old";
     const ENDED: &str = "lineage-ended";
     let sandbox = Sandbox::new("recover-lineage");
-    let image = LineageImage::install("recover");
+    let image = LineageImage::install("recover").sharing_bases(sandbox.tree.path());
     let mut live = image.write_profile(&sandbox.profiles_dir, LIVE, &sandbox.instance, true, "");
     image.write_profile(&sandbox.profiles_dir, OLD, &sandbox.instance, true, "");
     let mut ended = image.write_profile(&sandbox.profiles_dir, ENDED, &sandbox.instance, true, "");
@@ -3574,7 +3575,7 @@ async fn a_taken_back_window_is_judged_against_the_child_its_holder_names() {
     let old_record = record_of(&sandbox, &old_id);
     first.kill_keeping_windows();
     let ended_pid = ended.exit().await;
-    common::wait_processes_gone(&[ended_pid]).await;
+    yagura_test_support::process::wait_processes_gone(&[ended_pid], |_| String::new()).await;
     for (window_id, mark) in [(&live_id, "PARCEL-FOR-LIVE"), (&old_id, "PARCEL-FOR-OLD")] {
         seed_parcel(&sandbox, window_id, mark);
     }
@@ -3626,6 +3627,7 @@ async fn a_taken_back_window_is_judged_against_the_child_its_holder_names() {
             token: TOKEN.to_owned(),
             declaration: Some(yagura_protocol::Declaration {
                 profile: ENDED.to_owned(),
+                guest: None,
             }),
         },
     )
@@ -3652,7 +3654,7 @@ async fn a_taken_back_window_keeps_whether_its_cli_runs_in_another_environment()
     const GUEST_ROWLESS: &str = "guest-rowless";
     const PLAIN_ROWLESS: &str = "plain-rowless";
     let sandbox = Sandbox::new("recover-guest");
-    let image = LineageImage::install("guest");
+    let image = LineageImage::install("guest").sharing_bases(sandbox.tree.path());
     let host_paths = guest_host_paths();
     let profiles = &sandbox.profiles_dir;
     let instance = &sandbox.instance;
@@ -3775,7 +3777,7 @@ async fn a_window_whose_row_predates_the_guest_fact_is_judged_by_its_profiles_ho
     const GUEST: &str = "guest-old";
     const PLAIN: &str = "plain-old";
     let sandbox = Sandbox::new("recover-guest-old");
-    let image = LineageImage::install("guest-old");
+    let image = LineageImage::install("guest-old").sharing_bases(sandbox.tree.path());
     let profiles = &sandbox.profiles_dir;
     let instance = &sandbox.instance;
     let mut guest = image.write_profile(profiles, GUEST, instance, true, &guest_host_paths());
@@ -3810,4 +3812,64 @@ async fn a_window_whose_row_predates_the_guest_fact_is_judged_by_its_profiles_ho
     assert!(own.stdout.contains("PARCEL-FOR-PLAIN"), "{own:?}");
     guest.exit().await;
     plain.exit().await;
+}
+
+/// A guest window taken back by the next daemon is still judged by the chain its hooks
+/// collect, from the fact that its CLI runs in another environment kept with the window (its
+/// row, or its holder's launch record when the row is gone): the hook command run by a CLI
+/// the window's CLI started takes nothing, and the window's own CLI takes what waits.
+#[tokio::test]
+async fn a_taken_back_guest_window_is_judged_by_the_chain_its_hook_collects() {
+    use crate::hook_events_door::{By, LineageImage, guest_hook_argv, guest_shell};
+    let Some(shell) = guest_shell() else {
+        return;
+    };
+    const WITH_ROW: &str = "guest-chain-row";
+    const WITHOUT_ROW: &str = "guest-chain-record";
+    let sandbox = Sandbox::new("recover-guest-chain");
+    let image = LineageImage::install("guest-chain").sharing_bases(sandbox.tree.path());
+    let profiles = &sandbox.profiles_dir;
+    let instance = &sandbox.instance;
+    let mut with_row = image.write_guest_profile(profiles, WITH_ROW, instance, true);
+    let mut without_row = image.write_guest_profile(profiles, WITHOUT_ROW, instance, true);
+
+    let mut first = start_with_token(&sandbox).await;
+    let row_id = first.open_profile_window(&sandbox, WITH_ROW).await;
+    let record_id = first.open_profile_window(&sandbox, WITHOUT_ROW).await;
+    until_rows_settled(&sandbox, &[&row_id, &record_id]).await;
+    first.kill_keeping_windows();
+    {
+        let db = rusqlite::Connection::open(store_db(&sandbox)).unwrap();
+        db.execute("DELETE FROM windows WHERE window_id = ?1", [&record_id])
+            .unwrap();
+    }
+    for window_id in [&row_id, &record_id] {
+        seed_parcel(&sandbox, window_id, &format!("PARCEL-FOR-{window_id}"));
+    }
+
+    let mut next = start_with_token(&sandbox).await;
+    listed(&mut next, &sandbox, &row_id).await;
+    listed(&mut next, &sandbox, &record_id).await;
+    for (cli, profile, window_id) in [
+        (&mut with_row, WITH_ROW, &row_id),
+        (&mut without_row, WITHOUT_ROW, &record_id),
+    ] {
+        let mark = format!("PARCEL-FOR-{window_id}");
+        let hook = guest_hook_argv(&shell, instance, profile);
+        let nested = cli.run_command(By::Nested, &hook, "{}", &[]).await;
+        assert!(
+            !nested.stdout.contains(&mark),
+            "{profile}: a CLI the window's CLI started takes nothing after the take-back: \
+             {nested:?}; daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        let own = cli.run_command(By::Cli, &hook, "{}", &[]).await;
+        assert!(
+            own.stdout.contains(&mark),
+            "{profile}: the window's own CLI takes what waits after the take-back: {own:?}; \
+             daemon log:\n{}",
+            sandbox.daemon_log()
+        );
+        cli.exit().await;
+    }
 }

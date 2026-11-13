@@ -47,6 +47,42 @@ const FOR_INSTANCE: &str = " --for-instance yagura";
 fn hook_call(profile: &str, event: &str) -> String {
     format!("{FOR_INSTANCE} --hook {profile} {event}")
 }
+
+/// The command the shipped `profile` registers for `event`, with `daemon` as
+/// the daemon: the door call itself, or for the WSL row the shell that collects
+/// the guest's lineage first and then calls it.
+fn expected_call(profile: &str, daemon: &str, event: &str) -> String {
+    let call = format!("{daemon}{}", hook_call(profile, event));
+    if profile != WSL_PROFILE {
+        return call;
+    }
+    let root: toml::Table = read_doc_verbatim(&format!("../../profiles/{profile}.toml"))
+        .parse()
+        .expect("the shipped profile is TOML");
+    let handlers = &root["mcp_registration"]["json_entry"]["entries"]["{server}"][event][0];
+    let handler = handlers.get("hooks").map_or(handlers, |hooks| &hooks[0]);
+    let template = handler["command"].as_str().expect("a command template");
+    let rendered = template
+        .replace("{daemon}", daemon)
+        .replace("{server}", "yagura");
+    assert!(
+        rendered.contains(&call),
+        "{profile}/{event}: the shell calls the daemon's door: {rendered:?}"
+    );
+    rendered
+}
+
+/// The door call within `command`: for the WSL row, what its shell execs
+/// without the collected lineage that follows the call.
+fn door_call<'a>(profile: &str, command: &'a str) -> &'a str {
+    if profile != WSL_PROFILE {
+        return command;
+    }
+    let (_, call) = command
+        .rsplit_once("; exec ")
+        .unwrap_or_else(|| panic!("the WSL command execs the door: {command:?}"));
+    call.split(" --guest-root").next().unwrap_or(call)
+}
 const MCP_FILE: &str = ".gemini/config/mcp_config.json";
 
 /// How long a stubbed CLI stays alive when a case needs a live window: a
@@ -146,11 +182,7 @@ impl Layout {
 
     /// The command the entry is expected to run for `event`.
     fn expected_command(&self, profile: &str, event: &str) -> String {
-        format!(
-            "{}{}",
-            self.expected_daemon(profile),
-            hook_call(profile, event)
-        )
+        expected_call(profile, &self.expected_daemon(profile), event)
     }
 }
 
@@ -442,7 +474,7 @@ fn assert_yagura_entry(file: &Value, profile: &str, daemon: &str) {
         set_of(&["PreInvocation", "PostToolUse", "SessionStart", "Stop"]),
         "the running events, the start-up door and the stop are used: {entry}"
     );
-    let call = |event: &str| format!("{daemon}{}", hook_call(profile, event));
+    let call = |event: &str| expected_call(profile, daemon, event);
     let pre = entry["PreInvocation"].as_array().expect("an array");
     assert_eq!(pre.len(), 1, "{entry}");
     assert_handler(&pre[0], &call("PreInvocation"), "PreInvocation");
@@ -682,9 +714,13 @@ async fn the_entry_runs_the_report_folders_daemon_by_an_absolute_path_free_of_sh
             layout.expected_command(profile, "PreInvocation"),
             "{profile}"
         );
-        let door = file["yagura"]["SessionStart"][0]["command"]
-            .as_str()
-            .expect("a command string");
+        let door = door_call(
+            profile,
+            file["yagura"]["SessionStart"][0]["command"]
+                .as_str()
+                .expect("a command string"),
+        );
+        let command = door_call(profile, &command).to_string();
         assert!(
             door.starts_with(command.split(" --").next().unwrap())
                 && !contains_cmd_metacharacter(door)

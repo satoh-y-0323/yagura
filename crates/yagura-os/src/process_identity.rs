@@ -340,28 +340,47 @@ mod platform {
     }
 }
 
+// A Linux `/proc/<pid>/stat` line is read here whatever the host, as a WSL
+// guest's lines reach a Windows daemon too.
+
+/// The process id a `/proc/<pid>/stat` line starts with.
+pub(crate) fn stat_pid(stat: &str) -> Option<u32> {
+    stat.split_once(' ')?.0.parse().ok()
+}
+
+/// The state and the start time (in clock ticks since boot) in a
+/// `/proc/<pid>/stat` line. The command name before them is in
+/// parentheses and may hold spaces and parentheses itself, so the fields
+/// are counted from the last `)`.
+pub(crate) fn state_and_start(stat: &str) -> Option<(char, &str)> {
+    let (_, after_name) = stat.rsplit_once(')')?;
+    let mut fields = after_name.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    // The start time is the 22nd field; the state is the 3rd.
+    let start = fields.nth(18)?;
+    Some((state, start))
+}
+
+/// The parent, group and session ids in a `/proc/<pid>/stat` line: the
+/// 4th to 6th fields.
+pub(crate) fn family(stat: &str) -> Option<(u32, u32, u32)> {
+    let (_, after_name) = stat.rsplit_once(')')?;
+    let mut fields = after_name.split_whitespace().skip(1);
+    let ppid = fields.next()?.parse().ok()?;
+    let pgid = fields.next()?.parse().ok()?;
+    let sid = fields.next()?.parse().ok()?;
+    Some((ppid, pgid, sid))
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 
-    use super::Liveness;
+    use super::{Liveness, family, state_and_start};
 
     #[derive(Debug)]
     pub(super) struct Handle(OwnedFd);
-
-    /// The state and the start time (in clock ticks since boot) in a
-    /// `/proc/<pid>/stat` line. The command name before them is in
-    /// parentheses and may hold spaces and parentheses itself, so the fields
-    /// are counted from the last `)`.
-    fn state_and_start(stat: &str) -> Option<(char, &str)> {
-        let (_, after_name) = stat.rsplit_once(')')?;
-        let mut fields = after_name.split_whitespace();
-        let state = fields.next()?.chars().next()?;
-        // The start time is the 22nd field; the state is the 3rd.
-        let start = fields.nth(18)?;
-        Some((state, start))
-    }
 
     /// The process's state and start, the start tied to this boot, since
     /// clock ticks count from it; `None` when no process has that id.
@@ -385,17 +404,6 @@ mod platform {
 
     pub(super) fn start_of(pid: u32) -> io::Result<Option<String>> {
         Ok(read_stat(pid)?.map(|(_, start)| start))
-    }
-
-    /// The parent, group and session ids in a `/proc/<pid>/stat` line: the
-    /// 4th to 6th fields.
-    fn family(stat: &str) -> Option<(u32, u32, u32)> {
-        let (_, after_name) = stat.rsplit_once(')')?;
-        let mut fields = after_name.split_whitespace().skip(1);
-        let ppid = fields.next()?.parse().ok()?;
-        let pgid = fields.next()?.parse().ok()?;
-        let sid = fields.next()?.parse().ok()?;
-        Some((ppid, pgid, sid))
     }
 
     pub(super) fn facts_of(pid: u32) -> io::Result<Option<super::ProcessFacts>> {

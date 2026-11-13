@@ -258,6 +258,7 @@ async fn the_credentials_file_is_an_absolute_path_naming_the_window_and_a_token_
     let declaring = |profile: &str| {
         Some(Declaration {
             profile: profile.to_string(),
+            guest: None,
         })
     };
     for (what, candidate, declaration, accepted) in [

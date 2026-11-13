@@ -39,9 +39,17 @@ fn main() -> ExitCode {
     // pair is no claim, and `--credentials <path>` names the window otherwise.
     // `--profile <id>` names the profile whose registration or launch started
     // this relay, which the daemon matches against the window's.
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--guest-root` and `--guest-step` hand over what the registration's
+    // wrapper collected in a WSL guest, which the daemon judges.
+    let args = yagura_protocol::process_args();
     let window = process_window_credentials(&args);
-    let declaration = declaration_arg(&args);
+    let declaration = match declaration_arg(&args) {
+        Ok(declaration) => declaration,
+        Err(err) => {
+            eprintln!("yagura-mcp: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

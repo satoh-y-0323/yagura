@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use yagura_protocol::{
-    DaemonMessage, Door, HookInputValue, HookPointer, HookPointerKind, WindowStatus,
+    DaemonMessage, Door, GuestLineage, HookInputValue, HookPointer, HookPointerKind, WindowStatus,
 };
 
 use crate::inbox::{DeliverySpec, DoorRead, silence};
@@ -82,6 +82,8 @@ pub(super) struct HookRequest<'a> {
     pub(super) input: Option<Vec<HookInputValue>>,
     /// The process id of the connection's peer.
     pub(super) peer: Option<u32>,
+    /// What the hook collected of its lineage in a WSL guest.
+    pub(super) guest: Option<&'a GuestLineage>,
 }
 
 impl IpcServer {
@@ -101,11 +103,12 @@ impl IpcServer {
             name,
             input,
             peer,
+            guest,
         } = request;
         let Some(entry) = self
             .authenticate_window(
                 outbound,
-                HookDoor::new("run_hook", peer),
+                HookDoor::new("run_hook", peer).with_guest(guest),
                 token,
                 Some(window_id),
             )

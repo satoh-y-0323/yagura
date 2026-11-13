@@ -87,6 +87,7 @@ pub(crate) async fn send_door_read(conn: &mut Connection, window_id: &str, door:
             window_id: window_id.to_string(),
             token: VALID_TOKEN.to_string(),
             door,
+            guest: None,
         },
     )
     .await;

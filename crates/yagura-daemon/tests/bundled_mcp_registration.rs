@@ -177,6 +177,27 @@ fn raw_registration_table(id: &str) -> toml::Table {
     }
 }
 
+/// What the shipped profile `id` has the CLI run before the bridge as its
+/// server: the elements of its add between `--` and `{bridge}` (a shell
+/// wrapping the bridge), none for a server that is the bridge itself.
+fn server_wrapper(id: &str) -> Vec<String> {
+    let add: Vec<String> = raw_registration_table(id)["add"]
+        .as_array()
+        .expect("the add command is an array")
+        .iter()
+        .map(|arg| arg.as_str().expect("an argument").to_string())
+        .collect();
+    let from = add
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("the add command separates the server's command with `--`");
+    let to = add
+        .iter()
+        .position(|arg| arg == "{bridge}")
+        .expect("the add command names the bridge");
+    add[from + 1..to].to_vec()
+}
+
 /// The shipped profile's `[host_paths]` table, untyped, when it carries the
 /// file tools (`read`, and `replace` / `absent_exit` beside it).
 fn host_file_tools(id: &str) -> Option<toml::Table> {
@@ -441,7 +462,8 @@ fn wsl_file_tools_run_inside_wsl_and_take_the_file_as_one_positional_argument() 
 // =============================================================================
 
 /// The canonical `add` for `form`: `mcp add [scope] [--env=pair ...] <server>
-/// -- <bridge> --profile <id>`. Every flag precedes the name, as each CLI's usage line has
+/// -- [wrapper ...] <bridge> --profile <id>`, the wrapper being the profile's
+/// own ([`server_wrapper`]). Every flag precedes the name, as each CLI's usage line has
 /// it (`agy` rejects a flag after the name), and carries its value in the same
 /// argument, since `claude`'s variadic `-e <value>` would take the name too.
 fn expected_add(
@@ -459,6 +481,7 @@ fn expected_add(
     }
     argv.push(server.to_string());
     argv.push("--".to_string());
+    argv.extend(server_wrapper(id));
     argv.push(bridge.to_string());
     argv.extend(strings(&["--profile", id]));
     argv
@@ -606,9 +629,25 @@ fn lines_status(id: &str, scope: &str, command: &str) -> String {
     )
 }
 
-/// The JSON settings file listing servers registered for the profile `id`.
-fn json_settings(id: &str, server: &str, command: &str) -> String {
-    json!({ "mcpServers": { server: { "command": command, "args": ["--profile", id], "env": {} } } })
+/// The server argv the shipped profile `id` registers with `bridge` as the
+/// bridge: what follows `--` in its add command (a shell wrapping the bridge
+/// comes first).
+fn registered_server_argv(id: &str, bridge: &str) -> Vec<String> {
+    let add = shipped_spec(id)
+        .render_add(&default_target(), bridge)
+        .expect("the add command renders");
+    let at = add
+        .iter()
+        .position(|arg| arg == "--")
+        .expect("the add command separates the server's command with `--`");
+    add[at + 1..].to_vec()
+}
+
+/// The JSON settings file listing servers registered for the profile `id`,
+/// each the server argv `id` registers with `bridge` as the bridge.
+fn json_settings(id: &str, server: &str, bridge: &str) -> String {
+    let argv = registered_server_argv(id, bridge);
+    json!({ "mcpServers": { server: { "command": argv[0], "args": argv[1..], "env": {} } } })
         .to_string()
 }
 
@@ -780,7 +819,13 @@ fn the_json_file_form_reads_not_registered_registered_and_differs() {
         let other_bridge = exited(0, &json_settings(id, "yagura", other), "");
         let derived = derive(id, &other_bridge, bridge);
         assert_state(id, "another bridge", &derived, RegistrationState::Differs);
-        assert_eq!(derived.differs_in, strings(&["command"]), "{id}");
+        // What differs is the part of the server argv the bridge stands in.
+        let holding_bridge = if registered_server_argv(id, bridge)[0] == bridge {
+            "command"
+        } else {
+            "args"
+        };
+        assert_eq!(derived.differs_in, strings(&[holding_bridge]), "{id}");
     }
 }
 
@@ -933,17 +978,13 @@ async fn a_placed_profile_without_the_table_is_listed_with_the_shipped_table_and
     let wsl = row_of(&rows, "wsl-antigravity-cli");
     assert_eq!(wsl.display_name, "Placed Wsl Row");
     assert_eq!(wsl.group.as_deref(), Some("WSL"));
+    let mut rendered = strings(&["mcp", "add", "yagura", "--"]);
+    rendered.extend(server_wrapper("wsl-antigravity-cli"));
+    rendered.extend(strings(&["{bridge}", "--profile", "wsl-antigravity-cli"]));
+    let rendered: Vec<&str> = rendered.iter().map(String::as_str).collect();
     assert_eq!(
         wsl.add.as_ref().map(|add| add.argv.clone()),
-        Some(placed_argv(&[
-            "mcp",
-            "add",
-            "yagura",
-            "--",
-            "{bridge}",
-            "--profile",
-            "wsl-antigravity-cli"
-        ]))
+        Some(placed_argv(&rendered))
     );
     assert_eq!(wsl.toml_set, None);
 

@@ -394,15 +394,18 @@ pub struct WindowProvenance {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LineageRule {
     /// Not traced: the window's credentials and declaration are matched
-    /// only. A window whose profile declares no image of its CLI, or whose
-    /// CLI runs in another environment, whose processes the kernel's ids do
-    /// not reach.
+    /// only. A window whose profile declares no image of its CLI.
     #[default]
     Matched,
     /// Traced by the kernel's process ids from the requester up to the
     /// window's child: exactly one process on the way may run one of these
     /// images.
     ProcessIds(Vec<ImagePattern>),
+    /// Traced by what a request collected of its lineage in the WSL guest the
+    /// window's CLI runs in, whose processes the kernel's ids do not reach, up
+    /// to the root the launch put in the CLI's environment: exactly one
+    /// process on the way may run one of these images.
+    Guest(Vec<ImagePattern>),
 }
 
 impl LineageRule {
@@ -410,8 +413,10 @@ impl LineageRule {
     /// and whose CLI runs in another environment when `runs_in_guest`.
     #[must_use]
     pub fn for_window(images: Vec<ImagePattern>, runs_in_guest: bool) -> Self {
-        if images.is_empty() || runs_in_guest {
+        if images.is_empty() {
             Self::Matched
+        } else if runs_in_guest {
+            Self::Guest(images)
         } else {
             Self::ProcessIds(images)
         }

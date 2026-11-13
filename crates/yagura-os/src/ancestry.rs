@@ -272,8 +272,95 @@ pub fn read_lineage(pid: u32) -> Lineage {
     platform::read_lineage(pid)
 }
 
+/// The root of a WSL guest's lineage: the guest process that started the
+/// window's CLI there, as the launch put it in the CLI's environment,
+/// `<pid>:<boot_id>:<starttime>` (the starttime being the 22nd field of its
+/// `/proc/<pid>/stat` line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestRoot {
+    pid: u32,
+    boot: String,
+    start: ProcessStart,
+}
+
+/// A guest root that is not `<pid>:<boot_id>:<starttime>`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("the guest root {0:?} is not <pid>:<boot_id>:<starttime>")]
+pub struct GuestRootError(String);
+
+impl FromStr for GuestRoot {
+    type Err = GuestRootError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let malformed = || GuestRootError(text.to_owned());
+        let (pid, rest) = text.split_once(':').ok_or_else(malformed)?;
+        let (boot, ticks) = rest.rsplit_once(':').ok_or_else(malformed)?;
+        let pid = pid.parse().map_err(|_| malformed())?;
+        if boot.is_empty() || ticks.is_empty() || !ticks.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(malformed());
+        }
+        // The same form a Linux host gives its own starts (`process_start`).
+        let start = format!("{boot}:{ticks}").parse().map_err(|_| malformed())?;
+        Ok(Self {
+            pid,
+            boot: boot.to_owned(),
+            start,
+        })
+    }
+}
+
+impl GuestRoot {
+    /// The root as the anchor [`judge_lineage`] takes.
+    #[must_use]
+    pub fn anchor(&self) -> (u32, &ProcessStart) {
+        (self.pid, &self.start)
+    }
+}
+
+/// The lineage a WSL guest's hook command or bridge wrapper collected, as
+/// raw `steps` from its parent up: each a `/proc/<pid>/stat` line and the
+/// `/proc/<pid>/exe` link, each step the parent of the one before it. Starts
+/// are read against `root`'s boot, as the guest's kernel counts them. The
+/// lineage stops before a step that cannot be read (a line or link that is
+/// not one, or held bytes the way here could not carry, as the replacement
+/// character shows) or that is not the parent its child named.
+#[must_use]
+pub fn guest_lineage<'a>(
+    root: &GuestRoot,
+    steps: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Lineage {
+    let mut ancestors: Vec<Ancestor> = Vec::new();
+    let mut named_parent: Option<u32> = None;
+    for (stat, exe) in steps {
+        let Some((step, parent)) = guest_step(&root.boot, stat, exe) else {
+            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Unanswered));
+        };
+        if named_parent.is_some_and(|named| named != step.pid) {
+            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Reused));
+        }
+        ancestors.push(step);
+        if parent == 0 {
+            return Lineage::ended(ancestors, NameCase::Sensitive, Some(LineageEnd::Top));
+        }
+        named_parent = Some(parent);
+    }
+    Lineage::ended(ancestors, NameCase::Sensitive, None)
+}
+
+/// One step of a guest's lineage and the parent its stat line names.
+fn guest_step(boot: &str, stat: &str, exe: &str) -> Option<(Ancestor, u32)> {
+    if stat.contains(char::REPLACEMENT_CHARACTER) || exe.contains(char::REPLACEMENT_CHARACTER) {
+        return None;
+    }
+    let pid = crate::process_identity::stat_pid(stat)?;
+    let (_, ticks) = crate::process_identity::state_and_start(stat)?;
+    let (parent, _, _) = crate::process_identity::family(stat)?;
+    let image = proc_exe_image(exe)?;
+    let start = format!("{boot}:{ticks}").parse().ok()?;
+    Some((Ancestor { pid, image, start }, parent))
+}
+
 /// The last element of an executable path; `None` when it has none.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn file_name(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
     (!name.is_empty()).then(|| name.to_owned())
@@ -282,8 +369,7 @@ fn file_name(path: &str) -> Option<String> {
 /// The image of a `/proc/<pid>/exe` link. proc(5): the link of an unlinked
 /// executable holds " (deleted)" appended to the path it was started from,
 /// as when a CLI replaces its own file to update; that mark alone is taken
-/// off.
-#[cfg(any(target_os = "linux", test))]
+/// off. Read on any host, as a WSL guest's links reach a Windows daemon too.
 fn proc_exe_image(link: &str) -> Option<String> {
     file_name(link.strip_suffix(" (deleted)").unwrap_or(link))
 }

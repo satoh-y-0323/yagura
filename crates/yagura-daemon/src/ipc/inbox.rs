@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use yagura_protocol::{DaemonMessage, Door, WindowStatus};
+use yagura_protocol::{DaemonMessage, Door, GuestLineage, WindowStatus};
 
 use crate::inbox::{DoorHold, DoorRead, Wait, silence};
 use crate::window::WindowEntry;
@@ -182,14 +182,15 @@ pub(super) fn handle_older_done(outbound: &Outbound) {
 }
 
 impl IpcServer {
-    /// Answers `door_read`.
+    /// Answers `door_read`; `guest` is what the door collected of its
+    /// lineage in a WSL guest.
     pub(super) async fn handle_door_read(
         &self,
         outbound: &Arc<Outbound>,
         state: &mut ConnectionState,
-        window_id: &str,
-        token: &str,
+        (window_id, token): (&str, &str),
         door: Door,
+        guest: Option<&GuestLineage>,
     ) {
         if let Door::Hook {
             profile,
@@ -204,6 +205,7 @@ impl IpcServer {
                 name: &name,
                 input,
                 peer: state.peer_process_id,
+                guest,
             };
             self.handle_run_hook(outbound, request, HookRead::Door(&state.held_read))
                 .await;
@@ -212,7 +214,7 @@ impl IpcServer {
         let Some(entry) = self
             .authenticate_window(
                 outbound,
-                super::HookDoor::new("door_read", state.peer_process_id),
+                super::HookDoor::new("door_read", state.peer_process_id).with_guest(guest),
                 token,
                 Some(window_id),
             )

@@ -137,6 +137,7 @@ async fn call_door(
         window_id,
         token,
         door,
+        guest: None,
     };
     let (output, _, _) = common::expect_delivery(common::call_door(client, &message).await);
     // A door says it printed once it has, which ends what it took.

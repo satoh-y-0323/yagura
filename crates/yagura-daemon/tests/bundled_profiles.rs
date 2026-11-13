@@ -232,7 +232,7 @@ fn antigravity_cli_family_profiles_ship_no_mcp_table() {
 }
 
 // ---------------------------------------------------------------------
-// Both WSL profiles exec the CLI without going through a shell
+// The WSL profiles exec the CLI through a fixed wrapper, no value spliced into it
 // ---------------------------------------------------------------------
 
 #[test]
@@ -268,14 +268,87 @@ fn antigravity_cli_windows_argv_execs_agy_directly() {
     );
 }
 
+/// The WSL agy profile's `bash -c` runs one fixed statement before the CLI -- it puts the
+/// CLI's root in its environment -- and the statement ends by handing every argument the
+/// daemon appends on to the CLI through the same login-shell wrapper the other WSL profiles
+/// use. The argv is still fixed: no value of a launch is spliced into the statement.
 #[test]
 fn wsl_antigravity_cli_windows_argv_execs_the_cli_through_a_fixed_wrapper() {
     let argv = windows_argv("wsl-antigravity-cli");
 
     assert_eq!(
-        argv,
-        vec!["wsl", "-e", "bash", "-lic", "exec \"$0\" \"$@\"", "agy"],
-        "wsl-antigravity-cli's windows argv must be the fixed exec wrapper, got {argv:?}"
+        argv.len(),
+        6,
+        "wsl-antigravity-cli's windows argv is `wsl -e bash -c <statement> agy`, got {argv:?}"
+    );
+    assert_eq!(argv[..4], ["wsl", "-e", "bash", "-c"], "{argv:?}");
+    assert_eq!(argv[5], "agy", "{argv:?}");
+    assert!(
+        argv[4]
+            .trim_end()
+            .ends_with("exec bash -lic 'exec \"$0\" \"$@\"' \"$0\" \"$@\""),
+        "the statement ends by handing $0 and the daemon's arguments to the CLI: {:?}",
+        argv[4]
+    );
+}
+
+/// What the WSL agy profile's launch statement does when it runs, as bash in a WSL
+/// distribution runs it: the arguments the daemon appends reach the CLI as they were given
+/// (a model and a launch prompt with a space), and the CLI starts with a root in its
+/// environment that names its own process id. Only a Linux has the files it reads.
+#[test]
+fn the_wsl_agy_launch_statement_hands_its_arguments_on_and_puts_a_root_in_the_environment() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let probe = yagura_test_support::process::argv_probe_path();
+    let shown = crate::hook_events_door::run_guest_statement(
+        &probe,
+        &["--model", "gemini-model", "-i", "a prompt with spaces"],
+    );
+    for expected in [
+        "<<argv[1]=--model>>",
+        "<<argv[2]=gemini-model>>",
+        "<<argv[3]=-i>>",
+        "<<argv[4]=a prompt with spaces>>",
+    ] {
+        assert!(
+            shown.contains(expected),
+            "the CLI must be started with the arguments the daemon appended; missing \n             {expected} in {shown:?}"
+        );
+    }
+
+    let (pid, added) = crate::hook_events_door::guest_root_variables();
+    let root = added
+        .iter()
+        .find(|(name, _)| name == crate::hook_events_door::GUEST_ROOT_VAR)
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "the statement must export {} for the CLI it starts; it added {added:?}",
+                crate::hook_events_door::GUEST_ROOT_VAR
+            )
+        });
+    let boot_id =
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("a Linux has a boot id");
+    let parts: Vec<&str> = root.split(':').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "the root is <pid>:<boot_id>:<starttime>, got {root:?}"
+    );
+    assert_eq!(
+        parts[0], pid,
+        "the root names the CLI's own process: {root:?}"
+    );
+    assert_eq!(
+        parts[1],
+        boot_id.trim(),
+        "the root names this boot: {root:?}"
+    );
+    assert!(
+        !parts[2].is_empty() && parts[2].chars().all(|c| c.is_ascii_digit()),
+        "the root ends in the CLI's start time: {root:?}"
     );
 }
 
@@ -584,11 +657,20 @@ fn every_hook_a_cli_keeps_calls_the_hook_door_of_its_own_profile_with_one_handle
                     .iter()
                     .position(|token| *token == "--hook")
                     .unwrap_or_else(|| panic!("{id}/{event}: no --hook door in {line:?}"));
-                assert_eq!(
-                    tokens[at + 1..],
-                    [id, event.as_str()],
-                    "{id}/{event}: the door names this profile and this event: {line:?}"
-                );
+                if id == "wsl-antigravity-cli" {
+                    // The guest's command hands the door what it collected after the pair.
+                    assert_eq!(
+                        tokens[at + 1..].get(..2),
+                        Some(&[id, event.as_str()][..]),
+                        "{id}/{event}: the door names this profile and this event first: \n                         {line:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        tokens[at + 1..],
+                        [id, event.as_str()],
+                        "{id}/{event}: the door names this profile and this event: {line:?}"
+                    );
+                }
                 for flag in OLD_DOOR_FLAGS {
                     assert!(
                         !line.contains(flag),
@@ -946,10 +1028,6 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
         "1ee610f53e526888b150516e98a0c98897523d37edce399602a84f52fb87112c",
     ),
     (
-        "wsl-antigravity-cli",
-        "d48fe04b10130a122f70876bfcb11ed08555ed1dcf070f66bfe81745a07e27b8",
-    ),
-    (
         "wsl-claude-code",
         "b74899b4c3d29bd80100d362f3c70a55643df6c45d83d6b806ee74e90d9ae12c",
     ),
@@ -971,6 +1049,13 @@ const HOOK_REGISTRATION_TEXT_SHA256: &[(&str, &str)] = &[
     ),
 ];
 
+/// The sha256 of the hook text of `wsl-antigravity-cli` before its command collected what the
+/// daemon judges a guest's hook by. That command is written into the guest's `hooks.json`
+/// and rewritten by the daemon at each launch, so it is not one a CLI keeps by hash; it is
+/// no longer pinned to this text, and must not render it again.
+const GUEST_HOOK_TEXT_BEFORE_COLLECTION_SHA256: &str =
+    "d48fe04b10130a122f70876bfcb11ed08555ed1dcf070f66bfe81745a07e27b8";
+
 fn sha256_hex(text: &str) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(text.as_bytes())
@@ -981,8 +1066,16 @@ fn sha256_hex(text: &str) -> String {
 
 #[test]
 fn the_hook_registrations_a_cli_keeps_render_the_same_text_from_the_profiles_data() {
+    let guest = hook_registration_text(&parse_repo_profile("wsl-antigravity-cli"));
+    assert_ne!(
+        sha256_hex(&guest),
+        GUEST_HOOK_TEXT_BEFORE_COLLECTION_SHA256,
+        "wsl-antigravity-cli's hook command must collect what the daemon judges a guest's \
+         hook by, so its text is no longer the one it had without"
+    );
     let measured: Vec<(String, String)> = bundled_profile_ids()
         .into_iter()
+        .filter(|id| id != "wsl-antigravity-cli")
         .filter_map(|id| {
             let text = hook_registration_text(&parse_repo_profile(&id));
             (!text.is_empty()).then(|| (id, sha256_hex(&text)))
@@ -1235,6 +1328,29 @@ fn registered_bridge_args(profile: &Profile) -> Vec<String> {
         .expect("an entry of the registration runs the bridge")
 }
 
+/// The argv the registration has the CLI run as its server, whole: what follows `--` in
+/// `add` (or, without one, `add` from the bridge on), else the bridge entry's command and
+/// arguments. A server that is a shell wrapping the bridge is one argv with the shell first.
+fn registered_server_argv(profile: &Profile) -> Vec<String> {
+    let spec = profile
+        .mcp_registration
+        .as_ref()
+        .expect("a registration table");
+    let target = RegistrationTarget::for_instance(None);
+    let add = spec
+        .render_add(&target, RENDERED_BRIDGE)
+        .expect("add renders for the default instance");
+    if let Some(at) = add.iter().position(|arg| arg == "--") {
+        return add[at + 1..].to_vec();
+    }
+    if let Some(at) = add.iter().position(|arg| arg.contains(RENDERED_BRIDGE)) {
+        return add[at..].to_vec();
+    }
+    let mut argv = vec![RENDERED_BRIDGE.to_string()];
+    argv.extend(registered_bridge_args(profile));
+    argv
+}
+
 /// Every bundled profile starts the bridge a window's CLI runs -- the `[mcp]` injection
 /// when it has one, the registration otherwise -- with the profile's own id, which is
 /// how the daemon tells the window's bridge from one a nested CLI of another profile runs.
@@ -1280,10 +1396,11 @@ fn every_bundled_bridge_a_window_runs_names_its_own_profile() {
 }
 
 /// The status output a bundled profile's CLI prints (or the settings file it keeps) for
-/// `yagura` registered as `RENDERED_BRIDGE` with `args`, laid out the way the profile's
-/// `[mcp_registration.status]` table reads it: in JSON the arguments are the sibling of
-/// the command, in lines they are the `Args:` line joined by spaces.
-fn status_output(status: &toml::Table, toml_set: Option<&toml::Table>, args: &[String]) -> String {
+/// `yagura` registered as the server `argv` (a program, then its arguments), laid out the
+/// way the profile's `[mcp_registration.status]` table reads it: in JSON the arguments are
+/// the sibling of the command, in lines they are the `Args:` line joined by spaces.
+fn status_output(status: &toml::Table, toml_set: Option<&toml::Table>, argv: &[String]) -> String {
+    let (program, args) = argv.split_first().expect("a server has a program");
     let server = "yagura";
     let read = |key: &str| status.get(key).and_then(toml::Value::as_str);
     let command = read("command").expect("the status names the command");
@@ -1297,7 +1414,7 @@ fn status_output(status: &toml::Table, toml_set: Option<&toml::Table>, args: &[S
         {
             lines.push(format!("  {label} {}", word.as_str().expect("a word")));
         }
-        lines.push(format!("  {command} {RENDERED_BRIDGE}"));
+        lines.push(format!("  {command} {program}"));
         lines.push(format!("  Args: {}", args.join(" ")));
         return lines.join("\n") + "\n";
     }
@@ -1315,7 +1432,7 @@ fn status_output(status: &toml::Table, toml_set: Option<&toml::Table>, args: &[S
         .map(|parent| format!("{parent}/args"))
         .expect("the command's pointer ends in /command");
     let mut element = serde_json::json!({});
-    set(&mut element, &command, serde_json::json!(RENDERED_BRIDGE));
+    set(&mut element, &command, serde_json::json!(program));
     set(&mut element, &args_at, serde_json::json!(args));
     if let Some(toml_set) = toml_set {
         for (key, pointer) in toml_set
@@ -1364,7 +1481,7 @@ fn an_older_registration_of_each_bundled_profile_reads_as_differing() {
             .expect("a registration table");
         let status = registration["status"].as_table().expect("a status table");
         let toml_set = registration.get("toml_set").and_then(toml::Value::as_table);
-        let registered = registered_bridge_args(&profile);
+        let registered = registered_server_argv(&profile);
         assert!(
             names_profile(&registered, &id),
             "{id}: the registration names its profile, got {registered:?}"
@@ -1389,7 +1506,7 @@ fn an_older_registration_of_each_bundled_profile_reads_as_differing() {
             RegistrationState::Registered,
             "{id}: what the daemon registers reads as registered: {current:?}"
         );
-        let older = derive(&[]);
+        let older = derive(&[RENDERED_BRIDGE.to_string()]);
         assert_eq!(
             older.state,
             RegistrationState::Differs,
